@@ -55,6 +55,11 @@ Make illegal states unrepresentable.
 - Every new dependency needs a one-line justification in the PR. Prefer well-maintained,
   widely used crates; `cargo deny` must pass.
 
+## Networking
+
+- Everything facing the outside is dual stack (IPv4 + IPv6): bind `[::]` dual-stack or both families,
+  never hard-code `0.0.0.0`; use `IpAddr`/`SocketAddr`, not IPv4-only types; tests cover IPv6.
+
 ## File layout (top-to-bottom reading order)
 
 Organize for reading like a newspaper: headline first, details later.

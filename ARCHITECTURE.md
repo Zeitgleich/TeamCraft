@@ -43,6 +43,16 @@ Consequences:
 - Per-channel **retention** (keep last N days or last N messages) is a v1 feature (PLAN.md §1).
 - Bot/log channels can be marked as **integration channels** (§4.5).
 
+### 1.2 Network requirements
+
+- **Dual stack (IPv4 + IPv6) everywhere facing the outside:** API/gateway, SFU (QUIC), share-link
+  downloads, SIP trunk signalling and RTP, push providers, S3, OIDC provider. Listening sockets bind
+  `[::]` as dual-stack sockets (IPv4-mapped) or both families explicitly; clients use Happy Eyeballs
+  (RFC 8305) when connecting.
+- Internal loopback-only services may stay IPv4-only.
+- Address handling never assumes IPv4: store and log addresses as `IpAddr`, format URLs with brackets
+  for IPv6, ICE-free QUIC needs no NAT64 special-casing.
+
 **Non-goals (for now)**
 
 - Federation
