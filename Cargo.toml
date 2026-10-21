@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Zeitgleich/TeamCraft"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+non_fmt_panics = "deny"
+unused_imports = "deny"
+unused_mut = "deny"
+unused_variables = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Correctness / safety (from ArtCraft's Cranky.toml)
+await_holding_lock = "deny"
+borrow_interior_mutable_const = "deny"
+# Typed, readable code
+option_option = "deny"
+zero_sized_map_values = "deny"
+clone_on_copy = "deny"
+implicit_clone = "deny"
+needless_return = "deny"
+redundant_field_names = "deny"
+empty_structs_with_brackets = "deny"
+# No debugging leftovers, no panics in production paths (allowed in tests via clippy.toml)
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+# Explicitly allowed
+if_same_then_else = "allow"
