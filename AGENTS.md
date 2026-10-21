@@ -73,5 +73,12 @@ cargo test --workspace --all-features
 cargo deny check
 ```
 
-Commits: imperative subject line (≤ 72 chars), body explains *why*. Sign off with `git commit -s`
-(Developer Certificate of Origin, as in CalCraft).
+## Git workflow
+
+- Work on **feature branches** (`feat/…`, `fix/…`, `docs/…`), one feature or milestone step each.
+- **Commit every meaningful step** on the branch – a working sub-step, not every line. Each commit
+  builds and passes `cargo fmt --check` and `clippy`.
+- `main` only receives **squash merges** of reviewed branches; the squash commit message summarizes
+  the feature (subject ≤ 72 chars, body explains what and why).
+- Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
+  `git commit -s` (Developer Certificate of Origin, as in CalCraft).
