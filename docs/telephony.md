@@ -57,9 +57,15 @@ Configured per trunk, so any standards-compliant provider works:
 | Number handling | where to read the called number (Request-URI, `To`, `P-Called-Party-ID`), E.164 normalization, number block             |
 | Caller ID       | number to present on outbound legs; pass-through of the original caller if the provider allows it ("CLIP no screening") |
 | DTMF            | RFC 4733 (default), SIP INFO as fallback                                                                                |
+| Address family  | IPv4, IPv6 or both per trunk; SDP `c=IN IP6` supported, RTP on dual-stack sockets                                       |
 | NAT             | public address, RTP port range                                                                                          |
 
 Protocol needs:
+
+- **Dual stack from day one:** SIP over IPv4 and IPv6 (RFC 3261, RFC 6157 for the IPv6 transition),
+  SDP with `IN IP4` and `IN IP6` addresses, RTP/RTCP on dual-stack sockets, DNS via NAPTR/SRV and
+  A + AAAA. Most providers are IPv4-only today; the trunk setting only selects the family – there is
+  no IPv4-only code path to replace later.
 
 - `REGISTER`, inbound and outbound `INVITE`, `BYE`, `CANCEL`, re-INVITE for hold, `OPTIONS` keepalive
 - SDP offer/answer, RTP/RTCP, SRTP
