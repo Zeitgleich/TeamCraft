@@ -8,6 +8,7 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Zeitgleich/TeamCraft"
 rust-version = "1.85"
+publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -38,3 +39,37 @@ unwrap_used = "warn"
 expect_used = "warn"
 # Explicitly allowed
 if_same_then_else = "allow"
+
+[workspace.dependencies]
+# Internal crates
+teamcraft-proto = { path = "crates/teamcraft-proto" }
+teamcraft-db = { path = "crates/teamcraft-db" }
+
+# Serialization and schemas
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+utoipa = "6"
+
+# Errors, logging, secrets
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+secrecy = { version = "0.10", features = ["serde"] }
+
+# Async runtime and HTTP
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+axum = "0.8"
+tower-http = { version = "0.7", features = ["trace", "request-id"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# Database
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "time"] }
+time = "0.3"
+
+# Networking
+socket2 = "0.6"
+
+# Auth and configuration
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+figment = { version = "0.10", features = ["toml", "env"] }

@@ -1,0 +1,59 @@
+# TeamCraft server configuration. Every option is listed with its default; options without a
+# default are required. Copy to teamcraft.toml and run:  teamcraft-server --config teamcraft.toml
+#
+# Any value can be overridden by an environment variable: prefix TEAMCRAFT_, nesting separated by
+# a double underscore, e.g. TEAMCRAFT_DATABASE__URL or TEAMCRAFT_OIDC__ROLES__GUEST.
+# The config file path can also be given as TEAMCRAFT_CONFIG.
+
+[server]
+# Address of the HTTP listener. TLS is terminated by the reverse proxy. "[::]" is a dual-stack
+# socket (IPv4 and IPv6); use e.g. "127.0.0.1:8080" or "[::1]:8080" to bind a single address.
+listen_addr = "[::]:8080"
+# Number (0-1023) of this instance in generated IDs. Must be unique per running server instance.
+worker_id = 0
+# How many months of message partitions are created ahead of time (in addition to the current one).
+partitions_ahead_months = 3
+
+[database]
+# Required. Prefer the environment variable TEAMCRAFT_DATABASE__URL for the password.
+url = "postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft"
+max_connections = 10
+acquire_timeout_secs = 5
+
+[oidc]
+# Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`
+# claim of the tokens; the server fetches <issuer>/.well-known/openid-configuration for the keys.
+issuer = "http://127.0.0.1:8080/realms/teamcraft-dev"
+# Public client the apps log in with; tokens must be issued to it (`azp` or `aud`). Its client
+# roles are read from `resource_access.<client_id>.roles`.
+client_id = "teamcraft"
+# Confidential client with a service account (reserved for the admin API and back-channel logout).
+server_client = "teamcraft-server"
+# Optional: use this key set URL instead of the one in the discovery document, e.g. when the
+# server reaches the provider through an internal address.
+# jwks_uri = "http://keycloak.internal:8080/realms/teamcraft-dev/protocol/openid-connect/certs"
+# Accepted signature algorithms.
+algorithms = ["RS256", "ES256", "EdDSA"]
+# Tolerated clock difference when checking token expiry.
+leeway_secs = 30
+# How long signing keys are used before they are fetched again.
+jwks_cache_ttl_secs = 3600
+# Minimum time between two key fetches (also protects against floods of unknown key IDs).
+jwks_min_refresh_interval_secs = 30
+# Timeout of requests to the provider.
+http_timeout_secs = 10
+
+# TeamCraft role = client role of `client_id` in the provider. Users with several roles get the
+# highest (owner > admin > member > guest); users with none of them are rejected.
+# Example for an existing setup: guest = "external"
+[oidc.roles]
+owner = "owner"
+admin = "admin"
+member = "member"
+guest = "guest"
+
+[logging]
+# `tracing` filter, e.g. "info" or "teamcraft_server=debug,info". The RUST_LOG variable wins.
+filter = "info"
+# "pretty" for humans, "json" for log collectors.
+format = "pretty"

@@ -30,6 +30,8 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace path dependencies carry no version.
+allow-wildcard-paths = true
 # One implementation per concern: OpenSSL is not used (rustls everywhere).
 deny = [
   { name = "openssl" },

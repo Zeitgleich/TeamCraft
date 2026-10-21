@@ -1,0 +1,26 @@
+[package]
+name = "teamcraft-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teamcraft-proto.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+tokio.workspace = true
+
+[features]
+# Tests that need the dev Postgres (TEAMCRAFT_TEST_DATABASE_URL / DATABASE_URL).
+integration = []

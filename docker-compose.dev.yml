@@ -1,0 +1,60 @@
+# Local development stack: Postgres, Keycloak (OIDC) and Garage (S3).
+# Start:  docker compose -f docker-compose.dev.yml up -d && ./dev/init-garage.sh
+# Every credential below is dev-only and must never be used outside a developer machine.
+# Ports are bound to loopback only, on IPv4 (127.0.0.1) and IPv6 ([::1]).
+
+name: teamcraft-dev
+
+services:
+  postgres:
+    image: postgres:18.6-alpine3.23
+    environment:
+      POSTGRES_USER: teamcraft
+      POSTGRES_PASSWORD: teamcraft-dev-only
+      POSTGRES_DB: teamcraft
+    ports:
+      - "127.0.0.1:5432:5432"
+      - "[::1]:5432:5432"
+    volumes:
+      # Postgres 18+ images keep PGDATA below /var/lib/postgresql.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U teamcraft -d teamcraft"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    image: keycloak/keycloak:26.7.5
+    # Dev mode keeps its H2 database inside the container; the realm is re-imported from dev/keycloak
+    # whenever the container is recreated (`docker compose ... down` resets all Keycloak state).
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin-dev-only
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "[::1]:8080:8080"
+    volumes:
+      - ./dev/keycloak/teamcraft-dev-realm.json:/opt/keycloak/data/import/teamcraft-dev-realm.json:ro
+
+  garage:
+    image: dxflrs/garage:v2.4.0
+    command: ["/garage", "server"]
+    ports:
+      - "127.0.0.1:3900:3900"
+      - "[::1]:3900:3900" # S3 API
+      - "127.0.0.1:3903:3903"
+      - "[::1]:3903:3903" # admin API
+    volumes:
+      - ./dev/garage/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+
+volumes:
+  postgres-data:
+  garage-meta:
+  garage-data:

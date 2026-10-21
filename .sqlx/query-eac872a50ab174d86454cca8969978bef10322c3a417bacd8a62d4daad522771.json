@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT tc_ensure_month_partitions($1::text, now(), $2::int)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tc_ensure_month_partitions",
+        "type_info": "Void",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "eac872a50ab174d86454cca8969978bef10322c3a417bacd8a62d4daad522771"
+}

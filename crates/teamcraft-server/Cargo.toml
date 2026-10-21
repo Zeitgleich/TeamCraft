@@ -5,9 +5,37 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
 
+[lib]
+name = "teamcraft_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "teamcraft-server"
+path = "src/main.rs"
+
 [dependencies]
-teamcraft-proto = { path = "../teamcraft-proto" }
+teamcraft-proto.workspace = true
+teamcraft-db.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+figment.workspace = true
+jsonwebtoken.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+socket2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+tokio = { workspace = true, features = ["test-util"] }

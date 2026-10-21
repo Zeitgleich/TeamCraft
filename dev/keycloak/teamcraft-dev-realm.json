@@ -1,0 +1,257 @@
+{
+  "realm": "teamcraft-dev",
+  "enabled": true,
+  "displayName": "TeamCraft (dev)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 300,
+  "groups": [
+    {
+      "name": "project-a",
+      "path": "/project-a",
+      "clientRoles": {
+        "teamcraft": [
+          "member"
+        ]
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "teamcraft",
+      "name": "TeamCraft apps",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "http://127.0.0.1/callback",
+        "http://[::1]/callback",
+        "http://localhost:8082/*",
+        "http://127.0.0.1:8082/*",
+        "com.example.teamcraft:/oauth/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8082",
+        "http://127.0.0.1:8082"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      },
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "basic",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "tc_identity_key",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "tc_identity_key",
+            "claim.name": "tc_identity_key",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "teamcraft-server",
+      "name": "TeamCraft server",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "teamcraft-server-dev-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "backchannel.logout.url": "http://host.docker.internal:8081/api/v1/auth/backchannel-logout",
+        "backchannel.logout.session.required": "true"
+      }
+    }
+  ],
+  "roles": {
+    "client": {
+      "teamcraft": [
+        {
+          "name": "owner",
+          "description": "Instance owner"
+        },
+        {
+          "name": "admin",
+          "description": "Server admin"
+        },
+        {
+          "name": "member",
+          "description": "Employee"
+        },
+        {
+          "name": "guest",
+          "description": "External person: only invited spaces and channels"
+        }
+      ]
+    }
+  },
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Owner",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice-dev-pass",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "teamcraft": [
+          "owner"
+        ]
+      }
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "bob@example.com",
+      "firstName": "Bob",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob-dev-pass",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "teamcraft": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "carol@example.com",
+      "firstName": "Carol",
+      "lastName": "Member",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol-dev-pass",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/project-a"
+      ]
+    },
+    {
+      "username": "dave",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "dave@example.com",
+      "firstName": "Dave",
+      "lastName": "Guest",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dave-dev-pass",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "teamcraft": [
+          "guest"
+        ]
+      }
+    },
+    {
+      "username": "erin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "erin@example.com",
+      "firstName": "Erin",
+      "lastName": "Multi",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "erin-dev-pass",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "teamcraft": [
+          "guest",
+          "member"
+        ]
+      }
+    },
+    {
+      "username": "frank",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "frank@example.com",
+      "firstName": "Frank",
+      "lastName": "NoRole",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "frank-dev-pass",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "service-account-teamcraft-server",
+      "enabled": true,
+      "serviceAccountClientId": "teamcraft-server",
+      "clientRoles": {
+        "realm-management": [
+          "view-users",
+          "query-users",
+          "query-groups",
+          "view-realm"
+        ]
+      }
+    }
+  ]
+}
