@@ -275,7 +275,13 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - Signaling (join, leave, subscribe, layer selection) on a reliable QUIC stream of the same session.
 - Browser: WebTransport + **WebCodecs** for encoding/decoding; `getUserMedia` for capture (gives the browser's echo cancellation).
 - Desktop: `cpal` for audio I/O, `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
-- Requires recent browsers with WebTransport and WebCodecs. **Safari support has to be checked before relying on browser guests**; no WebRTC fallback is planned.
+- Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
+  Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
+  Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned.
+- `MediaStreamTrackProcessor` (raw frames from the camera/mic track) is missing in Firefox: fall back to
+  an `AudioWorklet` for audio and `<video>` → `VideoFrame` for video there. Codec availability (e.g.
+  Opus in `AudioEncoder`) is checked at runtime with `isConfigSupported()`; fallback is a WASM Opus
+  encoder.
 
 ### 6.2 E2EE: DAVE
 
@@ -353,16 +359,17 @@ See [PLAN.md](PLAN.md#roadmap).
 Decided:
 
 - Business chat in the Mattermost / Slack / Teams mould; no federation
-- AGPL-3.0; reuse of AGPL code (e.g. Threema's rendezvous protocol) is allowed
+- License AGPL-3.0-or-later (as CalCraft and Fluxer); reuse of AGPL code (e.g. Threema's
+  AGPL-3.0-only rendezvous protocol) is allowed
 - S3-compatible storage for blobs; Postgres for metadata and ciphertext
 - Desktop for macOS + Linux only; iOS and Android are part of v1
 - Search via encrypted shared index segments (e2ee.md §10)
 - OIDC provider on a separate server attests identity keys (e2ee.md §3.1)
 - Telephony directly on SIP trunks of any provider; no Asterisk, no Twilio
 - Monorepo + separate private deploy repository
+- Browser calls without WebRTC: WebTransport + WebCodecs are available in all current browsers incl.
+  Safari 26.4 (§6.1)
 
 Open:
 
-- License variant: `AGPL-3.0-only` (current) or `AGPL-3.0-or-later` (as CalCraft)
-- Safari: WebTransport/WebCodecs support for external meeting guests
 - Further E2EE questions: [docs/e2ee.md](docs/e2ee.md) §14

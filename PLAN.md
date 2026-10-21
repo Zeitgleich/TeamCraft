@@ -413,4 +413,3 @@ Each milestone ends with something usable. M0–M10 make up v1.
 - `admin_self_join` defaults to `visible`
 - Apple Developer and Google Play accounts exist
 
-Open: license variant (see ARCHITECTURE.md §10).

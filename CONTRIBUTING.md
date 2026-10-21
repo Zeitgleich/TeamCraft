@@ -24,4 +24,4 @@ The rules are in [AGENTS.md](AGENTS.md) and [.claude/rules/](.claude/rules/). In
 - Changes to keys or protocols update [docs/e2ee.md](docs/e2ee.md) in the same pull request.
 - Security issues are reported privately, never in public issues.
 
-By contributing, you agree that your contributions are licensed under the AGPL-3.0.
+By contributing, you agree that your contributions are licensed under the AGPL-3.0-or-later.
