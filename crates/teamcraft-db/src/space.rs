@@ -179,11 +179,7 @@ impl Database {
               AND (m.expires_at IS NULL OR m.expires_at > now())
          WHERE ($2::bigint IS NULL OR s.id = $2)
            AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL
-                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL)
-                -- A channel moved into a space keeps its members, who may not be members of it.
-                OR EXISTS (SELECT 1 FROM conversations c
-                           JOIN memberships cm ON cm.conversation_id = c.id AND cm.user_id = $1
-                           WHERE c.space_id = s.id))
+                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))
          ORDER BY s.name, s.id"#,
       to_db(viewer),
       maybe_space.map(to_db),
