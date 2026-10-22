@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Search filters -->
+  <string name="search_filter_from">From</string>
+  <string name="search_filter_in">In</string>
+  <string name="search_filter_date">Date</string>
+  <string name="search_filter_after">After a date…</string>
+  <string name="search_filter_before">Before a date…</string>
+  <string name="search_filter_has_file">Has file</string>
+  <string name="search_filter_has_link">Has link</string>
+  <string name="search_filter_in_thread">In thread</string>
+  <string name="search_filter_from_title">Messages from</string>
+  <string name="search_filter_in_title">Messages in</string>
+  <string name="search_filter_no_choices">Nothing to choose from yet.</string>
+  <string name="search_filter_remove">Remove filter</string>
+
+  <!-- Channel management -->
+  <string name="channel_bookmarks">Bookmarks</string>
+  <string name="channel_bookmarks_empty">This conversation has no bookmarks yet.</string>
+  <string name="channel_bookmark_file">File – opens the files list</string>
+  <string name="channel_archive">Archive channel</string>
+  <string name="channel_archive_title">Archive %1$s?</string>
+  <string name="channel_archive_text">The channel becomes read-only for everyone. Its messages and files stay available.</string>
+  <string name="channel_archive_confirm">Archive</string>
+  <string name="channel_leave_title">Leave %1$s?</string>
+  <string name="channel_leave_text">You will no longer receive messages from this conversation.</string>
+  <string name="channel_leave_confirm">Leave</string>
+</resources>

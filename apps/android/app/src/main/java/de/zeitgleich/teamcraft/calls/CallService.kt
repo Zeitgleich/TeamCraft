@@ -18,7 +18,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 
 /**
- * Keeps the process and the microphone alive while a call runs, with the ongoing-call
+ * Keeps the process, the microphone and the camera alive while a call runs, with the ongoing-call
  * notification (CallStyle) that lets the user return to it or hang up.
  */
 class CallService : Service() {
@@ -29,8 +29,10 @@ class CallService : Service() {
       TeamCraftApplication.graph(this).calls.hangUp()
       return START_NOT_STICKY
     }
+    val hasCamera = intent?.getBooleanExtra(EXTRA_CAMERA, false) == true
     val types = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+      val base = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+      if (hasCamera) base or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else base
     } else {
       0
     }
@@ -75,9 +77,12 @@ class CallService : Service() {
     private const val CHANNEL_CALLS = "calls"
     private const val NOTIFICATION_ID = 2001
     private const val ACTION_HANG_UP = "de.zeitgleich.teamcraft.calls.HANG_UP"
+    private const val EXTRA_CAMERA = "camera"
 
-    fun start(context: Context) {
-      ContextCompat.startForegroundService(context, Intent(context, CallService::class.java))
+    /** Starts the service, or updates what it keeps alive (the camera while it sends). */
+    fun start(context: Context, hasCamera: Boolean) {
+      val intent = Intent(context, CallService::class.java).putExtra(EXTRA_CAMERA, hasCamera)
+      ContextCompat.startForegroundService(context, intent)
     }
 
     fun stop(context: Context) {
