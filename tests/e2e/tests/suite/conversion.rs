@@ -262,3 +262,64 @@ async fn full_history_in_a_public_channel_needs_an_explicit_choice_by_the_adding
 
   stack.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_roster_member_who_joins_a_public_channel_alone_does_not_get_the_past() {
+  let Some(stack) = Stack::start().await else { return };
+  let mut alice = Peer::enroll(&stack, "alice").await;
+  let mut erin = Peer::enroll(&stack, "erin").await;
+  let space = space_with(&stack, &alice, "Project A", &[(&erin, "member")]).await;
+  let channel = channel_with(&mut alice, space, "plans", &mut []).await;
+  // The signed policy shares full history with people on the signed roster; Erin (an admin) is on it.
+  alice
+    .client
+    .publish_roster(&[
+      (alice.user_id(), teamcraft_core::workspace::RosterRole::Owner),
+      (erin.user_id(), teamcraft_core::workspace::RosterRole::Admin),
+    ])
+    .await
+    .unwrap();
+  alice
+    .set_policy(|policy| policy.history_default = teamcraft_proto::HistoryPolicy::Full)
+    .await;
+  alice
+    .client
+    .send_text(channel, None, "before the join")
+    .await
+    .unwrap();
+  stack
+    .put(
+      &alice.tokens,
+      &format!("/conversations/{channel}/visibility"),
+      json!({"visibility": "public", "history_policy": "full"}),
+    )
+    .await
+    .expect(StatusCode::OK);
+
+  // Erin joins on her own; a member's client adds her from her signed self-add.
+  erin.client.sync_workspace().await.unwrap();
+  erin.client.join_channel(channel).await.unwrap();
+  let deadline = std::time::Instant::now() + Duration::from_secs(30);
+  while !erin.client.has_group(channel).unwrap() {
+    assert!(std::time::Instant::now() < deadline, "Erin was never added");
+    alice.pump().await;
+    alice.client.apply_pending_changes().await.unwrap();
+    erin.pump().await;
+    erin.client.sync_welcomes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+  alice
+    .client
+    .send_text(channel, None, "after the join")
+    .await
+    .unwrap();
+  erin.wait_for_text(channel, "after the join").await;
+  erin.client.load_older_messages(channel).await.unwrap();
+  settle(&mut [&mut erin], Duration::from_secs(1)).await;
+  assert!(
+    !erin.texts(channel).contains(&"before the join".to_owned()),
+    "a self-joiner read the past although nobody chose to show it to her"
+  );
+
+  stack.stop().await;
+}

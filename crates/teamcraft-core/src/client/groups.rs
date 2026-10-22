@@ -410,6 +410,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!(conversation_id = %conversation, "refused to add a guest with full history");
       return Ok(());
     }
+    if let (ChangeSource::Delegated(signed), MembershipAction::AddUser { user_id, history }) =
+      (&source, action)
+      && signed.signer_user() == user_id
+      && history != HistoryShare::FromJoin
+    {
+      // Somebody added themselves and signed the past for themselves: only a member who chooses
+      // to share it adds somebody with full history (e2ee.md §4.7).
+      tracing::warn!(conversation_id = %conversation, "refused a self-add with full history");
+      return Ok(());
+    }
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
       if !self.has_group(conversation)? {

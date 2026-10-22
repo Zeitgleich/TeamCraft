@@ -273,6 +273,8 @@ encryption, and what does and does not hold:
   them the past. **Full history in a public channel needs an explicit choice** by the member who adds
   the person ("share history" in the add dialog). A dishonest server can make a public channel look
   private; then the usual default for roster members applies, which is what a private add would give them.
+- **Self-joins** sign `from_join` for themselves, and a member's client refuses to commit a signed self-add
+  that asks for more (a modified client can't talk the group into showing it the past).
 - **`history_policy` in the conversion request** is therefore a *hint* the server stores and shows (and
   that the add dialog can preselect); it is not what protects the past. What protects it is the rule
   above. Converting to public never gives anyone history they didn't have, and can't take anything back
