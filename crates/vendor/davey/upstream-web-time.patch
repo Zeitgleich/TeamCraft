@@ -1,0 +1,55 @@
+diff --git a/davey/Cargo.toml b/davey/Cargo.toml
+--- a/davey/Cargo.toml
++++ b/davey/Cargo.toml
+@@ -15,6 +15,8 @@ openmls_basic_credential = "0.6.0"
+ openmls_rust_crypto = "0.6.0"
+ tracing = "0.1.41"
+ thiserror = "2.0.12"
++# Instant that works on wasm32-unknown-unknown; re-exports std::time::Instant elsewhere.
++web-time = "1.1.0"
+ # Crypto utils
+ p256 = { version = "0.13" }
+ rand = "0.8"
+diff --git a/davey/src/cryptor/cryptor_manager.rs b/davey/src/cryptor/cryptor_manager.rs
+--- a/davey/src/cryptor/cryptor_manager.rs
++++ b/davey/src/cryptor/cryptor_manager.rs
+@@ -3,8 +3,10 @@ use std::{
+   cmp::max,
+   collections::{HashMap, VecDeque},
+   sync::Arc,
+-  time::{Duration, Instant},
++  time::Duration,
+ };
++// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
++use web_time::Instant;
+ use tracing::{debug, trace, warn};
+ 
+ use crate::errors::ExpiringCipherError;
+diff --git a/davey/src/cryptor/decryptor.rs b/davey/src/cryptor/decryptor.rs
+--- a/davey/src/cryptor/decryptor.rs
++++ b/davey/src/cryptor/decryptor.rs
+@@ -4,8 +4,10 @@ use std::{
+   cmp::min,
+   collections::{HashMap, VecDeque},
+   sync::Arc,
+-  time::{Duration, Instant},
++  time::Duration,
+ };
++// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
++use web_time::Instant;
+ 
+ use tracing::{trace, warn};
+ 
+diff --git a/davey/src/cryptor/encryptor.rs b/davey/src/cryptor/encryptor.rs
+--- a/davey/src/cryptor/encryptor.rs
++++ b/davey/src/cryptor/encryptor.rs
+@@ -1,6 +1,8 @@
+ #[cfg(feature = "napi")]
+ use napi_derive::napi;
+-use std::{collections::HashMap, time::Instant};
++use std::collections::HashMap;
++// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
++use web_time::Instant;
+ 
+ use tracing::warn;
+ 

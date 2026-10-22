@@ -12,17 +12,12 @@
 
 use std::collections::BTreeSet;
 
-use teamcraft_media::dave::{
-  DaveCallId, DaveEpoch, DaveError, DaveExternalSender, DaveLeafIndex, DaveParticipantId,
-};
-use teamcraft_proto::IdError;
+use teamcraft_media::dave::{DaveEpoch, DaveError, DaveExternalSender, DaveLeafIndex, DaveParticipantId};
+use teamcraft_proto::{Base64Bytes, CallEvent, CallId, DeviceId, IdError};
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use crate::{
-  ids::{CallId, DeviceId, dave_participant_id, device_id_from_dave},
-  signaling::ServerMessage,
-};
+use crate::ids::{dave_call_id, dave_participant_id, device_id_from_dave};
 
 /// DAVE membership state of one call.
 pub struct DaveCoordinator {
@@ -43,7 +38,7 @@ pub struct DaveCoordinator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbound {
   pub recipient: DeviceId,
-  pub message: ServerMessage,
+  pub event: CallEvent,
 }
 
 /// Proposals sent for `epoch`, waiting for the first commit.
@@ -187,7 +182,7 @@ impl DaveCoordinator {
     let (founder, _) = joiners.remove(0);
     self.leaves = vec![Some(founder)];
     self.maybe_epoch = Some(DaveEpoch(0));
-    debug!(call_id = self.call_id.0, ?founder, "founding DAVE group");
+    debug!(call_id = %self.call_id, ?founder, "founding DAVE group");
     self.propose(DaveEpoch(0), joiners, Vec::new())
   }
 
@@ -204,13 +199,13 @@ impl DaveCoordinator {
     let proposals =
       match self
         .external_sender
-        .propose(DaveCallId(self.call_id.0), epoch, &joiner_refs, &removed)
+        .propose(dave_call_id(self.call_id), epoch, &joiner_refs, &removed)
       {
         Ok(proposals) => proposals,
         Err(error) => {
           // Key packages are validated on arrival, so this is unexpected; drop the batch rather than
           // wedge the call.
-          warn!(call_id = self.call_id.0, %error, "creating DAVE proposals failed");
+          warn!(call_id = %self.call_id, %error, "creating DAVE proposals failed");
           return Vec::new();
         },
       };
@@ -224,9 +219,9 @@ impl DaveCoordinator {
       .iter()
       .map(|&recipient| Outbound {
         recipient,
-        message: ServerMessage::DaveProposals {
+        event: CallEvent::DaveProposals {
           epoch: epoch.0,
-          proposals: proposals.clone(),
+          proposals: Base64Bytes::new(proposals.clone()),
           expected_participants: expected_participants.clone(),
         },
       })
@@ -252,9 +247,9 @@ impl DaveCoordinator {
       .members()
       .map(|recipient| Outbound {
         recipient,
-        message: ServerMessage::DaveAnnounceCommit {
+        event: CallEvent::DaveAnnounceCommit {
           epoch: transition.epoch.0,
-          commit: commit.clone(),
+          commit: Base64Bytes::new(commit.clone()),
         },
       })
       .collect();
@@ -268,8 +263,8 @@ impl DaveCoordinator {
       } else if let Some(welcome) = &maybe_welcome {
         outbound.push(Outbound {
           recipient: *joiner,
-          message: ServerMessage::DaveWelcome {
-            welcome: welcome.clone(),
+          event: CallEvent::DaveWelcome {
+            welcome: Base64Bytes::new(welcome.clone()),
           },
         });
       }
@@ -334,7 +329,6 @@ mod tests {
 
   use super::*;
 
-  const CALL: CallId = CallId(77);
   const FRAME: &[u8] = &[0x78, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
   mod membership {
@@ -477,14 +471,14 @@ mod tests {
   impl Harness {
     fn new() -> Self {
       Self {
-        coordinator: DaveCoordinator::new(CALL).unwrap(),
+        coordinator: DaveCoordinator::new(call()).unwrap(),
         clients: BTreeMap::new(),
         queue: VecDeque::new(),
       }
     }
 
     fn new_client(&self, id: u64) -> DaveParticipant {
-      let mut client = DaveParticipant::new(DaveParticipantId(id), DaveCallId(CALL.0)).unwrap();
+      let mut client = DaveParticipant::new(DaveParticipantId(id), dave_call_id(call())).unwrap();
       client
         .set_external_sender(&self.coordinator.external_sender_package().unwrap())
         .unwrap();
@@ -513,12 +507,12 @@ mod tests {
 
     /// Delivers queued messages the way the SFU would, feeding commits back into the coordinator.
     fn deliver_all(&mut self) {
-      while let Some(Outbound { recipient, message }) = self.queue.pop_front() {
+      while let Some(Outbound { recipient, event }) = self.queue.pop_front() {
         let Some(client) = self.clients.get_mut(&recipient) else {
           continue;
         };
-        match message {
-          ServerMessage::DaveProposals {
+        match event {
+          CallEvent::DaveProposals {
             epoch,
             proposals,
             expected_participants,
@@ -527,7 +521,7 @@ mod tests {
               .iter()
               .map(|id| dave_participant_id(*id))
               .collect();
-            if let Some(commit) = client.process_proposals(&proposals, &expected).unwrap() {
+            if let Some(commit) = client.process_proposals(proposals.as_slice(), &expected).unwrap() {
               let outbound =
                 self
                   .coordinator
@@ -535,9 +529,9 @@ mod tests {
               self.queue.extend(outbound);
             }
           },
-          ServerMessage::DaveAnnounceCommit { commit, .. } => client.process_commit(&commit).unwrap(),
-          ServerMessage::DaveWelcome { welcome } => client.process_welcome(&welcome).unwrap(),
-          other => panic!("unexpected message {other:?}"),
+          CallEvent::DaveAnnounceCommit { commit, .. } => client.process_commit(commit.as_slice()).unwrap(),
+          CallEvent::DaveWelcome { welcome } => client.process_welcome(welcome.as_slice()).unwrap(),
+          other => panic!("unexpected event {other:?}"),
         }
       }
     }
@@ -565,6 +559,10 @@ mod tests {
         }
       }
     }
+  }
+
+  fn call() -> CallId {
+    "77".parse().unwrap()
   }
 
   fn device(raw: u64) -> DeviceId {

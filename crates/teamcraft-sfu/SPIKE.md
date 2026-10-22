@@ -76,10 +76,10 @@ Chrome reported `maxDatagramSize = 1024` at connection start.
 
 ## Problems and findings
 
-1. **`davey` panics in the browser.** It uses `std::time::Instant` (cipher/ratchet expiry and
-   stats). That compiles for `wasm32-unknown-unknown` but panics at runtime there. Needs an upstream
-   patch (e.g. `web-time`) or a fork before the browser can run DAVE. The WASM build also needs
-   `getrandom` 0.2 with `js` (added as a target dependency) – `openmls`' `js` feature covers 0.3.
+1. **`davey` panicked in the browser** because it used `std::time::Instant`. Fixed in the vendored
+   copy with `web-time` (M6, see `crates/vendor/davey/VENDORED.md`); a `wasm-bindgen-test` runs a
+   DAVE round trip in Node and Chromium. The WASM build also needs `getrandom` 0.2 with `js`
+   (a target dependency of `teamcraft-media`).
 2. **`davey` maturity.** Version 0.1.x, one maintainer, few tests, no audit of its own (DAVE and
    OpenMLS are reviewed, this binding isn't). It panics on some unexpected inputs instead of
    returning errors (`process_proposals` when a welcome is missing, `expect` in `reset`). Plan a
@@ -95,9 +95,9 @@ Chrome reported `maxDatagramSize = 1024` at connection start.
    to parse the public commits (DAVE uses plaintext wire format) to track the tree.
 5. **No recovery path yet.** If no member commits (all hang) or a commit/welcome is invalid
    (DAVE `invalid_commit_welcome`), the transition stays in flight. Needs a timeout and re-add.
-6. **Signaling encoding.** JSON with byte arrays is convenient for the test page but bloats key
-   packages and welcomes ~3×. Use a binary encoding for `teamcraft-proto`. Per-connection event
-   sequence numbers (api-conventions.md) are not implemented.
+6. **Signaling encoding.** Moved to `teamcraft-proto` (M6) with base64 instead of JSON number
+   arrays (~1.33× instead of ~3×) and per-connection event sequence numbers. A binary encoding is
+   still an option if signaling volume matters.
 7. **Dual stack.** The SFU binds `[::]` with `IPV6_V6ONLY` off by default (ARCHITECTURE.md §1.2)
    and accepts IPv4 clients as IPv4-mapped addresses; the end-to-end test runs over IPv4, IPv6 and
    a mixed call, and two browser tabs (`http://[::1]:…` and `http://127.0.0.1:…`) talked through one
@@ -116,27 +116,56 @@ TEAMCRAFT_SFU_DEV_HTTP='[::]:8080' cargo run -p teamcraft-sfu   # SFU on [::]:44
 cargo test -p teamcraft-sfu --test dave_call -- --nocapture   # native DAVE call + numbers
 ```
 
-The page shows browser feature support (WebTransport, WebCodecs, `MediaStreamTrackProcessor`,
-Opus in `AudioEncoder`), sends synthetic audio datagrams with a selectable level (set it to 127 to
-see the SFU drop a silent speaker) and reports per-stream packets, loss and one-way latency.
+The page shows browser feature support and sends 20 ms Opus frames (WebCodecs `AudioEncoder`) from
+the microphone or a test tone, captured with `MediaStreamTrackProcessor` where available and an
+`AudioWorklet` otherwise (the Firefox path). It computes the RFC 6464 level per frame, decodes and
+plays received streams (`AudioDecoder`) and reports packets, loss, decoded frames, level and
+one-way latency (from a development-only send-time header extension, id 14). "Synthetic bytes"
+keeps the old codec-free mode with a fixed level. Checked in Chromium (both capture paths):
+~0.3–0.8 ms average one-way latency between two tabs, no loss. Media is not DAVE-encrypted on this
+page yet.
+
+With real join tokens instead of dev tokens, configure `[calls]` on the server (see
+`teamcraft.example.toml`) and give the SFU the matching public key:
+
+```sh
+TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY=call-signing.pub.pem \
+TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER=https://chat.example.com cargo run -p teamcraft-sfu
+```
+
+## M6 progress
+
+Done on `feat/m6-calls`:
+
+- Vendored `davey` uses `web-time`; DAVE verified in Node and Chromium via `wasm-bindgen-test`.
+- Call signaling in `teamcraft-proto` (`calls` module): `CallClientMessage`, `CallServerMessage`
+  with event sequence numbers, `CallEvent`, `CallId`, call error codes.
+- Join tokens: `POST /api/v1/conversations/{id}/call/join-token` on the server (members only, own
+  active device, 60 s EdDSA JWT); the SFU verifies signature, issuer, audience, times and a maximum
+  lifetime. Dev tokens only in dev mode.
+- Opus encode/decode for native clients (`teamcraft-media`, feature `native`) with FEC/PLC for
+  jitter-buffer gaps; RFC 6464 levels from PCM.
+- Top-N forwarding with cached selection, hysteresis and `active_speakers` events; routing logic in
+  `forwarding.rs`, unit tested without network.
+- Test page sends real Opus via WebCodecs and plays what it receives.
 
 ## Recommended next steps for M6
 
-1. Fix `davey` for WASM (`Instant` → `web-time`), then build `teamcraft-media` with
-   `wasm-bindgen` and run the full browser pipeline: `getUserMedia` → WebCodecs Opus →
-   DAVE encrypt (WASM) → datagram; receive → jitter buffer → decode → `AudioWorklet`.
-2. Move signaling types and IDs into `teamcraft-proto` with a binary encoding, sequence numbers and
-   reconnect/resume.
-3. Real join tokens and roster from `teamcraft-server`; clients verify the signed roster and use it
-   as `expected_participants`. Decide where the DAVE coordinator lives (SFU vs. server).
+1. Build `teamcraft-media` with `wasm-bindgen` for the page/web client and add DAVE to the browser
+   pipeline: WebCodecs Opus → DAVE encrypt (WASM) → datagram; receive → jitter buffer (WASM) →
+   decode → `AudioWorklet` (the page still schedules decoded audio without a jitter buffer).
+2. Signed roster from `teamcraft-server` for `expected_participants`; decide where the DAVE
+   coordinator lives (SFU vs. server). The SFU should report ended calls so the server stops
+   reusing the call id (today it expires after `call_idle_secs`).
+3. A call permission in the permission scheme (today: every member of the conversation may join).
 4. Coordinator robustness: commit timeout, invalid commit/welcome handling, membership tracking
    from public commits, tests for message loss and reordering.
 5. Video: codec packetization within ~1000-byte datagrams, simulcast layer selection, keyframe
    requests over signaling, bandwidth estimation (transport-wide feedback + QUIC congestion state).
 6. Audio quality: adaptive (time-based) jitter buffer, Opus FEC/PLC on `Playout::Missing`, native
    pipeline with `cpal` + `opus` + `webrtc-audio-processing`.
-7. SFU performance: forwarding without the per-room mutex, cached speaker selection instead of
-   sorting per packet, load test (rooms × participants, CPU per forwarded packet).
+7. SFU performance: forwarding without the per-room mutex, load test (rooms × participants, CPU per
+   forwarded packet).
 8. Fallback decision for UDP-blocked networks.
 
 ## M6 design notes

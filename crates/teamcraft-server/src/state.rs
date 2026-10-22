@@ -13,6 +13,7 @@ use crate::error::ApiError;
 use crate::gateway::Hub;
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
+use crate::services::calls::CallService;
 use crate::storage::BlobStore;
 
 /// Shared, cheaply cloneable application state of all handlers.
@@ -28,6 +29,8 @@ pub struct AppState {
   pub push: Arc<PushDispatcher>,
   /// Attachment storage, if configured.
   pub maybe_blob_store: Option<Arc<BlobStore>>,
+  /// Call join tokens, if calls are configured.
+  pub maybe_calls: Option<Arc<CallService>>,
   pub scheme: Arc<PermissionScheme>,
   pub settings: Arc<Settings>,
 }

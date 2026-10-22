@@ -20,12 +20,13 @@ use crate::auth::{
   AuthError, JwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator,
   ValidatorOptions,
 };
-use crate::config::{RoleNames, StorageConfig};
+use crate::config::{CallsConfig, RoleNames, StorageConfig};
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
 use crate::router::router;
+use crate::services::calls::CallService;
 use crate::state::{AppState, Settings};
 use crate::storage::BlobStore;
 
@@ -89,7 +90,7 @@ impl TestApp {
   }
 
   pub async fn start_with(customize: impl FnOnce(&mut Settings)) -> Option<Self> {
-    Self::start_inner(customize, None).await
+    Self::start_inner(customize, None, None).await
   }
 
   /// Like [`Self::start`] with attachment storage on the dev Garage (`TEAMCRAFT_TEST_S3_ENDPOINT`,
@@ -120,7 +121,21 @@ impl TestApp {
       presign_expiry_secs: 300,
       max_attachment_bytes: 1024 * 1024,
     };
-    Self::start_inner(customize, Some(storage)).await
+    Self::start_inner(customize, Some(storage), None).await
+  }
+
+  /// Like [`Self::start`] with calls enabled: join tokens are signed with `signing_key_pem`
+  /// (Ed25519) and point to the SFU URL `sfu_url`.
+  pub async fn start_with_calls(signing_key_pem: &str, sfu_url: &str) -> Option<Self> {
+    let config = CallsConfig {
+      sfu_url: sfu_url.into(),
+      issuer: TEST_ISSUER.into(),
+      signing_key_path: "unused.pem".into(),
+      join_token_ttl_secs: 60,
+      call_idle_secs: 3600,
+    };
+    let calls = CallService::new(&config, signing_key_pem.as_bytes()).unwrap();
+    Self::start_inner(|_| {}, None, Some(calls)).await
   }
 
   /// Like [`Self::start_with`] with the given push dispatcher (tests record or fake the senders).
@@ -128,19 +143,21 @@ impl TestApp {
     customize: impl FnOnce(&mut Settings),
     dispatcher: PushDispatcher,
   ) -> Option<Self> {
-    Self::start_full(customize, None, Some(dispatcher)).await
+    Self::start_full(customize, None, None, Some(dispatcher)).await
   }
 
   async fn start_inner(
     customize: impl FnOnce(&mut Settings),
     maybe_storage: Option<StorageConfig>,
+    maybe_calls: Option<CallService>,
   ) -> Option<Self> {
-    Self::start_full(customize, maybe_storage, None).await
+    Self::start_full(customize, maybe_storage, maybe_calls, None).await
   }
 
   async fn start_full(
     customize: impl FnOnce(&mut Settings),
     maybe_storage: Option<StorageConfig>,
+    maybe_calls: Option<CallService>,
     maybe_push: Option<PushDispatcher>,
   ) -> Option<Self> {
     let test_db = TestDatabase::create().await?;
@@ -179,6 +196,7 @@ impl TestApp {
       })),
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
+      maybe_calls: maybe_calls.map(Arc::new),
       scheme: Arc::new(PermissionScheme::default()),
       settings: Arc::new(settings),
     };

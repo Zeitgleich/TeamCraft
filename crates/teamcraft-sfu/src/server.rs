@@ -1,10 +1,11 @@
 //! WebTransport endpoint and per-session handling.
 //!
 //! Session flow: the client connects to `/call`, opens one bidirectional stream for signaling and
-//! sends [`ClientMessage::Join`] with its token. Afterwards media flows as QUIC datagrams.
+//! sends [`CallClientMessage::Join`] with its token. Afterwards media flows as QUIC datagrams.
 
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 
+use teamcraft_proto::{Base64Bytes, CallClientMessage, CallServerMessage, ErrorBody, ErrorCode};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -19,9 +20,7 @@ use crate::{
   auth::{JoinGrant, JoinTokenVerifier},
   config::SfuConfig,
   room::{ParticipantHandle, Room, RoomError, Rooms},
-  signaling::{
-    ClientMessage, ServerMessage, SignalingError, SignalingErrorCode, read_message, write_message,
-  },
+  signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
 };
 
 /// HTTP path of the WebTransport session.
@@ -45,7 +44,7 @@ struct ParticipantSession {
   connection: Connection,
   room: Arc<Room>,
   grant: JoinGrant,
-  signal_tx: mpsc::UnboundedSender<ServerMessage>,
+  signal_tx: mpsc::UnboundedSender<Outgoing>,
   max_bytes: usize,
 }
 
@@ -149,18 +148,18 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   let max_bytes = shared.config.max_signaling_message_bytes;
   let first = tokio::time::timeout(
     shared.config.join_timeout,
-    read_message::<ClientMessage>(&mut recv, max_bytes),
+    read_message::<CallClientMessage>(&mut recv, max_bytes),
   )
   .await
   .map_err(|_| SessionError::JoinTimeout)??;
-  let ClientMessage::Join { token } = first else {
-    reject(&mut send, SignalingErrorCode::ProtocolViolation, "expected join").await;
+  let CallClientMessage::Join { token } = first else {
+    reject(&mut send, ErrorCode::ProtocolViolation, "expected join").await;
     return Err(SessionError::ExpectedJoin);
   };
   let grant = match shared.verifier.verify(&token) {
     Ok(grant) => grant,
     Err(error) => {
-      reject(&mut send, SignalingErrorCode::InvalidToken, &error.to_string()).await;
+      reject(&mut send, ErrorCode::InvalidJoinToken, &error.to_string()).await;
       return Ok(());
     },
   };
@@ -170,10 +169,10 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     connection: connection.clone(),
     signal_tx: signal_tx.clone(),
   };
-  let room = match shared.rooms.join(grant.call_id, grant.participant_id, handle) {
+  let room = match shared.rooms.join(grant, handle) {
     Ok(room) => room,
     Err(error) => {
-      reject(&mut send, SignalingErrorCode::AlreadyJoined, &error.to_string()).await;
+      reject(&mut send, ErrorCode::AlreadyJoined, &error.to_string()).await;
       return Err(error.into());
     },
   };
@@ -186,7 +185,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     max_bytes,
   };
   let result = session.run(send, recv, signal_rx).await;
-  shared.rooms.leave(&session.room, grant.participant_id);
+  shared.rooms.leave(&session.room, grant.device_id);
   result
 }
 
@@ -196,12 +195,12 @@ impl ParticipantSession {
     &self,
     send: SendStream,
     mut recv: RecvStream,
-    signal_rx: mpsc::UnboundedReceiver<ServerMessage>,
+    signal_rx: mpsc::UnboundedReceiver<Outgoing>,
   ) -> Result<(), SessionError> {
     let writer = tokio::spawn(write_signaling(send, signal_rx));
     let signaling = async {
       loop {
-        let message = read_message::<ClientMessage>(&mut recv, self.max_bytes).await?;
+        let message = read_message::<CallClientMessage>(&mut recv, self.max_bytes).await?;
         self.handle_client_message(message);
       }
     };
@@ -211,9 +210,9 @@ impl ParticipantSession {
         if let Err(error) =
           self
             .room
-            .forward_datagram(self.grant.participant_id, &datagram.payload(), Instant::now())
+            .forward_datagram(self.grant.device_id, &datagram.payload(), Instant::now())
         {
-          debug!(participant_id = %self.grant.participant_id, %error, "dropping invalid datagram");
+          debug!(participant_id = %self.grant.device_id, %error, "dropping invalid datagram");
         }
       }
     };
@@ -223,55 +222,62 @@ impl ParticipantSession {
     };
     writer.abort();
     info!(
-      call_id = self.grant.call_id.0,
-      participant_id = %self.grant.participant_id,
+      call_id = %self.grant.call_id,
+      participant_id = %self.grant.device_id,
       "session closed"
     );
     result
   }
 
-  fn handle_client_message(&self, message: ClientMessage) {
-    let participant_id = self.grant.participant_id;
+  fn handle_client_message(&self, message: CallClientMessage) {
+    let participant_id = self.grant.device_id;
     match message {
-      ClientMessage::DaveKeyPackage { key_package } => {
-        if let Err(error) = self.room.on_key_package(participant_id, key_package) {
+      CallClientMessage::DaveKeyPackage { key_package } => {
+        if let Err(error) = self.room.on_key_package(participant_id, key_package.into_vec()) {
           warn!(participant_id = %participant_id, %error, "rejected key package");
-          self.send_error(SignalingErrorCode::InvalidKeyPackage, error.to_string());
+          self.send_error(ErrorCode::InvalidKeyPackage, error.to_string());
         }
       },
-      ClientMessage::DaveCommit {
+      CallClientMessage::DaveCommit {
         epoch,
         commit,
         maybe_welcome,
       } => {
-        self.room.on_commit(participant_id, epoch, commit, maybe_welcome);
+        self.room.on_commit(
+          participant_id,
+          epoch,
+          commit.into_vec(),
+          maybe_welcome.map(Base64Bytes::into_vec),
+        );
       },
-      ClientMessage::Join { .. } => {
-        self.send_error(SignalingErrorCode::ProtocolViolation, "already joined".to_owned())
+      CallClientMessage::Join { .. } => {
+        self.send_error(ErrorCode::ProtocolViolation, "already joined".to_owned())
       },
-      ClientMessage::Unknown => debug!(participant_id = %participant_id, "ignoring unknown message"),
+      CallClientMessage::Unknown => debug!(participant_id = %participant_id, "ignoring unknown message"),
     }
   }
 
-  fn send_error(&self, error_code: SignalingErrorCode, message: String) {
+  fn send_error(&self, error_code: ErrorCode, message: String) {
     // Fails only when the writer task ended, i.e. the session is closing anyway.
-    let _ = self.signal_tx.send(ServerMessage::Error { error_code, message });
+    let _ = self
+      .signal_tx
+      .send(Outgoing::Error(ErrorBody::new(error_code, message)));
   }
 }
 
-async fn write_signaling(mut send: SendStream, mut signal_rx: mpsc::UnboundedReceiver<ServerMessage>) {
-  while let Some(message) = signal_rx.recv().await {
-    if let Err(error) = write_message(&mut send, &message).await {
+async fn write_signaling(mut send: SendStream, mut signal_rx: mpsc::UnboundedReceiver<Outgoing>) {
+  let mut sequence = EventSequence::default();
+  while let Some(outgoing) = signal_rx.recv().await {
+    if let Err(error) = write_message(&mut send, &sequence.frame(outgoing)).await {
       debug!(%error, "signaling write failed");
       return;
     }
   }
 }
 
-async fn reject(send: &mut SendStream, error_code: SignalingErrorCode, message: &str) {
-  let error = ServerMessage::Error {
-    error_code,
-    message: message.to_owned(),
+async fn reject(send: &mut SendStream, error_code: ErrorCode, message: &str) {
+  let error = CallServerMessage::Error {
+    error: ErrorBody::new(error_code, message),
   };
   // Best effort: the session is being closed anyway.
   if write_message(send, &error).await.is_ok() {

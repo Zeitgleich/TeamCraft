@@ -32,3 +32,32 @@ on `OwnPendingCommit` instead of in the error arm; behaviour for clients is unch
 
 - `cargo test` and `cargo clippy` pass.
 - No public API changes in davey.
+
+---
+
+# Second upstream PR draft: browser support
+
+Not opened yet. Independent of the openmls PR above; `upstream-web-time.patch` applies on top of it
+(the `Cargo.toml` context includes the openmls 0.9 lines). Without the first PR, add the `web-time`
+line to `davey/Cargo.toml` by hand.
+
+---
+
+**Title:** fix: use web-time so encryption works on wasm32-unknown-unknown
+
+**Body:**
+
+`davey` builds for `wasm32-unknown-unknown` (openmls has the `js` feature enabled), but every
+`encrypt`/`decrypt` panics there with "time not implemented on this platform": the encryptor,
+decryptor and cryptor manager use `std::time::Instant`, which has no implementation on that target.
+
+This switches those three files to `web_time::Instant`
+([web-time](https://crates.io/crates/web-time), MIT OR Apache-2.0), which uses
+`performance.now()` in browsers and Node and simply re-exports `std::time::Instant` on every other
+target, so native behaviour and performance are unchanged.
+
+- Verified with a two-member group and frame round trip under `wasm-bindgen-test` in Node 24 and
+  Chromium; fails before the change, passes after.
+- `cargo test` and `cargo clippy` pass natively.
+- No public API changes.
+

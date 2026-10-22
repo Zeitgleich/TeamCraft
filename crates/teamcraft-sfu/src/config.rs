@@ -5,6 +5,8 @@ use std::{
   time::Duration,
 };
 
+use crate::speakers::SpeakerSelectionConfig;
+
 #[derive(Debug, Clone)]
 pub struct SfuConfig {
   /// UDP address of the WebTransport endpoint. IPv6 addresses are bound dual-stack
@@ -14,14 +16,16 @@ pub struct SfuConfig {
   /// Serves the browser test page over plain HTTP when set. Development only: it also enables the
   /// [`crate::auth::DevTokenVerifier`] in `main`.
   pub maybe_dev_http_addr: Option<SocketAddr>,
-  /// Audio of at most this many loudest speakers is forwarded (ARCHITECTURE.md §6.3: 3–5).
-  pub max_forwarded_speakers: usize,
-  /// A participant whose audio stopped this long ago no longer counts as a speaker.
-  pub speaker_timeout: Duration,
+  /// Which speakers' audio is forwarded (top-N by audio level).
+  pub speakers: SpeakerSelectionConfig,
   /// Time a new session has to send its `join` message.
   pub join_timeout: Duration,
   /// Upper bound for one signaling message.
   pub max_signaling_message_bytes: usize,
+  /// Tolerated clock difference to the server when checking join token times.
+  pub join_token_leeway: Duration,
+  /// Join tokens valid for longer than this are rejected.
+  pub max_join_token_lifetime: Duration,
 }
 
 impl Default for SfuConfig {
@@ -29,10 +33,11 @@ impl Default for SfuConfig {
     Self {
       bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 4433)),
       maybe_dev_http_addr: None,
-      max_forwarded_speakers: 3,
-      speaker_timeout: Duration::from_millis(1000),
+      speakers: SpeakerSelectionConfig::default(),
       join_timeout: Duration::from_secs(10),
       max_signaling_message_bytes: 256 * 1024,
+      join_token_leeway: Duration::from_secs(5),
+      max_join_token_lifetime: Duration::from_secs(300),
     }
   }
 }

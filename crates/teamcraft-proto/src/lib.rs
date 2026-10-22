@@ -5,6 +5,7 @@
 
 mod api;
 mod bytes;
+mod calls;
 mod conversation;
 mod error;
 mod gateway;
@@ -16,11 +17,15 @@ mod wire_enum;
 
 pub use api::*;
 pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, UnixMillis};
+pub use calls::{
+  CALL_JOIN_TOKEN_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims, CallParticipant, CallServerMessage,
+  MediaStreamId,
+};
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};
 pub use gateway::{GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
-  AttachmentId, AuditEntryId, CategoryId, ConversationId, DeviceId, Id, IdError, InviteId, MessageId,
+  AttachmentId, AuditEntryId, CallId, CategoryId, ConversationId, DeviceId, Id, IdError, InviteId, MessageId,
   MlsMessageId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId,
   ThreadId, UserId,
 };

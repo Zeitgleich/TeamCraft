@@ -206,6 +206,10 @@ define_id!(
   /// A thread, identified by the ID of its root message.
   ThreadId
 );
+define_id!(
+  /// A call (one SFU room, one DAVE group).
+  CallId
+);
 
 #[cfg(test)]
 mod tests {

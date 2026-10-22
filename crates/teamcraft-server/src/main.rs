@@ -20,6 +20,7 @@ use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{ApnsSender, FcmSender, PushDispatcher, UnifiedPushSender, WebPushSender};
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
+use teamcraft_server::services::calls::CallService;
 use teamcraft_server::services::presence::refresh_presence;
 use teamcraft_server::services::{oidc, retention};
 use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, Settings};
@@ -66,6 +67,13 @@ async fn main() -> anyhow::Result<()> {
       .map(BlobStore::new)
       .transpose()
       .context("configuring attachment storage")?
+      .map(Arc::new),
+    maybe_calls: config
+      .calls
+      .as_ref()
+      .map(CallService::from_config)
+      .transpose()
+      .context("configuring calls")?
       .map(Arc::new),
     scheme: Arc::new(PermissionScheme::default()),
     settings: Arc::new(Settings {

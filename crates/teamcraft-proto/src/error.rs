@@ -26,6 +26,10 @@ wire_enum! {
     KeyPackageExhausted => "key_package_exhausted",
     PayloadTooLarge => "payload_too_large",
     RateLimited => "rate_limited",
+    InvalidJoinToken => "invalid_join_token",
+    AlreadyJoined => "already_joined",
+    ProtocolViolation => "protocol_violation",
+    InvalidKeyPackage => "invalid_key_package",
     Internal => "internal",
     Unavailable => "unavailable",
   }

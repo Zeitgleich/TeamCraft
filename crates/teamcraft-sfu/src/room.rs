@@ -10,22 +10,19 @@ use std::{
   time::Instant,
 };
 
-use teamcraft_media::{
-  datagram::{DatagramError, DatagramHeader, StreamId},
-  dave::DaveEpoch,
-  rtp::{AudioLevel, RtpError, RtpHeader},
-};
+use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
+use teamcraft_proto::{Base64Bytes, CallEvent, CallId, CallParticipant, DeviceId, MediaStreamId, UserId};
 use thiserror::Error;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, trace, warn};
 use wtransport::Connection;
 
 use crate::{
+  auth::JoinGrant,
   config::SfuConfig,
   dave_coordinator::{DaveCoordinator, DaveCoordinatorError, Outbound},
-  ids::{CallId, DeviceId},
-  signaling::{ParticipantInfo, ServerMessage},
-  speakers::SpeakerSelector,
+  forwarding::{ForwardError, Forwarder},
+  signaling::Outgoing,
 };
 
 /// All rooms of this SFU.
@@ -44,17 +41,18 @@ pub struct Room {
 #[derive(Clone)]
 pub struct ParticipantHandle {
   pub connection: Connection,
-  pub signal_tx: UnboundedSender<ServerMessage>,
+  pub signal_tx: UnboundedSender<Outgoing>,
 }
 
 struct RoomState {
   participants: HashMap<DeviceId, Participant>,
-  speakers: SpeakerSelector,
+  forwarder: Forwarder,
   dave: DaveCoordinator,
   next_stream_id: u32,
 }
 
 struct Participant {
+  user_id: UserId,
   audio_stream_id: StreamId,
   handle: ParticipantHandle,
 }
@@ -63,14 +61,8 @@ struct Participant {
 pub enum RoomError {
   #[error("participant {0:?} is already in the call")]
   AlreadyJoined(DeviceId),
-  #[error("participant {0:?} is not in the call")]
-  NotJoined(DeviceId),
-  #[error("stream {actual:?} does not belong to the sender (expected {expected:?})")]
-  ForeignStream { expected: StreamId, actual: StreamId },
-  #[error("invalid datagram: {0}")]
-  Datagram(#[from] DatagramError),
-  #[error("invalid RTP header: {0}")]
-  Rtp(#[from] RtpError),
+  #[error(transparent)]
+  Forward(#[from] ForwardError),
   #[error(transparent)]
   Dave(#[from] DaveCoordinatorError),
 }
@@ -84,12 +76,8 @@ impl Rooms {
   }
 
   /// Adds a participant to a call, creating the room on first join.
-  pub fn join(
-    &self,
-    call_id: CallId,
-    participant_id: DeviceId,
-    handle: ParticipantHandle,
-  ) -> Result<Arc<Room>, RoomError> {
+  pub fn join(&self, grant: JoinGrant, handle: ParticipantHandle) -> Result<Arc<Room>, RoomError> {
+    let call_id = grant.call_id;
     // The rooms lock is held across the join so `leave` can't drop the room in between.
     // Lock order everywhere: rooms, then room state.
     let mut rooms = lock(&self.rooms);
@@ -98,11 +86,11 @@ impl Rooms {
       None => {
         let room = Arc::new(Room::new(call_id, &self.config)?);
         rooms.insert(call_id, Arc::clone(&room));
-        info!(call_id = call_id.0, "room created");
+        info!(call_id = %call_id, "room created");
         room
       },
     };
-    let result = room.join(participant_id, handle);
+    let result = room.join(grant.user_id, grant.device_id, handle);
     if result.is_err() && room.is_empty() {
       rooms.remove(&call_id);
     }
@@ -118,7 +106,7 @@ impl Rooms {
       // Only drop the room if no one rejoined in the meantime.
       if rooms.get(&room.call_id).is_some_and(|current| current.is_empty()) {
         rooms.remove(&room.call_id);
-        info!(call_id = room.call_id.0, "room closed");
+        info!(call_id = %room.call_id, "room closed");
       }
     }
   }
@@ -128,7 +116,7 @@ impl Room {
   fn new(call_id: CallId, config: &SfuConfig) -> Result<Self, RoomError> {
     let state = RoomState {
       participants: HashMap::new(),
-      speakers: SpeakerSelector::new(config.max_forwarded_speakers, config.speaker_timeout),
+      forwarder: Forwarder::new(config.speakers),
       dave: DaveCoordinator::new(call_id)?,
       next_stream_id: 1,
     };
@@ -152,20 +140,11 @@ impl Room {
   ) -> Result<usize, RoomError> {
     let receivers: Vec<Connection> = {
       let mut state = lock(&self.state);
-      let Some(participant) = state.participants.get(&sender) else {
-        return Err(RoomError::NotJoined(sender));
-      };
-      let header = DatagramHeader::parse(datagram)?;
-      if header.stream_id != participant.audio_stream_id {
-        return Err(RoomError::ForeignStream {
-          expected: participant.audio_stream_id,
-          actual: header.stream_id,
-        });
+      let route = state.forwarder.route(sender, datagram, now)?;
+      if let Some(speakers) = route.maybe_active_speakers {
+        state.broadcast(CallEvent::ActiveSpeakers { device_ids: speakers });
       }
-      let (rtp_header, _) = RtpHeader::parse(&datagram[teamcraft_media::datagram::DATAGRAM_HEADER_BYTES..])?;
-      let level = rtp_header.audio_level().unwrap_or(AudioLevel::SILENCE);
-      state.speakers.record(sender, level, now);
-      if !state.speakers.is_selected(sender, now) {
+      if !route.should_forward {
         return Ok(0);
       }
       state
@@ -205,51 +184,57 @@ impl Room {
     state.dispatch(outbound);
   }
 
-  fn join(&self, participant_id: DeviceId, handle: ParticipantHandle) -> Result<(), RoomError> {
+  fn join(
+    &self,
+    user_id: UserId,
+    participant_id: DeviceId,
+    handle: ParticipantHandle,
+  ) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
     if state.participants.contains_key(&participant_id) {
       return Err(RoomError::AlreadyJoined(participant_id));
     }
     let audio_stream_id = StreamId(state.next_stream_id);
     state.next_stream_id = state.next_stream_id.wrapping_add(1);
-    let others: Vec<ParticipantInfo> = state
+    let others: Vec<CallParticipant> = state
       .participants
       .iter()
-      .map(|(&id, participant)| ParticipantInfo {
-        participant_id: id,
-        audio_stream_id: participant.audio_stream_id.0,
-      })
+      .map(|(&device_id, participant)| participant.info(device_id))
       .collect();
     let package = state.dave.external_sender_package()?;
+    let participant = Participant {
+      user_id,
+      audio_stream_id,
+      handle,
+    };
+    let info = participant.info(participant_id);
     send(
-      &handle,
-      ServerMessage::Joined {
+      &participant.handle,
+      CallEvent::Joined {
         call_id: self.call_id,
-        participant_id,
-        audio_stream_id: audio_stream_id.0,
+        participant: info,
         participants: others,
       },
     );
-    send(&handle, ServerMessage::DaveExternalSender { package });
-    let info = ParticipantInfo {
-      participant_id,
-      audio_stream_id: audio_stream_id.0,
-    };
-    for participant in state.participants.values() {
-      send(&participant.handle, ServerMessage::ParticipantJoined(info));
-    }
-    state.participants.insert(
-      participant_id,
-      Participant {
-        audio_stream_id,
-        handle,
+    send(
+      &participant.handle,
+      CallEvent::DaveExternalSender {
+        package: Base64Bytes::new(package),
       },
     );
-    info!(
-      call_id = self.call_id.0,
-      participant_id = %participant_id,
-      "participant joined"
-    );
+    let active_speakers = state.forwarder.active_speakers().to_vec();
+    if !active_speakers.is_empty() {
+      send(
+        &participant.handle,
+        CallEvent::ActiveSpeakers {
+          device_ids: active_speakers,
+        },
+      );
+    }
+    state.broadcast(CallEvent::ParticipantJoined { participant: info });
+    state.forwarder.add(participant_id, audio_stream_id);
+    state.participants.insert(participant_id, participant);
+    info!(call_id = %self.call_id, participant_id = %participant_id, "participant joined");
     Ok(())
   }
 
@@ -259,17 +244,16 @@ impl Room {
     if state.participants.remove(&participant_id).is_none() {
       return state.participants.is_empty();
     }
-    state.speakers.remove(participant_id);
-    for participant in state.participants.values() {
-      send(
-        &participant.handle,
-        ServerMessage::ParticipantLeft { participant_id },
-      );
+    state.broadcast(CallEvent::ParticipantLeft {
+      device_id: participant_id,
+    });
+    if let Some(speakers) = state.forwarder.remove(participant_id, Instant::now()) {
+      state.broadcast(CallEvent::ActiveSpeakers { device_ids: speakers });
     }
     let outbound = state.dave.on_leave(participant_id);
     state.dispatch(outbound);
     info!(
-      call_id = self.call_id.0,
+      call_id = %self.call_id,
       participant_id = %participant_id,
       "participant left"
     );
@@ -282,10 +266,16 @@ impl Room {
 }
 
 impl RoomState {
+  fn broadcast(&self, event: CallEvent) {
+    for participant in self.participants.values() {
+      send(&participant.handle, event.clone());
+    }
+  }
+
   fn dispatch(&self, outbound: Vec<Outbound>) {
-    for Outbound { recipient, message } in outbound {
+    for Outbound { recipient, event } in outbound {
       match self.participants.get(&recipient) {
-        Some(participant) => send(&participant.handle, message),
+        Some(participant) => send(&participant.handle, event),
         None => debug!(
           participant_id = %recipient,
           "dropping DAVE message for departed participant"
@@ -295,9 +285,19 @@ impl RoomState {
   }
 }
 
-fn send(handle: &ParticipantHandle, message: ServerMessage) {
+impl Participant {
+  fn info(&self, device_id: DeviceId) -> CallParticipant {
+    CallParticipant {
+      user_id: self.user_id,
+      device_id,
+      audio_stream_id: MediaStreamId(self.audio_stream_id.0),
+    }
+  }
+}
+
+fn send(handle: &ParticipantHandle, event: CallEvent) {
   // The receiver only disappears when the session ends, which also removes the participant.
-  if handle.signal_tx.send(message).is_err() {
+  if handle.signal_tx.send(Outgoing::Event(event)).is_err() {
     warn!("signaling channel closed");
   }
 }

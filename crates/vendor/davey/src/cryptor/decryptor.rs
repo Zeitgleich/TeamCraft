@@ -4,8 +4,10 @@ use std::{
   cmp::min,
   collections::{HashMap, VecDeque},
   sync::Arc,
-  time::{Duration, Instant},
+  time::Duration,
 };
+// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
+use web_time::Instant;
 
 use tracing::{trace, warn};
 

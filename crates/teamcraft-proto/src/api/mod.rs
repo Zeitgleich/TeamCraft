@@ -2,6 +2,7 @@
 
 mod admin;
 mod attachments;
+mod calls;
 mod conversations;
 mod health;
 mod key_bag;
@@ -14,6 +15,7 @@ mod workspace;
 
 pub use admin::*;
 pub use attachments::*;
+pub use calls::*;
 pub use conversations::*;
 pub use health::*;
 pub use key_bag::*;

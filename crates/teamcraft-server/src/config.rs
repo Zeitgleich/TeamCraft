@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use figment::Figment;
@@ -39,6 +39,9 @@ pub struct Config {
   /// Blob storage for attachments; without it the attachment endpoints answer 503.
   #[serde(default)]
   pub storage: Option<StorageConfig>,
+  /// Calls through the SFU; without it the join-token endpoint answers 503.
+  #[serde(default)]
+  pub calls: Option<CallsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +253,25 @@ pub struct RetentionJobConfig {
   pub partitions_ahead_months: u32,
 }
 
+/// Calls (ARCHITECTURE.md §6): the server issues join tokens the SFU verifies with its public key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallsConfig {
+  /// WebTransport URL of the SFU that clients connect to.
+  pub sfu_url: String,
+  /// `iss` of join tokens, usually the server's public base URL; the SFU expects the same value.
+  pub issuer: String,
+  /// PEM file with the Ed25519 private key that signs join tokens (`openssl genpkey -algorithm
+  /// ed25519`). The SFU is configured with the matching public key.
+  pub signing_key_path: PathBuf,
+  /// Lifetime of a join token; it is only checked when joining, so keep it short.
+  #[serde(default = "default_join_token_ttl_secs")]
+  pub join_token_ttl_secs: u64,
+  /// A conversation's call gets a new id once no join token was issued for this long.
+  #[serde(default = "default_call_idle_secs")]
+  pub call_idle_secs: u64,
+}
+
 /// Device-linking relay at /api/v1/rendezvous.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -441,6 +463,14 @@ impl Default for LoggingConfig {
 
 fn env_provider() -> Env {
   Env::prefixed(ENV_PREFIX).ignore(&["config"]).split(ENV_NESTING)
+}
+
+fn default_join_token_ttl_secs() -> u64 {
+  60
+}
+
+fn default_call_idle_secs() -> u64 {
+  12 * 3600
 }
 
 fn default_region() -> String {

@@ -162,3 +162,18 @@ request_timeout_secs = 10
 max_concurrent_sends = 32
 # Development only: allow http and private addresses as Web Push endpoints.
 allow_private_endpoints = false
+
+# Calls through the SFU (ARCHITECTURE.md §6). Without this section the join-token endpoint answers
+# 503. The server signs short-lived join tokens; the SFU verifies them with the public key:
+#   openssl genpkey -algorithm ed25519 -out call-signing.pem
+#   openssl pkey -in call-signing.pem -pubout -out call-signing.pub.pem   # for the SFU
+# [calls]
+# WebTransport URL of the SFU that clients connect to.
+# sfu_url = "https://sfu.example.com:4433/call"
+# `iss` of join tokens; the SFU is configured with the same value.
+# issuer = "https://chat.example.com"
+# signing_key_path = "/etc/teamcraft/call-signing.pem"
+# Join tokens are only checked when joining, so keep them short-lived.
+# join_token_ttl_secs = 60
+# A conversation's call gets a new id once no join token was issued for this long.
+# call_idle_secs = 43200

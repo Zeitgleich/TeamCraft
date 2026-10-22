@@ -3,26 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SFU transport test</title>
+<title>SFU audio test</title>
 <style>
   :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6b6b70; --ok: #1a7f37; --bad: #c62828; --line: #d9d9de; }
   @media (prefers-color-scheme: dark) { :root { --fg: #e8e8ea; --bg: #161618; --muted: #9a9aa2; --ok: #4ac26b; --bad: #ff6b6b; --line: #333338; } }
-  body { font: 14px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 860px; padding: 16px; }
+  body { font: 14px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 900px; padding: 16px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
   p.note { color: var(--muted); margin: 0 0 16px; }
-  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 16px; padding: 12px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 16px; padding: 12px; min-width: 0; }
   label { display: inline-flex; gap: 6px; align-items: center; margin: 0 12px 8px 0; }
   input[type=text] { width: 12em; }
+  input[type=number] { width: 5em; }
+  .table-wrap { overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-  th, td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: right; }
+  th, td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: right; white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; }
   .ok { color: var(--ok); } .bad { color: var(--bad); }
   pre { background: color-mix(in srgb, var(--fg) 6%, transparent); padding: 8px; border-radius: 6px; max-height: 240px; overflow: auto; font-size: 12px; }
 </style>
 </head>
 <body>
-<h1>SFU transport test</h1>
-<p class="note">Development page. Sends synthetic RTP audio datagrams (60 bytes payload every 20 ms, <strong>not</strong> DAVE-encrypted) through the SFU and shows what arrives from other tabs or browsers. Open it twice with different participant ids.</p>
+<h1>SFU audio test</h1>
+<p class="note">Development page. Sends 20 ms Opus frames (WebCodecs) from the microphone or a test tone through the
+SFU as RTP datagrams with the audio level extension, and decodes and plays what arrives. Media is
+<strong>not</strong> DAVE-encrypted here. Open it in two tabs or browsers with different device ids.</p>
 
 <fieldset>
   <legend>Browser support</legend>
@@ -32,22 +36,35 @@
 <fieldset>
   <legend>Session</legend>
   <label>Token <input id="token" type="text"></label>
-  <label>Level (-dBov) <input id="level" type="range" min="0" max="127" value="30"> <span id="level-value">30</span></label>
-  <label><input id="sending" type="checkbox" checked> send audio datagrams</label>
+  <label>Source
+    <select id="source">
+      <option value="tone">Test tone (Opus)</option>
+      <option value="microphone">Microphone (Opus)</option>
+      <option value="synthetic">Synthetic bytes (no codec)</option>
+    </select>
+  </label>
+  <label>Tone Hz <input id="tone" type="number" min="100" max="2000" value="440"></label>
+  <label>Synthetic level (-dBov) <input id="level" type="range" min="0" max="127" value="30"> <span id="level-value">30</span></label>
+  <label><input id="sending" type="checkbox" checked> send</label>
+  <label><input id="playing" type="checkbox" checked> play received audio</label>
   <div>
     <button id="connect">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
     <span id="status"></span>
   </div>
+  <p class="note" id="pipeline"></p>
 </fieldset>
 
 <fieldset>
   <legend>Received streams</legend>
-  <table>
-    <thead><tr><th>Participant</th><th>Stream</th><th>Packets</th><th>Lost</th><th>Latency avg</th><th>min</th><th>max</th></tr></thead>
-    <tbody id="streams"></tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Device</th><th>Stream</th><th>Packets</th><th>Lost</th><th>Decoded</th><th>Level</th><th>Latency avg</th><th>min</th><th>max</th></tr></thead>
+      <tbody id="streams"></tbody>
+    </table>
+  </div>
   <p class="note" id="sent"></p>
+  <p class="note">Active speakers (forwarded audio): <span id="speakers">none</span></p>
 </fieldset>
 
 <fieldset>
@@ -59,17 +76,40 @@
 "use strict";
 const WEBTRANSPORT_PORT = __WEBTRANSPORT_PORT__;
 const CERT_HASH = new Uint8Array(__CERT_HASH__);
+const SAMPLE_RATE = 48000;
+const FRAME_SAMPLES = 960; // 20 ms
 const FRAME_INTERVAL_MS = 20;
-const PAYLOAD_BYTES = 60;
+const SYNTHETIC_PAYLOAD_BYTES = 60;
 const OPUS_PAYLOAD_TYPE = 111;
+const SYNTHETIC_PAYLOAD_TYPE = 96;
 const AUDIO_LEVEL_EXTENSION_ID = 1;
+// Development only: send time (float64 ms) for one-way latency between tabs on one machine.
+const SEND_TIME_EXTENSION_ID = 14;
+const VOICE_THRESHOLD_DBOV = 50;
+const PLAYOUT_DELAY_S = 0.06;
+const OPUS_CONFIG = { codec: "opus", sampleRate: SAMPLE_RATE, numberOfChannels: 1 };
+
+// Copies 128-sample render quanta to the main thread (capture path without MediaStreamTrackProcessor).
+const CAPTURE_WORKLET = `
+class CaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (channel) this.port.postMessage(channel.slice());
+    return true;
+  }
+}
+registerProcessor("capture", CaptureProcessor);
+`;
 
 const $ = (id) => document.getElementById(id);
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 let session = null;
+let isOpusSupported = false;
 
-$("token").value = `dev:1:${Math.floor(Math.random() * 1000) + 1}`;
+// Development token: dev:<call id>:<user id>:<device id> (only accepted in dev mode).
+const deviceId = Math.floor(Math.random() * 1000) + 1;
+$("token").value = `dev:1:${deviceId}:${deviceId}`;
 $("level").oninput = () => { $("level-value").textContent = $("level").value; };
 $("connect").onclick = () => connect().catch((error) => setStatus(`failed: ${error}`, false));
 $("disconnect").onclick = () => session?.transport.close();
@@ -78,17 +118,18 @@ showFeatures();
 async function showFeatures() {
   const checks = [
     ["WebTransport", "WebTransport" in window],
-    ["WebCodecs AudioEncoder", "AudioEncoder" in window],
-    ["WebCodecs VideoEncoder", "VideoEncoder" in window],
+    ["AudioEncoder", "AudioEncoder" in window],
+    ["AudioDecoder", "AudioDecoder" in window],
     ["MediaStreamTrackProcessor", "MediaStreamTrackProcessor" in window],
+    ["AudioWorklet", "AudioWorkletNode" in window],
   ];
   if ("AudioEncoder" in window) {
     try {
-      const support = await AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 });
-      checks.push(["Opus in AudioEncoder", support.supported]);
+      isOpusSupported = (await AudioEncoder.isConfigSupported(OPUS_CONFIG)).supported === true;
     } catch (error) {
-      checks.push(["Opus in AudioEncoder", false]);
+      isOpusSupported = false;
     }
+    checks.push(["Opus in AudioEncoder", isOpusSupported]);
   }
   $("features").innerHTML = checks
     .map(([name, ok]) => `<span class="${ok ? "ok" : "bad"}">${ok ? "✓" : "✗"} ${name}</span>`)
@@ -106,17 +147,31 @@ function log(line) {
   pre.scrollTop = pre.scrollHeight;
 }
 
+// ---- Session -------------------------------------------------------------------------------
+
 async function connect() {
   // location.hostname keeps the brackets of IPv6 literals ("[::1]"), so it works in the URL as is.
   const url = `https://${location.hostname}:${WEBTRANSPORT_PORT}/call`;
   setStatus(`connecting to ${url}…`, true);
+  // Created inside the click handler so autoplay policies allow playback.
+  const playback = new AudioContext({ sampleRate: SAMPLE_RATE });
   const transport = new WebTransport(url, {
     serverCertificateHashes: [{ algorithm: "sha-256", value: CERT_HASH }],
   });
   await transport.ready;
   const stream = await transport.createBidirectionalStream();
-  const writer = stream.writable.getWriter();
-  session = { transport, writer, datagramWriter: transport.datagrams.writable.getWriter(), streamId: null, participants: new Map(), stats: new Map(), sent: 0 };
+  session = {
+    transport,
+    writer: stream.writable.getWriter(),
+    datagramWriter: transport.datagrams.writable.getWriter(),
+    playback,
+    streamId: null,
+    participants: new Map(),
+    stats: new Map(),
+    sent: 0,
+    sequence: 0,
+    stopMedia: () => {},
+  };
   $("connect").disabled = true;
   $("disconnect").disabled = false;
   setStatus(`connected, max datagram ${transport.datagrams.maxDatagramSize ?? "?"} bytes`, true);
@@ -124,11 +179,11 @@ async function connect() {
   await sendSignal({ type: "join", token: $("token").value });
   readSignaling(stream.readable).catch((error) => log(`signaling closed: ${error}`));
   readDatagrams(transport.datagrams.readable).catch((error) => log(`datagrams closed: ${error}`));
-  const timer = setInterval(sendFrame, FRAME_INTERVAL_MS);
   const render = setInterval(renderStats, 500);
   transport.closed.finally(() => {
-    clearInterval(timer);
     clearInterval(render);
+    session?.stopMedia();
+    playback.close();
     setStatus("disconnected", false);
     $("connect").disabled = false;
     $("disconnect").disabled = true;
@@ -137,7 +192,7 @@ async function connect() {
 }
 
 async function sendSignal(message) {
-  const body = encoder.encode(JSON.stringify(message));
+  const body = textEncoder.encode(JSON.stringify(message));
   const framed = new Uint8Array(4 + body.length);
   new DataView(framed.buffer).setUint32(0, body.length);
   framed.set(body, 4);
@@ -157,106 +212,313 @@ async function readSignaling(readable) {
     while (buffer.length >= 4) {
       const length = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0);
       if (buffer.length < 4 + length) break;
-      handleSignal(JSON.parse(decoder.decode(buffer.subarray(4, 4 + length))));
+      handleSignal(JSON.parse(textDecoder.decode(buffer.subarray(4, 4 + length))));
       buffer = buffer.slice(4 + length);
     }
   }
 }
 
 function handleSignal(message) {
-  switch (message.type) {
+  if (message.type === "error") {
+    log(`error ${message.error.error_code}: ${message.error.message}`);
+    return;
+  }
+  if (message.type !== "event") return;
+  const event = message.event;
+  switch (event.type) {
     case "joined":
-      session.streamId = message.audio_stream_id;
-      for (const p of message.participants) session.participants.set(p.audio_stream_id, p.participant_id);
-      log(`joined call ${message.call_id} as ${message.participant_id}, stream ${message.audio_stream_id}`);
+      session.streamId = event.participant.audio_stream_id;
+      for (const p of event.participants) session.participants.set(p.audio_stream_id, p.device_id);
+      log(`#${message.seq} joined call ${event.call_id} as device ${event.participant.device_id}, stream ${session.streamId}`);
+      startMedia().catch((error) => log(`media failed: ${error}`));
       break;
     case "participant_joined":
-      session.participants.set(message.audio_stream_id, message.participant_id);
-      log(`participant ${message.participant_id} joined (stream ${message.audio_stream_id})`);
+      session.participants.set(event.participant.audio_stream_id, event.participant.device_id);
+      log(`#${message.seq} device ${event.participant.device_id} joined (stream ${event.participant.audio_stream_id})`);
       break;
     case "participant_left":
-      log(`participant ${message.participant_id} left`);
+      log(`#${message.seq} device ${event.device_id} left`);
       break;
-    case "error":
-      log(`error ${message.error_code}: ${message.message}`);
+    case "active_speakers":
+      $("speakers").textContent = event.device_ids.join(", ") || "none";
       break;
     default:
-      // DAVE messages: this page doesn't run DAVE (no WASM build yet), so they are only logged.
-      log(`${message.type}`);
+      // DAVE events: this page doesn't run DAVE, so they are only logged.
+      log(`#${message.seq} ${event.type}`);
   }
 }
 
-function sendFrame() {
+// ---- Sending -------------------------------------------------------------------------------
+
+async function startMedia() {
+  const source = $("source").value;
+  if (source === "synthetic" || !isOpusSupported) {
+    if (source !== "synthetic") log("Opus encoding is not available; sending synthetic bytes");
+    const timer = setInterval(sendSyntheticFrame, FRAME_INTERVAL_MS);
+    session.stopMedia = () => clearInterval(timer);
+    $("pipeline").textContent = "Sending: synthetic bytes, fixed level";
+    return;
+  }
+
+  const capture = new AudioContext({ sampleRate: SAMPLE_RATE });
+  const track = await openTrack(capture, source);
+  const pendingLevels = [];
+  const encoder = new AudioEncoder({
+    output: (chunk) => {
+      const payload = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(payload);
+      sendRtp(OPUS_PAYLOAD_TYPE, payload, pendingLevels.shift() ?? 127);
+    },
+    error: (error) => log(`encoder: ${error}`),
+  });
+  encoder.configure({ ...OPUS_CONFIG, bitrate: 32000, opus: { frameDuration: 20000 } });
+
+  let buffered = new Float32Array(0);
+  let frameIndex = 0;
+  const onSamples = (samples) => {
+    const joined = new Float32Array(buffered.length + samples.length);
+    joined.set(buffered);
+    joined.set(samples, buffered.length);
+    buffered = joined;
+    while (buffered.length >= FRAME_SAMPLES) {
+      const frame = buffered.slice(0, FRAME_SAMPLES);
+      buffered = buffered.slice(FRAME_SAMPLES);
+      if (!$("sending").checked || encoder.state !== "configured") continue;
+      pendingLevels.push(levelDbov(frame));
+      encoder.encode(new AudioData({
+        format: "f32-planar",
+        sampleRate: SAMPLE_RATE,
+        numberOfFrames: FRAME_SAMPLES,
+        numberOfChannels: 1,
+        timestamp: frameIndex * 20000,
+        data: frame,
+      }));
+      frameIndex += 1;
+    }
+  };
+  const stopCapture = await startCapture(capture, track, onSamples);
+  session.stopMedia = () => {
+    stopCapture();
+    track.stop();
+    if (encoder.state !== "closed") encoder.close();
+    capture.close();
+  };
+}
+
+/** The microphone (with the browser's echo cancellation) or a sine tone as a MediaStreamTrack. */
+async function openTrack(context, source) {
+  if (source === "microphone") {
+    const media = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+    return media.getAudioTracks()[0];
+  }
+  const oscillator = context.createOscillator();
+  oscillator.frequency.value = Number($("tone").value) || 440;
+  const gain = context.createGain();
+  gain.gain.value = 0.25;
+  const destination = context.createMediaStreamDestination();
+  oscillator.connect(gain).connect(destination);
+  oscillator.start();
+  return destination.stream.getAudioTracks()[0];
+}
+
+/** Delivers mono 48 kHz Float32 samples; MediaStreamTrackProcessor where available, else AudioWorklet. */
+async function startCapture(context, track, onSamples) {
+  if ("MediaStreamTrackProcessor" in window) {
+    const processor = new MediaStreamTrackProcessor({ track });
+    const reader = processor.readable.getReader();
+    let running = true;
+    $("pipeline").textContent = "Capture: MediaStreamTrackProcessor → AudioEncoder (Opus)";
+    (async () => {
+      while (running) {
+        const { value: data, done } = await reader.read();
+        if (done) return;
+        if (data.sampleRate !== SAMPLE_RATE) {
+          log(`track runs at ${data.sampleRate} Hz; resampling is not implemented on this page`);
+          data.close();
+          running = false;
+          return;
+        }
+        const samples = new Float32Array(data.numberOfFrames);
+        data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
+        data.close();
+        onSamples(samples);
+      }
+    })().catch((error) => log(`capture: ${error}`));
+    return () => { running = false; reader.cancel(); };
+  }
+  const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: "application/javascript" }));
+  await context.audioWorklet.addModule(moduleUrl);
+  URL.revokeObjectURL(moduleUrl);
+  const node = new AudioWorkletNode(context, "capture");
+  node.port.onmessage = (message) => onSamples(message.data);
+  const source = context.createMediaStreamSource(new MediaStream([track]));
+  // A muted path to the destination keeps the graph (and the worklet) running everywhere.
+  const mute = context.createGain();
+  mute.gain.value = 0;
+  source.connect(node).connect(mute).connect(context.destination);
+  $("pipeline").textContent = "Capture: AudioWorklet → AudioEncoder (Opus)";
+  return () => { source.disconnect(); node.disconnect(); };
+}
+
+function sendSyntheticFrame() {
   if (!session || session.streamId === null || !$("sending").checked) return;
-  const level = Number($("level").value);
-  const datagram = new Uint8Array(5 + 12 + 8 + PAYLOAD_BYTES);
+  sendRtp(SYNTHETIC_PAYLOAD_TYPE, new Uint8Array(SYNTHETIC_PAYLOAD_BYTES), Number($("level").value));
+}
+
+/** TeamCraft datagram header + RTP header with audio level and send time extensions + payload. */
+function sendRtp(payloadType, payload, level) {
+  if (!session || session.streamId === null) return;
+  const extensionBytes = 12; // level (2) + send time (9) + 1 padding
+  const datagram = new Uint8Array(5 + 12 + 4 + extensionBytes + payload.length);
   const view = new DataView(datagram.buffer);
-  // TeamCraft header: version 0, layer 0, stream id.
-  datagram[0] = 0;
+  datagram[0] = 0; // version 0, layer 0
   view.setUint32(1, session.streamId);
-  // RTP header with one-byte extension (0xBEDE, one word: audio level element + 2 bytes padding).
-  const sequence = session.sent & 0xffff;
-  datagram[5] = 0x90;
-  datagram[6] = OPUS_PAYLOAD_TYPE;
-  view.setUint16(7, sequence);
-  view.setUint32(9, (session.sent * 960) >>> 0);
+  datagram[5] = 0x90; // V=2, X=1
+  datagram[6] = payloadType;
+  view.setUint16(7, session.sequence & 0xffff);
+  view.setUint32(9, (session.sequence * FRAME_SAMPLES) >>> 0);
   view.setUint32(13, session.streamId);
   view.setUint16(17, 0xbede);
-  view.setUint16(19, 1);
+  view.setUint16(19, extensionBytes / 4);
   datagram[21] = (AUDIO_LEVEL_EXTENSION_ID << 4) | 0;
-  datagram[22] = (level < 127 ? 0x80 : 0) | level;
-  // Payload: send time (ms since epoch, float64) for one-way latency between tabs on one machine.
-  view.setFloat64(25, performance.timeOrigin + performance.now());
+  datagram[22] = (level < VOICE_THRESHOLD_DBOV ? 0x80 : 0) | level;
+  datagram[23] = (SEND_TIME_EXTENSION_ID << 4) | 7;
+  view.setFloat64(24, performance.timeOrigin + performance.now());
+  datagram.set(payload, 5 + 12 + 4 + extensionBytes);
   // Datagrams are unreliable; a rejected write is just a dropped frame.
   session.datagramWriter.write(datagram).catch(() => {});
+  session.sequence += 1;
   session.sent += 1;
 }
+
+/** RFC 6464 level of a frame: RMS in -dBov, 0 loudest, 127 silence. */
+function levelDbov(samples) {
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  const rms = Math.sqrt(sum / samples.length);
+  if (rms <= 0) return 127;
+  return Math.min(127, Math.max(0, Math.round(-20 * Math.log10(rms))));
+}
+
+// ---- Receiving -----------------------------------------------------------------------------
 
 async function readDatagrams(readable) {
   const reader = readable.getReader();
   for (;;) {
     const { value, done } = await reader.read();
     if (done) return;
-    const now = performance.timeOrigin + performance.now();
-    const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
-    const streamId = view.getUint32(1);
-    const rtp = 5;
-    const hasExtension = (value[rtp] & 0x10) !== 0;
-    const csrcCount = value[rtp] & 0x0f;
-    const sequence = view.getUint16(rtp + 2);
-    let offset = rtp + 12 + 4 * csrcCount;
-    if (hasExtension) offset += 4 + 4 * view.getUint16(offset + 2);
-    const latency = offset + 8 <= value.length ? now - view.getFloat64(offset) : NaN;
-    recordStat(streamId, sequence, latency);
+    const received = parseDatagram(value);
+    if (received) handleMedia(received, performance.timeOrigin + performance.now());
   }
 }
 
-function recordStat(streamId, sequence, latency) {
-  let stat = session.stats.get(streamId);
-  if (!stat) {
-    stat = { packets: 0, lost: 0, lastSequence: null, sum: 0, min: Infinity, max: -Infinity };
-    session.stats.set(streamId, stat);
+function parseDatagram(bytes) {
+  if (bytes.length < 5 + 12) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const rtp = 5;
+  const hasExtension = (bytes[rtp] & 0x10) !== 0;
+  const csrcCount = bytes[rtp] & 0x0f;
+  const result = {
+    streamId: view.getUint32(1),
+    payloadType: bytes[rtp + 1] & 0x7f,
+    sequence: view.getUint16(rtp + 2),
+    timestamp: view.getUint32(rtp + 4),
+    level: 127,
+    sentAt: NaN,
+  };
+  let offset = rtp + 12 + 4 * csrcCount;
+  if (hasExtension) {
+    const profile = view.getUint16(offset);
+    const end = offset + 4 + 4 * view.getUint16(offset + 2);
+    if (end > bytes.length) return null;
+    let position = offset + 4;
+    while (profile === 0xbede && position < end) {
+      const first = bytes[position];
+      if (first === 0) { position += 1; continue; }
+      const id = first >> 4;
+      const length = (first & 0x0f) + 1;
+      if (id === 15 || position + 1 + length > end) break;
+      if (id === AUDIO_LEVEL_EXTENSION_ID) result.level = bytes[position + 1] & 0x7f;
+      if (id === SEND_TIME_EXTENSION_ID && length === 8) result.sentAt = view.getFloat64(position + 1);
+      position += 1 + length;
+    }
+    offset = end;
   }
+  result.payload = bytes.subarray(offset);
+  return result;
+}
+
+function handleMedia(packet, now) {
+  const stat = statFor(packet.streamId);
   if (stat.lastSequence !== null) {
-    const gap = (sequence - stat.lastSequence - 1) & 0xffff;
+    const gap = (packet.sequence - stat.lastSequence - 1) & 0xffff;
     if (gap > 0 && gap < 1000) stat.lost += gap;
   }
-  stat.lastSequence = sequence;
+  stat.lastSequence = packet.sequence;
   stat.packets += 1;
-  if (Number.isFinite(latency)) {
+  stat.level = packet.level;
+  if (Number.isFinite(packet.sentAt)) {
+    const latency = now - packet.sentAt;
     stat.sum += latency;
+    stat.timed += 1;
     stat.min = Math.min(stat.min, latency);
     stat.max = Math.max(stat.max, latency);
   }
+  if (packet.payloadType !== OPUS_PAYLOAD_TYPE || !("AudioDecoder" in window)) return;
+  if (!stat.decoder) stat.decoder = createDecoder(stat);
+  if (stat.decoder.state !== "configured") return;
+  stat.decoder.decode(new EncodedAudioChunk({
+    type: "key",
+    timestamp: Math.round(packet.timestamp * 1e6 / SAMPLE_RATE),
+    data: packet.payload,
+  }));
+}
+
+function statFor(streamId) {
+  let stat = session.stats.get(streamId);
+  if (!stat) {
+    stat = { packets: 0, lost: 0, decoded: 0, level: 127, lastSequence: null, sum: 0, timed: 0, min: Infinity, max: -Infinity, decoder: null, nextPlayTime: 0 };
+    session.stats.set(streamId, stat);
+  }
+  return stat;
+}
+
+function createDecoder(stat) {
+  const decoder = new AudioDecoder({
+    output: (data) => { stat.decoded += 1; play(stat, data); },
+    error: (error) => log(`decoder: ${error}`),
+  });
+  decoder.configure(OPUS_CONFIG);
+  return decoder;
+}
+
+/** Schedules decoded audio back to back with a small playout delay (no jitter buffer yet). */
+function play(stat, data) {
+  if (!session || !$("playing").checked) { data.close(); return; }
+  const context = session.playback;
+  const buffer = context.createBuffer(1, data.numberOfFrames, data.sampleRate);
+  const channel = new Float32Array(data.numberOfFrames);
+  data.copyTo(channel, { planeIndex: 0, format: "f32-planar" });
+  data.close();
+  buffer.copyToChannel(channel, 0);
+  const node = context.createBufferSource();
+  node.buffer = buffer;
+  node.connect(context.destination);
+  const earliest = context.currentTime + PLAYOUT_DELAY_S;
+  if (stat.nextPlayTime < context.currentTime) stat.nextPlayTime = earliest;
+  node.start(stat.nextPlayTime);
+  stat.nextPlayTime += buffer.duration;
 }
 
 function renderStats() {
   if (!session) return;
+  const ms = (value) => (Number.isFinite(value) ? `${value.toFixed(2)} ms` : "–");
   const rows = [...session.stats.entries()].map(([streamId, s]) => {
-    const participant = session.participants.get(streamId) ?? "?";
-    const ms = (value) => `${value.toFixed(2)} ms`;
-    return `<tr><td>${participant}</td><td>${streamId}</td><td>${s.packets}</td><td>${s.lost}</td>` +
-      `<td>${ms(s.sum / s.packets)}</td><td>${ms(s.min)}</td><td>${ms(s.max)}</td></tr>`;
+    const device = session.participants.get(streamId) ?? "?";
+    return `<tr><td>${device}</td><td>${streamId}</td><td>${s.packets}</td><td>${s.lost}</td><td>${s.decoded}</td>` +
+      `<td>-${s.level} dBov</td><td>${ms(s.sum / s.timed)}</td><td>${ms(s.min)}</td><td>${ms(s.max)}</td></tr>`;
   });
   $("streams").innerHTML = rows.join("");
   $("sent").textContent = `sent ${session.sent} datagrams`;

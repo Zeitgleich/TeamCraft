@@ -3,7 +3,11 @@
 //! Configuration via environment (spike; moves to the TOML config later):
 //!
 //! - `TEAMCRAFT_SFU_BIND`: UDP address, default `[::]:4433` (dual-stack)
-//! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test page, dev tokens)
+//! - `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY`: PEM file with the server's Ed25519 public key for join
+//!   tokens (`[calls] signing_key_path` on the server), and `TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER`: the
+//!   server's `[calls] issuer`
+//! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test page; unsigned
+//!   dev tokens when no public key is configured)
 //! - `TEAMCRAFT_SFU_CERT` / `TEAMCRAFT_SFU_KEY`: PEM files; without them a self-signed
 //!   certificate valid for 14 days is generated (browsers accept it via certificate hash)
 
@@ -11,7 +15,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
 use teamcraft_sfu::{
-  auth::{DevTokenVerifier, JoinTokenVerifier, RejectAllVerifier},
+  auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
   config::SfuConfig,
   dev_page::serve_dev_page,
   server::Sfu,
@@ -33,13 +37,7 @@ async fn main() -> anyhow::Result<()> {
   config.maybe_dev_http_addr = env_addr("TEAMCRAFT_SFU_DEV_HTTP")?;
 
   let identity = load_identity().await?;
-  let verifier: Arc<dyn JoinTokenVerifier> = if config.maybe_dev_http_addr.is_some() {
-    warn!("development mode: unsigned dev tokens are accepted");
-    Arc::new(DevTokenVerifier)
-  } else {
-    warn!("no join token verifier configured yet; all joins are rejected");
-    Arc::new(RejectAllVerifier)
-  };
+  let verifier = load_verifier(&config)?;
 
   let maybe_dev_http_addr = config.maybe_dev_http_addr;
   let sfu = Sfu::bind(config, identity, verifier).context("binding the SFU")?;
@@ -63,6 +61,29 @@ async fn main() -> anyhow::Result<()> {
     },
   }
   Ok(())
+}
+
+fn load_verifier(config: &SfuConfig) -> anyhow::Result<Arc<dyn JoinTokenVerifier>> {
+  if let Ok(path) = std::env::var("TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY") {
+    let issuer = std::env::var("TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER")
+      .context("TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER must be set together with the public key")?;
+    let pem = std::fs::read(&path).with_context(|| format!("reading {path}"))?;
+    let jwt_config = JwtJoinTokenConfig {
+      issuer,
+      leeway: config.join_token_leeway,
+      max_lifetime: config.max_join_token_lifetime,
+    };
+    let verifier =
+      JwtJoinTokenVerifier::new(&pem, &jwt_config).context("loading the join token public key")?;
+    info!("verifying join tokens signed by the server");
+    return Ok(Arc::new(verifier));
+  }
+  if config.maybe_dev_http_addr.is_some() {
+    warn!("development mode: unsigned dev tokens are accepted");
+    return Ok(Arc::new(DevTokenVerifier));
+  }
+  warn!("no join token public key configured; all joins are rejected");
+  Ok(Arc::new(RejectAllVerifier))
 }
 
 async fn load_identity() -> anyhow::Result<Identity> {

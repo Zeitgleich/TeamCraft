@@ -7,6 +7,7 @@
 | License      | MIT (`LICENSE`, copied from the upstream repository at that commit)   |
 | Used by      | `teamcraft-media` (DAVE, ARCHITECTURE.md §6), via `[patch.crates-io]` |
 | Why vendored | Move DAVE to `openmls` 0.9 so chat and calls share one MLS stack      |
+| Also         | `web-time` instead of `std::time::Instant`, for DAVE in the browser    |
 
 ## Why
 
@@ -30,11 +31,34 @@ The first commit adding this directory is the unmodified crate (its `Cargo.toml.
    when the commit matches the pending one (and `StageCommitError::OwnCommitMismatch` when it
    doesn't). The own-commit branch moved from the error arm to that content variant; the now unused
    `ProcessMessageError` import was dropped.
-3. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` (changes 1 and 2 without the
+3. `src/cryptor/{encryptor,decryptor,cryptor_manager}.rs`: `std::time::Instant` → `web_time::Instant`
+   (new dependency `web-time` 1.1, MIT OR Apache-2.0, already in our tree). `std::time::Instant`
+   compiles for `wasm32-unknown-unknown` but panics there on first use ("time not implemented on
+   this platform"), and the encryptor and decryptor take a timestamp for every frame. On native
+   targets `web_time::Instant` *is* `std::time::Instant`, so nothing changes there. Upstream draft:
+   second section of `UPSTREAM_PR.md`, patch `upstream-web-time.patch`.
+4. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` and `upstream-web-time.patch` (changes 1 and 2 without the
    `[workspace]` table, relative to the upstream repository), `.gitignore` (standalone `Cargo.lock`
    and `target/`).
 
 No other source changes. `cargo test` and `cargo clippy` pass on the copy.
+
+## Browser verification
+
+`crates/teamcraft-media/tests/wasm_dave.rs` sets up a two-member DAVE group and round-trips frames
+on `wasm32-unknown-unknown` (`wasm-bindgen-test`). Without change 3 it fails with "time not
+implemented on this platform"; with it, it passes in Node 24 and in Chromium (checked 2026-10 with
+`wasm-bindgen-cli` 0.2.129, matching `Cargo.lock`):
+
+```sh
+cargo install wasm-bindgen-cli --version 0.2.129 --locked
+export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner
+cargo test -p teamcraft-media --target wasm32-unknown-unknown --test wasm_dave          # Node
+WASM_BINDGEN_USE_BROWSER=1 NO_HEADLESS=1 \
+  cargo test -p teamcraft-media --target wasm32-unknown-unknown --test wasm_dave        # open the printed URL
+```
+
+Firefox and Safari still need the same run (the code path is plain `performance.now()`).
 
 ## Updating or dropping the vendor copy
 

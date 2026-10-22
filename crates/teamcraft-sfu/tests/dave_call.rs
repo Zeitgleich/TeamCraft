@@ -15,20 +15,25 @@ use std::{
 
 use teamcraft_media::{
   datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId},
-  dave::{DaveCallId, DaveEpoch, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind},
+  dave::{DaveEpoch, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind},
   rtp::{AudioLevel, PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc},
+};
+use teamcraft_proto::{
+  Base64Bytes, CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorCode,
 };
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
   config::SfuConfig,
-  ids::{DeviceId, dave_participant_id, device_id_from_dave},
+  ids::{dave_call_id, dave_participant_id, device_id_from_dave},
   server::{CALL_PATH, Sfu},
-  signaling::{ClientMessage, ServerMessage, read_message, write_message},
+  signaling::{read_message, write_message},
 };
 use tokio::sync::{Barrier, Notify, mpsc};
 use wtransport::{ClientConfig, Connection, Endpoint, Identity, tls::Sha256Digest};
 
 const CALL_ID: u64 = 42;
+/// All participants belong to this user; the SFU only cares about devices.
+const USER_ID: u64 = 1000;
 const FRAMES_PER_SENDER: u32 = 50;
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
 /// Typical size of a 20 ms Opus voice frame at ~24 kbit/s.
@@ -56,6 +61,28 @@ async fn call_over_ipv6() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn call_with_mixed_address_families() {
   run_call([V4, V6, V4, V6]).await;
+}
+
+#[tokio::test]
+async fn invalid_join_token_is_rejected() {
+  let (port, certificate_hash) = start_sfu().await;
+  let connection = connect(SocketAddr::new(V6, port), certificate_hash).await;
+  let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
+  write_message(
+    &mut send,
+    &CallClientMessage::Join {
+      token: "forged".into(),
+    },
+  )
+  .await
+  .unwrap();
+
+  let reply: CallServerMessage = read_message(&mut recv, MAX_SIGNALING_BYTES).await.unwrap();
+
+  let CallServerMessage::Error { error } = reply else {
+    panic!("expected an error, got {reply:?}");
+  };
+  assert_eq!(error.error_code, ErrorCode::InvalidJoinToken);
 }
 
 /// Runs one call; `client_ips[i]` is the SFU address participant `i` connects to.
@@ -120,6 +147,14 @@ async fn run_call(client_ips: [IpAddr; 4]) {
       "{:?} failed to decrypt frames",
       report.participant_id
     );
+    let mut speakers = report.active_speakers.clone();
+    speakers.sort();
+    assert_eq!(
+      speakers,
+      vec![device(1), device(2), device(3)],
+      "active speakers seen by {:?}",
+      report.participant_id
+    );
     latencies.extend_from_slice(&report.latencies);
   }
   println!("client address families: {client_ips:?}");
@@ -135,6 +170,7 @@ struct ClientReport {
   encrypted_frame_bytes: usize,
   datagram_bytes: usize,
   privacy_code: String,
+  active_speakers: Vec<DeviceId>,
 }
 
 /// Frames a client decrypted, per sender.
@@ -157,6 +193,8 @@ impl ReceiveResults {
 struct ClientState {
   dave: DaveParticipant,
   senders_by_stream: HashMap<StreamId, DeviceId>,
+  /// Last `active_speakers` event.
+  active_speakers: Vec<DeviceId>,
 }
 
 /// Starts an SFU on a dual-stack `[::]` socket with an ephemeral port.
@@ -183,31 +221,38 @@ async fn run_client(
 ) -> ClientReport {
   let connection = connect(addr, certificate_hash).await;
   let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
-  let token = format!("dev:{CALL_ID}:{participant_id}");
-  write_message(&mut send, &ClientMessage::Join { token })
+  let token = format!("dev:{CALL_ID}:{USER_ID}:{participant_id}");
+  write_message(&mut send, &CallClientMessage::Join { token })
     .await
     .unwrap();
 
-  let ServerMessage::Joined {
-    audio_stream_id,
-    participants,
-    ..
+  let CallServerMessage::Event {
+    seq: 1,
+    event: CallEvent::Joined {
+      participant,
+      participants,
+      ..
+    },
   } = read_message(&mut recv, MAX_SIGNALING_BYTES).await.unwrap()
   else {
-    panic!("expected joined");
+    panic!("expected joined as first event");
   };
-  let dave = DaveParticipant::new(dave_participant_id(participant_id), DaveCallId(CALL_ID)).unwrap();
+  assert_eq!(participant.device_id, participant_id);
+  let audio_stream_id = participant.audio_stream_id.0;
+  let call_id: CallId = CALL_ID.to_string().parse().unwrap();
+  let dave = DaveParticipant::new(dave_participant_id(participant_id), dave_call_id(call_id)).unwrap();
   let senders_by_stream = participants
     .iter()
-    .map(|info| (StreamId(info.audio_stream_id), info.participant_id))
+    .map(|info| (StreamId(info.audio_stream_id.0), info.device_id))
     .collect();
   let state = Arc::new(Mutex::new(ClientState {
     dave,
     senders_by_stream,
+    active_speakers: Vec::new(),
   }));
 
   // Signaling: a writer task fed by a channel, and a reader task driving DAVE.
-  let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<ClientMessage>();
+  let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<CallClientMessage>();
   tokio::spawn(async move {
     while let Some(message) = outgoing_rx.recv().await {
       write_message(&mut send, &message).await.unwrap();
@@ -216,8 +261,14 @@ async fn run_client(
   let (group_ready_tx, mut group_ready_rx) = mpsc::unbounded_channel::<()>();
   let signaling_state = Arc::clone(&state);
   tokio::spawn(async move {
-    while let Ok(message) = read_message::<ServerMessage>(&mut recv, MAX_SIGNALING_BYTES).await {
-      handle_server_message(&signaling_state, message, &outgoing_tx, &group_ready_tx);
+    let mut last_seq = 1;
+    while let Ok(message) = read_message::<CallServerMessage>(&mut recv, MAX_SIGNALING_BYTES).await {
+      let CallServerMessage::Event { seq, event } = message else {
+        panic!("unexpected frame {message:?}");
+      };
+      assert_eq!(seq, last_seq + 1, "event sequence must increase by one");
+      last_seq = seq;
+      handle_event(&signaling_state, event, &outgoing_tx, &group_ready_tx);
     }
   });
 
@@ -236,6 +287,10 @@ async fn run_client(
   ));
   let (encrypted_frame_bytes, datagram_bytes) =
     send_frames(&connection, &state, StreamId(audio_stream_id), level_dbov, start).await;
+  // Everyone has sent; take the speaker set before any client leaves and changes it.
+  ready.wait().await;
+  let active_speakers = state.lock().unwrap().active_speakers.clone();
+  ready.wait().await;
   // Wait for every audible sender's last frame; datagrams may be lost, so give up after a while.
   let expected_senders = audible_senders_except(participant_id);
   let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
@@ -269,6 +324,7 @@ async fn run_client(
     encrypted_frame_bytes,
     datagram_bytes,
     privacy_code,
+    active_speakers,
   }
 }
 
@@ -284,22 +340,24 @@ async fn connect(addr: SocketAddr, certificate_hash: Sha256Digest) -> Connection
     .unwrap()
 }
 
-fn handle_server_message(
+fn handle_event(
   state: &Mutex<ClientState>,
-  message: ServerMessage,
-  outgoing: &mpsc::UnboundedSender<ClientMessage>,
+  event: CallEvent,
+  outgoing: &mpsc::UnboundedSender<CallClientMessage>,
   group_ready: &mpsc::UnboundedSender<()>,
 ) {
   let mut state = state.lock().unwrap();
-  match message {
-    ServerMessage::DaveExternalSender { package } => {
-      state.dave.set_external_sender(&package).unwrap();
+  match event {
+    CallEvent::DaveExternalSender { package } => {
+      state.dave.set_external_sender(package.as_slice()).unwrap();
       let key_package = state.dave.create_key_package().unwrap();
       outgoing
-        .send(ClientMessage::DaveKeyPackage { key_package })
+        .send(CallClientMessage::DaveKeyPackage {
+          key_package: Base64Bytes::new(key_package),
+        })
         .unwrap();
     },
-    ServerMessage::DaveProposals {
+    CallEvent::DaveProposals {
       epoch,
       proposals,
       expected_participants,
@@ -308,28 +366,33 @@ fn handle_server_message(
         .iter()
         .map(|id| dave_participant_id(*id))
         .collect();
-      if let Some(commit) = state.dave.process_proposals(&proposals, &expected).unwrap() {
+      if let Some(commit) = state
+        .dave
+        .process_proposals(proposals.as_slice(), &expected)
+        .unwrap()
+      {
         outgoing
-          .send(ClientMessage::DaveCommit {
+          .send(CallClientMessage::DaveCommit {
             epoch,
-            commit: commit.commit,
-            maybe_welcome: commit.maybe_welcome,
+            commit: Base64Bytes::new(commit.commit),
+            maybe_welcome: commit.maybe_welcome.map(Base64Bytes::new),
           })
           .unwrap();
       }
     },
-    ServerMessage::DaveAnnounceCommit { epoch, commit } => {
+    CallEvent::DaveAnnounceCommit { epoch, commit } => {
       assert_eq!(state.dave.maybe_epoch(), Some(DaveEpoch(epoch)));
-      state.dave.process_commit(&commit).unwrap();
+      state.dave.process_commit(commit.as_slice()).unwrap();
     },
-    ServerMessage::DaveWelcome { welcome } => state.dave.process_welcome(&welcome).unwrap(),
-    ServerMessage::ParticipantJoined(info) => {
+    CallEvent::DaveWelcome { welcome } => state.dave.process_welcome(welcome.as_slice()).unwrap(),
+    CallEvent::ParticipantJoined { participant } => {
       state
         .senders_by_stream
-        .insert(StreamId(info.audio_stream_id), info.participant_id);
+        .insert(StreamId(participant.audio_stream_id.0), participant.device_id);
     },
-    ServerMessage::ParticipantLeft { .. } => {},
-    other => panic!("unexpected message {other:?}"),
+    CallEvent::ActiveSpeakers { device_ids } => state.active_speakers = device_ids,
+    CallEvent::ParticipantLeft { .. } => {},
+    other => panic!("unexpected event {other:?}"),
   }
   if state.dave.is_ready() && state.dave.participant_ids().len() == PARTICIPANTS.len() {
     // The receiver only stops listening after the first signal; later sends are harmless.

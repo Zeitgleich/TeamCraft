@@ -1,90 +1,24 @@
-//! Signaling on the reliable bidirectional stream the client opens first.
+//! Framing of the call signaling stream and the per-connection event sequence.
 //!
-//! Framing: 4-byte big-endian length, then one JSON message. Binary DAVE payloads are JSON byte
-//! arrays, which is simple for the browser page but wasteful; see SPIKE.md. These types move to
-//! `teamcraft-proto` after the spike.
+//! Message types live in `teamcraft_proto` (`CallClientMessage`, `CallServerMessage`); the wire is
+//! a 4-byte big-endian length followed by one JSON message.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::{CallEvent, CallServerMessage, ErrorBody};
 use thiserror::Error;
 use wtransport::{RecvStream, SendStream};
 
-use crate::ids::{CallId, DeviceId};
-
-/// Messages from a client to the SFU.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientMessage {
-  /// First message of every session.
-  Join { token: String },
-  /// The client's DAVE key package (after it received [`ServerMessage::DaveExternalSender`]).
-  DaveKeyPackage { key_package: Vec<u8> },
-  /// The client's commit for the proposals of `epoch`.
-  DaveCommit {
-    epoch: u64,
-    commit: Vec<u8>,
-    maybe_welcome: Option<Vec<u8>>,
-  },
-  #[serde(other)]
-  Unknown,
+/// What the SFU queues for one connection; the writer turns it into a [`CallServerMessage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outgoing {
+  Event(CallEvent),
+  Error(ErrorBody),
 }
 
-/// Messages from the SFU to a client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerMessage {
-  Joined {
-    call_id: CallId,
-    participant_id: DeviceId,
-    /// Stream id the client must put into its audio datagrams.
-    audio_stream_id: u32,
-    participants: Vec<ParticipantInfo>,
-  },
-  ParticipantJoined(ParticipantInfo),
-  ParticipantLeft {
-    participant_id: DeviceId,
-  },
-  /// Serialized MLS `ExternalSender` for this call.
-  DaveExternalSender {
-    package: Vec<u8>,
-  },
-  /// Proposals for `epoch`; every member commits, the SFU picks the first commit.
-  DaveProposals {
-    epoch: u64,
-    proposals: Vec<u8>,
-    expected_participants: Vec<DeviceId>,
-  },
-  /// The selected commit; members move to `epoch + 1`.
-  DaveAnnounceCommit {
-    epoch: u64,
-    commit: Vec<u8>,
-  },
-  DaveWelcome {
-    welcome: Vec<u8>,
-  },
-  Error {
-    error_code: SignalingErrorCode,
-    message: String,
-  },
-  #[serde(other)]
-  Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ParticipantInfo {
-  pub participant_id: DeviceId,
-  pub audio_stream_id: u32,
-}
-
-/// Stable error codes sent to clients.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SignalingErrorCode {
-  InvalidToken,
-  AlreadyJoined,
-  ProtocolViolation,
-  InvalidKeyPackage,
-  #[serde(untagged)]
-  Unknown(String),
+/// Numbers events per connection, starting at 1 (api-conventions.md).
+#[derive(Debug, Default)]
+pub struct EventSequence {
+  last_seq: u64,
 }
 
 #[derive(Debug, Error)]
@@ -97,6 +31,21 @@ pub enum SignalingError {
   TooLarge { actual_bytes: usize, max_bytes: usize },
   #[error("invalid JSON: {0}")]
   Json(#[from] serde_json::Error),
+}
+
+impl EventSequence {
+  pub fn frame(&mut self, outgoing: Outgoing) -> CallServerMessage {
+    match outgoing {
+      Outgoing::Event(event) => {
+        self.last_seq += 1;
+        CallServerMessage::Event {
+          seq: self.last_seq,
+          event,
+        }
+      },
+      Outgoing::Error(error) => CallServerMessage::Error { error },
+    }
+  }
 }
 
 /// Reads one length-prefixed JSON message.
@@ -139,69 +88,37 @@ pub fn encode_message<T: Serialize>(message: &T) -> Result<Vec<u8>, SignalingErr
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_proto::{CallClientMessage, ErrorCode};
+
   use super::*;
 
   #[test]
-  fn client_message_wire_format() {
-    let message = ClientMessage::Join {
-      token: "dev:1:2".to_owned(),
+  fn events_are_numbered_from_one_and_errors_are_not() {
+    let mut sequence = EventSequence::default();
+    let event = || {
+      Outgoing::Event(CallEvent::ActiveSpeakers {
+        device_ids: Vec::new(),
+      })
     };
-    assert_eq!(
-      serde_json::to_string(&message).unwrap(),
-      r#"{"type":"join","token":"dev:1:2"}"#
-    );
-    let commit = ClientMessage::DaveCommit {
-      epoch: 3,
-      commit: vec![1, 2],
-      maybe_welcome: None,
-    };
-    assert_eq!(
-      serde_json::to_string(&commit).unwrap(),
-      r#"{"type":"dave_commit","epoch":3,"commit":[1,2],"maybe_welcome":null}"#
-    );
-  }
-
-  #[test]
-  fn server_message_wire_format() {
-    let message = ServerMessage::ParticipantJoined(ParticipantInfo {
-      participant_id: device(5),
-      audio_stream_id: 9,
-    });
-    assert_eq!(
-      serde_json::to_string(&message).unwrap(),
-      r#"{"type":"participant_joined","participant_id":"5","audio_stream_id":9}"#
-    );
-    let error = ServerMessage::Error {
-      error_code: SignalingErrorCode::InvalidToken,
-      message: "no".to_owned(),
-    };
-    assert_eq!(
-      serde_json::to_string(&error).unwrap(),
-      r#"{"type":"error","error_code":"invalid_token","message":"no"}"#
-    );
-  }
-
-  #[test]
-  fn unknown_variants_are_tolerated() {
-    let client: ClientMessage = serde_json::from_str(r#"{"type":"from_the_future","x":1}"#).unwrap();
-    assert_eq!(client, ClientMessage::Unknown);
-    let server: ServerMessage = serde_json::from_str(r#"{"type":"from_the_future"}"#).unwrap();
-    assert_eq!(server, ServerMessage::Unknown);
-    let code: SignalingErrorCode = serde_json::from_str(r#""rate_limited""#).unwrap();
-    assert_eq!(code, SignalingErrorCode::Unknown("rate_limited".to_owned()));
+    assert!(matches!(
+      sequence.frame(event()),
+      CallServerMessage::Event { seq: 1, .. }
+    ));
+    let error = sequence.frame(Outgoing::Error(ErrorBody::new(ErrorCode::ProtocolViolation, "x")));
+    assert!(matches!(error, CallServerMessage::Error { .. }));
+    assert!(matches!(
+      sequence.frame(event()),
+      CallServerMessage::Event { seq: 2, .. }
+    ));
   }
 
   #[test]
   fn framing_prefixes_length() {
-    let framed = encode_message(&ClientMessage::Unknown).unwrap();
+    let framed = encode_message(&CallClientMessage::Unknown).unwrap();
     let body = &framed[4..];
     assert_eq!(
       u32::from_be_bytes([framed[0], framed[1], framed[2], framed[3]]) as usize,
       body.len()
     );
-  }
-
-  fn device(raw: u64) -> DeviceId {
-    crate::ids::device_id_from_dave(teamcraft_media::dave::DaveParticipantId(raw)).unwrap()
   }
 }
