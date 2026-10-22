@@ -14,7 +14,8 @@ use crate::settings::{load_string, store_string};
 use crate::slash::{ReminderTime, SlashCommand, SlashError, StatusChange};
 use crate::state::{AppState, Overlay};
 
-const SHRUG: &str = "¯\\_(ツ)_/¯";
+// Markdown source: the backslash and both underscores are escaped so they show as typed.
+const SHRUG: &str = "¯\\\\\\_(ツ)\\_/¯";
 const REMINDERS_KEY: &str = "teamcraft.reminders";
 const MS_PER_DAY: i64 = 86_400_000;
 

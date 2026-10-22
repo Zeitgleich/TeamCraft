@@ -43,6 +43,8 @@ struct Suggestion {
   label: String,
   detail: String,
   person: Option<User>,
+  /// The typed word already is this suggestion (`/shrug`): Enter sends instead of completing.
+  is_exact: bool,
 }
 
 const MAX_SUGGESTIONS: usize = 8;
@@ -79,6 +81,7 @@ fn mention_suggestions(
         label: "@channel".to_owned(),
         detail: channel_label.to_owned(),
         person: None,
+        is_exact: false,
       },
     ));
   }
@@ -91,6 +94,7 @@ fn mention_suggestions(
           label: user.display_name.clone(),
           detail: format!("@{}", user.username),
           person: Some(user.clone()),
+          is_exact: false,
         },
       ));
     }
@@ -104,6 +108,7 @@ fn mention_suggestions(
           label: group.name.clone(),
           detail: format!("@{}", group.handle),
           person: None,
+          is_exact: false,
         },
       ));
     }
@@ -330,6 +335,7 @@ pub fn Composer(
           label: format!("/{name} {usage}").trim_end().to_owned(),
           detail: String::new(),
           person: None,
+          is_exact: name == found.query.to_lowercase(),
         })
         .collect(),
       TriggerKind::Mention => {
@@ -395,9 +401,17 @@ pub fn Composer(
           return;
         },
         "Enter" | "Tab" => {
-          ev.prevent_default();
-          accept_suggestion(selected_suggestion.get_untracked());
-          return;
+          let is_exact = suggestions.with_untracked(|list| {
+            list
+              .get(selected_suggestion.get_untracked())
+              .is_some_and(|item| item.is_exact)
+          });
+          // A fully typed command is sent, not completed.
+          if !(is_exact && ev.key() == "Enter") {
+            ev.prevent_default();
+            accept_suggestion(selected_suggestion.get_untracked());
+            return;
+          }
         },
         "Escape" => {
           ev.prevent_default();
