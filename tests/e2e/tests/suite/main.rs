@@ -4,6 +4,7 @@
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 
+mod acceptance_calls;
 mod acceptance_files;
 mod acceptance_notifications;
 mod acceptance_people;
