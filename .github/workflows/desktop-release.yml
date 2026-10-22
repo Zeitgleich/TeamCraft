@@ -32,10 +32,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: rust:1.99.1-trixie
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Rust target
         run: rustup target add wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.arch }}
       - name: System packages
@@ -46,7 +46,7 @@ jobs:
           libasound2-dev meson ninja-build libclang-dev libpipewire-0.3-dev libspa-0.2-dev
           libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Trunk (builds the UI bundle)
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: trunk
       - name: Tauri CLI
@@ -59,7 +59,7 @@ jobs:
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-packages-${{ matrix.arch }}
           path: |
@@ -70,7 +70,7 @@ jobs:
       # The UI bundle is wasm32, the same for both architectures: keep one.
       - name: Keep the web UI bundle for the Flatpak job
         if: matrix.arch == 'x86_64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ui-dist
           path: crates/teamcraft-ui/dist
@@ -92,14 +92,14 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
       # SDK's Rust lacks) comes from the Linux job.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ui-dist
           path: crates/teamcraft-ui/dist
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6
         with:
           bundle: teamcraft-desktop-${{ matrix.arch }}.flatpak
           manifest-path: apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml
@@ -114,11 +114,11 @@ jobs:
     # Cisco library at runtime (openh264_library.rs).
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: universal-apple-darwin
       - name: Meson and ninja (build WebRTC audio processing)
@@ -142,7 +142,7 @@ jobs:
           sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
           sudo installer -pkg "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" -target /
       - name: Trunk (builds the UI bundle)
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: trunk
       - name: Tauri CLI
@@ -172,7 +172,7 @@ jobs:
         # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
         #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
         #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-universal
           path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
@@ -195,15 +195,15 @@ jobs:
     env:
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: wasm32-unknown-unknown,${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
       # OpenSSL for SQLCipher is built from source and needs NASM; Perl comes with the image.
-      - uses: ilammy/setup-nasm@v1
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
       # Direct download: install-action's bash startup fails on the Windows image.
       - name: Trunk (builds the UI bundle)
         shell: pwsh
@@ -221,7 +221,7 @@ jobs:
         run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles nsis,msi
         # Signing is left out on purpose (the installers are unsigned). To enable it, see
         # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-${{ matrix.target }}
           path: |
