@@ -19,6 +19,15 @@ struct ActiveCall: Identifiable, Equatable {
   var participantCount: UInt32 = 0
   /// The code participants compare to rule out a man in the middle (once secured).
   var maybePrivacyCode: String?
+  /// Put on hold from the system's call UI: nothing is sent or played.
+  var isOnHold = false
+}
+
+/// A remote camera or screen track that is shown in the call.
+struct RemoteVideoStream: Identifiable {
+  let id: String
+  let isScreen: Bool
+  let renderer: RemoteVideoRenderer
 }
 
 /// Calls through CallKit (docs/e2ee.md §8, PLAN.md §15): the system shows the incoming call screen
@@ -36,6 +45,14 @@ final class CallManager: NSObject, @unchecked Sendable {
   private(set) var activeCall: ActiveCall?
   /// Why the last call ended, shown briefly on the screen.
   private(set) var maybeEndNote: LocalizedStringResource?
+  /// Tracks of other participants that arrived, in the order they were published.
+  private(set) var remoteVideo: [RemoteVideoStream] = []
+  /// This device sends its camera.
+  private(set) var isCameraOn = false
+  /// The user refused camera access; the screen explains where to change it.
+  private(set) var isCameraDenied = false
+  /// Local picture and sender of the camera.
+  @ObservationIgnored let camera = CameraStreamer()
 
   @ObservationIgnored private let provider: CXProvider
   @ObservationIgnored private let controller = CXCallController()
@@ -45,10 +62,12 @@ final class CallManager: NSObject, @unchecked Sendable {
   @ObservationIgnored private var wantsJoin = false
   @ObservationIgnored private var isAudioActive = false
   @ObservationIgnored private var isJoining = false
+  @ObservationIgnored private var wantsVideoStart = false
+  @ObservationIgnored private let renderers = RendererRegistry()
 
   override init() {
     let configuration = CXProviderConfiguration()
-    configuration.supportsVideo = false
+    configuration.supportsVideo = true
     configuration.maximumCallGroups = 1
     configuration.maximumCallsPerCallGroup = 1
     configuration.supportedHandleTypes = [.generic]
@@ -75,14 +94,16 @@ final class CallManager: NSObject, @unchecked Sendable {
 
   // MARK: Commands from the app
 
-  /// Starts (or joins) the conversation's call.
+  /// Starts (or joins) the conversation's call; with `withVideo` the camera goes on once connected.
   @MainActor
-  func startCall(conversationId: String, displayName: String) {
+  func startCall(conversationId: String, displayName: String, withVideo: Bool = false) {
     guard activeCall == nil else { return }
     let uuid = UUID()
     let handle = CXHandle(type: .generic, value: conversationId)
     let action = CXStartCallAction(call: uuid, handle: handle)
     action.contactIdentifier = displayName
+    action.isVideo = withVideo
+    wantsVideoStart = withVideo
     activeCall = ActiveCall(
       id: uuid, conversationId: conversationId, displayName: displayName, isOutgoing: true,
       phase: .connecting)
@@ -94,6 +115,31 @@ final class CallManager: NSObject, @unchecked Sendable {
   func setMuted(_ isMuted: Bool) {
     guard let call = activeCall else { return }
     controller.request(CXTransaction(action: CXSetMutedCallAction(call: call.id, muted: isMuted)), completion: { _ in })
+  }
+
+  /// Turns the camera on or off during a call (CallKit is told so the system UI shows a video call).
+  @MainActor
+  func setCameraEnabled(_ isEnabled: Bool) async {
+    guard let session = maybeSession, activeCall != nil else { return }
+    if isEnabled {
+      guard await CameraStreamer.requestAccess() else {
+        isCameraDenied = true
+        return
+      }
+      camera.start(sending: session)
+    } else {
+      camera.stop()
+    }
+    isCameraOn = isEnabled
+    reportHasVideo(isEnabled)
+  }
+
+  func flipCamera() {
+    camera.flip()
+  }
+
+  func dismissCameraDenied() {
+    isCameraDenied = false
   }
 
   func hangUp() {
@@ -145,6 +191,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       do {
         let session = try await AppModel.shared.joinCall(conversationId: call.conversationId)
         maybeSession = session
+        session.setVideoListener(listener: self)
         if var current = activeCall {
           current.phase = .connected
           activeCall = current
@@ -152,6 +199,10 @@ final class CallManager: NSObject, @unchecked Sendable {
         if call.isOutgoing { provider.reportOutgoingCall(with: call.id, connectedAt: Date()) }
         maybePendingAction?.fulfill()
         maybePendingAction = nil
+        if wantsVideoStart {
+          wantsVideoStart = false
+          await setCameraEnabled(true)
+        }
       } catch {
         failCall(call, reason: .failed)
       }
@@ -164,9 +215,19 @@ final class CallManager: NSObject, @unchecked Sendable {
     }
   }
 
-  private func configureAudioSession() {
+  /// `playAndRecord` for calls; a call that starts with video uses the video chat mode (speaker by default).
+  private func configureAudioSession(video: Bool = false) {
     let session = AVAudioSession.sharedInstance()
-    try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+    let options: AVAudioSession.CategoryOptions = video ? [.allowBluetooth, .defaultToSpeaker] : [.allowBluetooth]
+    try? session.setCategory(.playAndRecord, mode: video ? .videoChat : .voiceChat, options: options)
+  }
+
+  @MainActor
+  private func reportHasVideo(_ hasVideo: Bool) {
+    guard let call = activeCall else { return }
+    let update = CXCallUpdate()
+    update.hasVideo = hasVideo
+    provider.reportCall(with: call.id, updated: update)
   }
 
   @MainActor
@@ -180,6 +241,11 @@ final class CallManager: NSObject, @unchecked Sendable {
 
   private func clear() {
     DispatchQueue.main.async {
+      self.camera.stop()
+      self.renderers.removeAll()
+      self.remoteVideo = []
+      self.isCameraOn = false
+      self.wantsVideoStart = false
       self.maybeSession = nil
       self.wantsJoin = false
       self.isAudioActive = false
@@ -197,7 +263,7 @@ extension CallManager: CXProviderDelegate {
   }
 
   func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
-    configureAudioSession()
+    configureAudioSession(video: action.isVideo)
     provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: nil)
     maybePendingAction = action
     wantsJoin = true
@@ -232,9 +298,15 @@ extension CallManager: CXProviderDelegate {
     action.fulfill()
   }
 
-  /// The core has no hold; holding mutes, resuming unmutes.
+  /// Hold silences the microphone, stops playing the others and pauses the camera; the call stays
+  /// joined, so resuming is instant.
   func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
-    maybeSession?.setMuted(isMuted: action.isOnHold)
+    maybeSession?.setHeld(isHeld: action.isOnHold)
+    camera.setPaused(action.isOnHold)
+    if var call = activeCall {
+      call.isOnHold = action.isOnHold
+      activeCall = call
+    }
     action.fulfill()
   }
 
@@ -319,5 +391,67 @@ extension CallManager: CallListener {
     case .endedByHost: return "call_ended_by_host"
     default: return nil
     }
+  }
+}
+
+// MARK: - Video from the core
+
+/// Remote tracks and keyframe requests of the core's call session (called on the call thread).
+extension CallManager: VideoListener {
+  func onRemoteVideoTrack(track: RemoteVideoTrack) {
+    let renderer = renderers.renderer(for: track.streamId, creating: true)
+    DispatchQueue.main.async {
+      guard let renderer, self.maybeSession != nil else { return }
+      if !self.remoteVideo.contains(where: { $0.id == track.streamId }) {
+        self.remoteVideo.append(
+          RemoteVideoStream(id: track.streamId, isScreen: track.isScreen, renderer: renderer))
+      }
+      self.maybeSession?.watchVideo(streamId: track.streamId)
+    }
+  }
+
+  func onRemoteVideoEnded(streamId: String) {
+    renderers.remove(streamId)
+    DispatchQueue.main.async { self.remoteVideo.removeAll { $0.id == streamId } }
+  }
+
+  func onRemoteVideoFrame(frame: RemoteVideoFrame) {
+    renderers.renderer(for: frame.streamId, creating: false)?.push(data: frame.data, timestamp: frame.timestamp)
+  }
+
+  func onKeyframeRequested() {
+    camera.requestKeyframe()
+  }
+}
+
+/// The renderers of the remote tracks, shared between the call thread (frames) and the main thread
+/// (screens).
+final class RendererRegistry: @unchecked Sendable {
+  private let lock = NSLock()
+  private var renderers: [String: RemoteVideoRenderer] = [:]
+
+  func renderer(for streamId: String, creating: Bool) -> RemoteVideoRenderer? {
+    lock.lock()
+    defer { lock.unlock() }
+    if let existing = renderers[streamId] { return existing }
+    guard creating else { return nil }
+    let created = RemoteVideoRenderer()
+    renderers[streamId] = created
+    return created
+  }
+
+  func remove(_ streamId: String) {
+    lock.lock()
+    let removed = renderers.removeValue(forKey: streamId)
+    lock.unlock()
+    removed?.reset()
+  }
+
+  func removeAll() {
+    lock.lock()
+    let all = renderers
+    renderers = [:]
+    lock.unlock()
+    for renderer in all.values { renderer.reset() }
   }
 }

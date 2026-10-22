@@ -6,7 +6,9 @@ PLAN.md M8). All encryption, sync, storage and call media live in `teamcraft-cor
 Android app uses). The app does login, keys in the Keychain, screens, push and CallKit.
 
 Status: written without a Mac; CI builds and unit-tests it on a macOS runner, nobody has run it on a
-device yet. Use the [manual test checklist](#manual-test-checklist) for the first run.
+device yet. Use the [manual test checklist](#manual-test-checklist) for the first run. **Untested on a
+device, and not testable in CI:** the camera and video path (needs a camera and a call partner), the
+photo and document pickers, Quick Look, the background prefetch task and CallKit's video flag.
 
 ## Layout
 
@@ -18,13 +20,13 @@ device yet. Use the [manual test checklist](#manual-test-checklist) for the firs
 | `TeamCraft/App`        | `@main`, `AppDelegate` (APNs token, notification taps and actions)                                                               |
 | `TeamCraft/Auth`       | OIDC login: `ASWebAuthenticationSession`, PKCE                                                                                   |
 | `TeamCraft/Model`      | `AppModel` (state, the one entry to the core), conversation sections, chat actions                                               |
-| `TeamCraft/Calls`      | `CallManager`: CallKit provider, PushKit forward, mute / hold / hang up                                                          |
+| `TeamCraft/Calls`      | `CallManager`: CallKit provider, PushKit forward, mute / hold / hang up; camera (`CameraStreamer`, `H264Encoder`), remote video  |
 | `TeamCraft/UI`         | SwiftUI screens                                                                                                                  |
 | `TeamCraft/Design`     | Design tokens (same values as the desktop UI and the Android theme)                                                              |
-| `TeamCraft/Resources`  | String Catalogs (en, de), asset catalog (placeholder icon)                                                                       |
+| `TeamCraft/Resources`  | String Catalogs (en, de), asset catalog (app icon, launch screen colour and logo)                                                |
 | `Shared/`              | Compiled into the app **and** the extension: keychain, App Group, process lock, OIDC session, core factory, notification content |
 | `NotificationService/` | The Notification Service Extension                                                                                               |
-| `TeamCraftTests/`      | Unit tests (PKCE, OIDC URLs, push payload, lock, notification text, sections)                                                    |
+| `TeamCraftTests/`      | Unit tests (PKCE, OIDC URLs, push payload, lock, notification text, sections, wire models, search filters, Annex B)              |
 | `Generated/`           | `TeamCraftFFI.xcframework` and `Swift/teamcraft_ffi.swift` (not in git)                                                          |
 
 ## Build
@@ -121,9 +123,61 @@ wake-ups show the generic alert next to CallKit's screen.
   from there into CallKit. Background modes `voip` and `audio` are set for this.
 - Answering joins in the core **after CallKit activated the audio session** (`didActivate`); the media
   runs in Rust (`cpal` / CoreAudio) on `AVAudioSession` category `playAndRecord`, mode `voiceChat`.
-- Mute, hold (the core has no hold: it mutes), end and outgoing calls go through `CXCallController`,
+- Mute, hold (the core mutes and stops playing, `setHeld`), end and outgoing calls go through `CXCallController`,
   so the lock screen, headset buttons, the call list and **CarPlay** (system call UI) all work.
   CarPlay needs no extra entitlement for calls.
+
+### Files and link previews
+
+The composer's **+** menu attaches photos and videos (`PhotosPicker`, exported to a file, never loaded
+into memory) and any file (Files app). Picks are copied into the app's `uploads` folder (not in backups,
+removed after a week and on sign-out) and sent as one `send_message` action with `source: path`; the core
+encrypts and uploads them in chunks. Messages show their files with thumbnail, size and **upload /
+download progress** (re-read once a second while something moves); a tap opens a downloaded file in
+Quick Look or starts the download first. *Files* in a chat's toolbar is the gallery of all its files.
+Link previews are drawn from what the **sender's** core fetched (the receiving phone never contacts the
+site); only `http(s)` links are opened. Files over the server's limit are refused before copying.
+
+### Meetings
+
+*Meetings* (calendar icon in the chat list) lists the user's scheduled meetings (`GET /meetings`), sorted
+by start. **Join** starts the meeting chat's call; the menu answers the invitation (`PUT
+/meetings/{id}/rsvp`: accept, maybe, decline), shown with the current answer. Like the Android screen.
+
+### Notification rules
+
+*Settings → Mentions and keywords*: first name, `@channel` / `@here` / `@all` and own keywords
+(`teamcraft_core::notify_rules`, kept in the sealed store). The extension reads them with the store, so a
+pushed message that matches counts as a mention (`PushNotification.isMention`): it ranks higher in the
+notification summary. The rules cannot stop the server from pushing, and an extension without the
+filtering entitlement cannot suppress a notification (see Push).
+
+### Search
+
+The search field takes the core's query syntax; the filter button (top left of the chat list) builds
+`from:`, `in:`, `after:`, `before:`, `has:file` and `has:link` for you. *Settings → Search → Download
+search index* sets whether the core prefetches shared index segments (off / on Wi-Fi / any network). iOS
+runs it as a `BGProcessingTask` (`de.zeitgleich.teamcraft.segment-prefetch`, needs power and network,
+scheduled when the app goes to the background); the core checks the setting and the network's metered flag.
+iOS decides when the task really runs, so old history may need a day of charging before it is searchable.
+
+### Video calls
+
+The phone icon with a camera starts a video call; *camera* in any call turns the camera on (permission
+asked then), a *flip* button switches front and back. CallKit is told (`supportsVideo`, `hasVideo`).
+The core has no platform camera on iOS, and Cisco's OpenH264 cannot be downloaded into an iOS app, so
+the app does the codec work in system frameworks and hands **H.264 (Baseline, Annex B, SPS and PPS in
+front of every keyframe)** to the call engine, which encrypts (DAVE) and forwards it:
+
+- send: `AVCaptureSession` → `H264Encoder` (VideoToolbox, 720p portrait, 1.2 Mbit/s, keyframe every 2 s
+  and when the SFU asks) → `CallSession.sendCameraFrame`;
+- receive: `VideoListener.onRemoteVideoFrame` → `RemoteVideoRenderer` (Annex B → AVCC samples with the
+  stream's parameter sets) → `AVSampleBufferDisplayLayer`, which decodes with the hardware decoder.
+
+One simulcast layer, one remote track is shown (the first camera, else a screen share), camera tracks
+only on the send side (no screen sharing from the phone). Other clients must offer H.264 (the desktop
+client does). **Hold** (system call UI) silences the microphone, stops playing the others and pauses the
+camera; the call stays joined (`CallSession.setHeld`).
 
 ### Server side
 
@@ -176,7 +230,29 @@ a **device** (push, CallKit and memory only work there), then the simulator.
    `call` wake-up): the system's incoming-call screen, answer joins; decline stops ringing on the caller.
    If you have CarPlay (or the simulator's CarPlay window): the call appears there, answer works.
 10. **Sign out.** *Settings → Sign out* returns to sign-in; the Keychain items and the account are gone from the shared defaults; signing in again as the same user restores the chats.
-11. **German.** Switch the phone's language to German; screens, notification actions and the call
+11. **Files.** Attach a photo, a video and a PDF from the Files app (also two at once): chips show above the
+    composer, sending shows the files with a progress bar; the other side (desktop) receives them. A file
+    from the desktop shows *Tap to download*, a tap downloads and opens it in Quick Look; the gallery
+    (folder icon) lists them. A file over the server's limit shows the "larger than the server accepts"
+    alert. A message with a link shows a preview card when the sender's client made one.
+12. **Meetings.** Schedule a meeting on the desktop and invite the phone's user: it shows in *Meetings*,
+    *Maybe* / *Accepted* / *Declined* changes the answer on the desktop too, *Join* opens the call.
+13. **Notification rules.** Add a keyword in *Settings → Mentions and keywords*, send it from another
+    user while the app is killed: the notification arrives and is ranked as a mention in the summary
+    (check with a muted-by-default channel). Turn *My first name* off and check that a message with the
+    name no longer ranks higher.
+14. **Search filters.** Search with `from`, `in`, a date range, *Has a file*, *Has a link* from the filter
+    sheet and check that the results shrink; clear the filters.
+15. **Search prefetch.** Set *Download search index* to *On any network*, background the app on the
+    charger (Xcode: *Debug → Simulate Background Fetch* does not run processing tasks; use
+    `e -l objc -- (void)[[BGTaskScheduler sharedScheduler] _simulateLaunchForTaskWithIdentifier:@"de.zeitgleich.teamcraft.segment-prefetch"]`
+    in the debugger) and check that an old-month search finds hits afterwards.
+16. **Video.** Start a video call from a chat (video icon) with a desktop user: both see each other
+    (camera permission prompt on first use); *flip* switches the camera; turning the camera off and on
+    again works; hold from the system UI freezes the picture and silences both ways; the call screen
+    shows the remote picture in portrait and landscape of the other side. Join a call that already has
+    video: the picture appears within a few seconds. Check CPU/heat over five minutes.
+17. **German.** Switch the phone's language to German; screens, notification actions and the call
     screen are translated.
 
 Report anything that fails with the Xcode console log (subsystem `de.zeitgleich.teamcraft` once added) and
@@ -184,8 +260,13 @@ whether it was a device or the simulator.
 
 ## Known gaps
 
-- No file sending, link previews, meetings, or admin screens (desktop and web only, as on Android).
-- No video in calls; call hold mutes instead of holding.
+- No admin screens (desktop and web only, as on Android). Meetings can be joined and answered, not
+  scheduled, from the phone.
+- Video: one camera track per phone, no screen sharing from the phone, no layout for more than one remote
+  track (the first one is shown), portrait capture only. The camera and video path has only ever run in
+  CI's compiler and unit tests (Annex B handling), never on a device.
+- The keyword rules mark and rank notifications; they cannot suppress one without the filtering
+  entitlement, and the server still decides what is pushed.
+- Search prefetch has no size cap, and iOS decides when a processing task runs.
 - Push and ring-in-the-background need the server's APNs sender and the `call` wake-up.
-- Placeholder app icon, no launch screen artwork.
-- Swift 5 language mode (the generated bindings aren't strict-concurrency clean yet).
+- Swift 5 language mode (CI probes Swift 6 in a non-gating step; see the PR).

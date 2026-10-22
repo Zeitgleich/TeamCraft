@@ -10,13 +10,26 @@ struct ConversationListView: View {
   @State private var query = ""
   @State private var hits: [SearchHitItem] = []
   @State private var isShowingSettings = false
+  @State private var isShowingMeetings = false
+  @State private var isShowingFilters = false
+  @State private var filters = SearchFilters()
 
   var body: some View {
     NavigationSplitView {
       sidebar
         .navigationTitle("chats_title")
         .toolbar {
-          ToolbarItem(placement: .topBarTrailing) {
+          ToolbarItem(placement: .topBarLeading) {
+            Button { isShowingFilters = true } label: {
+              Image(
+                systemName: filters.isEmpty
+                  ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+            }
+            .accessibilityLabel(Text("search_filters_title"))
+          }
+          ToolbarItemGroup(placement: .topBarTrailing) {
+            Button { isShowingMeetings = true } label: { Image(systemName: "calendar") }
+              .accessibilityLabel(Text("meetings_title"))
             Button { isShowingSettings = true } label: { Image(systemName: "gearshape") }
               .accessibilityLabel(Text("settings_title"))
           }
@@ -31,11 +44,11 @@ struct ConversationListView: View {
     }
     .searchable(text: $query, prompt: Text("search_hint"))
     .task(id: model.changeCount) { conversations = await model.conversations() }
-    .task(id: query) {
+    .task(id: fullQuery) {
       // Debounced: a new keystroke cancels this task before the search runs.
       try? await Task.sleep(for: .milliseconds(250))
       guard !Task.isCancelled else { return }
-      hits = await model.search(query)
+      hits = await model.search(fullQuery)
     }
     .onChange(of: model.openConversationId) { _, id in
       if let id {
@@ -44,13 +57,21 @@ struct ConversationListView: View {
       }
     }
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
+    .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
+    .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
   }
+
+  /// The text and the filters in the core's query syntax.
+  private var fullQuery: String { filters.query(for: query) }
+
+  private var isSearching: Bool { !fullQuery.isEmpty }
 
   @ViewBuilder
   private var sidebar: some View {
-    if !query.trimmingCharacters(in: .whitespaces).isEmpty {
-      SearchResultsView(hits: hits, query: query) { hit in
+    if isSearching {
+      SearchResultsView(hits: hits, query: fullQuery) { hit in
         query = ""
+        filters = SearchFilters()
         selection = hit.message.conversationId
       }
     } else if conversations.isEmpty {

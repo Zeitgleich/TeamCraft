@@ -63,6 +63,17 @@ mentions") and links to the app, never where, from whom or what. Off by default.
 - Only the digest's count and the link leave the server; pushes for urgent messages and mentions are
   separate (below).
 
+## Mention rules on the device
+
+What counts as a mention beyond `@username` is decided on the device, on the decrypted text, because the
+server cannot read it: `@channel` / `@here` / `@all`, the user's first name and their own keywords
+(`teamcraft_core::notify_rules`, desktop: Settings → Notifications). The mobile apps keep the rules in the
+sealed local store (`mention_rules`), so the app and the push extension apply the same ones. The push
+preview carries the result (`PushPreview::is_rule_match`, `PushNotification::is_mention`); it is set only
+while the signed push-content policy lets the text show on the lock screen. The rules rank and mark
+notifications (iOS: relevance score of the notification); they do not stop the server from pushing, and an
+extension without the filtering entitlement cannot suppress a notification.
+
 ## Push routing
 
 For each recipient without a live connection: muted (level `none` or mute-until) never pushes; DND

@@ -102,6 +102,8 @@ final class AppModel {
   func bootstrap() async {
     guard case .starting = phase else { return }
     storeChanges.observe { [weak self] in self?.changeCount += 1 }
+    // Copies of picked files older than a week were uploaded long ago.
+    container.pruneUploads(olderThan: 7 * 24 * 3600)
     await refreshAccountState()
   }
 
@@ -137,6 +139,7 @@ final class AppModel {
       vault.clear()
       NotificationAuthenticator().removeKey()
       container.wipeDownloads()
+      container.pruneUploads(olderThan: 0)
       container.activeAccount = nil
       container.displayName = nil
       UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
@@ -259,6 +262,101 @@ final class AppModel {
     try? await core().act(actionJson: action.json)
   }
 
+  /// Like `perform`, but tells whether the core accepted the action.
+  func performChecked(_ action: ChatAction) async -> Bool {
+    do {
+      try await core().act(actionJson: action.json)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // MARK: Files
+
+  /// Importer for picked files, with the server's upload limit if the core knows it.
+  func attachmentImporter() async -> AttachmentImporter {
+    AttachmentImporter(directory: container.uploadsDirectory, maybeLimitBytes: await maxUploadBytes())
+  }
+
+  func maxUploadBytes() async -> Int64? {
+    await answer(.maxUploadBytes)?.maybeBytes
+  }
+
+  /// Files, link previews and other extras of the given messages, by message id.
+  func extras(conversationId: String, messageIds: [String]) async -> [String: MessageExtras] {
+    guard !messageIds.isEmpty,
+      let extras = await answer(.messageExtras(conversationId: conversationId, messageIds: messageIds))?.extras
+    else { return [:] }
+    return Dictionary(extras.map { ($0.message, $0) }, uniquingKeysWith: { first, _ in first })
+  }
+
+  /// Every file of the conversation, newest first as the core lists them.
+  func files(conversationId: String) async -> [FileInfo] {
+    await answer(.conversationFiles(conversationId: conversationId))?.files ?? []
+  }
+
+  // MARK: Meetings
+
+  /// The user's meetings that haven't ended, soonest first.
+  func meetings() async -> [Meeting] {
+    guard let json = try? await core().apiRequest(method: "GET", path: "/meetings", maybeBody: nil),
+      let list = Wire.decode(MeetingList.self, from: json)
+    else { return [] }
+    return list.meetings.filter { $0.status == "scheduled" }.sorted { $0.startsAt < $1.startsAt }
+  }
+
+  func setRsvp(meetingId: String, answer: RsvpAnswer) async -> Bool {
+    let body = jsonText(["status": answer.rawValue])
+    do {
+      _ = try await core().apiRequest(method: "PUT", path: "/meetings/\(meetingId)/rsvp", maybeBody: body)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // MARK: Notification rules and prefetch
+
+  func mentionRules() async -> MentionRulesItem {
+    (try? await core().mentionRules())
+      ?? MentionRulesItem(firstNameIsMention: true, channelMentionsNotify: true, keywords: [])
+  }
+
+  func setMentionRules(_ rules: MentionRulesItem) async {
+    try? await core().setMentionRules(rules: rules)
+  }
+
+  func segmentPrefetch() async -> SegmentPrefetchMode {
+    (try? await core().segmentPrefetch()) ?? .unmeteredOnly
+  }
+
+  func setSegmentPrefetch(_ mode: SegmentPrefetchMode) async {
+    try? await core().setSegmentPrefetch(mode: mode)
+    if mode == .off {
+      SegmentPrefetchTask.cancel()
+    } else {
+      SegmentPrefetchTask.schedule()
+    }
+  }
+
+  /// Runs in a background processing task (power and network): downloads the search index
+  /// segments this device doesn't have yet, if the setting allows it on this network. `true` when
+  /// there was nothing to do or the download went through.
+  func runSegmentPrefetch() async -> Bool {
+    guard let core = try? core() else { return true }
+    guard let mode = try? await core.segmentPrefetch(), mode != .off else { return true }
+    let isMetered = await NetworkPath.isMetered()
+    guard mode == .always || !isMetered else { return true }
+    // The foreground app already holds the lock; otherwise take it like the extension does.
+    if !isSyncing {
+      let lock = processLock
+      guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }
+    }
+    defer { if !isSyncing { processLock.release() } }
+    return (try? await core.prefetchSegments(isNetworkMetered: isMetered)) != nil
+  }
+
   // MARK: Scene and sync
 
   /// Foreground: this process syncs (it holds the cross-process lock, docs/e2ee.md §7).
@@ -269,6 +367,8 @@ final class AppModel {
 
   func sceneEnteredBackground() async {
     await stopSyncing()
+    guard case .ready = phase else { return }
+    if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
   }
 
   // MARK: Push
@@ -339,6 +439,11 @@ final class AppModel {
       })
     maybeCore = opened
     return opened
+  }
+
+  private func answer(_ query: ChatQuery) async -> ChatAnswer? {
+    guard let json = try? await core().query(queryJson: query.json) else { return nil }
+    return Wire.decode(ChatAnswer.self, from: json)
   }
 
   private func refreshAccountState() async {

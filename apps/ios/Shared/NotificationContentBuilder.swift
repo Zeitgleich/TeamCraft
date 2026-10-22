@@ -50,7 +50,16 @@ struct NotificationContentBuilder {
     if notification.isUrgent {
       content.interruptionLevel = .timeSensitive
     }
+    // The core's mention rules (@channel, first name, keywords) decide `isMention`: mentions rank
+    // first in the notification summary and the stack.
+    content.relevanceScore = Self.relevance(isMention: notification.isMention, isUrgent: notification.isUrgent)
     return (content, intent(for: notification, text: text))
+  }
+
+  /// Ranking in the notification summary: urgent first, then mentions, then the rest.
+  static func relevance(isMention: Bool, isUrgent: Bool) -> Double {
+    if isUrgent { return 1 }
+    return isMention ? 0.8 : 0.3
   }
 
   private func intent(for notification: PushNotification, text: NotificationText) -> INSendMessageIntent? {

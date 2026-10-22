@@ -9,6 +9,8 @@ enum ChatAction {
   case deleteMessage(conversationId: String, messageId: String)
   case setCustomStatus(CustomStatusValue?)
   case setActivity(isIdle: Bool)
+  case sendMessage(SendRequest)
+  case downloadFile(conversationId: String, messageId: String)
 
   /// The wire form.
   var json: String {
@@ -31,11 +33,76 @@ enum ChatAction {
       }
     case .setActivity(let isIdle):
       object = ["action": "set_activity", "is_idle": isIdle]
+    case .sendMessage(let request):
+      object = ["action": "send_message", "message": request.object]
+    case .downloadFile(let conversation, let message):
+      object = ["action": "download_file", "conversation": conversation, "message": message]
     }
-    // Invariant: the dictionaries above hold only strings, bools and nulls, which always serialize.
-    let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
-    return String(decoding: data, as: UTF8.self)
+    return jsonText(object)
   }
+}
+
+/// A message with files (`OutgoingMessage` of the core). Plain text without files goes through
+/// `TeamCraft.sendMessage` instead.
+struct SendRequest: Equatable {
+  var conversationId: String
+  var maybeThreadId: String?
+  var body: String
+  var files: [PickedFile] = []
+
+  var object: [String: Any] {
+    [
+      "conversation": conversationId,
+      "maybe_thread": maybeThreadId.map { $0 as Any } ?? NSNull(),
+      "body": body,
+      "maybe_reply_to": NSNull(),
+      "priority": "normal",
+      "wants_acknowledgement": false,
+      "is_silent": false,
+      "also_send_to_channel": false,
+      "files": files.map { file in
+        [
+          "file_name": file.fileName, "media_type": file.mediaType,
+          "source": ["kind": "path", "path": file.path],
+        ] as [String: Any]
+      },
+    ]
+  }
+}
+
+/// A file picked for sending, already copied to a path the core can read.
+struct PickedFile: Equatable, Identifiable {
+  let fileName: String
+  let mediaType: String
+  let path: String
+
+  var id: String { path }
+}
+
+/// The `ChatQuery` JSON messages (tagged by `kind`) that `TeamCraft.query(queryJson:)` answers.
+enum ChatQuery {
+  case messageExtras(conversationId: String, messageIds: [String])
+  case conversationFiles(conversationId: String)
+  case maxUploadBytes
+
+  var json: String {
+    switch self {
+    case .messageExtras(let conversation, let messages):
+      return jsonText(["kind": "message_extras", "conversation": conversation, "messages": messages])
+    case .conversationFiles(let conversation):
+      return jsonText(["kind": "conversation_files", "conversation": conversation])
+    case .maxUploadBytes:
+      return jsonText(["kind": "max_upload_bytes"])
+    }
+  }
+}
+
+/// Compact JSON with sorted keys.
+func jsonText(_ object: [String: Any]) -> String {
+  // Invariant: callers pass only strings, numbers, bools, nulls and arrays or dictionaries of them,
+  // which always serialize.
+  let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+  return String(decoding: data, as: UTF8.self)
 }
 
 /// A custom status next to the user's name ("🌴 Vacation").
