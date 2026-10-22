@@ -6,9 +6,9 @@ backups, upgrades and secret rotation. Configuration reference: `teamcraft.examp
 
 ## Quickstart: a fresh server in 15 minutes
 
-The reference deployment is the Ansible playbook in [`deploy/`](../deploy/README.md), which installs
-TeamCraft on one Debian VPS with **rootless Podman and Quadlet**, each service under its own
-unprivileged user:
+The reference deployment is an Ansible playbook (kept in a separate deployment repository next to
+this one, `teamcraft-deploy`) that installs TeamCraft on one Debian VPS with **rootless Podman and
+Quadlet**, each service under its own unprivileged user:
 
 | Service             | User        | Listens on                                                |
 |---------------------|-------------|-----------------------------------------------------------|
@@ -36,15 +36,14 @@ Not on the VPS: the OIDC provider (e.g. Keycloak) and the S3 storage.
 
 ### Steps
 
-1. **Inventory.** Copy `deploy/ansible/inventories/example` to a directory of your own, outside this
-   checkout (ideally a private repository, `deploy/README.md`, "Your own inventory"), and set the host
+1. **Inventory.** Copy `ansible/inventories/production` to an inventory of your own and set the host
    (`hosts.yml`) and `group_vars/all.yml`: the two names, an ACME e-mail, the OIDC issuer, the S3
    endpoint, region and bucket, and the image digests from `images.txt` of the release.
-2. **Secrets.** Generate them (commands in `deploy/secrets/README.md`), put your age key into the
-   inventory's `.sops.yaml` and write them into the encrypted file next to the inventory:
+2. **Secrets.** Generate them (commands in `secrets/README.md`), add your age key to `.sops.yaml` and
+   write them into the encrypted file:
 
    ```sh
-   cd ~/my-teamcraft-instance && sops secrets.enc.yaml
+   sops secrets/production.enc.yaml
    ```
 
    Needed: `postgres_password`, `s3_access_key`, `s3_secret_key`, `sfu_registration_token`,
@@ -52,8 +51,8 @@ Not on the VPS: the OIDC provider (e.g. Keycloak) and the S3 storage.
 3. **Deploy.**
 
    ```sh
-   ansible-galaxy collection install -r deploy/ansible/requirements.yml
-   ansible-playbook -i ~/my-teamcraft-instance deploy/ansible/site.yml
+   ansible-galaxy collection install -r ansible/requirements.yml
+   ansible-playbook -i ansible/inventories/<yours> ansible/site.yml
    ```
 
    The first run installs Podman, creates the four service users, pulls the images, gets the
@@ -80,14 +79,14 @@ Then read "Backup and restore" below and set up the database backup before invit
 
 ### Trying it locally first
 
-`deploy/test/dry-run.sh all` runs the whole playbook against a throwaway
+`test/dry-run.sh all` in the deployment repository (`TEAMCRAFT_REPO` points at this checkout) runs the whole playbook against a throwaway
 Debian trixie container (systemd, rootless Podman inside, its own dual-stack Docker network), with
 images built from this repository, generated secrets, Caddy's internal CA and the dev Keycloak and
 Garage of `docker-compose.dev.yml`. It then checks the health endpoints over IPv4 and IPv6, that
 `/api/internal/` is refused, the SFU's QUIC handshake over both families, and sends encrypted messages
 between two dev users through the deployment with the end-to-end harness
 (`tests/e2e/tests/suite/deployed.rs`, `E2E_DEPLOYED_URL`; `SSL_CERT_FILE` points the clients at Caddy's
-local root). `deploy/test/dry-run.sh down` removes it again.
+local root). `test/dry-run.sh down` removes it again.
 
 Pitfalls the dry run found, worth knowing for any other way of running the images:
 

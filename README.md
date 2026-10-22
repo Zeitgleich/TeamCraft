@@ -6,9 +6,6 @@ written in Rust. License: AGPL-3.0-or-later.
 - Architecture, threat model and data model: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Feature catalog and roadmap: [PLAN.md](PLAN.md)
 - User and administrator guide: [docs/guide/index.md](docs/guide/index.md)
-- Run your own server: [docs/operations.md](docs/operations.md) (quickstart) and [deploy/](deploy/README.md)
-  (Ansible playbook, rootless Podman)
-- Releases and changes: [CHANGELOG.md](CHANGELOG.md), [docs/release.md](docs/release.md)
 - Rules for contributors and coding agents: [AGENTS.md](AGENTS.md)
 
 ## Development setup

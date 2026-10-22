@@ -1,5 +1,0 @@
-- name: Deploy TeamCraft
-  hosts: teamcraft
-  become: true
-  roles:
-    - teamcraft
