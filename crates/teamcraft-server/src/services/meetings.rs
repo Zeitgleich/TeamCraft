@@ -5,6 +5,7 @@
 //! the invitation e-mails anyway. The meeting chat and the media are end-to-end encrypted.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use teamcraft_db::{
   AttendeeDiff, AttendeeKey, MeetingChanges, NewAttendee, NewConversation, NewMeeting, StoredAttendee,
@@ -23,6 +24,7 @@ use super::access::is_guest;
 use super::convert::{offset_date_time, unix_millis};
 use super::{validate_name, validate_text};
 use crate::auth::{AuthError, AuthenticatedUser};
+use crate::brand::Brand;
 use crate::error::ApiError;
 use crate::meetings::MeetingService;
 use crate::meetings::ical::{self, EventAttendee, EventData, EventPerson, EventStatus, Method};
@@ -408,7 +410,9 @@ async fn sync_calendar(
   if meeting.kind != MeetingKind::Scheduled.as_str() {
     return Ok(());
   }
-  let event = event_for(state, service, meeting, service.join_url(meeting.id)).await?;
+  let brand = organizer_brand(state, meeting).await?;
+  let join_url = join_url_on(service, &brand, meeting.id);
+  let event = event_for(state, service, &brand, meeting, join_url).await?;
   let ics = ical::render_event(&event.data(), None);
   calendar
     .put_event(&meeting.id.to_string(), &ics)
@@ -456,6 +460,7 @@ impl OwnedEvent {
 async fn event_for(
   state: &AppState,
   service: &MeetingService,
+  brand: &Brand,
   meeting: &StoredMeeting,
   join_url: String,
 ) -> Result<OwnedEvent, ApiError> {
@@ -472,7 +477,14 @@ async fn event_for(
       .get(&meeting.organizer)
       .cloned()
       .unwrap_or_else(|| service.organizer_fallback_address().to_owned()),
-    maybe_name: organizer_user.map(|user| user.display_name),
+    // Without an address of their own the organizer is the brand's calendar identity.
+    maybe_name: match (
+      emails.contains_key(&meeting.organizer),
+      &brand.mail.maybe_imip_organizer_name,
+    ) {
+      (false, Some(brand_name)) => Some(brand_name.clone()),
+      _ => organizer_user.map(|user| user.display_name),
+    },
   };
   let attendees = attendees
     .iter()
@@ -529,6 +541,7 @@ async fn send_invitations(
     .get_user(meeting.organizer)
     .await?
     .map_or_else(String::new, |user| user.display_name);
+  let brand = organizer_brand(state, meeting).await?;
   let mut undelivered = Vec::new();
   // The instance's mail identity is not for bulk mail: an organizer has an hourly budget. What
   // exceeds it counts as undelivered (the invitees still see the meeting in the app).
@@ -564,11 +577,11 @@ async fn send_invitations(
       continue;
     };
     let join_url = match attendee.maybe_user {
-      Some(_) => service.join_url(meeting.id),
-      None => personal_join_url(state, service, meeting, &address).await?,
+      Some(_) => join_url_on(service, &brand, meeting.id),
+      None => personal_join_url(state, service, &brand, meeting, &address).await?,
     };
     let (subject, text, method, status) = compose(service, meeting, kind, &organizer_name, &join_url);
-    let event = event_for(state, service, meeting, join_url).await?;
+    let event = event_for(state, service, &brand, meeting, join_url).await?;
     let mail = OutgoingMail {
       to_address: address.clone(),
       maybe_to_name: attendee.maybe_name.clone(),
@@ -576,7 +589,10 @@ async fn send_invitations(
       text,
       method,
       ics: ical::render_event(&event.data_with_status(status), Some(method)),
-    };
+      maybe_from_name: None,
+      maybe_from_address: None,
+    }
+    .as_brand(&brand);
     if let Err(error) = mailer.send(&mail).await {
       warn!(%error, meeting_id = %meeting.id, "sending an invitation failed");
       undelivered.push(address);
@@ -589,6 +605,7 @@ async fn send_invitations(
 async fn personal_join_url(
   state: &AppState,
   service: &MeetingService,
+  brand: &Brand,
   meeting: &StoredMeeting,
   email: &str,
 ) -> Result<String, ApiError> {
@@ -600,7 +617,33 @@ async fn personal_join_url(
     .tokens()
     .sign_invite(invite, meeting.id)
     .map_err(|error| ApiError::Internal(error.to_string()))?;
-  Ok(service.guest_join_url(meeting.id, &token))
+  Ok(format!(
+    "{}#invite={token}",
+    join_url_on(service, brand, meeting.id)
+  ))
+}
+
+/// The brand meeting mail goes out as: the organizer's home brand (their e-mail domain), else the
+/// default brand.
+async fn organizer_brand(state: &AppState, meeting: &StoredMeeting) -> Result<Arc<Brand>, ApiError> {
+  let emails = state.database.get_user_emails(&[meeting.organizer]).await?;
+  Ok(Arc::clone(
+    emails
+      .get(&meeting.organizer)
+      .map_or(state.brands.default_brand(), |email| {
+        state.brands.for_email(email)
+      }),
+  ))
+}
+
+/// The join link on the brand's own host, or the service's base when the brand has none.
+fn join_url_on(service: &MeetingService, brand: &Brand, meeting: MeetingId) -> String {
+  let origin = brand.origin();
+  if origin.is_empty() {
+    service.join_url(meeting)
+  } else {
+    format!("{origin}/meeting/{meeting}")
+  }
 }
 
 /// Subject, text, iMIP method and event status of a mail from the configured templates.

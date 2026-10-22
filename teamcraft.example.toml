@@ -42,6 +42,10 @@ jwks_cache_ttl_secs = 3600
 jwks_min_refresh_interval_secs = 30
 # Timeout of requests to the provider.
 http_timeout_secs = 10
+# Optional: name of the access-token claim with the user's organization (a string, or a list whose
+# first entry counts; at most 100 characters). It is shown as a badge next to the name and filters the
+# directory; nothing else depends on it. In Keycloak add a token mapper for it to the `client_id` client.
+# organization_claim = "organization"
 
 # TeamCraft role = client role of `client_id` in the provider. Users with several roles get the
 # highest (owner > admin > member > guest); users with none of them are rejected.
@@ -242,6 +246,58 @@ auth_failures_per_minute = 30
 # Without it /f/<id> serves the app shell.
 # share_page_dir = "/srv/teamcraft/share-page"
 # share_page_content_security_policy = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; ..."
+
+# Brands (docs/branding.md): one server under several host names, each with its own name, logo, colors,
+# login text, links and e-mail identity. Without [[brands]] the server has one built-in brand "TeamCraft".
+# A brand is presentation only: users, spaces and permissions are the same behind every host name.
+[branding]
+# Directory the brand image files are read from (at startup). File names below are relative to it.
+# assets_dir = "/etc/teamcraft/brands"
+# What a request on a host name no brand lists gets: "default" serves the default brand (links still
+# use the default brand's own host name, never the received one), "reject" answers 421. Health probes
+# and server-to-server endpoints are exempt from "reject".
+unknown_host = "default"
+# Take the host from X-Forwarded-Host (its last entry) instead of Host. Only behind a proxy that sets it.
+trust_forwarded_host = false
+# Largest brand image file.
+max_asset_bytes = 524288
+
+# Exactly one brand has is_default = true. Host names are lower-case DNS names without port; each
+# belongs to one brand and must be a redirect URI host of the OIDC client (docs/branding.md §10).
+# [[brands]]
+# id = "brand-a"                              # a-z, 0-9, "-"; stable
+# is_default = true
+# hostnames = ["chat.brand-a.example.com"]
+# display_name = "Brand A"
+# email_domains = ["brand-a.example.com"]     # people with such an address have this home brand: their
+#                                             # invitation and meeting mail goes out as this brand
+# logo = "brand-a/logo.svg"                   # svg, png, jpg, webp or ico; *_dark variants optional
+# logo_dark = "brand-a/logo-dark.svg"
+# icon = "brand-a/icon.png"
+# favicon = "brand-a/favicon.png"
+# support_url = "https://support.brand-a.example.com"
+# privacy_url = "https://brand-a.example.com/privacy"
+# terms_url = "https://brand-a.example.com/terms"
+# imprint_url = "https://brand-a.example.com/imprint"
+# connect_origins = []                        # extra connect-src origins for this brand only
+# content_security_policy = "..."             # replaces [web].content_security_policy for this brand
+# [brands.login_title]                        # language code -> text; "en" is the fallback
+# en = "Welcome to Brand A"
+# de = "Willkommen bei Brand A"
+# [brands.login_text]
+# en = "Sign in with your company account."
+# [brands.colors.light]                       # accent, accent_strong, on_accent, accent_soft, sidebar,
+# accent = "#0b7f78"                          # sidebar_current, chrome; each #rgb or #rrggbb
+# [brands.colors.dark]
+# accent = "#35c6ba"
+# [brands.mail]
+# sender_name = "Brand A Team"                # display name of the From header
+# from_address = "chat@brand-a.example.com"   # else [mail.smtp].from_address
+# imip_organizer_name = "Brand A"             # organizer name of meeting invitations without an organizer address
+# invite_subject = "..."                      # same placeholders as [mail]; else the global texts
+# invite_body = "..."
+# activation_subject = "..."
+# activation_body = "..."
 
 # Meetings (PLAN.md §9): scheduled and instant meetings with their own chat. Without this section the
 # /meetings endpoints answer 503.

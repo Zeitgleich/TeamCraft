@@ -12,6 +12,7 @@ use super::audit::{self, Target as AuditTarget};
 use super::convert::{invite_response, offset_date_time};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
+use crate::brand::ResolvedBrand;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
 use crate::meetings::mailer::OutgoingMail;
@@ -25,6 +26,7 @@ const MAX_INVITE_CHANNELS: usize = 100;
 pub async fn create_invite(
   state: &AppState,
   caller: &crate::auth::AuthenticatedUser,
+  brand: &ResolvedBrand,
   space: SpaceId,
   request: CreateInviteRequest,
 ) -> Result<InviteResponse, ApiError> {
@@ -64,7 +66,7 @@ pub async fn create_invite(
     &json!({"role": invite.role.as_str()}),
   )
   .await?;
-  send_invite_mail(state, caller, &access.view.space.name, &invite).await;
+  send_invite_mail(state, caller, brand, &access.view.space.name, &invite).await;
   Ok(invite_response(&invite))
 }
 
@@ -113,27 +115,35 @@ pub fn future_expiry(
 async fn send_invite_mail(
   state: &AppState,
   caller: &AuthenticatedUser,
+  request_brand: &ResolvedBrand,
   space_name: &str,
   invite: &teamcraft_db::Invite,
 ) {
   let Some(mailer) = &state.maybe_mailer else {
     return;
   };
+  // Mail goes out as the brand of the recipient's domain, else as the brand the inviter used.
+  let brand = state.brands.for_recipient(&invite.email, &request_brand.brand);
+  let url = brand.base_url(&state.settings.mail.public_base_url);
+  let (subject, body) = brand.invite_texts(&state.settings.mail);
   let fill = |template: &str| {
     template
       .replace("{inviter}", &caller.user.display_name)
       .replace("{space}", space_name)
       .replace("{role}", invite.role.as_str())
-      .replace("{url}", &state.settings.mail.public_base_url)
+      .replace("{url}", &url)
   };
   let mail = OutgoingMail {
     to_address: invite.email.clone(),
     maybe_to_name: None,
-    subject: fill(&state.settings.mail.invite_subject),
-    text: fill(&state.settings.mail.invite_body),
+    subject: fill(&subject),
+    text: fill(&body),
     method: Method::Request,
     ics: String::new(),
-  };
+    maybe_from_name: None,
+    maybe_from_address: None,
+  }
+  .as_brand(brand);
   if let Err(error) = mailer.send(&mail).await {
     warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
   }

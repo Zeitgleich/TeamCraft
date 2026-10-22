@@ -251,3 +251,112 @@ async fn the_web_client_gets_the_policy_of_its_brand() {
   );
   app.stop().await;
 }
+
+mod mail {
+  use std::sync::Arc;
+
+  use serde_json::json;
+  use teamcraft_server::testing::FakeMailer;
+
+  use super::*;
+
+  async fn invite_as(app: &TestApp, host: &str, email: &str) {
+    let alice = TestUser::new("alice", &["owner"]);
+    let space = app
+      .post(
+        &alice,
+        "/spaces",
+        json!({"name": "Client", "join_policy": "invite_only"}),
+      )
+      .await
+      .id();
+    let response = app
+      .http
+      .post(format!("{}/api/v1/spaces/{space}/invites", app.base_url))
+      .header("Host", host)
+      .bearer_auth(app.token(&alice))
+      .json(&json!({"email": email, "role": "guest"}))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+  }
+
+  use teamcraft_server::testing::TestUser;
+
+  async fn start(mailer: Arc<FakeMailer>) -> Option<TestApp> {
+    TestApp::start_with_mailer(
+      |settings| {
+        settings.mail.public_base_url = "https://global.example.com".into();
+        let mut a = brand("a", HOST_A, true);
+        a.mail.maybe_sender_name = Some("Brand A Team".into());
+        let mut b = brand("b", HOST_B, false);
+        b.email_domains = vec!["b-company.example.com".into()];
+        b.mail.maybe_sender_name = Some("Brand B Team".into());
+        b.mail.maybe_from_address = Some("chat@b-company.example.com".into());
+        b.mail.maybe_invite_subject = Some("[B] {inviter} invited you to {space}".into());
+        settings.brands = vec![a, b];
+      },
+      mailer,
+    )
+    .await
+  }
+
+  #[tokio::test]
+  async fn mail_goes_out_as_the_brand_of_the_recipients_domain_else_of_the_request() {
+    let mailer = Arc::new(FakeMailer::default());
+    let Some(app) = start(mailer.clone()).await else {
+      return;
+    };
+
+    // The inviter works on brand A's host; the invitee's domain belongs to brand B.
+    invite_as(&app, HOST_A, "max@b-company.example.com").await;
+    // An unlisted domain gets the brand of the request.
+    invite_as(&app, HOST_A, "ext@elsewhere.example.com").await;
+    invite_as(&app, HOST_B, "ext2@elsewhere.example.com").await;
+
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[0].maybe_from_name.as_deref(), Some("Brand B Team"));
+    assert_eq!(
+      sent[0].maybe_from_address.as_deref(),
+      Some("chat@b-company.example.com")
+    );
+    assert!(sent[0].subject.starts_with("[B] "), "{}", sent[0].subject);
+    assert!(
+      sent[0].text.contains("https://chat.b.example.com"),
+      "{}",
+      sent[0].text
+    );
+
+    assert_eq!(sent[1].maybe_from_name.as_deref(), Some("Brand A Team"));
+    assert!(sent[1].maybe_from_address.is_none());
+    assert!(
+      sent[1].text.contains("https://chat.a.example.com"),
+      "{}",
+      sent[1].text
+    );
+    assert!(!sent[1].text.contains("global.example.com"));
+
+    assert_eq!(sent[2].maybe_from_name.as_deref(), Some("Brand B Team"));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn without_brand_hosts_the_global_base_url_is_used() {
+    let mailer = Arc::new(FakeMailer::default());
+    let Some(app) = TestApp::start_with_mailer(
+      |settings| settings.mail.public_base_url = "https://global.example.com".into(),
+      mailer.clone(),
+    )
+    .await
+    else {
+      return;
+    };
+    invite_as(&app, "anything.example.com", "x@example.org").await;
+    let sent = mailer.sent();
+    assert!(sent[0].text.contains("https://global.example.com"));
+    assert!(sent[0].maybe_from_name.is_none());
+    app.stop().await;
+  }
+}

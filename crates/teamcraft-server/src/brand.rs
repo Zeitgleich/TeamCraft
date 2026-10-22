@@ -184,19 +184,26 @@ impl BrandRegistry {
     self.brands.iter().find(|brand| brand.id == id)
   }
 
-  /// The home brand of an e-mail address: the brand that lists its domain, else the default.
-  pub fn for_email(&self, email: &str) -> &Arc<Brand> {
+  /// The brand that lists the domain of an e-mail address, if any.
+  pub fn find_by_email(&self, email: &str) -> Option<&Arc<Brand>> {
     let domain = email
       .rsplit_once('@')
-      .map(|(_, domain)| domain.to_ascii_lowercase());
-    domain
-      .and_then(|domain| {
-        self
-          .brands
-          .iter()
-          .find(|brand| brand.email_domains.iter().any(|d| *d == domain))
-      })
-      .unwrap_or(&self.default)
+      .map(|(_, domain)| domain.to_ascii_lowercase())?;
+    self
+      .brands
+      .iter()
+      .find(|brand| brand.email_domains.iter().any(|d| *d == domain))
+  }
+
+  /// The home brand of an e-mail address: the brand that lists its domain, else the default.
+  pub fn for_email(&self, email: &str) -> &Arc<Brand> {
+    self.find_by_email(email).unwrap_or(&self.default)
+  }
+
+  /// The brand mail to `email` is sent as: the one that lists the recipient's domain, else the
+  /// brand of the request that caused the mail.
+  pub fn for_recipient<'a>(&'a self, email: &str, request: &'a Arc<Brand>) -> &'a Arc<Brand> {
+    self.find_by_email(email).unwrap_or(request)
   }
 
   /// Whether a stored brand id still exists; links of removed brands fall back to the default.
@@ -263,6 +270,25 @@ impl Brand {
         return Err(invalid(format!("email domain {domain:?} is not a DNS name")));
       }
     }
+    for text in [
+      &config.mail.maybe_sender_name,
+      &config.mail.maybe_imip_organizer_name,
+    ]
+    .into_iter()
+    .flatten()
+    {
+      if text.trim().is_empty() || text.chars().count() > MAX_TEXT_CHARS || text.chars().any(char::is_control)
+      {
+        return Err(invalid("mail names must be short single-line text".into()));
+      }
+    }
+    if let Some(address) = &config.mail.maybe_from_address
+      && !address
+        .parse::<lettre::Address>()
+        .is_ok_and(|a| a.to_string() == *address)
+    {
+      return Err(invalid("mail.from_address is not an e-mail address".into()));
+    }
     let links = BrandLinks {
       maybe_support: checked_url(config.maybe_support_url.as_deref(), "support_url", &id)?,
       maybe_privacy: checked_url(config.maybe_privacy_url.as_deref(), "privacy_url", &id)?,
@@ -318,6 +344,48 @@ impl Brand {
   /// The image of a slot, if the brand has one.
   pub fn asset(&self, slot: &BrandAssetSlot) -> Option<&BrandAsset> {
     self.assets.get(slot.as_str())
+  }
+
+  /// The base URL links in mail are built on: the brand's own origin, else `fallback`.
+  pub fn base_url(&self, fallback: &str) -> String {
+    let origin = self.origin();
+    if origin.is_empty() {
+      fallback.trim_end_matches('/').to_owned()
+    } else {
+      origin
+    }
+  }
+
+  /// Subject and body of the invitation e-mail: the brand's texts, else the global ones.
+  pub fn invite_texts(&self, mail: &MailConfig) -> (String, String) {
+    (
+      self
+        .mail
+        .maybe_invite_subject
+        .clone()
+        .unwrap_or_else(|| mail.invite_subject.clone()),
+      self
+        .mail
+        .maybe_invite_body
+        .clone()
+        .unwrap_or_else(|| mail.invite_body.clone()),
+    )
+  }
+
+  /// Subject and body of the activation e-mail of local accounts.
+  pub fn activation_texts(&self, mail: &MailConfig) -> (String, String) {
+    (
+      self
+        .mail
+        .maybe_activation_subject
+        .clone()
+        .unwrap_or_else(|| mail.activation_subject.clone()),
+      self
+        .mail
+        .maybe_activation_body
+        .clone()
+        .unwrap_or_else(|| mail.activation_body.clone()),
+    )
   }
 
   /// `https://<canonical host>`, empty if the brand has no host name. Links in mail, invitations
@@ -925,6 +993,64 @@ mod tests {
       );
       let local = self::registry(&[brand("l", &["localhost"], true)], UnknownHostPolicy::Default).unwrap();
       assert_eq!(local.default_brand().origin(), "http://localhost");
+    }
+  }
+
+  mod config_file {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn the_documented_toml_shape_parses_and_builds() {
+      let config = Config::from_toml(
+        r##"
+        [database]
+        url = "postgres://u:p@localhost/db"
+        [oidc]
+        issuer = "https://auth.example.com/realms/company"
+        [branding]
+        unknown_host = "reject"
+        [[brands]]
+        id = "brand-a"
+        is_default = true
+        hostnames = ["chat.a.example.com"]
+        display_name = "Brand A"
+        support_url = "https://support.a.example.com"
+        [brands.login_title]
+        en = "Welcome"
+        de = "Willkommen"
+        [brands.colors.light]
+        accent = "#0b7f78"
+        [brands.mail]
+        sender_name = "Brand A Team"
+        [[brands]]
+        id = "brand-b"
+        hostnames = ["chat.b.example.com"]
+        display_name = "Brand B"
+        "##,
+      )
+      .unwrap();
+      let registry =
+        BrandRegistry::build(&config.branding, &config.brands, &config.web, &config.mail).unwrap();
+      assert_eq!(registry.unknown_host_policy(), UnknownHostPolicy::Reject);
+      let a = registry.resolve(Some("chat.a.example.com")).brand;
+      assert_eq!(a.response.login_title["de"], "Willkommen");
+      assert_eq!(a.mail.maybe_sender_name.as_deref(), Some("Brand A Team"));
+      assert_eq!(registry.resolve(Some("chat.b.example.com")).brand.id, "brand-b");
+    }
+
+    #[test]
+    fn unknown_keys_are_refused() {
+      let toml = r#"
+        [database]
+        url = "postgres://u:p@localhost/db"
+        [oidc]
+        issuer = "https://auth.example.com/realms/company"
+        [[brands]]
+        id = "a"
+        colour = "red"
+      "#;
+      assert!(Config::from_toml(toml).is_err());
     }
   }
 

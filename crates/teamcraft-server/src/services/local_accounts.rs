@@ -29,6 +29,7 @@ use super::convert::{unix_millis, user_summary};
 use super::invites::{check_channels, check_guest_domain, future_expiry, normalize_email};
 use super::spaces::require_member_management;
 use crate::auth::{AuthError, AuthenticatedUser, TokenIdentity};
+use crate::brand::ResolvedBrand;
 use crate::config::LocalAccountsConfig;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
@@ -113,6 +114,7 @@ impl LocalAuth {
 pub async fn create_local_guest(
   state: &AppState,
   caller: &AuthenticatedUser,
+  request_brand: &ResolvedBrand,
   space: SpaceId,
   request: CreateLocalGuestRequest,
 ) -> Result<LocalGuestResponse, ApiError> {
@@ -178,7 +180,12 @@ pub async fn create_local_guest(
   )
   .await?;
 
-  let url = format!("{}/activate#token={token}", state.settings.mail.public_base_url);
+  let brand = state.brands.for_recipient(&email, &request_brand.brand);
+  let url = format!(
+    "{}/activate#token={token}",
+    brand.base_url(&state.settings.mail.public_base_url)
+  );
+  let (subject, body) = brand.activation_texts(&state.settings.mail);
   let fill = |template: &str| {
     template
       .replace("{inviter}", &caller.user.display_name)
@@ -188,11 +195,14 @@ pub async fn create_local_guest(
   let mail = OutgoingMail {
     to_address: email.clone(),
     maybe_to_name: Some(display_name.clone()),
-    subject: fill(&state.settings.mail.activation_subject),
-    text: fill(&state.settings.mail.activation_body),
+    subject: fill(&subject),
+    text: fill(&body),
     method: Method::Request,
     ics: String::new(),
-  };
+    maybe_from_name: None,
+    maybe_from_address: None,
+  }
+  .as_brand(brand);
   mailer
     .send(&mail)
     .await
@@ -215,6 +225,7 @@ pub async fn create_local_guest(
 pub async fn reissue_activation(
   state: &AppState,
   caller: &AuthenticatedUser,
+  request_brand: &ResolvedBrand,
   user: UserId,
 ) -> Result<LocalGuestResponse, ApiError> {
   let _ = local_auth(state)?;
@@ -246,26 +257,28 @@ pub async fn reissue_activation(
     &json!({}),
   )
   .await?;
-  let url = format!("{}/activate#token={token}", state.settings.mail.public_base_url);
+  let brand = state.brands.for_recipient(&account.login, &request_brand.brand);
+  let url = format!(
+    "{}/activate#token={token}",
+    brand.base_url(&state.settings.mail.public_base_url)
+  );
+  let (subject, body) = brand.activation_texts(&state.settings.mail);
   let mail = OutgoingMail {
     to_address: account.login.clone(),
     maybe_to_name: None,
-    subject: state
-      .settings
-      .mail
-      .activation_subject
+    subject: subject
       .replace("{inviter}", &caller.user.display_name)
-      .replace("{space}", "TeamCraft"),
-    text: state
-      .settings
-      .mail
-      .activation_body
+      .replace("{space}", &brand.display_name),
+    text: body
       .replace("{inviter}", &caller.user.display_name)
-      .replace("{space}", "TeamCraft")
+      .replace("{space}", &brand.display_name)
       .replace("{url}", &url),
     method: Method::Request,
     ics: String::new(),
-  };
+    maybe_from_name: None,
+    maybe_from_address: None,
+  }
+  .as_brand(brand);
   mailer
     .send(&mail)
     .await

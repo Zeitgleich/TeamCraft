@@ -39,6 +39,8 @@ async fn an_invitation_reaches_the_mail_catcher_with_the_calendar_part_and_attac
       text: "Join: https://chat.example.com/meeting/1".into(),
       method: Method::Request,
       ics: ics.into(),
+      maybe_from_name: None,
+      maybe_from_address: None,
     })
     .await
     .unwrap();

@@ -23,6 +23,10 @@ use teamcraft_server::testing::{FakeCalendar, FakeMailer, TestApp, TestUser};
 /// Operations that need no bearer token, and why.
 const PUBLIC: &[(&str, &str)] = &[
   ("get", "/api/v1/openapi.json"),
+  // Public presentation of the host (name, colors, logo): the login screen needs it before sign-in.
+  ("get", "/api/v1/brand"),
+  ("get", "/api/v1/brand/theme.css"),
+  ("get", "/api/v1/brand/assets/{slot}"),
   // The link's token is the credential.
   ("post", "/api/v1/meetings/join"),
   // Local accounts sign in here: the one-time activation token or the password and the TOTP code
