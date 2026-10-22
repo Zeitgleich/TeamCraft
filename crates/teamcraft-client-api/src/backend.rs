@@ -6,7 +6,7 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
-use teamcraft_proto::{CategoryId, HistoryPolicy, Role};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, Role};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
@@ -14,7 +14,8 @@ use crate::actions::{
 };
 use crate::admin::{AdminChannel, AdminUser, AuditEntry, Retention, SecurityPolicy, SelfJoinOutcome};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
+  Participant,
 };
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
@@ -133,6 +134,14 @@ pub trait ChatBackend {
   fn saved_items(&self) -> Vec<SavedItem> {
     Vec::new()
   }
+  /// The user's own call background pictures.
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    Vec::new()
+  }
+  /// Adds a picture (the host normalizes it to a JPEG without metadata first); it is encrypted,
+  /// uploaded and synced to the user's devices.
+  fn add_background_image(&self, _name: &str, _picture: Vec<u8>) {}
+  fn delete_background_image(&self, _id: BackgroundId) {}
   /// A link to the message that only members of the conversation can open.
   fn permalink(&self, _conversation: ConversationId, _message: MessageId) -> Option<String> {
     None

@@ -3,10 +3,11 @@
 //! people out afterwards; the SFU acts on the media connections.
 
 use serde_json::json;
-use teamcraft_proto::{MeetingControlAction, MeetingControlRequest, MeetingId, MeetingStatus};
+use teamcraft_proto::{
+  MeetingControlAction, MeetingControlRequest, MeetingId, MeetingStatus, SfuControlAction, SfuControlRequest,
+};
 
 use super::audit::{self, Target as AuditTarget};
-use super::calls::{SfuControlAction, SfuControlRequest};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -72,7 +73,8 @@ pub async fn control_meeting(
     SfuControlAction::End => {
       state.database.end_meeting(meeting.id).await?;
     },
-    SfuControlAction::MuteAll => {},
+    // Unknown is only what a newer peer might send; the server never builds it.
+    SfuControlAction::MuteAll | SfuControlAction::Unknown => {},
   }
   audit::record(
     state,
