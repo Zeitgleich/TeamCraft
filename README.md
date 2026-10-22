@@ -149,3 +149,9 @@ export DATABASE_URL=postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamc
 sqlx migrate run --source crates/teamcraft-db/migrations
 cargo sqlx prepare --workspace -- -p teamcraft-db -p teamcraft-server --all-targets --all-features
 ```
+
+## License
+
+TeamCraft is licensed under the GNU Affero General Public License v3.0 or later, see
+[LICENSE](LICENSE). Third-party material is listed in [NOTICE](NOTICE). Security reports:
+[SECURITY.md](SECURITY.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
