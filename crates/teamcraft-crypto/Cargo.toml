@@ -13,7 +13,7 @@ workspace = true
 # Versions follow what openmls_rust_crypto already pulls in, so the RustCrypto stack is not duplicated.
 [dependencies]
 # Web Push payload encryption (RFC 8291, aes128gcm).
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.1"
 # VAPID JWT and Web Push headers (base64url).
 base64 = "0.22.1"
 # Password-based key wrapping for the backup key (e2ee.md §6.2 fallback).
