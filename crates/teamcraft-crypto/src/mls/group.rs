@@ -7,19 +7,28 @@ use openmls::prelude::{
   ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome,
 };
 use openmls_traits::OpenMlsProvider;
-use tls_codec::Deserialize as _;
+use tls_codec::{
+  Deserialize as _, DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize,
+};
 
 use super::content_keys::ContentKeyBundle;
 use super::{CIPHERSUITE, GroupMember, MlsError, credential, validate_key_package};
+use crate::content_key::{ContentKey, ContentKeyId};
+use crate::domain;
 use crate::identity::{DeviceKeyPair, SignedDeviceCertificate, VerifiedDevice};
-use crate::ids::ConversationId;
+use crate::ids::{ConversationId, UserId};
 use crate::membership::{
   ChangeId, IdentityDirectory, MembershipAction, MembershipAuthority, MembershipChange,
   SignedMembershipChange,
 };
+use crate::secret::SymmetricKey;
 
 /// Prefix of MLS group IDs; the conversation ID follows as big-endian `u64`.
 const GROUP_ID_PREFIX: &[u8] = b"teamcraft/conversation/";
+/// How many epochs after signing a membership change may still be committed (if nothing changed its
+/// target user meanwhile). A constant rather than a setting: every member must decide the same way,
+/// or the group splits.
+pub const MAX_CHANGE_AGE_EPOCHS: u64 = 32;
 
 /// This device's view of a conversation's MLS group.
 #[derive(Debug)]
@@ -27,9 +36,36 @@ pub struct ConversationGroup {
   conversation_id: ConversationId,
   group: MlsGroup,
   /// Changes already committed, to refuse replays of the same signed change.
-  // TODO(client-db): persist together with the MLS group state.
   applied_changes: BTreeSet<ChangeId>,
-  maybe_pending_change: Option<ChangeId>,
+  /// Which users signed changes touched recently, and since when this device knows the group.
+  history: ChangeHistory,
+  maybe_pending: Option<PendingEffect>,
+}
+
+/// What this device's pending commit does, recorded once it is confirmed.
+#[derive(Debug)]
+struct PendingEffect {
+  maybe_change: Option<MembershipChange>,
+  removed: Vec<GroupMember>,
+}
+
+/// What this device saw of the group's signed changes, persisted with the MLS state: a change
+/// signed before this device joined, or before a later change to the same user, is refused
+/// (security review A3).
+#[derive(Clone, Debug, Default, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct ChangeHistory {
+  joined_epoch: u64,
+  /// Epochs in which a commit for a signed change about the user was made, newest last.
+  touched: Vec<TouchedUser>,
+  /// Devices revoked (removed one by one) while this device was in the group; they never come back
+  /// (a revoked device's old key packages and certificate stay valid, security review A4).
+  removed_devices: Vec<GroupMember>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct TouchedUser {
+  epoch: u64,
+  user_id: UserId,
 }
 
 /// What to send after creating a commit: the commit to the group, the welcome to new members.
@@ -83,7 +119,7 @@ impl ConversationGroup {
       .use_ratchet_tree_extension(true)
       .build(provider, device, credential::credential_with_key(certificate)?)
       .map_err(|error| MlsError::openmls("group creation", error))?;
-    Ok(Self::from_group(conversation_id, group))
+    Ok(Self::from_group(conversation_id, group, ChangeHistory::default()))
   }
 
   /// Joins a group from a welcome. Every member credential in the group is verified against the
@@ -114,20 +150,26 @@ impl ConversationGroup {
     let group = staged
       .into_group(provider)
       .map_err(|error| MlsError::openmls("joining group", error))?;
-    Ok(Self::from_group(conversation_id, group))
+    let history = ChangeHistory {
+      joined_epoch: group.epoch().as_u64(),
+      ..ChangeHistory::default()
+    };
+    Ok(Self::from_group(conversation_id, group, history))
   }
 
-  /// Loads a group from the provider's storage, with the change IDs applied so far (persisted by
-  /// the caller next to the MLS state). `None` if the provider has no state for the conversation.
+  /// Loads a group from the provider's storage, with the change IDs applied so far and the change
+  /// history (persisted by the caller next to the MLS state). `None` if the provider has no state
+  /// for the conversation.
   pub fn load(
     provider: &impl OpenMlsProvider,
     conversation_id: ConversationId,
     applied_changes: impl IntoIterator<Item = ChangeId>,
+    history: ChangeHistory,
   ) -> Result<Option<Self>, MlsError> {
     let maybe_group = MlsGroup::load(provider.storage(), &group_id(conversation_id))
       .map_err(|error| MlsError::openmls("loading group", error))?;
     Ok(maybe_group.map(|group| {
-      let mut loaded = Self::from_group(conversation_id, group);
+      let mut loaded = Self::from_group(conversation_id, group, history);
       loaded.applied_changes.extend(applied_changes);
       loaded
     }))
@@ -140,6 +182,11 @@ impl ConversationGroup {
   /// Signed changes this group has committed or accepted; persist them with the MLS state.
   pub fn applied_changes(&self) -> impl Iterator<Item = &ChangeId> {
     self.applied_changes.iter()
+  }
+
+  /// Persist with the MLS state and pass back to [`Self::load`].
+  pub fn change_history(&self) -> &ChangeHistory {
+    &self.history
   }
 
   /// Removes the group's state from the provider's storage, e.g. after this device was removed.
@@ -156,6 +203,25 @@ impl ConversationGroup {
 
   pub fn epoch(&self) -> u64 {
     self.group.epoch().as_u64()
+  }
+
+  /// The content key of the current epoch, derived from the MLS exporter (RFC 9420 §8.5). Every
+  /// member that merged the epoch's commit derives the same key, and nobody else can: after a
+  /// removal it becomes the current key at once, so the new key can't be withheld from members and
+  /// the removed device never learns it (security review A5).
+  pub fn epoch_content_key(&self, provider: &impl OpenMlsProvider) -> Result<ContentKey, MlsError> {
+    let mut context = self.conversation_id.get().to_be_bytes().to_vec();
+    context.extend_from_slice(&self.epoch().to_be_bytes());
+    let exported = zeroize::Zeroizing::new(
+      self
+        .group
+        .export_secret(provider.crypto(), domain::EPOCH_CONTENT_KEY, &context, 48)
+        .map_err(|error| MlsError::openmls("exporting the epoch key", error))?,
+    );
+    let (id, key) = exported.split_at(16);
+    let id = <[u8; 16]>::try_from(id).map_err(|_| MlsError::UnexpectedMessage("short export"))?;
+    let key = SymmetricKey::from_slice(key).ok_or(MlsError::UnexpectedMessage("short export"))?;
+    Ok(ContentKey::from_parts(ContentKeyId::from_bytes(id), key))
   }
 
   /// All member devices.
@@ -207,12 +273,16 @@ impl ConversationGroup {
       proposed.removed.push(*member);
     }
     self.check_change_matches(change, &proposed)?;
+    self.check_not_removed(&proposed)?;
 
     self.group.set_aad(signed_change.to_bytes()?);
     let result = self.stage_commit(provider, device, validated_key_packages, removed_leaves);
     self.group.set_aad(Vec::new());
     let output = result?;
-    self.maybe_pending_change = Some(change.change_id());
+    self.maybe_pending = Some(PendingEffect {
+      maybe_change: Some(change.clone()),
+      removed: proposed.removed,
+    });
     Ok(output)
   }
 
@@ -233,8 +303,9 @@ impl ConversationGroup {
       proposed.added.push(added_device);
     }
     self.check_device_additions(&proposed)?;
+    self.check_not_removed(&proposed)?;
     let output = self.stage_commit(provider, device, validated_key_packages, Vec::new())?;
-    self.maybe_pending_change = None;
+    self.maybe_pending = None;
     Ok(output)
   }
 
@@ -243,19 +314,20 @@ impl ConversationGroup {
     if self.group.pending_commit().is_none() {
       return Err(MlsError::NoPendingCommit);
     }
+    let epoch = self.epoch();
     self
       .group
       .merge_pending_commit(provider)
       .map_err(|error| MlsError::openmls("merging own commit", error))?;
-    if let Some(change_id) = self.maybe_pending_change.take() {
-      self.applied_changes.insert(change_id);
+    if let Some(effect) = self.maybe_pending.take() {
+      self.record_commit(effect.maybe_change.as_ref(), &effect.removed, epoch);
     }
     Ok(())
   }
 
   /// Drops the pending commit, e.g. because another member's commit for this epoch won.
   pub fn discard_commit(&mut self, provider: &impl OpenMlsProvider) -> Result<(), MlsError> {
-    self.maybe_pending_change = None;
+    self.maybe_pending = None;
     self
       .group
       .clear_pending_commit(provider.storage())
@@ -310,26 +382,52 @@ impl ConversationGroup {
       ProcessedMessageContent::StagedCommitMessage(staged) => {
         let update =
           self.authorize_commit(&staged, sender_index, &authenticated_data, directory, authority)?;
+        let epoch = self.epoch();
         self
           .group
           .merge_staged_commit(provider, *staged)
           .map_err(|error| MlsError::openmls("merging commit", error))?;
-        if let Some(change) = &update.maybe_change {
-          self.applied_changes.insert(change.change_id());
-        }
+        self.record_commit(update.maybe_change.as_ref(), &update.removed, epoch);
         Ok(GroupEvent::MembershipChanged(update))
       },
       _ => Err(MlsError::UnexpectedMessage("standalone proposals are not used")),
     }
   }
 
-  fn from_group(conversation_id: ConversationId, group: MlsGroup) -> Self {
+  fn from_group(conversation_id: ConversationId, group: MlsGroup, history: ChangeHistory) -> Self {
     Self {
       conversation_id,
       group,
       applied_changes: BTreeSet::new(),
-      maybe_pending_change: None,
+      history,
+      maybe_pending: None,
     }
+  }
+
+  /// Notes a merged commit made in `epoch`: its signed change and the devices it removed.
+  fn record_commit(&mut self, maybe_change: Option<&MembershipChange>, removed: &[GroupMember], epoch: u64) {
+    if let Some(change) = maybe_change {
+      self.applied_changes.insert(change.change_id());
+      self.history.touched.push(TouchedUser {
+        epoch,
+        user_id: change.action().target_user(),
+      });
+    }
+    // A removed user may be added again later; a revoked device may not.
+    let is_device_revocation =
+      maybe_change.is_some_and(|change| matches!(change.action(), MembershipAction::RemoveDevice { .. }));
+    if is_device_revocation {
+      for member in removed {
+        if !self.history.removed_devices.contains(member) {
+          self.history.removed_devices.push(*member);
+        }
+      }
+    }
+    let current = self.epoch();
+    self
+      .history
+      .touched
+      .retain(|touched| touched.epoch.saturating_add(MAX_CHANGE_AGE_EPOCHS) >= current);
   }
 
   fn ensure_conversation(&self, actual: ConversationId) -> Result<(), MlsError> {
@@ -449,12 +547,13 @@ impl ConversationGroup {
     let mut proposed = ProposedMembership::default();
     for add in staged.add_proposals() {
       let leaf = add.add_proposal().key_package().leaf_node();
-      proposed.added.push(credential::verify(
-        leaf.credential(),
-        leaf.signature_key().as_slice(),
-        directory,
-      )?);
+      let device = credential::verify(leaf.credential(), leaf.signature_key().as_slice(), directory)?;
+      if !directory.is_active_device(&device) {
+        return Err(MlsError::InactiveDevice(device.device_id()));
+      }
+      proposed.added.push(device);
     }
+    self.check_not_removed(&proposed)?;
     for remove in staged.remove_proposals() {
       let removed = self
         .group
@@ -504,6 +603,7 @@ impl ConversationGroup {
     if self.applied_changes.contains(&change.change_id()) {
       return Err(MlsError::ReplayedChange(change.change_id()));
     }
+    self.ensure_fresh(change)?;
     let expected_removed: Vec<GroupMember> = self
       .leaves_removed_by(change.action())?
       .into_iter()
@@ -528,6 +628,43 @@ impl ConversationGroup {
     }
   }
 
+  /// A change is valid in the epoch it was signed for and up to [`MAX_CHANGE_AGE_EPOCHS`] later,
+  /// unless this device joined after it was signed or another signed change about the same user
+  /// was committed since (then it may be stale: an add replayed after a removal).
+  fn ensure_fresh(&self, change: &MembershipChange) -> Result<(), MlsError> {
+    let current = self.epoch();
+    let signed = change.epoch();
+    let target = change.action().target_user();
+    let is_fresh = signed <= current
+      && signed >= self.history.joined_epoch
+      && current - signed <= MAX_CHANGE_AGE_EPOCHS
+      && !self
+        .history
+        .touched
+        .iter()
+        .any(|touched| touched.user_id == target && touched.epoch >= signed);
+    if is_fresh {
+      Ok(())
+    } else {
+      Err(MlsError::StaleChange {
+        signed_epoch: signed,
+        current_epoch: current,
+      })
+    }
+  }
+
+  /// Devices removed from the group before stay out, whatever the server serves for them.
+  fn check_not_removed(&self, proposed: &ProposedMembership) -> Result<(), MlsError> {
+    match proposed
+      .added
+      .iter()
+      .find(|device| self.history.removed_devices.contains(&GroupMember::from(*device)))
+    {
+      Some(device) => Err(MlsError::RemovedDevice(device.device_id())),
+      None => Ok(()),
+    }
+  }
+
   /// Unsigned additions are only allowed for further devices of users who are already members.
   fn check_device_additions(&self, proposed: &ProposedMembership) -> Result<(), MlsError> {
     let members = self.members()?;
@@ -540,6 +677,16 @@ impl ConversationGroup {
     } else {
       Err(MlsError::MissingSignedChange)
     }
+  }
+}
+
+impl ChangeHistory {
+  pub fn to_bytes(&self) -> Result<Vec<u8>, MlsError> {
+    Ok(self.tls_serialize_detached()?)
+  }
+
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, MlsError> {
+    Ok(Self::tls_deserialize_exact_bytes(bytes)?)
   }
 }
 

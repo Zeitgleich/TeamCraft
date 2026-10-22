@@ -183,7 +183,10 @@ async fn fetch_and_decrypt<A: ServerApi>(
     .find(|message| message.id == message_id)
     .ok_or_else(|| CoreError::Corrupt("pushed message not found".into()))?;
   let account = records::load_account(store)?.ok_or(CoreError::NotEnrolled)?;
-  decrypt_content(&account.key_bag, &message)
+  let maybe_sender_key =
+    records::device_signing_key(store, message.sender_user_id, message.sender_device_id)?;
+  // Previews never show unsigned messages.
+  decrypt_content(&account.key_bag, &message, maybe_sender_key.as_ref(), false)
 }
 
 fn content_preview(content: &MessageContent) -> PreviewContent {

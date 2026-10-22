@@ -111,6 +111,8 @@ impl FakeCalls {
       },
       CallAction::SelectMicrophone { .. }
       | CallAction::SelectSpeakers { .. }
+      | CallAction::SetPushToTalk { .. }
+      | CallAction::SetTalking { .. }
       | CallAction::SelectCamera { .. }
       | CallAction::Unknown => {},
     }
@@ -129,6 +131,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     conversation: request.conversation,
     kind: request.kind,
     is_muted: false,
+    maybe_muted_by_host: None,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),

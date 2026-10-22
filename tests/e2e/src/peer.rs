@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use teamcraft_core::api::{HttpGateway, HttpServerApi};
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
-use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
+use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{ConversationId, ThreadId, UserId};
@@ -148,7 +148,7 @@ pub async fn settle(peers: &mut [&mut Peer], duration: Duration) {
 pub fn enrollment_options(device_name: &str) -> EnrollmentOptions {
   EnrollmentOptions {
     device_name: device_name.into(),
-    passphrase: SecretBytes::new(PASSPHRASE.as_bytes().to_vec()),
+    secret: EnrollmentSecret::Passphrase(SecretBytes::new(PASSPHRASE.as_bytes().to_vec())),
     // Cheap key stretching: the tests enroll many devices.
     argon2: Argon2Settings {
       memory_kib: 1024,
@@ -156,7 +156,5 @@ pub fn enrollment_options(device_name: &str) -> EnrollmentOptions {
       parallelism: 1,
     },
     maybe_attestation: None,
-    maybe_org_recovery: None,
-    maybe_linked: None,
   }
 }

@@ -41,6 +41,9 @@ Finding IDs are the part letter plus the number inside that part (A1 = part A, f
 The full lists, including the further Medium, Low and Info findings and the "done correctly" notes,
 are in parts A to E below.
 
+**Fix status (branch `fix/security-crypto-core`):** A1–A10, A12, B1–B6, B10 and B11 are fixed or
+mitigated; each finding below has a status line naming the commit and what remains open.
+
 ### Suggested order of fixes
 
 1. **Close the server-injection paths before anything else** (A1, A2, A4, B1): verify the attestation
@@ -92,6 +95,8 @@ All paths are relative to the worktree root. Line numbers were checked against t
 
 #### 1. High: OIDC attestation is never checked, so identity keys are pure TOFU from the server
 
+**Status: fixed** in `80cb2df` (`fix/security-crypto-core`). `teamcraft-crypto::attestation` verifies ES256/EdDSA ID tokens against the issuer's JWKS (fetched from the issuer's own discovery document, never through the server), checks issuer and audience, and requires the claim `"<user id>:<fingerprint>"`. Configured with `ClientSettings::maybe_attestation`; with `is_required` unattested keys aren't pinned, otherwise they are pinned as not attested. Open: RS256 realms (no RSA implementation), and showing attested vs. TOFU pins in the UI.
+
 **Location:** `crates/teamcraft-core/src/client/mod.rs:249-277`. The TODO at lines 257-258 reads `// TODO(attestation): verify response.maybe_attestation ... before pinning`.
 
 **What happens.** `pin_identities` takes `response.public_key` from `GET identity_key(user)` and pins it the first time it sees the user (lines 259-263). `maybe_attestation` is ignored. Nothing else in the code verifies an ID token: no JWKS fetch and no check of the `tc_identity_key` claim. `attestation.rs` only *writes* the Keycloak attribute. Every caller of enrollment in the repo also passes `maybe_attestation: None` (ui_backend.rs:607, ffi/engine.rs:537, bridge).
@@ -101,6 +106,8 @@ All paths are relative to the worktree root. Line numbers were checked against t
 **Fix.** Verify the ID token before pinning: fetch JWKS directly from the configured issuer (pinned issuer URL, not taken from the server), check `iss`/`aud`/signature, and check that `tc_identity_key == fingerprint(public_key)`. Ignore `exp`, or use a dedicated long-lived attestation. Bind the token's `sub` to the TeamCraft user (see #15). Record whether a pin was attested or TOFU, and show TOFU pins in the UI.
 
 #### 2. High: pins and the workspace root are per device, so every new device or reinstall is a fresh TOFU window
+
+**Status: fixed** in `a85a688`. Pins and the workspace root are account data in the encrypted key bag; linked and recovered devices start with them, `sync_workspace` seeds the root (a forged genesis fails with `RootChanged`), `workspace_root_fingerprint` exposes it. Open: requiring the genesis owner's key to be attested, and the UI for comparing the root fingerprint.
 
 **Server status:** `05f3e57` (`fix/security-server`). Server side of the fix: a `KeyBagUpdate` gateway event tells a user's other devices to fetch a changed key bag (which carries the pins and the workspace root).
 
@@ -118,6 +125,8 @@ Honest members reject these commits, and the group forks. The forked device and 
 **Fix.** Sync pins and the workspace root across a user's devices by storing them in the key bag, or in a signed per-user "trusted contacts" blob. Linking (§5) should transfer them. Show the root fingerprint and let the user verify it. With #1 fixed, require that the genesis owner's key is OIDC-attested.
 
 #### 3. High: replay of old signed membership changes through devices that joined later
+
+**Status: fixed** in `13df103`. Signed changes (version 2) carry the group epoch; committers and receivers accept them only up to 32 epochs old, not older than the device's join, and not older than a committed change about the same user (history persisted next to the MLS state).
 
 **Location:**
 - `crates/teamcraft-crypto/src/mls/group.rs:31` (`applied_changes`), `:117` and `:326-333`. `join` builds the group via `from_group`, which starts with an empty `BTreeSet`.
@@ -139,6 +148,8 @@ Old members reject the commit and stall in their epoch. The new members and Mall
 
 #### 4. High: device revocation is not enforced by cryptography
 
+**Status: fixed** in `153d020` (client side). Signed per-user device lists (identity key, monotonic sequence, revoked set) gate device additions, commits adding devices and org recovery sealing; groups never re-admit a device removed by a signed `RemoveDevice`; `Client::revoke_device` revokes, republishes the list and signs the removals. Needs the server endpoints `GET /users/{id}/device-list` and `PUT /me/device-list` (core README, server gaps); until then clients fall back to certificates. Open: certificate validity periods.
+
 **Server status:** `54bc175` (`fix/security-server`). Server side of the fix: `GET /api/v1/users/{user_id}/device-list` and `PUT /api/v1/me/device-list` store the signed list as an opaque blob with a compare-and-swap on a sequence number that only goes up.
 
 **Location:**
@@ -159,6 +170,8 @@ Old members reject the commit and stall in their epoch. The new members and Mall
 
 #### 5. High: content key rotation after a removal can be suppressed or rolled back
 
+**Status: fixed** in `f4099d8`. After a removal (and a from-join addition) every member derives the epoch's content key from the MLS exporter at merge; no separate message to suppress. Bundles only set a current key on rings without one, so nothing rolls back. Residual: a member that never receives the removal commit stays in the old epoch.
+
 **Location:**
 - `crates/teamcraft-core/src/client/groups.rs:401-421`: the removal commit is posted and confirmed first. Only after that does `send_bundle` send the new key as a separate MLS application message.
 - `:483-512`: after `max_commit_attempts` epoch conflicts it returns `GaveUp`. The committer has already switched to the new key locally, through `ContentKeyBundle::rotate`.
@@ -178,6 +191,8 @@ The design doc (§4.1: "The removed person ... sees nothing new") is not met aga
 
 #### 6. Medium: roster and policy logs have no freshness and no fork detection
 
+**Status: fixed** in `8391fca`. Documents name the previous entry's hash and their signing time; owners re-sign the roster when half of `workspace_max_age` (default 30 days) has passed, and a stale roster grants no admin authority; members gossip their verified heads in encrypted messages, and a fork or withheld entries set an alarm.
+
 **Location:** `crates/teamcraft-core/src/workspace.rs:120-198`, `client/workspace.rs:79-93`. The signed input is `{log, version, payload}` (`crypto/src/workspace.rs:34-39`): it has no previous-entry hash and no timestamp.
 
 **Exploit.**
@@ -190,6 +205,8 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 
 #### 7. Medium: the server sets the order across the roster and policy logs
 
+**Status: fixed** in `8391fca`. Rosters are applied before policies by version; a policy names its roster version, is verified against that roster's owners and may not name an older one than the previous policy; owners re-sign the policy after each roster change.
+
 **Location:** `crates/teamcraft-core/src/workspace.rs:122-128` sorts by the server-supplied `created_at`. A policy entry is verified against whichever roster is current at that point (`:194`). Policy entries are not bound to a roster version.
 
 **Exploit.** Owner A is removed in roster v3. Later, A (an insider working with the server) signs policy v(n+1). The server back-dates its `created_at` to before roster v3. Any client that syncs from scratch, or has not applied v3 yet, accepts A's policy. Examples: flipping `admin_self_join` to `visible`, or changing `history_default`.
@@ -197,6 +214,8 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 **Fix.** Put the roster version, or the roster head hash, into the signed policy document. Verify it against exactly that roster version, and require the roster version to be the latest.
 
 #### 8. Medium: the server can make honest clients sign removals of anyone
+
+**Status: fixed** in `153d020`. Server-reported removals are hints only. Removals are signed by the remover, by the user's own device that revokes (`revoke_device`) or by an admin (`admin_remove_member`, a delegated change). Server gap: deactivation needs the admin client to remove the user per conversation.
 
 **Server status:** `05f3e57` (`fix/security-server`). Server side of the fix: `GET /api/v1/admin/conversations?user_id=` lists the channels a user is in, so the admin client can sign the removals itself.
 
@@ -208,6 +227,8 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 
 #### 9. Medium: history share level and guest status come from the server
 
+**Status: fixed (interim)** in `c335ada` and `f4099d8`. Without an explicit choice the signed workspace default applies, and full history only for users the signed roster lists; the choice is settled before signing, and an admin's full-history add of a guest isn't committed. Open: signed per-channel history settings and a signed guest list.
+
 **Location:** `crates/teamcraft-core/src/client/groups.rs:117-129`. `history_policy` comes from the server's `ConversationResponse` (not signed); only `Unknown` falls back to the signed workspace default. At `:610-629`, guest status (`UserKind::Guest`) is taken from the server's `UserSummary`.
 
 **Exploit.** For a channel configured as `FromJoin`, the server reports `Full`, or reports a guest as a regular user. When a member adds someone legitimately, the client sends the newcomer every historical content key. This breaks e2ee.md §4.3 ("Guests only ever see history from their join on").
@@ -215,6 +236,8 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 **Fix.** Make per-channel history policy and guest status signed data: owner or admin signed, like the roster. Until then, default to `FromJoin` unless the signed workspace policy says `Full`. Treat users the client can't prove to be members as guests.
 
 #### 10. Medium: message sender authenticity rests only on a shared symmetric key
+
+**Status: fixed** in `12166d6`. Messages (version 2) are signed by the sender's device key and checked against verified device keys; devices can't add messages dated after they left a conversation; unsigned version 1 messages only with `accept_unsigned_messages`.
 
 **Location:** `crates/teamcraft-crypto/src/message.rs:89-103` and `:130-140`. The sender user and device are only AEAD-bound to the shared content key. `decrypt_message` accepts any key in the ring, however old (`:98-100`).
 
@@ -227,6 +250,8 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 **Location:** `crates/teamcraft-core/src/trust.rs:78-80`. This is documented at lines 23-24 as a gap: "signed per-channel roles aren't in the roster yet". Any single member can add arbitrary users with full history, or remove anyone, which amplifies #3 and #8. It matches the stated interim design. Track it so it is closed before release.
 
 #### 12. Low: org recovery shares are sealed to device keys whose device ID is not bound
+
+**Status: fixed** in `153d020`. Shares go only to devices the signed device list names with that key.
 
 **Location:** `crates/teamcraft-core/src/client/org_recovery.rs:168-191`. Registration certificates carry `PROVISIONAL_DEVICE_ID = 0` (`enroll.rs:28-30,342-357`). The server's `device.id` is not bound to the certificate, so the server can relabel devices or present revoked ones. The share is still sealed only to a key the identity signed, so the server itself cannot open it. With #4, though, a revoked or stolen device can receive admin shares.
 
@@ -245,6 +270,8 @@ All of these affect availability, not confidentiality. Consider only dropping a 
 `RotationPolicy` and `RotationReason` (`crypto/src/content_key.rs:17-59`) are not used anywhere in `teamcraft-core`. Keys rotate only on adds with `FromJoin` and on removals. e2ee.md §4.2's "every N messages or every 7 days" is missing. That widens the exposure if a key leaks.
 
 #### 15. Info (uncertain): attestation design points to settle before implementing #1
+
+**Status: partly addressed** in `80cb2df`: the claim binds the TeamCraft user ID, so the subject mapping doesn't come from the server. Open: separate tokens or audiences for the TeamCraft API and the Keycloak account API (server and app side).
 
 **Server status:** not changed (`fix/security-server`). The server no longer relies on `aud` (D12); rejecting tokens that carry the Keycloak `account` audience would refuse the stock tokens of a default realm, so separating the audiences stays a realm configuration task.
 
@@ -296,6 +323,8 @@ Paths are relative to the repo root. Line numbers were checked against the files
 
 ### B1: Linked-device enrollment falls back to a new identity wrapped with an empty or fixed passphrase (High)
 
+**Status: fixed** in `a8e25c2`. `EnrollmentSecret` (passphrase, linked, org recovery); only a passphrase enrollment creates an identity, others fail with `IdentityMissing`; wrapping refuses passphrases under 8 bytes.
+
 **Location**
 - `crates/teamcraft-core/src/client/enroll.rs:86-99`: if `api.identity_key(me.id)` returns *not found*, the
   client creates a new identity and backup key. It does this even when `options.maybe_linked` or
@@ -333,6 +362,8 @@ key from the signed roster, see an identity change. That limits the damage but d
 ---
 
 ### B2: Rendezvous short code does not stop a relay that knows AK (High, latent)
+
+**Status: fixed** in `adc0837`. Responder commits to its ephemeral key, non-contributory DH results are refused, keys and path hash are bound to both ephemeral keys, the code has 6 digits.
 
 **Location:** `crates/teamcraft-crypto/src/rendezvous.rs`
 - `:35`: `SHORT_CODE_DIGITS = 4` (about 13.3 bits).
@@ -372,6 +403,8 @@ Until then, remove or rewrite the misleading test and the doc comment.
 
 ### B3: Org recovery seals the backup key to an unauthenticated request key (High, design)
 
+**Status: fixed** in `52c3c82`. `RecoveryRequest` (the server's request ID, user, key); its verification code is the request key's fingerprint, and only a `ConfirmedRecoveryRequest` (code entered by the admin) receives the backup key; HPKE info binds request ID, user and key.
+
 **Location:** `crates/teamcraft-core/src/client/org_recovery.rs:132-158`.
 `recover_backup_key_for(…, request: [u8; 32])` seals the recovered backup key to raw caller- or
 server-supplied bytes (`RecoveryRequestPublicKey::from_bytes(request)`, `:155-156`;
@@ -394,6 +427,8 @@ keys): a full compromise of that user.
 ---
 
 ### B4: Combining admin keeps the org secret and t shares, and nothing rotates afterwards (Medium)
+
+**Status: mitigated** in `52c3c82`. Shares for the combiner are bound to one request and only go to roster admins; `rotate_org_recovery` replaces the org key and members re-wrap automatically. Open: threshold decryption (no reconstruction of `s`) and the server telling owners' clients that a recovery finished so they rotate on their own.
 
 **Location:** `crates/teamcraft-core/src/client/org_recovery.rs:112-127` and `:132-158`.
 - `share_for_combiner` seals the admin's long-term share itself, not anything tied to one request,
@@ -421,6 +456,8 @@ cryptographic. It holds for the first t-1 admins, but one approval hands over a 
 
 ### B5: A recovered user keeps the backup key that admins have seen (Medium)
 
+**Status: fixed** in `ab95d28`. The recovered device switches to a new backup key, wrapped with a new passphrase and the current org key.
+
 **Location:** `crates/teamcraft-core/src/client/enroll.rs:298-306`. After org recovery, the
 recovered `backup_key` is kept as the account backup key, and later key bag uploads use it
 (`enroll.rs:226-229`). The identity key also stays the same.
@@ -436,6 +473,8 @@ telling the user that admins performed a recovery.
 ---
 
 ### B6: Custodians are not checked against the signed roster, and old device certificates still get shares (Medium)
+
+**Status: fixed** in `52c3c82` (custodians must be roster admins) and `153d020` (devices must be in the signed device list).
 
 **Location:** `crates/teamcraft-core/src/client/org_recovery.rs:39-62` and `:168-193`.
 - `set_up_org_recovery(admins, …)` takes any `UserId` list. It doesn't check that each user is an
@@ -509,6 +548,8 @@ document that it leaks.
 
 ### B10: Rendezvous handshake nonce is reused when the same code is scanned twice (Low)
 
+**Status: fixed** in `adc0837`. Handshake messages carry a random nonce.
+
 **Location:** `crates/teamcraft-crypto/src/rendezvous.rs:325-331`. Handshake messages use fixed
 nonces 0 and 1 under keys derived only from AK. `start_link_approval`
 (`client/linking.rs:143-152`) builds a new `Responder` with fresh random contents every time it is
@@ -525,6 +566,8 @@ the code as single-use on the responder and refuse a second use.
 ---
 
 ### B11: Key bag rollback and server-supplied wrapped keys (Low)
+
+**Status: fixed** in `0be8c92`. Encrypted key bags carry a sequence and a hash of the wrapped keys in the AAD; devices refuse older bags and take the server's wraps only after the bag opened with them.
 
 - `crates/teamcraft-crypto/src/key_bag.rs:65-70,224-233`: the AAD binds only the format version and
   user ID, not a monotonic key bag version. The server can serve an older bag to a recovering

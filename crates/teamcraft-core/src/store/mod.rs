@@ -82,6 +82,12 @@ pub enum Table {
   Categories,
   /// Public channels the user could join, per space (the channel browser).
   ChannelBrowser,
+  /// Users' signed device lists, newest seen (security review A4).
+  DeviceLists,
+  /// Verified signing keys of devices, `{user}/{device}`, to check message signatures (A10).
+  DeviceKeys,
+  /// When a device left a conversation, `{conversation}/{user}/{device}` (A10).
+  RemovedSenders,
 }
 
 /// A decrypted (or own, not yet sent) message.
@@ -215,6 +221,9 @@ pub struct MessageMeta {
   pub attachments: Vec<AttachmentRef>,
   #[serde(rename = "link_preview", default, skip_serializing_if = "Option::is_none")]
   pub maybe_link_preview: Option<LinkPreviewData>,
+  /// The sender's verified workspace head, added when the message is sent (security review A6).
+  #[serde(rename = "workspace_head", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_workspace_head: Option<Box<crate::workspace::WorkspaceHead>>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.
@@ -450,7 +459,7 @@ impl StoredMessage {
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 27] = [
+  pub const ALL: [Self; 30] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -478,6 +487,9 @@ impl Table {
     Self::PendingPreviews,
     Self::Categories,
     Self::ChannelBrowser,
+    Self::DeviceLists,
+    Self::DeviceKeys,
+    Self::RemovedSenders,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -515,6 +527,9 @@ impl Table {
       Self::PendingPreviews => "pending_previews",
       Self::Categories => "categories",
       Self::ChannelBrowser => "channel_browser",
+      Self::DeviceLists => "device_lists",
+      Self::DeviceKeys => "device_keys",
+      Self::RemovedSenders => "removed_senders",
     }
   }
 }

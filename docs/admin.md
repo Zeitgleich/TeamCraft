@@ -59,6 +59,17 @@ could add itself to every channel.
 - The **admin roster** (who is owner/admin) is a signed, append-only log: each change is signed by an
   existing owner. Owners' clients sign changes automatically when they match the OIDC provider's
   signed role claims (ARCHITECTURE.md §5.1.1).
+- Each roster and policy entry names the hash of the previous entry of its log and when it was
+  signed; a policy also names the roster version its signer was an owner in, and is checked against
+  exactly that roster. Clients apply rosters before policies and refuse a policy naming an older
+  roster than the previous policy did; owners' clients sign the current policy again after every
+  roster change, so an owner removed later can't sign a "back-dated" policy.
+- **Freshness.** Owners' clients sign the roster again regularly; when the newest roster a client has
+  is older than the accepted age (default 30 days, a client setting), admins have no authority on that
+  client until an owner re-signs. A server that holds back a demotion gains at most that long.
+- **Fork detection.** Members send their verified roster and policy heads inside their encrypted
+  messages. A colleague with a different entry for the same version, or with entries this client
+  isn't shown, raises an alarm.
 - Space admin and channel owner assignments are signed by an admin or a higher role.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed

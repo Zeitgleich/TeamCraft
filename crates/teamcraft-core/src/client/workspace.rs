@@ -3,14 +3,12 @@
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use teamcraft_crypto::membership::{
-  HistoryShare, MembershipAction, MembershipChange, SignedMembershipChange,
-};
+use teamcraft_crypto::membership::{MembershipAction, MembershipChange, SignedMembershipChange};
 use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry};
 use teamcraft_proto::{
-  AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ConversationId, DeviceId,
-  HistoryPolicy, Id, ListWorkspaceLogQuery, MlsMessageKind, PolicyDocument, PostMlsMessageRequest,
-  PresenceState, UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
+  AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ConversationId, DeviceId, Id,
+  ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest, PresenceState, UserId,
+  WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
 };
 
 use super::Client;
@@ -20,7 +18,9 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
-use crate::workspace::{RosterDocument, RosterMember, RosterRole, WorkspaceState};
+use crate::workspace::{
+  ChainedPolicyDocument, RosterDocument, RosterMember, RosterRole, WorkspaceHead, WorkspaceState,
+};
 
 pub(crate) const WORKSPACE_KEY: &str = "state";
 
@@ -33,12 +33,13 @@ pub(crate) enum PendingChange {
     conversation_id: ConversationId,
     change: Base64Bytes,
   },
-  /// The server removed the user from the conversation (admin action, deactivation).
+  /// Queued by earlier versions when the server reported a removal; dropped unsigned now
+  /// (security review A8).
   RemoveUser {
     conversation_id: ConversationId,
     user_id: UserId,
   },
-  /// The user's device was removed (lost phone, deactivation).
+  /// Queued by earlier versions when the server reported a revoked device; dropped now.
   RemoveDevice {
     conversation_id: ConversationId,
     user_id: UserId,
@@ -69,6 +70,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(records::get_json(&self.store, Table::Workspace, WORKSPACE_KEY)?.unwrap_or_default())
   }
 
+  /// Fingerprint of the workspace root of trust (the first owner's identity key), for the user to
+  /// compare with a colleague or the admin (admin.md §2.3: "shown once, can be verified").
+  pub fn workspace_root_fingerprint(&self) -> Result<Option<String>, CoreError> {
+    Ok(self.workspace()?.maybe_root.map(|root| {
+      teamcraft_crypto::identity::IdentityPublicKey::from_bytes(root.identity_key)
+        .fingerprint()
+        .to_string()
+    }))
+  }
+
   /// The verified workspace policy; the default policy if none was signed yet.
   pub fn workspace_policy(&self) -> Result<WorkspacePolicy, CoreError> {
     Ok(self.workspace()?.policy)
@@ -78,6 +89,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// last verified state stays in force and [`WorkspaceState::maybe_rejection`] says why.
   pub async fn sync_workspace(&mut self) -> Result<(), CoreError> {
     let mut state = self.workspace()?;
+    // A new device takes the root another device of the user verified, so a forged genesis
+    // roster is refused here too (security review A2).
+    if state.maybe_root.is_none()
+      && let Some(root) = self.account_data().maybe_workspace_root
+      && let Ok(identity_key) = <[u8; 32]>::try_from(root.public_key.as_slice())
+    {
+      state.maybe_root = Some(crate::workspace::RootOfTrust {
+        user_id: root.user_id,
+        identity_key,
+      });
+    }
     let mut entries = self
       .fetch_log(&WorkspaceLogKind::Roster, state.roster.version)
       .await?;
@@ -87,9 +109,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?,
     );
     if let Err(error) = state.apply_entries(entries) {
-      tracing::warn!(%error, "rejected workspace log entry");
+      tracing::error!(%error, "rejected workspace log entry");
+    }
+    state.check_ahead();
+    if let Some(alarm) = &state.maybe_alarm {
+      tracing::error!(%alarm, "workspace log alarm");
     }
     records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)
+  }
+
+  /// Compares a member's workspace head (from a message) with this device's.
+  pub(crate) fn note_workspace_head(&self, head: &WorkspaceHead) -> Result<(), CoreError> {
+    let mut state = self.workspace()?;
+    state.note_head(head);
+    records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)
+  }
+
+  /// Syncs the logs if a member showed a newer head; afterwards the state says whether this device
+  /// is being shown less than its colleagues.
+  pub async fn check_workspace_head(&mut self) -> Result<(), CoreError> {
+    if self.workspace()?.maybe_ahead.is_some() {
+      self.sync_workspace().await?;
+    }
+    Ok(())
   }
 
   /// Signs and publishes a new roster (owners only). Identity keys come from what this device
@@ -108,38 +150,70 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         identity_key: Base64Bytes::new(identity.public_key.to_vec()),
       });
     }
-    let current = self.workspace()?.roster;
-    let version = current.version + 1;
-    let document = RosterDocument {
-      version,
-      members,
-      maybe_org_recovery_key: current.maybe_org_recovery_key,
-    };
-    self
-      .append_log(WorkspaceLogKind::Roster, WorkspaceLog::Roster, version, &document)
-      .await
+    let mut document = self.workspace()?.roster;
+    document.members = members;
+    self.append_roster(document).await
   }
 
   /// Publishes the current roster with a new org recovery key (owners only).
   pub(crate) async fn publish_org_recovery_key(&mut self, key: &[u8; 32]) -> Result<(), CoreError> {
     self.sync_workspace().await?;
     let mut document = self.workspace()?.roster;
-    document.version += 1;
     document.maybe_org_recovery_key = Some(Base64Bytes::new(key.to_vec()));
-    let version = document.version;
-    self
-      .append_log(WorkspaceLogKind::Roster, WorkspaceLog::Roster, version, &document)
-      .await
+    self.append_roster(document).await
   }
 
   /// Signs and publishes a new workspace policy (owners only).
   pub async fn publish_policy(&mut self, policy: WorkspacePolicy) -> Result<(), CoreError> {
     self.sync_workspace().await?;
-    let version = self.workspace()?.policy_version + 1;
-    let document = PolicyDocument { version, policy };
+    let state = self.workspace()?;
+    let document = ChainedPolicyDocument {
+      version: state.policy_version + 1,
+      policy,
+      roster_version: state.roster.version,
+      maybe_prev_hash: Some(head_or_genesis(state.heads.maybe_policy_hash)),
+      maybe_signed_at_ms: Some(self.now_ms()),
+    };
+    let version = document.version;
     self
       .append_log(WorkspaceLogKind::Policy, WorkspaceLog::Policy, version, &document)
       .await
+  }
+
+  /// Owners: signs the roster again when it is half as old as clients accept (security review A6).
+  /// Cheap when nothing is due; the runner calls it regularly.
+  pub async fn refresh_workspace_signatures(&mut self) -> Result<(), CoreError> {
+    let state = self.workspace()?;
+    let is_owner = state
+      .roster
+      .members
+      .iter()
+      .any(|member| member.user_id == self.account.user_id && member.role == RosterRole::Owner);
+    let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    if !is_owner || state.is_roster_fresh(self.now_ms(), max_age_ms / 2) && state.heads.is_roster_chained {
+      return Ok(());
+    }
+    self.sync_workspace().await?;
+    let document = self.workspace()?.roster;
+    self.append_roster(document).await
+  }
+
+  /// Signs `document` as the next roster version, then the current policy again under it, so a
+  /// policy signed under an older roster (by an owner removed since) is refused (A7).
+  async fn append_roster(&mut self, mut document: RosterDocument) -> Result<(), CoreError> {
+    let state = self.workspace()?;
+    document.version = state.roster.version + 1;
+    document.maybe_prev_hash = Some(head_or_genesis(state.heads.maybe_roster_hash));
+    document.maybe_signed_at_ms = Some(self.now_ms());
+    let version = document.version;
+    self
+      .append_log(WorkspaceLogKind::Roster, WorkspaceLog::Roster, version, &document)
+      .await?;
+    let state = self.workspace()?;
+    if state.policy_version > 0 {
+      self.publish_policy(state.policy).await?;
+    }
+    Ok(())
   }
 
   /// An admin adds `user` to a conversation they aren't a member of: the server membership changes
@@ -160,16 +234,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await?;
-    let history = match self.workspace_policy()?.history_default {
-      HistoryPolicy::FromJoin => HistoryShare::FromJoin,
-      _ => HistoryShare::Full,
-    };
+    let history = self.implicit_history(user)?;
     self
       .post_admin_change(
         conversation,
         MembershipAction::AddUser {
           user_id: convert::user(user),
           history,
+        },
+      )
+      .await
+  }
+
+  /// An admin removes `user` from a conversation, also one the admin isn't a member of: the server
+  /// membership changes now, the signed change waits in the group's queue until a member's client
+  /// commits it (admin.md §2.2). Deactivating someone calls this per conversation; the server's
+  /// own removal is only a hint to the clients (security review A8).
+  pub async fn admin_remove_member(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    self.api.remove_member(conversation, user).await?;
+    self
+      .post_admin_change(
+        conversation,
+        MembershipAction::RemoveUser {
+          user_id: convert::user(user),
         },
       )
       .await
@@ -219,25 +310,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => format!("add_device/{conversation_id}/{device_id}"),
     };
     records::put_json(&self.store, Table::PendingChanges, &key, &change)
-  }
-
-  /// Queues the removal of a revoked device from every group it is in.
-  pub(crate) fn queue_device_removal(&mut self, user: UserId, device: DeviceId) -> Result<(), CoreError> {
-    if device == self.account.device_id {
-      tracing::warn!("this device was revoked; it will no longer receive messages");
-      return Ok(());
-    }
-    let conversations: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
-    for conversation in conversations {
-      if self.has_group(conversation)? && self.group_device_ids(conversation)?.contains(&device) {
-        self.queue_pending(PendingChange::RemoveDevice {
-          conversation_id: conversation,
-          user_id: user,
-          device_id: device,
-        })?;
-      }
-    }
-    Ok(())
   }
 
   /// Queues adding a member's new device to every group this device shares with that member. The
@@ -301,30 +373,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ))
   }
 
-  /// Queues the MLS removal of a user the server removed (if this device's group still has them).
-  pub(crate) fn queue_user_removal(
-    &mut self,
-    conversation: ConversationId,
-    user: UserId,
-  ) -> Result<(), CoreError> {
-    if !self.has_group(conversation)? {
-      return Ok(());
-    }
-    let crypto_user = convert::user(user);
-    let group = self.group_or_error(conversation)?;
-    if group
-      .members()?
-      .iter()
-      .any(|member| member.user_id == crypto_user)
-    {
-      self.queue_pending(PendingChange::RemoveUser {
-        conversation_id: conversation,
-        user_id: user,
-      })?;
-    }
-    Ok(())
-  }
-
   async fn apply_pending(&mut self, change: &PendingChange) -> Result<PendingOutcome, CoreError> {
     let source = match change {
       PendingChange::Delegated {
@@ -334,25 +382,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let signed = SignedMembershipChange::from_bytes(change.as_slice())?;
         (*conversation_id, ChangeSource::Delegated(Box::new(signed)))
       },
-      PendingChange::RemoveUser {
-        conversation_id,
-        user_id,
-      } => {
-        let action = MembershipAction::RemoveUser {
-          user_id: convert::user(*user_id),
-        };
-        (*conversation_id, ChangeSource::Own(action))
-      },
-      PendingChange::RemoveDevice {
-        conversation_id,
-        user_id,
-        device_id,
-      } => {
-        let action = MembershipAction::RemoveDevice {
-          user_id: convert::user(*user_id),
-          device_id: convert::device(*device_id),
-        };
-        (*conversation_id, ChangeSource::Own(action))
+      PendingChange::RemoveUser { .. } | PendingChange::RemoveDevice { .. } => {
+        tracing::info!("dropped a removal the server asked for without a signed change");
+        return Ok(PendingOutcome::Done);
       },
       PendingChange::AddDevice { .. } => return self.apply_device_addition(change).await,
     };
@@ -416,18 +448,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     action: MembershipAction,
   ) -> Result<(), CoreError> {
-    let signed = MembershipChange::new(convert::conversation(conversation), action, &mut OsRng)
-      .sign(&self.account.device, self.account.certificate.clone())?;
-    let mut payload = ADMIN_CHANGE_MAGIC.to_vec();
-    payload.extend_from_slice(&signed.to_bytes()?);
-    // A non-member can't read the group's queue, so it learns the epoch from the conflict answer.
+    // A non-member can't read the group's queue, so it learns the epoch from the conflict answer;
+    // the change is signed for that epoch (security review A3).
     let mut epoch = 0;
     for _ in 0..2 {
+      let signed = MembershipChange::new(convert::conversation(conversation), epoch, action, &mut OsRng)
+        .sign(&self.account.device, self.account.certificate.clone())?;
+      let mut payload = ADMIN_CHANGE_MAGIC.to_vec();
+      payload.extend_from_slice(&signed.to_bytes()?);
       let request = PostMlsMessageRequest {
         device_id: self.account.device_id,
         epoch,
         kind: MlsMessageKind::Proposal,
-        payload: Base64Bytes::new(payload.clone()),
+        payload: Base64Bytes::new(payload),
       };
       match self.api.post_mls_message(conversation, &request).await {
         Ok(_) => return Ok(()),
@@ -498,6 +531,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.api.append_workspace_log(&kind, &request).await?;
     self.sync_workspace().await
   }
+}
+
+/// The previous entry's hash for a new document; zeros for a log's first chained entry.
+fn head_or_genesis(maybe_head: Option<Base64Bytes>) -> Base64Bytes {
+  maybe_head.unwrap_or_else(|| Base64Bytes::new(vec![0; 32]))
 }
 
 /// Reads "the group is in epoch N" from an `epoch_conflict` answer (the body has no field for it

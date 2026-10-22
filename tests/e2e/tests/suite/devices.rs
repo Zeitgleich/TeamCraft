@@ -36,8 +36,10 @@ async fn a_linked_device_shares_the_identity_and_joins_the_channels() {
   carol.client.complete_link_approval(phone_side).await.unwrap();
   let secrets = laptop_side.receive_secrets().await.unwrap();
 
-  let mut options = enrollment_options("carol linked laptop");
-  options.maybe_linked = Some(secrets);
+  let options = teamcraft_core::EnrollmentOptions {
+    secret: teamcraft_core::EnrollmentSecret::Linked(secrets),
+    ..enrollment_options("carol linked laptop")
+  };
   let mut laptop = PendingEnrollment::new()
     .complete(
       laptop_api,

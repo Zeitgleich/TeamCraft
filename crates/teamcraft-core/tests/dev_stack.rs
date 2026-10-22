@@ -20,7 +20,7 @@ use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::read_state;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::workspace::RosterRole;
-use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
+use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
@@ -174,15 +174,13 @@ async fn a_second_device_is_linked_through_the_relay() {
 
   let options = EnrollmentOptions {
     device_name: "alice linked laptop".into(),
-    passphrase: SecretBytes::new(b"unused".to_vec()),
+    secret: EnrollmentSecret::Linked(secrets),
     argon2: Argon2Settings {
       memory_kib: 1024,
       iterations: 1,
       parallelism: 1,
     },
     maybe_attestation: None,
-    maybe_org_recovery: None,
-    maybe_linked: Some(secrets),
   };
   let laptop = PendingEnrollment::new()
     .complete(
@@ -259,8 +257,10 @@ async fn thread_updates_and_new_devices_follow_server_events() {
     bob.start_link_approval(&code)
   );
   bob.complete_link_approval(phone_side.unwrap()).await.unwrap();
-  let mut options = enroll_options("bob linked laptop");
-  options.maybe_linked = Some(laptop_side.unwrap().receive_secrets().await.unwrap());
+  let options = EnrollmentOptions {
+    secret: EnrollmentSecret::Linked(laptop_side.unwrap().receive_secrets().await.unwrap()),
+    ..enroll_options("bob linked laptop")
+  };
   let mut laptop = PendingEnrollment::new()
     .complete(
       laptop_api,
@@ -329,15 +329,13 @@ async fn enroll(user: &str, token: &str) -> (DevClient, Arc<MemoryStore>) {
 fn enroll_options(device_name: &str) -> EnrollmentOptions {
   EnrollmentOptions {
     device_name: device_name.into(),
-    passphrase: SecretBytes::new(PASSPHRASE.as_bytes().to_vec()),
+    secret: EnrollmentSecret::Passphrase(SecretBytes::new(PASSPHRASE.as_bytes().to_vec())),
     argon2: Argon2Settings {
       memory_kib: 1024,
       iterations: 1,
       parallelism: 1,
     },
     maybe_attestation: None,
-    maybe_org_recovery: None,
-    maybe_linked: None,
   }
 }
 

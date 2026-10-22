@@ -7,7 +7,7 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
-use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
+use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{ConversationId, SpaceId};
@@ -83,8 +83,7 @@ pub async fn link_device(owner: &mut Peer) -> TestClient {
     .complete_link_approval(owner_side.unwrap())
     .await
     .unwrap();
-  let mut link_options = options("unused");
-  link_options.maybe_linked = Some(new_side.unwrap().receive_secrets().await.unwrap());
+  let link_options = linked_options(new_side.unwrap().receive_secrets().await.unwrap());
   PendingEnrollment::new()
     .complete(
       api,
@@ -144,7 +143,7 @@ pub fn settings() -> ClientSettings {
 pub fn options(passphrase: &str) -> EnrollmentOptions {
   EnrollmentOptions {
     device_name: "Test device".into(),
-    passphrase: SecretBytes::new(passphrase.as_bytes().to_vec()),
+    secret: EnrollmentSecret::Passphrase(SecretBytes::new(passphrase.as_bytes().to_vec())),
     // Cheap Argon2id so tests stay fast; production uses the default (128 MiB).
     argon2: Argon2Settings {
       memory_kib: 64,
@@ -152,7 +151,13 @@ pub fn options(passphrase: &str) -> EnrollmentOptions {
       parallelism: 1,
     },
     maybe_attestation: None,
-    maybe_org_recovery: None,
-    maybe_linked: None,
+  }
+}
+
+/// Enrollment of a linked device with the secrets from the existing one.
+pub fn linked_options(secrets: teamcraft_core::client::LinkedSecrets) -> EnrollmentOptions {
+  EnrollmentOptions {
+    secret: EnrollmentSecret::Linked(secrets),
+    ..options(PASSPHRASE)
   }
 }

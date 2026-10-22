@@ -146,6 +146,13 @@ impl IdentityKeyPair {
   }
 }
 
+impl IdentityKeyPair {
+  /// Signs a domain-separated statement of the user (e.g. the device list).
+  pub(crate) fn sign_labeled(&self, label: &str, body: &[u8]) -> Ed25519Signature {
+    Ed25519Signature(self.signing_key.sign(&domain::labeled(label, body)).to_bytes())
+  }
+}
+
 impl fmt::Debug for IdentityKeyPair {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("IdentityKeyPair")
@@ -170,6 +177,19 @@ impl IdentityPublicKey {
 
   fn verifying_key(&self) -> Result<VerifyingKey, IdentityError> {
     VerifyingKey::from_bytes(&self.0).map_err(|_| IdentityError::InvalidPublicKey)
+  }
+
+  pub(crate) fn verify_labeled(
+    &self,
+    label: &str,
+    body: &[u8],
+    signature: &Ed25519Signature,
+  ) -> Result<(), IdentityError> {
+    let signature = ed25519_dalek::Signature::from_bytes(&signature.0);
+    self
+      .verifying_key()?
+      .verify_strict(&domain::labeled(label, body), &signature)
+      .map_err(|_| IdentityError::InvalidSignature)
   }
 }
 

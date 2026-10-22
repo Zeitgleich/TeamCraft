@@ -18,12 +18,21 @@ use crate::identity::{
 };
 use crate::ids::{ConversationId, DeviceId, UserId};
 
-const MEMBERSHIP_CHANGE_VERSION: u8 = 1;
+/// Version 2 binds the change to the group epoch it was signed in (security review A3).
+const MEMBERSHIP_CHANGE_VERSION: u8 = 2;
 
 /// Pinned identity keys of other users (trust on first use or OIDC-attested, e2ee.md §3).
 /// Implemented by the client's contact store.
 pub trait IdentityDirectory {
   fn pinned_identity(&self, user_id: UserId) -> Option<IdentityPublicKey>;
+
+  /// Whether the user's newest signed device list names this device ([`crate::device_list`]).
+  /// Checked before a device is added to a group. Users who never published a list have no
+  /// answer to give; the implementation decides (e.g. by policy) whether to accept them.
+  fn is_active_device(&self, device: &VerifiedDevice) -> bool {
+    let _ = device;
+    true
+  }
 }
 
 /// Decides whether a user may make a membership change in a conversation (admin.md §2.3).
@@ -70,6 +79,10 @@ pub struct MembershipChange {
   version: u8,
   change_id: ChangeId,
   conversation_id: ConversationId,
+  /// The group epoch the signer saw. A change is only committed in that epoch, or a few later if
+  /// nothing changed the target user since, so an old signed change can't be replayed (for example
+  /// to re-add a user who was removed afterwards) to devices that never saw it.
+  epoch: u64,
   action: MembershipAction,
 }
 
@@ -153,6 +166,7 @@ impl MembershipAction {
 impl MembershipChange {
   pub fn new(
     conversation_id: ConversationId,
+    epoch: u64,
     action: MembershipAction,
     rng: &mut impl CryptoRngCore,
   ) -> Self {
@@ -160,6 +174,7 @@ impl MembershipChange {
       version: MEMBERSHIP_CHANGE_VERSION,
       change_id: ChangeId::generate(rng),
       conversation_id,
+      epoch,
       action,
     }
   }
@@ -170,6 +185,11 @@ impl MembershipChange {
 
   pub fn conversation_id(&self) -> ConversationId {
     self.conversation_id
+  }
+
+  /// The group epoch the change was signed for.
+  pub fn epoch(&self) -> u64 {
+    self.epoch
   }
 
   pub fn action(&self) -> &MembershipAction {
@@ -414,8 +434,10 @@ pub(crate) mod tests {
       };
       let mut other_conversation = signed.clone();
       other_conversation.change.conversation_id = ConversationId::new(501);
+      let mut other_epoch = signed.clone();
+      other_epoch.change.epoch = 9;
 
-      for tampered in [other_user, other_history, other_conversation] {
+      for tampered in [other_user, other_history, other_conversation, other_epoch] {
         assert!(matches!(
           tampered.verify(&directory, &authority),
           Err(MembershipError::InvalidSignature)
@@ -451,7 +473,7 @@ pub(crate) mod tests {
         .unwrap()
         .to_bytes()
         .unwrap();
-      bytes[1 + 16 + 8] = 9; // unknown action discriminant
+      bytes[1 + 16 + 8 + 8] = 9; // unknown action discriminant
       assert!(SignedMembershipChange::from_bytes(&bytes).is_err());
     }
   }
@@ -459,6 +481,7 @@ pub(crate) mod tests {
   fn add_anna() -> MembershipChange {
     MembershipChange::new(
       CONVERSATION,
+      0,
       MembershipAction::AddUser {
         user_id: ANNA,
         history: HistoryShare::FromJoin,

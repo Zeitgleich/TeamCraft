@@ -958,15 +958,15 @@ mod tests {
     let store = std::sync::Arc::new(MemoryStore::new());
     let options = crate::EnrollmentOptions {
       device_name: "test".into(),
-      passphrase: teamcraft_crypto::secret::SecretBytes::new(b"pass".to_vec()),
+      secret: crate::EnrollmentSecret::Passphrase(teamcraft_crypto::secret::SecretBytes::new(
+        b"passphrase".to_vec(),
+      )),
       argon2: teamcraft_crypto::backup::Argon2Settings {
         memory_kib: 64,
         iterations: 1,
         parallelism: 1,
       },
       maybe_attestation: None,
-      maybe_org_recovery: None,
-      maybe_linked: None,
     };
     let mut client = crate::PendingEnrollment::new()
       .complete(

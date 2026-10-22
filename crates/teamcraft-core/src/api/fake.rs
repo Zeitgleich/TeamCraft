@@ -39,6 +39,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
@@ -80,6 +81,7 @@ struct State {
   conversations: BTreeMap<ConversationId, Conversation>,
   welcomes: Vec<MlsMessageResponse>,
   key_bags: HashMap<UserId, KeyBagResponse>,
+  device_lists: HashMap<UserId, DeviceListResponse>,
   sessions: HashMap<String, Session>,
   offline_users: HashSet<UserId>,
   next_connection: u64,
@@ -189,6 +191,18 @@ impl FakeServer {
     }
   }
 
+  /// Serves another identity key for a user, as a server substituting its own would.
+  pub fn replace_identity_key(&self, user: UserId, public_key: Vec<u8>) {
+    if let Some(entry) = self.lock().identity_keys.get_mut(&user) {
+      entry.public_key = Base64Bytes::new(public_key);
+    }
+  }
+
+  /// Forgets a user's identity key, so the server answers "not found" as a lying server would.
+  pub fn forget_identity_key(&self, user: UserId) {
+    self.lock().identity_keys.remove(&user);
+  }
+
   /// Closes all gateway connections of a user, as a network drop would. Sessions stay resumable.
   pub fn drop_gateways(&self, user: UserId) {
     for session in self
@@ -209,23 +223,16 @@ impl FakeServer {
 
   /// Revokes a device, as the device list or an admin would, and announces it like the server.
   pub fn revoke_device(&self, user: UserId, device: DeviceId) {
-    let mut state = self.lock();
-    state.devices.remove(&device);
-    state.key_packages.remove(&device);
-    let mut audience: HashSet<UserId> = state
-      .conversations
-      .values()
-      .filter(|conversation| conversation.members.contains_key(&user))
-      .flat_map(|conversation| conversation.members.keys().copied())
-      .collect();
-    audience.insert(user);
-    state.publish(
-      audience,
-      &GatewayEvent::DeviceRemove {
-        user_id: user,
-        device_id: device,
-      },
-    );
+    self.lock().revoke_device(user, device);
+  }
+
+  /// Serves `list` as the user's device list, as a server holding back a newer one would.
+  pub fn serve_device_list(&self, user: UserId, list: DeviceListResponse) {
+    self.lock().device_lists.insert(user, list);
+  }
+
+  pub fn device_list_of(&self, user: UserId) -> Option<DeviceListResponse> {
+    self.lock().device_lists.get(&user).cloned()
   }
 
   /// Sends an event as the server would (for events whose endpoints the fake doesn't have, like
@@ -277,6 +284,19 @@ impl FakeServer {
       .key_bags
       .get(&user)
       .map(|bag| bag.wrapped_backup_keys.as_slice().to_vec())
+  }
+
+  /// The key bag stored for a user.
+  pub fn key_bag_of(&self, user: UserId) -> Option<KeyBagResponse> {
+    self.lock().key_bags.get(&user).cloned()
+  }
+
+  /// Serves `bag` as the user's key bag with a newer version number, as a server rolling back to
+  /// an older upload (or swapping the wrapped keys) would.
+  pub fn serve_key_bag(&self, user: UserId, mut bag: KeyBagResponse) {
+    let mut state = self.lock();
+    bag.version = state.key_bags.get(&user).map_or(1, |current| current.version + 1);
+    state.key_bags.insert(user, bag);
   }
 
   /// Space invitations sent so far.
@@ -477,6 +497,45 @@ impl ServerApi for FakeServerApi {
         .get(&user)
         .cloned()
         .ok_or_else(|| ApiError::status(404, ErrorCode::IdentityKeyNotFound, "no key"))
+    })
+  }
+
+  async fn device_list(&self, user: UserId) -> Result<DeviceListResponse, ApiError> {
+    self.with(|state, _| {
+      state
+        .device_lists
+        .get(&user)
+        .cloned()
+        .ok_or_else(|| ApiError::status(404, ErrorCode::DeviceNotFound, "no device list"))
+    })
+  }
+
+  async fn put_device_list(&self, request: &PutDeviceListRequest) -> Result<DeviceListResponse, ApiError> {
+    self.with(|state, me| {
+      let current = state.device_lists.get(&me).map_or(0, |list| list.sequence);
+      if request.expected_sequence != current || request.sequence <= current {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::VersionConflict,
+          format!("stored device list is {current}"),
+        ));
+      }
+      let stored = DeviceListResponse {
+        sequence: request.sequence,
+        signed_list: request.signed_list.clone(),
+      };
+      state.device_lists.insert(me, stored.clone());
+      Ok(stored)
+    })
+  }
+
+  async fn revoke_device(&self, device: DeviceId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      if state.devices.get(&device).is_none_or(|entry| entry.user != me) {
+        return Err(ApiError::status(404, ErrorCode::DeviceNotFound, "no such device"));
+      }
+      state.revoke_device(me, device);
+      Ok(())
     })
   }
 
@@ -690,7 +749,12 @@ impl ServerApi for FakeServerApi {
 
   async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
     self.with(|state, me| {
-      let entry = state.member_conversation_mut(conversation, me)?;
+      // Server admins may remove people from conversations they aren't in.
+      let entry = if state.admins.contains(&me) {
+        state.conversation_mut(conversation)?
+      } else {
+        state.member_conversation_mut(conversation, me)?
+      };
       let mut recipients: Vec<UserId> = entry.members.keys().copied().collect();
       if entry.members.remove(&user).is_none() {
         return Err(ApiError::status(404, ErrorCode::UserNotFound, "not a member"));
@@ -1805,6 +1869,26 @@ impl State {
     let space = self.next_id();
     self.space = Some(space);
     space
+  }
+
+  fn revoke_device(&mut self, user: UserId, device: DeviceId) {
+    let state = self;
+    state.devices.remove(&device);
+    state.key_packages.remove(&device);
+    let mut audience: HashSet<UserId> = state
+      .conversations
+      .values()
+      .filter(|conversation| conversation.members.contains_key(&user))
+      .flat_map(|conversation| conversation.members.keys().copied())
+      .collect();
+    audience.insert(user);
+    state.publish(
+      audience,
+      &GatewayEvent::DeviceRemove {
+        user_id: user,
+        device_id: device,
+      },
+    );
   }
 
   fn conversation_mut(&mut self, conversation: ConversationId) -> Result<&mut Conversation, ApiError> {

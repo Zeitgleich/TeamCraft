@@ -7,7 +7,7 @@ use teamcraft_crypto::key_bag::KeyBagError;
 use teamcraft_crypto::membership::MembershipError;
 use teamcraft_crypto::message::MessageError;
 use teamcraft_crypto::mls::MlsError;
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_proto::{ConversationId, DeviceId, UserId};
 
 use crate::api::ApiError;
 use crate::store::StoreError;
@@ -36,12 +36,25 @@ pub enum CoreError {
   WorkspaceLog(#[from] teamcraft_crypto::workspace::WorkspaceLogError),
   #[error("membership change: {0}")]
   Membership(#[from] MembershipError),
+  #[error("device list: {0}")]
+  DeviceList(#[from] teamcraft_crypto::device_list::DeviceListError),
   #[error("this device is not enrolled yet")]
   NotEnrolled,
   #[error("the account already has an identity key; recover it instead of enrolling anew")]
   AlreadyEnrolled,
   #[error("the server's identity key for this account doesn't match the recovered key bag")]
   IdentityMismatch,
+  /// A linked or recovering device was told the account has no identity: it never creates one
+  /// (security review B1).
+  #[error("the server reports no identity key for this account, but this device expects one")]
+  IdentityMissing,
+  /// The server offered a key bag older than one this device already saw.
+  #[error("the server offered key bag {offered}, older than {seen} seen before")]
+  KeyBagRollback { seen: u64, offered: u64 },
+  #[error("no verified key yet for device {device} of user {user}")]
+  UnknownSender { user: UserId, device: DeviceId },
+  #[error("user {0} isn't an admin in the signed roster")]
+  NotAnAdmin(UserId),
   #[error("user {0} has no identity key yet (never enrolled)")]
   UnknownIdentity(UserId),
   #[error("conversation {0} has no MLS group on this device")]

@@ -20,7 +20,8 @@ use teamcraft_core::store::{DatabaseKeySource, KeySourceError, KeyringKeySource,
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{
-  CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, LinkOffer, PendingEnrollment,
+  CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
+  PendingEnrollment,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -551,12 +552,10 @@ impl Core {
     let store = self.store.clone().ok_or("the local database is not open")?;
     let options = EnrollmentOptions {
       device_name: request.device_name,
-      passphrase: SecretBytes::new(request.passphrase.into_bytes()),
+      secret: EnrollmentSecret::Passphrase(SecretBytes::new(request.passphrase.into_bytes())),
       argon2: self.config.argon2,
       maybe_attestation: None,
       // The desktop flow only offers passphrase enrollment so far; linking and org recovery follow.
-      maybe_org_recovery: None,
-      maybe_linked: None,
     };
     let client = PendingEnrollment::new()
       .complete(
@@ -609,12 +608,9 @@ impl Core {
     let store = self.store.clone().ok_or("the local database is not open")?;
     let options = EnrollmentOptions {
       device_name,
-      // Linked devices get the backup key from the existing device; no passphrase is involved.
-      passphrase: SecretBytes::new(Vec::new()),
+      secret: EnrollmentSecret::Linked(secrets),
       argon2: self.config.argon2,
       maybe_attestation: None,
-      maybe_org_recovery: None,
-      maybe_linked: Some(secrets),
     };
     let client = PendingEnrollment::new()
       .complete(
@@ -725,14 +721,7 @@ impl Core {
         return Ok(());
       },
       ChatAction::AcceptKeyChange { user } => {
-        let mut pinned = records::pinned_identities(client.store()).map_err(describe)?;
-        if let Some(entry) = pinned.get_mut(user)
-          && let Some(new_key) = entry.maybe_changed_to.take()
-        {
-          entry.public_key = new_key;
-          records::pin_identity(client.store(), *user, entry).map_err(describe)?;
-        }
-        return Ok(());
+        return client.accept_identity_change(*user).map_err(describe);
       },
       ChatAction::PublishPolicy {
         policy,

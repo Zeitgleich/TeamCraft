@@ -9634,6 +9634,7 @@ dependencies = [
 name = "teamcraft-core"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "futures-channel",
  "futures-util",
  "image",
@@ -9641,6 +9642,7 @@ dependencies = [
  "keyring",
  "openmls_rust_crypto",
  "openmls_traits",
+ "p256",
  "rand_core 0.6.4",
  "reqwest",
  "rusqlite",

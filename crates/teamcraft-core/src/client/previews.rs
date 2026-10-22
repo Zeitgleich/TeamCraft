@@ -1,7 +1,9 @@
 //! Generating link previews before a message goes out (e2ee.md §12). A message with a link waits
 //! in the outbox until its preview is made or given up on (bounded by the fetch timeouts).
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
+#[cfg(not(target_arch = "wasm32"))]
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -12,7 +14,9 @@ use url::Url;
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-use crate::link_preview::{Fetched, PreviewFetcher, first_url, is_allowed, parse_page};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::link_preview::Fetched;
+use crate::link_preview::{PreviewFetcher, first_url, is_allowed, parse_page};
 use crate::records;
 use crate::store::{LinkPreviewData, LocalStore, MessageContent, Table};
 
