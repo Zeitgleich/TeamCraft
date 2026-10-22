@@ -6,26 +6,60 @@
 //! - `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY`: PEM file with the server's Ed25519 public key for join
 //!   tokens (`[calls] signing_key_path` on the server), and `TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER`: the
 //!   server's `[calls] issuer`
+//! - `TEAMCRAFT_SFU_HEALTH_BIND`: TCP address of the `/healthz` endpoint, default `[::]:8081`;
+//!   `teamcraft-sfu healthcheck` probes it (for the container `HEALTHCHECK`)
 //! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test page; unsigned
 //!   dev tokens when no public key is configured)
 //! - `TEAMCRAFT_SFU_CERT` / `TEAMCRAFT_SFU_KEY`: PEM files; without them a self-signed
 //!   certificate valid for 14 days is generated (browsers accept it via certificate hash)
 
-use std::{net::SocketAddr, sync::Arc};
+use std::io::Write;
+use std::net::SocketAddr;
+use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::Context;
+use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
   config::SfuConfig,
   dev_page::serve_dev_page,
+  health::{DEFAULT_HEALTH_ADDR, serve_health},
   server::Sfu,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use wtransport::Identity;
 
+fn main() -> ExitCode {
+  if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+    return healthcheck();
+  }
+  match run() {
+    Ok(()) => ExitCode::SUCCESS,
+    Err(error) => {
+      // Logging may not be initialised yet, so report on stderr directly.
+      let _ = writeln!(std::io::stderr(), "teamcraft-sfu failed: {error:#}");
+      ExitCode::FAILURE
+    },
+  }
+}
+
+/// `teamcraft-sfu healthcheck`: probes the running SFU's health endpoint. The image has no curl.
+fn healthcheck() -> ExitCode {
+  let result = health_addr()
+    .and_then(|addr| probe(probe_target(addr), "/healthz", DEFAULT_TIMEOUT).map_err(anyhow::Error::from));
+  match result {
+    Ok(()) => ExitCode::SUCCESS,
+    Err(error) => {
+      let _ = writeln!(std::io::stderr(), "unhealthy: {error:#}");
+      ExitCode::FAILURE
+    },
+  }
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
     .init();
@@ -45,20 +79,17 @@ async fn main() -> anyhow::Result<()> {
   let certificate_hash = sfu.certificate_hash();
   info!(%local_addr, "SFU listening");
 
-  match maybe_dev_http_addr {
-    Some(http_addr) => {
-      tokio::select! {
-        () = sfu.run() => {},
-        result = serve_dev_page(http_addr, local_addr.port(), &certificate_hash) => result.context("dev page")?,
-        result = tokio::signal::ctrl_c() => result?,
-      }
-    },
-    None => {
-      tokio::select! {
-        () = sfu.run() => {},
-        result = tokio::signal::ctrl_c() => result?,
-      }
-    },
+  let dev_page = async {
+    match maybe_dev_http_addr {
+      Some(http_addr) => serve_dev_page(http_addr, local_addr.port(), &certificate_hash).await,
+      None => std::future::pending().await,
+    }
+  };
+  tokio::select! {
+    () = sfu.run() => {},
+    result = dev_page => result.context("dev page")?,
+    result = serve_health(health_addr()?) => result.context("health endpoint")?,
+    () = shutdown_signal() => {},
   }
   Ok(())
 }
@@ -99,6 +130,10 @@ async fn load_identity() -> anyhow::Result<Identity> {
       Identity::self_signed(["localhost", "127.0.0.1", "::1"]).context("generating certificate")
     },
   }
+}
+
+fn health_addr() -> anyhow::Result<SocketAddr> {
+  Ok(env_addr("TEAMCRAFT_SFU_HEALTH_BIND")?.unwrap_or(DEFAULT_HEALTH_ADDR.parse()?))
 }
 
 fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {

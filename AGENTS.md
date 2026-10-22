@@ -10,13 +10,15 @@ untrusted VPS.
 
 Read before changing behaviour:
 
-| Document                               | Content                                               |
-|----------------------------------------|-------------------------------------------------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md)     | Components, threat model, data model, Keycloak, calls |
-| [PLAN.md](PLAN.md)                     | Feature catalog with priorities, roadmap              |
-| [docs/e2ee.md](docs/e2ee.md)           | Encryption, devices, backup, push, search, compliance |
-| [docs/admin.md](docs/admin.md)         | Roles, admin actions without content access           |
-| [docs/telephony.md](docs/telephony.md) | SIP trunk, AI hotline, agents                         |
+| Document                                       | Content                                               |
+|------------------------------------------------|-------------------------------------------------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md)             | Components, threat model, data model, Keycloak, calls |
+| [PLAN.md](PLAN.md)                             | Feature catalog with priorities, roadmap              |
+| [docs/e2ee.md](docs/e2ee.md)                   | Encryption, devices, backup, push, search, compliance |
+| [docs/admin.md](docs/admin.md)                 | Roles, admin actions without content access           |
+| [docs/telephony.md](docs/telephony.md)         | SIP trunk, AI hotline, agents                         |
+| [docs/notifications.md](docs/notifications.md) | Threads, unread counts, notifications, urgent         |
+| [docs/meetings.md](docs/meetings.md)           | Meetings, invitations, guests and lobby               |
 
 ## Repository layout
 

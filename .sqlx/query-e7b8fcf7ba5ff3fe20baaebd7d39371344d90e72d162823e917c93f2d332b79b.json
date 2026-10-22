@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.member_denied, c.guest_denied,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id,\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\"\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND c.visibility = 'public' AND c.archived_at IS NULL\n                           AND m.user_id IS NULL))\n         ORDER BY c.id",
+  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.member_denied, c.guest_denied,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\"\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND c.visibility = 'public' AND c.archived_at IS NULL\n                           AND m.user_id IS NULL))\n         ORDER BY c.id",
   "describe": {
     "columns": [
       {
@@ -176,6 +176,17 @@
       },
       {
         "ordinal": 16,
+        "name": "muted_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "muted_until"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
         "name": "joined_floor?",
         "type_info": "Int8",
         "origin": "Expression"
@@ -207,8 +218,9 @@
       false,
       false,
       true,
+      true,
       null
     ]
   },
-  "hash": "0caf2542021123022874e4776b269dc7b1fa1583d06b7ced5dfcab2051985f4b"
+  "hash": "e7b8fcf7ba5ff3fe20baaebd7d39371344d90e72d162823e917c93f2d332b79b"
 }

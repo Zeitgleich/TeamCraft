@@ -7,10 +7,12 @@ use crate::auth::{Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use crate::config::{
-  GatewayConfig, LimitsConfig, PolicyConfig, RendezvousConfig, RetentionJobConfig, RoleNames,
+  GatewayConfig, LimitsConfig, NotificationsConfig, PolicyConfig, RendezvousConfig, RetentionJobConfig,
+  RoleNames,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
+use crate::meetings::MeetingService;
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
 use crate::services::calls::CallService;
@@ -31,6 +33,8 @@ pub struct AppState {
   pub maybe_blob_store: Option<Arc<BlobStore>>,
   /// Call join tokens, if calls are configured.
   pub maybe_calls: Option<Arc<CallService>>,
+  /// Meetings, if configured.
+  pub maybe_meetings: Option<Arc<MeetingService>>,
   pub scheme: Arc<PermissionScheme>,
   pub settings: Arc<Settings>,
 }
@@ -45,6 +49,7 @@ pub struct Settings {
   pub gateway: GatewayConfig,
   pub rendezvous: RendezvousConfig,
   pub retention: RetentionJobConfig,
+  pub notifications: NotificationsConfig,
   pub push: PushSettings,
 }
 

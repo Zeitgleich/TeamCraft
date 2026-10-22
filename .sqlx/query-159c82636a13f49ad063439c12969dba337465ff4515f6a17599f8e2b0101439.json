@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO threads_followed (user_id, conversation_id, thread_id, state, reason, last_read_message_id)\n         VALUES ($1, $2, $3, 'following', $4, $5)\n         ON CONFLICT (user_id, conversation_id, thread_id) DO UPDATE SET\n           reason = CASE WHEN threads_followed.state = 'unfollowed' THEN EXCLUDED.reason\n                         ELSE threads_followed.reason END,\n           state = 'following',\n           last_read_message_id = GREATEST(COALESCE(threads_followed.last_read_message_id, 0),\n                                           EXCLUDED.last_read_message_id),\n           updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "159c82636a13f49ad063439c12969dba337465ff4515f6a17599f8e2b0101439"
+}

@@ -117,7 +117,7 @@ pub async fn run(state: AppState, mut socket: WebSocket) {
 
 async fn authenticate(state: &AppState, token: &str) -> Result<teamcraft_proto::UserId, ErrorBody> {
   let result = async {
-    let identity = state.validator.validate(token).await?;
+    let identity = accounts::validate_token(state, token).await?;
     accounts::authenticate(state, identity).await
   }
   .await;

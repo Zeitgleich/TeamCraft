@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 teamcraft-media = { path = "../teamcraft-media" }
+teamcraft-ops.workspace = true
 teamcraft-proto.workspace = true
 anyhow.workspace = true
 jsonwebtoken.workspace = true

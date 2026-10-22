@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.id FROM meetings m\n         WHERE m.ends_at > $2 AND ($3::timestamptz IS NULL OR m.starts_at < $3)\n           AND (m.organizer_user_id = $1\n                OR EXISTS (SELECT 1 FROM meeting_attendees a WHERE a.meeting_id = m.id AND a.user_id = $1))\n         ORDER BY m.starts_at, m.id LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meetings",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f4a855e78b77068c5d7ddba5b9d077895d4400caf89dd117cc9ba4e260ad7398"
+}

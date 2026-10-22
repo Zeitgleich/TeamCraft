@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO threads_followed (user_id, conversation_id, thread_id, state, reason)\n         SELECT user_id, conversation_id, $3, 'following', 'started' FROM memberships\n         WHERE conversation_id = $1 AND user_id = $2 AND user_id <> $4\n         ON CONFLICT DO NOTHING RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads_followed",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "03cba4d215871641b2d54ef507a340cbe6fb9162857f53e651a96968de4d0b2d"
+}

@@ -1,0 +1,623 @@
+//! Meetings, their invitees and their chat conversation (PLAN.md §9).
+
+use std::collections::HashMap;
+
+use teamcraft_proto::{ChannelRole, ConversationId, MeetingAttendeeId, MeetingId, MeetingInviteId, UserId};
+use time::OffsetDateTime;
+
+use crate::conversation::{NewConversation, insert_conversation, insert_membership};
+use crate::database::Database;
+use crate::error::DbError;
+use crate::ids::{from_db, from_db_opt, to_db};
+
+/// A stored meeting. `kind`, `status` are the wire names (`scheduled`, `instant`; `scheduled`,
+/// `cancelled`, `ended`).
+#[derive(Debug, Clone)]
+pub struct StoredMeeting {
+  pub id: MeetingId,
+  pub uid: String,
+  pub organizer: UserId,
+  pub conversation: ConversationId,
+  pub title: String,
+  pub maybe_description: Option<String>,
+  pub starts_at: OffsetDateTime,
+  pub ends_at: OffsetDateTime,
+  pub maybe_recurrence_rule: Option<String>,
+  pub kind: String,
+  pub status: String,
+  pub has_lobby: bool,
+  pub sequence: i32,
+}
+
+/// An invitee as stored. `rsvp` is the wire name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAttendee {
+  pub id: MeetingAttendeeId,
+  pub meeting: MeetingId,
+  pub maybe_user: Option<UserId>,
+  pub maybe_email: Option<String>,
+  pub maybe_name: Option<String>,
+  pub rsvp: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewMeeting<'a> {
+  pub id: MeetingId,
+  pub uid: &'a str,
+  pub organizer: UserId,
+  pub conversation: NewConversation<'a>,
+  pub title: &'a str,
+  pub maybe_description: Option<&'a str>,
+  pub starts_at: OffsetDateTime,
+  pub ends_at: OffsetDateTime,
+  pub maybe_recurrence_rule: Option<&'a str>,
+  pub kind: &'a str,
+  pub has_lobby: bool,
+  pub attendees: &'a [NewAttendee],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewAttendee {
+  pub id: MeetingAttendeeId,
+  pub maybe_user: Option<UserId>,
+  /// Lower-cased.
+  pub maybe_email: Option<String>,
+  pub maybe_name: Option<String>,
+}
+
+/// Fields to change; `None` keeps the stored value. An empty description clears it.
+#[derive(Debug, Clone, Default)]
+pub struct MeetingChanges<'a> {
+  pub maybe_title: Option<&'a str>,
+  pub maybe_description: Option<&'a str>,
+  pub maybe_starts_at: Option<OffsetDateTime>,
+  pub maybe_ends_at: Option<OffsetDateTime>,
+  pub maybe_has_lobby: Option<bool>,
+}
+
+/// A personal join link of a meeting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMeetingInvite {
+  pub id: MeetingInviteId,
+  pub meeting: MeetingId,
+  pub maybe_email: Option<String>,
+  pub maybe_label: Option<String>,
+  pub is_redeemed: bool,
+  pub maybe_guest_user: Option<UserId>,
+}
+
+/// A guest waiting in (or let out of) the lobby.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LobbyRow {
+  pub user: UserId,
+  /// `waiting`, `admitted` or `denied`.
+  pub state: String,
+  pub requested_at: OffsetDateTime,
+}
+
+/// How the invitee list changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttendeeDiff {
+  pub added: Vec<StoredAttendee>,
+  pub removed: Vec<StoredAttendee>,
+}
+
+/// Which invitee an answer belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttendeeKey<'a> {
+  User(UserId),
+  Email(&'a str),
+}
+
+impl Database {
+  /// Creates the meeting, its chat conversation (the organizer is admin there) and the invitees;
+  /// invited users become members of the chat.
+  pub async fn create_meeting(&self, new: &NewMeeting<'_>) -> Result<(), DbError> {
+    let mut tx = self.pool().begin().await?;
+    insert_conversation(&mut tx, &new.conversation).await?;
+    insert_membership(&mut tx, new.conversation.id, new.organizer, ChannelRole::Admin).await?;
+    sqlx::query!(
+      r#"INSERT INTO meetings (id, uid, organizer_user_id, conversation_id, title, description, starts_at,
+                               ends_at, recurrence_rule, kind, has_lobby)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+      to_db(new.id),
+      new.uid,
+      to_db(new.organizer),
+      to_db(new.conversation.id),
+      new.title,
+      new.maybe_description,
+      new.starts_at,
+      new.ends_at,
+      new.maybe_recurrence_rule,
+      new.kind,
+      new.has_lobby,
+    )
+    .execute(&mut *tx)
+    .await?;
+    for attendee in new.attendees {
+      insert_attendee(&mut tx, new.id, attendee).await?;
+      if let Some(user) = attendee.maybe_user.filter(|user| *user != new.organizer) {
+        insert_membership(&mut tx, new.conversation.id, user, ChannelRole::Member).await?;
+      }
+    }
+    tx.commit().await?;
+    Ok(())
+  }
+
+  pub async fn get_meeting(&self, id: MeetingId) -> Result<Option<StoredMeeting>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT id, uid, organizer_user_id, conversation_id, title, description, starts_at, ends_at,
+                recurrence_rule, kind, status, has_lobby, sequence
+         FROM meetings WHERE id = $1"#,
+      to_db(id),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    row
+      .map(|row| {
+        Ok(StoredMeeting {
+          id: from_db(row.id)?,
+          uid: row.uid,
+          organizer: from_db(row.organizer_user_id)?,
+          conversation: from_db(row.conversation_id)?,
+          title: row.title,
+          maybe_description: row.description,
+          starts_at: row.starts_at,
+          ends_at: row.ends_at,
+          maybe_recurrence_rule: row.recurrence_rule,
+          kind: row.kind,
+          status: row.status,
+          has_lobby: row.has_lobby,
+          sequence: row.sequence,
+        })
+      })
+      .transpose()
+  }
+
+  pub async fn get_meeting_by_uid(&self, uid: &str) -> Result<Option<StoredMeeting>, DbError> {
+    let id = sqlx::query_scalar!("SELECT id FROM meetings WHERE uid = $1", uid)
+      .fetch_optional(self.pool())
+      .await?;
+    match id {
+      Some(id) => self.get_meeting(from_db(id)?).await,
+      None => Ok(None),
+    }
+  }
+
+  /// Meetings the user organizes or is invited to that end after `from` and start before `to`,
+  /// soonest first. Cancelled meetings are included (clients show them struck through).
+  pub async fn list_meetings_of_user(
+    &self,
+    user: UserId,
+    from: OffsetDateTime,
+    maybe_to: Option<OffsetDateTime>,
+    limit: i64,
+  ) -> Result<Vec<StoredMeeting>, DbError> {
+    let ids = sqlx::query_scalar!(
+      r#"SELECT m.id FROM meetings m
+         WHERE m.ends_at > $2 AND ($3::timestamptz IS NULL OR m.starts_at < $3)
+           AND (m.organizer_user_id = $1
+                OR EXISTS (SELECT 1 FROM meeting_attendees a WHERE a.meeting_id = m.id AND a.user_id = $1))
+         ORDER BY m.starts_at, m.id LIMIT $4"#,
+      to_db(user),
+      from,
+      maybe_to,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut meetings = Vec::with_capacity(ids.len());
+    for id in ids {
+      if let Some(meeting) = self.get_meeting(from_db(id)?).await? {
+        meetings.push(meeting);
+      }
+    }
+    Ok(meetings)
+  }
+
+  pub async fn list_attendees(&self, meeting: MeetingId) -> Result<Vec<StoredAttendee>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT id, meeting_id, user_id, email, display_name, rsvp FROM meeting_attendees
+         WHERE meeting_id = $1 ORDER BY id"#,
+      to_db(meeting),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(StoredAttendee {
+          id: from_db(row.id)?,
+          meeting: from_db(row.meeting_id)?,
+          maybe_user: from_db_opt(row.user_id)?,
+          maybe_email: row.email,
+          maybe_name: row.display_name,
+          rsvp: row.rsvp,
+        })
+      })
+      .collect()
+  }
+
+  /// Applies the changes and increases the iCalendar sequence. Returns the new meeting.
+  pub async fn update_meeting(
+    &self,
+    id: MeetingId,
+    changes: &MeetingChanges<'_>,
+  ) -> Result<Option<StoredMeeting>, DbError> {
+    sqlx::query!(
+      r#"UPDATE meetings SET
+           title = COALESCE($2, title),
+           description = CASE WHEN $3::text IS NULL THEN description WHEN $3 = '' THEN NULL ELSE $3 END,
+           starts_at = COALESCE($4, starts_at),
+           ends_at = COALESCE($5, ends_at),
+           has_lobby = COALESCE($6, has_lobby),
+           sequence = sequence + 1
+         WHERE id = $1"#,
+      to_db(id),
+      changes.maybe_title,
+      changes.maybe_description,
+      changes.maybe_starts_at,
+      changes.maybe_ends_at,
+      changes.maybe_has_lobby,
+    )
+    .execute(self.pool())
+    .await?;
+    self.get_meeting(id).await
+  }
+
+  /// Replaces the invitee list. People who stay keep their answer; invited users join the chat and
+  /// removed users leave it (the organizer always stays).
+  pub async fn replace_attendees(
+    &self,
+    meeting: &StoredMeeting,
+    wanted: &[NewAttendee],
+  ) -> Result<AttendeeDiff, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let current = self.list_attendees(meeting.id).await?;
+    let mut diff = AttendeeDiff::default();
+
+    for existing in &current {
+      let is_kept = wanted.iter().any(|candidate| same_person(existing, candidate));
+      if !is_kept {
+        sqlx::query!("DELETE FROM meeting_attendees WHERE id = $1", to_db(existing.id))
+          .execute(&mut *tx)
+          .await?;
+        if let Some(user) = existing.maybe_user.filter(|user| *user != meeting.organizer) {
+          sqlx::query!(
+            "DELETE FROM memberships WHERE conversation_id = $1 AND user_id = $2",
+            to_db(meeting.conversation),
+            to_db(user),
+          )
+          .execute(&mut *tx)
+          .await?;
+        }
+        diff.removed.push(existing.clone());
+      }
+    }
+    for candidate in wanted {
+      if current.iter().any(|existing| same_person(existing, candidate)) {
+        continue;
+      }
+      insert_attendee(&mut tx, meeting.id, candidate).await?;
+      if let Some(user) = candidate.maybe_user.filter(|user| *user != meeting.organizer) {
+        sqlx::query!(
+          r#"INSERT INTO memberships (conversation_id, user_id, role) VALUES ($1, $2, 'member')
+             ON CONFLICT DO NOTHING"#,
+          to_db(meeting.conversation),
+          to_db(user),
+        )
+        .execute(&mut *tx)
+        .await?;
+      }
+      diff.added.push(StoredAttendee {
+        id: candidate.id,
+        meeting: meeting.id,
+        maybe_user: candidate.maybe_user,
+        maybe_email: candidate.maybe_email.clone(),
+        maybe_name: candidate.maybe_name.clone(),
+        rsvp: "needs_action".into(),
+      });
+    }
+    tx.commit().await?;
+    Ok(diff)
+  }
+
+  /// Marks the meeting cancelled and archives its chat. Returns `false` if it was not scheduled.
+  pub async fn cancel_meeting(&self, meeting: &StoredMeeting) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      "UPDATE meetings SET status = 'cancelled', sequence = sequence + 1 WHERE id = $1 AND status = 'scheduled'",
+      to_db(meeting.id),
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    sqlx::query!(
+      "UPDATE conversations SET archived_at = now() WHERE id = $1 AND archived_at IS NULL",
+      to_db(meeting.conversation),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// Records an invitee's answer; `false` if nobody matches.
+  pub async fn set_rsvp(
+    &self,
+    meeting: MeetingId,
+    key: &AttendeeKey<'_>,
+    rsvp: &str,
+  ) -> Result<bool, DbError> {
+    let (maybe_user, maybe_email) = match key {
+      AttendeeKey::User(user) => (Some(to_db(*user)), None),
+      AttendeeKey::Email(email) => (None, Some(*email)),
+    };
+    let result = sqlx::query!(
+      r#"UPDATE meeting_attendees SET rsvp = $4
+         WHERE meeting_id = $1 AND (user_id = $2 OR lower(email) = lower($3))"#,
+      to_db(meeting),
+      maybe_user,
+      maybe_email,
+      rsvp,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// Removes a meeting with its chat and invitees (rollback of a failed creation).
+  pub async fn delete_meeting(&self, meeting: &StoredMeeting) -> Result<(), DbError> {
+    sqlx::query!(
+      "DELETE FROM conversations WHERE id = $1",
+      to_db(meeting.conversation)
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// E-mail addresses of the users that have one.
+  pub async fn get_user_emails(&self, users: &[UserId]) -> Result<HashMap<UserId, String>, DbError> {
+    let raw: Vec<i64> = users.iter().map(|user| to_db(*user)).collect();
+    let rows = sqlx::query!(
+      "SELECT id, email AS \"email!\" FROM users WHERE id = ANY($1) AND email IS NOT NULL",
+      &raw,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.id)?, row.email)))
+      .collect()
+  }
+
+  /// The unredeemed invite for this e-mail address, or a new one with `new_id`.
+  pub async fn ensure_email_invite(
+    &self,
+    meeting: MeetingId,
+    email: &str,
+    new_id: MeetingInviteId,
+    created_by: UserId,
+  ) -> Result<MeetingInviteId, DbError> {
+    let id = sqlx::query_scalar!(
+      r#"INSERT INTO meeting_invites (id, meeting_id, email, created_by) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (meeting_id, email) WHERE email IS NOT NULL AND redeemed_at IS NULL
+         DO UPDATE SET email = EXCLUDED.email
+         RETURNING id"#,
+      to_db(new_id),
+      to_db(meeting),
+      email,
+      to_db(created_by),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    from_db(id)
+  }
+
+  /// A link the host hands out by hand.
+  pub async fn create_label_invite(
+    &self,
+    meeting: MeetingId,
+    id: MeetingInviteId,
+    maybe_label: Option<&str>,
+    created_by: UserId,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "INSERT INTO meeting_invites (id, meeting_id, label, created_by) VALUES ($1, $2, $3, $4)",
+      to_db(id),
+      to_db(meeting),
+      maybe_label,
+      to_db(created_by),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  pub async fn get_meeting_invite(
+    &self,
+    id: MeetingInviteId,
+  ) -> Result<Option<StoredMeetingInvite>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS "is_redeemed!", guest_user_id
+         FROM meeting_invites WHERE id = $1"#,
+      to_db(id),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    row
+      .map(|row| {
+        Ok(StoredMeetingInvite {
+          id: from_db(row.id)?,
+          meeting: from_db(row.meeting_id)?,
+          maybe_email: row.email,
+          maybe_label: row.label,
+          is_redeemed: row.is_redeemed,
+          maybe_guest_user: from_db_opt(row.guest_user_id)?,
+        })
+      })
+      .transpose()
+  }
+
+  /// Marks the invite redeemed by `guest`; `false` if it was redeemed before.
+  pub async fn redeem_meeting_invite(&self, id: MeetingInviteId, guest: UserId) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE meeting_invites SET redeemed_at = now(), guest_user_id = $2 WHERE id = $1 AND redeemed_at IS NULL",
+      to_db(id),
+      to_db(guest),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// Puts the guest into the lobby as waiting, or returns the existing state.
+  pub async fn enter_lobby(&self, meeting: MeetingId, user: UserId) -> Result<LobbyRow, DbError> {
+    let row = sqlx::query!(
+      r#"INSERT INTO meeting_lobby (meeting_id, user_id) VALUES ($1, $2)
+         ON CONFLICT (meeting_id, user_id) DO UPDATE SET meeting_id = EXCLUDED.meeting_id
+         RETURNING state, requested_at"#,
+      to_db(meeting),
+      to_db(user),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(LobbyRow {
+      user,
+      state: row.state,
+      requested_at: row.requested_at,
+    })
+  }
+
+  pub async fn get_lobby_entry(&self, meeting: MeetingId, user: UserId) -> Result<Option<LobbyRow>, DbError> {
+    let row = sqlx::query!(
+      "SELECT state, requested_at FROM meeting_lobby WHERE meeting_id = $1 AND user_id = $2",
+      to_db(meeting),
+      to_db(user),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| LobbyRow {
+      user,
+      state: row.state,
+      requested_at: row.requested_at,
+    }))
+  }
+
+  /// Guests waiting for a decision, longest waiting first.
+  pub async fn list_waiting(&self, meeting: MeetingId) -> Result<Vec<LobbyRow>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT user_id, state, requested_at FROM meeting_lobby
+         WHERE meeting_id = $1 AND state = 'waiting' ORDER BY requested_at, user_id"#,
+      to_db(meeting),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(LobbyRow {
+          user: from_db(row.user_id)?,
+          state: row.state,
+          requested_at: row.requested_at,
+        })
+      })
+      .collect()
+  }
+
+  /// Admits or denies a waiting guest (`state` is `admitted` or `denied`); an admitted guest joins
+  /// the meeting chat. `false` if the guest was not waiting.
+  pub async fn decide_lobby(
+    &self,
+    meeting: &StoredMeeting,
+    user: UserId,
+    state: &str,
+    decided_by: UserId,
+  ) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      r#"UPDATE meeting_lobby SET state = $3, decided_at = now(), decided_by = $4
+         WHERE meeting_id = $1 AND user_id = $2 AND state = 'waiting'"#,
+      to_db(meeting.id),
+      to_db(user),
+      state,
+      to_db(decided_by),
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    if state == "admitted" {
+      sqlx::query!(
+        "INSERT INTO memberships (conversation_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING",
+        to_db(meeting.conversation),
+        to_db(user),
+      )
+      .execute(&mut *tx)
+      .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// Members of the meeting chat who may host: the organizer and chat admins.
+  pub async fn meeting_host_ids(&self, meeting: &StoredMeeting) -> Result<Vec<UserId>, DbError> {
+    let ids = sqlx::query_scalar!(
+      "SELECT user_id FROM memberships WHERE conversation_id = $1 AND role = 'admin' ORDER BY user_id",
+      to_db(meeting.conversation),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut hosts: Vec<UserId> = ids.into_iter().map(from_db).collect::<Result<_, _>>()?;
+    if !hosts.contains(&meeting.organizer) {
+      hosts.push(meeting.organizer);
+    }
+    Ok(hosts)
+  }
+
+  /// IDs of users the meeting concerns: organizer and invited users.
+  pub async fn meeting_user_ids(&self, meeting: &StoredMeeting) -> Result<Vec<UserId>, DbError> {
+    let ids = sqlx::query_scalar!(
+      "SELECT user_id AS \"user_id!\" FROM meeting_attendees WHERE meeting_id = $1 AND user_id IS NOT NULL",
+      to_db(meeting.id),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut users: Vec<UserId> = ids.into_iter().map(from_db).collect::<Result<_, _>>()?;
+    users.push(meeting.organizer);
+    users.sort_unstable();
+    users.dedup();
+    Ok(users)
+  }
+}
+
+fn same_person(existing: &StoredAttendee, candidate: &NewAttendee) -> bool {
+  match (existing.maybe_user, candidate.maybe_user) {
+    (Some(a), Some(b)) => a == b,
+    (None, None) => existing.maybe_email == candidate.maybe_email,
+    _ => false,
+  }
+}
+
+async fn insert_attendee(
+  tx: &mut sqlx::PgConnection,
+  meeting: MeetingId,
+  attendee: &NewAttendee,
+) -> Result<(), DbError> {
+  sqlx::query!(
+    r#"INSERT INTO meeting_attendees (id, meeting_id, user_id, email, display_name)
+       VALUES ($1, $2, $3, $4, $5)"#,
+    to_db(attendee.id),
+    to_db(meeting),
+    attendee.maybe_user.map(to_db),
+    attendee.maybe_email,
+    attendee.maybe_name,
+  )
+  .execute(tx)
+  .await?;
+  Ok(())
+}

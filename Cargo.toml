@@ -47,6 +47,7 @@ if_same_then_else = "allow"
 teamcraft-proto = { path = "crates/teamcraft-proto" }
 teamcraft-db = { path = "crates/teamcraft-db" }
 teamcraft-crypto = { path = "crates/teamcraft-crypto" }
+teamcraft-ops = { path = "crates/teamcraft-ops" }
 
 # Serialization and schemas
 serde = { version = "1", features = ["derive"] }
@@ -75,6 +76,9 @@ base64 = "0.22"
 
 # Randomness (already in the tree through jsonwebtoken and reqwest)
 aws-lc-rs = "1"
+
+# E-mail (iMIP meeting invitations); rustls with the aws-lc-rs provider like the rest of the tree
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
 
 # S3 presigned URLs (sans-IO, no SDK)
 rusty-s3 = { version = "0.10", default-features = false, features = ["aws-lc-rs"] }

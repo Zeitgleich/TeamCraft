@@ -79,6 +79,7 @@ pub fn my_membership(membership: &Membership) -> MyMembership {
     notification_level: membership.notification_level.clone(),
     is_favorite: membership.is_favorite,
     maybe_last_read_message_id: membership.maybe_last_read_message_id,
+    maybe_muted_until: membership.maybe_muted_until.map(unix_millis),
   }
 }
 

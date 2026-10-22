@@ -1,4 +1,4 @@
-use teamcraft_proto::{ConversationId, DeviceId, NotificationLevel, PushProvider, UserId};
+use teamcraft_proto::{ConversationId, DeviceId, NotificationLevel, PushProvider, ThreadId, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
@@ -21,27 +21,42 @@ pub struct PushRecipientRow {
   pub notification_level: NotificationLevel,
   pub presence_pref: String,
   pub maybe_dnd_until: Option<OffsetDateTime>,
+  pub maybe_muted_until: Option<OffsetDateTime>,
+  /// `away_only` or `always`.
+  pub push_mode: String,
+  /// The user's DND schedule as stored (JSON text, parsed by the server).
+  pub maybe_dnd_schedule: Option<String>,
+  /// The user follows the thread of the message being routed.
+  pub is_following_thread: bool,
   pub devices: Vec<PushDeviceRow>,
 }
 
 impl Database {
-  /// Members of the conversation (except `exclude`) that registered push devices.
+  /// Members of the conversation (except `exclude`) that registered push devices. With
+  /// `maybe_thread` set, rows say whether the member follows that thread.
   pub async fn list_push_recipients(
     &self,
     conversation: ConversationId,
     exclude: UserId,
+    maybe_thread: Option<ThreadId>,
   ) -> Result<Vec<PushRecipientRow>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT m.user_id, m.notification_level, u.presence_pref, u.dnd_until,
+      r#"SELECT m.user_id, m.notification_level, m.muted_until, u.presence_pref, u.dnd_until,
+                COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.dnd_schedule,
+                tf.user_id IS NOT NULL AS "is_following_thread!",
                 d.id AS device_id, d.push_provider AS "push_provider!", d.push_token AS "push_token!",
                 d.push_key AS "push_key!"
          FROM memberships m
          JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL
          JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL
+         LEFT JOIN user_notification_settings s ON s.user_id = u.id
+         LEFT JOIN threads_followed tf ON tf.user_id = u.id AND tf.conversation_id = m.conversation_id
+                                      AND tf.thread_id = $3 AND tf.state = 'following'
          WHERE m.conversation_id = $1 AND m.user_id <> $2
          ORDER BY m.user_id, d.id"#,
       to_db(conversation),
       to_db(exclude),
+      maybe_thread.map(to_db),
     )
     .fetch_all(self.pool())
     .await?;
@@ -62,6 +77,10 @@ impl Database {
           notification_level: NotificationLevel::from(row.notification_level),
           presence_pref: row.presence_pref,
           maybe_dnd_until: row.dnd_until,
+          maybe_muted_until: row.muted_until,
+          push_mode: row.push_mode,
+          maybe_dnd_schedule: row.dnd_schedule,
+          is_following_thread: row.is_following_thread,
           devices: vec![device],
         }),
       }

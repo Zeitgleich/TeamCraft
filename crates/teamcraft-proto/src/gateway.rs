@@ -11,9 +11,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId, ErrorBody,
-  MessageResponse, MlsMessageResponse, PresenceState, SpaceId, UnixMillis, UserId, UserSummary,
-  WorkspaceLogKind,
+  CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId, ErrorBody, LobbyState,
+  MeetingId, MessageId, MessageResponse, MlsMessageResponse, PresenceState, SpaceId, ThreadId, UnixMillis,
+  UserId, UserSummary, WorkspaceLogKind,
 };
 
 /// Frames sent by the client.
@@ -102,6 +102,41 @@ pub enum GatewayEvent {
   WorkspaceUpdate {
     kind: WorkspaceLogKind,
     version: u64,
+  },
+  /// A meeting was created, changed, cancelled or answered; refetch `GET /meetings/{id}`. Sent to
+  /// the organizer and the invited users.
+  MeetingUpdate {
+    meeting_id: MeetingId,
+  },
+  /// A guest waits in the lobby of a meeting. Sent to the meeting's hosts.
+  LobbyJoin {
+    meeting_id: MeetingId,
+    user: UserSummary,
+  },
+  /// The host admitted or denied the guest. Sent to the guest.
+  LobbyDecision {
+    meeting_id: MeetingId,
+    state: LobbyState,
+  },
+  /// A member acknowledged an urgent message. Sent to the message's sender and to the member's
+  /// other devices.
+  MessageAck {
+    conversation_id: ConversationId,
+    message_id: MessageId,
+    user_id: UserId,
+  },
+  /// A member of a DM or group DM read up to `message_id`. Sent only to members who send receipts
+  /// themselves, and only if the reader does.
+  ReadReceipt {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    message_id: MessageId,
+  },
+  /// The user's thread follow or thread read position changed (on another device or by an
+  /// automatic follow); refetch `GET /threads` or `GET /unread`. Sent only to that user.
+  ThreadUpdate {
+    conversation_id: ConversationId,
+    thread_id: ThreadId,
   },
   /// The first participant joined: a call is running in the conversation.
   CallStart {

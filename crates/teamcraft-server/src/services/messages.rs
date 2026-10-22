@@ -8,6 +8,7 @@ use teamcraft_proto::{
 
 use super::access::{is_guest, load_conversation, require};
 use super::convert::message_response;
+use super::{threads, urgent};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -72,17 +73,20 @@ pub async fn send_message(
       "mentioned user {stranger} is not in the conversation"
     )));
   }
-  if let Some(thread) = request.maybe_thread_id
-    && state
-      .database
-      .get_message(conversation, MessageId::from_snowflake(thread.snowflake()))
-      .await?
-      .is_none()
-  {
-    return Err(ApiError::InvalidRequest(
-      "thread root is not a message of this conversation".into(),
-    ));
-  }
+  let maybe_thread_root = match request.maybe_thread_id {
+    Some(thread) => {
+      let root = state
+        .database
+        .get_message(conversation, MessageId::from_snowflake(thread.snowflake()))
+        .await?
+        .filter(|root| root.maybe_thread_id.is_none())
+        .ok_or_else(|| {
+          ApiError::InvalidRequest("thread root is not a message of this conversation".into())
+        })?;
+      Some(root)
+    },
+    None => None,
+  };
 
   let mut mentioned = request.mentioned_user_ids.clone();
   mentioned.sort_unstable();
@@ -105,6 +109,16 @@ pub async fn send_message(
 
   let response = message_response(&outcome.message);
   if outcome.is_new {
+    if let Some(root) = &maybe_thread_root {
+      threads::record_reply(state, root, &outcome.message).await?;
+    }
+    urgent::schedule_reminders(
+      state,
+      &access.view.conversation.kind,
+      &outcome.message,
+      time::OffsetDateTime::now_utc(),
+    )
+    .await?;
     state.hub.publish(
       members,
       &GatewayEvent::MessageCreate {
@@ -119,6 +133,7 @@ pub async fn send_message(
         message: outcome.message.id,
         sender: caller.user.id,
         mentioned: outcome.message.mentioned_user_ids.clone(),
+        maybe_thread: outcome.message.maybe_thread_id,
         is_urgent: outcome.message.is_urgent,
       },
     ));

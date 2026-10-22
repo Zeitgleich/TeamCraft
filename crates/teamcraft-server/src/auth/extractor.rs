@@ -27,7 +27,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
 
   async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
     let token = bearer_token(parts)?;
-    let identity = state.validator.validate(token).await?;
+    let identity = accounts::validate_token(state, token).await?;
     accounts::authenticate(state, identity).await
   }
 }

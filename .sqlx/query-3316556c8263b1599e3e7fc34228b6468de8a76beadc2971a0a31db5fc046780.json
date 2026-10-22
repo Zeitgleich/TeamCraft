@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO threads_followed (user_id, conversation_id, thread_id, state, reason)\n           VALUES ($1, $2, $3, 'unfollowed', 'manual')\n           ON CONFLICT (user_id, conversation_id, thread_id) DO UPDATE SET\n             state = 'unfollowed', updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3316556c8263b1599e3e7fc34228b6468de8a76beadc2971a0a31db5fc046780"
+}

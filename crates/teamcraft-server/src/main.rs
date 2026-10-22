@@ -1,12 +1,15 @@
 //! Entry point: configuration, logging, database, then serve.
 
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use secrecy::ExposeSecret;
 use teamcraft_db::{Database, DatabaseOptions, SnowflakeGenerator};
+use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_proto::PermissionScheme;
 use teamcraft_proto::PushProvider;
 use teamcraft_server::auth::{
@@ -16,22 +19,60 @@ use teamcraft_server::config::{CONFIG_PATH_ENV, Config};
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
+use teamcraft_server::meetings::caldav::{CalDavStore, CalendarStore};
+use teamcraft_server::meetings::mailer::{Mailer, SmtpMailer};
+use teamcraft_server::meetings::{MeetingBackends, MeetingService};
 use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{ApnsSender, FcmSender, PushDispatcher, UnifiedPushSender, WebPushSender};
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
 use teamcraft_server::services::calls::CallService;
 use teamcraft_server::services::presence::{self, refresh_presence};
-use teamcraft_server::services::{oidc, retention};
+use teamcraft_server::services::{oidc, retention, urgent};
 use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, Settings};
 use teamcraft_server::storage::BlobStore;
-use tokio::signal;
 use tracing::{info, warn};
 
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
+fn main() -> ExitCode {
+  if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+    return healthcheck();
+  }
+  match run() {
+    Ok(()) => ExitCode::SUCCESS,
+    Err(error) => {
+      // Logging may not be initialised yet, so report on stderr directly.
+      let _ = writeln!(std::io::stderr(), "teamcraft-server failed: {error:#}");
+      ExitCode::FAILURE
+    },
+  }
+}
+
+/// `teamcraft-server healthcheck [--ready]`: probes the running server's `/healthz` (or `/readyz`
+/// with `--ready`) on its own listen address. For the container `HEALTHCHECK`; the image has no curl.
+fn healthcheck() -> ExitCode {
+  let path = if std::env::args().any(|arg| arg == "--ready") {
+    "/readyz"
+  } else {
+    "/healthz"
+  };
+  let result = Config::load(config_path().as_deref())
+    .map_err(anyhow::Error::from)
+    .and_then(|config| {
+      probe(probe_target(config.server.listen_addr), path, DEFAULT_TIMEOUT).map_err(anyhow::Error::from)
+    });
+  match result {
+    Ok(()) => ExitCode::SUCCESS,
+    Err(error) => {
+      let _ = writeln!(std::io::stderr(), "unhealthy: {error:#}");
+      ExitCode::FAILURE
+    },
+  }
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
   let config = Config::load(config_path().as_deref()).context("loading configuration")?;
   logging::init(&config.logging)?;
 
@@ -75,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
       .transpose()
       .context("configuring calls")?
       .map(Arc::new),
+    maybe_meetings: build_meetings(&config)?.map(Arc::new),
     scheme: Arc::new(PermissionScheme::default()),
     settings: Arc::new(Settings {
       maybe_oidc_sync: build_oidc_sync(&config)?,
@@ -83,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
       gateway: config.gateway.clone(),
       rendezvous: config.rendezvous.clone(),
       retention: config.retention.clone(),
+      notifications: config.notifications.clone(),
       push: PushSettings {
         ttl: Duration::from_secs(config.push.ttl_secs),
         allow_private_endpoints: config.push.allow_private_endpoints,
@@ -100,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
   if config.retention.is_enabled {
     spawn_retention_job(state.clone());
   }
+  spawn_urgent_scheduler(state.clone());
 
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
@@ -140,6 +184,50 @@ fn spawn_retention_job(state: AppState) {
       interval.tick().await;
       if let Err(error) = retention::run_once(&state, time::OffsetDateTime::now_utc()).await {
         warn!(%error, "retention run failed");
+      }
+    }
+  });
+}
+
+/// The meeting feature, if `[meetings]` is configured.
+fn build_meetings(config: &Config) -> anyhow::Result<Option<MeetingService>> {
+  let Some(meetings) = &config.meetings else {
+    return Ok(None);
+  };
+  let maybe_calendar = match &meetings.caldav {
+    Some(caldav) => {
+      let store = CalDavStore::new(caldav).context("configuring the CalDAV client")?;
+      Some(Arc::new(store) as Arc<dyn CalendarStore>)
+    },
+    None => None,
+  };
+  let maybe_mailer = match &meetings.smtp {
+    Some(smtp) => {
+      let mailer = SmtpMailer::new(smtp).context("configuring the mail server")?;
+      Some(Arc::new(mailer) as Arc<dyn Mailer>)
+    },
+    None => None,
+  };
+  MeetingService::new(
+    meetings,
+    MeetingBackends {
+      maybe_calendar,
+      maybe_mailer,
+    },
+  )
+  .map(Some)
+  .context("configuring meetings")
+}
+
+/// Pushes urgent direct messages again until they are acknowledged (PLAN.md §5).
+fn spawn_urgent_scheduler(state: AppState) {
+  tokio::spawn(async move {
+    let period = Duration::from_secs(state.settings.notifications.urgent_scheduler_interval_secs.max(1));
+    let mut interval = tokio::time::interval(period);
+    loop {
+      interval.tick().await;
+      if let Err(error) = urgent::run_due(&state, time::OffsetDateTime::now_utc()).await {
+        warn!(%error, "urgent reminders failed");
       }
     }
   });
@@ -254,28 +342,4 @@ fn config_path() -> Option<PathBuf> {
     }
   }
   std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from)
-}
-
-async fn shutdown_signal() {
-  let ctrl_c = async {
-    if signal::ctrl_c().await.is_err() {
-      std::future::pending::<()>().await;
-    }
-  };
-  #[cfg(unix)]
-  let terminate = async {
-    match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-      Ok(mut stream) => {
-        stream.recv().await;
-      },
-      Err(_) => std::future::pending::<()>().await,
-    }
-  };
-  #[cfg(not(unix))]
-  let terminate = std::future::pending::<()>();
-
-  tokio::select! {
-    () = ctrl_c => {},
-    () = terminate => {},
-  }
 }

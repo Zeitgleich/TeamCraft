@@ -9,7 +9,7 @@ use crate::services::calls;
 use crate::state::AppState;
 
 /// Returns the call that is running in the conversation.
-#[utoipa::path(get, path = "/api/v1/conversations/{conversation_id}/call", tag = "calls", summary = "Returns the call that is running in the conversation.", params(("conversation_id" = ConversationId, Path)), responses((status = 200, body = CallStateResponse), (status = 401, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)), security(("bearer" = [])))]
+#[utoipa::path(get, path = "/api/v1/conversations/{conversation_id}/call", tag = "calls", summary = "Returns the call that is running in the conversation.", params(("conversation_id" = ConversationId, Path)), responses((status = 200, body = CallStateResponse), (status = 400, body = ErrorBody), (status = 401, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)), security(("bearer" = [])))]
 pub async fn get_call_handler(
   State(state): State<AppState>,
   caller: AuthenticatedUser,

@@ -14,13 +14,18 @@ pub mod identity;
 pub mod invites;
 pub mod key_bag;
 pub mod key_packages;
+pub mod meeting_guests;
+pub mod meetings;
 pub mod members;
 pub mod messages;
 pub mod mls;
+pub mod notifications;
 pub mod oidc;
 pub mod presence;
 pub mod retention;
 pub mod spaces;
+pub mod threads;
+pub mod urgent;
 pub mod workspace;
 
 use crate::error::ApiError;

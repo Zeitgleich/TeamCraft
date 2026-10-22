@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meeting_attendees SET rsvp = $4\n         WHERE meeting_id = $1 AND (user_id = $2 OR lower(email) = lower($3))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc2f9918e3b70ecc1903847c74fe390c6fc6ef8b9e2c2cc1f9be17061f012c31"
+}

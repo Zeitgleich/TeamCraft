@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_notification_settings (user_id, push_mode, send_read_receipts, dnd_schedule)\n         VALUES ($1, $2, $3, $4)\n         ON CONFLICT (user_id) DO UPDATE SET push_mode = EXCLUDED.push_mode,\n           send_read_receipts = EXCLUDED.send_read_receipts, dnd_schedule = EXCLUDED.dnd_schedule,\n           updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74f2157af6653ea7868f635ccf2af8f0c2e802a1b3a515a660e6f7691765fa6b"
+}

@@ -15,8 +15,10 @@ mod ids;
 mod invite;
 mod key_bag;
 mod key_package;
+mod meeting;
 mod message;
 mod mls;
+mod notification;
 mod push;
 mod retention;
 mod snowflake;
@@ -24,6 +26,8 @@ mod space;
 mod status;
 #[cfg(feature = "integration")]
 pub mod testing;
+mod thread;
+mod urgent;
 mod user;
 mod workspace_log;
 
@@ -44,8 +48,13 @@ pub use identity::{IdentityKey, IdentityKeyOutcome, NewIdentityKey};
 pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};
 pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts};
+pub use meeting::{
+  AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, StoredAttendee,
+  StoredMeeting, StoredMeetingInvite,
+};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
+pub use notification::{ReceiptRow, StoredUserSettings};
 pub use push::{PushDeviceRow, PushRecipientRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};
@@ -53,5 +62,7 @@ pub use space::{
   Category, NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing, SpaceMember, SpaceView,
 };
 pub use status::StoredStatus;
+pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};
+pub use urgent::{Acknowledgement, DueReminder};
 pub use user::{OidcIdentity, OidcUserRow, PresencePreference, User, UserSearch};
 pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};

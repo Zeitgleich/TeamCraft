@@ -134,7 +134,7 @@ async fn authenticate(
   device: DeviceId,
 ) -> Option<AuthenticatedUser> {
   let result = async {
-    let identity = state.validator.validate(token).await?;
+    let identity = accounts::validate_token(state, token).await?;
     let caller = accounts::authenticate(state, identity).await?;
     if !state.database.is_active_device_of(caller.user.id, device).await? {
       return Err(ApiError::device_not_found());

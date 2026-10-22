@@ -6,6 +6,8 @@ wire_enum! {
     Dm => "dm",
     Group => "group",
     Channel => "channel",
+    /// The chat of a meeting; created with the meeting, outside spaces.
+    Meeting => "meeting",
   }
 }
 

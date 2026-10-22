@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO urgent_reminders (message_id, conversation_id, user_id, pushes_sent, next_push_at)\n         SELECT $1, conversation_id, user_id, 1, $4 FROM memberships\n         WHERE conversation_id = $2 AND user_id <> $3\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "58a28cccc395f033da032f6cd7ffb88bc15ac4a7d484b1eb57fa23a4c5b583d7"
+}

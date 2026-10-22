@@ -4,7 +4,39 @@ use tracing::info;
 
 use crate::auth::{AuthError, AuthenticatedUser, TokenIdentity};
 use crate::error::ApiError;
+use crate::meetings::guest;
 use crate::state::AppState;
+
+/// Validates a bearer token: meeting guests carry tokens signed by this server, everybody else a
+/// token of the identity provider.
+pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdentity, AuthError> {
+  if let Some(meetings) = &state.maybe_meetings
+    && guest::is_guest_token_header(token)
+  {
+    let claims = meetings
+      .tokens()
+      .verify_session(token)
+      .map_err(|_| AuthError::InvalidToken("invalid guest session".into()))?;
+    return Ok(guest_identity(claims.sub, claims.name, claims.iat));
+  }
+  state.validator.validate(token).await
+}
+
+/// The identity of a meeting guest: an account under the server's own guest issuer, keyed by the
+/// redeemed invite.
+pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i64) -> TokenIdentity {
+  TokenIdentity {
+    issuer: guest::GUEST_ISSUER.to_owned(),
+    subject: invite_subject,
+    maybe_username: None,
+    display_name,
+    maybe_email: None,
+    is_email_verified: false,
+    role: Role::Guest,
+    issued_at,
+    maybe_session_id: None,
+  }
+}
 
 /// Turns a validated token into the user: creates or refreshes the account on first sight, applies
 /// pending invites for the verified email and rejects deactivated accounts.

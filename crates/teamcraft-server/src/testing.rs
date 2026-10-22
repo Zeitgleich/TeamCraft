@@ -17,12 +17,15 @@ use tokio::task::JoinHandle;
 
 use crate::auth::test_keys::{TEST_KEY_ID, TEST_MODULUS_B64, TEST_PRIVATE_KEY_PEM};
 use crate::auth::{
-  AuthError, JwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator,
+  AuthError, BoxFuture, JwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator,
   ValidatorOptions,
 };
-use crate::config::{CallsConfig, RoleNames, StorageConfig};
+use crate::config::{CallsConfig, MeetingsConfig, RoleNames, StorageConfig};
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
+use crate::meetings::caldav::{CalendarError, CalendarStore};
+use crate::meetings::mailer::{MailError, Mailer, OutgoingMail};
+use crate::meetings::{MeetingBackends, MeetingService};
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
 use crate::router::router;
@@ -32,6 +35,102 @@ use crate::storage::BlobStore;
 
 pub const TEST_ISSUER: &str = "https://auth.example.com/realms/test";
 pub const TEST_CLIENT: &str = "teamcraft";
+
+/// A calendar for tests: keeps the written events in memory and can be told to fail.
+#[derive(Default)]
+pub struct FakeCalendar {
+  events: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+  is_failing: std::sync::atomic::AtomicBool,
+}
+
+impl FakeCalendar {
+  /// The stored event, if there is one.
+  pub fn event(&self, object_name: &str) -> Option<String> {
+    self.events.lock().unwrap().get(object_name).cloned()
+  }
+
+  /// Names of all stored events.
+  pub fn names(&self) -> Vec<String> {
+    self.events.lock().unwrap().keys().cloned().collect()
+  }
+
+  /// Makes every following write fail as if the calendar server were down.
+  pub fn set_failing(&self, is_failing: bool) {
+    self.is_failing.store(is_failing, Ordering::SeqCst);
+  }
+
+  fn check(&self) -> Result<(), CalendarError> {
+    if self.is_failing.load(Ordering::SeqCst) {
+      Err(CalendarError::Unreachable("the fake calendar is down".into()))
+    } else {
+      Ok(())
+    }
+  }
+}
+
+impl CalendarStore for FakeCalendar {
+  fn put_event<'a>(&'a self, object_name: &'a str, ics: &'a str) -> BoxFuture<'a, Result<(), CalendarError>> {
+    Box::pin(async move {
+      self.check()?;
+      self
+        .events
+        .lock()
+        .unwrap()
+        .insert(object_name.to_owned(), ics.to_owned());
+      Ok(())
+    })
+  }
+
+  fn delete_event<'a>(&'a self, object_name: &'a str) -> BoxFuture<'a, Result<(), CalendarError>> {
+    Box::pin(async move {
+      self.check()?;
+      self.events.lock().unwrap().remove(object_name);
+      Ok(())
+    })
+  }
+}
+
+/// A mail server for tests: remembers what was sent and can be told to refuse addresses.
+#[derive(Default)]
+pub struct FakeMailer {
+  sent: std::sync::Mutex<Vec<OutgoingMail>>,
+  refused: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeMailer {
+  /// Everything sent so far, oldest first.
+  pub fn sent(&self) -> Vec<OutgoingMail> {
+    self.sent.lock().unwrap().clone()
+  }
+
+  /// Mail to this address fails from now on.
+  pub fn refuse(&self, address: &str) {
+    self.refused.lock().unwrap().push(address.to_owned());
+  }
+}
+
+impl Mailer for FakeMailer {
+  fn send<'a>(&'a self, mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>> {
+    Box::pin(async move {
+      if self.refused.lock().unwrap().contains(&mail.to_address) {
+        return Err(MailError::Send(
+          "the fake mail server refuses this address".into(),
+        ));
+      }
+      self.sent.lock().unwrap().push(mail.clone());
+      Ok(())
+    })
+  }
+}
+
+/// Optional parts a test server is started with.
+#[derive(Default)]
+struct Extras {
+  maybe_storage: Option<StorageConfig>,
+  maybe_calls: Option<CallService>,
+  maybe_push: Option<PushDispatcher>,
+  maybe_meetings: Option<MeetingService>,
+}
 
 pub struct TestApp {
   pub http: reqwest::Client,
@@ -90,7 +189,7 @@ impl TestApp {
   }
 
   pub async fn start_with(customize: impl FnOnce(&mut Settings)) -> Option<Self> {
-    Self::start_inner(customize, None, None).await
+    Self::start_full(customize, Extras::default()).await
   }
 
   /// Like [`Self::start`] with attachment storage on the dev Garage (`TEAMCRAFT_TEST_S3_ENDPOINT`,
@@ -121,7 +220,14 @@ impl TestApp {
       presign_expiry_secs: 300,
       max_attachment_bytes: 1024 * 1024,
     };
-    Self::start_inner(customize, Some(storage), None).await
+    Self::start_full(
+      customize,
+      Extras {
+        maybe_storage: Some(storage),
+        ..Extras::default()
+      },
+    )
+    .await
   }
 
   /// Like [`Self::start`] with calls enabled: join tokens are signed with `signing_key_pem`
@@ -142,7 +248,39 @@ impl TestApp {
   /// Like [`Self::start_with_calls`] with a full calls configuration (SFU token, ring timeout).
   pub async fn start_with_calls_config(config: &CallsConfig, signing_key_pem: &str) -> Option<Self> {
     let calls = CallService::new(config, signing_key_pem.as_bytes()).unwrap();
-    Self::start_inner(|_| {}, None, Some(calls)).await
+    Self::start_full(
+      |_| {},
+      Extras {
+        maybe_calls: Some(calls),
+        ..Extras::default()
+      },
+    )
+    .await
+  }
+
+  /// Like [`Self::start`] with meetings enabled. Calendar writes go to `calendar`, invitation mail
+  /// to `mailer`.
+  pub async fn start_with_meetings(
+    config: &MeetingsConfig,
+    calendar: Arc<dyn CalendarStore>,
+    mailer: Arc<dyn Mailer>,
+  ) -> Option<Self> {
+    let meetings = MeetingService::new(
+      config,
+      MeetingBackends {
+        maybe_calendar: Some(calendar),
+        maybe_mailer: Some(mailer),
+      },
+    )
+    .unwrap();
+    Self::start_full(
+      |_| {},
+      Extras {
+        maybe_meetings: Some(meetings),
+        ..Extras::default()
+      },
+    )
+    .await
   }
 
   /// Like [`Self::start_with`] with the given push dispatcher (tests record or fake the senders).
@@ -150,23 +288,23 @@ impl TestApp {
     customize: impl FnOnce(&mut Settings),
     dispatcher: PushDispatcher,
   ) -> Option<Self> {
-    Self::start_full(customize, None, None, Some(dispatcher)).await
+    Self::start_full(
+      customize,
+      Extras {
+        maybe_push: Some(dispatcher),
+        ..Extras::default()
+      },
+    )
+    .await
   }
 
-  async fn start_inner(
-    customize: impl FnOnce(&mut Settings),
-    maybe_storage: Option<StorageConfig>,
-    maybe_calls: Option<CallService>,
-  ) -> Option<Self> {
-    Self::start_full(customize, maybe_storage, maybe_calls, None).await
-  }
-
-  async fn start_full(
-    customize: impl FnOnce(&mut Settings),
-    maybe_storage: Option<StorageConfig>,
-    maybe_calls: Option<CallService>,
-    maybe_push: Option<PushDispatcher>,
-  ) -> Option<Self> {
+  async fn start_full(customize: impl FnOnce(&mut Settings), extras: Extras) -> Option<Self> {
+    let Extras {
+      maybe_storage,
+      maybe_calls,
+      maybe_push,
+      maybe_meetings,
+    } = extras;
     let test_db = TestDatabase::create().await?;
     let mut settings = Settings::default();
     settings.gateway.presence_offline_grace_secs = 0;
@@ -204,6 +342,7 @@ impl TestApp {
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
       maybe_calls: maybe_calls.map(Arc::new),
+      maybe_meetings: maybe_meetings.map(Arc::new),
       scheme: Arc::new(PermissionScheme::default()),
       settings: Arc::new(settings),
     };

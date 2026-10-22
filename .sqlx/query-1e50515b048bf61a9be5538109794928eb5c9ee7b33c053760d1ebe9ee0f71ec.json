@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM urgent_reminders WHERE pushes_sent >= $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1e50515b048bf61a9be5538109794928eb5c9ee7b33c053760d1ebe9ee0f71ec"
+}

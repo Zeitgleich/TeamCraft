@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE urgent_reminders r\n         SET pushes_sent = r.pushes_sent + 1,\n             next_push_at = $1 + make_interval(secs => $2)\n         WHERE (r.message_id, r.user_id) IN (\n           SELECT message_id, user_id FROM urgent_reminders\n           WHERE next_push_at <= $1 ORDER BY next_push_at LIMIT $3 FOR UPDATE SKIP LOCKED)\n         RETURNING r.conversation_id, r.message_id, r.user_id, r.pushes_sent",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "urgent_reminders",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "urgent_reminders",
+            "name": "message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "urgent_reminders",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "pushes_sent",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "urgent_reminders",
+            "name": "pushes_sent"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "29829ca32baa63e2d398e9406d52c6f9711b0c2631944249ab83122ae655f4b5"
+}

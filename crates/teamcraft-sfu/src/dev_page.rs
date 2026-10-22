@@ -8,9 +8,9 @@
 use std::net::SocketAddr;
 
 use axum::{Router, response::Html, routing::get};
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::TcpListener;
 use tracing::info;
+
+use crate::net::bind_dual_stack;
 use wtransport::tls::{Sha256Digest, Sha256DigestFmt};
 
 const PAGE_TEMPLATE: &str = include_str!("../static/dev.html");
@@ -26,20 +26,6 @@ pub async fn serve_dev_page(
   let listener = bind_dual_stack(addr)?;
   info!("dev test page on http://{}/", listener.local_addr()?);
   axum::serve(listener, router).await
-}
-
-/// Binds a TCP listener; IPv6 addresses also accept IPv4 (IPv4-mapped).
-fn bind_dual_stack(addr: SocketAddr) -> std::io::Result<TcpListener> {
-  const BACKLOG: i32 = 128;
-  let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
-  if addr.is_ipv6() {
-    socket.set_only_v6(false)?;
-  }
-  socket.set_reuse_address(true)?;
-  socket.set_nonblocking(true)?;
-  socket.bind(&addr.into())?;
-  socket.listen(BACKLOG)?;
-  TcpListener::from_std(socket.into())
 }
 
 fn render(webtransport_port: u16, certificate_hash: &Sha256Digest) -> String {

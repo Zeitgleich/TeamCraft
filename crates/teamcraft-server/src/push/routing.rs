@@ -1,14 +1,16 @@
 //! Who gets a push for a new message (e2ee.md §7): the server decides from metadata it has anyway.
 
-use teamcraft_db::{PushDeviceRow, PushRecipientRow};
+use teamcraft_db::{DueReminder, PushDeviceRow, PushRecipientRow};
 use teamcraft_proto::{
-  ConversationId, ConversationKind, MessageId, NotificationLevel, PushKind, PushWakeUp, UserId,
+  ConversationId, ConversationKind, DndSchedule, MessageId, NotificationLevel, PushKind, PushMode,
+  PushWakeUp, ThreadId, UserId,
 };
 use time::OffsetDateTime;
 use tracing::{debug, info, warn};
 
 use super::sender::{PushError, PushTarget, Urgency};
 use crate::gateway::DeviceAggregate;
+use crate::services::notifications;
 use crate::state::AppState;
 
 /// A message that was just stored.
@@ -19,6 +21,8 @@ pub struct NewMessageEvent {
   pub message: MessageId,
   pub sender: UserId,
   pub mentioned: Vec<UserId>,
+  /// The thread the message replies in.
+  pub maybe_thread: Option<ThreadId>,
   pub is_urgent: bool,
 }
 
@@ -42,15 +46,22 @@ pub struct RecipientState {
   /// DMs and group DMs notify like a mention.
   pub is_direct: bool,
   pub is_dnd: bool,
+  /// The user follows the thread the message replies in.
+  pub is_followed_thread: bool,
+  /// Push even while a device of the user is active.
+  pub always_pushes: bool,
   pub devices: DeviceAggregate,
 }
 
 /// The routing rules:
 ///
-/// 1. Muted (`none`) never notifies. Urgent messages don't override a mute.
-/// 2. Do-not-disturb suppresses all pushes (mentions are collected and shown afterwards).
-/// 3. No push while a device of the user is active: they see the message live.
-/// 4. In `mentions` channels only mentions and direct messages push; in `all` channels everything.
+/// 1. Muted (level `none`, or muted until a later time) never notifies. Urgent messages don't
+///    override a mute.
+/// 2. Do-not-disturb (manual, or the schedule unless the sender is allowed) suppresses all pushes
+///    (mentions are collected and shown afterwards).
+/// 3. No push while a device of the user is active: they see the message live (unless the user
+///    chose to be pushed always).
+/// 4. Mentions, direct messages and replies in followed threads push; otherwise only `all` channels do.
 pub fn decide(state: RecipientState) -> Result<PushKind, Skip> {
   if state.level_is_none {
     return Err(Skip::Muted);
@@ -58,13 +69,13 @@ pub fn decide(state: RecipientState) -> Result<PushKind, Skip> {
   if state.is_dnd {
     return Err(Skip::DoNotDisturb);
   }
-  if state.devices == DeviceAggregate::Active {
+  if state.devices == DeviceAggregate::Active && !state.always_pushes {
     return Err(Skip::Active);
   }
   if state.is_mentioned || state.is_direct {
     return Ok(PushKind::Mention);
   }
-  if state.level_is_all {
+  if state.level_is_all || state.is_followed_thread {
     Ok(PushKind::Message)
   } else {
     Err(Skip::NotMentioned)
@@ -85,44 +96,113 @@ async fn route(
 ) -> Result<(), teamcraft_db::DbError> {
   let recipients = state
     .database
-    .list_push_recipients(event.conversation, event.sender)
+    .list_push_recipients(event.conversation, event.sender, event.maybe_thread)
     .await?;
   for recipient in recipients {
-    let verdict = decide(RecipientState {
-      level_is_all: recipient.notification_level == NotificationLevel::All,
-      level_is_none: recipient.notification_level == NotificationLevel::None,
-      is_mentioned: event.mentioned.contains(&recipient.user),
-      is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
-      is_dnd: is_dnd(&recipient, now),
-      devices: state.hub.device_aggregate(recipient.user),
-    });
-    let kind = match verdict {
-      Ok(kind) => kind,
-      Err(skip) => {
-        debug!(user_id = %recipient.user, ?skip, "no push");
-        continue;
-      },
-    };
-    for device in &recipient.devices {
-      // A device with a live connection already got the event.
-      if state.hub.is_device_connected(recipient.user, device.device) {
-        continue;
-      }
-      let wake_up = PushWakeUp {
-        kind: kind.clone(),
-        conversation_id: event.conversation,
-        maybe_message_id: Some(event.message),
-        maybe_sender_id: Some(event.sender),
-        is_urgent: event.is_urgent,
-      };
-      spawn_delivery(state.clone(), recipient.user, device.clone(), wake_up);
-    }
+    push_to_recipient(state, event, &recipient, now);
   }
   Ok(())
 }
 
-fn is_dnd(recipient: &PushRecipientRow, now: OffsetDateTime) -> bool {
-  recipient.presence_pref == "dnd" && recipient.maybe_dnd_until.is_none_or(|until| until > now)
+/// Pushes an urgent direct message again to one recipient who has not acknowledged it (the
+/// scheduler of `services::urgent`). The routing rules apply as for the first push.
+pub async fn notify_reminder(
+  state: &AppState,
+  reminder: DueReminder,
+  now: OffsetDateTime,
+) -> Result<(), teamcraft_db::DbError> {
+  let Some(message) = state
+    .database
+    .get_message(reminder.conversation, reminder.message)
+    .await?
+  else {
+    return Ok(());
+  };
+  let event = NewMessageEvent {
+    conversation: reminder.conversation,
+    kind: ConversationKind::Dm,
+    message: message.id,
+    sender: message.sender_user_id,
+    mentioned: vec![reminder.user],
+    maybe_thread: message.maybe_thread_id,
+    is_urgent: true,
+  };
+  let recipients = state
+    .database
+    .list_push_recipients(
+      reminder.conversation,
+      message.sender_user_id,
+      message.maybe_thread_id,
+    )
+    .await?;
+  for recipient in recipients
+    .iter()
+    .filter(|recipient| recipient.user == reminder.user)
+  {
+    push_to_recipient(state, &event, recipient, now);
+  }
+  Ok(())
+}
+
+fn push_to_recipient(
+  state: &AppState,
+  event: &NewMessageEvent,
+  recipient: &PushRecipientRow,
+  now: OffsetDateTime,
+) {
+  let unix_seconds = now.unix_timestamp();
+  let verdict = decide(RecipientState {
+    level_is_all: recipient.notification_level == NotificationLevel::All,
+    level_is_none: recipient.notification_level == NotificationLevel::None
+      || notifications::is_muted(recipient.maybe_muted_until, now),
+    is_mentioned: event.mentioned.contains(&recipient.user),
+    is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
+    is_dnd: is_dnd(recipient, now, unix_seconds, event.sender),
+    is_followed_thread: recipient.is_following_thread,
+    always_pushes: PushMode::from(recipient.push_mode.clone()) == PushMode::Always,
+    devices: state.hub.device_aggregate(recipient.user),
+  });
+  let kind = match verdict {
+    Ok(kind) => kind,
+    Err(skip) => {
+      debug!(user_id = %recipient.user, ?skip, "no push");
+      return;
+    },
+  };
+  for device in &recipient.devices {
+    // A device with a live connection already got the event.
+    if state.hub.is_device_connected(recipient.user, device.device) {
+      continue;
+    }
+    let wake_up = PushWakeUp {
+      kind: kind.clone(),
+      conversation_id: event.conversation,
+      maybe_message_id: Some(event.message),
+      maybe_sender_id: Some(event.sender),
+      is_urgent: event.is_urgent,
+    };
+    spawn_delivery(state.clone(), recipient.user, device.clone(), wake_up);
+  }
+}
+
+fn is_dnd(recipient: &PushRecipientRow, now: OffsetDateTime, unix_seconds: i64, sender: UserId) -> bool {
+  let is_manual =
+    recipient.presence_pref == "dnd" && recipient.maybe_dnd_until.is_none_or(|until| until > now);
+  is_manual || is_scheduled_dnd(recipient, unix_seconds, sender)
+}
+
+fn is_scheduled_dnd(recipient: &PushRecipientRow, unix_seconds: i64, sender: UserId) -> bool {
+  let Some(raw) = &recipient.maybe_dnd_schedule else {
+    return false;
+  };
+  match serde_json::from_str::<DndSchedule>(raw) {
+    Ok(schedule) => schedule.silences(unix_seconds, sender),
+    Err(error) => {
+      // Validated on write, so this means a stored value from an incompatible version: notify.
+      warn!(%error, user_id = %recipient.user, "ignoring an unreadable DND schedule");
+      false
+    },
+  }
 }
 
 fn spawn_delivery(state: AppState, user: UserId, device: PushDeviceRow, wake_up: PushWakeUp) {
@@ -172,6 +252,8 @@ mod tests {
       is_mentioned: false,
       is_direct: false,
       is_dnd: false,
+      is_followed_thread: false,
+      always_pushes: false,
       devices: DeviceAggregate::NoDevice,
     }
   }
@@ -212,6 +294,38 @@ mod tests {
     assert_eq!(
       decide(RecipientState {
         is_direct: true,
+        ..base()
+      }),
+      Ok(PushKind::Mention)
+    );
+  }
+
+  #[test]
+  fn replies_in_followed_threads_push_even_in_mention_only_channels() {
+    assert_eq!(
+      decide(RecipientState {
+        is_followed_thread: true,
+        ..base()
+      }),
+      Ok(PushKind::Message)
+    );
+    assert_eq!(
+      decide(RecipientState {
+        is_followed_thread: true,
+        level_is_none: true,
+        ..base()
+      }),
+      Err(Skip::Muted)
+    );
+  }
+
+  #[test]
+  fn users_who_chose_always_are_pushed_while_a_device_is_active() {
+    assert_eq!(
+      decide(RecipientState {
+        is_mentioned: true,
+        always_pushes: true,
+        devices: DeviceAggregate::Active,
         ..base()
       }),
       Ok(PushKind::Mention)
@@ -264,23 +378,69 @@ mod tests {
     );
   }
 
-  #[test]
-  fn timed_do_not_disturb_ends() {
-    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
-    let recipient = |until: Option<i64>| PushRecipientRow {
-      user: UserId::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap()),
-      notification_level: NotificationLevel::All,
-      presence_pref: "dnd".into(),
-      maybe_dnd_until: until.map(|s| now + time::Duration::seconds(s)),
-      devices: Vec::new(),
-    };
-    assert!(is_dnd(&recipient(None), now));
-    assert!(is_dnd(&recipient(Some(60)), now));
-    assert!(!is_dnd(&recipient(Some(-60)), now));
-    let auto = PushRecipientRow {
-      presence_pref: "auto".into(),
-      ..recipient(None)
-    };
-    assert!(!is_dnd(&auto, now));
+  mod do_not_disturb {
+    use teamcraft_proto::{DndWindow, Snowflake, Weekday};
+
+    use super::*;
+
+    // 2026-01-05 (Monday) 23:00 UTC.
+    const MONDAY_NIGHT: i64 = 1_767_571_200 + 23 * 3600;
+
+    #[test]
+    fn timed_do_not_disturb_ends() {
+      let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+      let at = |until: Option<i64>| PushRecipientRow {
+        maybe_dnd_until: until.map(|s| now + time::Duration::seconds(s)),
+        ..recipient("dnd", None)
+      };
+      let sender = user(2);
+      assert!(is_dnd(&at(None), now, 0, sender));
+      assert!(is_dnd(&at(Some(60)), now, 0, sender));
+      assert!(!is_dnd(&at(Some(-60)), now, 0, sender));
+      assert!(!is_dnd(&recipient("auto", None), now, 0, sender));
+    }
+
+    #[test]
+    fn the_schedule_silences_everybody_but_allowed_senders() {
+      let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
+      let schedule = DndSchedule {
+        utc_offset_minutes: 0,
+        windows: vec![DndWindow {
+          weekdays: vec![Weekday::Monday],
+          start_minute: 22 * 60,
+          end_minute: 7 * 60,
+        }],
+        allow_user_ids: vec![user(3)],
+      };
+      let scheduled = recipient("auto", Some(serde_json::to_string(&schedule).unwrap()));
+      assert!(is_dnd(&scheduled, now, MONDAY_NIGHT, user(2)));
+      assert!(!is_dnd(&scheduled, now, MONDAY_NIGHT, user(3)));
+      assert!(!is_dnd(&scheduled, now, MONDAY_NIGHT - 5 * 3600, user(2)));
+    }
+
+    #[test]
+    fn an_unreadable_schedule_does_not_silence() {
+      let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
+      let broken = recipient("auto", Some("{not json".into()));
+      assert!(!is_dnd(&broken, now, MONDAY_NIGHT, user(2)));
+    }
+
+    fn user(raw: i64) -> UserId {
+      UserId::from_snowflake(Snowflake::new(raw).unwrap())
+    }
+
+    fn recipient(presence_pref: &str, maybe_dnd_schedule: Option<String>) -> PushRecipientRow {
+      PushRecipientRow {
+        user: user(1),
+        notification_level: NotificationLevel::All,
+        presence_pref: presence_pref.into(),
+        maybe_dnd_until: None,
+        maybe_muted_until: None,
+        push_mode: "away_only".into(),
+        maybe_dnd_schedule,
+        is_following_thread: false,
+        devices: Vec::new(),
+      }
+    }
   }
 }

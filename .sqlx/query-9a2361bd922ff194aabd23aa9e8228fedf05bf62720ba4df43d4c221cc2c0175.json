@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT tf.conversation_id, tf.thread_id, tf.reason,\n                COUNT(m.id) AS \"reply_count!\",\n                MAX(m.id) AS \"last_reply!\",\n                COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0)\n                                      AND m.sender_user_id <> tf.user_id) AS \"unread!\",\n                COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0)\n                                      AND m.sender_user_id <> tf.user_id\n                                      AND tf.user_id = ANY(m.mentioned_user_ids)) AS \"mentions!\"\n         FROM threads_followed tf\n         JOIN memberships ms ON ms.conversation_id = tf.conversation_id AND ms.user_id = tf.user_id\n         JOIN messages m ON m.conversation_id = tf.conversation_id AND m.thread_id = tf.thread_id\n         WHERE tf.user_id = $1 AND tf.state = 'following'\n         GROUP BY tf.conversation_id, tf.thread_id, tf.reason\n         HAVING ($2::bigint IS NULL OR MAX(m.id) < $2)\n            AND (NOT $3 OR COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0)\n                                                 AND m.sender_user_id <> tf.user_id) > 0)\n         ORDER BY MAX(m.id) DESC\n         LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads_followed",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads_followed",
+            "name": "thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads_followed",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "reply_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_reply!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "unread!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "mentions!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bool",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "9a2361bd922ff194aabd23aa9e8228fedf05bf62720ba4df43d4c221cc2c0175"
+}

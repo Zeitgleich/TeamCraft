@@ -1049,6 +1049,7 @@ impl Conversation {
       notification_level: NotificationLevel::All,
       is_favorite: self.favorites.get(&me).copied().unwrap_or(false),
       maybe_last_read_message_id: self.read_positions.get(&me).copied(),
+      maybe_muted_until: None,
     });
     response
   }

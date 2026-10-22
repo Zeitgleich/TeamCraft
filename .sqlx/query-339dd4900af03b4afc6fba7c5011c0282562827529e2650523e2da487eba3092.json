@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE threads_followed\n         SET last_read_message_id = GREATEST(COALESCE(last_read_message_id, 0), $4), updated_at = now()\n         WHERE user_id = $1 AND conversation_id = $2 AND thread_id = $3 AND state = 'following'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "339dd4900af03b4afc6fba7c5011c0282562827529e2650523e2da487eba3092"
+}

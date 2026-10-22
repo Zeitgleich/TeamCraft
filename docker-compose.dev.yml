@@ -1,4 +1,5 @@
-# Local development stack: Postgres, Keycloak (OIDC) and Garage (S3).
+# Local development stack: Postgres, Keycloak (OIDC), Garage (S3), Mailpit (mail catcher) and CalCraft
+# (CalDAV). Mailpit shows every invitation e-mail at http://127.0.0.1:8025 instead of sending it.
 # Start:  docker compose -f docker-compose.dev.yml up -d && ./dev/init-garage.sh
 # Every credential below is dev-only and must never be used outside a developer machine.
 # Ports are bound to loopback only, on IPv4 (127.0.0.1) and IPv6 ([::1]).
@@ -57,7 +58,32 @@ services:
       - garage-meta:/var/lib/garage/meta
       - garage-data:/var/lib/garage/data
 
+  mailpit:
+    image: docker.io/axllent/mailpit:v1.31.6
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "[::1]:1025:1025" # SMTP, no authentication
+      - "127.0.0.1:8025:8025"
+      - "[::1]:8025:8025" # web UI and API
+
+  # CalDAV server for meetings. The image is built from a pinned CalCraft commit (no public image);
+  # the first build compiles the web UI and takes a while. Create the account the server uses with
+  # ./dev/init-calcraft.sh.
+  calcraft:
+    build:
+      context: https://github.com/Zeitgleich/CalCraft.git#b771c227848f608d1e755bff38e39a1b37fd57f6
+    environment:
+      CALCRAFT_SERVER__BIND: "0.0.0.0:5232"
+      CALCRAFT_STORAGE__DATABASE: /data/calcraft.db
+      CALCRAFT_SECURITY__SECURE_COOKIES: "false"
+    ports:
+      - "127.0.0.1:5232:5232"
+      - "[::1]:5232:5232"
+    volumes:
+      - calcraft-data:/data
+
 volumes:
   postgres-data:
+  calcraft-data:
   garage-meta:
   garage-data:

@@ -97,6 +97,13 @@ impl ApiError {
     }
   }
 
+  pub fn meeting_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::MeetingNotFound,
+      what: "meeting",
+    }
+  }
+
   pub fn key_bag_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::KeyBagNotFound,

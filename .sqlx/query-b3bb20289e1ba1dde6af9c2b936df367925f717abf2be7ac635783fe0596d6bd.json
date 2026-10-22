@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.auto_follow_mentioned_threads,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.send_read_receipts, s.dnd_schedule\n         FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         WHERE u.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "auto_follow_mentioned_threads",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "auto_follow_mentioned_threads"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "push_mode!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "send_read_receipts",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "send_read_receipts"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "dnd_schedule",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "dnd_schedule"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "b3bb20289e1ba1dde6af9c2b936df367925f717abf2be7ac635783fe0596d6bd"
+}

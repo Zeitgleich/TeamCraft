@@ -36,12 +36,17 @@ pub struct Config {
   pub retention: RetentionJobConfig,
   #[serde(default)]
   pub push: PushConfig,
+  #[serde(default)]
+  pub notifications: NotificationsConfig,
   /// Blob storage for attachments; without it the attachment endpoints answer 503.
   #[serde(default)]
   pub storage: Option<StorageConfig>,
   /// Calls through the SFU; without it the join-token endpoint answers 503.
   #[serde(default)]
   pub calls: Option<CallsConfig>,
+  /// Meetings (PLAN.md §9); without it the meeting endpoints answer 503.
+  #[serde(default)]
+  pub meetings: Option<MeetingsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +258,118 @@ pub struct RetentionJobConfig {
   pub partitions_ahead_months: u32,
 }
 
+/// Meetings (PLAN.md §9, ARCHITECTURE.md §6.4).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeetingsConfig {
+  /// Public base URL of this server, without trailing slash. Join links are `<base>/meeting/<id>`
+  /// and the host part names the iCalendar UIDs.
+  pub public_base_url: String,
+  /// Address used as organizer of iCalendar events when the organizer has no e-mail address.
+  pub organizer_fallback_address: String,
+  /// The calendar server events are written to; without it meetings are not stored in a calendar.
+  #[serde(default)]
+  pub caldav: Option<CalDavConfig>,
+  /// Most invitees of one meeting.
+  #[serde(default = "default_max_meeting_invitees")]
+  pub max_invitees: usize,
+  /// Key that signs the personal join links and guest sessions (at least 32 bytes of randomness).
+  /// Prefer `TEAMCRAFT_MEETINGS__GUEST_TOKEN_SECRET`.
+  pub guest_token_secret: SecretString,
+  /// Guests may use their link until this long after the meeting's end.
+  #[serde(default = "default_guest_grace_secs")]
+  pub guest_grace_secs: u64,
+  /// Shared secret of the inbox handler that forwards received RSVP e-mail (iMIP REPLY) to
+  /// `POST /api/internal/v1/meetings/replies` as `Authorization: Bearer <token>`. Without it that
+  /// endpoint answers 503. Prefer `TEAMCRAFT_MEETINGS__INBOX_TOKEN`.
+  #[serde(rename = "inbox_token", default)]
+  pub maybe_inbox_token: Option<SecretString>,
+  /// Outgoing mail server for invitations (iMIP); without it no e-mail is sent.
+  #[serde(default)]
+  pub smtp: Option<SmtpConfig>,
+  /// Subjects and texts of the invitation e-mails.
+  #[serde(default)]
+  pub mail_texts: MailTexts,
+}
+
+/// How the connection to the mail server is secured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmtpSecurity {
+  /// Plain connection upgraded with STARTTLS (port 587); the upgrade is required.
+  #[default]
+  StartTls,
+  /// TLS from the first byte (port 465).
+  Tls,
+  /// No encryption; only for a local mail catcher in development.
+  None,
+}
+
+/// SMTP server for invitation e-mails.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpConfig {
+  pub host: String,
+  #[serde(default = "default_smtp_port")]
+  pub port: u16,
+  #[serde(default)]
+  pub security: SmtpSecurity,
+  #[serde(default)]
+  pub username: Option<String>,
+  /// Prefer `TEAMCRAFT_MEETINGS__SMTP__PASSWORD`.
+  #[serde(default)]
+  pub password: Option<SecretString>,
+  /// Sender address of invitations.
+  pub from_address: String,
+  #[serde(default)]
+  pub from_name: Option<String>,
+  #[serde(default = "default_smtp_timeout_secs")]
+  pub timeout_secs: u64,
+}
+
+/// Texts of the invitation e-mails. Placeholders: `{title}`, `{organizer}`, `{start}`, `{end}`
+/// (UTC), `{description}` and `{join_url}`. Admins translate them here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MailTexts {
+  pub invitation_subject: String,
+  pub invitation_body: String,
+  pub update_subject: String,
+  pub update_body: String,
+  pub cancellation_subject: String,
+  pub cancellation_body: String,
+}
+
+/// A calendar collection on a CalDAV server and the account that writes to it. Events of all
+/// meetings go into this one calendar (per-organizer calendars need per-user credentials, which the
+/// server does not hold).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalDavConfig {
+  /// URL of the calendar collection, e.g. `https://cal.example.com/dav/calendars/teamcraft/meetings/`.
+  pub calendar_url: String,
+  pub username: String,
+  /// Password or app password of the account. Prefer `TEAMCRAFT_MEETINGS__CALDAV__PASSWORD`.
+  pub password: SecretString,
+  #[serde(default = "default_caldav_timeout_secs")]
+  pub request_timeout_secs: u64,
+}
+
+/// Notification defaults and the persistent-notification scheduler for urgent direct messages
+/// (PLAN.md §5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NotificationsConfig {
+  /// Whether users who never chose send read receipts in DMs and group DMs.
+  pub read_receipts_default: bool,
+  /// Time between repeated pushes for an urgent DM nobody acknowledged.
+  pub urgent_repeat_interval_secs: u64,
+  /// How often an urgent DM is pushed in total, the first push included. `1` disables repeats.
+  pub urgent_max_pushes: u32,
+  /// How often the scheduler looks for due repeats.
+  pub urgent_scheduler_interval_secs: u64,
+}
+
 /// Calls (ARCHITECTURE.md §6): the server issues join tokens the SFU verifies with its public key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -436,6 +553,30 @@ impl Default for PushConfig {
   }
 }
 
+impl Default for MailTexts {
+  fn default() -> Self {
+    Self {
+      invitation_subject: "Invitation: {title}".into(),
+      invitation_body: "{organizer} invites you to \"{title}\".\n\nStart: {start}\nEnd: {end}\n\n{description}\nJoin: {join_url}\n".into(),
+      update_subject: "Updated: {title}".into(),
+      update_body: "{organizer} changed \"{title}\".\n\nStart: {start}\nEnd: {end}\n\n{description}\nJoin: {join_url}\n".into(),
+      cancellation_subject: "Cancelled: {title}".into(),
+      cancellation_body: "{organizer} cancelled \"{title}\" ({start}).\n".into(),
+    }
+  }
+}
+
+impl Default for NotificationsConfig {
+  fn default() -> Self {
+    Self {
+      read_receipts_default: true,
+      urgent_repeat_interval_secs: 120,
+      urgent_max_pushes: 5,
+      urgent_scheduler_interval_secs: 15,
+    }
+  }
+}
+
 impl Default for RetentionJobConfig {
   fn default() -> Self {
     Self {
@@ -475,6 +616,26 @@ fn env_provider() -> Env {
 
 fn default_join_token_ttl_secs() -> u64 {
   60
+}
+
+fn default_guest_grace_secs() -> u64 {
+  2 * 3600
+}
+
+fn default_smtp_port() -> u16 {
+  587
+}
+
+fn default_smtp_timeout_secs() -> u64 {
+  20
+}
+
+fn default_max_meeting_invitees() -> usize {
+  200
+}
+
+fn default_caldav_timeout_secs() -> u64 {
+  10
 }
 
 fn default_ring_timeout_secs() -> u64 {

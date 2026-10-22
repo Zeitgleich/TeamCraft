@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meeting_lobby SET state = $3, decided_at = now(), decided_by = $4\n         WHERE meeting_id = $1 AND user_id = $2 AND state = 'waiting'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "97698162aa48d3b53355111acfeafda1b82485f90489dfb636822ab8dc0bf173"
+}

@@ -5,6 +5,8 @@ use teamcraft_proto::{
   HistoryPolicy, MessageId, NotificationLevel, Permission, SpaceId, UserId,
 };
 
+use time::OffsetDateTime;
+
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, from_db_opt, to_db, to_db_all};
@@ -31,6 +33,7 @@ pub struct Membership {
   pub notification_level: NotificationLevel,
   pub is_favorite: bool,
   pub maybe_last_read_message_id: Option<MessageId>,
+  pub maybe_muted_until: Option<OffsetDateTime>,
   /// Smallest message ID created after the member joined; history cut-off for `from_join`.
   pub joined_floor: MessageId,
 }
@@ -161,7 +164,7 @@ impl Database {
       r#"SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,
                 c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.member_denied, c.guest_denied,
                 m.role AS "role?", m.notification_level AS "notification_level?",
-                m.is_favorite AS "is_favorite?", m.last_read_message_id,
+                m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 tc_snowflake_floor(m.joined_at) AS "joined_floor?"
          FROM conversations c
          LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1
@@ -194,6 +197,7 @@ impl Database {
             notification_level: NotificationLevel::from(level),
             is_favorite,
             maybe_last_read_message_id: from_db_opt(row.last_read_message_id)?,
+            maybe_muted_until: row.muted_until,
             joined_floor: from_db(floor)?,
           }),
           _ => None,
@@ -459,7 +463,10 @@ impl Database {
   }
 }
 
-async fn insert_conversation(tx: &mut sqlx::PgConnection, new: &NewConversation<'_>) -> Result<(), DbError> {
+pub(crate) async fn insert_conversation(
+  tx: &mut sqlx::PgConnection,
+  new: &NewConversation<'_>,
+) -> Result<(), DbError> {
   sqlx::query!(
     r#"INSERT INTO conversations
          (id, space_id, kind, name, topic, description, visibility, history_policy, category_id, participants_key)
@@ -480,7 +487,7 @@ async fn insert_conversation(tx: &mut sqlx::PgConnection, new: &NewConversation<
   Ok(())
 }
 
-async fn insert_membership(
+pub(crate) async fn insert_membership(
   tx: &mut sqlx::PgConnection,
   conversation: ConversationId,
   user: UserId,

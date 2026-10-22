@@ -1,0 +1,10 @@
+# Build context for containers/*.Containerfile: the whole workspace without build output and tooling.
+/target
+/.git
+/.claude
+/.github
+/dev
+/docs
+**/node_modules
+**/__pycache__
+/teamcraft.toml

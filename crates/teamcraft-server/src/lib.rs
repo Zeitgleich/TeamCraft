@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod handlers;
 pub mod listener;
 pub mod logging;
+pub mod meetings;
 pub mod openapi;
 pub mod push;
 pub mod rendezvous;

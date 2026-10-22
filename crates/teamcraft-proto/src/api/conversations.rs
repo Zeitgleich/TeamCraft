@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 use crate::wire_enum::wire_enum;
 use crate::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, MessageId, SpaceId, UserId, UserSummary,
+  HistoryPolicy, MessageId, SpaceId, UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -28,6 +28,9 @@ pub struct MyMembership {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_last_read_message_id: Option<MessageId>,
+  /// The conversation is muted until this time.
+  #[serde(rename = "muted_until", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_muted_until: Option<UnixMillis>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

@@ -3,30 +3,37 @@ use axum::routing::{delete, get, patch, post, put};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-  add_conversation_member_handler, add_space_member_handler, admin_deactivate_user_handler,
-  admin_list_audit_handler, admin_list_conversation_members_handler, admin_list_conversations_handler,
-  admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
-  admin_list_users_handler, admin_reactivate_user_handler, admin_revoke_device_handler,
-  append_policy_handler, append_roster_handler, backchannel_logout_handler, claim_key_packages_handler,
+  acknowledge_message_handler, add_conversation_member_handler, add_space_member_handler,
+  admin_deactivate_user_handler, admin_list_audit_handler, admin_list_conversation_members_handler,
+  admin_list_conversations_handler, admin_list_space_members_handler, admin_list_spaces_handler,
+  admin_list_user_devices_handler, admin_list_users_handler, admin_reactivate_user_handler,
+  admin_revoke_device_handler, admit_guest_handler, append_policy_handler, append_roster_handler,
+  backchannel_logout_handler, cancel_meeting_handler, claim_key_packages_handler,
   clear_custom_status_handler, complete_attachment_handler, create_attachment_handler,
   create_call_join_token_handler, create_category_handler, create_channel_handler, create_dm_handler,
-  create_group_dm_handler, create_invite_handler, create_space_handler, delete_category_handler,
-  delete_invite_handler, download_attachment_handler, gateway_handler, get_call_handler,
-  get_conversation_handler, get_conversation_retention_handler, get_identity_key_handler,
-  get_key_bag_handler, get_me_handler, get_policy_handler, get_security_log_handler, get_space_handler,
-  get_space_retention_handler, get_user_handler, healthz_handler, join_conversation_handler,
-  join_space_handler, key_package_status_handler, list_categories_handler, list_conversation_members_handler,
-  list_conversations_handler, list_devices_handler, list_invites_handler, list_messages_handler,
-  list_mls_messages_handler, list_policy_log_handler, list_presence_handler, list_roster_handler,
-  list_space_members_handler, list_spaces_handler, list_user_devices_handler, list_welcomes_handler,
-  pin_message_handler, post_mls_commit_handler, post_mls_message_handler, put_identity_key_handler,
-  put_key_bag_handler, readyz_handler, register_device_handler, register_push_handler,
-  remove_conversation_member_handler, remove_space_member_handler, rendezvous_handler,
+  create_group_dm_handler, create_guest_link_handler, create_instant_meeting_handler, create_invite_handler,
+  create_meeting_handler, create_space_handler, delete_category_handler, delete_invite_handler,
+  deny_guest_handler, download_attachment_handler, follow_thread_handler, gateway_handler, get_call_handler,
+  get_conversation_handler, get_conversation_notification_settings_handler,
+  get_conversation_retention_handler, get_identity_key_handler, get_key_bag_handler, get_me_handler,
+  get_meeting_handler, get_my_lobby_state_handler, get_notification_settings_handler, get_policy_handler,
+  get_read_receipts_handler, get_security_log_handler, get_space_handler, get_space_retention_handler,
+  get_unread_handler, get_user_handler, healthz_handler, join_conversation_handler, join_meeting_handler,
+  join_space_handler, key_package_status_handler, list_acknowledgements_handler, list_categories_handler,
+  list_conversation_members_handler, list_conversations_handler, list_devices_handler, list_invites_handler,
+  list_lobby_handler, list_meetings_handler, list_messages_handler, list_mls_messages_handler,
+  list_policy_log_handler, list_presence_handler, list_roster_handler, list_space_members_handler,
+  list_spaces_handler, list_threads_handler, list_user_devices_handler, list_welcomes_handler,
+  pin_message_handler, post_mls_commit_handler, post_mls_message_handler,
+  put_conversation_notification_settings_handler, put_identity_key_handler, put_key_bag_handler,
+  put_notification_settings_handler, readyz_handler, receive_meeting_reply_handler, register_device_handler,
+  register_push_handler, remove_conversation_member_handler, remove_space_member_handler, rendezvous_handler,
   report_participant_joined_handler, report_participant_left_handler, revoke_device_handler,
   search_users_handler, send_message_handler, set_conversation_retention_handler, set_custom_status_handler,
-  set_device_certificate_handler, set_presence_handler, set_read_position_handler,
-  set_space_retention_handler, unpin_message_handler, unregister_push_handler, update_category_handler,
-  update_conversation_handler, update_conversation_member_handler, update_space_handler,
+  set_device_certificate_handler, set_meeting_rsvp_handler, set_presence_handler, set_read_position_handler,
+  set_space_retention_handler, set_thread_read_handler, unfollow_thread_handler, unpin_message_handler,
+  unregister_push_handler, update_category_handler, update_conversation_handler,
+  update_conversation_member_handler, update_meeting_handler, update_space_handler,
   update_space_member_handler, upload_key_packages_handler,
 };
 use crate::openapi::openapi_json_handler;
@@ -39,6 +46,7 @@ pub fn router(state: AppState) -> Router {
     .route("/rendezvous", get(rendezvous_handler))
     .route("/auth/backchannel-logout", post(backchannel_logout_handler))
     .route("/openapi.json", get(openapi_json_handler))
+    .route("/meetings/join", post(join_meeting_handler))
     .route(
       "/devices",
       post(register_device_handler).get(list_devices_handler),
@@ -206,6 +214,62 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/me/status",
       put(set_custom_status_handler).delete(clear_custom_status_handler),
+    )
+    .route("/threads", get(list_threads_handler))
+    .route("/unread", get(get_unread_handler))
+    .route(
+      "/conversations/{conversation_id}/threads/{thread_id}/follow",
+      put(follow_thread_handler).delete(unfollow_thread_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/threads/{thread_id}/read",
+      put(set_thread_read_handler),
+    )
+    .route(
+      "/me/notification-settings",
+      get(get_notification_settings_handler).put(put_notification_settings_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/notification-settings",
+      get(get_conversation_notification_settings_handler).put(put_conversation_notification_settings_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/read-receipts",
+      get(get_read_receipts_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/messages/{message_id}/acknowledgement",
+      put(acknowledge_message_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/messages/{message_id}/acknowledgements",
+      get(list_acknowledgements_handler),
+    )
+    .route(
+      "/meetings",
+      post(create_meeting_handler).get(list_meetings_handler),
+    )
+    .route("/meetings/instant", post(create_instant_meeting_handler))
+    .route(
+      "/meetings/{meeting_id}",
+      get(get_meeting_handler)
+        .patch(update_meeting_handler)
+        .delete(cancel_meeting_handler),
+    )
+    .route("/meetings/{meeting_id}/rsvp", put(set_meeting_rsvp_handler))
+    .route(
+      "/meetings/{meeting_id}/guest-links",
+      post(create_guest_link_handler),
+    )
+    .route("/meetings/{meeting_id}/lobby", get(list_lobby_handler))
+    .route("/meetings/{meeting_id}/lobby/me", get(get_my_lobby_state_handler))
+    .route(
+      "/meetings/{meeting_id}/lobby/{user_id}/admit",
+      post(admit_guest_handler),
+    )
+    .route(
+      "/meetings/{meeting_id}/lobby/{user_id}/deny",
+      post(deny_guest_handler),
     );
 
   let internal = Router::new()
@@ -213,7 +277,8 @@ pub fn router(state: AppState) -> Router {
       "/calls/participants/joined",
       post(report_participant_joined_handler),
     )
-    .route("/calls/participants/left", post(report_participant_left_handler));
+    .route("/calls/participants/left", post(report_participant_left_handler))
+    .route("/meetings/replies", post(receive_meeting_reply_handler));
 
   Router::new()
     .route("/healthz", get(healthz_handler))

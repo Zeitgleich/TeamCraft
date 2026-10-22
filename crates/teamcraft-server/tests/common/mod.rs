@@ -117,6 +117,26 @@ pub async fn send(app: &TestApp, user: &TestUser, conversation: &str, device: &s
   reply.id()
 }
 
+/// Sends a message with optional thread and mentions and returns its server ID.
+pub async fn send_in(
+  app: &TestApp,
+  user: &TestUser,
+  conversation: &str,
+  device: &str,
+  n: u8,
+  maybe_thread: Option<&str>,
+  mentioned: &[&str],
+) -> String {
+  let mut body = message_body(n, device);
+  body["thread_id"] = json!(maybe_thread);
+  body["mentioned_user_ids"] = json!(mentioned);
+  let reply = app
+    .post(user, &format!("/conversations/{conversation}/messages"), body)
+    .await;
+  assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+  reply.id()
+}
+
 /// alice owns a space; carol and dave are members of its private channel (returned).
 pub async fn channel_with(app: &TestApp, members: &[&TestUser]) -> String {
   let alice = owner();
@@ -147,10 +167,15 @@ pub mod ws {
 
   /// Connects and identifies; returns once the session is ready.
   pub async fn connect(app: &TestApp, user: &TestUser, device: &str) -> Socket {
+    connect_with_token(app, app.token(user), device).await
+  }
+
+  /// Like [`connect`] with a bearer token that is not an identity provider token (guest sessions).
+  pub async fn connect_with_token(app: &TestApp, token: String, device: &str) -> Socket {
     let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
     socket.next().await;
     let identify = GatewayClientMessage::Identify {
-      token: app.token(user),
+      token,
       device_id: serde_json::from_value(json!(device)).unwrap(),
       activity: DeviceActivity::Active,
     };

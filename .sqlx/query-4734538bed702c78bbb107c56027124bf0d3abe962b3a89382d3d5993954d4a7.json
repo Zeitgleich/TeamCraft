@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.user_id, m.notification_level, u.presence_pref, u.dnd_until,\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
+  "query": "SELECT m.user_id, m.notification_level, m.muted_until, u.presence_pref, u.dnd_until,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.dnd_schedule,\n                tf.user_id IS NOT NULL AS \"is_following_thread!\",\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         LEFT JOIN threads_followed tf ON tf.user_id = u.id AND tf.conversation_id = m.conversation_id\n                                      AND tf.thread_id = $3 AND tf.state = 'following'\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "muted_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "muted_until"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "presence_pref",
         "type_info": "Text",
         "origin": {
@@ -37,7 +48,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "dnd_until",
         "type_info": "Timestamptz",
         "origin": {
@@ -48,7 +59,30 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
+        "name": "push_mode!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "dnd_schedule",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "dnd_schedule"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "is_following_thread!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
         "name": "device_id",
         "type_info": "Int8",
         "origin": {
@@ -59,7 +93,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 9,
         "name": "push_provider!",
         "type_info": "Text",
         "origin": {
@@ -70,7 +104,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 10,
         "name": "push_token!",
         "type_info": "Text",
         "origin": {
@@ -81,7 +115,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 11,
         "name": "push_key!",
         "type_info": "Bytea",
         "origin": {
@@ -95,19 +129,24 @@
     "parameters": {
       "Left": [
         "Int8",
+        "Int8",
         "Int8"
       ]
     },
     "nullable": [
       false,
       false,
+      true,
       false,
       true,
+      null,
+      true,
+      null,
       false,
       true,
       true,
       true
     ]
   },
-  "hash": "77816d7954c03b076710d7a3641794b3c54f5d1279ab488df90c697e06d1df3c"
+  "hash": "4734538bed702c78bbb107c56027124bf0d3abe962b3a89382d3d5993954d4a7"
 }

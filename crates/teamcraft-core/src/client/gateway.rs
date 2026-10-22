@@ -176,6 +176,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::WorkspaceUpdate { .. }
       | GatewayEvent::DeviceRemove { .. }
       | GatewayEvent::DeviceAdd { .. }
+      // Thread follows and unread counts come from the server; the shell does not show them yet.
+      | GatewayEvent::ThreadUpdate { .. }
+      | GatewayEvent::ReadReceipt { .. }
+      | GatewayEvent::MessageAck { .. }
+      // Meetings are not shown by the shell yet.
+      | GatewayEvent::MeetingUpdate { .. }
+      | GatewayEvent::LobbyJoin { .. }
+      | GatewayEvent::LobbyDecision { .. }
       // Call roster and ringing: the UI shell does not show calls from the server roster yet.
       | GatewayEvent::CallStart { .. }
       | GatewayEvent::CallUpdate { .. }

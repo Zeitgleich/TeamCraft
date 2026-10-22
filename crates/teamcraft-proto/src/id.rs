@@ -210,6 +210,18 @@ define_id!(
   /// A call (one SFU room, one DAVE group).
   CallId
 );
+define_id!(
+  /// A scheduled or instant meeting.
+  MeetingId
+);
+define_id!(
+  /// A person invited to a meeting (user or external).
+  MeetingAttendeeId
+);
+define_id!(
+  /// A personal one-time join link of a meeting for somebody without an account.
+  MeetingInviteId
+);
 
 #[cfg(test)]
 mod tests {

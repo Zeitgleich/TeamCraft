@@ -341,6 +341,337 @@ mod routing {
   }
 }
 
+mod preferences {
+  use super::*;
+
+  /// A DND schedule that covers the whole week, around the clock.
+  fn always_dnd(allowed: &[String]) -> serde_json::Value {
+    let every_day = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    json!({
+      "utc_offset_minutes": 0,
+      "windows": [
+        {"weekdays": every_day, "start_minute": 0, "end_minute": 1439},
+        {"weekdays": every_day, "start_minute": 1439, "end_minute": 0},
+      ],
+      "allow_user_ids": allowed,
+    })
+  }
+
+  async fn put_settings(app: &TestApp, user: &TestUser, push_mode: &str, schedule: serde_json::Value) {
+    let reply = app
+      .put(
+        user,
+        "/me/notification-settings",
+        json!({
+          "auto_follow_mentioned_threads": true,
+          "push_mode": push_mode,
+          "send_read_receipts": true,
+          "dnd_schedule": schedule,
+        }),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+  }
+
+  async fn mention(app: &TestApp, s: &Scene, n: u8) {
+    let mut body = message_body(n, &s.alice_device);
+    body["mentioned_user_ids"] = json!([user_id(app, &s.carol).await]);
+    let reply = app
+      .post(&s.alice, &format!("/conversations/{}/messages", s.channel), body)
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+  }
+
+  #[tokio::test]
+  async fn muting_until_a_time_suppresses_pushes_until_it_passes() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let path = format!("/conversations/{}/notification-settings", s.channel);
+    let in_one_hour = unix_millis_from_now(3_600_000);
+    let an_hour_ago = unix_millis_from_now(-3_600_000);
+
+    app
+      .put(
+        &s.carol,
+        &path,
+        json!({"level": "all", "muted_until": in_one_hour}),
+      )
+      .await;
+    mention(&app, &s, 1).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "muted for an hour");
+
+    app
+      .put(
+        &s.carol,
+        &path,
+        json!({"level": "all", "muted_until": an_hour_ago}),
+      )
+      .await;
+    mention(&app, &s, 2).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1, "the mute passed");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_dnd_schedule_silences_everyone_except_allowed_senders() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let alice_id = user_id(&app, &s.alice).await;
+
+    put_settings(&app, &s.carol, "away_only", always_dnd(&[])).await;
+    mention(&app, &s, 1).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "scheduled do not disturb");
+
+    put_settings(&app, &s.carol, "away_only", always_dnd(&[alice_id])).await;
+    mention(&app, &s, 2).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1, "alice is allowed through");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn replies_in_followed_threads_push_in_mention_only_channels() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let root = send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    let carol_device = &s.carol_push_device;
+
+    send_in(&app, &s.carol, &s.channel, carol_device, 2, Some(&root), &[]).await;
+    let to_alice = recorder.wait_for(1).await;
+    assert_eq!(to_alice.len(), 1, "alice wrote the root, so she follows");
+    assert_eq!(to_alice[0].device, s.alice_device);
+    assert_eq!(to_alice[0].wake_up.kind, PushKind::Message);
+
+    // Carol follows her own reply; a top-level message of alice's still doesn't push.
+    send(&app, &s.alice, &s.channel, &s.alice_device, 3).await;
+    send_in(&app, &s.alice, &s.channel, &s.alice_device, 4, Some(&root), &[]).await;
+    let all = recorder.wait_for(2).await;
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!(all[1].device, *carol_device);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_always_push_mode_pushes_while_another_device_is_active() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let _socket = ws::connect(&app, &s.carol, &desktop).await;
+
+    mention(&app, &s, 1).await;
+    assert!(
+      recorder.wait_for(0).await.is_empty(),
+      "away_only: carol is active"
+    );
+
+    put_settings(&app, &s.carol, "always", serde_json::Value::Null).await;
+    mention(&app, &s, 2).await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(
+      pushes.iter().map(|p| p.device.clone()).collect::<Vec<_>>(),
+      vec![s.carol_push_device.clone()]
+    );
+    app.stop().await;
+  }
+
+  fn unix_millis_from_now(offset_millis: i64) -> i64 {
+    let now = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_millis();
+    i64::try_from(now).unwrap() + offset_millis
+  }
+}
+
+mod urgent {
+  use teamcraft_server::services::urgent::run_due;
+  use time::{Duration as TimeDuration, OffsetDateTime};
+
+  use super::*;
+
+  async fn start_urgent(recorder: &Recorder) -> Option<TestApp> {
+    TestApp::start_with_push(
+      |settings| {
+        settings.notifications.urgent_repeat_interval_secs = 60;
+        settings.notifications.urgent_max_pushes = 3;
+      },
+      recorder.dispatcher(),
+    )
+    .await
+  }
+
+  /// alice sends an urgent DM to carol and returns (dm, message).
+  async fn urgent_dm(app: &TestApp, s: &Scene, n: u8) -> (String, String) {
+    let carol_id = user_id(app, &s.carol).await;
+    let dm = app
+      .post(&s.alice, "/dms", json!({"user_id": carol_id}))
+      .await
+      .id();
+    let mut body = message_body(n, &s.alice_device);
+    body["is_urgent"] = json!(true);
+    let reply = app
+      .post(&s.alice, &format!("/conversations/{dm}/messages"), body)
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    (dm, reply.id())
+  }
+
+  fn later(seconds: i64) -> OffsetDateTime {
+    OffsetDateTime::now_utc() + TimeDuration::seconds(seconds)
+  }
+
+  #[tokio::test]
+  async fn unacknowledged_urgent_dms_are_pushed_again_up_to_the_limit() {
+    let recorder = Recorder::default();
+    let Some(app) = start_urgent(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    urgent_dm(&app, &s, 1).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1, "the first push is immediate");
+
+    assert_eq!(run_due(&app.state, later(30)).await.unwrap(), 0, "not due yet");
+    assert_eq!(run_due(&app.state, later(61)).await.unwrap(), 1);
+    assert_eq!(recorder.wait_for(2).await.len(), 2);
+    assert_eq!(run_due(&app.state, later(61 + 61)).await.unwrap(), 1);
+    assert_eq!(recorder.wait_for(3).await.len(), 3);
+    assert_eq!(
+      run_due(&app.state, later(600)).await.unwrap(),
+      0,
+      "three pushes in total"
+    );
+
+    let pushes = recorder.wait_for(3).await;
+    assert!(
+      pushes
+        .iter()
+        .all(|p| p.wake_up.is_urgent && p.wake_up.kind == PushKind::Mention)
+    );
+    assert!(pushes.iter().all(|p| p.device == s.carol_push_device));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn acknowledging_stops_the_repeats_and_tells_the_sender() {
+    let recorder = Recorder::default();
+    let Some(app) = start_urgent(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let (dm, message) = urgent_dm(&app, &s, 1).await;
+    recorder.wait_for(1).await;
+    let mut alice_socket = ws::connect(&app, &s.alice, &s.alice_device).await;
+    ws::events(&mut alice_socket, Duration::from_millis(300)).await;
+    let path = format!("/conversations/{dm}/messages/{message}/acknowledgement");
+
+    let ack = app.put(&s.carol, &path, json!({})).await;
+    assert_eq!(ack.status, StatusCode::NO_CONTENT, "{}", ack.body);
+    assert_eq!(
+      app.put(&s.carol, &path, json!({})).await.status,
+      StatusCode::NO_CONTENT,
+      "idempotent"
+    );
+
+    assert_eq!(run_due(&app.state, later(3600)).await.unwrap(), 0);
+    assert_eq!(
+      recorder.wait_for(1).await.len(),
+      1,
+      "no repeat after the acknowledgement"
+    );
+    let events = ws::events(&mut alice_socket, Duration::from_millis(400)).await;
+    let acks: Vec<_> = events
+      .iter()
+      .map(|event| serde_json::to_value(event).unwrap())
+      .filter(|json| json["type"] == "message_ack")
+      .collect();
+    assert_eq!(acks.len(), 1, "announced once: {acks:?}");
+    assert_eq!(acks[0]["message_id"], message.as_str());
+    assert_eq!(acks[0]["user_id"], user_id(&app, &s.carol).await.as_str());
+
+    let listed = app.get(&s.alice, &format!("{path}s")).await;
+    assert_eq!(listed.body["acknowledgements"].as_array().unwrap().len(), 1);
+    assert_eq!(
+      listed.body["acknowledgements"][0]["user_id"],
+      user_id(&app, &s.carol).await.as_str()
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_urgent_messages_of_others_in_my_conversations_can_be_acknowledged() {
+    let recorder = Recorder::default();
+    let Some(app) = start_urgent(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let (dm, message) = urgent_dm(&app, &s, 1).await;
+    let plain = send(&app, &s.alice, &dm, &s.alice_device, 2).await;
+    let eve = member("eve");
+
+    let path = |id: &str| format!("/conversations/{dm}/messages/{id}/acknowledgement");
+    assert_eq!(
+      app.put(&s.carol, &path(&plain), json!({})).await.status,
+      StatusCode::BAD_REQUEST,
+      "not urgent"
+    );
+    assert_eq!(
+      app.put(&s.alice, &path(&message), json!({})).await.status,
+      StatusCode::BAD_REQUEST,
+      "own message"
+    );
+    assert_eq!(
+      app.put(&eve, &path(&message), json!({})).await.status,
+      StatusCode::NOT_FOUND,
+      "stranger"
+    );
+    assert_eq!(
+      app.get(&eve, &format!("{}s", path(&message))).await.status,
+      StatusCode::NOT_FOUND
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn urgent_channel_messages_are_not_repeated_and_do_not_beat_do_not_disturb() {
+    let recorder = Recorder::default();
+    let Some(app) = start_urgent(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let carol_id = user_id(&app, &s.carol).await;
+    let mut body = message_body(1, &s.alice_device);
+    body["is_urgent"] = json!(true);
+    body["mentioned_user_ids"] = json!([carol_id]);
+    app
+      .post(&s.alice, &format!("/conversations/{}/messages", s.channel), body)
+      .await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1);
+    assert_eq!(
+      run_due(&app.state, later(3600)).await.unwrap(),
+      0,
+      "channels have no repeats"
+    );
+
+    // In a DM, a recipient on do-not-disturb gets neither the first push nor the repeats.
+    app.put(&s.carol, "/me/presence", json!({"manual": "dnd"})).await;
+    urgent_dm(&app, &s, 2).await;
+    assert_eq!(
+      run_due(&app.state, later(3600)).await.unwrap(),
+      1,
+      "the attempt is counted"
+    );
+    assert_eq!(
+      recorder.wait_for(1).await.len(),
+      1,
+      "no new push while do-not-disturb"
+    );
+    app.stop().await;
+  }
+}
+
 mod web_push {
   use super::*;
 
