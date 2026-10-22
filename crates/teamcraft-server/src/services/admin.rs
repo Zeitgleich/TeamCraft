@@ -554,6 +554,7 @@ pub async fn instance_status(
       state: state_of,
       success_count: health.success_count,
       failure_count: health.failure_count,
+      endpoint_failure_count: health.endpoint_failure_count,
       maybe_last_success_at: health.maybe_last_success_at,
       maybe_last_failure_at: health.maybe_last_failure_at,
       maybe_last_error: health.maybe_last_error,

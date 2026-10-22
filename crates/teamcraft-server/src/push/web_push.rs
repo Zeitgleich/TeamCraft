@@ -12,6 +12,10 @@ use super::crypto::{SubscriptionKeys, VapidKey, encrypt_web_push};
 use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
 use crate::auth::BoxFuture;
 
+/// Connecting to an endpoint a user chose may take this long at most; a working push service
+/// answers far sooner.
+const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A browser's `PushSubscription` as the client registers it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebPushSubscription {
@@ -180,6 +184,7 @@ pub(super) fn build_client(
   // resolver below.
   let builder = reqwest::Client::builder()
     .timeout(timeout)
+    .connect_timeout(timeout.min(MAX_CONNECT_TIMEOUT))
     .no_proxy()
     .redirect(reqwest::redirect::Policy::none());
   if allow_private_endpoints {
@@ -189,24 +194,30 @@ pub(super) fn build_client(
   }
 }
 
-pub struct WebPushSender {
-  vapid: VapidKey,
+/// VAPID credentials (RFC 8292) for the `Authorization` header.
+pub struct Vapid {
+  key: VapidKey,
+  /// Contact for push services, `mailto:` or `https:`.
   subject: String,
+}
+
+impl Vapid {
+  pub fn new(key: VapidKey, subject: String) -> Self {
+    Self { key, subject }
+  }
+}
+
+pub struct WebPushSender {
+  vapid: Vapid,
   allow_private_endpoints: bool,
   http: reqwest::Client,
 }
 
 impl WebPushSender {
-  pub fn new(
-    vapid: VapidKey,
-    subject: String,
-    timeout: Duration,
-    allow_private_endpoints: bool,
-  ) -> Result<Self, reqwest::Error> {
+  pub fn new(vapid: Vapid, timeout: Duration, allow_private_endpoints: bool) -> Result<Self, reqwest::Error> {
     let http = build_client(timeout, allow_private_endpoints)?;
     Ok(Self {
       vapid,
-      subject,
       allow_private_endpoints,
       http,
     })
@@ -221,36 +232,52 @@ impl PushSender for WebPushSender {
   ) -> BoxFuture<'a, Result<(), PushError>> {
     Box::pin(async move {
       let (subscription, keys) = WebPushSubscription::parse(&target.token, self.allow_private_endpoints)?;
-      let body = encrypt_web_push(&keys, &message.sealed)?;
-      let now = jsonwebtoken::get_current_timestamp();
-      let audience = origin_of(&subscription.endpoint)
-        .ok_or_else(|| PushError::Invalid("endpoint is not a URL".into()))?;
-      let authorization = self.vapid.authorization(&audience, &self.subject, now)?;
-      let urgency = match message.urgency {
-        Urgency::Normal => "normal",
-        Urgency::High => "high",
-      };
-
-      let response = self
-        .http
-        .post(&subscription.endpoint)
-        .header("Authorization", authorization)
-        .header("Content-Encoding", "aes128gcm")
-        .header("Content-Type", "application/octet-stream")
-        .header("TTL", message.ttl.as_secs().to_string())
-        .header("Urgency", urgency)
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
-      match response.status() {
-        status if status.is_success() => Ok(()),
-        StatusCode::NOT_FOUND | StatusCode::GONE => Err(PushError::Gone),
-        StatusCode::TOO_MANY_REQUESTS => Err(PushError::Unavailable("rate limited".into())),
-        status if status.is_server_error() => Err(PushError::Unavailable(format!("status {status}"))),
-        status => Err(PushError::Rejected(status.as_u16())),
-      }
+      post_encrypted(&self.http, &subscription, &keys, Some(&self.vapid), message).await
     })
+  }
+}
+
+/// Encrypts the sealed wake-up for the subscription (RFC 8291) and posts it to its endpoint
+/// (RFC 8030), with a VAPID token if there is a key. Shared by Web Push and UnifiedPush, whose
+/// distributors speak the same protocol.
+pub(super) async fn post_encrypted(
+  http: &reqwest::Client,
+  subscription: &WebPushSubscription,
+  keys: &SubscriptionKeys,
+  maybe_vapid: Option<&Vapid>,
+  message: &PushMessage,
+) -> Result<(), PushError> {
+  let body = encrypt_web_push(keys, &message.sealed)?;
+  let urgency = match message.urgency {
+    Urgency::Normal => "normal",
+    Urgency::High => "high",
+  };
+  let mut request = http
+    .post(&subscription.endpoint)
+    .header("Content-Encoding", "aes128gcm")
+    .header("Content-Type", "application/octet-stream")
+    .header("TTL", message.ttl.as_secs().to_string())
+    .header("Urgency", urgency);
+  if let Some(vapid) = maybe_vapid {
+    let audience =
+      origin_of(&subscription.endpoint).ok_or_else(|| PushError::Invalid("endpoint is not a URL".into()))?;
+    let now = jsonwebtoken::get_current_timestamp();
+    request = request.header(
+      "Authorization",
+      vapid.key.authorization(&audience, &vapid.subject, now)?,
+    );
+  }
+  let response = request
+    .body(body)
+    .send()
+    .await
+    .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+  match response.status() {
+    status if status.is_success() => Ok(()),
+    StatusCode::NOT_FOUND | StatusCode::GONE => Err(PushError::Gone),
+    StatusCode::TOO_MANY_REQUESTS => Err(PushError::Unavailable("rate limited".into())),
+    status if status.is_server_error() => Err(PushError::Unavailable(format!("status {status}"))),
+    status => Err(PushError::Rejected(status.as_u16())),
   }
 }
 

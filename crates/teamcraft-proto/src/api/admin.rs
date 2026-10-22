@@ -241,6 +241,10 @@ pub struct PushProviderStatus {
   /// registrations (device gone) are not counted: the push service itself worked.
   #[serde(default)]
   pub failure_count: u64,
+  /// Web Push and UnifiedPush: sends that failed at an endpoint a user registered. Counted apart
+  /// from `failure_count`: users choose those endpoints, so they never make the provider failing.
+  #[serde(default)]
+  pub endpoint_failure_count: u64,
   #[serde(rename = "last_success_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_last_success_at: Option<UnixMillis>,
   #[serde(rename = "last_failure_at", default, skip_serializing_if = "Option::is_none")]

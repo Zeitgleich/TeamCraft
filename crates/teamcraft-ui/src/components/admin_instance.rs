@@ -97,7 +97,13 @@ fn InstanceCards(instance: AdminInstanceResponse) -> impl IntoView {
                         None => i18n.t("instance-never"),
                       }}
                     </td>
-                    <td class="num">{entry.failure_count}</td>
+                    <td class="num">
+                      {entry.failure_count}
+                      {(entry.endpoint_failure_count > 0).then(|| {
+                        let count = entry.endpoint_failure_count;
+                        view! { <span class="muted-text small" title=move || i18n.t("instance-push-endpoint-failures")>" (+" {count} ")"</span> }
+                      })}
+                    </td>
                     <td class="small">
                       {entry.maybe_last_error.clone().map(|error| {
                         let when = entry.maybe_last_failure_at.map(|at| format_relative(at.0, now, i18n.locale().tag()));

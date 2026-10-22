@@ -117,12 +117,12 @@ impl FcmSender {
 
   /// The cached OAuth token, or a fresh one. Holding the lock across the request makes concurrent
   /// sends share one token request.
-  async fn bearer(&self) -> Result<String, PushError> {
+  async fn bearer(&self) -> Result<SecretString, PushError> {
     let mut cached = self.access_token.lock().await;
     if let Some(token) = cached.as_ref()
       && Instant::now() < token.renew_at
     {
-      return Ok(token.value.expose_secret().to_owned());
+      return Ok(token.value.clone());
     }
     let now = jsonwebtoken::get_current_timestamp();
     let claims = AssertionClaims {
@@ -161,7 +161,7 @@ impl FcmSender {
       .await
       .map_err(|_| PushError::Unavailable("unreadable token response".into()))?;
     let lifetime = Duration::from_secs(token.expires_in).saturating_sub(TOKEN_MARGIN);
-    let value = token.access_token.expose_secret().to_owned();
+    let value = token.access_token.clone();
     *cached = Some(AccessToken {
       value: token.access_token,
       renew_at: Instant::now() + lifetime,
@@ -203,7 +203,8 @@ impl PushSender for FcmSender {
       let response = self
         .http
         .post(&self.send_url)
-        .bearer_auth(self.bearer().await?)
+        // bearer_auth marks the header sensitive.
+        .bearer_auth(self.bearer().await?.expose_secret())
         .json(&body)
         .send()
         .await
