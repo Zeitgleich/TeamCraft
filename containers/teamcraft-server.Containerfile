@@ -6,10 +6,11 @@
 # that run the image should configure the same command themselves: `teamcraft-server healthcheck`.
 #
 # Base images are pinned by digest so builds are reproducible; bump them deliberately
-# (`podman pull <image>` and copy the new digest).
+# with the multi-arch index digest
+# (`docker buildx imagetools inspect <image>`, the top-level Digest), never a single-platform one.
 
-ARG RUST_IMAGE=docker.io/library/rust:1-bookworm@sha256:8bf7188ae46ad73b801c8d405eedc13ce63a7852b562885743a56890723549a8
-ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:777e96cf322c46bc32aca926c263624c4dc8d7cf37e2fa65ba2c7e697318ebbb
+ARG RUST_IMAGE=docker.io/library/rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 
 FROM ${RUST_IMAGE} AS build
 ENV SQLX_OFFLINE=true \
