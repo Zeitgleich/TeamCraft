@@ -157,9 +157,12 @@ pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiE
   let preference = state.database.get_presence_preference(user).await?;
   let now = OffsetDateTime::now_utc();
   let aggregate = state.hub.device_aggregate(user);
-  // Last seen is the moment the user stopped being active (idle or gone), whatever they show.
+  // Last seen is the moment the user stopped being active (idle or gone). Not recorded while they
+  // appear offline or hide it: a time from that period could show once they stop hiding.
   if state.hub.swap_aggregate(user, aggregate) == Some(DeviceAggregate::Active)
     && aggregate != DeviceAggregate::Active
+    && preference.manual != ManualPresence::Invisible
+    && state.database.get_last_seen_visibility(user).await? == LastSeenVisibility::Everyone
   {
     state.database.set_last_seen(user, now).await?;
   }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT h.call_id, h.conversation_id, h.started_by, h.started_at, h.ended_at, h.was_ringing\n         FROM call_history h\n         JOIN memberships m ON m.conversation_id = h.conversation_id AND m.user_id = $1\n         WHERE ($2::bigint IS NULL OR h.call_id < $2)\n         ORDER BY h.call_id DESC LIMIT $3",
+  "query": "SELECT h.call_id, h.conversation_id, h.started_by, h.started_at, h.ended_at, h.was_ringing,\n                h.call_id >= tc_snowflake_floor(m.joined_at) AS \"was_member_at_start!\"\n         FROM call_history h\n         JOIN memberships m ON m.conversation_id = h.conversation_id AND m.user_id = $1\n         JOIN conversations c ON c.id = h.conversation_id\n         WHERE ($2::bigint IS NULL OR h.call_id < $2)\n           -- Call IDs are snowflakes: the same cut as for messages.\n           AND (h.call_id >= tc_snowflake_floor(m.joined_at) OR ($4 AND c.history_policy = 'full'))\n         ORDER BY h.call_id DESC LIMIT $3",
   "describe": {
     "columns": [
       {
@@ -68,13 +68,20 @@
             "name": "was_ringing"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "was_member_at_start!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
         "Int8",
         "Int8",
-        "Int8"
+        "Int8",
+        "Bool"
       ]
     },
     "nullable": [
@@ -83,8 +90,9 @@
       true,
       false,
       true,
-      false
+      false,
+      null
     ]
   },
-  "hash": "0f772bd361ef93d3ea7b68cc2fd6e3e8b0208af3447759042c438424992fb1c9"
+  "hash": "bf5b9275c43f5fb3b72450d3460084065abc8941e50641e4d79410f026acd1ee"
 }
