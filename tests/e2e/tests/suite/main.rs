@@ -15,6 +15,7 @@ mod guests;
 mod meetings;
 mod membership;
 mod messaging;
+mod mfa;
 mod moderator;
 mod threads_policy;
 #[cfg(feature = "browser")]

@@ -87,11 +87,14 @@ impl Peer {
     }
     let mut policy = self.client.workspace().expect("workspace state").policy;
     edit(&mut policy);
-    self
-      .client
-      .publish_policy(policy)
-      .await
-      .expect("publishing the policy");
+    // A policy that requires a second factor takes effect with its own request: the follow-up call
+    // already gets "MFA required" (the dev realm has no second factor).
+    if let Err(error) = self.client.publish_policy(policy).await {
+      assert!(
+        format!("{error:?}").contains("MfaRequired"),
+        "publishing the policy: {error}"
+      );
+    }
   }
 
   /// Applies the frames that are waiting on the gateway.
