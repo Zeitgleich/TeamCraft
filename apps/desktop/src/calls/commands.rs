@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
-use teamcraft_client_api::calls::{BackgroundEffect as UiBackgroundEffect, MediaDevices};
+use teamcraft_client_api::calls::{BackgroundEffect as UiBackgroundEffect, MediaDevices, OrgBackgrounds};
 use teamcraft_client_api::remote::{CallAction, CallSnapshot};
+use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
 use teamcraft_proto::MediaStreamId;
 
 use super::{CallHost, push_to_talk, video};
@@ -57,6 +58,44 @@ pub async fn call_unwatch_video(
   Ok(())
 }
 
+/// Applies `requested` as far as the organization's rule allows (admin.md §3.6) and loads the
+/// picture it needs: the user's own (decrypted) or the organization's (hash-checked).
+async fn apply_background(
+  core: &CoreHost,
+  calls: &CallHost,
+  requested: UiBackgroundEffect,
+) -> Result<(), CommandError> {
+  let org = org_backgrounds(core).await;
+  let effect = org.effective(requested);
+  let maybe_picture = match effect {
+    UiBackgroundEffect::Custom(id) => Some(core.current()?.background_picture(id).await?),
+    UiBackgroundEffect::Org(id) => Some(core.current()?.org_background_picture(id).await?),
+    _ => None,
+  };
+  let maybe_image = match maybe_picture {
+    Some(picture) => Some(
+      tauri::async_runtime::spawn_blocking(move || video::decode_background(&picture))
+        .await
+        .map_err(|error| error.to_string())??,
+    ),
+    None => None,
+  };
+  calls.set_background_effect(effect, maybe_image, org.is_required());
+  Ok(())
+}
+
+/// The organization's backgrounds and rule from the verified policy; without a running core
+/// nothing is known, and nothing is restricted.
+async fn org_backgrounds(core: &CoreHost) -> OrgBackgrounds {
+  let Ok(runtime) = core.current() else {
+    return OrgBackgrounds::default();
+  };
+  match runtime.query(ChatQuery::OrgBackgrounds).await {
+    Ok(ChatAnswer::OrgBackgrounds { backgrounds }) => backgrounds,
+    _ => OrgBackgrounds::default(),
+  }
+}
+
 /// A small JPEG of a preset or one of the user's own backgrounds, for the picker.
 #[tauri::command]
 pub async fn call_background_preview(
@@ -67,6 +106,7 @@ pub async fn call_background_preview(
 ) -> Result<tauri::ipc::Response, CommandError> {
   let maybe_picture = match effect {
     UiBackgroundEffect::Custom(id) => Some(core.current()?.background_picture(id).await?),
+    UiBackgroundEffect::Org(id) => Some(core.current()?.org_background_picture(id).await?),
     _ => None,
   };
   let (width, height) = (width.clamp(16, 640), height.clamp(16, 360));
@@ -96,22 +136,20 @@ pub async fn call_action(
     CallAction::SetDeafened { is_deafened } => calls.set_deafened(is_deafened).await,
     CallAction::SelectMicrophone { maybe_device } => calls.select_microphone(maybe_device).await?,
     CallAction::SelectSpeakers { maybe_device } => calls.select_speakers(maybe_device).await?,
-    CallAction::SetCamera { is_on } => calls.set_camera(is_on).await?,
-    CallAction::SelectCamera { maybe_device } => calls.select_camera(maybe_device).await?,
-    CallAction::SetBackgroundEffect { effect } => {
-      let maybe_custom = match effect {
-        UiBackgroundEffect::Custom(id) => {
-          let picture = core.current()?.background_picture(id).await?;
-          Some(
-            tauri::async_runtime::spawn_blocking(move || video::decode_background(&picture))
-              .await
-              .map_err(|error| error.to_string())??,
-          )
-        },
-        _ => None,
-      };
-      calls.set_background_effect(effect, maybe_custom);
+    CallAction::SetCamera { is_on } => {
+      if is_on {
+        // The current choice under the current rule (it may have changed since it was made).
+        let current = calls
+          .snapshot()
+          .maybe_active
+          .map(|active| active.background)
+          .unwrap_or_default();
+        apply_background(&core, &calls, current).await?;
+      }
+      calls.set_camera(is_on).await?;
     },
+    CallAction::SelectCamera { maybe_device } => calls.select_camera(maybe_device).await?,
+    CallAction::SetBackgroundEffect { effect } => apply_background(&core, &calls, effect).await?,
     CallAction::StartScreenShare => calls.start_screen_share().await?,
     CallAction::StopScreenShare => calls.stop_screen_share().await,
     CallAction::SetPushToTalk {
