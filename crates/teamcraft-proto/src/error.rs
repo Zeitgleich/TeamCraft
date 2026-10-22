@@ -37,6 +37,10 @@ wire_enum! {
     RateLimited => "rate_limited",
     InvalidJoinToken => "invalid_join_token",
     AlreadyJoined => "already_joined",
+    /// The meeting host locked the call: no new participants.
+    CallLocked => "call_locked",
+    /// The meeting host removed this user from the call.
+    RemovedFromCall => "removed_from_call",
     ProtocolViolation => "protocol_violation",
     InvalidKeyPackage => "invalid_key_package",
     Internal => "internal",

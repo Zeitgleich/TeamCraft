@@ -128,6 +128,18 @@ pub enum CallEngineEvent {
   },
   MuteChanged(bool),
   DeafenChanged(bool),
+  /// The meeting host muted everyone (the engine muted itself; `MuteChanged` follows).
+  MutedByHost {
+    by_user_id: UserId,
+  },
+  /// The meeting host removed this user; the SFU closes the connection.
+  RemovedByHost {
+    by_user_id: UserId,
+  },
+  /// The meeting host ended the call for everyone; the SFU closes the connection.
+  EndedByHost {
+    by_user_id: UserId,
+  },
   /// Estimated uplink bandwidth after new feedback.
   UplinkEstimate {
     bps: u32,
@@ -487,6 +499,20 @@ impl CallEngine {
       },
       CallEvent::LayersNeeded { stream_id, layers } => {
         self.event(CallEngineEvent::LayersNeeded { stream_id, layers });
+        Ok(())
+      },
+      CallEvent::MutedByHost { by_user_id } => {
+        // The host can ask; the user can unmute again afterwards. The reason comes first.
+        self.event(CallEngineEvent::MutedByHost { by_user_id });
+        self.set_muted(true);
+        Ok(())
+      },
+      CallEvent::RemovedByHost { by_user_id } => {
+        self.event(CallEngineEvent::RemovedByHost { by_user_id });
+        Ok(())
+      },
+      CallEvent::EndedByHost { by_user_id } => {
+        self.event(CallEngineEvent::EndedByHost { by_user_id });
         Ok(())
       },
       CallEvent::Unknown => Ok(()),

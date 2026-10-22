@@ -25,6 +25,7 @@ use teamcraft_proto::{ConversationId, Id, ThreadId};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, LocalSet};
 
+use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, MessageItem, Presence, PushNotification,
@@ -58,6 +59,7 @@ pub(crate) struct Engine {
   maybe_link_offer: Option<LinkOffer>,
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
+  calls: CallHub,
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
@@ -145,6 +147,7 @@ impl Engine {
       maybe_link_offer: None,
       maybe_new_link: None,
       maybe_approval: None,
+      calls: CallHub::default(),
     };
     if let Some(client) = Client::open(
       engine.api(),
@@ -396,6 +399,26 @@ impl Engine {
     Ok(result?)
   }
 
+  /// What joining the conversation's call needs from the client; pauses syncing meanwhile.
+  pub(crate) async fn prepare_call(
+    &mut self,
+    conversation_id: &str,
+  ) -> Result<CallPreparation, TeamCraftError> {
+    let conversation: ConversationId = parse_id(conversation_id)?;
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = prepare_call(&mut client, conversation).await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    result
+  }
+
+  pub(crate) fn calls(&self) -> &CallHub {
+    &self.calls
+  }
+
   pub(crate) async fn notification_for_push(
     &mut self,
     payload: Vec<u8>,
@@ -425,7 +448,8 @@ impl Engine {
     self.account_state().await
   }
 
-  fn adopt(&mut self, client: CoreClient) {
+  fn adopt(&mut self, mut client: CoreClient) {
+    self.attach_call_sink(&mut client);
     self.identity_fingerprint = client.identity_fingerprint();
     self.maybe_backend = Some(CoreChatBackend::new(
       self.store.clone(),
@@ -433,6 +457,12 @@ impl Engine {
       Box::new(SystemClock),
     ));
     self.client = ClientSlot::Idle(Box::new(client));
+  }
+
+  /// Gateway call events (rings) of `client` go to the app's call listener.
+  fn attach_call_sink(&self, client: &mut CoreClient) {
+    let calls = self.calls.clone();
+    client.set_call_event_sink(Box::new(move |event| calls.on_gateway_event(event)));
   }
 
   /// Stops the sync loop if it runs and hands out the client; put it back into `self.client`.
@@ -452,12 +482,13 @@ impl Engine {
         // Only a panic in the sync loop gets here; reopen the client from the store.
         Err(error) => {
           tracing::error!(%error, "sync loop ended abnormally");
-          if let Ok(Some(client)) = Client::open(
+          if let Ok(Some(mut client)) = Client::open(
             self.api(),
             self.store.clone(),
             Box::new(SystemClock),
             ClientSettings::default(),
           ) {
+            self.attach_call_sink(&mut client);
             self.client = ClientSlot::Idle(Box::new(client));
           }
         },
@@ -521,6 +552,22 @@ impl AccessTokenSource for ForeignTokens {
 }
 
 /// Runs a UI command on an idle client; offline is fine (the outbox keeps messages).
+async fn prepare_call(
+  client: &mut CoreClient,
+  conversation: ConversationId,
+) -> Result<CallPreparation, TeamCraftError> {
+  let join = client.call_join_token(conversation).await?;
+  let devices = client.verified_call_devices(conversation).await?;
+  Ok(CallPreparation {
+    conversation,
+    join,
+    user_id: client.user_id(),
+    device_id: client.device_id(),
+    signer: client.call_key_signer(),
+    devices,
+  })
+}
+
 async fn run_offline_tolerant(client: &mut CoreClient, command: CoreCommand) -> Result<(), TeamCraftError> {
   match client.run_ui_command(command).await {
     Ok(()) => Ok(()),

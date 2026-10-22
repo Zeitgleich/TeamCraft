@@ -17,14 +17,49 @@ platforms Opus, audio devices, echo cancellation and the WebTransport call drive
 
 ## Features
 
-| Feature  | Default | What                                                                         |
-|----------|---------|------------------------------------------------------------------------------|
-| `dave`   | yes     | DAVE and the call engine; builds for `wasm32-unknown-unknown`                |
-| `native` | no      | Opus, audio devices, the WebTransport driver and the `teamcraft-call` binary |
-| `web`    | no      | Browser driver: WebTransport, WebCodecs Opus, AudioWorklet (wasm32)          |
+| Feature           | Default | What                                                                         |
+|-------------------|---------|------------------------------------------------------------------------------|
+| `dave`            | yes     | DAVE and the call engine; builds for `wasm32-unknown-unknown`                |
+| `native`          | no      | Opus, audio devices, the WebTransport driver and the `teamcraft-call` binary |
+| `web`             | no      | Browser driver: WebTransport, WebCodecs Opus, AudioWorklet (wasm32)          |
+| `openh264-source` | no      | OpenH264 built from source into the binary: development and tests only       |
+| `gstreamer`       | no      | Hardware H.264 through GStreamer: VA-API (Linux), VideoToolbox (macOS)       |
 
 `native` builds libopus with cmake and uses cpal for audio devices, which needs the ALSA headers on
 Linux (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora).
+
+## OpenH264: Cisco's binary at runtime
+
+H.264 is covered by patents. Cisco pays the royalties for its prebuilt OpenH264 libraries, but
+the license only covers a binary the user's device downloads from Cisco: OpenH264 built from source
+into our app, or Cisco's binary bundled with our installer, is not covered. So release builds
+contain no OpenH264 at all. On first video use the app downloads the library for its platform
+from `ciscobinary.openh264.org` (`openh264_library::OpenH264Binary`), checks it against Cisco's
+published SHA-256 hashes, caches it in the app's data directory and loads it from there, checking
+the hash again on every load. If the download fails, starting video reports it and the next try
+downloads again.
+
+`openh264-source` builds OpenH264 from source instead, for tests and development
+(`cargo test --features openh264-source`, the `video_bench` example); never enable it for
+release builds. `teamcraft-call --send-video`/`--watch-video` need it too.
+
+## Hardware encoding
+
+Encoders sit behind `VideoEncoder`; `video_pipeline::preferred_encoders()` picks a hardware one per
+simulcast layer and wraps it in `FallbackEncoder`, which switches to OpenH264 (with a keyframe) if
+the hardware fails mid-call. Where none can be built, OpenH264 is used from the start.
+
+| Platform | Encoder                                         | Build                                          |
+|----------|-------------------------------------------------|------------------------------------------------|
+| Linux    | `vah264enc` (VA-API) through GStreamer          | feature `gstreamer`; GStreamer dev packages    |
+| macOS    | `vtenc_h264` (VideoToolbox) through GStreamer   | feature `gstreamer`; compiles, untested        |
+| Android  | MediaCodec through the NDK (`ndk` crate)        | always with `native`                           |
+
+GStreamer (LGPL-2.1-or-later) is linked dynamically from the system: Fedora `gstreamer1-devel
+gstreamer1-plugins-base-devel`, Debian/Ubuntu `libgstreamer1.0-dev
+libgstreamer-plugins-base1.0-dev`; the VA-API encoder itself comes with `gst-plugins-bad` at
+runtime. `TEAMCRAFT_REQUIRE_HARDWARE_ENCODER=1 cargo test -p teamcraft-media --features
+gstreamer,openh264-source video_gstreamer` fails instead of skipping where no encoder is found.
 
 ## Echo cancellation (build-time switch)
 
@@ -55,7 +90,7 @@ builds packages with it. `RUSTFLAGS` changes invalidate the build cache, so use 
 ## Headless client
 
 ```sh
-cargo run -p teamcraft-media --features native --bin teamcraft-call -- \
+cargo run -p teamcraft-media --features openh264-source --bin teamcraft-call -- \
   --sfu https://127.0.0.1:4433/call --token dev:1:1:1 --user 1 --device 1 \
   --cert-hash <hash from the SFU's startup log> --source tone:440 --seconds 10
 ```

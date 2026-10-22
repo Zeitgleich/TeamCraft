@@ -7,15 +7,18 @@
 //! core for a join token, the verified device certificates of the conversation and a signer for the
 //! call key binding (e2ee.md §8), so DAVE only admits devices the user's contacts certified.
 
+mod codec_library;
 pub mod commands;
+mod push_to_talk;
 mod video;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallRequest, IncomingCall, MediaDevice, MediaDevices,
-  Participant, RunningCall,
+  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallRequest, IncomingCall, MediaDevice,
+  MediaDevices, Participant, PushToTalk, RemoteVideoTrack, RunningCall,
 };
 use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_core::CallKeySigner;
@@ -27,14 +30,17 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::EffectHandle;
-use teamcraft_media::video_pipeline::{VideoSendConfig, software_encoders};
+use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, Id, MediaCapabilities, Snowflake,
+  AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId,
   UserId, VideoCodec, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
+use self::codec_library::CodecLibrary;
+pub(crate) use self::video::BUNDLED_MODEL;
 use crate::core::CallPreparation;
 
 pub use teamcraft_client_api::remote::CALL_CHANGED_EVENT;
@@ -49,6 +55,17 @@ pub struct CallHost {
   notify: Arc<dyn Fn() + Send + Sync>,
   /// The running media call, if any; a mutex across awaits so joins and leaves don't interleave.
   media: tokio::sync::Mutex<Option<MediaCall>>,
+  video_sinks: VideoSinks,
+  codecs: CodecLibrary,
+  maybe_segmentation_model: Option<PathBuf>,
+}
+
+/// Files the calls need from the app's directories.
+pub struct MediaFiles {
+  /// Where Cisco's OpenH264 is cached (the app's data directory).
+  pub codec_directory: PathBuf,
+  /// The bundled segmentation model for background effects, if the app has its resources.
+  pub maybe_segmentation_model: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -65,6 +82,10 @@ struct CallState {
   maybe_effect_handle: Option<EffectHandle>,
   /// Lets the screen picker remember the last choice.
   maybe_screen_token: Option<String>,
+  /// Others' video in the active call.
+  video_tracks: BTreeMap<MediaStreamId, RemoteVideoTrack>,
+  push_to_talk: PushToTalk,
+  maybe_end_reason: Option<CallEndReason>,
 }
 
 /// Control of the task that owns the [`NativeCall`].
@@ -83,27 +104,45 @@ enum Control {
   },
   StartVideo(VideoSendConfig, oneshot::Sender<Result<(), String>>),
   StopVideo(VideoTrackKind),
+  Subscribe {
+    stream_id: MediaStreamId,
+    maybe_max_layer: Option<u8>,
+  },
   Leave,
 }
 
 /// Who is who in the call: the engine reports devices, the UI shows people.
 #[derive(Default)]
 struct Roster {
+  own_device: Option<DeviceId>,
   users_by_device: HashMap<DeviceId, UserId>,
   sharing_screen: BTreeSet<DeviceId>,
+  video_devices: HashMap<MediaStreamId, DeviceId>,
 }
+
+/// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
+pub type VideoSink = Arc<dyn Fn(&ReceivedVideoFrame) + Send + Sync>;
+type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, VideoSink>>>;
 
 /// Lets the media layer sign with the core's signer (the device key stays in the core).
 struct CoreSigner(CallKeySigner);
 
 impl CallHost {
   /// `notify` tells the UI that the call state changed.
-  pub fn new(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+  pub fn new(notify: Arc<dyn Fn() + Send + Sync>, files: MediaFiles) -> Self {
     Self {
       state: Arc::new(Mutex::new(CallState::default())),
       notify,
       media: tokio::sync::Mutex::new(None),
+      video_sinks: Arc::default(),
+      codecs: CodecLibrary::new(files.codec_directory),
+      maybe_segmentation_model: files.maybe_segmentation_model,
     }
+  }
+
+  /// Makes sure video can be encoded and decoded (downloads Cisco's OpenH264 on first use).
+  pub async fn ensure_video_codec(&self) -> Result<(), String> {
+    self.codecs.ensure().await
   }
 
   /// For the core runtime: applies the gateway's call events on whatever thread they arrive.
@@ -119,6 +158,9 @@ impl CallHost {
       incoming: state.incoming.values().copied().collect(),
       running: state.running.values().cloned().collect(),
       devices: state.devices.clone(),
+      video_tracks: state.video_tracks.values().cloned().collect(),
+      push_to_talk: state.push_to_talk.clone(),
+      maybe_end_reason: state.maybe_end_reason,
     }
   }
 
@@ -164,10 +206,15 @@ impl CallHost {
       let state = lock(&self.state);
       (state.microphone.clone(), state.speakers.clone())
     };
+    let own_device = preparation.device_id;
     let config = native_config(preparation, microphone, speakers)?;
     let call = NativeCall::join(config)
       .await
       .map_err(|error| error.to_string())?;
+    if self.push_to_talk().is_enabled {
+      // Push-to-talk: the microphone opens only while the key is held.
+      call.set_muted(true);
+    }
     {
       let mut state = lock(&self.state);
       state.incoming.remove(&request.conversation);
@@ -183,14 +230,21 @@ impl CallHost {
         is_camera_on: false,
         is_sharing_screen: false,
         background: state.background,
+        maybe_muted_by_host: None,
       });
+      state.maybe_end_reason = None;
     }
     let (controls, control_rx) = mpsc::unbounded_channel();
+    lock(&self.video_sinks).clear();
     let task = tokio::spawn(run_media(
       call,
       control_rx,
-      Arc::clone(&self.state),
-      Arc::clone(&self.notify),
+      MediaShared {
+        own_device,
+        state: Arc::clone(&self.state),
+        notify: Arc::clone(&self.notify),
+        video_sinks: Arc::clone(&self.video_sinks),
+      },
     ));
     *media = Some(MediaCall { controls, task });
     self.changed();
@@ -201,8 +255,68 @@ impl CallHost {
     if let Some(call) = self.media.lock().await.take() {
       call.leave().await;
     }
-    lock(&self.state).maybe_active = None;
+    {
+      let mut state = lock(&self.state);
+      state.maybe_active = None;
+      state.video_tracks.clear();
+    }
+    lock(&self.video_sinks).clear();
     self.changed();
+  }
+
+  /// Push-to-talk on or off (the command layer registers the shortcut); with it on, the call is
+  /// muted except while the key is held.
+  pub async fn set_push_to_talk(&self, is_enabled: bool, shortcut: String, is_global: bool) {
+    {
+      let mut state = lock(&self.state);
+      state.push_to_talk = PushToTalk {
+        is_enabled,
+        shortcut,
+        is_global,
+        is_talking: false,
+      };
+    }
+    self.control(Control::Mute(is_enabled)).await;
+    self.changed();
+  }
+
+  /// The push-to-talk key went down or up; ignored while push-to-talk is off.
+  pub async fn set_talking(&self, is_talking: bool) {
+    {
+      let mut state = lock(&self.state);
+      if !state.push_to_talk.is_enabled || state.push_to_talk.is_talking == is_talking {
+        return;
+      }
+      state.push_to_talk.is_talking = is_talking;
+    }
+    self.control(Control::Mute(!is_talking)).await;
+    self.changed();
+  }
+
+  fn push_to_talk(&self) -> PushToTalk {
+    lock(&self.state).push_to_talk.clone()
+  }
+
+  /// Receives another device's track and hands each frame to `sink` (the webview decodes it).
+  pub async fn watch_video(&self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>, sink: VideoSink) {
+    lock(&self.video_sinks).insert(stream_id, sink);
+    self
+      .control(Control::Subscribe {
+        stream_id,
+        maybe_max_layer: Some(maybe_max_layer.unwrap_or(u8::MAX)),
+      })
+      .await;
+  }
+
+  pub async fn unwatch_video(&self, stream_id: MediaStreamId) {
+    if lock(&self.video_sinks).remove(&stream_id).is_some() {
+      self
+        .control(Control::Subscribe {
+          stream_id,
+          maybe_max_layer: None,
+        })
+        .await;
+    }
   }
 
   /// Stops ringing on this device; the call goes on for the others.
@@ -259,13 +373,15 @@ impl CallHost {
       lock(&self.state).maybe_effect_handle = None;
       return Ok(());
     }
+    self.ensure_video_codec().await?;
     let (maybe_camera, background) = {
       let state = lock(&self.state);
       (state.maybe_camera.clone(), state.background)
     };
+    let maybe_model = self.maybe_segmentation_model.clone();
     let (capture, maybe_effects) = tokio::task::spawn_blocking(move || {
       let capture = video::open_camera(maybe_camera.as_deref())?;
-      Ok::<_, String>((capture, video::effects_filter(background)))
+      Ok::<_, String>((capture, video::effects_filter(background, maybe_model.as_deref())))
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -277,7 +393,7 @@ impl CallHost {
       kind: VideoTrackKind::Camera,
       layers: video::camera_layers(capture.format()),
       capture,
-      encoders: software_encoders(),
+      encoders: preferred_encoders(),
       maybe_filter,
     };
     self.start_video(config).await?;
@@ -313,6 +429,7 @@ impl CallHost {
 
   /// Shows the system's screen/window picker and shares the choice as its own stream.
   pub async fn start_screen_share(&self) -> Result<(), String> {
+    self.ensure_video_codec().await?;
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
     let (capture, maybe_new_token) =
       tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref()))
@@ -322,7 +439,7 @@ impl CallHost {
       kind: VideoTrackKind::Screen,
       layers: video::screen_layers(capture.format()),
       capture,
-      encoders: software_encoders(),
+      encoders: preferred_encoders(),
       maybe_filter: None,
     };
     self.start_video(config).await?;
@@ -456,13 +573,29 @@ impl CallBindingSigner for CoreSigner {
 }
 
 /// Owns the call: applies controls and turns engine events into the UI's view of the call.
+/// What the media task shares with the host.
+struct MediaShared {
+  own_device: DeviceId,
+  state: Arc<Mutex<CallState>>,
+  notify: Arc<dyn Fn() + Send + Sync>,
+  video_sinks: VideoSinks,
+}
+
 async fn run_media(
   mut call: NativeCall,
   mut controls: mpsc::UnboundedReceiver<Control>,
-  state: Arc<Mutex<CallState>>,
-  notify: Arc<dyn Fn() + Send + Sync>,
+  shared: MediaShared,
 ) {
-  let mut roster = Roster::default();
+  let MediaShared {
+    own_device,
+    state,
+    notify,
+    video_sinks,
+  } = shared;
+  let mut roster = Roster {
+    own_device: Some(own_device),
+    ..Roster::default()
+  };
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
@@ -477,9 +610,16 @@ async fn run_media(
           let _ = done.send(result);
         },
         Some(Control::StopVideo(kind)) => call.stop_video(kind),
+        Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
         Some(Control::Leave) | None => break,
       },
       maybe_event = call.next_event() => match maybe_event {
+        Some(CallEngineEvent::VideoFrame(frame)) => {
+          let maybe_sink = lock(&video_sinks).get(&frame.stream_id).cloned();
+          if let Some(sink) = maybe_sink {
+            sink(&frame);
+          }
+        },
         Some(event) => {
           if apply_event(&mut roster, &state, event) {
             notify();
@@ -498,13 +638,22 @@ async fn run_media(
     ),
     Err(error) => tracing::warn!(%error, "call ended with an error"),
   }
-  lock(&state).maybe_active = None;
+  {
+    let mut state = lock(&state);
+    state.maybe_active = None;
+    state.video_tracks.clear();
+  }
+  lock(&video_sinks).clear();
   notify();
 }
 
 /// Updates the active call from one engine event; `true` if the UI should re-read.
 fn apply_event(roster: &mut Roster, state: &Mutex<CallState>, event: CallEngineEvent) -> bool {
   let mut state = lock(state);
+  if state.maybe_active.is_none() {
+    return false;
+  }
+  update_video_tracks(roster, &mut state.video_tracks, &event);
   let Some(active) = state.maybe_active.as_mut() else {
     return false;
   };
@@ -541,11 +690,27 @@ fn apply_event(roster: &mut Roster, state: &Mutex<CallState>, event: CallEngineE
       active.is_secured = true;
       active.maybe_privacy_code = Some(privacy_code);
     },
-    CallEngineEvent::MuteChanged(is_muted) => active.is_muted = is_muted,
+    CallEngineEvent::MuteChanged(is_muted) => {
+      active.is_muted = is_muted;
+      if !is_muted {
+        active.maybe_muted_by_host = None;
+      }
+    },
+    CallEngineEvent::MutedByHost { by_user_id } => active.maybe_muted_by_host = Some(by_user_id),
+    CallEngineEvent::RemovedByHost { by_user_id } => {
+      state.maybe_end_reason = Some(CallEndReason::RemovedByHost { by: by_user_id });
+      return true;
+    },
+    CallEngineEvent::EndedByHost { by_user_id } => {
+      state.maybe_end_reason = Some(CallEndReason::EndedByHost { by: by_user_id });
+      return true;
+    },
     CallEngineEvent::DeafenChanged(is_deafened) => active.is_deafened = is_deafened,
     CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Screen => {
       roster.sharing_screen.insert(track.device_id);
     },
+    // Remote tracks changed (see update_video_tracks); the snapshot lists them.
+    CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {},
     CallEngineEvent::Error(error) => {
       tracing::warn!(error_code = ?error.error_code, "the SFU rejected a call request");
       return false;
@@ -559,6 +724,51 @@ fn apply_event(roster: &mut Roster, state: &Mutex<CallState>, event: CallEngineE
   }
   active.participants = participants(roster);
   true
+}
+
+/// Keeps the list of others' video tracks (and which device sends each) current.
+fn update_video_tracks(
+  roster: &mut Roster,
+  tracks: &mut BTreeMap<MediaStreamId, RemoteVideoTrack>,
+  event: &CallEngineEvent,
+) {
+  match event {
+    CallEngineEvent::VideoPublished(track) if Some(track.device_id) != roster.own_device => {
+      roster.video_devices.insert(track.stream_id, track.device_id);
+      if let Some(user) = roster.users_by_device.get(&track.device_id) {
+        tracks.insert(
+          track.stream_id,
+          RemoteVideoTrack {
+            stream_id: track.stream_id,
+            user: *user,
+            kind: track.kind.clone(),
+            layers: track
+              .layers
+              .iter()
+              .map(|layer| (layer.width, layer.height))
+              .collect(),
+          },
+        );
+      }
+    },
+    CallEngineEvent::VideoUnpublished(stream_id) => {
+      if let (Some(track), Some(device)) = (tracks.remove(stream_id), roster.video_devices.remove(stream_id))
+        && track.kind == VideoTrackKind::Screen
+      {
+        roster.sharing_screen.remove(&device);
+      }
+    },
+    CallEngineEvent::ParticipantLeft(device_id) => {
+      roster.video_devices.retain(|stream_id, device| {
+        let keeps = device != device_id;
+        if !keeps {
+          tracks.remove(stream_id);
+        }
+        keeps
+      });
+    },
+    _ => {},
+  }
 }
 
 fn participants(roster: &Roster) -> Vec<Participant> {
@@ -584,16 +794,6 @@ fn native_config(
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
 ) -> Result<NativeCallConfig, String> {
-  let mut devices = HashMap::new();
-  for device in preparation.devices {
-    let id = proto_device_id(device.device_id().get())?;
-    devices.insert(id, device);
-  }
-  let roster: Vec<DeviceId> = devices
-    .keys()
-    .copied()
-    .filter(|device| *device != preparation.device_id)
-    .collect();
   let engine = CallEngineConfig {
     user_id: preparation.user_id,
     device_id: preparation.device_id,
@@ -605,16 +805,19 @@ fn native_config(
     },
     bwe: BweConfig::default(),
   };
-  let mut config = NativeCallConfig::new(preparation.join.sfu_url, preparation.join.token, engine);
+  let authenticator =
+    DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
+      .map_err(|error| error.to_string())?;
+  let mut config = NativeCallConfig::device_bound(
+    preparation.join.sfu_url,
+    preparation.join.token,
+    engine,
+    authenticator,
+  );
   config.maybe_certificate_hash = certificate_hash_from_env()?;
   config.source = AudioSource::Microphone(microphone);
   config.sink = AudioSink::Speakers(speakers);
   config.maybe_processing = Some(AudioProcessingConfig::default());
-  config.maybe_trusted_roster = Some(roster);
-  config.maybe_authenticator = Some(Arc::new(DeviceCallKeyAuthenticator::new(
-    Arc::new(CoreSigner(preparation.signer)),
-    devices,
-  )));
   Ok(config)
 }
 
@@ -632,13 +835,6 @@ fn certificate_hash_from_env() -> Result<Option<[u8; 32]>, String> {
       .map_err(|_| format!("{CERT_HASH_VARIABLE} is not hex"))?;
   }
   Ok(Some(hash))
-}
-
-fn proto_device_id(raw: u64) -> Result<DeviceId, String> {
-  let raw = i64::try_from(raw).map_err(|_| format!("device id {raw} is out of range"))?;
-  Snowflake::new(raw)
-    .map(DeviceId::from_snowflake)
-    .map_err(|error| error.to_string())
 }
 
 fn users_of(entries: &[CallRosterEntry]) -> Vec<UserId> {
@@ -662,14 +858,16 @@ fn device_choice(maybe_id: Option<String>) -> AudioDeviceChoice {
   }
 }
 
-fn lock(state: &Mutex<CallState>) -> std::sync::MutexGuard<'_, CallState> {
+fn lock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
   // Poisoning only means a panic mid-update of plain view data; keep going with it.
   state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{CallId, CallParticipant, MediaStreamId, UnixMillis, VideoCodec, VideoTrack};
+  use teamcraft_proto::{
+    CallId, CallParticipant, Id, MediaStreamId, Snowflake, UnixMillis, VideoCodec, VideoTrack,
+  };
 
   use super::*;
 
@@ -785,6 +983,45 @@ mod tests {
     }
 
     #[test]
+    fn others_video_tracks_are_listed_until_unpublished() {
+      let state = Mutex::new(CallState {
+        maybe_active: Some(active()),
+        ..CallState::default()
+      });
+      let mut roster = Roster {
+        own_device: Some(device(10)),
+        ..Roster::default()
+      };
+      apply_event(
+        &mut roster,
+        &state,
+        CallEngineEvent::ParticipantJoined(participant(2, 20)),
+      );
+      for (owner, stream) in [(20, 7), (10, 8)] {
+        apply_event(
+          &mut roster,
+          &state,
+          CallEngineEvent::VideoPublished(VideoTrack {
+            stream_id: MediaStreamId(stream),
+            device_id: device(owner),
+            kind: VideoTrackKind::Camera,
+            codec: VideoCodec::H264,
+            layers: Vec::new(),
+          }),
+        );
+      }
+      let tracks: Vec<MediaStreamId> = lock(&state).video_tracks.keys().copied().collect();
+      assert_eq!(tracks, vec![MediaStreamId(7)], "own track not listed");
+      assert_eq!(lock(&state).video_tracks[&MediaStreamId(7)].user, user(2));
+      apply_event(
+        &mut roster,
+        &state,
+        CallEngineEvent::VideoUnpublished(MediaStreamId(7)),
+      );
+      assert!(lock(&state).video_tracks.is_empty());
+    }
+
+    #[test]
     fn audio_frames_do_not_wake_the_ui() {
       let state = Mutex::new(CallState {
         maybe_active: Some(active()),
@@ -795,14 +1032,28 @@ mod tests {
     }
   }
 
-  #[test]
-  fn crypto_device_ids_map_to_wire_ids() {
-    assert_eq!(proto_device_id(7).unwrap(), device(7));
-    assert!(proto_device_id(u64::MAX).is_err());
+  #[tokio::test]
+  async fn push_to_talk_tracks_the_key_only_when_enabled() {
+    let host = host();
+    host.set_talking(true).await;
+    assert!(!host.snapshot().push_to_talk.is_talking, "ignored while off");
+    host.set_push_to_talk(true, "F8".into(), false).await;
+    host.set_talking(true).await;
+    let push_to_talk = host.snapshot().push_to_talk;
+    assert!(push_to_talk.is_enabled && push_to_talk.is_talking);
+    assert_eq!(push_to_talk.shortcut, "F8");
+    host.set_talking(false).await;
+    assert!(!host.snapshot().push_to_talk.is_talking);
   }
 
   fn host() -> CallHost {
-    CallHost::new(Arc::new(|| {}))
+    CallHost::new(
+      Arc::new(|| {}),
+      MediaFiles {
+        codec_directory: std::env::temp_dir(),
+        maybe_segmentation_model: None,
+      },
+    )
   }
 
   fn active() -> ActiveCall {
@@ -818,6 +1069,7 @@ mod tests {
       is_camera_on: false,
       is_sharing_screen: false,
       background: UiBackgroundEffect::None,
+      maybe_muted_by_host: None,
     }
   }
 

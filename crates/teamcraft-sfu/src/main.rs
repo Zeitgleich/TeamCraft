@@ -9,7 +9,9 @@
 //! - `TEAMCRAFT_SFU_HEALTH_BIND`: TCP address of the `/healthz` endpoint, default `[::]:8081`;
 //!   `teamcraft-sfu healthcheck` probes it (for the container `HEALTHCHECK`)
 //! - `TEAMCRAFT_SFU_SERVER_URL` and `TEAMCRAFT_SFU_REGISTRATION_TOKEN`: report joins and leaves to
-//!   `teamcraft-server` (its `[calls] sfu_registration_token`), which starts calls and rings DMs
+//!   `teamcraft-server` (its `[calls] sfu_registration_token`), which starts calls and rings DMs;
+//!   the token also authenticates the server's meeting host controls
+//!   (`POST /internal/v1/calls/control` on the health listener)
 //! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test pages; unsigned
 //!   dev tokens when no public key is configured)
 //! - `TEAMCRAFT_SFU_DEV_ENGINE_DIR`: in dev mode, the `wasm-bindgen` output of `teamcraft-media`'s
@@ -28,6 +30,7 @@ use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
   config::SfuConfig,
+  control::control_router,
   dev_page::serve_dev_page,
   health::{DEFAULT_HEALTH_ADDR, serve_health},
   reporting::HttpReporter,
@@ -91,6 +94,14 @@ async fn run() -> anyhow::Result<()> {
     },
     _ => warn!("no server URL and registration token: calls are not reported to the server"),
   }
+  // Host controls come from the server with the same shared token.
+  let internal_routes = match std::env::var("TEAMCRAFT_SFU_REGISTRATION_TOKEN") {
+    Ok(token) => control_router(sfu.control(), token),
+    Err(_) => {
+      warn!("no registration token: meeting host controls are disabled");
+      axum::Router::new()
+    },
+  };
   let local_addr = sfu.local_addr()?;
   let certificate_hash = sfu.certificate_hash();
   info!(
@@ -111,7 +122,7 @@ async fn run() -> anyhow::Result<()> {
   tokio::select! {
     () = sfu.run() => {},
     result = dev_page => result.context("dev page")?,
-    result = serve_health(health_addr()?) => result.context("health endpoint")?,
+    result = serve_health(health_addr()?, internal_routes) => result.context("health endpoint")?,
     () = shutdown_signal() => {},
   }
   Ok(())

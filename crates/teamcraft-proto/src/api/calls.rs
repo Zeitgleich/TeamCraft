@@ -52,6 +52,37 @@ pub struct CallStateResponse {
   pub participants: Vec<CallRosterEntry>,
 }
 
+/// `POST {sfu}/internal/v1/calls/control`: a meeting host's action, which the server has authorized,
+/// forwarded to the SFU running the call. Internal: authenticated with the SFU registration token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuControlRequest {
+  pub call_id: CallId,
+  /// The host who acted (shown to participants).
+  pub by_user_id: UserId,
+  /// Flattened: `"action": "remove_participant", "user_id": "2"` sit next to `call_id`.
+  #[serde(flatten)]
+  pub action: SfuControlAction,
+}
+
+/// What a meeting host can do to a running call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SfuControlAction {
+  /// Ask every participant to mute (they may unmute).
+  MuteAll,
+  /// Disconnect all of the user's devices; the SFU refuses them for the rest of the call.
+  RemoveParticipant {
+    user_id: UserId,
+  },
+  /// No new participants until unlocked.
+  Lock,
+  Unlock,
+  /// Disconnect everyone.
+  End,
+  #[serde(other)]
+  Unknown,
+}
+
 /// Body of the SFU's reports `POST /api/internal/v1/calls/participants/{joined,left}`. Internal:
 /// authenticated with the SFU's registration token, not with a user token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -59,4 +90,29 @@ pub struct SfuParticipantReport {
   pub call_id: CallId,
   pub user_id: UserId,
   pub device_id: DeviceId,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::{Id, Snowflake};
+
+  #[test]
+  fn control_requests_have_a_stable_wire_format() {
+    let request = SfuControlRequest {
+      call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+      by_user_id: UserId::from_snowflake(Snowflake::new(1).unwrap()),
+      action: SfuControlAction::RemoveParticipant {
+        user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      },
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(
+      json,
+      r#"{"call_id":"7","by_user_id":"1","action":"remove_participant","user_id":"2"}"#
+    );
+    assert_eq!(serde_json::from_str::<SfuControlRequest>(&json).unwrap(), request);
+    let unknown: SfuControlAction = serde_json::from_str(r#"{"action":"spotlight"}"#).unwrap();
+    assert_eq!(unknown, SfuControlAction::Unknown);
+  }
 }

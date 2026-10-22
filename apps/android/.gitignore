@@ -5,3 +5,5 @@ local.properties
 # Built by scripts/build.sh from crates/teamcraft-ffi.
 app/src/main/jniLibs/
 app/src/main/java/uniffi/
+# Fetched by scripts/build.sh (crates/teamcraft-media/models/fetch.sh).
+app/src/main/assets/models/

@@ -2,7 +2,8 @@
 //!
 //! The SFU itself speaks QUIC, which a container health check can't probe without a client, so a
 //! tiny HTTP listener (default `[::]:8081`, `TEAMCRAFT_SFU_HEALTH_BIND`) stands in. It carries no
-//! data and no secrets.
+//! data and no secrets. The same internal listener carries the host control route
+//! ([`crate::control`]) when the SFU has a registration token.
 
 use std::net::SocketAddr;
 
@@ -14,11 +15,11 @@ use crate::net::bind_dual_stack;
 /// Default address of the health listener, also what `teamcraft-sfu healthcheck` probes.
 pub const DEFAULT_HEALTH_ADDR: &str = "[::]:8081";
 
-/// Serves `/healthz` until the task is dropped.
-pub async fn serve_health(addr: SocketAddr) -> std::io::Result<()> {
+/// Serves `/healthz`, plus the routes in `extra`, until the task is dropped.
+pub async fn serve_health(addr: SocketAddr, extra: Router) -> std::io::Result<()> {
   let listener = bind_dual_stack(addr)?;
   info!("health endpoint on http://{}/healthz", listener.local_addr()?);
-  axum::serve(listener, router()).await
+  axum::serve(listener, router().merge(extra)).await
 }
 
 fn router() -> Router {

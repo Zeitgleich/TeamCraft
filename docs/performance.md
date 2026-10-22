@@ -80,6 +80,37 @@ For larger channels the cost grows linearly: 5,000 connected members mean about 
 a send on the request path. If that becomes the limit, move publishing off the request path (the
 event is already stored before it is published) before adding instances.
 
+## Video send path
+
+Per-frame cost of sending a 720p camera at 30 fps (33 ms per frame), from
+`crates/teamcraft-media/examples/video_bench.rs`:
+
+```sh
+crates/teamcraft-media/models/fetch.sh
+TEAMCRAFT_SEGMENTATION_MODEL=crates/teamcraft-media/models/selfie_segmentation_landscape.onnx \
+  cargo run --release -p teamcraft-media --example video_bench \
+  --features openh264-source,segmentation,gstreamer
+```
+
+Measured on an AMD Ryzen 9 5900X with a Radeon RX 7800 XT (Mesa radeonsi, VA-API), 120 frames of
+a moving test pattern, while other builds kept the machine busy (load average about 29), so treat
+the worst cases as pessimistic.
+
+| Stage                                                        | Average  | Worst    |
+|--------------------------------------------------------------|----------|----------|
+| H.264 simulcast, 3 layers (720p/360p/180p), OpenH264 (CPU)   | 9.5 ms   | 22.2 ms  |
+| H.264 simulcast, 3 layers, VA-API through GStreamer          | 15.0 ms  | 45.8 ms  |
+| Background blur, light (WGSL compute on the GPU)             | 0.53 ms  | 1.5 ms   |
+| Background blur, strong                                      | 0.49 ms  | 0.92 ms  |
+| Background image                                             | 0.52 ms  | 1.1 ms   |
+| Person segmentation (MediaPipe landscape, tract on the CPU)  | 6.7 ms   | 16.0 ms  |
+
+The hardware row is latency, not CPU time: each layer waits for its picture from the GPU before
+the next layer starts, and the CPU is mostly idle meanwhile. What it saves is CPU (and battery);
+encoding the three layers in parallel would bring the latency down. The software encoder stays
+the fallback when no hardware encoder is usable. Segmentation plus blur and the software encoder
+together stay below the 33 ms frame budget on average.
+
 ## Limits to keep in mind
 
 - All of this is for a single server instance and one database; rate limits and the call roster are

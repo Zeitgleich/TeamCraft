@@ -6,12 +6,14 @@
 //! the sync loop; every call posts a job to it and awaits the answer. The app supplies access
 //! tokens ([`TokenProvider`]) and is told when to re-read ([`EventListener`]).
 
+mod calls;
 mod engine;
 mod error;
 mod types;
 
 use std::sync::Arc;
 
+pub use calls::{CallEndReason, CallListener, CallPhase, CallSession, CallStateInfo, IncomingCallInfo};
 pub use error::TeamCraftError;
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
@@ -190,6 +192,31 @@ impl TeamCraft {
     self
       .call(move |engine| Box::pin(engine.notification_for_push(payload)))
       .await
+  }
+
+  /// Rings and the state of this device's call go to `listener` from now on.
+  pub async fn set_call_listener(&self, listener: Arc<dyn CallListener>) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine.calls().set_listener(listener);
+          Ok(())
+        })
+      })
+      .await
+  }
+
+  /// Joins (or starts) the conversation's call; returns once connected.
+  pub async fn join_call(&self, conversation_id: String) -> Result<Arc<CallSession>, TeamCraftError> {
+    let (preparation, hub) = self
+      .call(move |engine| {
+        Box::pin(async move {
+          let preparation = engine.prepare_call(&conversation_id).await?;
+          Ok((preparation, engine.calls().clone()))
+        })
+      })
+      .await?;
+    calls::join(preparation, hub).await
   }
 }
 

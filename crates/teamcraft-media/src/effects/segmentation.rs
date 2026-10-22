@@ -85,6 +85,8 @@ impl std::fmt::Debug for SegmentationMask {
 mod tract {
   use std::sync::Arc;
 
+  use std::collections::HashMap;
+
   use tract_onnx::prelude::*;
 
   use super::{EffectsError, PersonSegmenter, SegmentationMask};
@@ -100,9 +102,20 @@ mod tract {
     pub height: u32,
     /// Output channel with the person probability (the model's only one for MediaPipe's).
     pub person_channel: usize,
+    /// Where the channels are in the input and output tensors.
+    pub layout: TensorLayout,
   }
 
-  /// A selfie segmentation model run with tract: NHWC float input in 0..1, NHWC probabilities out.
+  /// Channel order of a model's tensors.
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  pub enum TensorLayout {
+    /// NHWC, as TensorFlow Lite models (and their direct conversions) use.
+    ChannelsLast,
+    /// NCHW, as models exported for ONNX runtimes usually use.
+    ChannelsFirst,
+  }
+
+  /// A selfie segmentation model run with tract: RGB float input in 0..1, person probabilities out.
   pub struct TractSegmenter {
     plan: Plan,
     model: SegmentationModel,
@@ -110,24 +123,28 @@ mod tract {
   }
 
   impl SegmentationModel {
-    /// MediaPipe selfie segmentation, landscape variant (256x144, one output channel).
+    /// MediaPipe selfie segmentation, landscape variant (256x144, one output channel), as the
+    /// ONNX export the apps bundle (`models/fetch.sh`): NCHW.
     pub const MEDIAPIPE_LANDSCAPE: Self = Self {
       width: 256,
       height: 144,
       person_channel: 0,
+      layout: TensorLayout::ChannelsFirst,
     };
+
+    fn input_shape(&self) -> [usize; 4] {
+      let (width, height) = (self.width as usize, self.height as usize);
+      match self.layout {
+        TensorLayout::ChannelsLast => [1, height, width, 3],
+        TensorLayout::ChannelsFirst => [1, 3, height, width],
+      }
+    }
   }
 
   impl TractSegmenter {
     /// Loads an ONNX model (its bytes, e.g. read from the app's data files).
     pub fn new(onnx: &[u8], model: SegmentationModel) -> Result<Self, EffectsError> {
-      let shape = [1, model.height as usize, model.width as usize, 3];
-      let plan = tract_onnx::onnx()
-        .model_for_read(&mut std::io::Cursor::new(onnx))
-        .and_then(|graph| graph.with_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), shape)))
-        .and_then(|graph| graph.into_optimized())
-        .and_then(|graph| graph.into_runnable())
-        .map_err(segmentation_error)?;
+      let plan = load_plan(onnx, model).map_err(segmentation_error)?;
       Ok(Self {
         plan,
         model,
@@ -136,11 +153,26 @@ mod tract {
     }
   }
 
+  /// Exported models often name their batch dimension (`batch_size`): it stays symbolic while the
+  /// graph's facts are unified, then is fixed to 1 (the frames come one at a time).
+  fn load_plan(onnx: &[u8], model: SegmentationModel) -> TractResult<Plan> {
+    let graph = tract_onnx::onnx().model_for_read(&mut std::io::Cursor::new(onnx))?;
+    let batch = graph.symbols.sym("batch_size");
+    let [_, a, b, c] = model.input_shape().map(TDim::from);
+    let fact = InferenceFact::dt_shape(f32::datum_type(), tvec![batch.clone().into(), a, b, c]);
+    let typed = graph.with_input_fact(0, fact)?.into_typed()?;
+    let batch_of_one = HashMap::from([(batch, TDim::from(1))]);
+    typed
+      .set_symbols(&batch_of_one)?
+      .into_optimized()?
+      .into_runnable()
+  }
+
   impl PersonSegmenter for TractSegmenter {
     fn segment(&mut self, frame: &VideoFrame) -> Result<SegmentationMask, EffectsError> {
       let (width, height) = (self.model.width as usize, self.model.height as usize);
-      fill_rgb(frame, width, height, &mut self.rgb);
-      let input = Tensor::from_shape(&[1, height, width, 3], &self.rgb).map_err(segmentation_error)?;
+      fill_rgb(frame, width, height, self.model.layout, &mut self.rgb);
+      let input = Tensor::from_shape(&self.model.input_shape(), &self.rgb).map_err(segmentation_error)?;
       let outputs = self
         .plan
         .run(tvec!(input.into_tvalue()))
@@ -157,19 +189,27 @@ mod tract {
           self.model.person_channel
         )));
       }
-      let values: Vec<f32> = output
-        .iter()
-        .skip(self.model.person_channel)
-        .step_by(channels)
-        .copied()
-        .collect();
+      let values: Vec<f32> = match self.model.layout {
+        TensorLayout::ChannelsLast => output
+          .iter()
+          .skip(self.model.person_channel)
+          .step_by(channels)
+          .copied()
+          .collect(),
+        TensorLayout::ChannelsFirst => output
+          .iter()
+          .skip(self.model.person_channel * width * height)
+          .take(width * height)
+          .copied()
+          .collect(),
+      };
       SegmentationMask::new(self.model.width, self.model.height, values)
     }
   }
 
   /// Scales the I420 frame to the model size as RGB in 0..1 (nearest sample: the model is far
-  /// smaller than the frame).
-  fn fill_rgb(frame: &VideoFrame, width: usize, height: usize, out: &mut Vec<f32>) {
+  /// smaller than the frame), interleaved or as three planes per `layout`.
+  fn fill_rgb(frame: &VideoFrame, width: usize, height: usize, layout: TensorLayout, out: &mut Vec<f32>) {
     let resolution = frame.resolution();
     let (frame_width, frame_height) = (usize::from(resolution.width), usize::from(resolution.height));
     let (y_plane, u_plane, v_plane) = frame.planes();
@@ -194,6 +234,12 @@ mod tract {
         }
       }
     }
+    if layout == TensorLayout::ChannelsFirst {
+      let planar: Vec<f32> = (0..3)
+        .flat_map(|channel| out.iter().skip(channel).step_by(3).copied().collect::<Vec<_>>())
+        .collect();
+      *out = planar;
+    }
   }
 
   fn segmentation_error(error: impl std::fmt::Display) -> EffectsError {
@@ -202,7 +248,7 @@ mod tract {
 }
 
 #[cfg(feature = "segmentation")]
-pub use tract::{SegmentationModel, TractSegmenter};
+pub use tract::{SegmentationModel, TensorLayout, TractSegmenter};
 
 #[cfg(all(test, feature = "segmentation"))]
 mod tests {
@@ -219,6 +265,7 @@ mod tests {
     width: 8,
     height: 4,
     person_channel: 0,
+    layout: TensorLayout::ChannelsLast,
   };
 
   #[test]

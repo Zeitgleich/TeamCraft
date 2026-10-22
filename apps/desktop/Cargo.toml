@@ -36,6 +36,8 @@ secrecy.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "time", "sync", "macros"] }
 # System browser for the OIDC login (RFC 8252): the webview never shows the identity provider.
 tauri-plugin-opener = "2"
+# Push-to-talk while another app has focus (Windows, macOS, X11).
+tauri-plugin-global-shortcut = "2"
 # System notifications for mentions and direct messages (the UI decides what to show).
 tauri-plugin-notification = "2"
 # Refresh token in the OS keyring (Secret Service on Linux, Keychain on macOS).
@@ -45,11 +47,14 @@ reqwest = { workspace = true, features = ["form"] }
 oauth2 = { version = "5", default-features = false }
 url = "2"
 
-# Linux capture: the desktop portal (cameras, screens) and V4L2 cameras.
+# Linux capture: the desktop portal (cameras, screens) and V4L2 cameras; hardware encoding through
+# GStreamer's VA-API encoder.
 [target.'cfg(target_os = "linux")'.dependencies]
-teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire", "v4l2"] }
+teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire", "v4l2", "gstreamer"] }
 
-# macOS cameras (AVFoundation); untested.
+# macOS cameras (AVFoundation); untested. teamcraft-media's `gstreamer` feature also builds the
+# VideoToolbox encoder (`vtenc_h264`), but the dmg would then need GStreamer.framework bundled
+# (macOS has no system GStreamer), so it stays off here until that packaging exists.
 [target.'cfg(target_os = "macos")'.dependencies]
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfoundation"] }
 
@@ -61,3 +66,5 @@ integration = []
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["cookies"] }
+# Tests encode and decode without downloading Cisco's OpenH264 (release builds load that instead).
+teamcraft-media = { path = "../../crates/teamcraft-media", features = ["openh264-source"] }

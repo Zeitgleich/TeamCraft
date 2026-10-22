@@ -6,16 +6,17 @@
 //! fallback every platform has, and H.264 is decodable in every browser. Browsers use WebCodecs
 //! instead of this module.
 
+use openh264::Timestamp;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::encoder::{
   BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode, UsageType,
 };
 use openh264::formats::YUVSource;
-use openh264::{OpenH264API, Timestamp};
 use teamcraft_proto::{VideoCodec, VideoLayerInfo};
 use thiserror::Error;
 
 use crate::datagram::SimulcastLayer;
+use crate::openh264_library::{self, OpenH264LibraryError};
 use crate::video::{EncodedVideoFrame, VideoError, VideoFrame, VideoResolution};
 
 /// A keyframe at least this often, so receivers recover from losses without asking.
@@ -63,6 +64,15 @@ pub struct OpenH264Decoder {
   decoder: Decoder,
 }
 
+/// A hardware encoder that hands over to OpenH264 for good when it fails (a lost GPU, a driver
+/// error mid-call), with a keyframe so receivers recover right away.
+pub struct FallbackEncoder {
+  maybe_hardware: Option<Box<dyn VideoEncoder>>,
+  maybe_software: Option<OpenH264Encoder>,
+  layer: VideoLayerInfo,
+  content: VideoContent,
+}
+
 /// Encodes every simulcast layer of one track from the full-size frames, skipping layers no
 /// receiver needs (the SFU's `LayersNeeded`) and honouring keyframe requests per layer.
 pub struct SimulcastEncoder {
@@ -84,6 +94,8 @@ pub enum VideoCodecError {
   Frame(#[from] VideoError),
   #[error("layer {0} does not exist")]
   UnknownLayer(u8),
+  #[error(transparent)]
+  Library(#[from] OpenH264LibraryError),
 }
 
 impl OpenH264Encoder {
@@ -98,7 +110,7 @@ impl OpenH264Encoder {
       .usage_type(usage)
       .rate_control_mode(RateControlMode::Bitrate)
       .intra_frame_period(IntraFramePeriod::from_num_frames(KEYFRAME_INTERVAL_FRAMES));
-    let encoder = Encoder::with_api_config(OpenH264API::from_source(), config).map_err(codec_error)?;
+    let encoder = Encoder::with_api_config(openh264_library::api()?, config).map_err(codec_error)?;
     Ok(Self {
       encoder,
       resolution: VideoResolution {
@@ -143,7 +155,7 @@ impl VideoEncoder for OpenH264Encoder {
 impl OpenH264Decoder {
   pub fn new() -> Result<Self, VideoCodecError> {
     let decoder =
-      Decoder::with_api_config(OpenH264API::from_source(), DecoderConfig::new()).map_err(codec_error)?;
+      Decoder::with_api_config(openh264_library::api()?, DecoderConfig::new()).map_err(codec_error)?;
     Ok(Self { decoder })
   }
 }
@@ -164,6 +176,48 @@ impl VideoDecoder for OpenH264Decoder {
     copy_plane(picture.u(), u_stride, width / 2, height / 2, &mut data);
     copy_plane(picture.v(), v_stride, width / 2, height / 2, &mut data);
     Ok(Some(VideoFrame::new(resolution, timestamp_us, data)?))
+  }
+}
+
+impl FallbackEncoder {
+  pub fn new(hardware: Box<dyn VideoEncoder>, layer: &VideoLayerInfo, content: VideoContent) -> Self {
+    Self {
+      maybe_hardware: Some(hardware),
+      maybe_software: None,
+      layer: *layer,
+      content,
+    }
+  }
+}
+
+impl VideoEncoder for FallbackEncoder {
+  fn codec(&self) -> VideoCodec {
+    VideoCodec::H264
+  }
+
+  fn encode(
+    &mut self,
+    frame: &VideoFrame,
+    is_keyframe_forced: bool,
+  ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+    let mut is_switching = false;
+    if let Some(hardware) = &mut self.maybe_hardware {
+      match hardware.encode(frame, is_keyframe_forced) {
+        Ok(maybe_picture) => return Ok(maybe_picture),
+        Err(error) => {
+          tracing::warn!(%error, "hardware encoder failed; continuing in software");
+          self.maybe_hardware = None;
+          is_switching = true;
+        },
+      }
+    }
+    let software = match &mut self.maybe_software {
+      Some(software) => software,
+      None => self
+        .maybe_software
+        .insert(OpenH264Encoder::new(&self.layer, self.content)?),
+    };
+    software.encode(frame, is_keyframe_forced || is_switching)
   }
 }
 
@@ -281,6 +335,41 @@ impl std::fmt::Debug for EncodedPicture {
   }
 }
 
+/// An I420 frame as NV12 with the encoder's stride and slice height (rows padded with zeros).
+// Used by the hardware encoders (MediaCodec, GStreamer); tested on every platform.
+#[cfg_attr(not(any(target_os = "android", feature = "gstreamer")), allow(dead_code))]
+pub(crate) fn nv12_bytes(frame: &VideoFrame, stride: usize, slice_height: usize) -> Vec<u8> {
+  let width = usize::from(frame.resolution().width);
+  let height = usize::from(frame.resolution().height);
+  let chroma_width = width.div_ceil(2);
+  let chroma_height = height.div_ceil(2);
+  let mut nv12 = vec![0; stride * slice_height + stride * chroma_height];
+  let (luma, cb, cr) = frame.planes();
+  for row in 0..height {
+    nv12[row * stride..row * stride + width].copy_from_slice(&luma[row * width..(row + 1) * width]);
+  }
+  let chroma_start = stride * slice_height;
+  for row in 0..chroma_height {
+    let line = &mut nv12[chroma_start + row * stride..chroma_start + row * stride + 2 * chroma_width];
+    for column in 0..chroma_width {
+      line[2 * column] = cb[row * chroma_width + column];
+      line[2 * column + 1] = cr[row * chroma_width + column];
+    }
+  }
+  nv12
+}
+
+/// Whether an Annex B picture already carries its SPS (NAL type 7) up front.
+// Used by the Android MediaCodec encoder; tested on every platform.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn starts_with_sps(data: &[u8]) -> bool {
+  let header = match data {
+    [0, 0, 0, 1, header, ..] | [0, 0, 1, header, ..] => *header,
+    _ => return false,
+  };
+  header & 0x1f == 7
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -292,6 +381,10 @@ mod tests {
   };
 
   #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
   fn h264_round_trip_keeps_the_picture() {
     let layer = simulcast_layers(HD, 30, 2_000_000, 1)[0];
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
@@ -316,6 +409,10 @@ mod tests {
   }
 
   #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
   fn simulcast_encodes_needed_layers_and_keyframes_on_request() {
     let layers = simulcast_layers(HD, 30, 1_600_000, 3);
     let mut simulcast = SimulcastEncoder::new(&layers, |info| {
@@ -352,6 +449,27 @@ mod tests {
       simulcast.request_keyframe(7),
       Err(VideoCodecError::UnknownLayer(7))
     ));
+  }
+
+  #[test]
+  fn i420_frames_become_nv12_with_the_encoders_stride() {
+    // 4x2 frame: luma 0..8, one chroma row of two samples each.
+    let mut data: Vec<u8> = (0..8).collect();
+    data.extend([100, 101, 200, 201]);
+    let frame = VideoFrame::new(VideoResolution { width: 4, height: 2 }, 0, data).unwrap();
+    let nv12 = nv12_bytes(&frame, 6, 2);
+    assert_eq!(nv12.len(), 18);
+    assert_eq!(&nv12[0..6], &[0, 1, 2, 3, 0, 0]);
+    assert_eq!(&nv12[6..12], &[4, 5, 6, 7, 0, 0]);
+    assert_eq!(&nv12[12..16], &[100, 200, 101, 201]);
+  }
+
+  #[test]
+  fn sps_is_found_at_the_start_of_a_picture() {
+    assert!(starts_with_sps(&[0, 0, 0, 1, 0x67, 1]));
+    assert!(starts_with_sps(&[0, 0, 1, 0x27]));
+    assert!(!starts_with_sps(&[0, 0, 0, 1, 0x65]));
+    assert!(!starts_with_sps(&[]));
   }
 
   fn encode_frames(simulcast: &mut SimulcastEncoder, index: &mut u32, count: u32) -> Vec<EncodedVideoFrame> {

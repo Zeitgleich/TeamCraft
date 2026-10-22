@@ -5,20 +5,31 @@
 //! cameras when the portal isn't there. macOS: AVFoundation for cameras (untested); its screen
 //! share (ScreenCaptureKit) isn't there yet.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc as std_mpsc;
+
 use teamcraft_client_api::calls::BackgroundEffect as UiBackgroundEffect;
+use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{
   BackgroundEffect, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsPipeline,
   SegmentationModel, TractSegmenter,
 };
 use teamcraft_media::video::{VideoResolution, simulcast_layers};
 use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
+use teamcraft_media::video_codec::OpenH264Decoder;
+use teamcraft_media::video_jpeg::JpegTranscoder;
 use teamcraft_media::video_pipeline::FrameFilter;
-use teamcraft_proto::VideoLayerInfo;
-use tracing::{info, warn};
+use teamcraft_proto::{VideoCodec, VideoLayerInfo};
+use tracing::{debug, info, warn};
 
-/// The ONNX selfie segmentation model (MediaPipe's, landscape) for background effects; without
-/// it, effects are off.
+use super::VideoSink;
+
+/// Overrides the bundled segmentation model (development: a model fetched with
+/// `crates/teamcraft-media/models/fetch.sh`).
 const MODEL_VARIABLE: &str = "TEAMCRAFT_SEGMENTATION_MODEL";
+/// The bundled model, relative to the app's resources (tauri.models.conf.json).
+pub(crate) const BUNDLED_MODEL: &str = "models/selfie_segmentation_landscape.onnx";
 const CAMERA_FORMAT: CaptureFormat = CaptureFormat {
   resolution: VideoResolution {
     width: 1280,
@@ -110,9 +121,14 @@ pub(super) fn screen_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
   simulcast_layers(format.resolution, format.framerate, SCREEN_BITRATE_BPS, 1)
 }
 
-/// The effects filter for the camera, if a segmentation model and a GPU are available.
-pub(super) fn effects_filter(effect: UiBackgroundEffect) -> Option<(FrameFilter, EffectHandle)> {
-  let path = std::env::var(MODEL_VARIABLE).ok()?;
+/// The effects filter for the camera, if a segmentation model and a GPU are available. The model
+/// comes from `TEAMCRAFT_SEGMENTATION_MODEL`, else from the app's resources.
+pub(super) fn effects_filter(
+  effect: UiBackgroundEffect,
+  maybe_bundled_model: Option<&Path>,
+) -> Option<(FrameFilter, EffectHandle)> {
+  let path = model_path(maybe_bundled_model)?;
+  let path = path.display().to_string();
   let model = match std::fs::read(&path) {
     Ok(model) => model,
     Err(error) => {
@@ -135,6 +151,99 @@ pub(super) fn effects_filter(effect: UiBackgroundEffect) -> Option<(FrameFilter,
     },
   };
   Some(EffectsPipeline::new(Box::new(segmenter), compositor, media_effect(effect)).into_frame_filter())
+}
+
+fn model_path(maybe_bundled_model: Option<&Path>) -> Option<PathBuf> {
+  if let Ok(path) = std::env::var(MODEL_VARIABLE) {
+    return Some(PathBuf::from(path));
+  }
+  let bundled = maybe_bundled_model.filter(|path| path.exists());
+  if bundled.is_none() {
+    info!("no segmentation model bundled; background effects are off");
+  }
+  bundled.map(Path::to_path_buf)
+}
+
+/// Version of the frame message the webview decodes (see [`video_message`]).
+const VIDEO_MESSAGE_VERSION: u8 = 1;
+const KEYFRAME_FLAG: u8 = 0x01;
+const JPEG_FLAG: u8 = 0x02;
+const CODEC_H264: u8 = 1;
+const CODEC_VP9: u8 = 2;
+const CODEC_JPEG: u8 = 3;
+
+/// Sends a watched track's frames as they arrive, for the webview's WebCodecs decoder.
+pub(super) fn h264_sink(send: impl Fn(Vec<u8>) + Send + Sync + 'static) -> VideoSink {
+  Arc::new(move |frame| send(video_message(frame)))
+}
+
+/// Decodes a watched track on a thread of its own and sends JPEG images at a reduced rate, for
+/// webviews without WebCodecs. The thread ends when the sink is dropped (unwatch, call end).
+pub(super) fn jpeg_sink(send: impl Fn(Vec<u8>) + Send + 'static) -> VideoSink {
+  let (frames, queue) = std_mpsc::channel::<ReceivedVideoFrame>();
+  let spawned = std::thread::Builder::new()
+    .name("teamcraft-video-jpeg".into())
+    .spawn(move || transcode_to_jpeg(&queue, &send));
+  if let Err(error) = spawned {
+    warn!(%error, "no thread for JPEG video; the track stays blank");
+  }
+  // Unbounded on purpose: dropping H.264 frames would break decoding until the next keyframe.
+  // The sender only fails once the thread is gone; then there is nobody to decode for.
+  Arc::new(move |frame| drop(frames.send(frame.clone())))
+}
+
+fn transcode_to_jpeg(queue: &std_mpsc::Receiver<ReceivedVideoFrame>, send: &dyn Fn(Vec<u8>)) {
+  let decoder = match OpenH264Decoder::new() {
+    Ok(decoder) => decoder,
+    Err(error) => {
+      warn!(%error, "no H.264 decoder for JPEG video");
+      return;
+    },
+  };
+  let mut transcoder = JpegTranscoder::new(Box::new(decoder));
+  while let Ok(frame) = queue.recv() {
+    let timestamp_us = timestamp_us(&frame);
+    match transcoder.push(&frame.data, timestamp_us) {
+      Ok(Some(jpeg)) => send(message(
+        KEYFRAME_FLAG | JPEG_FLAG,
+        CODEC_JPEG,
+        &frame,
+        timestamp_us,
+        &jpeg,
+      )),
+      Ok(None) => {},
+      // A broken frame: later ones recover with the next keyframe.
+      Err(error) => debug!(%error, "frame not decodable"),
+    }
+  }
+}
+
+/// One received frame for the webview, as a single binary channel message:
+/// `[version u8][flags u8: bit 0 keyframe, bit 1 JPEG][codec u8: 1 H.264, 2 VP9, 3 JPEG, 0 other]`
+/// `[reserved u8][stream id u32 BE][timestamp µs u64 BE]` and then the payload (H.264 in Annex B,
+/// or one complete JPEG image).
+pub(super) fn video_message(frame: &ReceivedVideoFrame) -> Vec<u8> {
+  let codec = match frame.codec {
+    VideoCodec::H264 => CODEC_H264,
+    VideoCodec::Vp9 => CODEC_VP9,
+    _ => 0,
+  };
+  let flags = if frame.is_keyframe { KEYFRAME_FLAG } else { 0 };
+  message(flags, codec, frame, timestamp_us(frame), &frame.data)
+}
+
+fn message(flags: u8, codec: u8, frame: &ReceivedVideoFrame, timestamp_us: u64, payload: &[u8]) -> Vec<u8> {
+  let mut message = Vec::with_capacity(16 + payload.len());
+  message.extend_from_slice(&[VIDEO_MESSAGE_VERSION, flags, codec, 0]);
+  message.extend_from_slice(&frame.stream_id.0.to_be_bytes());
+  message.extend_from_slice(&timestamp_us.to_be_bytes());
+  message.extend_from_slice(payload);
+  message
+}
+
+/// RTP video clock (90 kHz) to microseconds.
+fn timestamp_us(frame: &ReceivedVideoFrame) -> u64 {
+  u64::from(frame.timestamp.0) * 1_000_000 / 90_000
 }
 
 /// The UI's effect as the media layer's.
@@ -164,11 +273,80 @@ mod tests {
   }
 
   #[test]
+  fn video_messages_have_a_fixed_header() {
+    use teamcraft_media::datagram::SimulcastLayer;
+    use teamcraft_media::rtp::RtpTimestamp;
+    use teamcraft_proto::{DeviceId, Id, MediaStreamId, Snowflake};
+
+    let frame = ReceivedVideoFrame {
+      sender: DeviceId::from_snowflake(Snowflake::new(2).unwrap()),
+      stream_id: MediaStreamId(0x0102_0304),
+      codec: VideoCodec::H264,
+      layer: SimulcastLayer::BASE,
+      timestamp: RtpTimestamp(90_000),
+      is_keyframe: true,
+      data: vec![0, 0, 0, 1, 0x65],
+    };
+    assert_eq!(
+      video_message(&frame),
+      vec![
+        1, 1, 1, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0x0f, 0x42, 0x40, 0, 0, 0, 1, 0x65
+      ]
+    );
+  }
+
+  #[test]
+  fn jpeg_sinks_send_decoded_images() {
+    use std::time::Duration;
+
+    use teamcraft_media::datagram::SimulcastLayer;
+    use teamcraft_media::rtp::RtpTimestamp;
+    use teamcraft_media::video_capture::test_pattern;
+    use teamcraft_media::video_codec::{OpenH264Encoder, VideoContent, VideoEncoder};
+    use teamcraft_proto::{DeviceId, Id, MediaStreamId, Snowflake};
+
+    let layer = screen_layers(CaptureFormat {
+      resolution: VideoResolution {
+        width: 320,
+        height: 180,
+      },
+      framerate: 15,
+    })[0];
+    let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
+    let picture = encoder
+      .encode(&test_pattern(layer_resolution(&layer), 0, 0).unwrap(), true)
+      .unwrap()
+      .unwrap();
+    let (images, received) = std_mpsc::channel();
+    let sink = jpeg_sink(move |message| drop(images.send(message)));
+    sink(&ReceivedVideoFrame {
+      sender: DeviceId::from_snowflake(Snowflake::new(2).unwrap()),
+      stream_id: MediaStreamId(7),
+      codec: VideoCodec::H264,
+      layer: SimulcastLayer::BASE,
+      timestamp: RtpTimestamp(0),
+      is_keyframe: true,
+      data: picture.data,
+    });
+
+    let message = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(&message[..4], &[1, KEYFRAME_FLAG | JPEG_FLAG, CODEC_JPEG, 0]);
+    assert_eq!(&message[16..18], &[0xff, 0xd8]);
+  }
+
+  #[test]
   fn ui_effects_map_to_media_effects() {
     assert_eq!(
       media_effect(UiBackgroundEffect::BlurLight),
       BackgroundEffect::Blur(BlurStrength::Light)
     );
     assert_eq!(media_effect(UiBackgroundEffect::None), BackgroundEffect::None);
+  }
+
+  fn layer_resolution(layer: &VideoLayerInfo) -> VideoResolution {
+    VideoResolution {
+      width: layer.width,
+      height: layer.height,
+    }
   }
 }

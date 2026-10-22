@@ -5,7 +5,7 @@
 //! table is a later optimization (SPIKE.md).
 
 use std::{
-  collections::HashMap,
+  collections::{HashMap, HashSet},
   sync::{Arc, Mutex, MutexGuard, PoisonError},
   time::Instant,
 };
@@ -13,7 +13,7 @@ use std::{
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
   Base64Bytes, CallEvent, CallId, CallParticipant, DeviceId, MediaCapabilities, MediaStreamId,
-  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  SfuControlAction, TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::UnboundedSender;
@@ -28,10 +28,23 @@ use crate::{
   signaling::Outgoing,
 };
 
+/// How long a closing participant has to receive the host's event before the connection drops.
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+/// QUIC application close code for connections a meeting host ended.
+const CLOSED_BY_HOST: u32 = 0x4801;
+
 /// All rooms of this SFU.
 pub struct Rooms {
   config: SfuConfig,
   rooms: Mutex<HashMap<CallId, Arc<Room>>>,
+  /// Host controls that outlive a room's participants: locked calls, removed users.
+  control: Mutex<ControlState>,
+}
+
+#[derive(Default)]
+struct ControlState {
+  locked: HashSet<CallId>,
+  removed: HashSet<(CallId, UserId)>,
 }
 
 /// One call.
@@ -68,6 +81,12 @@ pub enum RoomError {
   Forward(#[from] ForwardError),
   #[error(transparent)]
   Dave(#[from] DaveCoordinatorError),
+  #[error("the call is locked")]
+  Locked,
+  #[error("the meeting host removed this user from the call")]
+  Removed,
+  #[error("call {0} is not on this SFU")]
+  CallNotFound(CallId),
 }
 
 impl Rooms {
@@ -75,7 +94,45 @@ impl Rooms {
     Self {
       config,
       rooms: Mutex::new(HashMap::new()),
+      control: Mutex::new(ControlState::default()),
     }
+  }
+
+  /// Applies a meeting host's action (already authorized by the server).
+  pub fn control(
+    &self,
+    call_id: CallId,
+    by_user_id: UserId,
+    action: &SfuControlAction,
+  ) -> Result<(), RoomError> {
+    let room = lock(&self.rooms)
+      .get(&call_id)
+      .cloned()
+      .ok_or(RoomError::CallNotFound(call_id))?;
+    info!(call_id = %call_id, by_user_id = %by_user_id, ?action, "host control");
+    match action {
+      SfuControlAction::MuteAll => lock(&room.state).broadcast(CallEvent::MutedByHost { by_user_id }),
+      SfuControlAction::RemoveParticipant { user_id } => {
+        lock(&self.control).removed.insert((call_id, *user_id));
+        room.close_user(*user_id, CallEvent::RemovedByHost { by_user_id });
+      },
+      SfuControlAction::Lock => {
+        lock(&self.control).locked.insert(call_id);
+      },
+      SfuControlAction::Unlock => {
+        lock(&self.control).locked.remove(&call_id);
+      },
+      SfuControlAction::End => {
+        {
+          let mut control = lock(&self.control);
+          control.locked.remove(&call_id);
+          control.removed.retain(|(call, _)| *call != call_id);
+        }
+        room.close_everyone(CallEvent::EndedByHost { by_user_id });
+      },
+      SfuControlAction::Unknown => {},
+    }
+    Ok(())
   }
 
   /// Adds a participant to a call, creating the room on first join.
@@ -86,6 +143,15 @@ impl Rooms {
     handle: ParticipantHandle,
   ) -> Result<Arc<Room>, RoomError> {
     let call_id = grant.call_id;
+    {
+      let control = lock(&self.control);
+      if control.removed.contains(&(call_id, grant.user_id)) {
+        return Err(RoomError::Removed);
+      }
+      if control.locked.contains(&call_id) {
+        return Err(RoomError::Locked);
+      }
+    }
     // The rooms lock is held across the join so `leave` can't drop the room in between.
     // Lock order everywhere: rooms, then room state.
     let mut rooms = lock(&self.rooms);
@@ -114,6 +180,10 @@ impl Rooms {
       // Only drop the room if no one rejoined in the meantime.
       if rooms.get(&room.call_id).is_some_and(|current| current.is_empty()) {
         rooms.remove(&room.call_id);
+        // Host controls end with the call.
+        let mut control = lock(&self.control);
+        control.locked.remove(&room.call_id);
+        control.removed.retain(|(call, _)| *call != room.call_id);
         info!(call_id = %room.call_id, "room closed");
       }
     }
@@ -339,6 +409,29 @@ impl Room {
   fn is_empty(&self) -> bool {
     lock(&self.state).participants.is_empty()
   }
+
+  /// Tells the user's devices why, then closes their connections (the sessions then leave as
+  /// usual: DAVE re-keys and the server hears about it).
+  fn close_user(&self, user_id: UserId, event: CallEvent) {
+    let state = lock(&self.state);
+    let handles: Vec<ParticipantHandle> = state
+      .participants
+      .values()
+      .filter(|participant| participant.user_id == user_id)
+      .map(|participant| participant.handle.clone())
+      .collect();
+    close_after_event(handles, event);
+  }
+
+  fn close_everyone(&self, event: CallEvent) {
+    let state = lock(&self.state);
+    let handles = state
+      .participants
+      .values()
+      .map(|participant| participant.handle.clone())
+      .collect();
+    close_after_event(handles, event);
+  }
 }
 
 impl RoomState {
@@ -412,6 +505,22 @@ impl Participant {
       audio_stream_id: MediaStreamId(self.audio_stream_id.0),
     }
   }
+}
+
+/// Sends `event` to each handle and closes the connections a moment later, so the event is
+/// written first.
+fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent) {
+  for handle in &handles {
+    send(handle, event.clone());
+  }
+  tokio::spawn(async move {
+    tokio::time::sleep(CLOSE_GRACE).await;
+    for handle in handles {
+      handle
+        .connection
+        .close(CLOSED_BY_HOST.into(), b"closed by the meeting host");
+    }
+  });
 }
 
 fn send(handle: &ParticipantHandle, event: CallEvent) {

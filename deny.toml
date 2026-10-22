@@ -55,6 +55,16 @@ allow = [
   "Unicode-3.0",
   "Zlib",
 ]
+# Not a crate, so not listed: GStreamer itself (LGPL-2.1-or-later, hardware video encoding) is linked
+# dynamically from the system through gstreamer-rs (MIT/Apache-2.0); no GPL plugin is used.
+# jpeg-encoder ports libjpeg's tables: IJG is permissive and GPL-compatible; binaries must credit
+# the Independent JPEG Group, which crates/teamcraft-media/NOTICE.md does.
+# libbz2-rs-sys (bzip2's pure-Rust backend) unpacks Cisco's OpenH264 download: the bzip2 license is
+# BSD-style; crates/teamcraft-media/NOTICE.md carries its notice.
+exceptions = [
+  { crate = "jpeg-encoder", allow = ["IJG"] },
+  { crate = "libbz2-rs-sys", allow = ["bzip2-1.0.6"] },
+]
 
 [bans]
 multiple-versions = "warn"

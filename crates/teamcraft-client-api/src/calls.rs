@@ -144,6 +144,52 @@ pub struct ActiveCall {
   /// The effect behind this device's camera image.
   #[serde(default)]
   pub background: BackgroundEffect,
+  /// The meeting host who last muted everyone (cleared when the user unmutes).
+  #[serde(default)]
+  pub maybe_muted_by_host: Option<UserId>,
+}
+
+/// Why the last call ended other than by leaving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum CallEndReason {
+  RemovedByHost { by: UserId },
+  EndedByHost { by: UserId },
+}
+
+/// Push-to-talk: the microphone is open only while the shortcut is held.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushToTalk {
+  pub is_enabled: bool,
+  /// Accelerator string, e.g. `CommandOrControl+Shift+Space`.
+  pub shortcut: String,
+  /// The shortcut works while another app has focus. `false` where the desktop doesn't allow
+  /// global shortcuts (e.g. Wayland): the UI then handles the key inside its window, like the
+  /// browser does.
+  pub is_global: bool,
+  /// The shortcut is held right now.
+  pub is_talking: bool,
+}
+
+impl Default for PushToTalk {
+  fn default() -> Self {
+    Self {
+      is_enabled: false,
+      shortcut: "CommandOrControl+Shift+Space".into(),
+      is_global: false,
+      is_talking: false,
+    }
+  }
+}
+
+/// Another device's video track in the active call, to watch (desktop: `call_watch_video`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteVideoTrack {
+  pub stream_id: teamcraft_proto::MediaStreamId,
+  pub user: UserId,
+  pub kind: teamcraft_proto::VideoTrackKind,
+  /// (width, height) of each simulcast layer, lowest first; pick `max_layer` by tile size.
+  pub layers: Vec<(u16, u16)>,
 }
 
 /// A call running in a conversation (server roster), whether or not this device is in it.

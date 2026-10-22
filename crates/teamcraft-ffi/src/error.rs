@@ -32,6 +32,9 @@ pub enum TeamCraftError {
   /// The engine thread is gone (the app closed the handle).
   #[error("the engine has stopped")]
   EngineStopped,
+  /// The call couldn't be joined or broke (connection, audio device, key verification).
+  #[error("call: {0}")]
+  Call(String),
   /// Anything else the core reported.
   #[error("{0}")]
   Core(String),

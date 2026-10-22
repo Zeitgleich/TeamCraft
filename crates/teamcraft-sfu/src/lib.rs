@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod control;
 pub mod dave_coordinator;
 pub mod dev_page;
 pub mod forwarding;

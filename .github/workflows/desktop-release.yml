@@ -33,15 +33,18 @@ jobs:
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev
           libayatana-appindicator3-dev patchelf rpm libfuse2t64
           libasound2-dev meson ninja-build libclang-dev libpipewire-0.3-dev libspa-0.2-dev
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Trunk (builds the UI bundle)
         uses: taiki-e/install-action@v2
         with:
           tool: trunk
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
+      - name: Segmentation model (background effects; not in git)
+        run: crates/teamcraft-media/models/fetch.sh
       - name: Build packages
         working-directory: apps/desktop
-        run: cargo tauri build --bundles deb,rpm,appimage
+        run: cargo tauri build --config tauri.models.conf.json --bundles deb,rpm,appimage
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -108,9 +111,11 @@ jobs:
           tool: trunk
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
+      - name: Segmentation model (background effects; not in git)
+        run: crates/teamcraft-media/models/fetch.sh
       - name: Build dmg
         working-directory: apps/desktop
-        run: cargo tauri build --target ${{ matrix.target }} --bundles dmg
+        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles dmg
         # Signing and notarization are left out on purpose (the dmg is unsigned). To enable them,
         # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
         #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,

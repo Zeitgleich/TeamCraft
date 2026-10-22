@@ -179,6 +179,7 @@ mod tests {
         is_camera_on: false,
         is_sharing_screen: false,
         background: BackgroundEffect::default(),
+        maybe_muted_by_host: None,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {
@@ -187,6 +188,9 @@ mod tests {
         is_ringing: false,
       }],
       devices: MediaDevices::default(),
+      video_tracks: Vec::new(),
+      push_to_talk: Default::default(),
+      maybe_end_reason: None,
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());

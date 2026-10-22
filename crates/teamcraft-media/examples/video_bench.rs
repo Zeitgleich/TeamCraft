@@ -2,7 +2,8 @@
 //! given a model, segmentation.
 //!
 //! ```sh
-//! cargo run --release -p teamcraft-media --example video_bench --features native,segmentation
+//! cargo run --release -p teamcraft-media --example video_bench --features openh264-source,segmentation
+//! # with hardware encoding: --features openh264-source,segmentation,gstreamer
 //! TEAMCRAFT_SEGMENTATION_MODEL=selfie_segmentation_landscape.onnx cargo run --release ...
 //! ```
 
@@ -41,6 +42,27 @@ fn main() -> anyhow::Result<()> {
       simulcast.encode(frame).map(drop).context("encode")
     })?,
   );
+
+  #[cfg(feature = "gstreamer")]
+  {
+    use teamcraft_media::video_gstreamer::GstreamerEncoder;
+    if GstreamerEncoder::new(&layers[0], VideoContent::Camera).is_some() {
+      let mut hardware = SimulcastEncoder::new(&layers, |layer| {
+        GstreamerEncoder::new(layer, VideoContent::Camera)
+          .map(|encoder| Box::new(encoder) as Box<dyn VideoEncoder>)
+          .context("hardware encoder")
+          .map_err(|error| teamcraft_media::video_codec::VideoCodecError::Codec(error.to_string()))
+      })?;
+      report(
+        "H.264 simulcast encode (3 layers, hardware via GStreamer)",
+        time(&frames, |frame| {
+          hardware.encode(frame).map(drop).context("encode")
+        })?,
+      );
+    } else {
+      info!("no hardware encoder through GStreamer");
+    }
+  }
 
   let mut compositor = pollster::block_on(Compositor::new(EffectsConfig::default()))?;
   let mask = EllipseSegmenter {

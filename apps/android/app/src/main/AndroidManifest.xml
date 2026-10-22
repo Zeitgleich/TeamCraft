@@ -4,6 +4,12 @@
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- Calls: Telecom integration (Core-Telecom), the microphone and the ongoing-call service. -->
+  <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
   <application
     android:name=".TeamCraftApplication"
@@ -44,6 +50,33 @@
         <action android:name="org.unifiedpush.android.connector.TEMP_UNAVAILABLE" />
       </intent-filter>
     </receiver>
+
+    <!-- In-call screen; shown over the lock screen for answered calls. -->
+    <activity
+      android:name=".calls.CallActivity"
+      android:exported="false"
+      android:launchMode="singleTask"
+      android:showWhenLocked="true"
+      android:turnScreenOn="true" />
+
+    <service
+      android:name=".calls.CallService"
+      android:exported="false"
+      android:foregroundServiceType="phoneCall|microphone" />
+
+    <!-- Android Auto calling: lists conversations to call (Car App Library, category CALLING). -->
+    <service
+      android:name=".calls.CarCallService"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="androidx.car.app.CarAppService" />
+        <category android:name="androidx.car.app.category.CALLING" />
+      </intent-filter>
+    </service>
+
+    <meta-data
+      android:name="androidx.car.app.minCarApiLevel"
+      android:value="1" />
 
     <!-- Android Auto reads and answers messaging notifications. -->
     <meta-data

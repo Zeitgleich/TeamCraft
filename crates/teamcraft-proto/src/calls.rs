@@ -168,6 +168,18 @@ pub enum CallEvent {
   TransportFeedback {
     feedback: TransportFeedback,
   },
+  /// The meeting host muted everyone; clients mute their microphone (and may unmute).
+  MutedByHost {
+    by_user_id: UserId,
+  },
+  /// The meeting host removed this user; the SFU closes the connection right after.
+  RemovedByHost {
+    by_user_id: UserId,
+  },
+  /// The meeting host ended the call for everyone; the SFU closes the connection right after.
+  EndedByHost {
+    by_user_id: UserId,
+  },
   #[serde(other)]
   Unknown,
 }

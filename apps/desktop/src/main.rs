@@ -14,11 +14,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use tauri::path::BaseDirectory;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{AuthService, DesktopConfig, KeyringStore};
-use crate::calls::{CALL_CHANGED_EVENT, CallHost};
+use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, MediaFiles};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
 
@@ -38,6 +39,7 @@ fn main() -> anyhow::Result<()> {
 
   tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
     .manage(service)
     .manage(CoreHost::new(config, tokens))
@@ -48,7 +50,11 @@ fn main() -> anyhow::Result<()> {
           tracing::debug!(%error, "could not notify the webview");
         }
       });
-      app.manage(Arc::new(CallHost::new(notify)));
+      let files = MediaFiles {
+        codec_directory: app.path().app_data_dir()?.join("codecs"),
+        maybe_segmentation_model: app.path().resolve(BUNDLED_MODEL, BaseDirectory::Resource).ok(),
+      };
+      app.manage(Arc::new(CallHost::new(notify, files)));
       create_main_window(app)?;
       Ok(())
     })
@@ -77,6 +83,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,
+      calls::commands::call_watch_video,
+      calls::commands::call_unwatch_video,
       notifications::notify_user,
     ])
     .run(tauri::generate_context!())

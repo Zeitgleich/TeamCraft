@@ -9,7 +9,9 @@ use std::{
   time::{Duration, Instant},
 };
 
-use teamcraft_proto::{Base64Bytes, CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode};
+use teamcraft_proto::{
+  Base64Bytes, CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SfuControlRequest,
+};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -47,6 +49,12 @@ struct Shared {
   rooms: Rooms,
   verifier: Arc<dyn JoinTokenVerifier>,
   reporter: Arc<dyn ParticipantReporter>,
+}
+
+/// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
+#[derive(Clone)]
+pub struct SfuControl {
+  shared: Arc<Shared>,
 }
 
 /// One joined participant's session.
@@ -128,6 +136,13 @@ impl Sfu {
     self.endpoint.local_addr().map_err(SfuError::Bind)
   }
 
+  /// A handle for host controls; take it after [`Self::with_reporter`] and before [`Self::run`].
+  pub fn control(&self) -> SfuControl {
+    SfuControl {
+      shared: Arc::clone(&self.shared),
+    }
+  }
+
   /// SHA-256 of the leaf certificate, for `serverCertificateHashes` in browsers.
   pub fn certificate_hash(&self) -> Sha256Digest {
     self.certificate_hash.clone()
@@ -192,7 +207,12 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   let room = match shared.rooms.join(grant, capabilities, handle) {
     Ok(room) => room,
     Err(error) => {
-      reject(&mut send, ErrorCode::AlreadyJoined, &error.to_string()).await;
+      let code = match error {
+        RoomError::Locked => ErrorCode::CallLocked,
+        RoomError::Removed => ErrorCode::RemovedFromCall,
+        _ => ErrorCode::AlreadyJoined,
+      };
+      reject(&mut send, code, &error.to_string()).await;
       return Err(error.into());
     },
   };
@@ -209,6 +229,15 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   shared.rooms.leave(&session.room, grant.device_id);
   shared.reporter.left(grant);
   result
+}
+
+impl SfuControl {
+  pub fn apply(&self, request: &SfuControlRequest) -> Result<(), RoomError> {
+    self
+      .shared
+      .rooms
+      .control(request.call_id, request.by_user_id, &request.action)
+  }
 }
 
 impl ParticipantSession {

@@ -11,7 +11,10 @@ use crate::actions::{
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use crate::backend::{ChatBackend, SearchBackend};
-use crate::calls::{ActiveCall, BackgroundEffect, CallRequest, IncomingCall, MediaDevices, RunningCall};
+use crate::calls::{
+  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, MediaDevices, PushToTalk,
+  RemoteVideoTrack, RunningCall,
+};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
   User, UserId,
@@ -33,6 +36,14 @@ pub struct CallSnapshot {
   /// Calls running in the user's conversations.
   pub running: Vec<RunningCall>,
   pub devices: MediaDevices,
+  /// Video of others in the active call.
+  #[serde(default)]
+  pub video_tracks: Vec<RemoteVideoTrack>,
+  #[serde(default)]
+  pub push_to_talk: PushToTalk,
+  /// Set when the meeting host removed the user or ended the call; cleared on the next join.
+  #[serde(default)]
+  pub maybe_end_reason: Option<CallEndReason>,
 }
 
 /// Something the user did in or about a call.
@@ -71,6 +82,17 @@ pub enum CallAction {
   },
   SetBackgroundEffect {
     effect: BackgroundEffect,
+  },
+  /// Push-to-talk on or off; `maybe_shortcut` changes the shortcut (desktop).
+  SetPushToTalk {
+    is_enabled: bool,
+    #[serde(default)]
+    maybe_shortcut: Option<String>,
+  },
+  /// The push-to-talk key went down or up inside the window (browser, or desktops without global
+  /// shortcuts).
+  SetTalking {
+    is_talking: bool,
   },
   /// Asks the system for a screen or window and shares it as its own stream.
   StartScreenShare,

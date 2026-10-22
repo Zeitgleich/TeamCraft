@@ -104,6 +104,9 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.appauth)
   implementation(libs.unifiedpush.connector)
+  // Calls: Telecom integration and Android Auto calling.
+  implementation(libs.androidx.core.telecom)
+  implementation(libs.androidx.car.app)
   // UniFFI's Kotlin bindings call the Rust library through JNA.
   implementation("${libs.jna.get()}@aar")
   "fullImplementation"(libs.firebase.messaging)

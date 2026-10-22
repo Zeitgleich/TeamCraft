@@ -295,9 +295,14 @@ async fn run_client(
   ));
   let (encrypted_frame_bytes, datagram_bytes) =
     send_frames(&connection, &state, StreamId(audio_stream_id), level_dbov, start).await;
-  // Everyone has sent; take the speaker set before any client leaves and changes it.
+  // Everyone has sent; take the speaker set and the privacy code before any client leaves: a leave
+  // rekeys the group, so a code read later may already belong to the next epoch.
   ready.wait().await;
-  let active_speakers = state.lock().unwrap().active_speakers.clone();
+  let (active_speakers, privacy_code) = {
+    let state = state.lock().unwrap();
+    let code = state.dave.maybe_privacy_code().unwrap_or_default().to_owned();
+    (state.active_speakers.clone(), code)
+  };
   ready.wait().await;
   // Wait for every audible sender's last frame; datagrams may be lost, so give up after a while.
   let expected_senders = audible_senders_except(participant_id);
@@ -317,13 +322,6 @@ async fn run_client(
     decrypt_failures,
     latencies,
   } = std::mem::take(&mut *results.lock().unwrap());
-  let privacy_code = state
-    .lock()
-    .unwrap()
-    .dave
-    .maybe_privacy_code()
-    .unwrap_or_default()
-    .to_owned();
   ClientReport {
     participant_id,
     decrypted_per_sender,

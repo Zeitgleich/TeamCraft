@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub use compositor::Compositor;
 pub use segmentation::{EllipseSegmenter, PersonSegmenter, SegmentationMask};
 #[cfg(feature = "segmentation")]
-pub use segmentation::{SegmentationModel, TractSegmenter};
+pub use segmentation::{SegmentationModel, TensorLayout, TractSegmenter};
 use thiserror::Error;
 
 use crate::video::{VideoError, VideoFrame};

@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.teamcraft.android.auth.AuthRepository
+import org.teamcraft.android.calls.CallController
 import org.teamcraft.android.core.CoreRepository
 import org.teamcraft.android.notifications.MessageNotifier
 import org.teamcraft.android.push.PushManager
@@ -22,6 +23,7 @@ class AppGraph(context: Context) {
   val core = CoreRepository(context, auth)
   val notifier = MessageNotifier(context)
   val push = PushManager(context, core, notifier, scope)
+  val calls = CallController(context, core, scope)
 }
 
 class TeamCraftApplication : Application() {
@@ -43,7 +45,10 @@ class TeamCraftApplication : Application() {
         if (!graph.auth.isSignedIn.value) return@launch
         runCatching {
           val core = graph.core.core()
-          if (core.accountState() is AccountState.Ready) core.start()
+          if (core.accountState() is AccountState.Ready) {
+            core.start()
+            graph.calls.start()
+          }
         }
       }
     }

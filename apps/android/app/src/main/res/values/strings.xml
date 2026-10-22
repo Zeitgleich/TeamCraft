@@ -76,4 +76,23 @@
     <item quantity="one">%d reply</item>
     <item quantity="other">%d replies</item>
   </plurals>
+  <!-- Calls -->
+  <string name="call_channel">Calls</string>
+  <string name="call_ongoing">TeamCraft call</string>
+  <string name="call_connecting">Connecting…</string>
+  <string name="call_securing">Securing the call…</string>
+  <string name="call_secured">End-to-end encrypted</string>
+  <string name="call_ended">Call ended</string>
+  <string name="call_failed">The call was interrupted.</string>
+  <string name="call_removed_by_host">The host removed you from the call.</string>
+  <string name="call_ended_by_host">The host ended the call for everyone.</string>
+  <string name="call_privacy_code_hint">Compare this code with the others to make sure nobody listens in:</string>
+  <string name="call_mute">Mute</string>
+  <string name="call_unmute">Unmute</string>
+  <string name="call_hang_up">Hang up</string>
+  <string name="call_car_title">Call</string>
+  <plurals name="call_participants">
+    <item quantity="one">%d other person in the call</item>
+    <item quantity="other">%d other people in the call</item>
+  </plurals>
 </resources>

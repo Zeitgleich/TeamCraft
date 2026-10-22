@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <automotiveApp>
   <uses name="notification" />
+  <!-- Calling (CarCallService) is a Car App Library app. -->
+  <uses name="template" />
 </automotiveApp>

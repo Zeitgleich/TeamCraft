@@ -75,4 +75,23 @@
     <item quantity="one">%d Antwort</item>
     <item quantity="other">%d Antworten</item>
   </plurals>
+  <!-- Calls -->
+  <string name="call_channel">Anrufe</string>
+  <string name="call_ongoing">TeamCraft-Anruf</string>
+  <string name="call_connecting">Verbinde…</string>
+  <string name="call_securing">Anruf wird abgesichert…</string>
+  <string name="call_secured">Ende-zu-Ende-verschlüsselt</string>
+  <string name="call_ended">Anruf beendet</string>
+  <string name="call_failed">Der Anruf wurde unterbrochen.</string>
+  <string name="call_removed_by_host">Der Gastgeber hat dich aus dem Anruf entfernt.</string>
+  <string name="call_ended_by_host">Der Gastgeber hat den Anruf für alle beendet.</string>
+  <string name="call_privacy_code_hint">Vergleiche diesen Code mit den anderen, damit niemand mithört:</string>
+  <string name="call_mute">Stumm</string>
+  <string name="call_unmute">Stumm aus</string>
+  <string name="call_hang_up">Auflegen</string>
+  <string name="call_car_title">Anrufen</string>
+  <plurals name="call_participants">
+    <item quantity="one">%d weitere Person im Anruf</item>
+    <item quantity="other">%d weitere Personen im Anruf</item>
+  </plurals>
 </resources>

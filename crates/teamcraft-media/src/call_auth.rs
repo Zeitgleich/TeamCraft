@@ -14,7 +14,7 @@ use std::time::Duration;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_crypto::ids::DeviceId as CryptoDeviceId;
-use teamcraft_proto::{CallId, DeviceId, Id};
+use teamcraft_proto::{CallId, DeviceId, Id, Snowflake};
 use thiserror::Error;
 use web_time::{SystemTime, UNIX_EPOCH};
 
@@ -56,6 +56,8 @@ pub enum CallKeyError {
   Binding(#[from] CallBindingError),
   #[error("the system clock is before 1970")]
   Clock,
+  #[error("device id {0} is not a valid snowflake")]
+  InvalidDeviceId(u64),
 }
 
 impl DeviceCallKeyAuthenticator {
@@ -63,6 +65,23 @@ impl DeviceCallKeyAuthenticator {
   /// roster), keyed by device id.
   pub fn new(signer: Arc<dyn CallBindingSigner>, devices: HashMap<DeviceId, VerifiedDevice>) -> Self {
     Self { signer, devices }
+  }
+
+  /// From the verified certificates as the client core lists them (any order).
+  pub fn from_verified(
+    signer: Arc<dyn CallBindingSigner>,
+    devices: Vec<VerifiedDevice>,
+  ) -> Result<Self, CallKeyError> {
+    let devices = devices
+      .into_iter()
+      .map(|device| Ok((proto_device_id(device.device_id())?, device)))
+      .collect::<Result<_, CallKeyError>>()?;
+    Ok(Self::new(signer, devices))
+  }
+
+  /// The devices that may be in the call.
+  pub fn device_ids(&self) -> impl Iterator<Item = DeviceId> + '_ {
+    self.devices.keys().copied()
   }
 }
 
@@ -116,6 +135,15 @@ pub fn crypto_device_id(device_id: DeviceId) -> CryptoDeviceId {
   CryptoDeviceId::new(snowflake_u64(device_id.snowflake().get()))
 }
 
+fn proto_device_id(device_id: CryptoDeviceId) -> Result<DeviceId, CallKeyError> {
+  let raw = device_id.get();
+  i64::try_from(raw)
+    .ok()
+    .and_then(|raw| Snowflake::new(raw).ok())
+    .map(DeviceId::from_snowflake)
+    .ok_or(CallKeyError::InvalidDeviceId(raw))
+}
+
 fn crypto_call_id(call_id: CallId) -> CryptoCallId {
   CryptoCallId::new(snowflake_u64(call_id.snowflake().get()))
 }
@@ -130,4 +158,20 @@ fn now_unix_secs() -> Result<u64, CallKeyError> {
     .duration_since(UNIX_EPOCH)
     .map(|elapsed| elapsed.as_secs())
     .map_err(|_| CallKeyError::Clock)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn crypto_device_ids_map_to_wire_ids() {
+    let device = proto_device_id(CryptoDeviceId::new(7)).unwrap();
+    assert_eq!(device.snowflake().get(), 7);
+    assert_eq!(crypto_device_id(device).get(), 7);
+    assert!(matches!(
+      proto_device_id(CryptoDeviceId::new(u64::MAX)),
+      Err(CallKeyError::InvalidDeviceId(u64::MAX))
+    ));
+  }
 }

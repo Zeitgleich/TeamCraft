@@ -15,8 +15,8 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::video::{EncodedVideoFrame, VideoFrame};
 use crate::video_capture::{CaptureError, VideoCapture, frame_queue};
 use crate::video_codec::{
-  OpenH264Decoder, OpenH264Encoder, SimulcastEncoder, VideoCodecError, VideoContent, VideoDecoder,
-  VideoEncoder,
+  FallbackEncoder, OpenH264Decoder, OpenH264Encoder, SimulcastEncoder, VideoCodecError, VideoContent,
+  VideoDecoder, VideoEncoder,
 };
 
 /// How often the encoder thread looks at controls while no frame arrives.
@@ -59,6 +59,33 @@ pub struct VideoReceiver {
 enum SenderControl {
   Keyframe(u8),
   NeededLayers(Vec<u8>),
+}
+
+/// Hardware encoders where the platform has them (Android: MediaCodec; Linux and macOS with the
+/// `gstreamer` feature: VA-API, VideoToolbox), each falling back to OpenH264 when it can't be
+/// built for a layer or fails later; OpenH264 everywhere else.
+pub fn preferred_encoders() -> EncoderFactory {
+  Arc::new(|layer, content| match hardware_encoder(layer, content) {
+    Some(hardware) => Ok(Box::new(FallbackEncoder::new(hardware, layer, content)) as Box<dyn VideoEncoder>),
+    None => Ok(Box::new(OpenH264Encoder::new(layer, content)?) as Box<dyn VideoEncoder>),
+  })
+}
+
+#[cfg(target_os = "android")]
+fn hardware_encoder(layer: &VideoLayerInfo, content: VideoContent) -> Option<Box<dyn VideoEncoder>> {
+  crate::video_mediacodec::MediaCodecEncoder::new(layer, content)
+    .map(|encoder| Box::new(encoder) as Box<dyn VideoEncoder>)
+}
+
+#[cfg(all(feature = "gstreamer", not(target_os = "android")))]
+fn hardware_encoder(layer: &VideoLayerInfo, content: VideoContent) -> Option<Box<dyn VideoEncoder>> {
+  crate::video_gstreamer::GstreamerEncoder::new(layer, content)
+    .map(|encoder| Box::new(encoder) as Box<dyn VideoEncoder>)
+}
+
+#[cfg(not(any(feature = "gstreamer", target_os = "android")))]
+fn hardware_encoder(_layer: &VideoLayerInfo, _content: VideoContent) -> Option<Box<dyn VideoEncoder>> {
+  None
 }
 
 /// The software encoders (OpenH264), for platforms without hardware encoding or as a fallback.
@@ -243,6 +270,10 @@ mod tests {
   };
 
   #[tokio::test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
   async fn captured_frames_come_out_encoded_and_decode_again() {
     let capture = ManualCapture::new(CaptureFormat {
       resolution: VGA,

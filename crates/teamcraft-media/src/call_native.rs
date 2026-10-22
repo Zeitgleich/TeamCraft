@@ -18,6 +18,8 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
+use wtransport::config::ClientConfigBuilder;
+use wtransport::config::states::{WantsRootStore, WantsTransportConfigClient};
 use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 
@@ -25,7 +27,7 @@ use crate::audio_codec::{FRAME_SAMPLES_PER_CHANNEL, OpusEncoderConfig};
 use crate::audio_device::{AudioDeviceError, AudioInput, AudioOutput, PlaybackBuffer};
 use crate::audio_io::{AudioSink, AudioSource, sine_tone};
 use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer};
-use crate::call_auth::CallKeyAuthenticator;
+use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_engine::{
   CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
@@ -162,6 +164,25 @@ impl NativeCallConfig {
       maybe_processing: None,
     }
   }
+
+  /// A call whose DAVE keys are bound to device identities (e2ee.md §8): only the
+  /// authenticator's devices are trusted, and this device signs its own key.
+  pub fn device_bound(
+    sfu_url: String,
+    token: String,
+    engine: CallEngineConfig,
+    authenticator: DeviceCallKeyAuthenticator,
+  ) -> Self {
+    let own_device = engine.device_id;
+    let roster = authenticator
+      .device_ids()
+      .filter(|device| *device != own_device)
+      .collect();
+    let mut config = Self::new(sfu_url, token, engine);
+    config.maybe_trusted_roster = Some(roster);
+    config.maybe_authenticator = Some(Arc::new(authenticator));
+    config
+  }
 }
 
 impl NativeCall {
@@ -271,13 +292,35 @@ impl NativeCall {
   }
 }
 
+/// The system's trusted roots. Android keeps them where rustls-native-certs doesn't look, so it
+/// uses the Mozilla roots (webpki-roots), like the client core's HTTPS on Android.
+#[cfg(not(target_os = "android"))]
+fn with_trusted_roots(
+  builder: ClientConfigBuilder<WantsRootStore>,
+) -> ClientConfigBuilder<WantsTransportConfigClient> {
+  builder.with_native_certs()
+}
+
+#[cfg(target_os = "android")]
+fn with_trusted_roots(
+  builder: ClientConfigBuilder<WantsRootStore>,
+) -> ClientConfigBuilder<WantsTransportConfigClient> {
+  let roots = wtransport::tls::rustls::RootCertStore {
+    roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+  };
+  builder.with_custom_tls(wtransport::tls::client::build_default_tls_config(
+    Arc::new(roots),
+    None,
+  ))
+}
+
 async fn connect(config: &NativeCallConfig) -> Result<Connection, NativeCallError> {
   let builder = ClientConfig::builder().with_bind_default();
   let client_config = match config.maybe_certificate_hash {
     Some(hash) => builder
       .with_server_certificate_hashes([Sha256Digest::new(hash)])
       .build(),
-    None => builder.with_native_certs().build(),
+    None => with_trusted_roots(builder).build(),
   };
   let endpoint =
     Endpoint::client(client_config).map_err(|error| NativeCallError::Connect(error.to_string()))?;

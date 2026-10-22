@@ -23,7 +23,11 @@ dave = [
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
-native = ["dave", "dep:openh264", "dep:zune-jpeg", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
+native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
+
+# OpenH264 built from source into the binary: development and tests only. Release builds load
+# Cisco's binary at runtime instead (openh264_library.rs explains why).
+openh264-source = ["native", "openh264/source"]
 
 # Browser clients: the WebTransport + WebCodecs + Web Audio call driver (wasm32).
 web = [
@@ -44,6 +48,11 @@ pipewire = ["native", "dep:pipewire", "dep:ashpd"]
 avfoundation = ["native", "dep:nokhwa"]
 # Cameras through V4L2 directly (Linux fallback when the camera portal is unavailable).
 v4l2 = ["native", "dep:v4l"]
+
+# Hardware H.264 encoding through GStreamer (dynamically linked, LGPL): VA-API (`vah264enc`) on
+# Linux, VideoToolbox (`vtenc_h264`) on macOS. Needs the GStreamer development packages to build;
+# at runtime a missing element or plugin falls back to OpenH264.
+gstreamer = ["native", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 
 # Background effects (blur, background images) as WGSL compute shaders on wgpu: Vulkan, Metal,
 # D3D12 natively, WebGPU in the browser.
@@ -69,9 +78,17 @@ pollster = { version = "1.0.1", optional = true }
 web-time = "1.1.0"
 # H.264 software encoder and decoder (Cisco's OpenH264, BSD-2-Clause, built from source): the
 # fallback when no hardware encoder is available, and decodable by every browser.
-openh264 = { version = "0.9.9", optional = true }
+openh264 = { version = "0.9.9", optional = true, default-features = false, features = ["libloading"] }
+# Cisco ships the OpenH264 binaries bzip2-compressed (pure-Rust decoder, MIT/Apache-2.0).
+bzip2 = { version = "0.6.1", optional = true }
 # MJPEG camera frames (many USB cameras only deliver 720p+ as MJPEG): pure-Rust JPEG decoder.
 zune-jpeg = { version = "0.4.21", optional = true }
+# Hardware encoding (feature `gstreamer`): safe GStreamer bindings, MIT/Apache-2.0.
+gstreamer = { version = "0.25.4", optional = true }
+gstreamer-app = { version = "0.25.2", optional = true }
+gstreamer-video = { version = "0.25.4", optional = true }
+# JPEG for webviews without WebCodecs (decoded remote video re-encoded): pure Rust, MIT/Apache-2.0.
+jpeg-encoder = { version = "0.7.1", optional = true }
 # Effects: GPU access (MIT/Apache-2.0), plain-old-data casts for its buffers, and a oneshot for
 # buffer read-back, which is asynchronous in the browser.
 wgpu = { version = "30.0.1", optional = true }
@@ -105,6 +122,14 @@ futures = { version = "0.3.34", optional = true, default-features = false, featu
 # Log output and error reporting of the headless teamcraft-call client.
 tracing-subscriber = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+
+# Trusted roots for the SFU's certificate on Android, where the system store isn't readable as
+# files (MPL-2.0 data, as in teamcraft-core).
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-roots = { version = "1.0.10", optional = true }
+# Hardware H.264 encoding through the NDK's MediaCodec (safe bindings, MIT/Apache-2.0; already in
+# the tree through cpal).
+ndk = { version = "0.9.0", optional = true, default-features = false, features = ["media"] }
 
 # Camera capture on Linux: V4L2 (safe ioctl wrappers, MIT).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -142,7 +167,7 @@ required-features = ["native"]
 # Per-frame costs of encoding, effects and segmentation (see the example's docs).
 [[example]]
 name = "video_bench"
-required-features = ["native", "segmentation"]
+required-features = ["openh264-source", "segmentation"]
 
 # The browser driver as a JS module for the SFU's development page (see the example's docs).
 [[example]]

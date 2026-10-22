@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../../crates/teamcraft-media/models/selfie_segmentation_landscape.onnx": "models/selfie_segmentation_landscape.onnx"
+    }
+  }
+}

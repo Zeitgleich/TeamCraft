@@ -16,8 +16,12 @@ if [ ! -d "${ANDROID_HOME}/ndk/${NDK_VERSION}" ]; then
   sdkmanager --sdk_root="${ANDROID_HOME}" "${SDK_PACKAGES[@]}"
 fi
 export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+# libopus (calls) builds with CMake, which needs `make`; the NDK ships one.
+export PATH="${ANDROID_NDK_HOME}/prebuilt/linux-x86_64/bin:${PATH}"
 
 cd "${REPO_DIR}"
+# Background effects' segmentation model, bundled as an asset (not in git; checksum-verified).
+crates/teamcraft-media/models/fetch.sh "${APP_DIR}/app/src/main/assets/models"
 cargo ndk --platform 26 -t arm64-v8a -t x86_64 -o "${APP_DIR}/app/src/main/jniLibs" \
   build --locked -p teamcraft-ffi --profile "${RUST_PROFILE}"
 profile_dir="${RUST_PROFILE}"

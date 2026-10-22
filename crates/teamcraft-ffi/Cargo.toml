@@ -25,11 +25,14 @@ integration = []
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite"] }
 teamcraft-client-api = { path = "../teamcraft-client-api" }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
+# Calls: the native call driver (WebTransport, Opus, audio devices; AAudio on Android).
+teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
 teamcraft-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# The engine thread runs the (non-Send) core on a current-thread runtime.
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+# The engine thread runs the (non-Send) core on a current-thread runtime; calls run on a
+# multi-thread runtime of their own.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 # Kotlin (and later Swift) bindings from proc-macros; Mozilla's generator, used by Firefox mobile.
 uniffi = "0.32.2"
 

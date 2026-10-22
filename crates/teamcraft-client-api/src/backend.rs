@@ -237,6 +237,9 @@ pub trait CallBackend {
   fn select_camera(&self, _maybe_device: Option<String>) {}
   fn set_background_effect(&self, _effect: BackgroundEffect) {}
   fn start_screen_share(&self) {}
+  fn set_push_to_talk(&self, _is_enabled: bool, _maybe_shortcut: Option<String>) {}
+  /// The push-to-talk key inside the window went down (`true`) or up.
+  fn set_talking(&self, _is_talking: bool) {}
   fn stop_screen_share(&self) {}
 }
 

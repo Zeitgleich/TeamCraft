@@ -16,9 +16,11 @@ teamcraft-ops.workspace = true
 teamcraft-proto.workspace = true
 anyhow.workspace = true
 jsonwebtoken.workspace = true
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Reports call participants to teamcraft-server.
 reqwest.workspace = true
+# Constant-time comparison of the registration token on the control endpoint.
+subtle = "2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -29,7 +31,7 @@ wtransport = { version = "0.7.2", features = ["self-signed"] }
 
 [dev-dependencies]
 # The native call client (engine, Opus, driver) for end-to-end tests against this SFU.
-teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
+teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264-source"] }
 # Device identities for the clients' call key bindings.
 teamcraft-crypto.workspace = true
 rand_core.workspace = true

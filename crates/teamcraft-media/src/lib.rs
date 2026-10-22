@@ -15,12 +15,20 @@ pub mod bwe;
 pub mod datagram;
 pub mod fragment;
 pub mod jitter;
+#[cfg(feature = "native")]
+pub mod openh264_library;
 pub mod rtp;
 pub mod video;
 #[cfg(any(feature = "native", feature = "web"))]
 pub mod video_capture;
 #[cfg(feature = "native")]
 pub mod video_codec;
+#[cfg(all(feature = "gstreamer", not(target_os = "android")))]
+pub mod video_gstreamer;
+#[cfg(feature = "native")]
+pub mod video_jpeg;
+#[cfg(all(feature = "native", target_os = "android"))]
+pub mod video_mediacodec;
 #[cfg(feature = "native")]
 pub mod video_pipeline;
 
