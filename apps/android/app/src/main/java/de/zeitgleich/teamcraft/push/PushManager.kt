@@ -22,10 +22,19 @@ class PushManager(
 ) {
   private val backends: List<PushBackend> = PushBackends.all()
 
+  /** Set while (and after) signing out: wake-ups arriving then show nothing. */
+  @Volatile private var isSigningOut = false
+
+  /** Drops every wake-up from now on until the next [register] (sign-out). */
+  fun beginSignOut() {
+    isSigningOut = true
+  }
+
   /** The backend in use, the first available in the flavor's order. */
   fun activeService(): PushService? = backends.firstOrNull { it.isAvailable(context) }?.service
 
   fun register() {
+    isSigningOut = false
     backends.firstOrNull { it.isAvailable(context) }?.register(context)
   }
 
@@ -48,13 +57,15 @@ class PushManager(
 
   /** Opens a wake-up and shows its notification. Never logs the payload or the text. */
   suspend fun onWakeUp(payload: ByteArray) {
+    if (isSigningOut) return
     runCatching {
       val core = core.core()
       // Keywords and the first name are matched on the device (the server can't read the text).
       core.setMentionSettings(mentionPrefs.settings.value)
       core.notificationForPush(payload)
     }
-      .onSuccess { notifier.show(it) }
+      // Checked again: sign-out may have started while the wake-up was being opened.
+      .onSuccess { if (!isSigningOut) notifier.show(it) }
       .onFailure { Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}") }
   }
 

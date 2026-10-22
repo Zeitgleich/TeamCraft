@@ -45,9 +45,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Removes this device's push registration and forgets the push key, so wake-ups that still
   /// arrive can't be opened (sign-out).
+  /// The push key on this device goes first, also when the server can't be reached (sign-out
+  /// offline): wake-ups that still arrive can't be opened any more.
   pub async fn unregister_push(&mut self) -> Result<(), CoreError> {
-    self.api.unregister_push(self.account.device_id).await?;
     self.store.delete(Table::Account, PUSH_KEY_RECORD)?;
+    self.api.unregister_push(self.account.device_id).await?;
     Ok(())
   }
 

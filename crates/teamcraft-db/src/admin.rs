@@ -215,7 +215,12 @@ impl Database {
                 u.deactivation_reason, u.created_at,
                 (SELECT count(*) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS "device_count!",
                 (SELECT count(*) FROM space_members m WHERE m.user_id = u.id) AS "space_count!",
-                (SELECT max(d.last_seen_at) FROM devices d WHERE d.user_id = u.id) AS last_seen
+                -- Only the day for users who hide their last seen or appear offline: admins still
+                -- spot unused devices, but not when someone was active.
+                (SELECT CASE WHEN u.last_seen_visibility = 'everyone' AND u.presence_pref <> 'invisible'
+                             THEN max(d.last_seen_at)
+                             ELSE date_trunc('day', max(d.last_seen_at), 'UTC') END
+                 FROM devices d WHERE d.user_id = u.id) AS last_seen
          FROM users u
          WHERE (u.display_name ILIKE $1 OR u.username ILIKE $1)
            AND ($2 = 'all' OR ($2 = 'active') = (u.deactivated_at IS NULL))
@@ -248,11 +253,16 @@ impl Database {
       .collect()
   }
 
-  /// All devices of a user including revoked ones.
+  /// All devices of a user including revoked ones. Last activity only to the day if the user hides
+  /// their last seen or appears offline.
   pub async fn admin_list_devices(&self, user: UserId) -> Result<Vec<AdminDeviceRow>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT id, name, revoked_at IS NOT NULL AS "is_revoked!", push_provider, last_seen_at, created_at
-         FROM devices WHERE user_id = $1 ORDER BY id"#,
+      r#"SELECT d.id, d.name, d.revoked_at IS NOT NULL AS "is_revoked!", d.push_provider, d.created_at,
+                CASE WHEN u.last_seen_visibility = 'everyone' AND u.presence_pref <> 'invisible'
+                     THEN d.last_seen_at
+                     ELSE date_trunc('day', d.last_seen_at, 'UTC') END AS last_seen_at
+         FROM devices d JOIN users u ON u.id = d.user_id
+         WHERE d.user_id = $1 ORDER BY d.id"#,
       to_db(user),
     )
     .fetch_all(self.pool())

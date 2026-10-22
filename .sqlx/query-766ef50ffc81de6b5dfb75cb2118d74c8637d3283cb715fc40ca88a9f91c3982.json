@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.oidc_role, u.deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                u.deactivation_reason, u.created_at,\n                (SELECT count(*) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS \"device_count!\",\n                (SELECT count(*) FROM space_members m WHERE m.user_id = u.id) AS \"space_count!\",\n                (SELECT max(d.last_seen_at) FROM devices d WHERE d.user_id = u.id) AS last_seen\n         FROM users u\n         WHERE (u.display_name ILIKE $1 OR u.username ILIKE $1)\n           AND ($2 = 'all' OR ($2 = 'active') = (u.deactivated_at IS NULL))\n           AND ($3::bigint IS NULL OR u.id > $3)\n         ORDER BY u.id LIMIT $4",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.oidc_role, u.deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                u.deactivation_reason, u.created_at,\n                (SELECT count(*) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS \"device_count!\",\n                (SELECT count(*) FROM space_members m WHERE m.user_id = u.id) AS \"space_count!\",\n                -- Only the day for users who hide their last seen or appear offline: admins still\n                -- spot unused devices, but not when someone was active.\n                (SELECT CASE WHEN u.last_seen_visibility = 'everyone' AND u.presence_pref <> 'invisible'\n                             THEN max(d.last_seen_at)\n                             ELSE date_trunc('day', max(d.last_seen_at), 'UTC') END\n                 FROM devices d WHERE d.user_id = u.id) AS last_seen\n         FROM users u\n         WHERE (u.display_name ILIKE $1 OR u.username ILIKE $1)\n           AND ($2 = 'all' OR ($2 = 'active') = (u.deactivated_at IS NULL))\n           AND ($3::bigint IS NULL OR u.id > $3)\n         ORDER BY u.id LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -127,5 +127,5 @@
       null
     ]
   },
-  "hash": "04614b4e759b5312617166213b3dcd5d2b06b79a19a69764cc3ef33c8a9ba105"
+  "hash": "766ef50ffc81de6b5dfb75cb2118d74c8637d3283cb715fc40ca88a9f91c3982"
 }

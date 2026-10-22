@@ -15,6 +15,7 @@ use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::LinkApproval;
 use teamcraft_core::client::NewDeviceLink;
+use teamcraft_core::client::files::sweep_staged_copies;
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
@@ -179,6 +180,11 @@ impl Engine {
     remove_shared_downloads(&directory.join(DOWNLOADS_DIR));
     let path = directory.join(format!("{}.teamcraft.db", config.account));
     let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
+    let upload_staging_dir = directory.join(UPLOAD_STAGING_DIR).join(&config.account);
+    // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
+    if let Err(error) = sweep_staged_copies(store.as_ref(), &upload_staging_dir) {
+      tracing::debug!(%error, "stray staged upload copies could not be listed");
+    }
     // A broken record only costs the preferences, not the store.
     let mentions: MentionSettings = load_mention_preferences(store.as_ref())
       .unwrap_or_default()
@@ -187,7 +193,7 @@ impl Engine {
       server_url: config.server_url,
       // Per account, so another account signed in on this device never sees these files.
       download_dir: directory.join(DOWNLOADS_DIR).join(&config.account),
-      upload_staging_dir: directory.join(UPLOAD_STAGING_DIR).join(&config.account),
+      upload_staging_dir,
       tokens,
       listener,
       store,
