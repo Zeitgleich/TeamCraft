@@ -33,6 +33,9 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
+use teamcraft_proto::{
+  BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+};
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -265,6 +268,20 @@ pub trait ServerApi {
     &self,
     attachment: AttachmentId,
   ) -> impl Future<Output = Result<AttachmentDownloadResponse, ApiError>>;
+  /// Announces the upload of one of the user's own call backgrounds; returns the presigned URL.
+  fn create_background_upload(
+    &self,
+    request: &CreateBackgroundUploadRequest,
+  ) -> impl Future<Output = Result<CreateBackgroundUploadResponse, ApiError>>;
+  fn complete_background_upload(
+    &self,
+    background: BackgroundId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  fn download_background(
+    &self,
+    background: BackgroundId,
+  ) -> impl Future<Output = Result<BackgroundDownloadResponse, ApiError>>;
+  fn delete_background(&self, background: BackgroundId) -> impl Future<Output = Result<(), ApiError>>;
   /// Uploads an encrypted blob to a presigned URL (object storage, not the API).
   fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
   /// Downloads an encrypted blob from a presigned URL.

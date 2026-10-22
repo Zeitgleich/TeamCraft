@@ -25,6 +25,9 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
+use teamcraft_proto::{
+  BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+};
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -545,6 +548,36 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     attachment: AttachmentId,
   ) -> Result<AttachmentDownloadResponse, ApiError> {
     self.get(&format!("/attachments/{attachment}/download")).await
+  }
+
+  async fn create_background_upload(
+    &self,
+    request: &CreateBackgroundUploadRequest,
+  ) -> Result<CreateBackgroundUploadResponse, ApiError> {
+    self.send_json(Method::POST, "/me/backgrounds", request).await
+  }
+
+  async fn complete_background_upload(&self, background: BackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/me/backgrounds/{background}/complete"),
+        None,
+      )
+      .await
+  }
+
+  async fn download_background(
+    &self,
+    background: BackgroundId,
+  ) -> Result<BackgroundDownloadResponse, ApiError> {
+    self.get(&format!("/me/backgrounds/{background}/download")).await
+  }
+
+  async fn delete_background(&self, background: BackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/me/backgrounds/{background}"), None)
+      .await
   }
 
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {

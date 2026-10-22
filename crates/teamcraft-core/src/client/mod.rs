@@ -8,6 +8,7 @@ mod account;
 mod actions;
 mod attachments;
 mod attested;
+mod backgrounds;
 mod calls;
 mod devices;
 mod enroll;
