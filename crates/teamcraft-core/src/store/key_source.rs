@@ -13,7 +13,7 @@ pub struct StaticKeySource {
 }
 
 /// The OS keystore via `keyring`: Keychain (macOS/iOS), Secret Service (Linux), Credential Manager.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub struct KeyringKeySource {
   service: String,
   account: String,
@@ -45,7 +45,7 @@ impl std::fmt::Debug for StaticKeySource {
   }
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 impl KeyringKeySource {
   /// `account` separates profiles (e.g. one database per server and user).
   pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
@@ -56,7 +56,7 @@ impl KeyringKeySource {
   }
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 impl DatabaseKeySource for KeyringKeySource {
   fn database_key(&self) -> Result<SymmetricKey, KeySourceError> {
     let entry = keyring::Entry::new(&self.service, &self.account)
@@ -78,7 +78,7 @@ impl DatabaseKeySource for KeyringKeySource {
   }
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 impl std::fmt::Debug for KeyringKeySource {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("KeyringKeySource")
