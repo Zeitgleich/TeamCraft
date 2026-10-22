@@ -57,8 +57,11 @@ pub fn App() -> impl IntoView {
 pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let i18n = use_i18n();
   let start = initial_location(backend.as_ref());
+  let change_source = backend.clone();
   let state = AppState::new(backend, settings, start);
   provide_context(state);
+  // Backends that load in the background (the desktop core) say so through this hook.
+  change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // Call defaults follow the settings (and set the initial state of the call session).
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));

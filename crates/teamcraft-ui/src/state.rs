@@ -96,6 +96,12 @@ impl AppState {
     }
   }
 
+  /// Tells every reader that the backend changed on its own (data arrived over the network or from
+  /// the desktop shell), so views re-read.
+  pub fn backend_changed(&self) {
+    self.revision.update(|revision| *revision += 1);
+  }
+
   /// Reads from the backend and re-runs the calling reactive scope after any mutation.
   pub fn read<R>(&self, read: impl FnOnce(&dyn Backend) -> R) -> R {
     get_if_observed(self.revision);

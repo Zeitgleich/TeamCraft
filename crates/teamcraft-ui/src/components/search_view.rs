@@ -151,7 +151,7 @@ pub fn SearchView() -> impl IntoView {
               name="q"
               autocomplete="off"
               spellcheck="false"
-              placeholder=move || i18n.t("search-placeholder")
+              placeholder=move || i18n.t("search-input-placeholder")
               node_ref=input
               prop:value=move || query.get()
               on:input=move |ev| {

@@ -9,9 +9,9 @@
 use std::cell::RefCell;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_ui::backend::SearchBackend;
-use teamcraft_ui::model::{ConversationId, Message, UserId};
-use teamcraft_ui::search::{
+use teamcraft_client_api::backend::SearchBackend;
+use teamcraft_client_api::model::{ConversationId, Message, UserId};
+use teamcraft_client_api::search::{
   Filter, ParsedQuery, SavedSearch, SearchHit, SearchResults, find_ci, has_file, has_link, make_snippet,
 };
 
@@ -64,7 +64,7 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
       .collect();
     mentions.sort_by_key(|message| std::cmp::Reverse(message.sent_at_ms));
     mentions.truncate(MAX_HITS);
-    let empty = teamcraft_ui::search::parse_query("");
+    let empty = teamcraft_client_api::search::parse_query("");
     mentions
       .iter()
       .filter_map(|stored| self.to_hit(stored, &empty))
@@ -180,10 +180,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     ) {
       return None;
     }
-    let conversation = teamcraft_ui::backend::ChatBackend::conversation(self, stored.conversation_id)?;
+    let conversation =
+      teamcraft_client_api::backend::ChatBackend::conversation(self, stored.conversation_id)?;
     let all = self.stored(stored.conversation_id);
     let message: Message = self.message_view(stored, &all);
-    let author = teamcraft_ui::backend::ChatBackend::user(self, stored.sender_user_id);
+    let author = teamcraft_client_api::backend::ChatBackend::user(self, stored.sender_user_id);
     let (username, display_name) = author
       .map(|user| (user.username, user.display_name))
       .unwrap_or_default();
@@ -200,7 +201,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       return None;
     }
     let maybe_space_name = conversation.maybe_space.and_then(|space| {
-      teamcraft_ui::backend::ChatBackend::spaces(self)
+      teamcraft_client_api::backend::ChatBackend::spaces(self)
         .into_iter()
         .find(|candidate| candidate.id == space)
         .map(|found| found.name)
@@ -232,7 +233,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   fn me_id(&self) -> UserId {
-    teamcraft_ui::backend::ChatBackend::me(self).id
+    teamcraft_client_api::backend::ChatBackend::me(self).id
   }
 
   #[cfg(not(target_arch = "wasm32"))]
@@ -252,11 +253,11 @@ fn searchable_text(stored: &StoredMessage) -> String {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_client_api::search::parse_query;
   use teamcraft_proto::{
     ChannelModeration, ClientMessageId, ConversationKind, ConversationResponse, ConversationVisibility,
     HistoryPolicy, Id, MessageId, Snowflake, UserKind, UserSummary,
   };
-  use teamcraft_ui::search::parse_query;
 
   use super::*;
   use crate::clock::ManualClock;

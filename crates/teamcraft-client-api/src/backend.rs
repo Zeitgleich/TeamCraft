@@ -1,9 +1,10 @@
 //! The data boundary of the UI. Components only talk to [`ChatBackend`]; the mock implementation in
-//! [`crate::mock`] is replaced by an adapter over `teamcraft-core` once the client core exists.
+//! `teamcraft-core`'s `CoreChatBackend` implements them over the encrypted local store; the UI crate
+//! ships a mock for development.
 //!
 //! The trait is synchronous on purpose: it models the *local, already decrypted* store of the client
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
-//! re-reading after a revision bump (see [`crate::state::AppState::revision`]).
+//! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
 use teamcraft_proto::Role;
 
@@ -16,6 +17,10 @@ use crate::model::{
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 
 pub trait ChatBackend {
+  /// Gives backends that load data in the background (over IPC or the network) a way to tell the UI
+  /// that something changed and views should re-read. Backends whose reads are instant ignore it.
+  fn set_change_notifier(&self, _notify: std::rc::Rc<dyn Fn()>) {}
+
   /// The signed-in user, including the presence and custom status they chose.
   fn me(&self) -> User;
   fn user(&self, id: UserId) -> Option<User>;

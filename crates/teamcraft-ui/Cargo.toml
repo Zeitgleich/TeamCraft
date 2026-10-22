@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 teamcraft-proto.workspace = true
+teamcraft-client-api = { path = "../teamcraft-client-api" }
 leptos = { version = "0.8.22", features = ["csr"] }
 # Browser bindings: DOM access for focus, scroll measurement, storage and clipboard-free helpers.
 wasm-bindgen = "0.2"

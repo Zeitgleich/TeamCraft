@@ -85,77 +85,57 @@ previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
 
 ## Layout of the crate
 
-| Path                | Content                                                                     |
-|---------------------|-----------------------------------------------------------------------------|
-| `src/backend.rs`    | `ChatBackend`, `CallBackend`, `AdminBackend`, `SecurityBackend` (= `Backend`) |
-| `src/mock.rs`       | `MockBackend`, demo data, lazily generated log channels                     |
-| `src/model.rs`      | View models; IDs are re-exported from `teamcraft-proto`                     |
-| `src/calls.rs`      | Call view models and `CallState` (session state of the user's call)         |
-| `src/admin.rs`      | Admin view models (channels, users, policy, audit)                          |
-| `src/security.rs`   | Device approval and key-change models                                       |
-| `src/state.rs`      | `AppState` (context): current space, view, panel, overlay, backend access   |
-| `src/settings.rs`   | Per-device preferences (theme, language, send mode) in `localStorage`       |
-| `src/i18n.rs`       | Fluent bundles, `I18n::t`, `t_with`, `t_count`                              |
-| `src/markdown.rs`   | Safe Markdown subset producing a tree (no HTML injection)                   |
-| `src/components/`   | One module per screen area                                                  |
-| `style/main.css`    | Design tokens, layout, components                                           |
+| Path                    | Content                                                                 |
+|-------------------------|-------------------------------------------------------------------------|
+| `src/mock.rs`           | `MockBackend`, demo data, lazily generated log channels                 |
+| `src/remote_backend.rs` | `RemoteChat`: `ChatBackend` over the desktop shell's client core (IPC)  |
+| `src/hybrid.rs`         | `Hybrid`: a real chat backend plus mock search, calls, admin, security  |
+| `src/server_backend.rs` | `RestChat`: web build, read-only chat over the REST API                 |
+| `src/calls.rs`          | `CallState` (session state of the user's call)                          |
+| `src/state.rs`          | `AppState` (context): current space, view, panel, overlay, backend      |
+| `src/settings.rs`       | Per-device preferences (theme, language, send mode) in `localStorage`   |
+| `src/i18n.rs`           | Fluent bundles, `I18n::t`, `t_with`, `t_count`                          |
+| `src/markdown.rs`       | Safe Markdown subset producing a tree (no HTML injection)               |
+| `src/components/`       | One module per screen area                                              |
+| `style/main.css`        | Design tokens, layout, components                                       |
 
-To connect the real client core, implement `ChatBackend` over `teamcraft-core` and pass it to
-`AppState::new` in `components/app.rs`. The trait is synchronous because it models the local,
-decrypted store; network and decryption update that store and the UI re-reads after
-`AppState::write`.
+The backend traits (`ChatBackend`, `SearchBackend`, `CallBackend`, `AdminBackend`, `SecurityBackend`)
+and the view models live in `teamcraft-client-api`, which `teamcraft-core` (feature `ui`) implements
+too; `teamcraft-ui` re-exports them.
 
-## Run the web build
+## Client core in the desktop app
 
-Prerequisites: the `wasm32-unknown-unknown` target (`rust-toolchain.toml` lists it when you use
-rustup) and [Trunk](https://trunkrs.dev) (`cargo install trunk --locked`, or a release binary).
+The desktop shell hosts `teamcraft-core` on a dedicated thread (see `apps/desktop/src/core/`), because
+the core is single-threaded and keeps the encrypted store (SQLCipher, key in the OS keystore) on the
+native side. After sign-in the webview:
+
+1. calls `core_start`; the answer is `needs_enrollment`, `ready` or `failed`;
+2. on first use shows the key setup screen (recovery passphrase, device name) and calls `core_enroll`;
+3. builds `Hybrid<RemoteChat>`: chat comes from the core, search, calls, admin and security stay mock.
+
+`ChatBackend` is synchronous but IPC is not, so `RemoteChat` keeps a mirror (snapshot plus pages of
+100 messages). A read miss returns an empty window, starts a load and re-renders when the page
+arrives. The shell emits `core-changed` after every sync step; the mirror refreshes then. Writes
+(`core_action`) go through the core, so they are encrypted, queued and sent by the sync loop.
+Settings > Data source still switches to the mock backend for demos.
+
+Local data lives in the app data dir (`<data>/core/<user>.db`); `TEAMCRAFT_DATA_DIR` overrides it.
+
+### Try it without the desktop window
+
+An ignored test serves the shell's commands over loopback HTTP, with a real core for alice and a
+second core (carol) that chats with her; `apps/desktop/dev/bridge-shim.js` implements
+`window.__TAURI__` on top of it, so the web build in any browser talks to a real core:
 
 ```sh
-cd crates/teamcraft-ui
-trunk serve            # http://localhost:8082, rebuilds on change; proxies /api to 127.0.0.1:8081
-trunk build --release  # static files in crates/teamcraft-ui/dist
+docker compose -f docker-compose.dev.yml up -d              # dev stack; run teamcraft-server on :8081
+(cd crates/teamcraft-ui && trunk serve --port 8082)         # proxies /api to the server
+cargo test -p teamcraft-desktop --features integration -- --ignored serve_dev_bridge --nocapture
+# open http://localhost:8082/?backend=server with the shim injected (e.g. a Playwright init script)
 ```
 
-Release builds are smaller with `CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=true`
-and `data-wasm-opt="s"` on the Rust link in `index.html` (Trunk downloads binaryen for that).
-Debug builds are slow in the browser; judge performance with `--release`.
-
-## Sign in and server mode
-
-The app starts on demo data. To use the real server, sign in with the dev Keycloak (README of the
-repository: realm `teamcraft-dev`, public client `teamcraft`, users `alice`, `bob`, … with password
-`<user>-dev-pass`):
-
-1. Start the dev stack and the server (`TEAMCRAFT_SERVER__LISTEN_ADDR="[::]:8081" cargo run -p teamcraft-server`).
-2. Web: `trunk serve`, then open `http://localhost:8082/?backend=server`. The choice is remembered
-   (Settings > Advanced > Data source). Port 8082 is the web origin and redirect URI registered for the
-   dev client; Trunk proxies `/api` to the server so no CORS is needed. Other origins: set
-   `localStorage` keys `teamcraft.server_url`, `teamcraft.oidc_issuer`, `teamcraft.oidc_client_id`.
-3. Desktop: `TEAMCRAFT_BACKEND=server cargo tauri dev` (or `cargo run -p teamcraft-desktop --features
-   custom-protocol`). Server and issuer: `TEAMCRAFT_SERVER_URL` (default `http://127.0.0.1:8081`),
-   `TEAMCRAFT_OIDC_ISSUER`, `TEAMCRAFT_OIDC_CLIENT_ID`.
-
-What happens:
-
-- **Web:** authorization code + PKCE redirect flow (`oauth2` crate, `fetch` as HTTP client). Tokens live
-  in memory only; the PKCE verifier and state survive the redirect in `sessionStorage`. After a reload
-  the page goes through the provider session again without a password prompt. Sign-out ends the
-  provider session with a direct request.
-- **Desktop:** the Rust side of the shell runs the flow (RFC 8252): a one-shot listener on
-  `127.0.0.1:<random port>`, the system browser through `tauri-plugin-opener`, and only the refresh
-  token in the OS keyring (Secret Service on Linux, Keychain on macOS). The webview calls commands
-  (`auth_restore`, `auth_login`, `auth_cancel`, `auth_logout`, `api_get`) and never sees a token;
-  `api_get` only accepts `/api/v1/` paths.
-- Both sit behind the `Authenticator` trait (`src/auth/mod.rs`), the seam `teamcraft-core` can take over.
-- **Screens:** login (with clear messages for `no_teamcraft_role` and an unreachable server), a first-device
-  welcome screen (the passkey step is a placeholder), the account menu (sign out; switch account is a
-  placeholder).
-- **Data:** `ServerBackend` reads `/me`, spaces, conversations, members and presence. Messages are not
-  available yet, so what you write stays in memory. Calls, administration and device security still use
-  the mock (the admin console shows demo data even for a real admin).
-
-Seeding some data for the dev stack (spaces, channels, a DM) is a few `curl` calls with a token from
-`dev/dev-token.py`; the API is in `docs/` and `/api/v1/openapi.json`.
+Alice's recovery passphrase in the dev stack is `dev-stack core passphrase`. Dev tool only: no
+authentication, loopback only, fixed database key.
 
 Tests against the running dev stack: `cargo test -p teamcraft-desktop --features integration`
 (full desktop flow with a fake browser, restore after restart, logout, an account without role, cancel,
@@ -195,8 +175,11 @@ compiler than the workspace baseline.
 
 ## Known gaps
 
-- Demo data is the default; with the server, messages, reactions, threads and unread counts are still
-  missing (they need `teamcraft-core`), and sending, favorites and presence only live in memory.
+- Demo data is the default. The desktop build shows real encrypted chat (messages, send, reactions,
+  channels, DMs); the web build only lists conversations read-only. Search, calls, admin and
+  security are still mock on top of the core.
+- The core integration test (`cargo test -p teamcraft-desktop --features integration core::`) needs a
+  fresh dev database and must not run in parallel with the sign-in tests, which end alice's session.
 - No drafts per conversation, message editing, emoji picker, search results page or meetings.
 - Calls are mocked: no real media, reactions in calls, recording or captions; own backgrounds cannot be
   uploaded yet.

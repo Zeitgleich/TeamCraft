@@ -6,17 +6,17 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 
 ## Modules
 
-| Module        | What                                                                                                |
-|---------------|-----------------------------------------------------------------------------------------------------|
-| `store`       | `LocalStore` trait; `SqlCipherStore` (native, e2ee.md §9), `MemoryStore`; database key sources      |
-| `records`     | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot           |
-| `api`         | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite), `fake::FakeServer` |
-| `client`      | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                         |
-| `attestation` | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)      |
-| `workspace`   | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                     |
-| `search`      | tantivy index of the store and shared encrypted segments (native only)                              |
-| `ui_backend`  | `CoreChatBackend`: teamcraft-ui's `ChatBackend` and `SearchBackend` over the store (feature `ui`)   |
-| `clock`       | Injectable wall clock (`SystemClock`, `ManualClock`)                                                |
+| Module        | What                                                                                                      |
+|---------------|-----------------------------------------------------------------------------------------------------------|
+| `store`       | `LocalStore` trait; `SqlCipherStore` (native, e2ee.md §9), `MemoryStore`; database key sources            |
+| `records`     | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                 |
+| `api`         | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite), `fake::FakeServer`       |
+| `client`      | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                               |
+| `attestation` | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)            |
+| `workspace`   | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                           |
+| `search`      | tantivy index of the store and shared encrypted segments (native only)                                    |
+| `ui_backend`  | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`) |
+| `clock`       | Injectable wall clock (`SystemClock`, `ManualClock`)                                                      |
 
 ## How it works
 
@@ -115,9 +115,8 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 
 ## UI wiring
 
-`teamcraft-core` depends on `teamcraft-ui` (feature `ui`) to implement its trait, so the UI crate
-can't depend on the core in turn. The app that wires both (the Tauri app or a web entry crate)
-should own the composition, or the backend traits should move to a small shared crate.
+The UI's backend traits and view models live in `teamcraft-client-api`, which both `teamcraft-ui` and
+`teamcraft-core` (feature `ui`) depend on. `apps/desktop` composes the two (login, enrollment, sync loop).
 
 ## Checks
 

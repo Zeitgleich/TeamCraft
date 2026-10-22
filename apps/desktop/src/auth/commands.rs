@@ -1,5 +1,7 @@
 //! Tauri commands the webview calls. Errors cross the boundary as `{ kind, message }`.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
@@ -24,12 +26,12 @@ impl From<AuthError> for CommandError {
 }
 
 #[tauri::command]
-pub async fn auth_restore(service: State<'_, Service>) -> Result<bool, CommandError> {
+pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, CommandError> {
   Ok(service.restore().await?)
 }
 
 #[tauri::command]
-pub async fn auth_login(app: AppHandle, service: State<'_, Service>) -> Result<(), CommandError> {
+pub async fn auth_login(app: AppHandle, service: State<'_, Arc<Service>>) -> Result<(), CommandError> {
   let open = move |url: &str| {
     app
       .opener()
@@ -40,16 +42,16 @@ pub async fn auth_login(app: AppHandle, service: State<'_, Service>) -> Result<(
 }
 
 #[tauri::command]
-pub fn auth_cancel(service: State<'_, Service>) {
+pub fn auth_cancel(service: State<'_, Arc<Service>>) {
   service.cancel_login();
 }
 
 #[tauri::command]
-pub async fn auth_logout(service: State<'_, Service>) -> Result<(), CommandError> {
+pub async fn auth_logout(service: State<'_, Arc<Service>>) -> Result<(), CommandError> {
   Ok(service.logout().await?)
 }
 
 #[tauri::command]
-pub async fn api_get(path: String, service: State<'_, Service>) -> Result<ApiResponse, CommandError> {
+pub async fn api_get(path: String, service: State<'_, Arc<Service>>) -> Result<ApiResponse, CommandError> {
   Ok(service.api_get(&path).await?)
 }

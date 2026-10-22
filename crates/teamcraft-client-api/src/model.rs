@@ -1,6 +1,7 @@
 //! View models the UI renders. The mock backend produces them today; the real client core
 //! (`teamcraft-core`) will map decrypted data into the same shapes.
 
+use serde::{Deserialize, Serialize};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
 
 /// Builds a typed ID from a small integer. Mock data and tests use it; real IDs come from the server.
@@ -31,7 +32,7 @@ pub fn root_message_of(thread: ThreadId) -> MessageId {
 pub type TimestampMs = i64;
 
 /// Presence state a user chose or the system derived.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PresenceStatus {
   Online,
   Away,
@@ -54,7 +55,7 @@ impl PresenceStatus {
 }
 
 /// Emoji, text and optional expiry shown next to a user's name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomStatus {
   pub emoji: String,
   pub text: String,
@@ -62,7 +63,7 @@ pub struct CustomStatus {
 }
 
 /// When a custom status clears itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StatusExpiry {
   Never,
   ThirtyMinutes,
@@ -98,7 +99,7 @@ impl StatusExpiry {
   }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct User {
   pub id: UserId,
   pub username: String,
@@ -128,7 +129,7 @@ pub fn initials(name: &str) -> String {
   letters.into_iter().collect()
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Space {
   pub id: SpaceId,
   pub name: String,
@@ -138,7 +139,7 @@ pub struct Space {
 }
 
 /// What kind of conversation a sidebar entry is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConversationKind {
   Public,
   Private,
@@ -155,7 +156,7 @@ impl ConversationKind {
 }
 
 /// Sidebar bucket a conversation is listed in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SidebarCategory {
   Favorites,
   Channels,
@@ -163,7 +164,7 @@ pub enum SidebarCategory {
   DirectMessages,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Conversation {
   pub id: ConversationId,
   /// `None` for DMs and group DMs, which live outside spaces.
@@ -182,20 +183,20 @@ pub struct Conversation {
   pub bookmarks: Vec<Bookmark>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
   pub emoji: String,
   pub title: String,
   pub kind: BookmarkKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BookmarkKind {
   Link,
   File,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
   Debug,
   Info,
@@ -215,7 +216,7 @@ impl LogLevel {
 }
 
 /// Which system event a system message reports; the text is built from i18n.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemEvent {
   Joined,
   Left,
@@ -223,7 +224,7 @@ pub enum SystemEvent {
   Renamed { name: String },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MessageKind {
   User,
   System(SystemEvent),
@@ -231,14 +232,14 @@ pub enum MessageKind {
   Log(LogLevel),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reaction {
   pub emoji: String,
   pub count: u32,
   pub reacted_by_me: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
   pub id: MessageId,
   pub conversation: ConversationId,

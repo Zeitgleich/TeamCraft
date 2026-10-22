@@ -1,9 +1,9 @@
 //! Runs the requests the UI adapter queued ([`CoreCommand`]) against the server.
 
+use teamcraft_client_api::model::PresenceStatus;
 use teamcraft_proto::{
   ManualPresence, SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest,
 };
-use teamcraft_ui::model::PresenceStatus;
 
 use super::Client;
 use crate::api::ServerApi;

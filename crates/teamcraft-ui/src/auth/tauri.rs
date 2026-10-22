@@ -81,7 +81,7 @@ struct CommandError {
   message: String,
 }
 
-async fn invoke(command: &str, args: JsValue) -> Result<JsValue, AuthError> {
+pub(crate) async fn invoke(command: &str, args: JsValue) -> Result<JsValue, AuthError> {
   let function =
     invoke_function().ok_or_else(|| AuthError::Unsupported("not running in the desktop app".to_owned()))?;
   let promise = function
@@ -119,6 +119,54 @@ fn serde_wasm_json<T: for<'de> Deserialize<'de>>(value: &JsValue) -> Result<T, A
     .and_then(|text| text.as_string())
     .ok_or_else(|| AuthError::InvalidResponse("not JSON".to_owned()))?;
   serde_json::from_str(&text).map_err(|error| AuthError::InvalidResponse(error.to_string()))
+}
+
+/// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.
+pub async fn call<T: for<'de> Deserialize<'de>>(
+  command: &str,
+  args: &serde_json::Value,
+) -> Result<T, String> {
+  let js_args =
+    js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
+  let answer = invoke(command, js_args).await.map_err(|error| match error {
+    AuthError::InvalidResponse(message) | AuthError::Denied(message) | AuthError::Network(message) => message,
+    other => other.to_string(),
+  })?;
+  // Commands without a result answer with `null`/undefined; `T` is then `()` or an `Option`.
+  let text = js_sys::JSON::stringify(&answer)
+    .ok()
+    .and_then(|text| text.as_string())
+    .unwrap_or_else(|| "null".to_owned());
+  serde_json::from_str(&text).map_err(|error| format!("unreadable answer of {command}: {error}"))
+}
+
+/// Calls `callback` whenever the desktop shell emits `event`.
+pub fn listen(event: &str, callback: impl FnMut() + 'static) {
+  let listener = (|| -> Option<(JsValue, js_sys::Function)> {
+    let window = web_sys::window()?;
+    let tauri = js_sys::Reflect::get(&window, &JsValue::from_str("__TAURI__")).ok()?;
+    let events = js_sys::Reflect::get(&tauri, &JsValue::from_str("event")).ok()?;
+    let listen = js_sys::Reflect::get(&events, &JsValue::from_str("listen"))
+      .ok()?
+      .dyn_into::<js_sys::Function>()
+      .ok()?;
+    Some((events, listen))
+  })();
+  let Some((events, function)) = listener else {
+    tracing::warn!(event, "the desktop event bridge is not available");
+    return;
+  };
+  let mut callback = callback;
+  let handler =
+    wasm_bindgen::closure::Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| callback());
+  if function
+    .call2(&events, &JsValue::from_str(event), handler.as_ref())
+    .is_err()
+  {
+    tracing::warn!(event, "could not subscribe to the desktop event");
+  }
+  // The subscription lives as long as the page.
+  handler.forget();
 }
 
 /// `window.__TAURI__.core.invoke`, present when the shell sets `withGlobalTauri`.

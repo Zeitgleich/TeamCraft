@@ -162,6 +162,10 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
         else {
           continue;
         };
+        // A row whose message is still loading is empty; keep its estimate so it stays in the window.
+        if measured <= 0.0 {
+          continue;
+        }
         if let Some(slot) = heights.get_mut(index)
           && (*slot - measured).abs() > MEASURE_EPSILON
         {

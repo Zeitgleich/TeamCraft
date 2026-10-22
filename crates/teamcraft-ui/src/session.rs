@@ -7,7 +7,10 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse};
 
-use crate::auth::{ApiResponse, AuthError, Authenticator};
+use teamcraft_client_api::remote::{CoreStatus, EnrollRequest};
+
+use crate::auth::{ApiResponse, AuthError, Authenticator, tauri};
+use crate::remote_backend;
 use crate::settings::{load_string, store_string};
 
 const KEY_DEVICE_READY_PREFIX: &str = "teamcraft.device_ready.";
@@ -19,8 +22,14 @@ pub enum SessionState {
   SignedOut(Option<LoginProblem>),
   /// The identity provider is open in the browser.
   SigningIn,
-  /// Signed in, but this device has no keys yet (first device of the account).
+  /// Signed in, but this device has no keys yet (first device of the account); the web build only
+  /// shows a placeholder here.
   NeedsDeviceSetup(GetMeResponse),
+  /// Desktop: this device has to create its encryption keys or recover them with the passphrase.
+  NeedsEnrollment {
+    me: GetMeResponse,
+    has_existing_identity: bool,
+  },
   Ready(GetMeResponse),
 }
 
@@ -30,6 +39,8 @@ pub enum LoginProblem {
   /// The account signed in but has no TeamCraft role (`no_teamcraft_role`).
   NoTeamcraftRole,
   ServerUnreachable,
+  /// The encrypted local data could not be opened (keystore, database); the text is for details.
+  CoreFailed(String),
   Cancelled,
   /// Anything else; the text is meant for logs and a "details" line, not as the main message.
   Failed(String),
@@ -40,6 +51,9 @@ pub enum LoginProblem {
 pub struct SessionControl {
   auth: StoredValue<Rc<dyn Authenticator>, LocalStorage>,
   pub state: RwSignal<SessionState>,
+  /// Why the last enrollment attempt failed, for the enrollment screen.
+  pub enroll_error: RwSignal<Option<String>>,
+  pub is_enrolling: RwSignal<bool>,
 }
 
 impl SessionControl {
@@ -47,6 +61,8 @@ impl SessionControl {
     Self {
       auth: StoredValue::new_local(auth),
       state: RwSignal::new(SessionState::Checking),
+      enroll_error: RwSignal::new(None),
+      is_enrolling: RwSignal::new(false),
     }
   }
 
@@ -90,6 +106,11 @@ impl SessionControl {
   pub fn sign_out(&self) {
     let control = *self;
     spawn_local(async move {
+      if tauri::is_available()
+        && let Err(error) = remote_backend::stop_core().await
+      {
+        tracing::warn!(%error, "could not stop the client core");
+      }
       if let Err(error) = control.authenticator().logout().await {
         tracing::warn!(%error, "sign-out did not finish cleanly");
       }
@@ -105,12 +126,63 @@ impl SessionControl {
     }
   }
 
+  /// Desktop: opens the encrypted local client and decides whether keys must be set up first.
+  async fn start_core(&self, me: GetMeResponse) {
+    match remote_backend::core_status(me.id).await {
+      Ok(CoreStatus::Ready { .. }) => self.state.set(SessionState::Ready(me)),
+      Ok(CoreStatus::NeedsEnrollment {
+        has_existing_identity,
+      }) => {
+        self.state.set(SessionState::NeedsEnrollment {
+          me,
+          has_existing_identity,
+        });
+      },
+      Ok(CoreStatus::Failed { message }) => self
+        .state
+        .set(SessionState::SignedOut(Some(LoginProblem::CoreFailed(message)))),
+      Ok(CoreStatus::NotStarted) => {
+        self
+          .state
+          .set(SessionState::SignedOut(Some(LoginProblem::CoreFailed(
+            "the client core did not start".to_owned(),
+          ))));
+      },
+      Err(error) => self
+        .state
+        .set(SessionState::SignedOut(Some(LoginProblem::Failed(error)))),
+    }
+  }
+
+  /// Creates this device's keys (or recovers them) with the passphrase, then enters the app.
+  pub fn enroll(&self, passphrase: String, device_name: String) {
+    let control = *self;
+    let SessionState::NeedsEnrollment { me, .. } = control.state.get_untracked() else {
+      return;
+    };
+    control.is_enrolling.set(true);
+    control.enroll_error.set(None);
+    spawn_local(async move {
+      let request = EnrollRequest {
+        passphrase,
+        device_name,
+      };
+      match remote_backend::enroll(&request).await {
+        Ok(()) => control.state.set(SessionState::Ready(me)),
+        Err(error) => control.enroll_error.set(Some(error)),
+      }
+      control.is_enrolling.set(false);
+    });
+  }
+
   async fn load_account(&self) {
     let response = self.authenticator().api_get("/api/v1/me").await;
     let outcome = response
       .map_err(|error| problem_from_auth(&error))
       .and_then(interpret_me_response);
     match outcome {
+      // The desktop shell hosts the client core, whose enrollment replaces the demo welcome step.
+      Ok(me) if tauri::is_available() => self.start_core(me).await,
       Ok(me) => {
         let is_ready = load_string(&device_ready_key(&me)).is_some();
         self.state.set(if is_ready {

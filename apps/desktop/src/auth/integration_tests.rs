@@ -11,7 +11,7 @@ use super::{AuthError, AuthService, DesktopConfig};
 
 /// Shares one in-memory store between two service instances, like the keyring across app restarts.
 #[derive(Clone, Default)]
-struct SharedStore(Arc<MemoryStore>);
+pub(crate) struct SharedStore(Arc<MemoryStore>);
 
 impl TokenStore for SharedStore {
   async fn load(&self) -> Result<Option<secrecy::SecretString>, AuthError> {
@@ -104,7 +104,7 @@ async fn api_paths_outside_the_api_are_refused() {
 
 /// Plays the browser: opens the authorization URL, submits the Keycloak login form with the dev
 /// password of `user`, and requests the redirect target (the loopback listener of the app).
-fn spawn_fake_browser(authorization_url: &str, user: &str) -> Result<(), String> {
+pub(crate) fn spawn_fake_browser(authorization_url: &str, user: &str) -> Result<(), String> {
   let url = authorization_url.to_owned();
   let user = user.to_owned();
   tokio::spawn(async move {

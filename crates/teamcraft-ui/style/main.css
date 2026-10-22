@@ -3657,3 +3657,19 @@ select.input {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.auth-form {
+  margin-top: 16px;
+}
+
+.auth-form .field {
+  margin-bottom: 14px;
+}
+
+.auth-form .field-error {
+  margin-top: 4px;
+}
+
+.auth-form .field-error .mono {
+  display: block;
+}

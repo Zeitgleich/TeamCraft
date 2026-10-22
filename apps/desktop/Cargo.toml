@@ -17,6 +17,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# The client core runs on the Rust side of the shell: encrypted store, sync engine, MLS.
+teamcraft-core = { path = "../../crates/teamcraft-core", features = ["ui"] }
+teamcraft-client-api = { path = "../../crates/teamcraft-client-api" }
+teamcraft-crypto = { path = "../../crates/teamcraft-crypto" }
+teamcraft-proto.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 anyhow = "1"
@@ -24,7 +29,7 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "rt", "time", "sync", "macros"] }
 # System browser for the OIDC login (RFC 8252): the webview never shows the identity provider.
 tauri-plugin-opener = "2"
 # Refresh token in the OS keyring (Secret Service on Linux, Keychain on macOS).

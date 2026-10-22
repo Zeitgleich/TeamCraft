@@ -1,0 +1,19 @@
+[package]
+name = "teamcraft-client-api"
+description = "The interface between the TeamCraft UI and the client core: backend traits and view models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teamcraft-proto.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

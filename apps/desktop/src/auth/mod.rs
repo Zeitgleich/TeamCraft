@@ -10,7 +10,7 @@ mod loopback;
 mod store;
 
 #[cfg(all(test, feature = "integration"))]
-mod integration_tests;
+pub(crate) mod integration_tests;
 
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,7 @@ const SCOPE: &str = "openid";
 /// How long the browser may take to come back.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Refresh this long before the access token expires.
-const REFRESH_MARGIN: Duration = Duration::from_secs(30);
+const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The webview may only ask for API paths below this prefix.
 const API_PREFIX: &str = "/api/v1/";
@@ -247,6 +247,12 @@ impl<S: TokenStore> AuthService<S> {
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
     Ok(ApiResponse { status, body })
+  }
+
+  /// The current access token as text, refreshed when needed. For the in-process client core only:
+  /// the webview never gets it.
+  pub async fn bearer_token(&self) -> Result<String, AuthError> {
+    Ok(self.access_token().await?.expose_secret().to_owned())
   }
 
   async fn access_token(&self) -> Result<SecretString, AuthError> {

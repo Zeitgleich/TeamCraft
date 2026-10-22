@@ -7936,6 +7936,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "teamcraft-client-api"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "teamcraft-proto",
+]
+
+[[package]]
 name = "teamcraft-core"
 version = "0.0.0"
 dependencies = [
@@ -7950,9 +7959,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tantivy",
+ "teamcraft-client-api",
  "teamcraft-crypto",
  "teamcraft-proto",
- "teamcraft-ui",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -8017,6 +8026,10 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "teamcraft-client-api",
+ "teamcraft-core",
+ "teamcraft-crypto",
+ "teamcraft-proto",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -8142,6 +8155,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "teamcraft-client-api",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tracing",

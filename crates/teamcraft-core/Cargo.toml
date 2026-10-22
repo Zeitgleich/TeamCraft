@@ -16,8 +16,8 @@ workspace = true
 default = ["sqlcipher"]
 # Encrypted local database (SQLCipher) on native targets. Links the system libcrypto.
 sqlcipher = ["dep:rusqlite"]
-# Adapter implementing the UI's backend traits (crates/teamcraft-ui).
-ui = ["dep:teamcraft-ui"]
+# Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
+ui = ["dep:teamcraft-client-api"]
 # Tests against the running dev stack (README.md): server on 8081, Keycloak on 8080.
 integration = []
 
@@ -39,7 +39,7 @@ futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # REST client; uses fetch in the browser.
 reqwest.workspace = true
-teamcraft-ui = { path = "../teamcraft-ui", optional = true }
+teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).

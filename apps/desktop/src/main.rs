@@ -6,12 +6,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod core;
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{AuthService, DesktopConfig, KeyringStore};
+use crate::core::TokenCache;
+use crate::core::commands::CoreHost;
+
+/// How often the core's token cache is refreshed from the login session.
+const TOKEN_REFRESH: Duration = Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
   tracing_subscriber::fmt()
@@ -20,11 +29,14 @@ fn main() -> anyhow::Result<()> {
 
   let config = DesktopConfig::from_env();
   let store = KeyringStore::new(&config.issuer);
-  let service = AuthService::new(config, store).context("could not set up sign-in")?;
+  let service = Arc::new(AuthService::new(config.clone(), store).context("could not set up sign-in")?);
+  let tokens = TokenCache::default();
+  keep_tokens_fresh(service.clone(), tokens.clone());
 
   tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .manage(service)
+    .manage(CoreHost::new(config, tokens))
     .setup(|app| {
       create_main_window(app)?;
       Ok(())
@@ -35,6 +47,14 @@ fn main() -> anyhow::Result<()> {
       auth::commands::auth_cancel,
       auth::commands::auth_logout,
       auth::commands::api_get,
+      core::commands::core_start,
+      core::commands::core_status,
+      core::commands::core_enroll,
+      core::commands::core_snapshot,
+      core::commands::core_messages,
+      core::commands::core_thread,
+      core::commands::core_action,
+      core::commands::core_stop,
     ])
     .run(tauri::generate_context!())
     .context("failed to run the TeamCraft desktop shell")
@@ -56,4 +76,15 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   }
   window.build()?;
   Ok(())
+}
+
+/// The client core reads its access token synchronously; this keeps a copy current (the login code
+/// refreshes it before it expires) and clears it on sign-out.
+fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>, tokens: TokenCache) {
+  tauri::async_runtime::spawn(async move {
+    loop {
+      tokens.set(service.bearer_token().await.ok());
+      tokio::time::sleep(TOKEN_REFRESH).await;
+    }
+  });
 }

@@ -1,6 +1,6 @@
-//! [`ChatBackend`] of `teamcraft-ui` over the local store (feature `ui`).
+//! [`ChatBackend`] of `teamcraft-client-api` over the local store (feature `ui`).
 //!
-//! The UI's trait is synchronous and reads the *already decrypted* store (crates/teamcraft-ui
+//! The UI's trait is synchronous and reads the *already decrypted* store (crates/teamcraft-client-api
 //! backend.rs), which is exactly what the store holds. Writes don't go to the network here:
 //! messages and reactions are put into the outbox, everything else becomes a [`CoreCommand`] the
 //! app's sync task drains and runs against the server. After either, the sync task flushes.
@@ -9,15 +9,15 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::model::{
+  Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind, PresenceStatus,
+  Reaction, SidebarCategory, Space, SpaceId, ThreadId, ThreadSummary, User, UserId,
+};
 use teamcraft_proto::{
   ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse, ConversationVisibility,
   Id, ListConversationMembersResponse, MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse,
   UserKind, UserSummary,
-};
-use teamcraft_ui::backend::ChatBackend;
-use teamcraft_ui::model::{
-  Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind, PresenceStatus,
-  Reaction, SidebarCategory, Space, SpaceId, ThreadId, ThreadSummary, User, UserId,
 };
 
 use crate::clock::Clock;

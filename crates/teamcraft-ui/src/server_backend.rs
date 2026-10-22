@@ -1,4 +1,5 @@
-//! [`ChatBackend`] and friends on top of the real `teamcraft-server`, read-only for now.
+//! [`ChatBackend`] on top of the real `teamcraft-server`, read-only for now (the browser build; the
+//! desktop app uses the client core instead, see `remote_backend`).
 //!
 //! Spaces, conversations, members, users and presence come from the REST API. Messages are not
 //! available yet (they arrive end-to-end encrypted through `teamcraft-core`), so messages written
@@ -13,20 +14,13 @@ use teamcraft_proto::{
   ListSpacesResponse, PresenceState, Role, SpaceResponse, UserKind, UserPresence, UserSummary,
 };
 
-use crate::admin::{
-  AdminChannel, AdminUser, AuditEntry, DeviceInfo, Retention, SecurityPolicy, SelfJoinOutcome,
-};
 use crate::auth::{AuthError, Authenticator};
-use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
-use crate::calls::{HuddleInfo, MediaDevices, Participant};
-use crate::mock::MockBackend;
+use crate::backend::ChatBackend;
 use crate::model::{
-  Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, MessageKind,
+  Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageId, MessageKind,
   PresenceStatus, SidebarCategory, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
   id_from_raw, raw_id,
 };
-use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
-use crate::security::KeyChange;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LoadError {
@@ -48,17 +42,20 @@ pub struct Snapshot {
   pub conversations: Vec<Conversation>,
 }
 
-pub struct ServerBackend {
+pub struct RestChat {
   snapshot: RefCell<Snapshot>,
   /// Messages written in this session, per conversation.
   local_messages: RefCell<HashMap<ConversationId, Vec<Message>>>,
   next_message: RefCell<u64>,
   now: TimestampMs,
-  /// Calls, administration and device security.
-  mock: MockBackend,
 }
 
-impl ServerBackend {
+impl RestChat {
+  /// The role of the signed-in user, for the admin check.
+  pub fn role(&self) -> Role {
+    self.snapshot.borrow().role.clone()
+  }
+
   /// Fetches spaces, conversations, members and presence for the signed-in user.
   pub async fn load(
     auth: &dyn Authenticator,
@@ -109,7 +106,6 @@ impl ServerBackend {
       local_messages: RefCell::new(HashMap::new()),
       next_message: RefCell::new(1),
       now,
-      mock: MockBackend::new(now),
     })
   }
 }
@@ -309,7 +305,7 @@ fn hue_from_hex(color: &str) -> Option<u16> {
   Some((hue * 60.0).round() as u16 % 360)
 }
 
-impl ChatBackend for ServerBackend {
+impl ChatBackend for RestChat {
   fn me(&self) -> User {
     self.snapshot.borrow().me.clone()
   }
@@ -444,134 +440,6 @@ impl ChatBackend for ServerBackend {
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.snapshot.borrow_mut().me.maybe_custom_status = maybe_status;
-  }
-}
-
-impl SearchBackend for ServerBackend {
-  /// Search needs decrypted messages, which the server cannot offer; until `teamcraft-core` provides
-  /// the local index, the mock answers so the screens can be used.
-  fn search(&self, query: &ParsedQuery) -> SearchResults {
-    self.mock.search(query)
-  }
-
-  fn recent_mentions(&self) -> Vec<SearchHit> {
-    self.mock.recent_mentions()
-  }
-
-  fn saved_searches(&self) -> Vec<SavedSearch> {
-    self.mock.saved_searches()
-  }
-
-  fn save_search(&self, name: &str, query: &str) {
-    self.mock.save_search(name, query);
-  }
-
-  fn delete_saved_search(&self, id: u64) {
-    self.mock.delete_saved_search(id);
-  }
-}
-
-impl CallBackend for ServerBackend {
-  fn media_devices(&self) -> MediaDevices {
-    self.mock.media_devices()
-  }
-
-  fn call_participants(&self, conversation: ConversationId) -> Vec<Participant> {
-    let members = self
-      .conversation(conversation)
-      .map(|conv| conv.member_ids)
-      .unwrap_or_default();
-    let me = self.snapshot.borrow().me.id;
-    members
-      .into_iter()
-      .filter(|member| *member != me)
-      .take(7)
-      .map(|user| Participant {
-        user,
-        is_muted: false,
-        is_camera_on: true,
-        has_hand_raised: false,
-        is_sharing_screen: false,
-      })
-      .collect()
-  }
-
-  fn huddle(&self, _conversation: ConversationId) -> Option<HuddleInfo> {
-    None
-  }
-}
-
-impl AdminBackend for ServerBackend {
-  fn my_role(&self) -> Role {
-    self.snapshot.borrow().role.clone()
-  }
-
-  fn admin_channels(&self) -> Vec<AdminChannel> {
-    self.mock.admin_channels()
-  }
-
-  fn admin_users(&self) -> Vec<AdminUser> {
-    self.mock.admin_users()
-  }
-
-  fn security_policy(&self) -> SecurityPolicy {
-    self.mock.security_policy()
-  }
-
-  fn set_security_policy(&self, policy: SecurityPolicy) {
-    self.mock.set_security_policy(policy);
-  }
-
-  fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
-    self.mock.set_channel_retention(channel, retention);
-  }
-
-  fn remove_device(&self, user: UserId, device: DeviceId) {
-    self.mock.remove_device(user, device);
-  }
-
-  fn set_user_active(&self, user: UserId, is_active: bool) {
-    self.mock.set_user_active(user, is_active);
-  }
-
-  fn start_org_recovery(&self, user: UserId) {
-    self.mock.start_org_recovery(user);
-  }
-
-  fn admin_join_channel(&self, channel: ConversationId) -> SelfJoinOutcome {
-    self.mock.admin_join_channel(channel)
-  }
-
-  fn audit_log(&self) -> Vec<AuditEntry> {
-    self.mock.audit_log()
-  }
-}
-
-impl SecurityBackend for ServerBackend {
-  fn my_devices(&self) -> Vec<DeviceInfo> {
-    self.mock.my_devices()
-  }
-
-  fn remove_my_device(&self, device: DeviceId) {
-    self.mock.remove_my_device(device);
-  }
-
-  fn key_change(&self, _conversation: ConversationId) -> Option<KeyChange> {
-    None
-  }
-
-  fn acknowledge_key_change(&self, _conversation: ConversationId) {}
-
-  fn my_identity_fingerprint(&self) -> String {
-    self.mock.my_identity_fingerprint()
-  }
-
-  fn contact_verification(&self, user: UserId) -> crate::security::ContactVerification {
-    self.mock.contact_verification(user)
-  }
-
-  fn set_contact_verified(&self, user: UserId, is_verified: bool) {
-    self.mock.set_contact_verified(user, is_verified);
   }
 }
 

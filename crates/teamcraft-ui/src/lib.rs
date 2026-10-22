@@ -4,21 +4,21 @@
 //! ships a mock implementation ([`mock::MockBackend`]) so the shell can be developed and reviewed
 //! without a server.
 
-pub mod admin;
+// The backend traits and view models live in `teamcraft-client-api`; the old paths keep working.
+pub use teamcraft_client_api::{admin, backend, model, search, security};
+
 pub mod auth;
-pub mod backend;
 pub mod calls;
 pub mod clock;
 pub mod components;
+pub mod hybrid;
 pub mod i18n;
 pub mod markdown;
 pub mod mock;
-pub mod model;
 pub mod prefs;
 pub mod reactive;
-pub mod search;
+pub mod remote_backend;
 pub mod sections;
-pub mod security;
 pub mod server_backend;
 pub mod session;
 pub mod settings;

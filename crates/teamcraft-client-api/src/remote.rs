@@ -1,0 +1,141 @@
+//! Wire types between a client core running outside the UI (the desktop shell's Rust side) and the
+//! UI in the webview. The core owns the encrypted store and the network; the UI keeps a mirror of
+//! what it shows and asks for more through these messages.
+
+use serde::{Deserialize, Serialize};
+
+use crate::model::{
+  Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
+  User, UserId,
+};
+
+/// Event name the host emits whenever the local store changed (new messages, membership, presence).
+pub const CORE_CHANGED_EVENT: &str = "core-changed";
+
+/// Everything the sidebar and headers need, in one piece.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatSnapshot {
+  pub me: User,
+  pub users: Vec<User>,
+  pub spaces: Vec<Space>,
+  /// Channels of all spaces plus direct and group messages.
+  pub conversations: Vec<Conversation>,
+  /// Top-level messages per conversation, so the feed knows its length before loading any row.
+  pub message_counts: Vec<(ConversationId, usize)>,
+}
+
+/// A slice of one conversation's feed, oldest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MessageWindow {
+  pub conversation: ConversationId,
+  pub start: usize,
+  /// Length of the whole feed at the time of reading.
+  pub total: usize,
+  pub messages: Vec<Message>,
+}
+
+/// Where the local client stands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CoreStatus {
+  /// No signed-in account yet.
+  NotStarted,
+  /// First run on this device: keys have to be created or recovered.
+  NeedsEnrollment {
+    /// The account already has keys on the server, so the recovery passphrase unlocks them.
+    has_existing_identity: bool,
+  },
+  Ready {
+    /// Fingerprint of the account's identity key.
+    identity_fingerprint: String,
+  },
+  Failed {
+    message: String,
+  },
+}
+
+/// First-run setup of this device (e2ee.md §3, §6).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollRequest {
+  /// Wraps the key backup; recovers an existing identity when the account has one.
+  pub passphrase: String,
+  /// Shown in the user's device list.
+  pub device_name: String,
+}
+
+/// Something the user did that changes data.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ChatAction {
+  PostMessage {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+    body: String,
+  },
+  ToggleReaction {
+    conversation: ConversationId,
+    message: MessageId,
+    emoji: String,
+  },
+  MarkRead {
+    conversation: ConversationId,
+  },
+  SetFavorite {
+    conversation: ConversationId,
+    is_favorite: bool,
+  },
+  SetPresence {
+    presence: PresenceStatus,
+  },
+  SetCustomStatus {
+    #[serde(default)]
+    maybe_status: Option<CustomStatus>,
+  },
+  /// Founds a new channel (and its encryption group) in a space.
+  CreateChannel {
+    space: SpaceId,
+    name: String,
+  },
+  /// Opens, or finds, the direct message with one person.
+  OpenDm {
+    user: UserId,
+  },
+  /// Adds a person to a conversation and gives them the history the policy allows.
+  AddMember {
+    conversation: ConversationId,
+    user: UserId,
+  },
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::model::id_from_raw;
+
+  #[test]
+  fn actions_round_trip_as_tagged_json() {
+    let action = ChatAction::PostMessage {
+      conversation: id_from_raw(7),
+      maybe_thread: None,
+      body: "hi".into(),
+    };
+    let json = serde_json::to_string(&action).expect("serialize");
+    assert_eq!(
+      json,
+      r#"{"action":"post_message","conversation":"7","maybe_thread":null,"body":"hi"}"#
+    );
+    assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), action);
+  }
+
+  #[test]
+  fn status_is_tagged_by_state() {
+    let status = CoreStatus::NeedsEnrollment {
+      has_existing_identity: true,
+    };
+    assert_eq!(
+      serde_json::to_string(&status).expect("serialize"),
+      r#"{"state":"needs_enrollment","has_existing_identity":true}"#
+    );
+  }
+}

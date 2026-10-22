@@ -173,6 +173,18 @@ mod tests {
   }
 
   #[test]
+  fn message_ids_are_unique_per_file() {
+    // A duplicate makes `add_resource` fail and logs an error at startup.
+    for (name, source) in [("en", EN_SOURCE), ("de", DE_SOURCE)] {
+      let ids = message_ids(source);
+      let mut sorted = ids.clone();
+      sorted.sort();
+      sorted.dedup();
+      assert_eq!(sorted.len(), ids.len(), "duplicate message ids in {name}.ftl");
+    }
+  }
+
+  #[test]
   fn german_covers_every_english_message() {
     let german = message_ids(DE_SOURCE);
     let missing: Vec<String> = message_ids(EN_SOURCE)
