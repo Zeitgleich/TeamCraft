@@ -207,6 +207,9 @@ impl Engine {
     Ok(SecuritySnapshot {
       my_fingerprint: self.identity_fingerprint.clone(),
       contacts,
+      maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(
+        self.store.as_ref(),
+      )),
     })
   }
 }
