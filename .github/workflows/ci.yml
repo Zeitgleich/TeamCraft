@@ -63,7 +63,7 @@ jobs:
         # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
         # the dependencies are fetched, and the build output only needs the space later.
         run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: check-${{ matrix.arch }}
@@ -111,7 +111,7 @@ jobs:
         # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
         # the dependencies are fetched, and the build output only needs the space later.
         run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-${{ matrix.arch }}
@@ -136,7 +136,7 @@ jobs:
     env:
       RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: audio-processing
@@ -158,7 +158,7 @@ jobs:
     env:
       SQLX_OFFLINE: "true"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
@@ -184,5 +184,5 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

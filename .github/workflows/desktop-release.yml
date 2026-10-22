@@ -37,7 +37,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release-linux-${{ matrix.arch }}
@@ -50,7 +50,7 @@ jobs:
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-packages-${{ matrix.arch }}
           path: |
@@ -61,7 +61,7 @@ jobs:
       # The UI bundle is wasm32, the same for both architectures: keep one.
       - name: Keep the web UI bundle for the Flatpak job
         if: matrix.arch == 'x86_64'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui-dist
           path: crates/teamcraft-ui/dist
@@ -83,10 +83,10 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
       # SDK's Rust lacks) comes from the Linux job.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ui-dist
           path: crates/teamcraft-ui/dist
@@ -105,7 +105,7 @@ jobs:
     # Cisco library at runtime (openh264_library.rs).
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
@@ -163,7 +163,7 @@ jobs:
         # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
         #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
         #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-universal
           path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
@@ -186,7 +186,7 @@ jobs:
     env:
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: wasm32-unknown-unknown,${{ matrix.target }}
@@ -212,7 +212,7 @@ jobs:
         run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles nsis,msi
         # Signing is left out on purpose (the installers are unsigned). To enable it, see
         # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-${{ matrix.target }}
           path: |
