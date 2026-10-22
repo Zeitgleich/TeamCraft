@@ -338,7 +338,8 @@ pub struct ChannelChanges {
   pub maybe_is_archived: Option<bool>,
   #[serde(default)]
   pub maybe_category: Option<CategoryChoice>,
-  /// Moves the channel to another space (owner or space admin); the channel leaves its category,
+  /// Moves the channel to another space (admin of both spaces, and every channel member already in
+  /// the new space); the channel leaves its category,
   /// unless `maybe_category` names one of the new space.
   #[serde(default)]
   pub maybe_space: Option<SpaceId>,

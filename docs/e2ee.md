@@ -283,6 +283,10 @@ encryption, and what does and does not hold:
   member removal, which rotates the keys (§4.2).
 - Guests stay what they were: they can't join public channels on their own and are always `from_join`.
 - Integration channels (bridge output) stay private; archived channels are converted after unarchiving.
+- Members get a `privacy_changed` system event, the audit log records `conversation_visibility_changed`
+  with the old and new value (metadata only).
+- *Later:* a signed per-channel history record (like the roster) would let clients trust "this channel
+  shares its past with newcomers" without the server's word.
 
 ### 4.8 Moving a channel between spaces
 
@@ -291,17 +295,17 @@ one it enters) changes only the `space_id` and drops the category. Like a conver
 server's word about *where a channel is listed*; **the MLS group, its members and the history stay as they
 are**, and nobody is added or removed. Consequences:
 
-- People in the channel keep it even if they are not members of the new space (the space list includes
-  spaces in which the user belongs to a channel). Access to the channel never comes from the space for
-  existing members; for newcomers of a public channel it is the new space's members who may join.
+- Every member of the channel must already be a member of the new space (guests: not expired);
+  otherwise the move is refused (409) and the people have to be added to the space first. Channel
+  members are always space members, so leaving the space, being removed from it or a guest's expiry
+  still ends the channel membership, and guest restrictions keep following the space role. For
+  newcomers of a public channel it is the new space's members who may join.
 - The space's permission scheme and its retention defaults apply from the move on; a channel's own
   retention setting stays.
 - A move is announced as a `moved` system event (metadata) and, by the client of the person who moved it,
   as an encrypted `moved` group message naming the new space.
-- Members get a `privacy_changed` system event, the audit log records `conversation_visibility_changed`
-  with the old and new value (metadata only).
-- *Later:* a signed per-channel history record (like the roster) would let clients trust "this channel
-  shares its past with newcomers" without the server's word.
+- The new space's admins manage the channel from then on (its scheme applies), like any channel of that
+  space.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 
