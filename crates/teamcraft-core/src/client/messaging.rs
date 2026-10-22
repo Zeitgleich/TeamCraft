@@ -7,8 +7,8 @@ use teamcraft_crypto::message::{
   EncryptedMessage, MessageContext, MessageError, decrypt_message, decrypt_unsigned_message, encrypt_message,
 };
 use teamcraft_proto::{
-  Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, MessageResponse, SendMessageRequest,
-  ThreadId, UserId,
+  Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, MessageId, MessageResponse,
+  SendMessageRequest, Snowflake, ThreadId, UserId,
 };
 use zeroize::Zeroizing;
 
@@ -202,6 +202,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let query = ListMessagesQuery {
       maybe_before: maybe_oldest,
       maybe_after: None,
+      maybe_limit: Some(self.settings.history_page_size),
+    };
+    let page = self.api.list_messages(conversation, &query).await?;
+    let count = page.messages.len();
+    for message in page.messages {
+      self.receive_message(message)?;
+    }
+    Ok(count)
+  }
+
+  /// Loads the first page of history sent at or after `from_ms` (Unix milliseconds), for "jump to
+  /// date" in channels too big to hold locally. Message IDs are snowflakes, so the time is a cursor
+  /// and no scan is needed. The page is merged into the store next to what is already there; the
+  /// messages between this window and the newest ones stay unloaded until the user scrolls to them.
+  /// Returns how many messages arrived.
+  pub async fn load_messages_from(
+    &mut self,
+    conversation: ConversationId,
+    from_ms: i64,
+  ) -> Result<usize, CoreError> {
+    let query = ListMessagesQuery {
+      maybe_before: None,
+      maybe_after: Some(MessageId::from_snowflake(Snowflake::cursor_before(from_ms))),
       maybe_limit: Some(self.settings.history_page_size),
     };
     let page = self.api.list_messages(conversation, &query).await?;
@@ -477,6 +500,9 @@ pub(crate) fn apply_control(
   content: &MessageContent,
   at_ms: i64,
 ) -> Result<(), CoreError> {
+  if let MessageContent::Bookmarks { items } = content {
+    return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
+  }
   let target = match content {
     MessageContent::Edit { target, .. }
     | MessageContent::Delete { target }
@@ -515,4 +541,9 @@ pub(crate) fn apply_control(
   }
   store.upsert_message(&stored)?;
   Ok(())
+}
+
+/// Where a conversation's bookmarks bar is kept: the newest `Bookmarks` message that was applied.
+pub(crate) fn bookmarks_key(conversation: ConversationId) -> String {
+  format!("bookmarks/{conversation}")
 }

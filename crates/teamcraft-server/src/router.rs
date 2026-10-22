@@ -18,15 +18,16 @@ use crate::handlers::{
   append_policy_handler, append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
   cancel_meeting_handler, cancel_recovery_request_handler, change_local_password_handler,
   claim_key_packages_handler, clear_custom_status_handler, complete_attachment_handler,
-  complete_avatar_upload_handler, control_meeting_handler, create_attachment_handler,
-  create_avatar_upload_handler, create_call_join_token_handler, create_category_handler,
-  create_channel_handler, create_dm_handler, create_group_dm_handler, create_guest_link_handler,
-  create_instant_meeting_handler, create_invite_handler, create_local_guest_handler, create_meeting_handler,
-  create_recovery_request_handler, create_share_link_handler, create_space_handler,
-  create_user_group_handler, delete_category_handler, delete_invite_handler, delete_my_avatar_handler,
-  delete_user_group_handler, deny_guest_handler, deny_recovery_request_handler, dismiss_announcement_handler,
-  download_attachment_handler, download_share_handler, follow_thread_handler, gateway_handler,
-  get_announcement_handler, get_call_handler, get_conversation_handler,
+  complete_avatar_upload_handler, complete_background_upload_handler, control_meeting_handler,
+  create_attachment_handler, create_avatar_upload_handler, create_background_upload_handler,
+  create_call_join_token_handler, create_category_handler, create_channel_handler, create_dm_handler,
+  create_group_dm_handler, create_guest_link_handler, create_instant_meeting_handler, create_invite_handler,
+  create_local_guest_handler, create_meeting_handler, create_recovery_request_handler,
+  create_share_link_handler, create_space_handler, create_user_group_handler, delete_background_handler,
+  delete_category_handler, delete_invite_handler, delete_my_avatar_handler, delete_user_group_handler,
+  deny_guest_handler, deny_recovery_request_handler, dismiss_announcement_handler,
+  download_attachment_handler, download_background_handler, download_share_handler, follow_thread_handler,
+  gateway_handler, get_announcement_handler, get_call_handler, get_conversation_handler,
   get_conversation_notification_settings_handler, get_conversation_retention_handler,
   get_identity_key_handler, get_key_bag_handler, get_me_handler, get_meeting_handler,
   get_my_lobby_state_handler, get_my_org_recovery_shares_handler, get_my_profile_handler,
@@ -156,6 +157,19 @@ pub fn router(state: AppState) -> Router {
       post(create_avatar_upload_handler).delete(delete_my_avatar_handler),
     )
     .route("/me/avatar/complete", post(complete_avatar_upload_handler))
+    .route("/me/backgrounds", post(create_background_upload_handler))
+    .route(
+      "/me/backgrounds/{background_id}",
+      delete(delete_background_handler),
+    )
+    .route(
+      "/me/backgrounds/{background_id}/complete",
+      post(complete_background_upload_handler),
+    )
+    .route(
+      "/me/backgrounds/{background_id}/download",
+      get(download_background_handler),
+    )
     .route("/users/{user_id}/avatar", get(get_user_avatar_handler))
     .route(
       "/user-groups",

@@ -213,13 +213,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         message_id,
         user_id,
       } => read_state::note_acknowledgement(&self.store, conversation_id, message_id, user_id),
+      // Another of the user's devices changed the key bag (account data: saved items, drafts,
+      // backgrounds, pins): take it now instead of at the next periodic sync.
+      GatewayEvent::KeyBagUpdate { version } if version > self.sync.key_bag_version => {
+        self.sync_account_data().await
+      },
+      GatewayEvent::KeyBagUpdate { .. } => Ok(()),
       // Meetings are not shown by the shell yet.
       GatewayEvent::MeetingUpdate { .. }
       | GatewayEvent::LobbyJoin { .. }
       | GatewayEvent::GuestExpired { .. }
       | GatewayEvent::ProfileUpdate { .. }
       | GatewayEvent::AnnouncementUpdate
-      | GatewayEvent::KeyBagUpdate { .. }
       | GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }

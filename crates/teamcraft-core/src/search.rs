@@ -15,10 +15,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use tantivy::Term;
 use tantivy::collector::TopDocs;
 use tantivy::directory::error::{DeleteError, OpenReadError, OpenWriteError};
 use tantivy::directory::{FileHandle, RamDirectory, WatchCallback, WatchHandle, WritePtr};
-use tantivy::query::{AllQuery, Query, QueryParser};
+use tantivy::query::{AllQuery, BooleanQuery, EmptyQuery, FuzzyTermQuery, Occur, Query};
 use tantivy::schema::{
   Field, IndexRecordOption, NumericOptions, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
 };
@@ -241,20 +242,14 @@ fn run_query(index: &Index, query: &SearchQuery) -> Result<Vec<SearchMatch>, Cor
   let fields = fields();
   let reader = index.reader().map_err(search_error)?;
   let searcher = reader.searcher();
+  // Automaton (fuzzy) queries panic in tantivy on a segment without documents.
+  if searcher.num_docs() == 0 {
+    return Ok(Vec::new());
+  }
   let parsed: Box<dyn Query> = if query.terms.is_empty() {
     Box::new(AllQuery)
   } else {
-    let mut parser = QueryParser::for_index(index, vec![fields.body_en, fields.body_de]);
-    parser.set_conjunction_by_default();
-    // Each term as a quoted phrase: user input never reaches tantivy's query syntax.
-    let text: Vec<String> = query
-      .terms
-      .iter()
-      .map(|term| format!("\"{}\"", term.replace('"', " ")))
-      .collect();
-    parser
-      .parse_query(&text.join(" "))
-      .map_err(|error| CoreError::Corrupt(error.to_string()))?
+    fuzzy_query(&query.terms, &fields)
   };
   let top = searcher
     .search(&parsed, &TopDocs::with_limit(MAX_CANDIDATES).order_by_score())
@@ -267,6 +262,55 @@ fn run_query(index: &Index, query: &SearchQuery) -> Result<Vec<SearchMatch>, Cor
     }
   }
   Ok(found)
+}
+
+/// Every analysed word of every term must match (AND), in its English or German form (OR), allowing
+/// typos: edit distance 0 up to 3 characters, 1 up to 7, then 2. User input is never parsed as
+/// query syntax, only tokenised.
+fn fuzzy_query(terms: &[String], fields: &Fields) -> Box<dyn Query> {
+  let mut analyzers = analyzers();
+  let mut required: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+  for term in terms {
+    let mut words: Vec<Vec<(tantivy::schema::Field, String)>> = Vec::new();
+    for (field, (_, analyzer)) in [fields.body_en, fields.body_de]
+      .into_iter()
+      .zip(analyzers.iter_mut())
+    {
+      let mut stream = analyzer.token_stream(term);
+      let mut index = 0;
+      while stream.advance() {
+        if words.len() <= index {
+          words.resize_with(index + 1, Vec::new);
+        }
+        words[index].push((field, stream.token().text.clone()));
+        index += 1;
+      }
+    }
+    for alternatives in words {
+      let clauses = alternatives
+        .into_iter()
+        .map(|(field, text)| {
+          let distance = match text.chars().count() {
+            0..=3 => 0,
+            4..=7 => 1,
+            _ => 2,
+          };
+          let query: Box<dyn Query> = Box::new(FuzzyTermQuery::new(
+            Term::from_field_text(field, &text),
+            distance,
+            true,
+          ));
+          (Occur::Should, query)
+        })
+        .collect();
+      required.push((Occur::Must, Box::new(BooleanQuery::new(clauses))));
+    }
+  }
+  if required.is_empty() {
+    Box::new(EmptyQuery)
+  } else {
+    Box::new(BooleanQuery::new(required))
+  }
 }
 
 fn to_match(fields: &Fields, document: &TantivyDocument, query: &SearchQuery) -> Option<SearchMatch> {
@@ -542,6 +586,18 @@ mod tests {
       vec![3, 1]
     );
     assert_eq!(ids(service.search(&store, &terms(&["häuser"])).unwrap()), vec![2]);
+    // Fuzzy: one typo still finds the word; short words must match exactly.
+    assert_eq!(
+      ids(service.search(&store, &terms(&["failled"])).unwrap()),
+      vec![1]
+    );
+    assert_eq!(ids(service.search(&store, &terms(&["gebaut"])).unwrap()), vec![2]);
+    assert_eq!(ids(service.search(&store, &terms(&["gebuat"])).unwrap()), vec![2]);
+    assert_eq!(
+      ids(service.search(&store, &terms(&["haeuser"])).unwrap()),
+      vec![2]
+    );
+    assert!(service.search(&store, &terms(&["fai"])).unwrap().hits.is_empty());
     let link_in_thread = SearchQuery {
       has_link: true,
       in_thread: true,

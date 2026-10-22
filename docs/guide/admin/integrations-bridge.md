@@ -54,5 +54,11 @@ default); alert levels and `danger` webhook attachments can @mention people.
 
 ## Limits
 
-Text only (webhook file attachments are ignored); source configuration is read at start; the UI shows
-integration channels as live log views in the **Integrations** section.
+Text only (webhook file attachments are ignored); source configuration is read at start.
+
+## Log view
+
+Integration channels appear under **Integrations** in the clients as live log views: compact rows
+with level colors, a *Jump to latest* follow mode, and a list that stays fast with tens of thousands
+of lines because only the visible rows are drawn. Alerts that mention a person notify them even
+though the channel pushes nothing else.

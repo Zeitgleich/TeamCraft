@@ -33,6 +33,9 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
+use teamcraft_proto::{
+  BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+};
 use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -95,6 +98,7 @@ struct State {
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
   maybe_max_attachment_bytes: Option<u64>,
   share_links: HashMap<String, AttachmentId>,
+  backgrounds: HashMap<BackgroundId, FakeBackground>,
   /// Spaces besides the default one, and changes to the default one.
   spaces: BTreeMap<SpaceId, SpaceResponse>,
   categories: BTreeMap<CategoryId, CategoryResponse>,
@@ -116,6 +120,13 @@ pub struct FakeRendezvous {
   maybe_rendezvous_id: Option<String>,
   sender: UnboundedSender<RendezvousFrame>,
   receiver: UnboundedReceiver<RendezvousFrame>,
+}
+
+struct FakeBackground {
+  owner: UserId,
+  size_bytes: u64,
+  maybe_blob: Option<Vec<u8>>,
+  is_complete: bool,
 }
 
 struct FakeAttachment {
@@ -1092,6 +1103,13 @@ impl ServerApi for FakeServerApi {
         updated_at: UnixMillis(0),
       };
       state.key_bags.insert(me, stored.clone());
+      // Like the server: the user's devices learn about the new version.
+      state.publish(
+        [me],
+        &GatewayEvent::KeyBagUpdate {
+          version: stored.version,
+        },
+      );
       Ok(stored)
     })
   }
@@ -1575,7 +1593,80 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn create_background_upload(
+    &self,
+    request: &CreateBackgroundUploadRequest,
+  ) -> Result<CreateBackgroundUploadResponse, ApiError> {
+    self.with(|state, me| {
+      let id: BackgroundId = state.next_id();
+      state.backgrounds.insert(
+        id,
+        FakeBackground {
+          owner: me,
+          size_bytes: request.size_bytes,
+          maybe_blob: None,
+          is_complete: false,
+        },
+      );
+      Ok(CreateBackgroundUploadResponse {
+        id,
+        upload_url: format!("{BACKGROUND_SCHEME}{id}"),
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn complete_background_upload(&self, background: BackgroundId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = own_background(state, me, background)?;
+      if entry.maybe_blob.as_ref().map(|blob| blob.len() as u64) != Some(entry.size_bytes) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "upload missing or of the wrong size",
+        ));
+      }
+      entry.is_complete = true;
+      Ok(())
+    })
+  }
+
+  async fn download_background(
+    &self,
+    background: BackgroundId,
+  ) -> Result<BackgroundDownloadResponse, ApiError> {
+    self.with(|state, me| {
+      let entry = own_background(state, me, background)?;
+      Ok(BackgroundDownloadResponse {
+        download_url: format!("{BACKGROUND_SCHEME}{background}"),
+        size_bytes: entry.size_bytes,
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn delete_background(&self, background: BackgroundId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      own_background(state, me, background)?;
+      state.backgrounds.remove(&background);
+      Ok(())
+    })
+  }
+
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
+    if let Some(raw) = url.strip_prefix(BACKGROUND_SCHEME) {
+      return self.with(|state, _| {
+        let entry = background_blob(state, raw)?;
+        if bytes.len() as u64 != entry.size_bytes || entry.is_complete {
+          return Err(ApiError::Status {
+            status: 403,
+            maybe_body: None,
+          });
+        }
+        entry.maybe_blob = Some(bytes);
+        Ok(())
+      });
+    }
     self.with(|state, _| {
       let entry = blob_entry(state, url)?;
       if bytes.len() as u64 != entry.size_bytes || entry.is_complete {
@@ -1590,6 +1681,17 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+    if let Some(raw) = url.strip_prefix(BACKGROUND_SCHEME) {
+      return self.with(|state, _| {
+        background_blob(state, raw)?
+          .maybe_blob
+          .clone()
+          .ok_or(ApiError::Status {
+            status: 404,
+            maybe_body: None,
+          })
+      });
+    }
     self.with(|state, _| {
       blob_entry(state, url)?
         .maybe_blob
@@ -2074,6 +2176,34 @@ impl KeyPackages {
 
 const PENDING_PREFIX: &str = "pending-";
 const BLOB_SCHEME: &str = "fake-blob://";
+const BACKGROUND_SCHEME: &str = "fake-background://";
+
+/// The caller's own background; others' look missing, like on the server.
+fn own_background(
+  state: &mut State,
+  me: UserId,
+  background: BackgroundId,
+) -> Result<&mut FakeBackground, ApiError> {
+  state
+    .backgrounds
+    .get_mut(&background)
+    .filter(|entry| entry.owner == me)
+    .ok_or_else(|| ApiError::status(404, ErrorCode::BackgroundNotFound, "unknown"))
+}
+
+/// A background's object, by the presigned URL's ID (the URL is the credential).
+fn background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut FakeBackground, ApiError> {
+  raw
+    .parse::<i64>()
+    .ok()
+    .and_then(|raw| Snowflake::new(raw).ok())
+    .map(BackgroundId::from_snowflake)
+    .and_then(|id| state.backgrounds.get_mut(&id))
+    .ok_or(ApiError::Status {
+      status: 404,
+      maybe_body: None,
+    })
+}
 
 /// The attachment behind a fake presigned URL.
 fn blob_entry<'a>(state: &'a mut State, url: &str) -> Result<&'a mut FakeAttachment, ApiError> {

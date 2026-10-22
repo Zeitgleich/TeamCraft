@@ -195,6 +195,33 @@ mod tests {
   }
 
   #[test]
+  fn german_has_no_messages_english_lacks() {
+    let english = message_ids(EN_SOURCE);
+    let orphans: Vec<String> = message_ids(DE_SOURCE)
+      .into_iter()
+      .filter(|id| !english.contains(id))
+      .collect();
+    assert!(
+      orphans.is_empty(),
+      "only in de.ftl (stale or misspelled): {orphans:?}"
+    );
+  }
+
+  /// A translation that drops or renames a `$placeholder` shows wrong or empty text.
+  #[test]
+  fn translations_use_the_same_placeholders() {
+    let german = placeholders(DE_SOURCE);
+    for (id, english_vars) in placeholders(EN_SOURCE) {
+      if let Some(german_vars) = german.get(&id) {
+        assert_eq!(
+          &english_vars, german_vars,
+          "placeholders of {id} differ between en and de"
+        );
+      }
+    }
+  }
+
+  #[test]
   fn plural_and_arguments_resolve() {
     let en = translate(Locale::En, "thread-replies", Some(&count_args(1)));
     let en_many = translate(Locale::En, "thread-replies", Some(&count_args(3)));
@@ -222,6 +249,34 @@ mod tests {
     let mut args = FluentArgs::new();
     args.set("count", count);
     args
+  }
+
+  /// The `$variables` each message uses, including the lines of its plural branches.
+  fn placeholders(source: &str) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut found: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+      Default::default();
+    let mut current: Option<String> = None;
+    for line in source.lines() {
+      if !line.starts_with([' ', '#', '-', '.'])
+        && let Some((id, _)) = line.split_once(" =")
+      {
+        current = Some(id.trim().to_owned());
+        found.entry(id.trim().to_owned()).or_default();
+      }
+      let Some(id) = &current else { continue };
+      let mut rest = line;
+      while let Some(position) = rest.find('$') {
+        let name: String = rest[position + 1..]
+          .chars()
+          .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+          .collect();
+        if !name.is_empty() {
+          found.entry(id.clone()).or_default().insert(name);
+        }
+        rest = &rest[position + 1..];
+      }
+    }
+    found
   }
 
   fn message_ids(source: &str) -> Vec<String> {

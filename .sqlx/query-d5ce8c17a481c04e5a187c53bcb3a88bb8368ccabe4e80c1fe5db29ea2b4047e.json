@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_backgrounds SET completed_at = COALESCE(completed_at, now()) WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d5ce8c17a481c04e5a187c53bcb3a88bb8368ccabe4e80c1fe5db29ea2b4047e"
+}

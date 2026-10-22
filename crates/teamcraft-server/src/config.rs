@@ -6,6 +6,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::Deserialize;
+use teamcraft_proto::{ConversationId, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
 /// `TEAMCRAFT_OIDC__ISSUER`, `TEAMCRAFT_OIDC__ROLES__GUEST`, `TEAMCRAFT_DATABASE__URL`.
@@ -174,6 +175,10 @@ pub struct PolicyConfig {
   pub guests_dm_only_with_shared_conversations: bool,
   /// Pending invites only apply to accounts whose identity provider verified the email address.
   pub invites_require_verified_email: bool,
+  /// Spaces (by ID) every new member joins on their first sign-in. Missing or archived ones are skipped.
+  pub default_spaces: Vec<SpaceId>,
+  /// Public channels (by ID) of the default spaces that new members join as well.
+  pub default_channels: Vec<ConversationId>,
 }
 
 /// Size limits of requests and results.
@@ -190,6 +195,10 @@ pub struct LimitsConfig {
   pub max_directory_results: u32,
   /// Largest avatar image.
   pub max_avatar_bytes: u64,
+  /// Largest call background picture a user uploads (encrypted; apps send Full HD JPEGs).
+  pub max_background_bytes: u64,
+  /// How many call background pictures one user may keep.
+  pub max_backgrounds_per_user: u32,
   /// How long a request for organization recovery waits for approvals.
   pub org_recovery_request_ttl_secs: u64,
   /// Largest sealed share or sealed backup key.
@@ -897,6 +906,8 @@ impl Default for PolicyConfig {
     Self {
       guests_dm_only_with_shared_conversations: true,
       invites_require_verified_email: true,
+      default_spaces: Vec::new(),
+      default_channels: Vec::new(),
     }
   }
 }
@@ -913,6 +924,8 @@ impl Default for LimitsConfig {
       max_page_size: 200,
       max_directory_results: 50,
       max_avatar_bytes: 1024 * 1024,
+      max_background_bytes: 8 * 1024 * 1024,
+      max_backgrounds_per_user: 24,
       org_recovery_request_ttl_secs: 86_400,
       max_recovery_blob_bytes: 8192,
       max_profile_text_chars: 100,

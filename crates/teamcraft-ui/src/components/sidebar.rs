@@ -111,6 +111,15 @@ pub fn Sidebar() -> impl IntoView {
       })}
       <button
         class="sb-item"
+        class:current=move || state.view.get() == MainView::Directory
+        aria-current=move || (state.view.get() == MainView::Directory).then_some("page")
+        on:click=move |_| state.open_directory()
+      >
+        <Icon name=IconName::Users />
+        <span class="sb-name">{move || i18n.t("sidebar-people")}</span>
+      </button>
+      <button
+        class="sb-item"
         class:current=move || state.view.get() == MainView::Saved
         aria-current=move || (state.view.get() == MainView::Saved).then_some("page")
         on:click=move |_| state.open_saved()

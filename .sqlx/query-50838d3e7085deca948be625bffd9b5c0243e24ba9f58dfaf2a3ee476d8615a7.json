@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET default_memberships_at = now()\n       WHERE id = $1 AND default_memberships_at IS NULL AND deactivated_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "50838d3e7085deca948be625bffd9b5c0243e24ba9f58dfaf2a3ee476d8615a7"
+}

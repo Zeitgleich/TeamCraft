@@ -27,9 +27,16 @@ pub fn Avatar(
   #[prop(default = false)] show_presence: bool,
 ) -> impl IntoView {
   let presence = user.presence;
+  let id = user.id;
+  // Their picture, once loaded (signed-in builds); the generated initials until then.
+  let picture = move || crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id));
+  let initials = user.initials();
   view! {
     <span class=size.class() style:--hue=user.avatar_hue.to_string() aria-hidden="true">
-      <span class="avatar-initials">{user.initials()}</span>
+      {move || match picture() {
+        Some(url) => view! { <img class="avatar-img" src=url alt="" /> }.into_any(),
+        None => view! { <span class="avatar-initials">{initials.clone()}</span> }.into_any(),
+      }}
       {show_presence.then(|| view! { <PresenceDot presence=presence /> })}
     </span>
   }

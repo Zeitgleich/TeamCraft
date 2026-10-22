@@ -7,6 +7,7 @@ mod admin;
 mod announcement;
 mod attachment;
 mod audit;
+mod background;
 mod bot;
 mod call_history;
 mod conversation;
@@ -49,6 +50,7 @@ pub use admin::{
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
 pub use attachment::{Attachment, NewAttachment};
 pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};
+pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};
 pub use call_history::{MissedCall, StoredCall};
 pub use conversation::{
@@ -88,6 +90,6 @@ pub use status::StoredStatus;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};
 pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};
 pub use urgent::{Acknowledgement, DueReminder};
-pub use user::{OidcIdentity, OidcUserRow, PresencePreference, User, UserSearch};
+pub use user::{OidcIdentity, OidcUserRow, PresencePreference, SyncedUser, User, UserSearch};
 pub use user_group::{GroupCreateOutcome, NewUserGroup, UserGroup};
 pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};

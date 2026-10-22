@@ -136,6 +136,12 @@ pub fn StatusMenu() -> impl IntoView {
           <span class="menu-label">{move || i18n.t("menu-administration")}</span>
         </button>
       </Show>
+      <Show when=|| crate::profiles::use_profiles().is_some() fallback=|| ()>
+        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::EditProfile)>
+          <Icon name=IconName::User />
+          <span class="menu-label">{move || i18n.t("profile-edit-title")}</span>
+        </button>
+      </Show>
       <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::Settings)>
         <Icon name=IconName::Sliders />
         <span class="menu-label">{move || i18n.t("menu-settings")}</span>
