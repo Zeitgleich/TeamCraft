@@ -13,5 +13,6 @@ mod guests;
 mod meetings;
 mod membership;
 mod messaging;
+mod moderator;
 #[cfg(feature = "browser")]
 mod web;
