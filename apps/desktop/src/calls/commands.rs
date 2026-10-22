@@ -7,6 +7,7 @@ use tauri::{AppHandle, State};
 use teamcraft_client_api::calls::{BackgroundEffect as UiBackgroundEffect, MediaDevices, OrgBackgrounds};
 use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
+use teamcraft_media::effects::BackgroundImage;
 use teamcraft_proto::MediaStreamId;
 
 use super::{CallHost, push_to_talk, video};
@@ -67,21 +68,35 @@ async fn apply_background(
 ) -> Result<(), CommandError> {
   let org = org_backgrounds(core).await;
   let effect = org.effective(requested);
-  let maybe_picture = match effect {
-    UiBackgroundEffect::Custom(id) => Some(core.current()?.background_picture(id).await?),
-    UiBackgroundEffect::Org(id) => Some(core.current()?.org_background_picture(id).await?),
-    _ => None,
+  match load_background_picture(core, effect).await {
+    Ok(maybe_image) => {
+      calls.set_background_effect(effect, maybe_image, org.is_required());
+      Ok(())
+    },
+    // A required picture that can't be fetched or doesn't match the signed hash: hide the room
+    // anyway (strong blur, or the camera goes off) rather than send it.
+    Err(error) if org.is_required() => {
+      calls.fail_closed_background().await;
+      Err(error.into())
+    },
+    Err(error) => Err(error.into()),
+  }
+}
+
+/// The decoded picture `effect` needs, if any.
+async fn load_background_picture(
+  core: &CoreHost,
+  effect: UiBackgroundEffect,
+) -> Result<Option<Arc<BackgroundImage>>, String> {
+  let picture = match effect {
+    UiBackgroundEffect::Custom(id) => core.current()?.background_picture(id).await?,
+    UiBackgroundEffect::Org(id) => core.current()?.org_background_picture(id).await?,
+    _ => return Ok(None),
   };
-  let maybe_image = match maybe_picture {
-    Some(picture) => Some(
-      tauri::async_runtime::spawn_blocking(move || video::decode_background(&picture))
-        .await
-        .map_err(|error| error.to_string())??,
-    ),
-    None => None,
-  };
-  calls.set_background_effect(effect, maybe_image, org.is_required());
-  Ok(())
+  tauri::async_runtime::spawn_blocking(move || video::decode_background(&picture))
+    .await
+    .map_err(|error| error.to_string())?
+    .map(Some)
 }
 
 /// The organization's backgrounds and rule from the verified policy; without a running core

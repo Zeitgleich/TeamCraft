@@ -461,6 +461,19 @@ impl CallHost {
     self.update_active(|active| active.background = effect);
   }
 
+  /// The organization requires a background but its picture can't be used: switches to strong
+  /// blur, which still hides the room, and turns the camera off where there are no effects to
+  /// apply it. The camera can't be turned on again until an organization picture loads.
+  pub async fn fail_closed_background(&self) {
+    tracing::warn!("required organization background unavailable; hiding the camera image");
+    self.set_background_effect(UiBackgroundEffect::BlurStrong, None, true);
+    let has_effects = lock(&self.state).maybe_effect_handle.is_some();
+    if self.is_camera_on() && !has_effects {
+      // Stopping only fails if the call is gone, and then nothing is sent anyway.
+      let _ = self.set_camera(false).await;
+    }
+  }
+
   /// Shows the system's screen/window picker and shares the choice as its own stream.
   pub async fn start_screen_share(&self) -> Result<(), String> {
     self.ensure_video_codec().await?;
@@ -1078,6 +1091,18 @@ mod tests {
     assert_eq!(push_to_talk.shortcut, "F8");
     host.set_talking(false).await;
     assert!(!host.snapshot().push_to_talk.is_talking);
+  }
+
+  #[tokio::test]
+  async fn an_unusable_required_picture_fails_closed() {
+    let host = host();
+    host.set_background_effect(UiBackgroundEffect::None, None, false);
+    host.fail_closed_background().await;
+    let snapshot_background = lock(&host.state).background;
+    assert_eq!(snapshot_background, UiBackgroundEffect::BlurStrong);
+    assert!(lock(&host.state).is_background_required);
+    // Blur alone doesn't satisfy the rule, so the camera stays off until a picture loads.
+    assert!(host.set_camera(true).await.is_err());
   }
 
   #[tokio::test]
