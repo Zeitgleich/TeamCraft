@@ -18,8 +18,9 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{
-  BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsPipeline,
-  PRESET_HEIGHT, PRESET_WIDTH, PresetBackground, SegmentationModel, TractSegmenter,
+  BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsError,
+  EffectsPipeline, PRESET_HEIGHT, PRESET_WIDTH, PhotoBackground, PresetBackground, SegmentationModel,
+  TractSegmenter,
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video::{VideoResolution, simulcast_layers};
@@ -322,15 +323,13 @@ pub(super) fn media_effect(
     UiBackgroundEffect::None => BackgroundEffect::None,
     UiBackgroundEffect::BlurLight => BackgroundEffect::Blur(BlurStrength::Light),
     UiBackgroundEffect::BlurStrong => BackgroundEffect::Blur(BlurStrength::Strong),
-    UiBackgroundEffect::Preset(preset) => {
-      match preset_background(preset).render(PRESET_WIDTH, PRESET_HEIGHT) {
-        Ok(image) => BackgroundEffect::Image(Arc::new(image)),
-        // Only an empty size fails, and the preset size isn't empty; keep the real background.
-        Err(error) => {
-          warn!(%error, ?preset, "preset background not drawn");
-          BackgroundEffect::None
-        },
-      }
+    UiBackgroundEffect::Preset(preset) => match preset_image(preset, PRESET_WIDTH, PRESET_HEIGHT) {
+      Ok(image) => BackgroundEffect::Image(Arc::new(image)),
+      // Only an empty size or a broken built-in file fails; keep the real background.
+      Err(error) => {
+        warn!(%error, ?preset, "preset background not loaded");
+        BackgroundEffect::None
+      },
     },
     UiBackgroundEffect::Custom(_) | UiBackgroundEffect::Org(_) => match maybe_custom {
       Some(image) => BackgroundEffect::Image(Arc::clone(image)),
@@ -359,7 +358,7 @@ pub(crate) fn background_preview(
   height: u32,
 ) -> Result<Vec<u8>, String> {
   let image = match (effect, maybe_custom) {
-    (UiBackgroundEffect::Preset(preset), _) => preset_background(preset).render(width, height),
+    (UiBackgroundEffect::Preset(preset), _) => preset_image(preset, width, height),
     (UiBackgroundEffect::Custom(_) | UiBackgroundEffect::Org(_), Some(picture)) => {
       BackgroundImage::decode(picture).map(|image| image.fit_within(width, height))
     },
@@ -370,13 +369,32 @@ pub(crate) fn background_preview(
     .map_err(|error| error.to_string())
 }
 
-/// The UI's preset as the media layer's drawing of it.
-pub(super) fn preset_background(preset: UiBackgroundPreset) -> PresetBackground {
+/// A preset at (at most) `width` x `height`: a photo decoded from its compiled-in file, an
+/// illustration drawn at exactly that size.
+fn preset_image(
+  preset: UiBackgroundPreset,
+  width: u32,
+  height: u32,
+) -> Result<BackgroundImage, EffectsError> {
+  match photo_background(preset) {
+    Some(photo) => photo.decode(width, height),
+    None => illustration(preset).render(width, height),
+  }
+}
+
+/// The photo behind a UI preset, if it is one (the UI and the media layer share the slugs).
+fn photo_background(preset: UiBackgroundPreset) -> Option<PhotoBackground> {
+  PhotoBackground::from_slug(preset.slug())
+}
+
+/// The UI's illustration preset as the media layer's drawing of it.
+fn illustration(preset: UiBackgroundPreset) -> PresetBackground {
   match preset {
-    UiBackgroundPreset::Office => PresetBackground::Office,
     UiBackgroundPreset::Bookshelf => PresetBackground::Bookshelf,
     UiBackgroundPreset::Sunrise => PresetBackground::Sunrise,
     UiBackgroundPreset::Forest => PresetBackground::Forest,
+    // Every other preset is a photo (checked by a test); the office is the neutral fallback.
+    _ => PresetBackground::Office,
   }
 }
 
@@ -498,6 +516,29 @@ mod tests {
       media_effect(UiBackgroundEffect::Preset(UiBackgroundPreset::Sunrise), None),
       BackgroundEffect::Image(image) if image.width() == PRESET_WIDTH
     ));
+  }
+
+  #[test]
+  fn photo_presets_load_at_call_size_and_illustrations_are_drawn() {
+    for preset in UiBackgroundPreset::PHOTOS {
+      assert!(photo_background(preset).is_some(), "{}", preset.slug());
+      assert!(matches!(
+        media_effect(UiBackgroundEffect::Preset(preset), None),
+        BackgroundEffect::Image(image) if (image.width(), image.height()) == (PRESET_WIDTH, PRESET_HEIGHT)
+      ));
+    }
+    for preset in UiBackgroundPreset::ILLUSTRATIONS {
+      assert!(photo_background(preset).is_none(), "{}", preset.slug());
+    }
+    let preview = background_preview(
+      UiBackgroundEffect::Preset(UiBackgroundPreset::LivingRoom),
+      None,
+      160,
+      90,
+    )
+    .unwrap();
+    let decoded = BackgroundImage::decode(&preview).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (160, 90));
   }
 
   fn layer_resolution(layer: &VideoLayerInfo) -> VideoResolution {

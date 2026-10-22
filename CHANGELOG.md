@@ -22,6 +22,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   appearing offline hides it too, and the admin can switch it off for the workspace
   (`presence.is_last_seen_enabled` in the signed policy).
 - **Call history** list: missed, incoming and outgoing calls with a button to call back.
+- **Photo backgrounds**: twelve public domain and CC0 pictures (living rooms, libraries, an empty
+  room, a misty lake) next to blur and the drawn illustrations, with thumbnails in the picker.
+  Licences and sources: `assets/backgrounds/SOURCES.md`.
 
 ### Fixed
 

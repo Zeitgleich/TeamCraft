@@ -9,6 +9,8 @@
 
 mod compositor;
 mod image_file;
+#[cfg(feature = "photo-backgrounds")]
+mod photos;
 mod presets;
 mod segmentation;
 
@@ -18,6 +20,8 @@ pub use compositor::Compositor;
 pub use image_file::{
   BACKGROUND_MAX_HEIGHT, BACKGROUND_MAX_WIDTH, MAX_DECODED_DIMENSION, normalize_background_file,
 };
+#[cfg(feature = "photo-backgrounds")]
+pub use photos::PhotoBackground;
 pub use presets::{PRESET_HEIGHT, PRESET_WIDTH, PresetBackground};
 pub use segmentation::{EllipseSegmenter, PersonSegmenter, SegmentationMask};
 #[cfg(feature = "segmentation")]

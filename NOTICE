@@ -19,6 +19,15 @@ davey (crates/vendor/davey/)
   WebAssembly (see crates/vendor/davey/VENDORED.md).
   MIT License, see crates/vendor/davey/LICENSE.
 
+Photo backgrounds (assets/backgrounds/)
+  Twelve pictures for background replacement, cropped and scaled by scripts/process-backgrounds.py.
+  Each is dedicated to the public domain (CC0 1.0) or marked public domain by its author
+  (Public Domain Mark 1.0); no attribution is required. Title, author, source URL, licence and
+  retrieval date of every picture: assets/backgrounds/SOURCES.md.
+  CC0 1.0: https://creativecommons.org/publicdomain/zero/1.0/
+  Authors: Wilfredor, Lo, Mertbiol, Foto Miki (Foto Miki Digital), National Chiao Tung University,
+  FelixM, Ted Moravec.
+
 Shipped with the apps, not stored in git
 ----------------------------------------
 
