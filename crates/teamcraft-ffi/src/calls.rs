@@ -343,6 +343,18 @@ struct VideoBridge {
   maybe_camera: Option<MediaStreamId>,
   /// The camera was asked for; the track announcement may still be on its way.
   is_camera_requested: bool,
+  /// Tracks of other devices that are published now; a listener that registers late (the app sets
+  /// it after the join returned) learns about them when it registers.
+  remote_tracks: Vec<RemoteVideoTrack>,
+}
+
+impl VideoBridge {
+  fn set_listener(&mut self, listener: Arc<dyn VideoListener>) {
+    for track in &self.remote_tracks {
+      listener.on_remote_video_track(track.clone());
+    }
+    self.maybe_listener = Some(listener);
+  }
 }
 
 /// Applies the app's controls and reports the engine's events until the call ends.
@@ -400,7 +412,7 @@ async fn run_call(
 /// Camera and watch requests of the app, for the engine.
 fn apply_video_control(call: &NativeCall, video: &mut VideoBridge, control: Control) {
   match control {
-    Control::SetVideoListener(listener) => video.maybe_listener = Some(listener),
+    Control::SetVideoListener(listener) => video.set_listener(listener),
     Control::PublishCamera(layer) => {
       if !video.is_camera_requested {
         video.is_camera_requested = true;
@@ -434,22 +446,27 @@ fn report_video(video: &mut VideoBridge, own_device: DeviceId, event: &CallEngin
       }
     },
     CallEngineEvent::VideoPublished(track) => {
+      let remote = RemoteVideoTrack {
+        stream_id: track.stream_id.0.to_string(),
+        device_id: track.device_id.to_string(),
+        is_screen: track.kind == VideoTrackKind::Screen,
+      };
+      video.remote_tracks.push(remote.clone());
       if let Some(listener) = &video.maybe_listener {
-        listener.on_remote_video_track(RemoteVideoTrack {
-          stream_id: track.stream_id.0.to_string(),
-          device_id: track.device_id.to_string(),
-          is_screen: track.kind == VideoTrackKind::Screen,
-        });
+        listener.on_remote_video_track(remote);
       }
     },
     CallEngineEvent::VideoUnpublished(stream_id) => {
       if video.maybe_camera == Some(*stream_id) {
         video.maybe_camera = None;
-      } else if let Some(listener) = &video.maybe_listener {
-        listener.on_remote_video_ended(stream_id.0.to_string());
+      } else {
+        let id = stream_id.0.to_string();
+        video.remote_tracks.retain(|track| track.stream_id != id);
+        if let Some(listener) = &video.maybe_listener {
+          listener.on_remote_video_ended(id);
+        }
       }
     },
-    CallEngineEvent::ParticipantLeft(_) => {},
     CallEngineEvent::VideoFrame(frame) => {
       if let Some(listener) = &video.maybe_listener {
         listener.on_remote_video_frame(RemoteVideoFrame {
@@ -560,7 +577,7 @@ fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{CallId, Id, Snowflake};
+  use teamcraft_proto::{CallId, Id, Snowflake, VideoTrack};
 
   use super::*;
 
@@ -592,6 +609,66 @@ mod tests {
       apply_event(&mut state, CallEngineEvent::EndedByHost { by_user_id: user(1) }),
       Some(CallEndReason::EndedByHost)
     );
+  }
+
+  #[test]
+  fn a_late_video_listener_learns_about_published_tracks() {
+    let mut video = VideoBridge::default();
+    let track = |stream: u32, device: i64| VideoTrack {
+      stream_id: MediaStreamId(stream),
+      device_id: DeviceId::from_snowflake(Snowflake::new(device).unwrap()),
+      kind: VideoTrackKind::Camera,
+      codec: VideoCodec::H264,
+      layers: Vec::new(),
+    };
+    report_video(
+      &mut video,
+      user_device(1),
+      &CallEngineEvent::VideoPublished(track(7, 2)),
+    );
+    report_video(
+      &mut video,
+      user_device(1),
+      &CallEngineEvent::VideoPublished(track(8, 3)),
+    );
+    report_video(
+      &mut video,
+      user_device(1),
+      &CallEngineEvent::VideoUnpublished(MediaStreamId(7)),
+    );
+    // Own camera: remembered for sending, not shown as a remote track.
+    video.is_camera_requested = true;
+    report_video(
+      &mut video,
+      user_device(1),
+      &CallEngineEvent::VideoPublished(track(9, 1)),
+    );
+    assert_eq!(video.maybe_camera, Some(MediaStreamId(9)));
+
+    let listener = Arc::new(VideoRecorder::default());
+    video.set_listener(listener.clone());
+    assert_eq!(*listener.tracks.lock().unwrap(), vec!["8".to_string()]);
+  }
+
+  #[derive(Default)]
+  struct VideoRecorder {
+    tracks: Mutex<Vec<String>>,
+  }
+
+  impl VideoListener for VideoRecorder {
+    fn on_remote_video_track(&self, track: RemoteVideoTrack) {
+      self.tracks.lock().unwrap().push(track.stream_id);
+    }
+
+    fn on_remote_video_ended(&self, _stream_id: String) {}
+
+    fn on_remote_video_frame(&self, _frame: RemoteVideoFrame) {}
+
+    fn on_keyframe_requested(&self) {}
+  }
+
+  fn user_device(raw: i64) -> DeviceId {
+    DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
   }
 
   #[derive(Default)]
