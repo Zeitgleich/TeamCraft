@@ -17,6 +17,7 @@ mod membership;
 mod messaging;
 mod mfa;
 mod moderator;
+mod retention_limits;
 mod threads_policy;
 #[cfg(feature = "browser")]
 mod web;
