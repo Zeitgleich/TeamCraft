@@ -597,11 +597,13 @@ pub struct BrandingConfig {
   /// relative to it and cannot leave it.
   #[serde(rename = "assets_dir")]
   pub maybe_assets_dir: Option<PathBuf>,
-  /// What a request on a host name no brand lists gets.
+  /// What a request on a host name no brand lists gets. Without any brand host name there is
+  /// nothing to match, and every host is served.
   pub unknown_host: UnknownHostPolicy,
-  /// Take the host from `X-Forwarded-Host` (its last entry) instead of `Host`. Only for a proxy that
-  /// sets it; otherwise anybody could forge it.
-  pub trust_forwarded_host: bool,
+  /// Addresses of reverse proxies whose `X-Forwarded-Host` (its last entry) replaces `Host`. Requests
+  /// from any other address are matched by their own `Host`; the header is never trusted from
+  /// elsewhere because anybody could forge it. Empty: `Host` only.
+  pub trusted_proxies: Vec<IpAddr>,
   /// Largest brand image file.
   pub max_asset_bytes: u64,
 }
@@ -611,7 +613,7 @@ impl Default for BrandingConfig {
     Self {
       maybe_assets_dir: None,
       unknown_host: UnknownHostPolicy::default(),
-      trust_forwarded_host: false,
+      trusted_proxies: Vec::new(),
       max_asset_bytes: 512 * 1024,
     }
   }
@@ -622,9 +624,12 @@ impl Default for BrandingConfig {
 #[serde(rename_all = "snake_case")]
 pub enum UnknownHostPolicy {
   /// Serve the default brand (links still use the default brand's own host name).
-  #[default]
   Default,
   /// Answer `421 Misdirected Request`, except for health probes and server-to-server endpoints.
+  /// The default: a host name nobody configured is not one this server should present itself on.
+  /// Reach the server by IP or an internal name only for `/healthz`, `/readyz` and the internal
+  /// endpoints, or switch to `default`.
+  #[default]
   Reject,
 }
 

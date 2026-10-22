@@ -3,7 +3,6 @@ use axum::extract::State;
 use teamcraft_proto::{ErrorBody, LocalGuestResponse, UserId};
 
 use crate::auth::AdminUser;
-use crate::brand::ResolvedBrand;
 use crate::error::ApiError;
 use crate::extract::ApiPath;
 use crate::services::local_accounts;
@@ -14,9 +13,8 @@ use crate::state::AppState;
 pub async fn admin_reissue_local_activation_handler(
   State(state): State<AppState>,
   AdminUser(caller): AdminUser,
-  brand: ResolvedBrand,
   ApiPath(user_id): ApiPath<UserId>,
 ) -> Result<Json<LocalGuestResponse>, ApiError> {
-  let response = local_accounts::reissue_activation(&state, &caller, &brand, user_id).await?;
+  let response = local_accounts::reissue_activation(&state, &caller, user_id).await?;
   Ok(Json(response))
 }

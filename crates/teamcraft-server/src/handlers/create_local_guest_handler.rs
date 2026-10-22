@@ -4,7 +4,6 @@ use axum::http::StatusCode;
 use teamcraft_proto::{CreateLocalGuestRequest, ErrorBody, LocalGuestResponse, SpaceId};
 
 use crate::auth::AuthenticatedUser;
-use crate::brand::ResolvedBrand;
 use crate::error::ApiError;
 use crate::extract::{ApiJson, ApiPath};
 use crate::services::local_accounts;
@@ -15,10 +14,9 @@ use crate::state::AppState;
 pub async fn create_local_guest_handler(
   State(state): State<AppState>,
   caller: AuthenticatedUser,
-  brand: ResolvedBrand,
   ApiPath(space_id): ApiPath<SpaceId>,
   ApiJson(request): ApiJson<CreateLocalGuestRequest>,
 ) -> Result<(StatusCode, Json<LocalGuestResponse>), ApiError> {
-  let response = local_accounts::create_local_guest(&state, &caller, &brand, space_id, request).await?;
+  let response = local_accounts::create_local_guest(&state, &caller, space_id, request).await?;
   Ok((StatusCode::CREATED, Json(response)))
 }

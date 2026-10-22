@@ -67,9 +67,10 @@ brand; `teamcraft.example.toml` documents every key and [docs/branding.md](../..
 design. Rules worth knowing:
 
 - Exactly one brand is the default. A request is matched to a brand by its host name, exactly; unknown
-  host names get the default brand or, with `unknown_host = "reject"`, `421`.
+  host names are answered with `421` (`unknown_host = "reject"`, the default) or get the default brand
+  (`unknown_host = "default"`). Brands are not tenants: everything behind them is shared.
 - Invitation and meeting e-mail goes out as the brand that lists the recipient's domain
-  (`email_domains`), otherwise as the brand the sender was using.
+  (`email_domains`), otherwise as the inviter's own brand (their e-mail domain).
 - A share link works only on the host names of the brand that made it.
 - Every host name must be listed at the identity provider as a redirect URI
   ([Keycloak](keycloak.md)) and be served by the reverse proxy with a certificate.

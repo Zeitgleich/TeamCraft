@@ -30,8 +30,8 @@ entry the server runs as before with one built-in default brand named "TeamCraft
 ```toml
 [branding]
 assets_dir = "/etc/teamcraft/brands"   # brand files are read from here, never from elsewhere
-unknown_host = "default"               # "default" or "reject" (see §3)
-trust_forwarded_host = false           # take X-Forwarded-Host instead of Host (proxy must set it)
+unknown_host = "reject"                # "reject" (default) or "default" (see §3)
+trusted_proxies = []                   # proxy addresses whose X-Forwarded-Host replaces Host
 
 [[brands]]
 id = "brand-a"                         # [a-z0-9-], 1..=32, stable; used in URLs and by clients
@@ -90,17 +90,20 @@ Validation at startup (the server refuses to start otherwise):
 
 Only host names from the configuration select a brand. Nothing else is ever used: not a query
 parameter, not a cookie, not a header other than `Host` (and `X-Forwarded-Host` if
-`trust_forwarded_host`, because the proxy sets it).
+`X-Forwarded-Host` from a peer listed in `trusted_proxies`, because that proxy sets it).
 
 1. Read the host: header value, lower-cased, trailing dot and port removed. An invalid or missing host
    counts as unknown.
 2. Exact match against the configured list. No wildcard and no suffix matching (`evil-chat.brand-a.example.com`
    or `chat.brand-a.example.com.evil.example` must not match).
-3. Match: that brand. No match: `unknown_host = "default"` serves the default brand but **marks the
-   response so that nothing host-derived is reflected** (links use the default brand's first host name,
-   never the received host); `unknown_host = "reject"` answers `421 Misdirected Request` with error code
-   `unknown_host` for every route except `/healthz`, `/readyz`, `/api/internal/*` and the back-channel
-   logout (probes and the identity provider reach the server by IP or internal names).
+3. Match: that brand. No match: `unknown_host = "reject"` (the default) answers `421 Misdirected Request` with
+   error code `unknown_host` for every route except `/healthz`, `/readyz`, `/api/internal/*` and the
+   back-channel logout (probes and the identity provider reach the server by IP or internal names).
+   Trade-off: the server cannot be opened by IP or an internal name, and a proxy that rewrites `Host`
+   must pass the brand host name. `unknown_host = "default"` serves the default brand instead, marking
+   the response so that nothing host-derived is reflected (links use the default brand's first host name,
+   never the received host). Without any brand host name (no `[[brands]]`, or a default brand without
+   hosts) there is nothing to match and every host is served.
 
 The brand description sent to the client contains configured values only. The received host name is
 never copied into a response, a link, an e-mail or a redirect.
@@ -135,7 +138,7 @@ of the request host:
 - The unauthenticated responses are the same for every caller of one host, `Vary: Host`, cacheable for
   five minutes. They count against the per-address request limit but not against the stricter limit of
   the credential-less endpoints, because one page load makes several of these requests.
-- `GET /api/v1/brands` (signed in) lists `id`, `display_name` and colors of all brands, default first,
+- `GET /api/v1/brands` (signed in; empty for guests, like the directory) lists `id`, `display_name` and colors of all brands, default first,
   without host names. It serves the space brand tag (§7).
 
 Color keys map to the UI tokens:
@@ -185,14 +188,16 @@ exists (a user clicks something) the request brand is used instead.
 
 | Surface                        | Brand used                                    | Effect                                                  |
 |--------------------------------|-----------------------------------------------|---------------------------------------------------------|
-| Invitation / activation e-mail | Recipient's domain brand, else request brand  | Sender name, optional From address, texts, link host    |
+| Invitation / activation e-mail | Recipient's domain brand, else inviter's brand | Sender name, optional From address, texts, link host    |
 | Meeting invitations (iMIP)     | Organizer's home brand                        | ORGANIZER CN, From name, join link host                 |
 | Push / notification text       | Recipient's home brand                        | Notification title/icon name (content stays encrypted)  |
 | E-mail digests                 | Recipient's home brand                        | Sender, footer, links                                   |
 | Share-link page                | Brand that created the link                   | Page title, logo; link only works on that brand's hosts |
 | Guest meeting links            | Brand of the meeting (organizer's home brand) | Join page branding, link host                           |
 
-Every generated link uses the first host name of the chosen brand, never the received host. Implemented
+Mail to a domain no brand lists goes out as the **inviter's home brand** (their e-mail domain, else the
+default brand), never as the brand of the `Host` the request came in on: the host header must not choose
+the identity of mail the server sends. Every generated link uses the first host name of the chosen brand, never the received host. Implemented
 today: invitation and activation e-mail, the mention digest, meeting invitations (iMIP, join links,
 CalDAV events) and share links. Push texts follow when they carry brand names.
 
@@ -221,14 +226,21 @@ An optional label per user, taken from the identity provider.
 
 - `[oidc] organization_claim = "organization"`: name of the access-token claim (a string, or a list whose
   first entry counts; at most 100 characters, no control characters). Unset: nobody has an
-  organization. In Keycloak add a token mapper (user attribute, or group name) to the app client.
+  organization. In Keycloak add a token mapper to the app client. **The claim must come from a source
+  only administrators can change**: a group name or the Organizations feature of the realm, or a user
+  attribute that users cannot edit (set the attribute's permissions to admin-only in the realm's user
+  profile). A user-editable attribute would let anybody label themselves as another company.
+- A value is ignored (not shortened) when it is blank, longer than 100 characters, or contains control
+  characters or invisible formatting characters (zero-width spaces, bidi overrides and isolates, the byte
+  order mark, tag characters), so a label cannot imitate another or reorder the text around it.
 - Stored in `users.organization`, updated at every sign-in where the claim is configured (a token
   without the claim clears it). Not editable by the user: the provider is the source of truth.
 - Shown as a badge next to the name in the member list, the directory, the profile card and the mention
   suggestions. The directory filters by organization (`GET /api/v1/users?organization=...`;
   `GET /api/v1/organizations` lists the existing ones). Guests get an empty list and, like
   everywhere, see only people they share a conversation with.
-- It is display data. No permission and no brand depends on it.
+- It is display data. No permission and no brand depends on it, and it never appears in verification
+  or safety-number screens: it says what the provider claims, not who a key belongs to.
 
 ## 10. OIDC and Caddy
 
@@ -243,9 +255,13 @@ An optional label per user, taken from the identity provider.
 - Back-channel logout is a server-to-server call to one internal URL and is independent of brands.
 - Reverse proxy (deploy repo): one site block (or a snippet applied to several host names) per brand
   host, all proxying to the same server, passing `Host` unchanged. Certificates for each host (Caddy
-  automatic HTTPS). `trust_forwarded_for` stays as is; `trust_forwarded_host` is not needed with Caddy.
+  automatic HTTPS). `trust_forwarded_for` stays as is; `trusted_proxies` stays empty with Caddy, which passes `Host` unchanged.
 
 ## 11. Security
+
+- **There is no tenant isolation.** All brands share one database, one set of spaces, one directory and
+  one encryption domain. A brand changes what a visitor sees, not what an authenticated user may do. Do not
+  use brands to separate companies that must not see each other; use separate instances for that.
 
 - Host allow-list: the only input to brand selection; exact matching; `unknown_host = "reject"` for
   deployments that want unknown hosts refused outright. Recommended with a proxy that only
@@ -267,7 +283,7 @@ An optional label per user, taken from the identity provider.
    organization, or remember the host a user signed in with last. Which one should win?
 2. **Per-brand Keycloak clients** (to theme the identity provider's login page per brand): needs the
    server to accept several audiences. Wanted for v1?
-3. **Unknown host default**: `default` (serve default brand) or `reject` (421)? Shipped default is `default`.
+3. **Unknown host default**: shipped as `reject` (421; probes exempt). Switch to `default` if the server must also be reachable by IP or through a proxy that rewrites `Host`.
 4. **Push notification branding** on iOS/Android depends on one app per store listing; per-brand apps are
    out of scope, only the in-app theme and the notification text name follow the brand.
 5. **Space brand tag** is a theming hint only; should it also limit who can be invited from which domain?

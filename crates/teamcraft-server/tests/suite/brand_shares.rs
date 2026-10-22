@@ -39,6 +39,7 @@ async fn public(app: &TestApp, host: &str, method: reqwest::Method, path: &str) 
 #[tokio::test]
 async fn a_link_works_only_on_the_hosts_of_the_brand_that_made_it() {
   let Some(app) = TestApp::start_with_storage(|settings| {
+    settings.branding.unknown_host = teamcraft_server::config::UnknownHostPolicy::Default;
     settings.brands = vec![brand("a", HOST_A, true), brand("b", HOST_B, false)];
     settings.shares.public_base_url = "https://configured.example.com".into();
   })

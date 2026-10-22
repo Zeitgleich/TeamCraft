@@ -6,12 +6,12 @@
 //! proxy) takes part, and the received host is never copied into a response.
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{FromRequestParts, Request, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Uri};
 use axum::middleware::Next;
@@ -46,7 +46,7 @@ pub struct BrandRegistry {
   by_host: HashMap<String, Arc<Brand>>,
   default: Arc<Brand>,
   unknown_host: UnknownHostPolicy,
-  trust_forwarded_host: bool,
+  trusted_proxies: Vec<IpAddr>,
 }
 
 /// One validated brand with everything precomputed that is served unchanged.
@@ -144,10 +144,19 @@ impl BrandRegistry {
     }
     Ok(Self {
       brands: built,
-      by_host,
       default,
-      unknown_host: branding.unknown_host,
-      trust_forwarded_host: branding.trust_forwarded_host,
+      // With no brand host name there is nothing to refuse: the built-in brand serves every host.
+      unknown_host: if by_host.is_empty() {
+        UnknownHostPolicy::Default
+      } else {
+        branding.unknown_host
+      },
+      by_host,
+      trusted_proxies: branding
+        .trusted_proxies
+        .iter()
+        .map(IpAddr::to_canonical)
+        .collect(),
     })
   }
 
@@ -231,10 +240,9 @@ impl BrandRegistry {
   }
 
   /// The host name a request names, taken from `Host` (or `X-Forwarded-Host` if trusted).
-  pub fn request_host(&self, headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    if self.trust_forwarded_host
-      && let Some(forwarded) = headers.get("x-forwarded-host").and_then(|v| v.to_str().ok())
-    {
+  pub fn request_host(&self, headers: &HeaderMap, uri: &Uri, maybe_peer: Option<IpAddr>) -> Option<String> {
+    let is_trusted = maybe_peer.is_some_and(|peer| self.trusted_proxies.contains(&peer.to_canonical()));
+    if is_trusted && let Some(forwarded) = headers.get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
       // The last entry is the one the nearest proxy added.
       return forwarded.rsplit(',').next().map(|host| host.trim().to_owned());
     }
@@ -425,7 +433,11 @@ impl<S: Send + Sync> FromRequestParts<S> for ResolvedBrand {
 /// Middleware: selects the brand of the request and refuses unknown hosts when so configured.
 pub async fn resolve_brand(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
   let registry = &state.brands;
-  let host = registry.request_host(request.headers(), request.uri());
+  let maybe_peer = request
+    .extensions()
+    .get::<ConnectInfo<SocketAddr>>()
+    .map(|ConnectInfo(peer)| peer.ip());
+  let host = registry.request_host(request.headers(), request.uri(), maybe_peer);
   let resolved = registry.resolve(host.as_deref());
   if !resolved.is_known_host
     && registry.unknown_host_policy() == UnknownHostPolicy::Reject
@@ -750,11 +762,13 @@ mod tests {
       let uri: Uri = "/".parse().unwrap();
       let untrusted = registry(&two_brands(), UnknownHostPolicy::Default).unwrap();
       assert_eq!(
-        untrusted.request_host(&headers, &uri).as_deref(),
+        untrusted
+          .request_host(&headers, &uri, Some("192.0.2.9".parse().unwrap()))
+          .as_deref(),
         Some("chat.a.example.com")
       );
       let branding = BrandingConfig {
-        trust_forwarded_host: true,
+        trusted_proxies: vec!["192.0.2.1".parse().unwrap()],
         ..BrandingConfig::default()
       };
       let trusted = BrandRegistry::build(
@@ -765,9 +779,25 @@ mod tests {
       )
       .unwrap();
       assert_eq!(
-        trusted.request_host(&headers, &uri).as_deref(),
+        trusted
+          .request_host(&headers, &uri, Some("192.0.2.1".parse().unwrap()))
+          .as_deref(),
         Some("chat.b.example.com")
       );
+      // The same proxy address as an IPv4-mapped IPv6 peer (dual-stack listener) counts too.
+      assert_eq!(
+        trusted
+          .request_host(&headers, &uri, Some("::ffff:192.0.2.1".parse().unwrap()))
+          .as_deref(),
+        Some("chat.b.example.com")
+      );
+      // Another peer, or none, gets its own Host.
+      for peer in [Some("192.0.2.2".parse().unwrap()), None] {
+        assert_eq!(
+          trusted.request_host(&headers, &uri, peer).as_deref(),
+          Some("chat.a.example.com")
+        );
+      }
     }
 
     #[test]
@@ -851,6 +881,24 @@ mod tests {
       let mut brands = two_brands();
       brands[0].maybe_support_url = Some("https://support.example.com/help".into());
       assert!(registry(&brands, UnknownHostPolicy::Default).is_ok());
+    }
+
+    #[test]
+    fn unknown_hosts_are_rejected_by_default_but_only_when_there_are_brand_hosts() {
+      assert_eq!(BrandingConfig::default().unknown_host, UnknownHostPolicy::Reject);
+      let with_hosts = BrandRegistry::build(
+        &BrandingConfig::default(),
+        &two_brands(),
+        &WebConfig::default(),
+        &MailConfig::default(),
+      )
+      .unwrap();
+      assert_eq!(with_hosts.unknown_host_policy(), UnknownHostPolicy::Reject);
+      // Nothing to match against: the built-in brand serves every host.
+      assert_eq!(
+        BrandRegistry::builtin().unknown_host_policy(),
+        UnknownHostPolicy::Default
+      );
     }
 
     #[test]

@@ -325,8 +325,28 @@ fn organization_from(maybe_value: Option<&serde_json::Value>) -> Option<String> 
     _ => return None,
   };
   let text = text.trim();
-  (!text.is_empty() && text.chars().count() <= MAX_ORGANIZATION_CHARS && !text.chars().any(char::is_control))
-    .then(|| text.to_owned())
+  (!text.is_empty()
+    && text.chars().count() <= MAX_ORGANIZATION_CHARS
+    && !text.chars().any(|c| c.is_control() || is_format_char(c)))
+  .then(|| text.to_owned())
+}
+
+/// Invisible and direction-changing characters (Unicode category Cf and the like): zero-width
+/// spaces, bidi overrides and isolates, joiners, the byte order mark, tag characters. They can make
+/// one organization look like another or reorder the text around the badge.
+fn is_format_char(c: char) -> bool {
+  matches!(
+    c,
+    '\u{00AD}'
+      | '\u{061C}'
+      | '\u{180E}'
+      | '\u{200B}'..='\u{200F}'
+      | '\u{202A}'..='\u{202E}'
+      | '\u{2060}'..='\u{206F}'
+      | '\u{FEFF}'
+      | '\u{FFF9}'..='\u{FFFB}'
+      | '\u{E0000}'..='\u{E007F}'
+  )
 }
 
 /// Maps library errors to messages that tell the client what is wrong without leaking internals.
@@ -700,6 +720,10 @@ mod tests {
       json!(5),
       json!("a\nb"),
       json!("x".repeat(101)),
+      json!("Brand\u{202E}A"),
+      json!("Br\u{200B}and"),
+      json!("\u{FEFF}Brand"),
+      json!("Br\u{2066}and"),
     ] {
       assert_eq!(some(bad.clone()), None, "{bad}");
     }

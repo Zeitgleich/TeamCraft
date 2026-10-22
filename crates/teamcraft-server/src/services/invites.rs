@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use serde_json::json;
 use teamcraft_db::NewInvite;
 use teamcraft_proto::{
   ConversationKind, CreateInviteRequest, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId,
-  SpaceRole,
+  SpaceRole, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -12,7 +14,7 @@ use super::audit::{self, Target as AuditTarget};
 use super::convert::{invite_response, offset_date_time, presented_name};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
-use crate::brand::ResolvedBrand;
+use crate::brand::Brand;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
 use crate::meetings::mailer::OutgoingMail;
@@ -26,7 +28,6 @@ const MAX_INVITE_CHANNELS: usize = 100;
 pub async fn create_invite(
   state: &AppState,
   caller: &crate::auth::AuthenticatedUser,
-  brand: &ResolvedBrand,
   space: SpaceId,
   request: CreateInviteRequest,
 ) -> Result<InviteResponse, ApiError> {
@@ -66,7 +67,7 @@ pub async fn create_invite(
     &json!({"role": invite.role.as_str()}),
   )
   .await?;
-  send_invite_mail(state, caller, brand, &access.view.space.name, &invite).await;
+  send_invite_mail(state, caller, &access.view.space.name, &invite).await;
   Ok(invite_response(&invite))
 }
 
@@ -110,12 +111,30 @@ pub fn future_expiry(
   Ok(Some(at))
 }
 
+/// The inviter's home brand (their e-mail domain, else the default brand). Mail to a domain no brand
+/// lists goes out as this brand, never as the brand of the host the request came in on: whoever
+/// controls the `Host` header must not choose the identity of mail the server sends.
+pub(super) async fn inviter_brand(state: &AppState, user: &UserId) -> Arc<Brand> {
+  let maybe_email = match state.database.get_user_emails(&[*user]).await {
+    Ok(emails) => emails.get(user).cloned(),
+    Err(error) => {
+      warn!(%error, "could not read the inviter's e-mail address; using the default brand");
+      None
+    },
+  };
+  let brands = &state.brands;
+  Arc::clone(
+    maybe_email
+      .as_deref()
+      .map_or(brands.default_brand(), |email| brands.for_email(email)),
+  )
+}
+
 /// Mails the invitee, if the server has a mail server. A failure is logged and does not undo the
 /// invite: it is applied at sign-in anyway.
 async fn send_invite_mail(
   state: &AppState,
   caller: &AuthenticatedUser,
-  request_brand: &ResolvedBrand,
   space_name: &str,
   invite: &teamcraft_db::Invite,
 ) {
@@ -123,7 +142,8 @@ async fn send_invite_mail(
     return;
   };
   // Mail goes out as the brand of the recipient's domain, else as the brand the inviter used.
-  let brand = state.brands.for_recipient(&invite.email, &request_brand.brand);
+  let inviter_brand = inviter_brand(state, &caller.user.id).await;
+  let brand = state.brands.for_recipient(&invite.email, &inviter_brand);
   let url = brand.base_url(&state.settings.mail.public_base_url);
   let (subject, body) = brand.invite_texts(&state.settings.mail);
   let fill = |template: &str| {

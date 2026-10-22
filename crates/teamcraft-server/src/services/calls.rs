@@ -6,6 +6,7 @@
 //! issued, and gets a new one after `call_idle_secs` without any.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,8 @@ pub struct CallService {
   controls: Mutex<HostControls>,
   /// Where host controls go.
   maybe_control: Option<ControlTarget>,
+  /// When the SFU last presented its registration token (Unix milliseconds, 0: never).
+  last_sfu_contact_ms: AtomicI64,
 }
 
 #[derive(Default)]
@@ -157,6 +160,7 @@ impl CallService {
         .map(|t| t.expose_secret().as_bytes().to_vec()),
       active: Mutex::new(HashMap::new()),
       controls: Mutex::new(HostControls::default()),
+      last_sfu_contact_ms: AtomicI64::new(0),
       maybe_control: config
         .maybe_sfu_control_url
         .as_ref()
@@ -174,6 +178,26 @@ impl CallService {
   /// The call id of the conversation's running call.
   pub fn running_call(&self, conversation_id: ConversationId) -> Option<CallId> {
     self.snapshot(conversation_id).map(|snapshot| snapshot.call_id)
+  }
+
+  pub fn sfu_url(&self) -> &str {
+    &self.sfu_url
+  }
+
+  pub fn is_reporting_enabled(&self) -> bool {
+    self.maybe_sfu_token.is_some()
+  }
+
+  /// When the SFU last reported to the server.
+  pub fn last_sfu_contact(&self) -> Option<UnixMillis> {
+    match self.last_sfu_contact_ms.load(Ordering::Relaxed) {
+      0 => None,
+      millis => Some(UnixMillis(millis)),
+    }
+  }
+
+  pub fn active_call_count(&self) -> usize {
+    self.active.lock().unwrap_or_else(PoisonError::into_inner).len()
   }
 
   /// Whether host controls can reach the SFU.
@@ -504,6 +528,8 @@ pub fn authenticate_sfu(state: &AppState, presented: Option<&str>) -> Result<(),
   let calls = calls_of(state)?;
   let presented = presented.ok_or(AuthError::MissingToken)?;
   if calls.is_sfu_token(presented.as_bytes())? {
+    let now = OffsetDateTime::now_utc().unix_timestamp().saturating_mul(1000);
+    calls.last_sfu_contact_ms.store(now, Ordering::Relaxed);
     Ok(())
   } else {
     Err(AuthError::InvalidToken("not the SFU registration token".into()).into())

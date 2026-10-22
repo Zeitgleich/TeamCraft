@@ -24,6 +24,9 @@ const MAX_SIGNATURE_BYTES: usize = 4096;
 const MAX_LINK_PREVIEW_DOMAINS: usize = 500;
 const MAX_DOMAIN_CHARS: usize = 253;
 const MAX_ORG_RECOVERY_ADMINS: u8 = 10;
+const MAX_GUEST_EXPIRY_DAYS: u32 = 3650;
+const MIN_PASSWORD_CHARS_FLOOR: u32 = 8;
+const MAX_PASSWORD_CHARS_CEILING: u32 = 128;
 const MAX_STATUS_PRESETS: usize = 20;
 const MAX_PRESET_TEXT_CHARS: usize = 100;
 /// Organization backgrounds a policy may list.
@@ -125,6 +128,38 @@ pub async fn list(
 }
 
 /// The latest policy (the default one if none was signed yet).
+/// Days until a guest without an explicit expiry expires (`0`: never).
+pub fn effective_guest_expiry_days(state: &AppState) -> u32 {
+  state
+    .policy
+    .get()
+    .guests
+    .maybe_default_expiry_days
+    .unwrap_or(state.settings.guests.default_expiry_days)
+}
+
+/// Whether guests may only open DMs with people they share a conversation with.
+pub fn effective_guest_dm_restriction(state: &AppState) -> bool {
+  state
+    .policy
+    .get()
+    .guests
+    .maybe_dm_only_with_shared_conversations
+    .unwrap_or(state.settings.policy.guests_dm_only_with_shared_conversations)
+}
+
+/// Shortest password of a local account.
+pub fn effective_min_password_chars(state: &AppState) -> usize {
+  state
+    .policy
+    .get()
+    .passwords
+    .maybe_min_chars
+    .map_or(state.settings.local_accounts.min_password_chars, |chars| {
+      chars as usize
+    })
+}
+
 pub async fn current_policy(
   state: &AppState,
 ) -> Result<(u64, WorkspacePolicy, Option<WorkspaceLogEntry>), ApiError> {
@@ -216,6 +251,15 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
       "session limits must be positive; leave them out for no limit".into(),
     ));
   }
+  check_guest_and_password_policy(policy)?;
+  if matches!(
+    policy.notifications.push_content,
+    teamcraft_proto::PushContentMode::Unknown(_)
+  ) {
+    return Err(ApiError::InvalidRequest(
+      "the policy contains values this server does not know".into(),
+    ));
+  }
   if policy.link_previews.domains.len() > MAX_LINK_PREVIEW_DOMAINS
     || policy
       .link_previews
@@ -236,6 +280,26 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
   check_retention(&policy.retention)?;
   check_call_backgrounds(&policy.call_backgrounds)?;
   Ok(document)
+}
+
+fn check_guest_and_password_policy(policy: &WorkspacePolicy) -> Result<(), ApiError> {
+  let guests = &policy.guests;
+  if guests
+    .maybe_default_expiry_days
+    .is_some_and(|days| days > MAX_GUEST_EXPIRY_DAYS)
+  {
+    return Err(ApiError::InvalidRequest(
+      "guests.default_expiry_days is too large".into(),
+    ));
+  }
+  if let Some(chars) = policy.passwords.maybe_min_chars
+    && !(MIN_PASSWORD_CHARS_FLOOR..=MAX_PASSWORD_CHARS_CEILING).contains(&chars)
+  {
+    return Err(ApiError::InvalidRequest(format!(
+      "passwords.min_chars must be between {MIN_PASSWORD_CHARS_FLOOR} and {MAX_PASSWORD_CHARS_CEILING}"
+    )));
+  }
+  Ok(())
 }
 
 /// The organization backgrounds' list is well-formed: known mode, unique ids, SHA-256 hashes,
@@ -411,6 +475,33 @@ mod tests {
   fn a_valid_document_for_the_next_version_passes() {
     assert!(check_policy_payload(&payload(3, |_| {}), 3).is_ok());
     assert!(check_policy_payload(&payload(3, |p| p.admin_self_join = AdminSelfJoin::Disabled), 3).is_ok());
+  }
+
+  #[test]
+  fn guest_and_password_rules_are_checked() {
+    let ok = |edit: fn(&mut WorkspacePolicy)| check_policy_payload(&payload(1, edit), 1).is_ok();
+    assert!(ok(|p| {
+      p.guests.allowed_email_domains = vec!["example.com".into(), "partner.example".into()];
+      p.guests.maybe_default_expiry_days = Some(30);
+      p.passwords.maybe_min_chars = Some(14);
+    }));
+    assert!(!ok(
+      |p| p.guests.allowed_email_domains = vec!["not a domain".into()]
+    ));
+    assert!(!ok(|p| p.guests.maybe_default_expiry_days = Some(100_000)));
+    assert!(!ok(|p| p.passwords.maybe_min_chars = Some(3)));
+    assert!(!ok(|p| p.passwords.maybe_min_chars = Some(500)));
+  }
+
+  #[test]
+  fn unknown_notification_defaults_are_rejected() {
+    let mut value = serde_json::to_value(PolicyDocument {
+      version: 1,
+      policy: WorkspacePolicy::default(),
+    })
+    .unwrap();
+    value["policy"]["notifications"]["push_content"] = serde_json::json!("everything");
+    assert!(check_policy_payload(&serde_json::to_vec(&value).unwrap(), 1).is_err());
   }
 
   #[test]

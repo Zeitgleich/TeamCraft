@@ -29,7 +29,6 @@ use super::convert::{presented_name, unix_millis, user_summary};
 use super::invites::{check_channels, check_guest_domain, future_expiry, normalize_email};
 use super::spaces::require_member_management;
 use crate::auth::{AuthError, AuthenticatedUser, TokenIdentity};
-use crate::brand::ResolvedBrand;
 use crate::config::LocalAccountsConfig;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
@@ -114,7 +113,6 @@ impl LocalAuth {
 pub async fn create_local_guest(
   state: &AppState,
   caller: &AuthenticatedUser,
-  request_brand: &ResolvedBrand,
   space: SpaceId,
   request: CreateLocalGuestRequest,
 ) -> Result<LocalGuestResponse, ApiError> {
@@ -180,7 +178,8 @@ pub async fn create_local_guest(
   )
   .await?;
 
-  let brand = state.brands.for_recipient(&email, &request_brand.brand);
+  let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
+  let brand = state.brands.for_recipient(&email, &inviter_brand);
   let url = format!(
     "{}/activate#token={token}",
     brand.base_url(&state.settings.mail.public_base_url)
@@ -228,7 +227,6 @@ pub async fn create_local_guest(
 pub async fn reissue_activation(
   state: &AppState,
   caller: &AuthenticatedUser,
-  request_brand: &ResolvedBrand,
   user: UserId,
 ) -> Result<LocalGuestResponse, ApiError> {
   let _ = local_auth(state)?;
@@ -260,7 +258,8 @@ pub async fn reissue_activation(
     &json!({}),
   )
   .await?;
-  let brand = state.brands.for_recipient(&account.login, &request_brand.brand);
+  let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
+  let brand = state.brands.for_recipient(&account.login, &inviter_brand);
   let url = format!(
     "{}/activate#token={token}",
     brand.base_url(&state.settings.mail.public_base_url)
@@ -597,7 +596,7 @@ async fn fail(
 
 fn check_password_rules(state: &AppState, password: &str) -> Result<(), ApiError> {
   let length = password.chars().count();
-  let minimum = state.settings.local_accounts.min_password_chars;
+  let minimum = super::workspace::effective_min_password_chars(state);
   if length < minimum {
     return Err(ApiError::InvalidRequest(format!(
       "the password needs at least {minimum} characters"

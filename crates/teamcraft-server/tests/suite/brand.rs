@@ -261,7 +261,8 @@ mod mail {
   use super::*;
 
   async fn invite_as(app: &TestApp, host: &str, email: &str) {
-    let alice = TestUser::new("alice", &["owner"]);
+    // The inviter's address belongs to brand A: that is their home brand.
+    let alice = TestUser::new("alice", &["owner"]).with_email("alice@a-company.example.com", true);
     let space = app
       .post(
         &alice,
@@ -288,7 +289,10 @@ mod mail {
     TestApp::start_with_mailer(
       |settings| {
         settings.mail.public_base_url = "https://global.example.com".into();
+        // The test client calls through the loopback address.
+        settings.branding.unknown_host = UnknownHostPolicy::Default;
         let mut a = brand("a", HOST_A, true);
+        a.email_domains = vec!["a-company.example.com".into()];
         a.mail.maybe_sender_name = Some("Brand A Team".into());
         let mut b = brand("b", HOST_B, false);
         b.email_domains = vec!["b-company.example.com".into()];
@@ -303,7 +307,7 @@ mod mail {
   }
 
   #[tokio::test]
-  async fn mail_goes_out_as_the_brand_of_the_recipients_domain_else_of_the_request() {
+  async fn mail_goes_out_as_the_brand_of_the_recipients_domain_else_of_the_inviter() {
     let mailer = Arc::new(FakeMailer::default());
     let Some(app) = start(mailer.clone()).await else {
       return;
@@ -338,7 +342,14 @@ mod mail {
     );
     assert!(!sent[1].text.contains("global.example.com"));
 
-    assert_eq!(sent[2].maybe_from_name.as_deref(), Some("Brand B Team"));
+    // The Host header the request came in on does not choose the identity of unlisted recipients:
+    // the same inviter on brand B's host still sends as brand A.
+    assert_eq!(sent[2].maybe_from_name.as_deref(), Some("Brand A Team"));
+    assert!(
+      sent[2].text.contains("https://chat.a.example.com"),
+      "{}",
+      sent[2].text
+    );
     app.stop().await;
   }
 
@@ -417,5 +428,37 @@ async fn spaces_can_carry_a_brand_tag_that_names_a_configured_brand() {
     !brands.body.to_string().contains("example.com"),
     "no host names in the list"
   );
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn guests_get_no_brand_list() {
+  let files = Files::create();
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
+  let visitor = teamcraft_server::testing::TestUser::new("visitor", &["guest"]);
+  let reply = app.get(&visitor, "/brands").await;
+  assert_eq!(reply.status, StatusCode::OK);
+  assert_eq!(reply.body["brands"], serde_json::json!([]));
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn unknown_hosts_are_refused_unless_configured_otherwise() {
+  let files = Files::create();
+  let dir = files.dir.clone();
+  let Some(app) = TestApp::start_with(move |settings| {
+    settings.branding.maybe_assets_dir = Some(dir.join("brands"));
+    settings.brands = vec![brand("a", HOST_A, true)];
+  })
+  .await
+  else {
+    return;
+  };
+  let (status, _, _) = get_as(&app, Some("evil.example"), "/api/v1/brand").await;
+  assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+  let (status, _, _) = get_as(&app, Some(HOST_A), "/api/v1/brand").await;
+  assert_eq!(status, StatusCode::OK);
   app.stop().await;
 }

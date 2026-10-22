@@ -277,12 +277,15 @@ auth_failures_per_minute = 30
 [branding]
 # Directory the brand image files are read from (at startup). File names below are relative to it.
 # assets_dir = "/etc/teamcraft/brands"
-# What a request on a host name no brand lists gets: "default" serves the default brand (links still
-# use the default brand's own host name, never the received one), "reject" answers 421. Health probes
-# and server-to-server endpoints are exempt from "reject".
-unknown_host = "default"
-# Take the host from X-Forwarded-Host (its last entry) instead of Host. Only behind a proxy that sets it.
-trust_forwarded_host = false
+# What a request on a host name no brand lists gets: "reject" (default) answers 421, "default" serves
+# the default brand (links still use the default brand's own host name, never the received one).
+# Trade-off: with "reject" the server cannot be reached by IP or by an internal name except for
+# /healthz, /readyz, /api/internal/* and the back-channel logout, which are always exempt; a proxy that
+# rewrites Host must be configured to pass the brand host name. Without any brand host name nothing is rejected.
+unknown_host = "reject"
+# Addresses of reverse proxies whose X-Forwarded-Host (last entry) replaces Host. Requests from other
+# addresses are matched by their own Host. Empty (default): Host only, which is right for Caddy.
+trusted_proxies = []
 # Largest brand image file.
 max_asset_bytes = 524288
 

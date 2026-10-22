@@ -128,7 +128,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
 
 /// The expiry guests get when their invite has none, in seconds from now.
 fn guest_default_expiry_secs(state: &AppState) -> Option<f64> {
-  let days = state.settings.guests.default_expiry_days;
+  let days = super::workspace::effective_guest_expiry_days(state);
   (days > 0).then(|| f64::from(days) * 86_400.0)
 }
 

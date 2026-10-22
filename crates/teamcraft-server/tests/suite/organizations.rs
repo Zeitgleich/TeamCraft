@@ -89,10 +89,14 @@ async fn unusable_claim_values_are_ignored() {
   let Some(app) = app_with_claim().await else { return };
   let (carol, dave, viewer) = (member("carol"), member("dave"), member("viewer"));
   let too_long = "x".repeat(101);
+  let (erin, frank) = (member("erin"), member("frank"));
+  // Bidi overrides and zero-width characters could make one organization look like another.
+  get_with_claims(&app, &erin, json!({CLAIM: "Brand\u{202E}A"}), "/me").await;
+  get_with_claims(&app, &frank, json!({CLAIM: "Br\u{200B}and A"}), "/me").await;
   for (user, value) in [(&carol, json!(too_long)), (&dave, json!({"nested": "no"}))] {
     get_with_claims(&app, user, json!({CLAIM: value}), "/me").await;
   }
-  for name in ["carol", "dave"] {
+  for name in ["carol", "dave", "erin", "frank"] {
     let found = app.get(&viewer, &format!("/users?query={name}")).await;
     assert!(found.body["users"][0].get("organization").is_none(), "{name}");
   }

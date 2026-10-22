@@ -9,7 +9,10 @@ use std::rc::Rc;
 use teamcraft_client_api::calls::OrgBackgroundRule;
 use teamcraft_proto::OrgBackgroundId;
 
-use teamcraft_proto::Role;
+use teamcraft_proto::{
+  AdminInstanceResponse, AnnouncementResponse, ChannelModeration, PermissionSchemeResponse, Role,
+  SchemeChange, SetAnnouncementRequest, WorkspacePolicy,
+};
 
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
@@ -18,10 +21,10 @@ use teamcraft_client_api::actions::{
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy};
 
 use crate::admin::{
-  AdminChannel, AdminUser, AuditEntry, DeviceInfo, PolicyBlocker, PolicyField, Retention, SecurityPolicy,
+  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, DeviceInfo, PolicyBlocker, Retention,
   SelfJoinOutcome,
 };
-use crate::admin_live::{AdminLive, policy_from_security};
+use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
@@ -478,6 +481,23 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     live.mark_thread_read(conversation, thread, latest);
   }
 
+  fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
+    self.chat.push_content_mode()
+  }
+
+  fn current_announcement(&self) -> Option<AnnouncementResponse> {
+    match &self.maybe_live {
+      Some(live) => live.announcement(),
+      None => self.mock.announcement(),
+    }
+  }
+
+  fn dismiss_announcement(&self, id: teamcraft_proto::AnnouncementId) {
+    if let Some(live) = &self.maybe_live {
+      live.dismiss_announcement(id);
+    }
+  }
+
   fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
     self
       .maybe_live
@@ -671,22 +691,114 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
-  fn security_policy(&self) -> SecurityPolicy {
+  fn workspace_policy(&self) -> (u64, WorkspacePolicy) {
     match &self.maybe_admin {
-      Some(admin) => admin.security_policy(),
-      None => self.mock.security_policy(),
+      Some(admin) => (admin.policy_version(), admin.policy()),
+      None => self.mock.workspace_policy(),
     }
   }
 
-  fn set_security_policy(&self, policy: SecurityPolicy) {
+  fn set_workspace_policy(&self, policy: WorkspacePolicy) {
     let Some(admin) = &self.maybe_admin else {
-      self.mock.set_security_policy(policy);
+      self.mock.set_workspace_policy(policy);
       return;
     };
-    let merged = policy_from_security(&admin.policy(), &policy);
     let (owners, admins) = admin.roster_candidates();
-    self.chat.publish_policy(merged, owners, admins);
+    // The editor started from what the server showed; the core signs only if that is also what it
+    // verified itself (a compromised server could show altered fields).
+    self.chat.publish_policy(admin.policy(), policy, owners, admins);
     admin.queue_refresh_after_publish();
+  }
+
+  fn admin_spaces(&self) -> Vec<AdminSpace> {
+    match &self.maybe_admin {
+      Some(admin) => admin.spaces(),
+      None => self.mock.admin_spaces(),
+    }
+  }
+
+  fn permission_scheme(&self, maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
+    match &self.maybe_admin {
+      Some(admin) => admin.permission_scheme(maybe_space),
+      None => self.mock.permission_scheme(maybe_space),
+    }
+  }
+
+  fn change_permissions(&self, maybe_space: Option<SpaceId>, changes: Vec<SchemeChange>) {
+    match &self.maybe_admin {
+      Some(admin) => admin.change_permissions(maybe_space, changes),
+      None => self.mock.change_permissions(maybe_space, changes),
+    }
+  }
+
+  fn channel_moderation(&self, channel: ConversationId) -> ChannelModeration {
+    match &self.maybe_admin {
+      Some(admin) => admin.channel_moderation(channel),
+      None => self.mock.channel_moderation(channel),
+    }
+  }
+
+  fn set_channel_moderation(&self, channel: ConversationId, moderation: ChannelModeration) {
+    match &self.maybe_admin {
+      Some(admin) => admin.set_channel_moderation(channel, moderation),
+      None => self.mock.set_channel_moderation(channel, moderation),
+    }
+  }
+
+  fn channel_member_candidates(&self, channel: ConversationId) -> Vec<UserId> {
+    match &self.maybe_admin {
+      Some(admin) => admin.channel_member_candidates(channel),
+      None => self.mock.channel_member_candidates(channel),
+    }
+  }
+
+  fn assign_channel_owner(&self, channel: ConversationId, user: UserId) {
+    match &self.maybe_admin {
+      Some(admin) => admin.assign_channel_owner(channel, user),
+      None => self.mock.assign_channel_owner(channel, user),
+    }
+  }
+
+  fn announcement(&self) -> Option<AnnouncementResponse> {
+    match &self.maybe_admin {
+      Some(admin) => admin.announcement(),
+      None => self.mock.announcement(),
+    }
+  }
+
+  fn set_announcement(&self, announcement: SetAnnouncementRequest) {
+    match &self.maybe_admin {
+      Some(admin) => admin.set_announcement(announcement),
+      None => self.mock.set_announcement(announcement),
+    }
+  }
+
+  fn clear_announcement(&self) {
+    match &self.maybe_admin {
+      Some(admin) => admin.clear_announcement(),
+      None => self.mock.clear_announcement(),
+    }
+  }
+
+  fn instance_status(&self) -> Option<AdminInstanceResponse> {
+    match &self.maybe_admin {
+      Some(admin) => admin.instance(),
+      None => self.mock.instance_status(),
+    }
+  }
+
+  fn audit_filter(&self) -> AuditFilter {
+    match &self.maybe_admin {
+      Some(admin) => admin.audit_filter(),
+      None => self.mock.audit_filter(),
+    }
+  }
+
+  fn set_audit_filter(&self, filter: AuditFilter) {
+    match &self.maybe_admin {
+      Some(admin) => admin.set_audit_filter(filter),
+      None => self.mock.set_audit_filter(filter),
+    }
   }
 
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
@@ -744,14 +856,6 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     if let Some(admin) = &self.maybe_admin {
       admin.queue_refresh();
     }
-  }
-
-  fn is_policy_field_stored(&self, field: PolicyField) -> bool {
-    self.maybe_admin.is_none()
-      || matches!(
-        field,
-        PolicyField::AdminSelfJoin | PolicyField::OrgRecovery | PolicyField::DefaultHistory
-      )
   }
 
   fn policy_edit_blocker(&self) -> Option<PolicyBlocker> {

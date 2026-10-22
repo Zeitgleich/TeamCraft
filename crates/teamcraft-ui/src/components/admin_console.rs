@@ -1,9 +1,13 @@
 use leptos::prelude::*;
 
 use crate::admin::AdminSection;
+use crate::components::admin_announcement::AnnouncementSection;
 use crate::components::admin_audit::AuditSection;
 use crate::components::admin_backgrounds::BackgroundsSection;
 use crate::components::admin_channels::ChannelsSection;
+use crate::components::admin_instance::InstanceSection;
+use crate::components::admin_people::PeopleSection;
+use crate::components::admin_permissions::PermissionsSection;
 use crate::components::admin_retention::RetentionSection;
 use crate::components::admin_security::SecuritySection;
 use crate::components::admin_users::UsersSection;
@@ -48,9 +52,13 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
         <ul>
           {nav_item(AdminSection::Channels, IconName::Layers)}
           {nav_item(AdminSection::Users, IconName::Users)}
+          {nav_item(AdminSection::Permissions, IconName::Shield)}
           {nav_item(AdminSection::Security, IconName::Key)}
+          {nav_item(AdminSection::People, IconName::User)}
+          {nav_item(AdminSection::Announcement, IconName::Bell)}
           {nav_item(AdminSection::Retention, IconName::Clock)}
           {nav_item(AdminSection::Backgrounds, IconName::Image)}
+          {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
         <button class="admin-back" on:click=move |_| state.exit_admin()>
@@ -67,7 +75,11 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
         {move || match section {
           AdminSection::Channels => view! { <ChannelsSection /> }.into_any(),
           AdminSection::Users => view! { <UsersSection /> }.into_any(),
+          AdminSection::Permissions => view! { <PermissionsSection /> }.into_any(),
           AdminSection::Security => view! { <SecuritySection /> }.into_any(),
+          AdminSection::People => view! { <PeopleSection /> }.into_any(),
+          AdminSection::Announcement => view! { <AnnouncementSection /> }.into_any(),
+          AdminSection::Instance => view! { <InstanceSection /> }.into_any(),
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
           AdminSection::Backgrounds => view! { <BackgroundsSection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),
