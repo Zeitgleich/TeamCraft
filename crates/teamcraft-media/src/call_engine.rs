@@ -854,6 +854,21 @@ impl CallEngine {
       }
       return;
     }
+    // The SFU's word is checked where it can be: a stream id already in use (someone's
+    // microphone) or a device that isn't in the call, or a second screen sound of one device,
+    // would let it relabel or cut off audio.
+    let is_taken = self.audio_streams.contains_key(&stream) || self.remote_video.contains_key(&stream);
+    let has_screen_audio = self
+      .audio_streams
+      .values()
+      .any(|(owner, origin)| *owner == track.device_id && *origin == AudioOrigin::Screen);
+    if is_taken || has_screen_audio || !self.participants.contains_key(&track.device_id) {
+      tracing::warn!(
+        stream_id = stream.0,
+        "ignored an inconsistent screen sound announcement"
+      );
+      return;
+    }
     self
       .audio_streams
       .insert(stream, (track.device_id, AudioOrigin::Screen));
@@ -1042,6 +1057,54 @@ mod tests {
       assert_eq!(
         alice.verification_code(device(2)),
         bob.verification_code(device(1))
+      );
+    }
+
+    #[test]
+    fn screen_audio_announcements_cannot_relabel_or_cut_off_audio() {
+      let now = Instant::now();
+      let (_alice, mut bob) = secured_pair(now);
+      for (seq, device_id, stream) in [
+        // Alice's microphone stream: taking it over would cut her off.
+        (4, device(1), 1),
+        // A device that is not in the call.
+        (5, device(9), 41),
+      ] {
+        let track = ScreenAudioTrack {
+          device_id,
+          stream_id: MediaStreamId(stream),
+        };
+        bob
+          .handle_signal(event(seq, CallEvent::ScreenAudioPublished { track }), now)
+          .unwrap();
+      }
+      let first = ScreenAudioTrack {
+        device_id: device(1),
+        stream_id: MediaStreamId(40),
+      };
+      let second = ScreenAudioTrack {
+        device_id: device(1),
+        stream_id: MediaStreamId(42),
+      };
+      bob
+        .handle_signal(event(6, CallEvent::ScreenAudioPublished { track: first }), now)
+        .unwrap();
+      bob
+        .handle_signal(event(7, CallEvent::ScreenAudioPublished { track: second }), now)
+        .unwrap();
+      let shared = drain(&mut bob)
+        .into_iter()
+        .filter(|output| {
+          matches!(
+            output,
+            EngineOutput::Event(CallEngineEvent::ScreenAudioChanged { .. })
+          )
+        })
+        .count();
+      assert_eq!(shared, 1, "only the first consistent announcement counts");
+      assert_eq!(
+        bob.audio_streams.get(&StreamId(1)),
+        Some(&(device(1), AudioOrigin::Microphone))
       );
     }
 

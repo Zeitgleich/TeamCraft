@@ -127,6 +127,8 @@ struct Roster {
   users_by_device: HashMap<DeviceId, UserId>,
   sharing_screen: BTreeSet<DeviceId>,
   video_devices: HashMap<MediaStreamId, DeviceId>,
+  /// This device's published screen track.
+  maybe_own_screen: Option<MediaStreamId>,
 }
 
 /// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
@@ -804,6 +806,19 @@ fn apply_event(roster: &mut Roster, state: &Mutex<CallState>, event: CallEngineE
     CallEngineEvent::DeafenChanged(is_deafened) => active.is_deafened = is_deafened,
     CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Screen => {
       roster.sharing_screen.insert(track.device_id);
+      if Some(track.device_id) == roster.own_device {
+        roster.maybe_own_screen = Some(track.stream_id);
+      }
+    },
+    // Our share ended without the stop button (from the system's indicator): its sound stopped
+    // with it (call_native), and the UI must not show a share that isn't there.
+    CallEngineEvent::VideoUnpublished(stream_id) if roster.maybe_own_screen == Some(stream_id) => {
+      roster.maybe_own_screen = None;
+      if let Some(device) = roster.own_device {
+        roster.sharing_screen.remove(&device);
+      }
+      active.is_sharing_screen = false;
+      active.screen_sound = ScreenShareSound::Off;
     },
     // Remote tracks changed (see update_video_tracks); the snapshot lists them.
     CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {},
@@ -1115,6 +1130,42 @@ mod tests {
         CallEngineEvent::VideoUnpublished(MediaStreamId(7)),
       );
       assert!(lock(&state).video_tracks.is_empty());
+    }
+
+    #[test]
+    fn a_share_ended_from_the_system_ends_in_the_ui_with_its_sound() {
+      let mut sharing = active();
+      sharing.is_sharing_screen = true;
+      sharing.screen_sound = ScreenShareSound::Shared;
+      let state = Mutex::new(CallState {
+        maybe_active: Some(sharing),
+        ..CallState::default()
+      });
+      let mut roster = Roster {
+        own_device: Some(device(10)),
+        ..Roster::default()
+      };
+      apply_event(
+        &mut roster,
+        &state,
+        CallEngineEvent::VideoPublished(VideoTrack {
+          stream_id: MediaStreamId(8),
+          device_id: device(10),
+          kind: VideoTrackKind::Screen,
+          codec: VideoCodec::H264,
+          layers: Vec::new(),
+        }),
+      );
+      // The capture ended without the stop button; the media driver unpublished the track.
+      apply_event(
+        &mut roster,
+        &state,
+        CallEngineEvent::VideoUnpublished(MediaStreamId(8)),
+      );
+      let state = lock(&state);
+      let active = state.maybe_active.as_ref().unwrap();
+      assert!(!active.is_sharing_screen);
+      assert_eq!(active.screen_sound, ScreenShareSound::Off);
     }
 
     #[test]
