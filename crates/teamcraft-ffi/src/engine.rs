@@ -49,6 +49,8 @@ pub(crate) type CoreClient = Client<Api, Store>;
 
 pub(crate) struct Engine {
   server_url: String,
+  /// Where downloaded files are decrypted to (inside the app's private storage).
+  download_dir: PathBuf,
   tokens: ForeignTokens,
   listener: Arc<dyn EventListener>,
   pub(crate) store: Store,
@@ -139,6 +141,7 @@ impl Engine {
     let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
     let mut engine = Self {
       server_url: config.server_url,
+      download_dir: directory.join("downloads"),
       tokens,
       listener,
       store,
@@ -155,7 +158,7 @@ impl Engine {
       engine.api(),
       engine.store.clone(),
       Box::new(SystemClock),
-      ClientSettings::default(),
+      engine.client_settings(),
     )? {
       engine.adopt(client);
     }
@@ -446,7 +449,7 @@ impl Engine {
         self.api(),
         self.store.clone(),
         Box::new(SystemClock),
-        ClientSettings::default(),
+        self.client_settings(),
         options,
       )
       .await?;
@@ -493,7 +496,7 @@ impl Engine {
             self.api(),
             self.store.clone(),
             Box::new(SystemClock),
-            ClientSettings::default(),
+            self.client_settings(),
           ) {
             self.attach_call_sink(&mut client);
             self.client = ClientSlot::Idle(Box::new(client));
@@ -558,6 +561,13 @@ impl Engine {
       .unwrap_or_default();
     let is_pending = message.id.snowflake().get() & PENDING_ID_BIT != 0;
     MessageItem::from_view(message, author_name, is_pending)
+  }
+
+  fn client_settings(&self) -> ClientSettings {
+    ClientSettings {
+      maybe_download_dir: Some(self.download_dir.clone()),
+      ..ClientSettings::default()
+    }
   }
 
   pub(crate) fn api(&self) -> Api {
