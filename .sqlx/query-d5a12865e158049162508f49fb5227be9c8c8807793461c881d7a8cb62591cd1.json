@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy,\n                s.archived_at IS NOT NULL AS \"is_archived!\", m.role AS \"role?\"\n         FROM spaces s\n         LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1\n              AND (m.expires_at IS NULL OR m.expires_at > now())\n         WHERE ($2::bigint IS NULL OR s.id = $2)\n           AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL\n                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))\n         ORDER BY s.name, s.id",
+  "query": "INSERT INTO spaces (id, name, icon_ref, color, description, join_policy)\n         VALUES ($1, $2, $3, $4, $5, $6)\n         RETURNING id, name, icon_ref, color, description, join_policy, brand_id,\n                   archived_at IS NOT NULL AS \"is_archived!\"",
   "describe": {
     "columns": [
       {
@@ -71,28 +71,30 @@
       },
       {
         "ordinal": 6,
-        "name": "is_archived!",
-        "type_info": "Bool",
-        "origin": "Expression"
-      },
-      {
-        "ordinal": 7,
-        "name": "role?",
+        "name": "brand_id",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "space_members",
-            "name": "role"
+            "table": "spaces",
+            "name": "brand_id"
           }
         }
+      },
+      {
+        "ordinal": 7,
+        "name": "is_archived!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
         "Int8",
-        "Int8",
-        "Bool",
-        "Bool"
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
       ]
     },
     "nullable": [
@@ -102,9 +104,9 @@
       true,
       true,
       false,
-      null,
-      false
+      true,
+      null
     ]
   },
-  "hash": "3a6ee0abb392cede551a6f5647a6a6c98432b4f32e7fa14e5e541a8f4ade7c12"
+  "hash": "d5a12865e158049162508f49fb5227be9c8c8807793461c881d7a8cb62591cd1"
 }

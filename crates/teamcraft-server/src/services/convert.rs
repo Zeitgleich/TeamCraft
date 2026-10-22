@@ -87,6 +87,7 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
     maybe_description: space.maybe_description.clone(),
     join_policy: space.join_policy.clone(),
     is_archived: space.is_archived,
+    maybe_brand_id: space.maybe_brand_id.clone(),
     maybe_my_role: view.maybe_role.clone(),
   }
 }

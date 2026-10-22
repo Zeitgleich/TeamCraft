@@ -37,7 +37,7 @@ use crate::handlers::{
   get_unread_handler, get_user_avatar_handler, get_user_device_list_handler, get_user_group_handler,
   get_user_handler, get_user_profile_handler, get_web_push_key_handler, healthz_handler,
   join_conversation_handler, join_meeting_handler, join_space_handler, key_package_status_handler,
-  list_acknowledgements_handler, list_call_history_handler, list_categories_handler,
+  list_acknowledgements_handler, list_brands_handler, list_call_history_handler, list_categories_handler,
   list_conversation_members_handler, list_conversations_handler, list_devices_handler, list_invites_handler,
   list_lobby_handler, list_meetings_handler, list_messages_handler, list_mls_messages_handler,
   list_organizations_handler, list_policy_log_handler, list_presence_handler, list_recovery_requests_handler,
@@ -67,6 +67,7 @@ use crate::web;
 pub fn router(state: AppState) -> Router {
   let api_v1 = Router::new()
     .route("/brand", get(get_brand_handler))
+    .route("/brands", get(list_brands_handler))
     .route("/brand/theme.css", get(get_brand_theme_handler))
     .route("/brand/assets/{slot}", get(get_brand_asset_handler))
     .route("/organizations", get(list_organizations_handler))

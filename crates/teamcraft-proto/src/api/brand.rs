@@ -55,6 +55,21 @@ pub struct BrandColors {
   pub dark: BTreeMap<String, String>,
 }
 
+/// `GET /api/v1/brands` (signed in): the brands of this server, for tagging spaces and for the
+/// accent color of a tagged space. No host names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ListBrandsResponse {
+  pub brands: Vec<BrandSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct BrandSummary {
+  pub id: String,
+  pub display_name: String,
+  #[serde(default)]
+  pub colors: BrandColors,
+}
+
 /// Color keys a brand may set and the CSS custom properties (design tokens of the UI) each one
 /// drives. Nothing else is brandable: status and danger colors keep their meaning.
 pub const BRAND_COLOR_TOKENS: &[(&str, &[&str])] = &[

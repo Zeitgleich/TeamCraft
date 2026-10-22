@@ -1197,6 +1197,7 @@ impl ServerApi for FakeServerApi {
         maybe_description: request.maybe_description.clone(),
         join_policy: request.join_policy.clone(),
         is_archived: false,
+        maybe_brand_id: None,
         maybe_my_role: Some(SpaceRole::SpaceAdmin),
       };
       state.spaces.insert(id, space.clone());
@@ -1859,6 +1860,7 @@ impl State {
       maybe_description: None,
       join_policy: JoinPolicy::Open,
       is_archived: false,
+      maybe_brand_id: None,
       maybe_my_role: Some(SpaceRole::Member),
     });
   }

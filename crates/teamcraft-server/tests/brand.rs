@@ -360,3 +360,62 @@ mod mail {
     app.stop().await;
   }
 }
+
+#[tokio::test]
+async fn spaces_can_carry_a_brand_tag_that_names_a_configured_brand() {
+  use serde_json::json;
+  use teamcraft_server::testing::TestUser;
+
+  let files = Files::create();
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
+  let alice = TestUser::new("alice", &["owner"]);
+  let space = app
+    .post(
+      &alice,
+      "/spaces",
+      json!({"name": "Project", "join_policy": "invite_only"}),
+    )
+    .await
+    .id();
+
+  let tagged = app
+    .patch(&alice, &format!("/spaces/{space}"), json!({"brand_id": "b"}))
+    .await;
+  assert_eq!(tagged.status, StatusCode::OK, "{}", tagged.body);
+  assert_eq!(tagged.body["brand_id"], "b");
+  assert_eq!(
+    app.get(&alice, &format!("/spaces/{space}")).await.body["brand_id"],
+    "b"
+  );
+
+  let unknown = app
+    .patch(&alice, &format!("/spaces/{space}"), json!({"brand_id": "nope"}))
+    .await;
+  assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+  // Other changes keep the tag; an empty string clears it.
+  let renamed = app
+    .patch(&alice, &format!("/spaces/{space}"), json!({"name": "Renamed"}))
+    .await;
+  assert_eq!(renamed.body["brand_id"], "b");
+  let cleared = app
+    .patch(&alice, &format!("/spaces/{space}"), json!({"brand_id": ""}))
+    .await;
+  assert!(cleared.body.get("brand_id").is_none(), "{}", cleared.body);
+
+  let brands = app.get(&alice, "/brands").await;
+  let ids: Vec<&str> = brands.body["brands"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|b| b["id"].as_str().unwrap())
+    .collect();
+  assert_eq!(ids, ["a", "b"]);
+  assert!(brands.body["brands"][1]["colors"]["light"]["accent"].is_string());
+  assert!(
+    !brands.body.to_string().contains("example.com"),
+    "no host names in the list"
+  );
+  app.stop().await;
+}

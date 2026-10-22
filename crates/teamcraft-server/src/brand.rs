@@ -17,7 +17,8 @@ use axum::http::{HeaderMap, HeaderValue, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use teamcraft_proto::{
-  BrandAssetSlot, BrandColors, BrandLinks, BrandResponse, brand_color_properties, is_brand_hex_color,
+  BrandAssetSlot, BrandColors, BrandLinks, BrandResponse, BrandSummary, brand_color_properties,
+  is_brand_hex_color,
 };
 
 use crate::config::{BrandConfig, BrandMailConfig, BrandingConfig, MailConfig, UnknownHostPolicy, WebConfig};
@@ -174,6 +175,20 @@ impl BrandRegistry {
         is_known_host: false,
       },
     }
+  }
+
+  /// Every brand, default first, for the signed-in list.
+  pub fn summaries(&self) -> Vec<BrandSummary> {
+    let mut brands: Vec<&Arc<Brand>> = self.brands.iter().collect();
+    brands.sort_by_key(|brand| brand.id != self.default.id);
+    brands
+      .into_iter()
+      .map(|brand| BrandSummary {
+        id: brand.id.clone(),
+        display_name: brand.display_name.clone(),
+        colors: brand.response.colors.clone(),
+      })
+      .collect()
   }
 
   pub fn default_brand(&self) -> &Arc<Brand> {
