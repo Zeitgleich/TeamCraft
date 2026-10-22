@@ -52,7 +52,13 @@ async fn a_new_member_searches_history_through_published_segments() {
     .unwrap();
   settle(&mut [&mut alice, &mut carol]).await;
   carol.client.load_older_messages(channel).await.unwrap();
+  // A prefetch cap smaller than the segment leaves it for later.
+  let capped = carol.client.prefetch_index_segments(1).await.unwrap();
+  assert_eq!((capped.fetched, capped.skipped, capped.stored_bytes), (0, 1, 0));
   assert_eq!(carol.client.fetch_index_segments().await.unwrap(), 1);
+  let again = carol.client.prefetch_index_segments(1).await.unwrap();
+  assert_eq!((again.fetched, again.skipped), (0, 0));
+  assert!(again.stored_bytes > 1);
 
   // A phone that keeps little history: the messages are gone locally, the segment stays.
   carol.store.delete_messages(channel).unwrap();

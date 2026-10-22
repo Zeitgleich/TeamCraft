@@ -6,14 +6,13 @@
 //! content and happens only on the device.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::notify;
 
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
 const MENTION_RULES_RECORD: &str = "mention_rules";
-/// Words that address everybody in a conversation.
-pub const CHANNEL_MENTIONS: [&str; 3] = ["channel", "here", "all"];
 
 /// The user's notification rules, beyond direct `@username` mentions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,29 +37,19 @@ impl Default for MentionRules {
 }
 
 impl MentionRules {
-  /// Whether `body` mentions the user (`@username`, or one of the rules matches).
+  /// Whether `body` mentions the user (`@username`, or one of the rules matches). The matching
+  /// is shared with desktop (teamcraft-client-api `notify`).
   pub fn is_mentioned(&self, body: &str, maybe_username: Option<&str>, display_name: &str) -> bool {
-    let lower = body.to_lowercase();
-    let words = words_of(&lower);
-    if let Some(username) = maybe_username.filter(|name| !name.is_empty()) {
-      let handle = format!("@{}", username.to_lowercase());
-      if words.contains(&handle.as_str()) {
-        return true;
-      }
-    }
-    if self.channel_mentions_notify && has_channel_mention(&words) {
-      return true;
-    }
-    let first_name = display_name.split_whitespace().next().map(str::to_lowercase);
-    if self.first_name_is_mention && first_name.is_some_and(|name| words.contains(&name.as_str())) {
-      return true;
-    }
-    self
-      .keywords
-      .iter()
-      .map(|keyword| keyword.trim().to_lowercase())
-      .filter(|keyword| !keyword.is_empty())
-      .any(|keyword| lower.contains(&keyword))
+    notify::is_mentioned(
+      body,
+      &notify::MentionRules {
+        username: maybe_username.unwrap_or_default(),
+        display_name,
+        first_name_is_mention: self.first_name_is_mention,
+        channel_mentions_notify: self.channel_mentions_notify,
+        keywords: &self.keywords,
+      },
+    )
   }
 
   /// The rules without empty or duplicate keywords, for saving.
@@ -93,18 +82,6 @@ pub fn save_mention_rules(store: &impl LocalStore, rules: &MentionRules) -> Resu
     MENTION_RULES_RECORD,
     &rules.clone().normalized(),
   )
-}
-
-fn words_of(lower: &str) -> Vec<&str> {
-  lower
-    .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_' && c != '-')
-    .collect()
-}
-
-fn has_channel_mention(words: &[&str]) -> bool {
-  CHANNEL_MENTIONS
-    .iter()
-    .any(|word| words.contains(&format!("@{word}").as_str()))
 }
 
 #[cfg(test)]

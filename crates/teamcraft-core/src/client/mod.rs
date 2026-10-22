@@ -49,6 +49,8 @@ pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use notifications::TYPING_TIMEOUT_MS;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
+#[cfg(not(target_arch = "wasm32"))]
+pub use segments::SegmentPrefetchReport;
 use teamcraft_crypto::membership::ChangeId;
 use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup};
 use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, UserId};

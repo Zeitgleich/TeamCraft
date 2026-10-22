@@ -272,3 +272,23 @@ impl From<SegmentPrefetchMode> for SegmentPrefetch {
     }
   }
 }
+
+/// What a search segment prefetch did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct SegmentPrefetchReport {
+  pub fetched: u32,
+  /// Left out because they would exceed the size cap.
+  pub skipped: u32,
+  /// Bytes of the segments kept on this device.
+  pub stored_bytes: u64,
+}
+
+impl From<teamcraft_core::client::SegmentPrefetchReport> for SegmentPrefetchReport {
+  fn from(report: teamcraft_core::client::SegmentPrefetchReport) -> Self {
+    Self {
+      fetched: u32::try_from(report.fetched).unwrap_or(u32::MAX),
+      skipped: u32::try_from(report.skipped).unwrap_or(u32::MAX),
+      stored_bytes: report.stored_bytes,
+    }
+  }
+}

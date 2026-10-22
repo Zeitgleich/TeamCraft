@@ -9,6 +9,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::clock::now_ms;
+pub use teamcraft_client_api::notify::needs_channel_confirmation;
+use teamcraft_client_api::notify::{self, MentionRules};
 use teamcraft_proto::PushContentMode;
 
 use crate::model::{
@@ -22,8 +24,6 @@ const WATCH_WINDOW: usize = 10;
 /// Preview length in characters.
 const PREVIEW_CHARS: usize = 140;
 const MS_PER_SECOND: i64 = 1000;
-/// Words that notify the whole conversation.
-pub const CHANNEL_MENTIONS: [&str; 3] = ["channel", "here", "all"];
 
 /// Everything the policy looks at for one candidate message.
 pub struct PolicyInput<'a> {
@@ -113,50 +113,19 @@ fn is_in_dnd_schedule(input: &PolicyInput) -> bool {
     .is_some_and(|schedule| schedule.silences(input.now / MS_PER_SECOND, input.sender))
 }
 
-/// `@username`, `@channel`/`@here`/`@all` (when enabled), the first name (when enabled) or a keyword.
+/// `@username`, `@channel`/`@here`/`@all` (when enabled), the first name (when enabled) or a keyword
+/// (the rules are shared with the mobile apps).
 pub fn is_mentioned(body: &str, me: &User, prefs: &NotificationPrefs) -> bool {
-  let lower = body.to_lowercase();
-  let words: Vec<&str> = lower
-    .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_' && c != '-')
-    .collect();
-  let username = format!("@{}", me.username.to_lowercase());
-  if words.contains(&username.as_str()) {
-    return true;
-  }
-  if prefs.channel_mentions_notify
-    && CHANNEL_MENTIONS
-      .iter()
-      .any(|word| words.contains(&format!("@{word}").as_str()))
-  {
-    return true;
-  }
-  let first_name = me.display_name.split_whitespace().next().map(str::to_lowercase);
-  if prefs.first_name_is_mention && first_name.is_some_and(|name| words.contains(&name.as_str())) {
-    return true;
-  }
-  prefs
-    .keywords
-    .iter()
-    .map(|keyword| keyword.trim().to_lowercase())
-    .filter(|keyword| !keyword.is_empty())
-    .any(|keyword| lower.contains(&keyword))
-}
-
-/// Whether sending `body` would notify a whole large conversation and should be confirmed first:
-/// the text has `@channel`/`@here`/`@all` and the conversation has more than `confirm_over` members
-/// (`0` never asks).
-pub fn needs_channel_confirmation(body: &str, member_count: usize, confirm_over: u32) -> bool {
-  if confirm_over == 0 || member_count <= confirm_over as usize {
-    return false;
-  }
-  let lower = body.to_lowercase();
-  lower
-    .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_' && c != '-')
-    .any(|word| {
-      CHANNEL_MENTIONS
-        .iter()
-        .any(|mention| word == format!("@{mention}"))
-    })
+  notify::is_mentioned(
+    body,
+    &MentionRules {
+      username: &me.username,
+      display_name: &me.display_name,
+      first_name_is_mention: prefs.first_name_is_mention,
+      channel_mentions_notify: prefs.channel_mentions_notify,
+      keywords: &prefs.keywords,
+    },
+  )
 }
 
 /// What to show.

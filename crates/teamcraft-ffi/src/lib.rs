@@ -11,20 +11,24 @@ mod calls;
 mod engine;
 mod error;
 mod types;
+mod video;
 
+use std::path::Path;
 use std::sync::Arc;
 
 pub use calls::{
   CallEndReason, CallListener, CallPhase, CallSession, CallStateInfo, IncomingCallInfo, RemoteVideoFrame,
-  RemoteVideoTrack, VideoListener,
+  RemoteVideoTrack, RgbaVideoListener, VideoListener,
 };
 pub use error::TeamCraftError;
+use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, MentionRulesItem, MessageItem,
   OrgRecoveryStart, Presence, PushNotification, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode,
+  SegmentPrefetchMode, SegmentPrefetchReport,
 };
+pub use video::{CameraFrame, VideoFrameRgba};
 
 use crate::engine::{Engine, Job};
 
@@ -304,6 +308,18 @@ impl TeamCraft {
       .await
   }
 
+  /// Like `prefetch_segments`, newest months first, while the segments kept on the device stay
+  /// within `max_total_bytes` (the phone's storage cap).
+  pub async fn prefetch_search_segments(
+    &self,
+    is_network_metered: bool,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchReport, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.prefetch_search_segments(is_network_metered, max_total_bytes)))
+      .await
+  }
+
   /// Rings and the state of this device's call go to `listener` from now on.
   pub async fn set_call_listener(&self, listener: Arc<dyn CallListener>) -> Result<(), TeamCraftError> {
     self
@@ -328,6 +344,44 @@ impl TeamCraft {
       .await?;
     calls::join(preparation, hub).await
   }
+}
+
+/// Whether sending `body` to a conversation with `member_count` members should be confirmed first
+/// (`@channel`/`@here`/`@all` and more members than `confirm_over`; `0` never asks).
+#[uniffi::export]
+pub fn needs_channel_confirmation(body: String, member_count: u32, confirm_over: u32) -> bool {
+  teamcraft_client_api::notify::needs_channel_confirmation(
+    &body,
+    usize::try_from(member_count).unwrap_or(usize::MAX),
+    confirm_over,
+  )
+}
+
+/// Where Cisco's OpenH264 for this phone is downloaded from (the engine decodes video with it for
+/// `set_rgba_video_listener`; it can't be shipped with the app, see teamcraft-media
+/// `openh264_library`). `None`: no binary for this CPU.
+#[uniffi::export]
+pub fn video_codec_download_url() -> Option<String> {
+  OpenH264Binary::for_this_platform()
+    .ok()
+    .map(|binary| binary.download_url())
+}
+
+/// Uses an earlier download from `directory`; `false` if there is none (or it doesn't check out).
+#[uniffi::export]
+pub fn use_installed_video_codec(directory: String) -> bool {
+  openh264_library::is_available()
+    || OpenH264Binary::for_this_platform().is_ok_and(|binary| binary.use_installed(Path::new(&directory)))
+}
+
+/// Unpacks the download from [`video_codec_download_url`] into `directory`, checks it against
+/// Cisco's published hashes and uses it for calls joined from now on.
+#[uniffi::export]
+pub fn install_video_codec(directory: String, compressed: Vec<u8>) -> Result<(), TeamCraftError> {
+  OpenH264Binary::for_this_platform()
+    .and_then(|binary| binary.install(Path::new(&directory), &compressed))
+    .map(drop)
+    .map_err(|error| TeamCraftError::Call(error.to_string()))
 }
 
 impl TeamCraft {

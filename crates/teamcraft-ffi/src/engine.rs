@@ -34,7 +34,7 @@ use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, MentionRulesItem, MessageItem, Presence,
-  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
+  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchReport,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -490,6 +490,30 @@ impl Engine {
       .await?;
     let count = fetched.lock().map(|total| *total).unwrap_or(0);
     Ok(u32::try_from(count).unwrap_or(u32::MAX))
+  }
+
+  pub(crate) async fn prefetch_search_segments(
+    &mut self,
+    is_network_metered: bool,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchReport, TeamCraftError> {
+    if !load_segment_prefetch(self.store.as_ref())?.allows(is_network_metered) {
+      return Ok(SegmentPrefetchReport::default());
+    }
+    let report = Arc::new(Mutex::new(SegmentPrefetchReport::default()));
+    let result = report.clone();
+    self
+      .with_client(move |client| {
+        Box::pin(async move {
+          let prefetch = client.prefetch_index_segments(max_total_bytes).await?;
+          if let Ok(mut report) = result.lock() {
+            *report = prefetch.into();
+          }
+          Ok(())
+        })
+      })
+      .await?;
+    Ok(report.lock().map(|report| *report).unwrap_or_default())
   }
 
   pub(crate) fn calls(&self) -> &CallHub {

@@ -20,7 +20,7 @@ sqlcipher = ["dep:rusqlite", "rusqlite/bundled-sqlcipher"]
 # no libcrypto for SQLCipher.
 sealed-sqlite = ["dep:rusqlite", "rusqlite/bundled"]
 # Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
-ui = ["dep:teamcraft-client-api"]
+ui = []
 # The Web Push service worker's entry points (`handlePush`, `handleNotificationClick`), exported
 # with wasm-bindgen for web/service-worker.js. Only has an effect on wasm32.
 service-worker = []
@@ -50,7 +50,8 @@ reqwest.workspace = true
 # Link previews: the URL in a message and the page's image URL (already in the tree via reqwest).
 url = "2.5.8"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
+# View models and the mention rules shared with desktop (no I/O, proto and serde only).
+teamcraft-client-api = { path = "../teamcraft-client-api" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).

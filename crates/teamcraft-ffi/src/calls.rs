@@ -3,6 +3,7 @@
 //! its own. The app integrates the call with the platform (Android Telecom) and drives it through
 //! [`CallSession`]; [`CallListener`] tells it about rings and the call's state.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use teamcraft_core::client::CallKeySigner;
@@ -15,8 +16,11 @@ use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_media::datagram::SimulcastLayer;
+use teamcraft_media::openh264_library;
 use teamcraft_media::rtp::RtpTimestamp;
-use teamcraft_media::video::EncodedVideoFrame;
+use teamcraft_media::video::{EncodedVideoFrame, VideoResolution, simulcast_layers};
+use teamcraft_media::video_capture::CaptureFormat;
+use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, GatewayEvent, MediaCapabilities,
   MediaStreamId, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
@@ -25,9 +29,16 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use crate::error::TeamCraftError;
+use crate::video::{AppCamera, CameraFrame, CameraSlot, VideoFrameRgba, i420_to_rgba};
 
 /// Worker threads of a call's runtime: network and engine; audio has its own thread.
 const CALL_WORKER_THREADS: usize = 2;
+/// Simulcast layers of a camera the engine encodes (Android): a phone's uplink and encoder are
+/// small.
+const ENGINE_CAMERA_LAYERS: u8 = 2;
+const ENGINE_CAMERA_BITRATE_BPS: u32 = 800_000;
+/// The highest layer the engine decodes of other devices' tracks for an RGBA listener.
+const RGBA_RECEIVE_MAX_LAYER: u8 = 1;
 
 /// Told about rings and about the call this device is in. Called from the engine and call
 /// threads; implementations hand over to their UI thread.
@@ -44,6 +55,8 @@ pub trait CallListener: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct CallSession {
   controls: mpsc::UnboundedSender<Control>,
+  /// Where the app's raw camera frames go while the engine encodes the camera.
+  camera: CameraSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -51,6 +64,10 @@ pub struct CallStateInfo {
   pub conversation_id: String,
   pub phase: CallPhase,
   pub is_muted: bool,
+  /// Nothing of the call is played (deafened by the user, or on hold).
+  pub is_deafened: bool,
+  /// This device sends its camera.
+  pub is_camera_on: bool,
   /// End-to-end encrypted with every participant's device verified.
   pub is_secured: bool,
   /// Other devices in the call.
@@ -112,6 +129,12 @@ enum Control {
   SetMuted(bool),
   /// Hold: nothing is sent and nothing is played until released.
   SetHeld(bool),
+  SetDeafened(bool),
+  SetRgbaVideoListener(Arc<dyn RgbaVideoListener>),
+  StartCamera {
+    format: CaptureFormat,
+    done: oneshot::Sender<Result<(), TeamCraftError>>,
+  },
   SetVideoListener(Arc<dyn VideoListener>),
   PublishCamera(VideoLayerInfo),
   SendCameraFrame(EncodedVideoFrame),
@@ -134,6 +157,16 @@ pub trait VideoListener: Send + Sync {
   fn on_remote_video_frame(&self, frame: RemoteVideoFrame);
   /// Encode a keyframe (with SPS and PPS) of the camera soon: a receiver joined or lost a frame.
   fn on_keyframe_requested(&self);
+}
+
+/// Other devices' video decoded by the engine (Android, where the engine has OpenH264 and
+/// MediaCodec): every remote track is received and handed over as RGBA, on decoder threads. The
+/// alternative to [`VideoListener`] for apps that don't decode themselves.
+#[uniffi::export(with_foreign)]
+pub trait RgbaVideoListener: Send + Sync {
+  /// The other devices' video tracks now in the call.
+  fn on_video_tracks(&self, tracks: Vec<RemoteVideoTrack>);
+  fn on_video_frame(&self, frame: VideoFrameRgba);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -202,8 +235,44 @@ impl CallSession {
     }));
   }
 
+  /// Stops the camera, whether the app or the engine encodes it.
   pub fn stop_camera(&self) {
+    self.camera.clear();
     self.send(Control::StopCamera);
+  }
+
+  /// Stops playing the call (and mutes, as on desktop).
+  pub fn set_deafened(&self, is_deafened: bool) {
+    self.send(Control::SetDeafened(is_deafened));
+  }
+
+  /// Other devices' video, decoded by the engine, goes to `listener` from now on; every remote
+  /// track is received. Needs Cisco's OpenH264 (`install_video_codec`) before joining.
+  pub fn set_rgba_video_listener(&self, listener: Arc<dyn RgbaVideoListener>) {
+    self.send(Control::SetRgbaVideoListener(listener));
+  }
+
+  /// Publishes the camera encoded by the engine (hardware MediaCodec on Android, OpenH264 as
+  /// fallback): the app pushes raw frames of this upright size and rate with
+  /// [`CallSession::push_camera_frame`]. The alternative to `publish_camera` for apps that don't
+  /// encode themselves.
+  pub async fn start_camera(&self, width: u16, height: u16, framerate: u8) -> Result<(), TeamCraftError> {
+    let (done, done_rx) = oneshot::channel();
+    let format = CaptureFormat {
+      resolution: VideoResolution {
+        width: width & !1,
+        height: height & !1,
+      },
+      framerate,
+    };
+    self.send(Control::StartCamera { format, done });
+    done_rx.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
+  /// One raw camera image for `start_camera`; `false` while that camera isn't running (or the
+  /// image is malformed). Called from the camera's thread; doesn't wait for the call.
+  pub fn push_camera_frame(&self, frame: CameraFrame) -> bool {
+    self.camera.push(&frame)
   }
 
   /// Receives the track `stream_id` (from `on_remote_video_track`).
@@ -282,6 +351,8 @@ pub(crate) async fn join(
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
   let config = native_config(preparation)?;
+  let camera = CameraSlot::default();
+  let thread_camera = camera.clone();
   let (controls, control_rx) = mpsc::unbounded_channel();
   let (joined, joined_rx) = oneshot::channel();
   lock(&hub.inner).maybe_active = Some(conversation);
@@ -289,6 +360,8 @@ pub(crate) async fn join(
     conversation_id: conversation.to_string(),
     phase: CallPhase::Connecting,
     is_muted: false,
+    is_deafened: false,
+    is_camera_on: false,
     is_secured: false,
     participant_count: 0,
     maybe_privacy_code: None,
@@ -320,7 +393,12 @@ pub(crate) async fn join(
           },
         };
         let _ = joined.send(Ok(()));
-        run_call(call, control_rx, own_device, &thread_hub, &mut state).await;
+        let context = CallContext {
+          own_device,
+          camera: thread_camera,
+          hub: thread_hub,
+        };
+        run_call(call, control_rx, &context, &mut state).await;
       });
     });
   if let Err(error) = spawned {
@@ -332,13 +410,24 @@ pub(crate) async fn join(
     warn!(%error, "joining the call failed");
     hub.report(ended(conversation, CallEndReason::Failed));
   }
-  result.map(|()| Arc::new(CallSession { controls }))
+  result.map(|()| Arc::new(CallSession { controls, camera }))
+}
+
+/// What the call thread needs besides the call.
+struct CallContext {
+  own_device: DeviceId,
+  camera: CameraSlot,
+  hub: CallHub,
 }
 
 /// What the call thread keeps for the app's video.
 #[derive(Default)]
 struct VideoBridge {
   maybe_listener: Option<Arc<dyn VideoListener>>,
+  /// Set by apps that let the engine decode; the decoder threads read it per frame.
+  rgba_listener: SharedRgbaListener,
+  /// Remote tracks the engine decodes for the RGBA listener.
+  decoded: BTreeMap<MediaStreamId, RemoteVideoTrack>,
   /// The stream id of this device's camera once the SFU announced it.
   maybe_camera: Option<MediaStreamId>,
   /// The camera was asked for; the track announcement may still be on its way.
@@ -355,19 +444,96 @@ impl VideoBridge {
     }
     self.maybe_listener = Some(listener);
   }
+
+  fn set_rgba_listener(&mut self, call: &NativeCall, listener: Arc<dyn RgbaVideoListener>) {
+    *lock_rgba(&self.rgba_listener) = Some(listener);
+    self.sync_decoded(call);
+    self.report_decoded();
+  }
+
+  /// With an RGBA listener, the engine decodes exactly the remote tracks that are published.
+  fn sync_decoded(&mut self, call: &NativeCall) {
+    if !self.has_rgba_listener() {
+      return;
+    }
+    let gone: Vec<MediaStreamId> = self
+      .decoded
+      .iter()
+      .filter(|(_, track)| !self.remote_tracks.contains(track))
+      .map(|(stream, _)| *stream)
+      .collect();
+    let new: Vec<RemoteVideoTrack> = self
+      .remote_tracks
+      .iter()
+      .filter(|track| !self.decoded.values().any(|decoded| decoded == *track))
+      .cloned()
+      .collect();
+    if gone.is_empty() && new.is_empty() {
+      return;
+    }
+    for stream in gone {
+      self.decoded.remove(&stream);
+      call.unwatch_video(stream);
+    }
+    for track in new {
+      self.decode(call, track);
+    }
+    self.report_decoded();
+  }
+
+  fn decode(&mut self, call: &NativeCall, track: RemoteVideoTrack) {
+    let Some(stream) = parse_stream(&track.stream_id) else {
+      return;
+    };
+    if self.decoded.contains_key(&stream) {
+      return;
+    }
+    let listener = self.rgba_listener.clone();
+    call.watch_video(
+      stream,
+      Some(RGBA_RECEIVE_MAX_LAYER),
+      Box::new(move |frame| {
+        let maybe_listener = lock_rgba(&listener).clone();
+        if let Some(listener) = maybe_listener {
+          let resolution = frame.resolution();
+          listener.on_video_frame(VideoFrameRgba {
+            stream_id: stream.0.to_string(),
+            width: u32::from(resolution.width),
+            height: u32::from(resolution.height),
+            rgba: i420_to_rgba(&frame),
+          });
+        }
+      }),
+    );
+    self.decoded.insert(stream, track);
+  }
+
+  fn report_decoded(&self) {
+    let maybe_listener = lock_rgba(&self.rgba_listener).clone();
+    if let Some(listener) = maybe_listener {
+      listener.on_video_tracks(self.decoded.values().cloned().collect());
+    }
+  }
+
+  fn has_rgba_listener(&self) -> bool {
+    lock_rgba(&self.rgba_listener).is_some()
+  }
 }
+
+/// The decoder threads' sinks read the RGBA listener when a frame arrives, so it may come later.
+type SharedRgbaListener = Arc<Mutex<Option<Arc<dyn RgbaVideoListener>>>>;
 
 /// Applies the app's controls and reports the engine's events until the call ends.
 async fn run_call(
   mut call: NativeCall,
   mut controls: mpsc::UnboundedReceiver<Control>,
-  own_device: DeviceId,
-  hub: &CallHub,
+  context: &CallContext,
   state: &mut CallStateInfo,
 ) {
   let mut reason = CallEndReason::Left;
   let mut video = VideoBridge::default();
   let mut is_muted_by_app = false;
+  let mut is_deafened_by_app = false;
   let mut is_held = false;
   loop {
     tokio::select! {
@@ -379,20 +545,39 @@ async fn run_call(
         Some(Control::SetHeld(held)) => {
           is_held = held;
           call.set_muted(is_muted_by_app || is_held);
-          call.set_deafened(is_held);
+          call.set_deafened(is_deafened_by_app || is_held);
+        },
+        Some(Control::SetDeafened(is_deafened)) => {
+          is_deafened_by_app = is_deafened;
+          call.set_deafened(is_deafened || is_held);
+        },
+        Some(Control::StartCamera { format, done }) => {
+          let result = start_engine_camera(&call, format, context.camera.clone()).await;
+          state.is_camera_on = result.is_ok();
+          context.hub.report(state.clone());
+          // The app may have stopped waiting; the state report tells it anyway.
+          let _ = done.send(result);
         },
         // Leave asked for, or the app dropped the session.
         Some(Control::Leave) | None => break,
-        Some(control) => apply_video_control(&call, &mut video, control),
+        Some(control) => {
+          apply_video_control(&call, &mut video, control);
+          let is_camera_on = video.is_camera_requested || context.camera.is_running();
+          if is_camera_on != state.is_camera_on {
+            state.is_camera_on = is_camera_on;
+            context.hub.report(state.clone());
+          }
+        },
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
-          report_video(&mut video, own_device, &event);
+          report_video(&mut video, context.own_device, &event);
+          video.sync_decoded(&call);
           if let Some(end) = apply_event(state, event) {
             reason = end;
             break;
           }
-          hub.report(state.clone());
+          context.hub.report(state.clone());
         },
         None => {
           reason = CallEndReason::Failed;
@@ -401,12 +586,37 @@ async fn run_call(
       },
     }
   }
+  context.camera.clear();
   if let Err(error) = call.leave().await {
     info!(%error, "the call ended with an error");
   }
   state.phase = CallPhase::Ended;
   state.maybe_end_reason = Some(reason);
-  hub.report(state.clone());
+  context.hub.report(state.clone());
+}
+
+/// The camera encoded by the engine from the app's raw frames.
+async fn start_engine_camera(
+  call: &NativeCall,
+  format: CaptureFormat,
+  camera: CameraSlot,
+) -> Result<(), TeamCraftError> {
+  let config = VideoSendConfig {
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(AppCamera::new(format, camera)),
+    layers: simulcast_layers(
+      format.resolution,
+      format.framerate,
+      ENGINE_CAMERA_BITRATE_BPS,
+      ENGINE_CAMERA_LAYERS,
+    ),
+    encoders: preferred_encoders(),
+    maybe_filter: None,
+  };
+  call
+    .start_video(config)
+    .await
+    .map_err(|error| TeamCraftError::Call(error.to_string()))
 }
 
 /// Camera and watch requests of the app, for the engine.
@@ -429,11 +639,18 @@ fn apply_video_control(call: &NativeCall, video: &mut VideoBridge, control: Cont
       if let Some(stream) = video.maybe_camera.take() {
         call.unpublish_video(stream);
       }
+      // The engine-encoded camera, if that is the one running.
+      call.stop_video(VideoTrackKind::Camera);
     },
+    Control::SetRgbaVideoListener(listener) => video.set_rgba_listener(call, listener),
     Control::WatchVideo(stream) => call.subscribe_video(stream, Some(0)),
     Control::UnwatchVideo(stream) => call.subscribe_video(stream, None),
     // Handled by the loop.
-    Control::SetMuted(_) | Control::SetHeld(_) | Control::Leave => {},
+    Control::SetMuted(_)
+    | Control::SetHeld(_)
+    | Control::SetDeafened(_)
+    | Control::StartCamera { .. }
+    | Control::Leave => {},
   }
 }
 
@@ -506,6 +723,7 @@ fn apply_event(state: &mut CallStateInfo, event: CallEngineEvent) -> Option<Call
       state.maybe_privacy_code = Some(privacy_code);
     },
     CallEngineEvent::MuteChanged(is_muted) => state.is_muted = is_muted,
+    CallEngineEvent::DeafenChanged(is_deafened) => state.is_deafened = is_deafened,
     CallEngineEvent::RemovedByHost { .. } => return Some(CallEndReason::RemovedByHost),
     CallEngineEvent::EndedByHost { .. } => return Some(CallEndReason::EndedByHost),
     CallEngineEvent::Error(error) => warn!(error_code = ?error.error_code, "the SFU rejected a call request"),
@@ -519,6 +737,8 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     conversation_id: conversation.to_string(),
     phase: CallPhase::Ended,
     is_muted: false,
+    is_deafened: false,
+    is_camera_on: false,
     is_secured: false,
     participant_count: 0,
     maybe_privacy_code: None,
@@ -536,7 +756,11 @@ fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamC
       audio_codecs: vec![AudioCodec::Opus],
       video_encoders: vec![VideoCodec::H264],
       video_decoders: vec![VideoCodec::H264],
-      max_simulcast_layers: 1,
+      max_simulcast_layers: if openh264_library::is_available() {
+        ENGINE_CAMERA_LAYERS
+      } else {
+        1
+      },
     },
     bwe: BweConfig::default(),
   };
@@ -568,6 +792,11 @@ impl CallBindingSigner for CoreSigner {
   ) -> Result<SignedCallKeyBinding, CallBindingError> {
     self.0.sign_call_key_binding(call_id, dave_public_key, not_after)
   }
+}
+
+fn lock_rgba(listener: &SharedRgbaListener) -> MutexGuard<'_, Option<Arc<dyn RgbaVideoListener>>> {
+  // A single assignment per update; a poisoned lock holds a consistent value.
+  listener.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
