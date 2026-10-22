@@ -43,19 +43,20 @@ pub(crate) type Job = Box<dyn for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, 
 /// Outbox messages get IDs with this bit set in the UI view model (teamcraft-core ui_backend).
 const PENDING_ID_BIT: i64 = 1 << 62;
 
-type Api = HttpServerApi<ForeignTokens>;
-type Store = Arc<SealedSqliteStore>;
-type CoreClient = Client<Api, Store>;
+pub(crate) type Api = HttpServerApi<ForeignTokens>;
+pub(crate) type Store = Arc<SealedSqliteStore>;
+pub(crate) type CoreClient = Client<Api, Store>;
 
 pub(crate) struct Engine {
   server_url: String,
   tokens: ForeignTokens,
   listener: Arc<dyn EventListener>,
-  store: Store,
-  client: ClientSlot,
+  pub(crate) store: Store,
+  pub(crate) client: ClientSlot,
   maybe_backend: Option<CoreChatBackend<Store>>,
   /// The enrolled identity's fingerprint (empty before enrollment).
-  identity_fingerprint: String,
+  pub(crate) identity_fingerprint: String,
+  pub(crate) maybe_recovery: Option<crate::bridge::PendingRecovery>,
   maybe_link_offer: Option<LinkOffer>,
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
@@ -63,7 +64,7 @@ pub(crate) struct Engine {
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
-enum ClientSlot {
+pub(crate) enum ClientSlot {
   Missing,
   Idle(Box<CoreClient>),
   Running {
@@ -80,7 +81,7 @@ struct PendingApproval {
 
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
-struct ForeignTokens(Arc<dyn TokenProvider>);
+pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
 
 /// Starts the engine thread and waits until the store is open.
 pub(crate) fn spawn(
@@ -144,6 +145,7 @@ impl Engine {
       client: ClientSlot::Missing,
       maybe_backend: None,
       identity_fingerprint: String::new(),
+      maybe_recovery: None,
       maybe_link_offer: None,
       maybe_new_link: None,
       maybe_approval: None,
@@ -435,7 +437,7 @@ impl Engine {
     Ok(preview.into())
   }
 
-  async fn complete_enrollment(
+  pub(crate) async fn complete_enrollment(
     &mut self,
     options: EnrollmentOptions,
   ) -> Result<AccountState, TeamCraftError> {
@@ -501,8 +503,24 @@ impl Engine {
     }
   }
 
+  /// Runs `operation` on the client with syncing paused, then resumes it and tells the app.
+  pub(crate) async fn with_client<F>(&mut self, operation: F) -> Result<(), TeamCraftError>
+  where
+    F: for<'a> FnOnce(&'a mut CoreClient) -> LocalFuture<'a, Result<(), teamcraft_core::CoreError>>,
+  {
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = operation(&mut client).await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    self.listener.on_change();
+    Ok(result?)
+  }
+
   /// Hands the UI adapter's queued commands to the sync loop, or runs them right away.
-  async fn dispatch_commands(&mut self) -> Result<(), TeamCraftError> {
+  pub(crate) async fn dispatch_commands(&mut self) -> Result<(), TeamCraftError> {
     let commands = self.backend()?.drain_commands();
     match &mut self.client {
       ClientSlot::Running { handle, .. } => {
@@ -522,7 +540,7 @@ impl Engine {
     Ok(())
   }
 
-  fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
+  pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
     self.maybe_backend.as_ref().ok_or(TeamCraftError::NotEnrolled)
   }
 
@@ -542,7 +560,7 @@ impl Engine {
     MessageItem::from_view(message, author_name, is_pending)
   }
 
-  fn api(&self) -> Api {
+  pub(crate) fn api(&self) -> Api {
     HttpServerApi::new(self.server_url.clone(), self.tokens.clone())
   }
 }
@@ -590,7 +608,7 @@ fn enrollment_options(device_name: String, secret: EnrollmentSecret) -> Enrollme
   }
 }
 
-fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamCraftError> {
+pub(crate) fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamCraftError> {
   text
     .parse()
     .map_err(|_| TeamCraftError::InvalidInput(format!("not an ID: {text}")))

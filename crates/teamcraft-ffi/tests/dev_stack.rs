@@ -124,6 +124,56 @@ async fn mobile_client_receives_and_answers_a_message() {
     assert!(Instant::now() < deadline, "Alice never got the phone's reply");
     tokio::time::sleep(Duration::from_millis(200)).await;
   }
+
+  // The JSON bridge the app uses for everything else: snapshot, window, actions, queries.
+  let snapshot: serde_json::Value = serde_json::from_str(&phone.snapshot().await.unwrap()).unwrap();
+  assert!(
+    snapshot["conversations"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|conversation| conversation["id"] == channel_id.as_str())
+  );
+  let window: serde_json::Value =
+    serde_json::from_str(&phone.message_window(channel_id.clone(), 0, 50).await.unwrap()).unwrap();
+  let alices = window["messages"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|message| message["body"] == "hello phone")
+    .unwrap()["id"]
+    .clone();
+  phone
+    .act(
+      serde_json::json!({
+        "action": "toggle_reaction", "conversation": channel_id, "message": alices, "emoji": "👍"
+      })
+      .to_string(),
+    )
+    .await
+    .unwrap();
+  let window: serde_json::Value =
+    serde_json::from_str(&phone.message_window(channel_id.clone(), 0, 50).await.unwrap()).unwrap();
+  let reacted = window["messages"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|message| message["id"] == alices)
+    .unwrap();
+  assert_eq!(reacted["reactions"][0]["emoji"], "👍");
+  let answer: serde_json::Value = serde_json::from_str(
+    &phone
+      .query(serde_json::json!({"kind": "followed_threads"}).to_string())
+      .await
+      .unwrap(),
+  )
+  .unwrap();
+  assert_eq!(answer["answer"], "threads");
+  let me: serde_json::Value =
+    serde_json::from_str(&phone.api_request("GET".into(), "/me".into(), None).await.unwrap()).unwrap();
+  assert_eq!(me["id"], bob_id.as_str());
+  assert!(phone.act("{\"action\":\"publish_policy\"}".into()).await.is_err());
+
   phone.stop().await.unwrap();
   std::fs::remove_dir_all(&directory).unwrap();
 }

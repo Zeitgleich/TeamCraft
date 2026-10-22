@@ -9765,7 +9765,10 @@ dependencies = [
 name = "teamcraft-ffi"
 version = "0.0.0"
 dependencies = [
+ "rand_core 0.6.4",
  "reqwest",
+ "serde",
+ "serde_json",
  "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
