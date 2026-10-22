@@ -87,9 +87,9 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
     Role::Guest => UserKind::Guest,
     _ => UserKind::Member,
   };
-  let user = state
+  let synced = state
     .database
-    .sync_oidc_user(
+    .sync_oidc_user_flagged(
       &OidcIdentity {
         issuer: &identity.issuer,
         subject: &identity.subject,
@@ -102,6 +102,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
       state.next_id()?,
     )
     .await?;
+  let user = synced.user;
   if user.is_deactivated {
     return Err(AuthError::AccountDeactivated.into());
   }
@@ -110,7 +111,8 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   if let Some(email) = identity.maybe_email.as_deref().filter(|_| may_use_email) {
     apply_pending_invites(state, &user, email).await?;
   }
-  if user.kind == UserKind::Member {
+  // The flag comes with the sign-in read: members who already got their defaults cost nothing.
+  if user.kind == UserKind::Member && synced.is_awaiting_default_memberships {
     apply_default_memberships(state, &user).await?;
   }
   Ok(AuthenticatedUser {
@@ -129,9 +131,6 @@ fn guest_default_expiry_secs(state: &AppState) -> Option<f64> {
 /// Adds a new member to the configured default spaces and channels (once per account).
 async fn apply_default_memberships(state: &AppState, user: &teamcraft_db::User) -> Result<(), ApiError> {
   let policy = &state.settings.policy;
-  if policy.default_spaces.is_empty() {
-    return Ok(());
-  }
   let applied = state
     .database
     .apply_default_memberships(user.id, &policy.default_spaces, &policy.default_channels)

@@ -175,15 +175,14 @@ impl Database {
     Ok(applied)
   }
 
-  /// Gives a new user the instance's default spaces (as members) and the public channels of those
-  /// spaces with one of the given names. Spaces and channels are matched by case-insensitive name;
-  /// archived ones and private channels are skipped. Claims `default_memberships_at`, so it applies
-  /// at most once per user: later calls return nothing.
+  /// Gives a new user the instance's default spaces (as members) and, of those spaces, the listed
+  /// public channels. Archived spaces and channels and private channels are skipped. Claims
+  /// `default_memberships_at`, so it applies at most once per user: later calls return nothing.
   pub async fn apply_default_memberships(
     &self,
     user: UserId,
-    space_names: &[String],
-    channel_names: &[String],
+    spaces: &[SpaceId],
+    channels: &[ConversationId],
   ) -> Result<Vec<AppliedInvite>, DbError> {
     let mut tx = self.pool().begin().await?;
     let claimed = sqlx::query!(
@@ -194,15 +193,16 @@ impl Database {
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    if claimed == 0 {
+    if claimed == 0 || spaces.is_empty() {
+      tx.commit().await?;
       return Ok(Vec::new());
     }
     let joined_spaces = sqlx::query_scalar!(
       r#"INSERT INTO space_members (space_id, user_id, role)
          SELECT s.id, $2, 'member' FROM spaces s
-         WHERE lower(s.name) = ANY($1) AND s.archived_at IS NULL
+         WHERE s.id = ANY($1) AND s.archived_at IS NULL
          ON CONFLICT (space_id, user_id) DO NOTHING RETURNING space_id"#,
-      &lowercase_all(space_names),
+      &to_db_all(spaces),
       to_db(user),
     )
     .fetch_all(&mut *tx)
@@ -213,11 +213,11 @@ impl Database {
         r#"INSERT INTO memberships (conversation_id, user_id, role)
            SELECT c.id, $2, 'member' FROM conversations c
            WHERE c.space_id = $1 AND c.kind = 'channel' AND c.visibility = 'public'
-             AND c.archived_at IS NULL AND lower(c.name) = ANY($3)
+             AND c.archived_at IS NULL AND c.id = ANY($3)
            ON CONFLICT DO NOTHING RETURNING conversation_id"#,
         space,
         to_db(user),
-        &lowercase_all(channel_names),
+        &to_db_all(channels),
       )
       .fetch_all(&mut *tx)
       .await?;
@@ -229,8 +229,4 @@ impl Database {
     tx.commit().await?;
     Ok(applied)
   }
-}
-
-fn lowercase_all(names: &[String]) -> Vec<String> {
-  names.iter().map(|name| name.to_lowercase()).collect()
 }

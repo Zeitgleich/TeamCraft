@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO space_members (space_id, user_id, role)\n         SELECT s.id, $2, 'member' FROM spaces s\n         WHERE lower(s.name) = ANY($1) AND s.archived_at IS NULL\n         ON CONFLICT (space_id, user_id) DO NOTHING RETURNING space_id",
+  "query": "INSERT INTO space_members (space_id, user_id, role)\n         SELECT s.id, $2, 'member' FROM spaces s\n         WHERE s.id = ANY($1) AND s.archived_at IS NULL\n         ON CONFLICT (space_id, user_id) DO NOTHING RETURNING space_id",
   "describe": {
     "columns": [
       {
@@ -17,7 +17,7 @@
     ],
     "parameters": {
       "Left": [
-        "TextArray",
+        "Int8Array",
         "Int8"
       ]
     },
@@ -25,5 +25,5 @@
       false
     ]
   },
-  "hash": "3b88c669935714d034a2d0b77acd1b07099fd12bc709ff3a02526514537eae06"
+  "hash": "fa9d3c0f181c1f4970fd697e99625819486371b6d022db1ef60bf7fce13410fb"
 }
