@@ -235,6 +235,12 @@ pub fn NotificationsTab() -> impl IntoView {
         on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.first_name_is_mention = value)))
       />
       <CheckField
+        label="notif-preview"
+        hint="notif-preview-hint"
+        value=Signal::derive(move || notes.get().show_preview)
+        on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.show_preview = value)))
+      />
+      <CheckField
         label="notif-channel-mentions"
         value=Signal::derive(move || notes.get().channel_mentions_notify)
         on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.channel_mentions_notify = value)))

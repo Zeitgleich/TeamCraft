@@ -5,14 +5,14 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestRedirect, Response};
 
-pub(super) struct FetchResponse {
+pub(crate) struct FetchResponse {
   pub status: u16,
   pub body: Vec<u8>,
 }
 
 /// Performs one request. Redirects are not followed: neither the token endpoint nor the API redirects,
 /// and following them would let a hostile response steer where a bearer token is sent.
-pub(super) async fn fetch(
+pub(crate) async fn fetch(
   method: &str,
   url: &str,
   headers: &[(String, String)],

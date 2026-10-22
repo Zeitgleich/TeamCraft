@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
+use teamcraft_client_api::remote::ApiMethod;
 
 use super::{ApiResponse, AuthError, AuthService, KeyringStore};
 
@@ -54,4 +55,14 @@ pub async fn auth_logout(service: State<'_, Arc<Service>>) -> Result<(), Command
 #[tauri::command]
 pub async fn api_get(path: String, service: State<'_, Arc<Service>>) -> Result<ApiResponse, CommandError> {
   Ok(service.api_get(&path).await?)
+}
+
+#[tauri::command]
+pub async fn api_request(
+  method: ApiMethod,
+  path: String,
+  body: Option<String>,
+  service: State<'_, Arc<Service>>,
+) -> Result<ApiResponse, CommandError> {
+  Ok(service.api_request(method, &path, body).await?)
 }

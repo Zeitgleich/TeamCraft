@@ -49,6 +49,40 @@ pub trait ChatBackend {
 
   fn set_presence(&self, presence: PresenceStatus);
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>);
+
+  /// Whether the user follows the thread (followed threads feed the threads inbox).
+  fn is_thread_followed(&self, _conversation: ConversationId, _thread: ThreadId) -> bool {
+    true
+  }
+  fn set_thread_followed(&self, _conversation: ConversationId, _thread: ThreadId, _is_followed: bool) {}
+  /// The user looked at the thread: its unread counters reset.
+  fn mark_thread_read(&self, _conversation: ConversationId, _thread: ThreadId) {}
+  /// Members who have read up to (or past) the message in a DM or group DM. Empty elsewhere and
+  /// when receipts are off.
+  fn seen_by(&self, _conversation: ConversationId, _message: MessageId) -> Vec<UserId> {
+    Vec::new()
+  }
+
+  /// Whether this backend holds the keys to sign workspace policy and add the admin to channels
+  /// (the client core on the desktop; the browser build has none).
+  fn can_sign_workspace(&self) -> bool {
+    false
+  }
+  /// Signs and publishes a policy version. When the workspace has no signed roster yet, `owners`
+  /// and `admins` become the first one. Needs [`Self::can_sign_workspace`].
+  fn publish_policy(
+    &self,
+    _policy: teamcraft_proto::WorkspacePolicy,
+    _owners: Vec<UserId>,
+    _admins: Vec<UserId>,
+  ) {
+  }
+  /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
+  fn admin_add_self(&self, _conversation: ConversationId) {}
+  /// The newest failure of an action sent to the core, in words for the user.
+  fn last_action_error(&self) -> Option<String> {
+    None
+  }
 }
 
 /// Calls and huddles. Media runs in `teamcraft-media`; this is the roster and device view of it,
@@ -97,6 +131,21 @@ pub trait AdminBackend {
   /// Adds the admin to a private channel according to the `admin_self_join` policy.
   fn admin_join_channel(&self, channel: ConversationId) -> SelfJoinOutcome;
   fn audit_log(&self) -> Vec<AuditEntry>;
+
+  /// Called when the console opens: backends that read the server fetch fresh data now.
+  fn admin_refresh(&self) {}
+  /// Whether the signed policy stores the field; the console disables the controls of others.
+  fn is_policy_field_stored(&self, _field: crate::admin::PolicyField) -> bool {
+    true
+  }
+  /// Why the signed policy cannot be changed here (not an owner, no encryption keys on this device).
+  fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
+    None
+  }
+  /// The last administrative action that the server or the core refused, in words for the user.
+  fn admin_error(&self) -> Option<String> {
+    None
+  }
 }
 
 /// The user's own devices and identity-key warnings.

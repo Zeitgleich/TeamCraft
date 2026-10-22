@@ -4,6 +4,7 @@ use leptos::ev;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
 use crate::clock::now_ms;
@@ -11,8 +12,10 @@ use crate::components::admin_console::AdminConsole;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::channel_view::ChannelView;
+use crate::components::guest_join::GuestJoinPage;
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::login::SessionGate;
+use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
@@ -28,8 +31,11 @@ use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
 use crate::i18n::{provide_i18n, use_i18n};
+use crate::meetings::parse_guest_link;
 use crate::mock::MockBackend;
 use crate::model::{ConversationId, SpaceId};
+use crate::notifier::{NotificationTitle, Notifier, notifications_for};
+use crate::notify_sync::NotificationSync;
 use crate::settings::{BackendMode, Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
 
@@ -42,6 +48,11 @@ pub fn App() -> impl IntoView {
   apply_theme(settings.theme);
   apply_density(settings);
   apply_language_attribute();
+
+  // A personal meeting link needs no sign-in: it gets its own page before anything else.
+  if let Some((meeting, invite_token)) = guest_link_from_location() {
+    return view! { <GuestJoinPage meeting=meeting invite_token=invite_token /> }.into_any();
+  }
 
   match BackendMode::load() {
     BackendMode::Mock => {
@@ -62,6 +73,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   provide_context(state);
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
+  // Preferences the server enforces (push, do not disturb, mutes) follow the account on the server.
+  if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
+    sync.get_value().start(settings);
+  }
+  if tauri::is_available() {
+    watch_for_notifications(state, i18n);
+  }
   // Call defaults follow the settings (and set the initial state of the call session).
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
@@ -89,6 +107,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Threads => view! { <ThreadsInbox /> }.into_any(),
             MainView::Admin(section) => view! { <AdminConsole section=section /> }.into_any(),
             MainView::Search => view! { <SearchView /> }.into_any(),
+            MainView::Meetings => view! { <MeetingsView /> }.into_any(),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
@@ -123,6 +142,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::LinkDevice => view! { <LinkDeviceDialog /> }.into_any(),
         Overlay::VerifyContact(user) => view! { <VerifyContactDialog user=user /> }.into_any(),
         Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
+        Overlay::ScheduleMeeting => view! { <ScheduleMeetingDialog /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
     </div>
@@ -244,4 +264,48 @@ fn initial_location(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> 
   let space = backend.spaces().into_iter().next()?;
   let conversation = backend.space_conversations(space.id).into_iter().next()?;
   Some((space.id, conversation.id))
+}
+
+/// Desktop only: new mentions and DMs become system notifications, decided by the user's preferences.
+fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
+  let notifier = Notifier::default();
+  let settings = state.settings;
+  Effect::new(move |_| {
+    // Reading through the state subscribes to every backend change.
+    let found = state.read(|backend| notifier.collect(backend));
+    if found.is_empty() {
+      return;
+    }
+    let prefs = settings.prefs.get_untracked().notifications;
+    let current = state.current_conversation_id();
+    let has_focus = window_has_focus();
+    let notifications = state.read(|backend| {
+      notifications_for(found, &prefs, backend, |conversation| {
+        has_focus && current == Some(conversation)
+      })
+    });
+    for notification in notifications {
+      let title = match &notification.title {
+        NotificationTitle::Sender(name) => name.clone(),
+        NotificationTitle::InChannel { sender, channel } => {
+          i18n.t_with("notify-in-channel", &[("name", sender), ("channel", channel)])
+        },
+        NotificationTitle::ThreadReply { sender } => i18n.t_with("notify-thread-reply", &[("name", sender)]),
+      };
+      let body = notification.body.unwrap_or_else(|| i18n.t("notify-new-message"));
+      leptos::task::spawn_local(async move { tauri::notify(&title, Some(&body)).await });
+    }
+  });
+}
+
+fn window_has_focus() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .is_some_and(|document| document.has_focus().unwrap_or(false))
+}
+
+/// The meeting and token when the page was opened from a personal meeting link.
+fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
+  let location = web_sys::window()?.location();
+  parse_guest_link(&location.pathname().ok()?, &location.hash().ok()?)
 }

@@ -167,6 +167,8 @@ pub struct NotificationPrefs {
   pub push_delay_minutes: u32,
   pub first_name_is_mention: bool,
   pub channel_mentions_notify: bool,
+  /// Show the message text in desktop notifications (off: only who wrote where).
+  pub show_preview: bool,
   /// Ask before @channel in conversations with more members than this (0 = never ask).
   pub confirm_channel_over: u32,
   pub keywords: Vec<String>,
@@ -188,6 +190,7 @@ impl Default for NotificationPrefs {
       push_delay_minutes: 2,
       first_name_is_mention: true,
       channel_mentions_notify: true,
+      show_preview: true,
       confirm_channel_over: 10,
       keywords: Vec::new(),
       highlight_keywords: Vec::new(),

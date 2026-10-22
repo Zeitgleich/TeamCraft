@@ -57,6 +57,29 @@ pub enum CallAction {
   Unknown,
 }
 
+/// HTTP verbs the UI may use for authenticated server calls (the shell attaches the bearer token).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiMethod {
+  Get,
+  Post,
+  Put,
+  Patch,
+  Delete,
+}
+
+impl ApiMethod {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Get => "GET",
+      Self::Post => "POST",
+      Self::Put => "PUT",
+      Self::Patch => "PATCH",
+      Self::Delete => "DELETE",
+    }
+  }
+}
+
 /// Everything the sidebar and headers need, in one piece.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatSnapshot {
@@ -150,6 +173,19 @@ pub enum ChatAction {
   AddMember {
     conversation: ConversationId,
     user: UserId,
+  },
+  /// Signs and publishes a workspace policy version. Owners and admins form the first signed roster
+  /// when the workspace has none yet (the signer becomes the root of trust).
+  PublishPolicy {
+    policy: teamcraft_proto::WorkspacePolicy,
+    #[serde(default)]
+    owners: Vec<UserId>,
+    #[serde(default)]
+    admins: Vec<UserId>,
+  },
+  /// An admin adds themselves to a conversation (subject to the policy's `admin_self_join`).
+  AdminJoinChannel {
+    conversation: ConversationId,
   },
 }
 

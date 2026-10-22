@@ -8,6 +8,7 @@
 mod auth;
 mod calls;
 mod core;
+mod notifications;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +38,7 @@ fn main() -> anyhow::Result<()> {
 
   tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_notification::init())
     .manage(service)
     .manage(CoreHost::new(config, tokens))
     .setup(|app| {
@@ -56,6 +58,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::auth_cancel,
       auth::commands::auth_logout,
       auth::commands::api_get,
+      auth::commands::api_request,
       core::commands::core_start,
       core::commands::core_status,
       core::commands::core_enroll,
@@ -67,6 +70,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,
+      notifications::notify_user,
     ])
     .run(tauri::generate_context!())
     .context("failed to run the TeamCraft desktop shell")

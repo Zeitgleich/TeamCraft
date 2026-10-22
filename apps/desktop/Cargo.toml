@@ -34,6 +34,8 @@ secrecy.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "time", "sync", "macros"] }
 # System browser for the OIDC login (RFC 8252): the webview never shows the identity provider.
 tauri-plugin-opener = "2"
+# System notifications for mentions and direct messages (the UI decides what to show).
+tauri-plugin-notification = "2"
 # Refresh token in the OS keyring (Secret Service on Linux, Keychain on macOS).
 keyring = "4"
 reqwest = { workspace = true, features = ["form"] }

@@ -3673,3 +3673,168 @@ select.input {
 .auth-form .field-error .mono {
   display: block;
 }
+
+.seen-line {
+  padding: 0 20px 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* ---- Meetings ---- */
+
+.meetings-view {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.meetings-view .panel-header .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.meetings-error {
+  margin: 12px 16px 0;
+}
+
+.meetings-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px 24px;
+}
+
+.meetings-day {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: none;
+}
+
+.meetings-day-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.meeting-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.meeting-card.meeting-over {
+  opacity: 0.6;
+}
+
+.meeting-time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.meeting-title {
+  margin: 4px 0 2px;
+  font-size: 15px;
+}
+
+.meeting-meta {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.meeting-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.meeting-link {
+  margin-top: 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.lobby {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+
+.lobby ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.lobby-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lobby-entry span {
+  flex: 1;
+}
+
+.schedule-form {
+  display: grid;
+  gap: 12px;
+}
+
+.invite-list {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  display: grid;
+  gap: 4px;
+}
+
+.invite-external {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.invite-external span {
+  flex: 1;
+}
+
+.modal-wide {
+  width: min(680px, 100%);
+}
+
+.modal-wide > form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.modal-wide .modal-body {
+  overflow-y: auto;
+}
+
+.schedule-form .input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.schedule-form .field-row > * {
+  min-width: 0;
+}

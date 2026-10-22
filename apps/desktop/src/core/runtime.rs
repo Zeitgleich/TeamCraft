@@ -9,6 +9,7 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, GatewayConnection, HttpSe
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::store::{DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{
   CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, PendingEnrollment,
 };
@@ -17,6 +18,7 @@ use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
   CallJoinTokenResponse, ConversationId, DeviceId, GatewayClientMessage, GatewayEvent, UserId,
+  WorkspacePolicy,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -487,6 +489,17 @@ impl Core {
       ChatAction::AddMember { conversation, user } => {
         return client.add_member(*conversation, *user).await.map_err(describe);
       },
+      ChatAction::PublishPolicy {
+        policy,
+        owners,
+        admins,
+      } => {
+        return publish_policy(client, policy.clone(), owners, admins).await;
+      },
+      ChatAction::AdminJoinChannel { conversation } => {
+        let me = client.user_id();
+        return client.admin_add_member(*conversation, me).await.map_err(describe);
+      },
       _ => {},
     }
     let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
@@ -508,7 +521,11 @@ impl Core {
       } => backend.set_favorite(conversation, is_favorite),
       ChatAction::SetPresence { presence } => backend.set_presence(presence),
       ChatAction::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
-      ChatAction::CreateChannel { .. } | ChatAction::OpenDm { .. } | ChatAction::AddMember { .. } => {},
+      ChatAction::CreateChannel { .. }
+      | ChatAction::OpenDm { .. }
+      | ChatAction::AddMember { .. }
+      | ChatAction::PublishPolicy { .. }
+      | ChatAction::AdminJoinChannel { .. } => {},
     }
     self.run_queued_commands().await;
     // New messages go out right away; failures stay in the outbox for the periodic retry.
@@ -610,4 +627,33 @@ async fn receive(
 /// Error text for the UI: the cause, without internal type names.
 fn describe(error: CoreError) -> String {
   error.to_string()
+}
+
+/// Signs and publishes a policy version. A workspace without a signed roster gets one first, with
+/// the signer as owner (the root of trust, e2ee.md §11); later policy changes only append.
+async fn publish_policy(
+  client: &mut Client<Api, Store>,
+  policy: WorkspacePolicy,
+  owners: &[UserId],
+  admins: &[UserId],
+) -> Result<(), String> {
+  client.sync_workspace().await.map_err(describe)?;
+  if client.workspace().map_err(describe)?.roster.version == 0 {
+    let me = client.user_id();
+    let mut roles: Vec<(UserId, RosterRole)> = vec![(me, RosterRole::Owner)];
+    roles.extend(
+      owners
+        .iter()
+        .filter(|user| **user != me)
+        .map(|user| (*user, RosterRole::Owner)),
+    );
+    roles.extend(
+      admins
+        .iter()
+        .filter(|user| **user != me && !owners.contains(user))
+        .map(|user| (*user, RosterRole::Admin)),
+    );
+    client.publish_roster(&roles).await.map_err(describe)?;
+  }
+  client.publish_policy(policy).await.map_err(describe)
 }

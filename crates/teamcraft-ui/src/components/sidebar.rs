@@ -6,6 +6,7 @@ use crate::components::avatar::PresenceDot;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationKind, PresenceStatus};
 use crate::sections::{SectionKind, build_sections};
 use crate::state::{MainView, Overlay, use_app_state};
@@ -86,6 +87,19 @@ pub fn Sidebar() -> impl IntoView {
           (unread > 0).then(|| view! { <span class="badge-count">{unread}</span> })
         }}
       </button>
+      {use_context::<MeetingsHub>().map(|_| {
+        view! {
+          <button
+            class="sb-item sb-meetings"
+            class:current=move || state.view.get() == MainView::Meetings
+            aria-current=move || (state.view.get() == MainView::Meetings).then_some("page")
+            on:click=move |_| state.open_meetings()
+          >
+            <Icon name=IconName::Calendar />
+            <span class="sb-name">{move || i18n.t("sidebar-meetings")}</span>
+          </button>
+        }
+      })}
       <button
         class="sb-item"
         class:current=move || state.view.get() == MainView::Search
@@ -181,10 +195,14 @@ fn SidebarItem(conversation: Conversation) -> impl IntoView {
     ConversationKind::Integration => view! { <Icon name=IconName::Terminal /> }.into_any(),
     ConversationKind::Group => view! { <Icon name=IconName::Users /> }.into_any(),
     ConversationKind::Direct => {
-      let presence = maybe_other
-        .as_ref()
-        .map_or(PresenceStatus::Offline, |user| user.presence);
-      view! { <span class="dm-dot"><PresenceDot presence=presence /></span> }.into_any()
+      // Presence arrives later than the row is built, so it is read reactively.
+      let maybe_other_id = maybe_other.as_ref().map(|user| user.id);
+      let presence = move || {
+        maybe_other_id
+          .and_then(|member| state.read(|backend| backend.user(member)))
+          .map_or(PresenceStatus::Offline, |user| user.presence)
+      };
+      view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence() /> }}</span> }.into_any()
     },
   };
   let status_emoji = maybe_other

@@ -71,6 +71,7 @@ pub struct RemoteChat {
   mirror: Rc<RefCell<Mirror>>,
   notify: Rc<RefCell<Option<ChangeNotifier>>>,
   refresh_queued: Rc<Cell<bool>>,
+  maybe_error: Rc<RefCell<Option<String>>>,
 }
 
 impl RemoteChat {
@@ -86,6 +87,7 @@ impl RemoteChat {
       })),
       notify: Rc::new(RefCell::new(None)),
       refresh_queued: Rc::new(Cell::new(false)),
+      maybe_error: Rc::new(RefCell::new(None)),
     };
     let listener = backend.clone();
     listen(CORE_CHANGED_EVENT, move || listener.queue_refresh());
@@ -213,10 +215,16 @@ impl RemoteChat {
   }
 
   fn act(&self, action: ChatAction) {
+    let backend = self.clone();
     spawn_local(async move {
-      if let Err(error) = call::<()>("core_action", &json!({ "action": action })).await {
-        tracing::warn!(%error, "action failed");
+      match call::<()>("core_action", &json!({ "action": action })).await {
+        Ok(()) => *backend.maybe_error.borrow_mut() = None,
+        Err(error) => {
+          tracing::warn!(%error, "action failed");
+          *backend.maybe_error.borrow_mut() = Some(error);
+        },
       }
+      backend.changed();
     });
   }
 
@@ -234,6 +242,31 @@ impl RemoteChat {
 }
 
 impl ChatBackend for RemoteChat {
+  fn can_sign_workspace(&self) -> bool {
+    true
+  }
+
+  fn publish_policy(
+    &self,
+    policy: teamcraft_proto::WorkspacePolicy,
+    owners: Vec<UserId>,
+    admins: Vec<UserId>,
+  ) {
+    self.act(ChatAction::PublishPolicy {
+      policy,
+      owners,
+      admins,
+    });
+  }
+
+  fn admin_add_self(&self, conversation: ConversationId) {
+    self.act(ChatAction::AdminJoinChannel { conversation });
+  }
+
+  fn last_action_error(&self) -> Option<String> {
+    self.maybe_error.borrow().clone()
+  }
+
   fn set_change_notifier(&self, notify: Rc<dyn Fn()>) {
     *self.notify.borrow_mut() = Some(notify);
   }

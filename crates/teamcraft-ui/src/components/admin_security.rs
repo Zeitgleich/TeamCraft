@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::HistoryPolicy;
 
-use crate::admin::{AdminSelfJoin, DmScope, SecurityPolicy};
+use crate::admin::{AdminSelfJoin, DmScope, PolicyBlocker, PolicyField, SecurityPolicy};
 use crate::components::admin_console::SectionHeader;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -19,22 +19,55 @@ pub fn SecuritySection() -> impl IntoView {
   let draft = RwSignal::new(stored.get_untracked());
   let saved_version = RwSignal::new(None::<u32>);
   let is_dirty = move || draft.get() != stored.get();
+  let blocker = Memo::new(move |_| state.read(|backend| backend.policy_edit_blocker()));
+  // A field is locked when nobody here may sign the policy or the signed policy does not hold it.
+  let locked = move |field: PolicyField| {
+    blocker.get().is_some() || !state.read(|backend| backend.is_policy_field_stored(field))
+  };
+  let not_stored = move |field: PolicyField| !state.read(|backend| backend.is_policy_field_stored(field));
 
+  // A signed policy reaches the server a moment after "save"; until its version shows up the form
+  // keeps the edits instead of snapping back to the old values.
+  let pending_after = RwSignal::new(None::<u32>);
   let save = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
+    let before = stored.get_untracked().version;
     state.write(|backend| backend.set_security_policy(draft.get_untracked()));
     let saved = stored.get_untracked();
-    saved_version.set(Some(saved.version));
-    draft.set(saved);
+    if saved.version == before {
+      pending_after.set(Some(before));
+    } else {
+      saved_version.set(Some(saved.version));
+      draft.set(saved);
+    }
   };
+  Effect::new(move |_| {
+    let current = stored.get();
+    if let Some(before) = pending_after.get_untracked()
+      && current.version > before
+    {
+      pending_after.set(None);
+      saved_version.set(Some(current.version));
+      draft.set(current);
+    }
+  });
 
   view! {
     <SectionHeader
       title=Signal::derive(move || i18n.t("admin-security-title"))
       subtitle=Signal::derive(move || i18n.t("admin-security-subtitle"))
     />
+    {move || {
+      blocker.get().map(|blocker| {
+        let key = match blocker {
+          PolicyBlocker::NotOwner => "policy-blocked-not-owner",
+          PolicyBlocker::NoSigningKeys => "policy-blocked-no-keys",
+        };
+        view! { <p class="auth-alert policy-blocked" role="status">{move || i18n.t(key)}</p> }
+      })
+    }}
     <form class="policy-form" on:submit=save>
-      <fieldset class="policy-group">
+      <fieldset class="policy-group" prop:disabled=move || locked(PolicyField::AdminSelfJoin)>
         <legend>{move || i18n.t("policy-self-join")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-self-join-hint")}</p>
         {AdminSelfJoin::ALL
@@ -59,7 +92,7 @@ pub fn SecuritySection() -> impl IntoView {
           .collect_view()}
       </fieldset>
 
-      <fieldset class="policy-group">
+      <fieldset class="policy-group" prop:disabled=move || locked(PolicyField::OrgRecovery)>
         <legend>{move || i18n.t("policy-recovery")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-recovery-hint")}</p>
         <label class="checkbox">
@@ -111,8 +144,11 @@ pub fn SecuritySection() -> impl IntoView {
         </div>
       </fieldset>
 
-      <fieldset class="policy-group">
+      <fieldset class="policy-group" prop:disabled=move || locked(PolicyField::SignIn)>
         <legend>{move || i18n.t("policy-signin")}</legend>
+        <Show when=move || not_stored(PolicyField::SignIn) fallback=|| ()>
+          <p class="muted-text small">{move || i18n.t("policy-not-stored")}</p>
+        </Show>
         <label class="checkbox">
           <input
             type="checkbox"
@@ -191,6 +227,7 @@ pub fn SecuritySection() -> impl IntoView {
             id="policy-domains"
             class="input"
             name="guest_email_domains"
+            prop:disabled=move || locked(PolicyField::GuestEmailDomains)
             autocomplete="off"
             spellcheck="false"
             placeholder="example.com, partner.example"
@@ -206,6 +243,7 @@ pub fn SecuritySection() -> impl IntoView {
           <select
             id="policy-history"
             class="input"
+            prop:disabled=move || locked(PolicyField::DefaultHistory)
             on:change=move |ev| {
               let value = if event_target_value(&ev) == "full" { HistoryPolicy::Full } else { HistoryPolicy::FromJoin };
               update_flag(draft, move |policy| policy.default_history = value.clone());
@@ -224,6 +262,7 @@ pub fn SecuritySection() -> impl IntoView {
           <select
             id="policy-dm"
             class="input"
+            prop:disabled=move || locked(PolicyField::DmScope)
             on:change=move |ev| {
               if let Some(scope) = DmScope::from_slug(&event_target_value(&ev)) {
                 update_flag(draft, move |policy| policy.dm_scope = scope);
@@ -250,12 +289,18 @@ pub fn SecuritySection() -> impl IntoView {
           <span>{move || i18n.t_with("policy-signing", &[("version", &stored.get().version.to_string())])}</span>
         </p>
         <span class="status-line" role="status">
-          {move || saved_version.get().map(|version| i18n.t_with("policy-saved", &[("version", &version.to_string())]))}
+          {move || {
+            if pending_after.get().is_some() {
+              Some(i18n.t("policy-saving"))
+            } else {
+              saved_version.get().map(|version| i18n.t_with("policy-saved", &[("version", &version.to_string())]))
+            }
+          }}
         </span>
         <button type="button" class="btn" disabled=move || !is_dirty() on:click=move |_| draft.set(stored.get_untracked())>
           {move || i18n.t("policy-reset")}
         </button>
-        <button type="submit" class="btn btn-primary" disabled=move || !is_dirty()>
+        <button type="submit" class="btn btn-primary" disabled=move || !is_dirty() || blocker.get().is_some()>
           {move || i18n.t("policy-save")}
         </button>
       </footer>

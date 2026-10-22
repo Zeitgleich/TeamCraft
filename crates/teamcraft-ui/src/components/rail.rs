@@ -74,7 +74,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
             MainView::Conversation(current) => state
               .read(|backend| backend.conversation(current))
               .is_some_and(|conv| conv.maybe_space == Some(id) || conv.maybe_space.is_none()),
-            MainView::Threads | MainView::Search => true,
+            MainView::Threads | MainView::Search | MainView::Meetings => true,
             MainView::Admin(_) => false,
           };
           if !belongs && let Some(conversation) = first_conversation(id) {

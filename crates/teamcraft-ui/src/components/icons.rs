@@ -56,6 +56,7 @@ pub enum IconName {
   Trash,
   User,
   EyeOff,
+  Calendar,
 }
 
 impl IconName {
@@ -139,6 +140,7 @@ impl IconName {
       Self::Download => "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3",
       Self::Trash => "M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6",
       Self::User => "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+      Self::Calendar => "M4 6h16v14H4z M4 10h16 M8 3v4 M16 3v4",
       Self::EyeOff => {
         "M17.9 17.9A10.1 10.1 0 0 1 12 20c-7 0-11-8-11-8a18.5 18.5 0 0 1 5.1-5.9 M9.9 4.2A9 9 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.2 3.2 M1 1l22 22"
       },

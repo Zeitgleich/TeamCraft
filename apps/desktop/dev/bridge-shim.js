@@ -10,8 +10,17 @@
     if ('error' in answer) throw answer.error;
     return answer.ok;
   };
+  // System notifications cannot be shown in a browser; they are collected for inspection instead.
+  window.__notifications = [];
+  const invoke = async (cmd, args) => {
+    if (cmd === 'notify_user') {
+      window.__notifications.push({ title: args.title, body: args.body });
+      return null;
+    }
+    return post(cmd, args);
+  };
   window.__TAURI__ = {
-    core: { invoke: post },
+    core: { invoke },
     event: {
       listen: async (_name, handler) => {
         let counter = 0;

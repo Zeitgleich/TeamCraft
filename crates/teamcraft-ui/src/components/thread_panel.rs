@@ -28,7 +28,12 @@ pub fn ThreadPanel(
   let can_post = state
     .read(|backend| backend.conversation(conversation))
     .is_none_or(|conv| conv.can_post);
-  let is_following = RwSignal::new(true);
+  let is_following = RwSignal::new(state.read(|backend| backend.is_thread_followed(conversation, thread)));
+  // Opening the thread (and every new reply while it is open) counts as reading it.
+  Effect::new(move |_| {
+    thread_messages.track();
+    state.write(|backend| backend.mark_thread_read(conversation, thread));
+  });
 
   view! {
     <aside class="side-panel thread-panel" class:embedded=embedded aria-label=move || i18n.t("thread-panel-label")>
@@ -42,7 +47,11 @@ pub fn ThreadPanel(
         <button
           class="header-btn"
           aria-pressed=move || is_following.get().to_string()
-          on:click=move |_| is_following.update(|value| *value = !*value)
+          on:click=move |_| {
+            is_following.update(|value| *value = !*value);
+            let is_followed = is_following.get_untracked();
+            state.write(|backend| backend.set_thread_followed(conversation, thread, is_followed));
+          }
         >
           <Icon name=IconName::Bell />
           <span>{move || if is_following.get() { i18n.t("thread-following") } else { i18n.t("thread-follow") }}</span>

@@ -16,7 +16,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use super::fetch::fetch;
-use super::{ApiResponse, AppConfig, AuthError, Authenticator, LocalFuture};
+use super::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, LocalFuture};
 use crate::clock::now_ms;
 
 const PENDING_KEY: &str = "teamcraft.oidc.pending";
@@ -287,17 +287,30 @@ impl Authenticator for BrowserAuth {
     })
   }
 
-  fn api_get(&self, path: &str) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
+  fn api_request(
+    &self,
+    method: ApiMethod,
+    path: &str,
+    maybe_body: Option<String>,
+  ) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
     let url = self.config.api_url(path);
     Box::pin(async move {
       let token = self.access_token().await?;
-      let headers = [
+      let mut headers = vec![
         ("Authorization".to_owned(), format!("Bearer {token}")),
         ("Accept".to_owned(), "application/json".to_owned()),
       ];
-      let response = fetch("GET", &url, &headers, None)
-        .await
-        .map_err(AuthError::Network)?;
+      if maybe_body.is_some() {
+        headers.push(("Content-Type".to_owned(), "application/json".to_owned()));
+      }
+      let response = fetch(
+        method.as_str(),
+        &url,
+        &headers,
+        maybe_body.map(String::into_bytes),
+      )
+      .await
+      .map_err(AuthError::Network)?;
       Ok(ApiResponse {
         status: response.status,
         body: String::from_utf8_lossy(&response.body).into_owned(),

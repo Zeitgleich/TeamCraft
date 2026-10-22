@@ -14,6 +14,8 @@ use crate::components::app::Shell;
 use crate::components::icons::{Icon, IconName};
 use crate::hybrid::Hybrid;
 use crate::i18n::use_i18n;
+use crate::meetings::{MeetingsClient, MeetingsHub};
+use crate::notify_sync::NotificationSync;
 use crate::remote_backend::RemoteChat;
 use crate::server_backend::{LoadError, RestChat};
 use crate::session::{LoginProblem, SessionControl, SessionState};
@@ -42,7 +44,7 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
 }
 
 #[component]
-fn AuthFrame(children: Children) -> impl IntoView {
+pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <main class="auth-page">
@@ -196,7 +198,7 @@ fn WelcomeScreen(name: String, control: SessionControl) -> impl IntoView {
 /// The desktop app reads chat data from the client core in the shell (encrypted store, sync); the
 /// browser build reads spaces and conversations over REST. Everything else is demo data for now.
 async fn load_backend(
-  auth: &dyn crate::auth::Authenticator,
+  auth: Rc<dyn crate::auth::Authenticator>,
   me: &GetMeResponse,
 ) -> Result<Rc<dyn Backend>, LoadError> {
   if tauri::is_available() {
@@ -204,10 +206,10 @@ async fn load_backend(
       path: "core_snapshot".to_owned(),
       reason,
     })?;
-    return Ok(Rc::new(Hybrid::new(chat, me.role.clone(), now_ms())));
+    return Ok(Rc::new(Hybrid::with_live(chat, me.role.clone(), now_ms(), auth)));
   }
-  let chat = RestChat::load(auth, me, now_ms()).await?;
-  Ok(Rc::new(Hybrid::new(chat, me.role.clone(), now_ms())))
+  let chat = RestChat::load(auth.as_ref(), me, now_ms()).await?;
+  Ok(Rc::new(Hybrid::with_live(chat, me.role.clone(), now_ms(), auth)))
 }
 
 /// Loads spaces, conversations and members from the server, then shows the shell. A failed load
@@ -225,14 +227,18 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
     let auth = control.authenticator();
     let me = me.get_value();
     leptos::task::spawn_local(async move {
-      backend.set(Some(load_backend(auth.as_ref(), &me).await));
+      backend.set(Some(load_backend(auth, &me).await));
     });
   });
 
   view! {
     {move || match backend.get() {
       None => view! { <CheckingScreen /> }.into_any(),
-      Some(Ok(loaded)) => view! { <Shell backend=loaded settings=settings /> }.into_any(),
+      Some(Ok(loaded)) => {
+        provide_context(StoredValue::new_local(NotificationSync::new(control.authenticator())));
+        provide_context(MeetingsHub::new(MeetingsClient::new(control.authenticator())));
+        view! { <Shell backend=loaded settings=settings /> }.into_any()
+      },
       Some(Err(error)) => {
         tracing::warn!(%error, "could not load the account data");
         let detail = error.to_string();

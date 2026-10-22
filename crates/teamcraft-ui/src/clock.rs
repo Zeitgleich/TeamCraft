@@ -23,6 +23,23 @@ pub fn local_day(ts: TimestampMs) -> i64 {
   (ts + local_offset_ms(ts)).div_euclid(MS_PER_DAY)
 }
 
+/// Offset of the user's time zone from UTC in minutes (east is positive).
+pub fn local_utc_offset_minutes(ts: TimestampMs) -> i16 {
+  i16::try_from(local_offset_ms(ts) / MS_PER_MINUTE).unwrap_or(0)
+}
+
+/// Start of the next local day (midnight in the user's time zone).
+pub fn end_of_local_day(ts: TimestampMs) -> TimestampMs {
+  (local_day(ts) + 1) * MS_PER_DAY - local_offset_ms(ts)
+}
+
+/// Start of the next local Monday, i.e. the end of the current week.
+pub fn end_of_local_week(ts: TimestampMs) -> TimestampMs {
+  // 1970-01-01 was a Thursday; Monday is index 0.
+  let weekday = (local_day(ts) + 3).rem_euclid(7);
+  end_of_local_day(ts) + (6 - weekday) * MS_PER_DAY
+}
+
 /// "14:05" in the user's locale and time zone.
 pub fn format_time(ts: TimestampMs, locale: &str) -> String {
   #[cfg(target_arch = "wasm32")]
@@ -150,6 +167,73 @@ fn relative_parts(delta_ms: i64) -> (i64, &'static str) {
   (0, "second")
 }
 
+/// Reads the value of an `<input type="datetime-local">` (`2026-10-22T14:30`) as a point in time in
+/// the user's time zone.
+pub fn parse_local_datetime(text: &str) -> Option<TimestampMs> {
+  let (date, time) = text.split_once('T')?;
+  let mut date_parts = date.split('-');
+  let (year, month, day) = (
+    date_parts.next()?.parse::<i64>().ok()?,
+    date_parts.next()?.parse::<i64>().ok()?,
+    date_parts.next()?.parse::<i64>().ok()?,
+  );
+  let mut time_parts = time.split(':');
+  let (hour, minute) = (
+    time_parts.next()?.parse::<i64>().ok()?,
+    time_parts.next()?.parse::<i64>().ok()?,
+  );
+  if !(1..=12).contains(&month)
+    || !(1..=31).contains(&day)
+    || !(0..24).contains(&hour)
+    || !(0..60).contains(&minute)
+  {
+    return None;
+  }
+  let as_if_utc = days_from_civil(year, month, day) * MS_PER_DAY + (hour * 60 + minute) * MS_PER_MINUTE;
+  // The offset depends on the date (summer time), so ask for it at the date in question.
+  Some(as_if_utc - local_offset_ms(as_if_utc))
+}
+
+/// The value for an `<input type="datetime-local">` showing `ts` in the user's time zone.
+pub fn format_local_datetime_input(ts: TimestampMs) -> String {
+  let local = ts + local_offset_ms(ts);
+  let (year, month, day) = civil_from_days(local.div_euclid(MS_PER_DAY));
+  let minutes = local.rem_euclid(MS_PER_DAY) / MS_PER_MINUTE;
+  format!(
+    "{year:04}-{month:02}-{day:02}T{:02}:{:02}",
+    minutes / 60,
+    minutes % 60
+  )
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+  let year = if month <= 2 { year - 1 } else { year };
+  let era = year.div_euclid(400);
+  let year_of_era = year.rem_euclid(400);
+  let month_index = (month + 9) % 12;
+  let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+  let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+  let days = days + 719_468;
+  let era = days.div_euclid(146_097);
+  let day_of_era = days.rem_euclid(146_097);
+  let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+  let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+  let month_index = (5 * day_of_year + 2) / 153;
+  let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+  let month = if month_index < 10 {
+    month_index + 3
+  } else {
+    month_index - 9
+  };
+  let year = year_of_era + era * 400 + i64::from(month <= 2);
+  (year, month, day)
+}
+
 fn local_offset_ms(ts: TimestampMs) -> i64 {
   #[cfg(target_arch = "wasm32")]
   {
@@ -173,6 +257,34 @@ mod tests {
     assert_eq!(relative_parts(-3 * MS_PER_DAY), (-3, "day"));
     assert_eq!(relative_parts(2 * 3_600_000), (2, "hour"));
     assert_eq!(relative_parts(400), (0, "second"));
+  }
+
+  #[test]
+  fn datetime_inputs_round_trip() {
+    for text in [
+      "2026-10-22T14:30",
+      "1970-01-01T00:00",
+      "2024-02-29T23:59",
+      "2000-03-01T00:01",
+    ] {
+      let ts = parse_local_datetime(text).expect("parses");
+      assert_eq!(format_local_datetime_input(ts), text);
+    }
+    assert_eq!(parse_local_datetime("1970-01-02T00:00"), Some(MS_PER_DAY));
+  }
+
+  #[test]
+  fn malformed_datetime_inputs_are_rejected() {
+    for bad in [
+      "",
+      "2026-10-22",
+      "2026-13-01T10:00",
+      "2026-10-22T24:00",
+      "2026-10-22T10:60",
+      "x-y-zT10:00",
+    ] {
+      assert_eq!(parse_local_datetime(bad), None, "{bad}");
+    }
   }
 
   #[test]

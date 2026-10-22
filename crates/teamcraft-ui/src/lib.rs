@@ -7,14 +7,19 @@
 // The backend traits and view models live in `teamcraft-client-api`; the old paths keep working.
 pub use teamcraft_client_api::{admin, backend, model, search, security};
 
+pub mod admin_live;
 pub mod auth;
 pub mod calls;
 pub mod clock;
 pub mod components;
 pub mod hybrid;
 pub mod i18n;
+pub mod live;
 pub mod markdown;
+pub mod meetings;
 pub mod mock;
+pub mod notifier;
+pub mod notify_sync;
 pub mod prefs;
 pub mod reactive;
 pub mod remote_backend;

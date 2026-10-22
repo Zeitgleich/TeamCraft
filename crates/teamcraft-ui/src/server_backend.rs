@@ -275,7 +275,7 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
 }
 
 /// A stable hue (0–359) from any text, for generated avatars and space colours.
-fn hue_from_seed(seed: &str) -> u16 {
+pub(crate) fn hue_from_seed(seed: &str) -> u16 {
   let hash = seed.bytes().fold(5381_u32, |acc, byte| {
     acc.wrapping_mul(33).wrapping_add(u32::from(byte))
   });

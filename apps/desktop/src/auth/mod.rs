@@ -23,6 +23,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
+use teamcraft_client_api::remote::ApiMethod;
+
 pub use store::{KeyringStore, TokenStore};
 
 const SCOPE: &str = "openid";
@@ -230,14 +232,30 @@ impl<S: TokenStore> AuthService<S> {
 
   /// `GET {server}{path}` with a fresh access token.
   pub async fn api_get(&self, path: &str) -> Result<ApiResponse, AuthError> {
+    self.api_request(ApiMethod::Get, path, None).await
+  }
+
+  /// `{method} {server}{path}` with a fresh access token; a body is sent as JSON.
+  pub async fn api_request(
+    &self,
+    method: ApiMethod,
+    path: &str,
+    maybe_body: Option<String>,
+  ) -> Result<ApiResponse, AuthError> {
     validate_api_path(path)?;
     let token = self.access_token().await?;
     let url = format!("{}{path}", self.config.server_url.trim_end_matches('/'));
-    let response = self
+    let mut request = self
       .http
-      .get(url)
+      .request(reqwest_method(method), url)
       .bearer_auth(token.expose_secret())
-      .header(reqwest::header::ACCEPT, "application/json")
+      .header(reqwest::header::ACCEPT, "application/json");
+    if let Some(body) = maybe_body {
+      request = request
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body);
+    }
+    let response = request
       .send()
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
@@ -451,6 +469,16 @@ fn validate_api_path(path: &str) -> Result<(), AuthError> {
     Err(AuthError::Unsupported(format!(
       "path {path:?} is not an API path"
     )))
+  }
+}
+
+fn reqwest_method(method: ApiMethod) -> reqwest::Method {
+  match method {
+    ApiMethod::Get => reqwest::Method::GET,
+    ApiMethod::Post => reqwest::Method::POST,
+    ApiMethod::Put => reqwest::Method::PUT,
+    ApiMethod::Patch => reqwest::Method::PATCH,
+    ApiMethod::Delete => reqwest::Method::DELETE,
   }
 }
 

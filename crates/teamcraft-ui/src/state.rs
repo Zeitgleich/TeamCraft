@@ -23,6 +23,8 @@ pub enum MainView {
   Admin(AdminSection),
   /// Message search; the query lives in [`AppState::search_query`].
   Search,
+  /// Scheduled and instant meetings (signed-in builds).
+  Meetings,
 }
 
 /// What the right-hand panel shows.
@@ -53,6 +55,8 @@ pub enum Overlay {
   VerifyKey(ConversationId),
   /// Compare the safety number with a contact (Settings > Devices and security).
   VerifyContact(UserId),
+  /// The dialog that schedules a meeting.
+  ScheduleMeeting,
 }
 
 #[derive(Clone, Copy)]
@@ -122,7 +126,7 @@ impl AppState {
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),
-      MainView::Threads | MainView::Admin(_) | MainView::Search => None,
+      MainView::Threads | MainView::Admin(_) | MainView::Search | MainView::Meetings => None,
     }
   }
 
@@ -175,6 +179,12 @@ impl AppState {
       self.search_query.set(query.to_owned());
     }
     self.view.set(MainView::Search);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  pub fn open_meetings(&self) {
+    self.view.set(MainView::Meetings);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
   }

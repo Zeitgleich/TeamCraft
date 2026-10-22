@@ -22,6 +22,15 @@ without a server.
 | Admin: security policy          | ![Admin security](docs/screenshots/admin-security.png)         |
 | Admin: retention                | ![Admin retention](docs/screenshots/admin-retention.png)       |
 | Admin: audit log                | ![Admin audit](docs/screenshots/admin-audit.png)               |
+| Live: unread badges and statuses  | ![Live unread](docs/screenshots/live-unread.png)               |
+| Live: threads inbox (server data) | ![Live threads](docs/screenshots/live-threads.png)             |
+| Live: DM with "Seen by"           | ![Live DM](docs/screenshots/live-dm-seen.png)                  |
+| Live: notification settings       | ![Live notifications](docs/screenshots/live-notification-settings.png) |
+| Meetings: list                    | ![Meetings](docs/screenshots/meetings-list.png)                |
+| Meetings: schedule dialog         | ![Schedule](docs/screenshots/meetings-schedule.png)            |
+| Meetings: lobby of a hosted meeting | ![Lobby](docs/screenshots/meetings-lobby.png)                |
+| Meetings: guest waiting / admitted | ![Guest waiting](docs/screenshots/meetings-guest-waiting.png) ![Guest admitted](docs/screenshots/meetings-guest-admitted.png) |
+| Live admin: channels, users, security, audit | ![Channels](docs/screenshots/live-admin-channels.png) ![Users](docs/screenshots/live-admin-users.png) ![Security](docs/screenshots/live-admin-security.png) ![Audit](docs/screenshots/live-admin-audit.png) |
 | Key-change banner               | ![Key change](docs/screenshots/key-change-banner.png)          |
 | Compare keys                    | ![Compare keys](docs/screenshots/key-verify.png)               |
 | New login approval              | ![Device approval](docs/screenshots/device-approval.png)       |
@@ -89,6 +98,11 @@ previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
 |-------------------------|-------------------------------------------------------------------------|
 | `src/mock.rs`           | `MockBackend`, demo data, lazily generated log channels                 |
 | `src/remote_backend.rs` | `RemoteChat`: `ChatBackend` over the desktop shell's client core (IPC)  |
+| `src/admin_live.rs`     | Admin console on the admin API: channels, users, devices, audit, policy  |
+| `src/meetings.rs`       | Meetings REST client, schedule form logic, guest link parsing and client |
+| `src/live.rs`           | `LiveServer`: unread counts, followed threads, presence, receipts (REST)  |
+| `src/notify_sync.rs`    | Server-enforced notification settings in step with the preferences      |
+| `src/notifier.rs`       | Desktop notification policy and the watcher for new messages            |
 | `src/hybrid.rs`         | `Hybrid`: a real chat backend plus mock search, calls, admin, security  |
 | `src/server_backend.rs` | `RestChat`: web build, read-only chat over the REST API                 |
 | `src/calls.rs`          | `CallState` (session state of the user's call)                          |
@@ -120,6 +134,45 @@ arrives. The shell emits `core-changed` after every sync step; the mirror refres
 Settings > Data source still switches to the mock backend for demos.
 
 Local data lives in the app data dir (`<data>/core/<user>.db`); `TEAMCRAFT_DATA_DIR` overrides it.
+
+### Live server state and notifications
+
+Things the server owns (it is not message content) are read over REST by `LiveServer` and laid over
+the chat by `Hybrid`: unread and mention counts, the followed-threads inbox (thread roots come from the
+core), presence with custom status, DM read receipts ("Seen by …"), thread follow and read. A refresh
+runs at start, when the chat changes and every 30 s.
+
+`NotificationSync` applies the server's notification settings to the local preferences at start and
+sends later changes: push mode, do-not-disturb schedule, read receipts, auto-follow and the level and
+mute time of each conversation. Desktop level, keywords and highlights stay on the device.
+
+Desktop notifications: `Notifier` watches the chat for new messages and thread replies and applies
+`decide` (level, per-conversation override, mutes, keywords, do-not-disturb schedule and manual DND,
+the conversation in front). The shell shows the result with the `notify_user` command
+(`tauri-plugin-notification`). Message text only appears when "Show message text" is on.
+
+### Meetings
+
+Signed-in builds get a Meetings screen (sidebar): upcoming and just-ended meetings by day, "Start now"
+(instant meeting), a schedule dialog (title, time and length, description, members, external email
+invitees, recurrence, lobby on/off), RSVP for invited members, cancel and a personal guest link for
+hosts, and the lobby of the meetings the user hosts (let in / turn away). Join opens the meeting's chat
+and the (still demo) call pre-join screen. Everything is the server's state (docs/meetings.md);
+`MeetingsHub` mirrors it and refreshes every 10 s while the screen is open.
+
+A guest opens `…/meeting/<id>#invite=<token>`: the web build shows a page without sign-in (name,
+lobby wait, admitted or turned away). The token stays in the URL fragment. Browser media for guests is
+not wired yet; the page says so.
+
+### Administration
+
+For admins and owners the console reads the admin API (`AdminLive`, metadata only): spaces and channels
+with owners and retention, users with roles, devices and spaces, the audit log with names resolved, and
+the workspace policy. Deactivate/reactivate, device removal and channel retention go to the server.
+The security policy is signed: only an owner on the desktop can save it, because the core signs the
+new version with the owner's device key (and founds the signed roster from the admin and owner roles
+if there is none yet). Browser builds and non-owners see it read-only; fields the signed policy does
+not hold (sign-in rules, guest domains, DM scope) are shown disabled.
 
 ### Try it without the desktop window
 
@@ -181,9 +234,11 @@ compiler than the workspace baseline.
 - The core integration test (`cargo test -p teamcraft-desktop --features integration core::`) needs a
   fresh dev database and must not run in parallel with the sign-in tests, which end alice's session.
 - No drafts per conversation, message editing, emoji picker, search results page or meetings.
+- Meetings: no edit dialog, no per-occurrence handling of recurring meetings and the guest page stops at
+  "admitted" (no media in the browser build yet).
 - Calls are mocked: no real media, reactions in calls, recording or captions; own backgrounds cannot be
   uploaded yet.
-- Admin: assigning owners, archiving, creating users and inviting guests, and the CSV audit export are
-  placeholders; policy and retention edits only change the mock.
+- Admin: assigning owners, archiving, creating users and inviting guests, organization recovery and the
+  CSV audit export are placeholders; storage size is unknown to the server (shown as 0).
 - Bookmarks bar is read-only; settings tabs for notifications and advanced are placeholders.
 - The sidebar has no drag-and-drop ordering and no channel browser yet.

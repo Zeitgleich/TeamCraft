@@ -11,6 +11,9 @@ use crate::i18n::use_i18n;
 use crate::model::{BookmarkKind, Conversation, ConversationId, ConversationKind};
 use crate::state::{SidePanel, use_app_state};
 
+/// How far back the seen line looks for the user's own latest message.
+const SEEN_LOOKBACK: usize = 50;
+
 /// Header, bookmarks bar, message feed and composer of one conversation.
 #[component]
 pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
@@ -31,6 +34,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <HuddleBar conversation=conversation />
         <BookmarksBar info=info />
         <MessageList conversation=conversation />
+        <SeenLine conversation=conversation />
         <Composer conversation=conversation can_post=can_post conversation_name=name />
       </section>
     })
@@ -193,5 +197,33 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
         </button>
       </Show>
     </Show>
+  }
+}
+
+/// "Seen by …" for the newest message of mine, when a DM member has read it. Receipts are
+/// reciprocal and only exist in DMs and group DMs; elsewhere the backend returns nobody.
+#[component]
+fn SeenLine(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let me = state.me().id;
+  let names = Memo::new(move |_| {
+    state.read(|backend| {
+      let count = backend.message_count(conversation);
+      let recent = backend.messages(conversation, count.saturating_sub(SEEN_LOOKBACK), SEEN_LOOKBACK);
+      let newest = recent.into_iter().rev().find(|message| message.author == me)?;
+      let names: Vec<String> = backend
+        .seen_by(conversation, newest.id)
+        .into_iter()
+        .filter_map(|user| backend.user(user))
+        .map(|user| user.display_name)
+        .collect();
+      (!names.is_empty()).then(|| names.join(", "))
+    })
+  });
+  move || {
+    names.get().map(|names| {
+      view! { <div class="seen-line" translate="no">{i18n.t_with("message-seen-by", &[("names", &names)])}</div> }
+    })
   }
 }

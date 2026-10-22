@@ -145,10 +145,19 @@ pub enum AuditAction {
   OwnerAssigned,
   GuestInvited,
   ChannelArchived,
+  MemberAdded,
+  MemberRemoved,
+  MemberRoleChanged,
+  ChannelUpdated,
+  SpaceCreated,
+  SpaceUpdated,
+  SessionEnded,
+  /// Anything the console has no wording for yet; the detail carries the raw action name.
+  Other,
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 10] = [
+  pub const ALL: [AuditAction; 18] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -159,6 +168,14 @@ impl AuditAction {
     Self::OwnerAssigned,
     Self::GuestInvited,
     Self::ChannelArchived,
+    Self::MemberAdded,
+    Self::MemberRemoved,
+    Self::MemberRoleChanged,
+    Self::ChannelUpdated,
+    Self::SpaceCreated,
+    Self::SpaceUpdated,
+    Self::SessionEnded,
+    Self::Other,
   ];
 
   pub fn slug(self) -> &'static str {
@@ -173,8 +190,38 @@ impl AuditAction {
       Self::OwnerAssigned => "owner-assigned",
       Self::GuestInvited => "guest-invited",
       Self::ChannelArchived => "channel-archived",
+      Self::MemberAdded => "member-added",
+      Self::MemberRemoved => "member-removed",
+      Self::MemberRoleChanged => "member-role-changed",
+      Self::ChannelUpdated => "channel-updated",
+      Self::SpaceCreated => "space-created",
+      Self::SpaceUpdated => "space-updated",
+      Self::SessionEnded => "session-ended",
+      Self::Other => "other",
     }
   }
+}
+
+/// The parts of the security policy that are stored in the signed workspace policy. The console
+/// disables the others when the backend cannot store them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyField {
+  AdminSelfJoin,
+  OrgRecovery,
+  DefaultHistory,
+  /// Sign-in rules (MFA, session length, idle timeout).
+  SignIn,
+  GuestEmailDomains,
+  DmScope,
+}
+
+/// Why the policy form is read-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyBlocker {
+  /// Only owners sign the policy.
+  NotOwner,
+  /// Signing needs the encryption keys, which only the desktop app holds.
+  NoSigningKeys,
 }
 
 /// One audit log line: metadata only, never message content (admin.md §4).

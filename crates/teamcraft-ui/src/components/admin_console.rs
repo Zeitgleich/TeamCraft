@@ -8,7 +8,11 @@ use crate::components::admin_security::SecuritySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::reactive::use_interval;
 use crate::state::use_app_state;
+
+/// How often the console reloads from the server while it is open.
+const REFRESH_MS: u64 = 30_000;
 
 /// Administration inside the normal client. Everything here is metadata: admins can manage rooms
 /// without reading them (admin.md §2).
@@ -16,6 +20,10 @@ use crate::state::use_app_state;
 pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  // Backends that read the server fetch fresh data when the console opens and while it stays open.
+  state.read(|backend| backend.admin_refresh());
+  use_interval(REFRESH_MS, move || state.read(|backend| backend.admin_refresh()));
+  let maybe_error = Memo::new(move |_| state.read(|backend| backend.admin_error()));
 
   let nav_item = move |target: AdminSection, icon: IconName| {
     view! {
@@ -49,6 +57,11 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
         </button>
       </nav>
       <div class="admin-content">
+        {move || {
+          maybe_error
+            .get()
+            .map(|detail| view! { <p class="auth-alert" role="alert">{i18n.t_with("admin-error", &[("detail", &detail)])}</p> })
+        }}
         {move || match section {
           AdminSection::Channels => view! { <ChannelsSection /> }.into_any(),
           AdminSection::Users => view! { <UsersSection /> }.into_any(),

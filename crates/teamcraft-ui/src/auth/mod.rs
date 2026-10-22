@@ -7,7 +7,7 @@
 
 pub mod browser;
 mod config;
-mod fetch;
+pub(crate) mod fetch;
 pub mod tauri;
 
 use std::future::Future;
@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 pub use config::AppConfig;
+pub use teamcraft_client_api::remote::ApiMethod;
 
 /// A boxed future that does not need to be `Send`; everything here runs on the UI thread.
 pub type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -65,8 +66,19 @@ pub trait Authenticator {
   fn cancel_login(&self) {}
   /// Ends the session and forgets stored tokens.
   fn logout(&self) -> LocalFuture<'_, Result<(), AuthError>>;
-  /// `GET {server}{path}` with the current access token; refreshes it first when it is about to expire.
-  fn api_get(&self, path: &str) -> LocalFuture<'_, Result<ApiResponse, AuthError>>;
+  /// `{method} {server}{path}` with the current access token, refreshed first when it is about to
+  /// expire. A body is sent as JSON.
+  fn api_request(
+    &self,
+    method: ApiMethod,
+    path: &str,
+    maybe_body: Option<String>,
+  ) -> LocalFuture<'_, Result<ApiResponse, AuthError>>;
+
+  /// `GET {server}{path}`, see [`Self::api_request`].
+  fn api_get(&self, path: &str) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
+    self.api_request(ApiMethod::Get, path, None)
+  }
 }
 
 /// Picks the implementation for the current platform.

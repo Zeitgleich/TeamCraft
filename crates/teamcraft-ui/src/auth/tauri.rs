@@ -5,7 +5,7 @@ use serde::Deserialize;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use super::{ApiResponse, AuthError, Authenticator, LocalFuture};
+use super::{ApiMethod, ApiResponse, AuthError, Authenticator, LocalFuture};
 
 /// Whether the page runs inside the desktop shell.
 pub fn is_available() -> bool {
@@ -52,13 +52,26 @@ impl Authenticator for TauriAuth {
     Box::pin(async { invoke("auth_logout", JsValue::UNDEFINED).await.map(|_| ()) })
   }
 
-  fn api_get(&self, path: &str) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
+  fn api_request(
+    &self,
+    method: ApiMethod,
+    path: &str,
+    maybe_body: Option<String>,
+  ) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
     let path = path.to_owned();
     Box::pin(async move {
+      let invalid = |_| AuthError::InvalidResponse("could not build the request".to_owned());
       let args = js_sys::Object::new();
-      js_sys::Reflect::set(&args, &"path".into(), &path.into())
-        .map_err(|_| AuthError::InvalidResponse("could not build the request".to_owned()))?;
-      let value = invoke("api_get", args.into()).await?;
+      let method = serde_json::to_value(method)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+      js_sys::Reflect::set(&args, &"method".into(), &method.into()).map_err(invalid)?;
+      js_sys::Reflect::set(&args, &"path".into(), &path.into()).map_err(invalid)?;
+      if let Some(body) = maybe_body {
+        js_sys::Reflect::set(&args, &"body".into(), &body.into()).map_err(invalid)?;
+      }
+      let value = invoke("api_request", args.into()).await?;
       let response: ApiPayload = serde_wasm_json(&value)?;
       Ok(ApiResponse {
         status: response.status,
@@ -119,6 +132,14 @@ fn serde_wasm_json<T: for<'de> Deserialize<'de>>(value: &JsValue) -> Result<T, A
     .and_then(|text| text.as_string())
     .ok_or_else(|| AuthError::InvalidResponse("not JSON".to_owned()))?;
   serde_json::from_str(&text).map_err(|error| AuthError::InvalidResponse(error.to_string()))
+}
+
+/// Shows a system notification through the desktop shell. Failures are logged, never shown.
+pub async fn notify(title: &str, maybe_body: Option<&str>) {
+  let args = serde_json::json!({ "title": title, "body": maybe_body });
+  if let Err(error) = call::<()>("notify_user", &args).await {
+    tracing::debug!(%error, "could not show a notification");
+  }
 }
 
 /// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.

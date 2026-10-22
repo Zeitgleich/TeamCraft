@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use teamcraft_client_api::remote::{ChatAction, CoreStatus, EnrollRequest};
+use teamcraft_client_api::model::thread_id_of;
+use teamcraft_client_api::remote::{ApiMethod, ChatAction, CoreStatus, EnrollRequest};
 use teamcraft_proto::{ConversationId, UserId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -104,6 +105,7 @@ async fn colleague(bridge: Arc<Bridge>, carol: Arc<Person>, config: DesktopConfi
     "Can you take the **API review** on Thursday? I'll cover the `rollout checklist`.",
   )
   .await;
+  set_status(&carol, &config, "🏖️", "Out on Friday").await;
   carol
     .runtime
     .action(ChatAction::OpenDm {
@@ -115,7 +117,7 @@ async fn colleague(bridge: Arc<Bridge>, carol: Arc<Person>, config: DesktopConfi
   say(
     &carol,
     dm,
-    "Hi Alice, this chat is end-to-end encrypted: the server only ever sees ciphertext.",
+    "Hi @alice, this chat is end-to-end encrypted: the server only ever sees ciphertext.",
   )
   .await;
   eprintln!("colleague ready: channel and DM exist");
@@ -132,6 +134,19 @@ async fn say(person: &Person, conversation: ConversationId, body: &str) {
     })
     .await
     .expect("post");
+}
+
+/// Sets a custom status over REST (the server stores it; it is not message content).
+async fn set_status(person: &Person, config: &DesktopConfig, emoji: &str, text: &str) {
+  let base = config.server_url.trim_end_matches('/');
+  let response = reqwest::Client::new()
+    .put(format!("{base}/api/v1/me/status"))
+    .bearer_auth(&person.token)
+    .json(&json!({ "emoji": emoji, "text": text }))
+    .send()
+    .await
+    .expect("set status");
+  assert!(response.status().is_success(), "status: {}", response.status());
 }
 
 /// Replies once to each new message from alice.
@@ -151,6 +166,24 @@ async fn answer_alice(carol: &Person, alice: UserId, conversations: [Conversatio
             message.body.chars().take(60).collect::<String>()
           );
           say(carol, conversation, &reply).await;
+          if conversation == conversations[0] {
+            // A thread under alice's message: she follows it and the inbox lists it with a mention.
+            carol
+              .runtime
+              .action(ChatAction::PostMessage {
+                conversation,
+                maybe_thread: Some(thread_id_of(message.id)),
+                body: "@alice I added the open questions to the doc.".to_owned(),
+              })
+              .await
+              .expect("thread reply");
+          }
+          // Carol has read it: a DM shows alice "Seen by Carol".
+          carol
+            .runtime
+            .action(ChatAction::MarkRead { conversation })
+            .await
+            .expect("mark read");
         }
       }
     }
@@ -209,6 +242,15 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
     "api_get" => {
       let path = args["path"].as_str().unwrap_or("");
       match bridge.alice.service.api_get(path).await {
+        Ok(response) => Ok(json!({ "status": response.status, "body": response.body })),
+        Err(error) => Err(error.to_string()),
+      }
+    },
+    "api_request" => {
+      let method: ApiMethod = serde_json::from_value(args["method"].clone()).expect("method");
+      let path = args["path"].as_str().unwrap_or("");
+      let body = args["body"].as_str().map(str::to_owned);
+      match bridge.alice.service.api_request(method, path, body).await {
         Ok(response) => Ok(json!({ "status": response.status, "body": response.body })),
         Err(error) => Err(error.to_string()),
       }
