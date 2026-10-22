@@ -62,6 +62,7 @@ pub fn App() -> impl IntoView {
   apply_theme(settings.theme);
   apply_density(settings);
   apply_language_attribute();
+  crate::brand::provide_brand(settings);
 
   // A personal meeting link needs no sign-in: it gets its own page before anything else.
   if let Some((meeting, invite_token)) = guest_link_from_location() {

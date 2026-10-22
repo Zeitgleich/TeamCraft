@@ -25,6 +25,11 @@ internally it's `space`.
 | Feature                                                                                                                                                                     | Prio  | Notes                                                               |
 |-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------|---------------------------------------------------------------------|
 | One workspace per instance                                                                                                                                                  | v1    | Multi-workspace not planned                                         |
+| **Brands**: one server under several host names, each with its own name, logo, colors, login text, links and e-mail sender                                                  | v1    | docs/branding.md; presentation only, same users and spaces          |
+| Brand chosen by the request host (allow-list, unknown host → default or 421), `GET /api/v1/brand`, per-brand CSP                                                            | v1    | Nothing but configured host names selects a brand                   |
+| Clients apply the brand before login (web) or from the entered server URL (desktop, mobile), cached                                                                         | v1    |                                                                     |
+| Mail, iMIP invitations and notification texts use the recipient's home brand; share links bound to the creating brand                                                       | v1    | Home brand = e-mail domain, else default                            |
+| Optional brand tag on a space (default accent theming)                                                                                                                      | v1.x  | Hint only, no access effect                                         |
 | **Spaces**: name, icon, color, description                                                                                                                                  | v1    | Encrypted name/description optional; see notes below                |
 | Space switcher (Mattermost/Teams-style team sidebar) with unread badges per space; optional "all spaces in one sidebar" view (Slack-style, channels grouped by space)       | v1    |                                                                     |
 | Space membership: open (everyone can join) or invite-only                                                                                                                   | v1    |                                                                     |
@@ -291,12 +296,13 @@ no Asterisk, no cloud telephony API. Details: [docs/telephony.md](docs/telephony
 
 ## 11. People, profiles, groups
 
-| Feature                                                                  | Prio  | Notes                                          |
-|--------------------------------------------------------------------------|-------|------------------------------------------------|
-| Profile: name, avatar, title, department, phone, time zone               | v1    | Synced from the OIDC provider; avatar editable |
-| Member directory                                                         | v1    | Not for guests                                 |
-| User groups (`@devteam`) mapped from Keycloak groups or created manually | v1    |                                                |
-| Org chart (manager field from Keycloak)                                  | later |                                                |
+| Feature                                                                                                                                | Prio  | Notes                                          |
+|----------------------------------------------------------------------------------------------------------------------------------------|-------|------------------------------------------------|
+| Profile: name, avatar, title, department, phone, time zone                                                                             | v1    | Synced from the OIDC provider; avatar editable |
+| Member directory                                                                                                                       | v1    | Not for guests                                 |
+| **Organization** per user from an OIDC claim or group (configurable); badge in profile, directory and mention picker; directory filter | v1    | Display data only; docs/branding.md §9         |
+| User groups (`@devteam`) mapped from Keycloak groups or created manually                                                               | v1    |                                                |
+| Org chart (manager field from Keycloak)                                                                                                | later |                                                |
 
 ## 12. Guests
 

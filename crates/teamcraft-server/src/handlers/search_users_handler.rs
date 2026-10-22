@@ -15,6 +15,7 @@ pub async fn search_users_handler(
   caller: AuthenticatedUser,
   ApiQuery(query): ApiQuery<SearchUsersQuery>,
 ) -> Result<Json<SearchUsersResponse>, ApiError> {
-  let response = directory::search_users(&state, &caller, &query.query).await?;
+  let response =
+    directory::search_users(&state, &caller, &query.query, query.maybe_organization.as_deref()).await?;
   Ok(Json(response))
 }

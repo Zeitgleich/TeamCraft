@@ -26,6 +26,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tower_http::services::{ServeDir, ServeFile};
 
+use crate::brand::ResolvedBrand;
 use crate::config::WebConfig;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
@@ -166,6 +167,12 @@ async fn add_headers(
   next: Next,
 ) -> Response {
   let path = request.uri().path().to_owned();
+  // The app's policy depends on the brand of the host (docs/branding.md §4).
+  let brand_policy = request
+    .extensions()
+    .get::<ResolvedBrand>()
+    .map(|resolved| resolved.brand.content_security_policy.clone());
+  let policy = brand_policy.or(policy);
   let mut response = next.run(request).await;
   let headers = response.headers_mut();
   let is_share = path.starts_with("/f/") || path.starts_with("/f-assets/");

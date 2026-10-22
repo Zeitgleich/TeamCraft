@@ -310,6 +310,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       avatar_hue: hue(summary.id),
       is_guest: summary.kind == UserKind::Guest,
       is_bot: false,
+      maybe_organization: summary.maybe_organization.clone(),
     }
   }
 
@@ -556,6 +557,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         avatar_hue: hue(self.me),
         is_guest: false,
         is_bot: false,
+        maybe_organization: None,
       })
   }
 

@@ -15,6 +15,8 @@ pub struct Space {
   pub maybe_description: Option<String>,
   pub join_policy: JoinPolicy,
   pub is_archived: bool,
+  /// Optional brand tag: a default theming hint (docs/branding.md §7).
+  pub maybe_brand_id: Option<String>,
 }
 
 /// Which spaces to list for a viewer.
@@ -55,6 +57,8 @@ pub struct SpaceChanges<'a> {
   pub maybe_description: Option<&'a str>,
   pub maybe_join_policy: Option<JoinPolicy>,
   pub maybe_is_archived: Option<bool>,
+  /// An empty string clears the brand tag.
+  pub maybe_brand_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +110,8 @@ impl Database {
     let row = sqlx::query!(
       r#"INSERT INTO spaces (id, name, icon_ref, color, description, join_policy)
          VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, icon_ref, color, description, join_policy, archived_at IS NOT NULL AS "is_archived!""#,
+         RETURNING id, name, icon_ref, color, description, join_policy, brand_id,
+                   archived_at IS NOT NULL AS "is_archived!""#,
       to_db(space.id),
       space.name,
       space.maybe_icon,
@@ -133,6 +138,7 @@ impl Database {
       maybe_description: row.description,
       join_policy: JoinPolicy::from(row.join_policy),
       is_archived: row.is_archived,
+      maybe_brand_id: row.brand_id,
     })
   }
 
@@ -162,7 +168,7 @@ impl Database {
     listing: SpaceListing,
   ) -> Result<Vec<SpaceView>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy,
+      r#"SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,
                 s.archived_at IS NOT NULL AS "is_archived!", m.role AS "role?"
          FROM spaces s
          LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1
@@ -190,6 +196,7 @@ impl Database {
             maybe_description: row.description,
             join_policy: JoinPolicy::from(row.join_policy),
             is_archived: row.is_archived,
+            maybe_brand_id: row.brand_id,
           },
           maybe_role: row.role.map(SpaceRole::from),
         })
@@ -206,7 +213,8 @@ impl Database {
            description = CASE WHEN $5::text IS NULL THEN description ELSE NULLIF($5, '') END,
            join_policy = COALESCE($6, join_policy),
            archived_at = CASE WHEN $7::boolean IS NULL THEN archived_at
-                              WHEN $7 THEN COALESCE(archived_at, now()) ELSE NULL END
+                              WHEN $7 THEN COALESCE(archived_at, now()) ELSE NULL END,
+           brand_id = CASE WHEN $8::text IS NULL THEN brand_id ELSE NULLIF($8, '') END
          WHERE id = $1"#,
       to_db(space),
       changes.maybe_name,
@@ -215,6 +223,7 @@ impl Database {
       changes.maybe_description,
       changes.maybe_join_policy.as_ref().map(JoinPolicy::as_str),
       changes.maybe_is_archived,
+      changes.maybe_brand_id,
     )
     .execute(self.pool())
     .await?;
@@ -235,7 +244,7 @@ impl Database {
 
   pub async fn list_space_members(&self, space: SpaceId) -> Result<Vec<SpaceMember>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at,
+      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
                 u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role, m.expires_at, m.sponsor_user_id
          FROM space_members m JOIN users u ON u.id = m.user_id
          WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())
@@ -255,6 +264,7 @@ impl Database {
             kind: row.kind.into(),
             created_at: row.created_at,
             is_deactivated: row.is_deactivated,
+            maybe_organization: row.organization,
           },
           role: SpaceRole::from(row.role),
           maybe_expires_at: row.expires_at,

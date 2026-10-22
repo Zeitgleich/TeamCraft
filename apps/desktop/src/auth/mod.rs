@@ -235,6 +235,26 @@ impl<S: TokenStore> AuthService<S> {
     self.api_request(ApiMethod::Get, path, None).await
   }
 
+  /// `GET {server}{path}` without credentials, for the public endpoints the login screen needs
+  /// (the brand of the server). Only `/api/...` paths; the answer is data for the page.
+  pub async fn public_get(&self, path: &str) -> Result<ApiResponse, AuthError> {
+    validate_api_path(path)?;
+    let url = format!("{}{path}", self.config.server_url.trim_end_matches('/'));
+    let response = self
+      .http
+      .get(url)
+      .header(reqwest::header::ACCEPT, "application/json")
+      .send()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    let status = response.status().as_u16();
+    let body = response
+      .text()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    Ok(ApiResponse { status, body })
+  }
+
   /// `{method} {server}{path}` with a fresh access token; a body is sent as JSON.
   pub async fn api_request(
     &self,

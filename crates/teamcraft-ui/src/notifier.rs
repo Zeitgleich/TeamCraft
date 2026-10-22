@@ -603,6 +603,7 @@ mod tests {
       avatar_hue: 10,
       is_guest: false,
       is_bot: false,
+      maybe_organization: None,
     }
   }
 

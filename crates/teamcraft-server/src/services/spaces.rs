@@ -116,11 +116,18 @@ pub async fn update_space(
   {
     validate_text(text, "space field", limits.max_text_length)?;
   }
+  if let Some(brand_id) = request.maybe_brand_id.as_deref()
+    && !brand_id.is_empty()
+    && !state.brands.is_known_id(brand_id)
+  {
+    return Err(ApiError::InvalidRequest("unknown brand".into()));
+  }
   state
     .database
     .update_space(
       id,
       &SpaceChanges {
+        maybe_brand_id: request.maybe_brand_id.as_deref(),
         maybe_name: maybe_name.as_deref(),
         maybe_icon: request.maybe_icon.as_deref(),
         maybe_color: request.maybe_color.as_deref(),

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               email = EXCLUDED.email,\n               display_name = EXCLUDED.display_name,\n               kind = EXCLUDED.kind,\n               oidc_role = EXCLUDED.oidc_role\n         RETURNING id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                   default_memberships_at IS NULL AS \"is_awaiting_defaults!\"",
+  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role, organization)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $10)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               email = EXCLUDED.email,\n               display_name = EXCLUDED.display_name,\n               kind = EXCLUDED.kind,\n               oidc_role = EXCLUDED.oidc_role,\n               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END\n         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                   default_memberships_at IS NULL AS \"is_awaiting_defaults!\"",
   "describe": {
     "columns": [
       {
@@ -60,12 +60,23 @@
       },
       {
         "ordinal": 5,
+        "name": "organization",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "organization"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "is_deactivated!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "is_awaiting_defaults!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -80,6 +91,8 @@
         "Text",
         "Text",
         "Text",
+        "Text",
+        "Bool",
         "Text"
       ]
     },
@@ -89,9 +102,10 @@
       false,
       false,
       false,
+      true,
       null,
       null
     ]
   },
-  "hash": "25e3d47c59157cd7d6dc246daf9b6892c574749247551346bb6b5aeed27d07e5"
+  "hash": "fb14713e931341a570573078742b5529addd2619d2253d6cffef41d854722912"
 }

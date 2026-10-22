@@ -245,6 +245,7 @@ mod tests {
       authentication_methods: methods.iter().map(|m| (*m).to_owned()).collect(),
       maybe_acr: maybe_acr.map(str::to_owned),
       is_exempt_from_session_policy: false,
+      maybe_organization: None,
     }
   }
 }

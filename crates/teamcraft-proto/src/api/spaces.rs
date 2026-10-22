@@ -25,6 +25,10 @@ pub struct SpaceResponse {
   pub maybe_description: Option<String>,
   pub join_policy: JoinPolicy,
   pub is_archived: bool,
+  /// Brand tag: the space may be themed with this brand's accent color. A hint; it restricts
+  /// nothing (docs/branding.md §7).
+  #[serde(rename = "brand_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_brand_id: Option<String>,
   /// The caller's role; absent if the caller is not a member (open spaces they could join).
   #[serde(rename = "my_role", default, skip_serializing_if = "Option::is_none")]
   pub maybe_my_role: Option<SpaceRole>,
@@ -63,6 +67,9 @@ pub struct UpdateSpaceRequest {
   pub maybe_join_policy: Option<JoinPolicy>,
   #[serde(rename = "is_archived", default, skip_serializing_if = "Option::is_none")]
   pub maybe_is_archived: Option<bool>,
+  /// The id of a configured brand; an empty string clears the tag.
+  #[serde(rename = "brand_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_brand_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

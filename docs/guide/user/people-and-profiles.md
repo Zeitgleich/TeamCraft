@@ -8,6 +8,11 @@ a whole team. Groups that come from your identity provider are marked and cannot
 Admins decide how names appear (as delivered, first name first, last name first, or username only)
 and whether full names and e-mail addresses are shown; guests never see e-mail addresses.
 
+If your workspace is shared by several companies, a person's **organization** appears as a small badge
+next to their name (member list, directory, profile card and when you @mention someone). Use the
+organization menu in **People** to show only one organization. The organization comes from your identity
+provider; you cannot change it yourself.
+
 ## Your profile
 
 Open your profile from the account menu: **picture**, job title, department, phone, **time zone** and

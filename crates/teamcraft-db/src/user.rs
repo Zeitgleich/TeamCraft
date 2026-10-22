@@ -18,6 +18,11 @@ pub struct OidcIdentity<'a> {
   pub kind: UserKind,
   /// The TeamCraft role the token granted (stored for the OIDC sync to compare against).
   pub maybe_oidc_role: Option<&'a str>,
+  /// The organization claim of the token, if the server reads one.
+  pub maybe_organization: Option<&'a str>,
+  /// Whether `maybe_organization` is authoritative: a token without the claim then clears the
+  /// stored organization. `false` leaves the stored value alone (the server reads no claim).
+  pub should_sync_organization: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +33,8 @@ pub struct User {
   pub kind: UserKind,
   pub created_at: OffsetDateTime,
   pub is_deactivated: bool,
+  /// Display label from the identity provider; no permission depends on it.
+  pub maybe_organization: Option<String>,
 }
 
 /// How a user chose to appear (ARCHITECTURE.md §5.3).
@@ -51,6 +58,8 @@ pub struct UserSearch<'a> {
   pub query: &'a str,
   /// Guests only find people who share a conversation with them.
   pub is_restricted_to_shared: bool,
+  /// Only people of this organization (exact match).
+  pub maybe_organization: Option<&'a str>,
   pub limit: i64,
 }
 
@@ -67,15 +76,16 @@ impl Database {
     new_id: UserId,
   ) -> Result<SyncedUser, DbError> {
     let row = sqlx::query!(
-      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role, organization)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $10)
          ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE
            SET username = EXCLUDED.username,
                email = EXCLUDED.email,
                display_name = EXCLUDED.display_name,
                kind = EXCLUDED.kind,
-               oidc_role = EXCLUDED.oidc_role
-         RETURNING id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS "is_deactivated!",
+               oidc_role = EXCLUDED.oidc_role,
+               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END
+         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!",
                    default_memberships_at IS NULL AS "is_awaiting_defaults!""#,
       to_db(new_id),
       identity.issuer,
@@ -85,6 +95,8 @@ impl Database {
       identity.display_name,
       identity.kind.as_str(),
       identity.maybe_oidc_role,
+      identity.should_sync_organization,
+      identity.maybe_organization,
     )
     .fetch_one(self.pool())
     .await?;
@@ -95,6 +107,7 @@ impl Database {
         row.display_name,
         row.kind,
         row.created_at,
+        row.organization,
         row.is_deactivated,
       )?,
       is_awaiting_default_memberships: row.is_awaiting_defaults,
@@ -115,7 +128,7 @@ impl Database {
     new_id: UserId,
   ) -> Result<SyncedUser, DbError> {
     let existing = sqlx::query!(
-      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, deactivated_at IS NOT NULL AS "is_deactivated!",
+      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!",
                 default_memberships_at IS NULL AS "is_awaiting_defaults!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2"#,
       identity.issuer,
@@ -129,7 +142,8 @@ impl Database {
         && row.email.as_deref() == identity.maybe_email
         && row.display_name == identity.display_name
         && row.kind == identity.kind.as_str()
-        && row.oidc_role.as_deref() == identity.maybe_oidc_role;
+        && row.oidc_role.as_deref() == identity.maybe_oidc_role
+        && (!identity.should_sync_organization || row.organization.as_deref() == identity.maybe_organization);
       if is_unchanged {
         return Ok(SyncedUser {
           user: user_from_parts(
@@ -138,6 +152,7 @@ impl Database {
             row.display_name,
             row.kind,
             row.created_at,
+            row.organization,
             row.is_deactivated,
           )?,
           is_awaiting_default_memberships: row.is_awaiting_defaults,
@@ -158,7 +173,8 @@ impl Database {
 
   pub async fn get_user(&self, id: UserId) -> Result<Option<User>, DbError> {
     let row = sqlx::query!(
-      r#"SELECT id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS "is_deactivated!"
+      r#"SELECT id, username, display_name, kind, created_at, organization,
+                deactivated_at IS NOT NULL AS "is_deactivated!"
          FROM users WHERE id = $1"#,
       to_db(id),
     )
@@ -172,6 +188,7 @@ impl Database {
           r.display_name,
           r.kind,
           r.created_at,
+          r.organization,
           r.is_deactivated,
         )
       })
@@ -180,7 +197,8 @@ impl Database {
 
   pub async fn get_users(&self, ids: &[UserId]) -> Result<Vec<User>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS "is_deactivated!"
+      r#"SELECT id, username, display_name, kind, created_at, organization,
+                deactivated_at IS NOT NULL AS "is_deactivated!"
          FROM users WHERE id = ANY($1) ORDER BY id"#,
       &to_db_all(ids),
     )
@@ -195,6 +213,7 @@ impl Database {
           r.display_name,
           r.kind,
           r.created_at,
+          r.organization,
           r.is_deactivated,
         )
       })
@@ -205,11 +224,12 @@ impl Database {
   pub async fn search_users(&self, search: &UserSearch<'_>) -> Result<Vec<User>, DbError> {
     let pattern = format!("%{}%", escape_like(search.query));
     let rows = sqlx::query!(
-      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at,
+      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
                 u.deactivated_at IS NOT NULL AS "is_deactivated!"
          FROM users u
          WHERE u.deactivated_at IS NULL
            AND (u.display_name ILIKE $2 OR u.username ILIKE $2)
+           AND ($5::text IS NULL OR u.organization = $5)
            AND (NOT $3 OR EXISTS (
                  SELECT 1 FROM memberships a JOIN memberships b ON a.conversation_id = b.conversation_id
                  WHERE a.user_id = $1 AND b.user_id = u.id))
@@ -219,6 +239,7 @@ impl Database {
       pattern,
       search.is_restricted_to_shared,
       search.limit,
+      search.maybe_organization,
     )
     .fetch_all(self.pool())
     .await?;
@@ -231,10 +252,22 @@ impl Database {
           r.display_name,
           r.kind,
           r.created_at,
+          r.organization,
           r.is_deactivated,
         )
       })
       .collect()
+  }
+
+  /// The organizations of active users, sorted, for the directory filter.
+  pub async fn list_organizations(&self) -> Result<Vec<String>, DbError> {
+    let rows = sqlx::query_scalar!(
+      r#"SELECT DISTINCT organization AS "organization!" FROM users
+         WHERE organization IS NOT NULL AND deactivated_at IS NULL ORDER BY 1"#
+    )
+    .fetch_all(self.pool())
+    .await?;
+    Ok(rows)
   }
 
   /// `true` if the two users share at least one conversation.
@@ -299,6 +332,7 @@ fn user_from_parts(
   display_name: String,
   kind: String,
   created_at: OffsetDateTime,
+  maybe_organization: Option<String>,
   is_deactivated: bool,
 ) -> Result<User, DbError> {
   Ok(User {
@@ -308,6 +342,7 @@ fn user_from_parts(
     kind: UserKind::from(kind),
     created_at,
     is_deactivated,
+    maybe_organization,
   })
 }
 

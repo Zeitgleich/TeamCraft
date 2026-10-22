@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use serde_json::json;
 use teamcraft_db::NewInvite;
 use teamcraft_proto::{
   ConversationKind, CreateInviteRequest, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId,
-  SpaceRole,
+  SpaceRole, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -12,6 +14,7 @@ use super::audit::{self, Target as AuditTarget};
 use super::convert::{invite_response, offset_date_time, presented_name};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
+use crate::brand::Brand;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
 use crate::meetings::mailer::OutgoingMail;
@@ -108,6 +111,25 @@ pub fn future_expiry(
   Ok(Some(at))
 }
 
+/// The inviter's home brand (their e-mail domain, else the default brand). Mail to a domain no brand
+/// lists goes out as this brand, never as the brand of the host the request came in on: whoever
+/// controls the `Host` header must not choose the identity of mail the server sends.
+pub(super) async fn inviter_brand(state: &AppState, user: &UserId) -> Arc<Brand> {
+  let maybe_email = match state.database.get_user_emails(&[*user]).await {
+    Ok(emails) => emails.get(user).cloned(),
+    Err(error) => {
+      warn!(%error, "could not read the inviter's e-mail address; using the default brand");
+      None
+    },
+  };
+  let brands = &state.brands;
+  Arc::clone(
+    maybe_email
+      .as_deref()
+      .map_or(brands.default_brand(), |email| brands.for_email(email)),
+  )
+}
+
 /// Mails the invitee, if the server has a mail server. A failure is logged and does not undo the
 /// invite: it is applied at sign-in anyway.
 async fn send_invite_mail(
@@ -119,6 +141,11 @@ async fn send_invite_mail(
   let Some(mailer) = &state.maybe_mailer else {
     return;
   };
+  // Mail goes out as the brand of the recipient's domain, else as the brand the inviter used.
+  let inviter_brand = inviter_brand(state, &caller.user.id).await;
+  let brand = state.brands.for_recipient(&invite.email, &inviter_brand);
+  let url = brand.base_url(&state.settings.mail.public_base_url);
+  let (subject, body) = brand.invite_texts(&state.settings.mail);
   let fill = |template: &str| {
     template
       .replace(
@@ -127,16 +154,19 @@ async fn send_invite_mail(
       )
       .replace("{space}", space_name)
       .replace("{role}", invite.role.as_str())
-      .replace("{url}", &state.settings.mail.public_base_url)
+      .replace("{url}", &url)
   };
   let mail = OutgoingMail {
     to_address: invite.email.clone(),
     maybe_to_name: None,
-    subject: fill(&state.settings.mail.invite_subject),
-    text: fill(&state.settings.mail.invite_body),
+    subject: fill(&subject),
+    text: fill(&body),
     method: Method::Request,
     ics: String::new(),
-  };
+    maybe_from_name: None,
+    maybe_from_address: None,
+  }
+  .as_brand(brand);
   if let Err(error) = mailer.send(&mail).await {
     warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
   }

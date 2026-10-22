@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE spaces SET\n           name = COALESCE($2, name),\n           icon_ref = CASE WHEN $3::text IS NULL THEN icon_ref ELSE NULLIF($3, '') END,\n           color = CASE WHEN $4::text IS NULL THEN color ELSE NULLIF($4, '') END,\n           description = CASE WHEN $5::text IS NULL THEN description ELSE NULLIF($5, '') END,\n           join_policy = COALESCE($6, join_policy),\n           archived_at = CASE WHEN $7::boolean IS NULL THEN archived_at\n                              WHEN $7 THEN COALESCE(archived_at, now()) ELSE NULL END,\n           brand_id = CASE WHEN $8::text IS NULL THEN brand_id ELSE NULLIF($8, '') END\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b2b18749d92e6dd233ab947f369ef5d75f6912852e1ce34cd4addd4cdc394a6b"
+}

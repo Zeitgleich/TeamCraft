@@ -303,6 +303,7 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
         <Avatar user=person.clone() size=AvatarSize::Large show_presence=true />
         {person.maybe_custom_status.clone().map(|status| view! { <p>{status.emoji} " " {status.text}</p> })}
         <p><InMeetingBadge user=user /></p>
+        {person.maybe_organization.clone().map(|name| view! { <p><crate::components::org_badge::OrgBadge organization=Some(name) /></p> })}
         {move || {
           profile().map(|profile| {
             let zone = profile.maybe_time_zone.clone();

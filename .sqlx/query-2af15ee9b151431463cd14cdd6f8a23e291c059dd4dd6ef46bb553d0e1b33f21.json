@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO spaces (id, name, icon_ref, color, description, join_policy)\n         VALUES ($1, $2, $3, $4, $5, $6)\n         RETURNING id, name, icon_ref, color, description, join_policy, archived_at IS NOT NULL AS \"is_archived!\"",
+  "query": "SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,\n                s.archived_at IS NOT NULL AS \"is_archived!\", m.role AS \"role?\"\n         FROM spaces s\n         LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1\n              AND (m.expires_at IS NULL OR m.expires_at > now())\n         WHERE ($2::bigint IS NULL OR s.id = $2)\n           AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL\n                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))\n         ORDER BY s.name, s.id",
   "describe": {
     "columns": [
       {
@@ -71,19 +71,39 @@
       },
       {
         "ordinal": 6,
+        "name": "brand_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "brand_id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
         "name": "is_archived!",
         "type_info": "Bool",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "role?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "role"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
         "Int8",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text"
+        "Int8",
+        "Bool",
+        "Bool"
       ]
     },
     "nullable": [
@@ -93,8 +113,10 @@
       true,
       true,
       false,
-      null
+      true,
+      null,
+      false
     ]
   },
-  "hash": "11c0ae96314cf05a82d4f491a01e24174481af1a99f8e90cf63710b9c94bcb49"
+  "hash": "2af15ee9b151431463cd14cdd6f8a23e291c059dd4dd6ef46bb553d0e1b33f21"
 }

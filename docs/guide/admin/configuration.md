@@ -49,12 +49,32 @@ Keep secrets in the environment or in files mounted by the orchestrator, not in 
 | `[shares]`                     | Share links for external download: expiry, download cap, public URL              | no              |
 | `[security]`                   | Request size, HSTS, `X-Forwarded-For`, per-minute rate limits                    | no              |
 | `[web]`                        | Directory of the web client and its CSP                                          | for web         |
+| `[branding]`, `[[brands]]`     | Several host names, each with its own look and mail sender                       | for brands      |
 | `[meetings]`                   | Public URL, guest token secret, CalDAV, SMTP, mail texts                         | for meetings    |
 | `[push]`                       | VAPID key for Web Push                                                           | for push        |
 | `[calls]`                      | SFU URL, join token signing key                                                  | for calls       |
 
 Sections that are optional features (`[storage]`, `[meetings]`, `[calls]`) make their endpoints
 answer **503** when absent.
+
+## Several brands on one server
+
+One server can answer under several host names, each with its own name, logo, colors, login text,
+support and legal links, and e-mail sender (for affiliated companies that share one workspace). It is
+presentation only: users, spaces and permissions are the same behind every host name. Configure
+`[branding]` (where the image files are, what happens to unknown host names) and one `[[brands]]` entry per
+brand; `teamcraft.example.toml` documents every key and [docs/branding.md](../../branding.md) explains the
+design. Rules worth knowing:
+
+- Exactly one brand is the default. A request is matched to a brand by its host name, exactly; unknown
+  host names are answered with `421` (`unknown_host = "reject"`, the default) or get the default brand
+  (`unknown_host = "default"`). Brands are not tenants: everything behind them is shared.
+- Invitation and meeting e-mail goes out as the brand that lists the recipient's domain
+  (`email_domains`), otherwise as the inviter's own brand (their e-mail domain).
+- A share link works only on the host names of the brand that made it.
+- Every host name must be listed at the identity provider as a redirect URI
+  ([Keycloak](keycloak.md)) and be served by the reverse proxy with a certificate.
+- `[oidc] organization_claim` names a token claim that is shown as the person's organization.
 
 ## Behind a reverse proxy
 

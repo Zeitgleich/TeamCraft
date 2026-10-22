@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -55,6 +56,12 @@ pub struct Config {
   pub mail: MailConfig,
   #[serde(default)]
   pub local_accounts: LocalAccountsConfig,
+  /// How the server picks a brand for a request (docs/branding.md).
+  #[serde(default)]
+  pub branding: BrandingConfig,
+  /// The brands: presentation per host name. Empty means one built-in default brand.
+  #[serde(default)]
+  pub brands: Vec<BrandConfig>,
   /// Blob storage for attachments; without it the attachment endpoints answer 503.
   #[serde(default)]
   pub storage: Option<StorageConfig>,
@@ -121,6 +128,11 @@ pub struct OidcConfig {
   pub http_timeout_secs: u64,
   #[serde(default)]
   pub roles: RoleNames,
+  /// Name of the access-token claim that holds the user's organization (a string, or a list whose
+  /// first entry counts), shown as a badge next to their name. Without it users have no
+  /// organization. In Keycloak add a token mapper (user attribute or group name) to the client.
+  #[serde(rename = "organization_claim", default)]
+  pub maybe_organization_claim: Option<String>,
   /// Periodic comparison with the provider's admin API (disabled users, role changes).
   #[serde(default)]
   pub sync: OidcSyncConfig,
@@ -575,6 +587,127 @@ impl WebConfig {
     }
     Ok(())
   }
+}
+
+/// How brands are chosen and where their files live (docs/branding.md §2, §3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BrandingConfig {
+  /// Directory the brands' image files are read from at startup. Asset names in `[[brands]]` are
+  /// relative to it and cannot leave it.
+  #[serde(rename = "assets_dir")]
+  pub maybe_assets_dir: Option<PathBuf>,
+  /// What a request on a host name no brand lists gets. Without any brand host name there is
+  /// nothing to match, and every host is served.
+  pub unknown_host: UnknownHostPolicy,
+  /// Addresses of reverse proxies whose `X-Forwarded-Host` (its last entry) replaces `Host`. Requests
+  /// from any other address are matched by their own `Host`; the header is never trusted from
+  /// elsewhere because anybody could forge it. Empty: `Host` only.
+  pub trusted_proxies: Vec<IpAddr>,
+  /// Largest brand image file.
+  pub max_asset_bytes: u64,
+}
+
+impl Default for BrandingConfig {
+  fn default() -> Self {
+    Self {
+      maybe_assets_dir: None,
+      unknown_host: UnknownHostPolicy::default(),
+      trusted_proxies: Vec::new(),
+      max_asset_bytes: 512 * 1024,
+    }
+  }
+}
+
+/// What to do with a request whose host name belongs to no brand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownHostPolicy {
+  /// Serve the default brand (links still use the default brand's own host name).
+  Default,
+  /// Answer `421 Misdirected Request`, except for health probes and server-to-server endpoints.
+  /// The default: a host name nobody configured is not one this server should present itself on.
+  /// Reach the server by IP or an internal name only for `/healthz`, `/readyz` and the internal
+  /// endpoints, or switch to `default`.
+  #[default]
+  Reject,
+}
+
+/// One brand: the presentation of one or more host names.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BrandConfig {
+  /// `[a-z0-9-]`, 1 to 32 characters, stable.
+  pub id: String,
+  /// Exactly one brand is the default when brands are configured.
+  pub is_default: bool,
+  /// Lower-case host names without port, exact match only.
+  pub hostnames: Vec<String>,
+  pub display_name: String,
+  /// Users with an e-mail address in one of these domains have this brand as home brand.
+  pub email_domains: Vec<String>,
+  /// Image files below `[branding].assets_dir`.
+  #[serde(rename = "logo")]
+  pub maybe_logo: Option<String>,
+  #[serde(rename = "logo_dark")]
+  pub maybe_logo_dark: Option<String>,
+  #[serde(rename = "icon")]
+  pub maybe_icon: Option<String>,
+  #[serde(rename = "icon_dark")]
+  pub maybe_icon_dark: Option<String>,
+  #[serde(rename = "favicon")]
+  pub maybe_favicon: Option<String>,
+  #[serde(rename = "favicon_dark")]
+  pub maybe_favicon_dark: Option<String>,
+  #[serde(rename = "support_url")]
+  pub maybe_support_url: Option<String>,
+  #[serde(rename = "privacy_url")]
+  pub maybe_privacy_url: Option<String>,
+  #[serde(rename = "terms_url")]
+  pub maybe_terms_url: Option<String>,
+  #[serde(rename = "imprint_url")]
+  pub maybe_imprint_url: Option<String>,
+  /// Language code -> text; `en` is the fallback.
+  pub login_title: BTreeMap<String, String>,
+  pub login_text: BTreeMap<String, String>,
+  pub colors: BrandColorsConfig,
+  /// Origins added to `connect-src` for this brand only.
+  pub connect_origins: Vec<String>,
+  /// Replaces `[web].content_security_policy` for this brand.
+  #[serde(rename = "content_security_policy")]
+  pub maybe_content_security_policy: Option<String>,
+  pub mail: BrandMailConfig,
+}
+
+/// Color overrides by token key (`accent`, ...), as `#rgb` / `#rrggbb`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BrandColorsConfig {
+  pub light: BTreeMap<String, String>,
+  pub dark: BTreeMap<String, String>,
+}
+
+/// Mail identity of a brand. Unset values fall back to `[mail]` and `[meetings]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BrandMailConfig {
+  /// Display name of the `From` header.
+  #[serde(rename = "sender_name")]
+  pub maybe_sender_name: Option<String>,
+  /// Address of the `From` header; must be one the mail server accepts.
+  #[serde(rename = "from_address")]
+  pub maybe_from_address: Option<String>,
+  /// `CN` of the `ORGANIZER` of meeting invitations.
+  #[serde(rename = "imip_organizer_name")]
+  pub maybe_imip_organizer_name: Option<String>,
+  #[serde(rename = "invite_subject")]
+  pub maybe_invite_subject: Option<String>,
+  #[serde(rename = "invite_body")]
+  pub maybe_invite_body: Option<String>,
+  #[serde(rename = "activation_subject")]
+  pub maybe_activation_subject: Option<String>,
+  #[serde(rename = "activation_body")]
+  pub maybe_activation_body: Option<String>,
 }
 
 /// Defaults of integration channels (ARCHITECTURE.md §4.5).

@@ -38,6 +38,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_description: changes.maybe_description,
         maybe_join_policy: changes.maybe_is_open.map(join_policy),
         maybe_is_archived: changes.maybe_is_archived,
+        maybe_brand_id: changes.maybe_brand_id,
       }),
     });
   }

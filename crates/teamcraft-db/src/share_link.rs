@@ -19,6 +19,8 @@ pub struct ShareLink {
   pub download_count: u32,
   pub maybe_last_downloaded_at: Option<OffsetDateTime>,
   pub is_revoked: bool,
+  /// The brand that made the link; `None` for links from before brands existed (any host).
+  pub maybe_brand_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +31,7 @@ pub struct NewShareLink<'a> {
   pub expires_at: OffsetDateTime,
   pub maybe_max_downloads: Option<u32>,
   pub is_password_protected: bool,
+  pub maybe_brand_id: Option<&'a str>,
 }
 
 /// What a download request found.
@@ -42,14 +45,15 @@ pub struct ShareTarget {
 impl Database {
   pub async fn create_share_link(&self, new: &NewShareLink<'_>) -> Result<ShareLink, DbError> {
     sqlx::query!(
-      r#"INSERT INTO share_links (id, attachment_id, created_by, expires_at, max_downloads, is_password_protected)
-         VALUES ($1, $2, $3, $4, $5, $6)"#,
+      r#"INSERT INTO share_links (id, attachment_id, created_by, expires_at, max_downloads, is_password_protected, brand_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
       new.id,
       to_db(new.attachment),
       to_db(new.created_by),
       new.expires_at,
       new.maybe_max_downloads.map(|n| i32::try_from(n).unwrap_or(i32::MAX)),
       new.is_password_protected,
+      new.maybe_brand_id,
     )
     .execute(self.pool())
     .await?;
@@ -62,7 +66,7 @@ impl Database {
   pub async fn get_share_link(&self, id: &str) -> Result<Option<ShareLink>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, attachment_id, created_by, created_at, expires_at, max_downloads, is_password_protected,
-                download_count, last_downloaded_at, revoked_at IS NOT NULL AS "is_revoked!"
+                download_count, last_downloaded_at, brand_id, revoked_at IS NOT NULL AS "is_revoked!"
          FROM share_links WHERE id = $1"#,
       id,
     )
@@ -81,6 +85,7 @@ impl Database {
           download_count: u32::try_from(row.download_count).unwrap_or(0),
           maybe_last_downloaded_at: row.last_downloaded_at,
           is_revoked: row.is_revoked,
+          maybe_brand_id: row.brand_id,
         })
       })
       .transpose()

@@ -45,6 +45,9 @@ pub enum ApiError {
   /// A share link that is unknown, revoked, expired or used up (one answer for all, so links cannot be probed).
   #[error("this link is not available")]
   ShareUnavailable,
+  /// The request arrived on a host name no brand is configured for and `unknown_host = "reject"`.
+  #[error("this host name is not served here")]
+  UnknownHost,
   #[error("internal error: {0}")]
   Internal(String),
 }
@@ -176,6 +179,13 @@ impl ApiError {
     }
   }
 
+  pub fn brand_asset_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::BrandAssetNotFound,
+      what: "brand asset",
+    }
+  }
+
   pub fn status(&self) -> StatusCode {
     match self {
       Self::Auth(AuthError::MissingToken | AuthError::InvalidToken(_)) => StatusCode::UNAUTHORIZED,
@@ -193,6 +203,7 @@ impl ApiError {
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
       Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
       Self::ShareUnavailable => StatusCode::GONE,
+      Self::UnknownHost => StatusCode::MISDIRECTED_REQUEST,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
   }
@@ -208,6 +219,7 @@ impl ApiError {
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
       Self::MfaRequired => ErrorCode::MfaRequired,
       Self::ShareUnavailable => ErrorCode::ShareUnavailable,
+      Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
@@ -301,6 +313,11 @@ mod tests {
   #[test]
   fn domain_errors_map_to_status_and_code() {
     let cases = [
+      (
+        ApiError::UnknownHost,
+        StatusCode::MISDIRECTED_REQUEST,
+        ErrorCode::UnknownHost,
+      ),
       (
         ApiError::space_not_found(),
         StatusCode::NOT_FOUND,

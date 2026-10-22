@@ -646,6 +646,7 @@ fn user_from_wire(
       avatar_hue: hue_from_seed(&format!("{}{username}", summary.display_name)),
       is_guest: summary.kind == UserKind::Guest,
       is_bot: false,
+      maybe_organization: None,
     },
     role,
     devices: devices

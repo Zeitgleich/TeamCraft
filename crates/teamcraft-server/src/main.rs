@@ -15,6 +15,7 @@ use teamcraft_proto::PushProvider;
 use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
+use teamcraft_server::brand::BrandRegistry;
 use teamcraft_server::config::{CONFIG_PATH_ENV, Config};
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
@@ -85,6 +86,8 @@ async fn run() -> anyhow::Result<()> {
     .validate()
     .map_err(anyhow::Error::msg)
     .context("checking [web]")?;
+  let brands = BrandRegistry::build(&config.branding, &config.brands, &config.web, &config.mail)
+    .context("checking [branding] and [[brands]]")?;
   logging::init(&config.logging)?;
 
   let database = Database::connect(
@@ -155,12 +158,16 @@ async fn run() -> anyhow::Result<()> {
       local_accounts: config.local_accounts.clone(),
       presence: config.presence.clone(),
       shares: config.shares.clone(),
+      maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
+      branding: config.branding.clone(),
+      brands: config.brands.clone(),
       push: PushSettings {
         ttl: Duration::from_secs(config.push.ttl_secs),
         allow_private_endpoints: config.push.allow_private_endpoints,
       },
     }),
     rate_limits: Arc::new(RateLimits::new(&config.security.rate_limits)),
+    brands: Arc::new(brands),
   };
   spawn_session_sweeper(state.clone());
   if state.settings.maybe_oidc_sync.is_some() {
@@ -488,6 +495,7 @@ fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {
       algorithms,
       leeway_secs: oidc.leeway_secs,
       logout_audiences: vec![oidc.client_id.clone(), oidc.server_client.clone()],
+      maybe_organization_claim: oidc.maybe_organization_claim.clone(),
     },
   ))
 }

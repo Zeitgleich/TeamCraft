@@ -3,12 +3,13 @@ use std::sync::Arc;
 use teamcraft_db::{Database, SnowflakeGenerator};
 
 use crate::auth::{Revocations, TokenValidator};
+use crate::brand::BrandRegistry;
 use secrecy::SecretString;
 
 use crate::config::{
-  GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig, LocalAccountsConfig, MailConfig,
-  NotificationsConfig, PolicyConfig, PresenceConfig, RendezvousConfig, RetentionJobConfig, RoleNames,
-  SecurityConfig, SharesConfig, WebConfig,
+  BrandConfig, BrandingConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
+  LocalAccountsConfig, MailConfig, NotificationsConfig, PolicyConfig, PresenceConfig, RendezvousConfig,
+  RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, WebConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -49,6 +50,8 @@ pub struct AppState {
   pub scheme: Arc<SchemeStore>,
   pub settings: Arc<Settings>,
   pub rate_limits: Arc<RateLimits>,
+  /// The brands and the host names that select them.
+  pub brands: Arc<BrandRegistry>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -71,6 +74,10 @@ pub struct Settings {
   pub presence: PresenceConfig,
   pub shares: SharesConfig,
   pub push: PushSettings,
+  /// Token claim the organization is read from, if any.
+  pub maybe_organization_claim: Option<String>,
+  pub branding: BrandingConfig,
+  pub brands: Vec<BrandConfig>,
 }
 
 impl AppState {

@@ -92,7 +92,10 @@ fn mention_suggestions(
         Suggestion {
           insert: user.username.clone(),
           label: user.display_name.clone(),
-          detail: format!("@{}", user.username),
+          detail: match &user.maybe_organization {
+            Some(organization) => format!("@{} · {organization}", user.username),
+            None => format!("@{}", user.username),
+          },
           person: Some(user.clone()),
           is_exact: false,
         },

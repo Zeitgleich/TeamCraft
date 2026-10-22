@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role\n         FROM memberships m JOIN users u ON u.id = m.user_id\n         WHERE m.conversation_id = $1 ORDER BY u.display_name, u.id",
+  "query": "SELECT id, username, email, display_name, kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                default_memberships_at IS NULL AS \"is_awaiting_defaults!\"\n         FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "email"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "display_name",
         "type_info": "Text",
         "origin": {
@@ -37,7 +48,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "kind",
         "type_info": "Text",
         "origin": {
@@ -48,7 +59,18 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
+        "name": "oidc_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "oidc_role"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -59,37 +81,47 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 7,
+        "name": "organization",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "organization"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "is_deactivated!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 6,
-        "name": "role",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "memberships",
-            "name": "role"
-          }
-        }
+        "ordinal": 9,
+        "name": "is_awaiting_defaults!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Text",
+        "Text"
       ]
     },
     "nullable": [
       false,
       true,
+      true,
       false,
       false,
+      true,
       false,
+      true,
       null,
-      false
+      null
     ]
   },
-  "hash": "cfbfa2842f07f3325871c9e7127d6f82f495ac9903753761304ca7f7bcb48861"
+  "hash": "9e288969dc91ba8608fc4e3c91bb0c90ae03cee5cc60c169f35101b7dca70e76"
 }

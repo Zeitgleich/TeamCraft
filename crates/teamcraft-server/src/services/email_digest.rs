@@ -9,6 +9,7 @@ use tracing::warn;
 
 use super::retention::snowflake_floor;
 use crate::auth::AuthenticatedUser;
+use crate::brand::Brand;
 use crate::config::EmailDigestConfig;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
@@ -97,7 +98,9 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
         .await?;
       continue;
     };
-    let (subject, text) = compose(state, count);
+    // The digest goes out as the recipient's home brand: sender name and link host.
+    let brand = state.brands.for_email(address);
+    let (subject, text) = compose(state, brand, count);
     let mail = OutgoingMail {
       to_address: address.clone(),
       maybe_to_name: None,
@@ -105,7 +108,10 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
       text,
       method: Method::Request,
       ics: String::new(),
-    };
+      maybe_from_name: None,
+      maybe_from_address: None,
+    }
+    .as_brand(brand);
     match mailer.send(&mail).await {
       Ok(()) => {
         state
@@ -127,7 +133,7 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
   Ok(sent)
 }
 
-fn compose(state: &AppState, count: u32) -> (String, String) {
+fn compose(state: &AppState, brand: &Brand, count: u32) -> (String, String) {
   let config = &state.settings.notifications.email_digest;
   let (subject, body) = if count == 1 {
     (&config.subject_one, &config.body_one)
@@ -137,7 +143,7 @@ fn compose(state: &AppState, count: u32) -> (String, String) {
   let fill = |template: &str| {
     template
       .replace("{count}", &count.to_string())
-      .replace("{url}", &state.settings.mail.public_base_url)
+      .replace("{url}", &brand.base_url(&state.settings.mail.public_base_url))
   };
   (fill(subject), fill(body))
 }

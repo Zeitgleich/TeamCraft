@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
+use crate::components::org_badge::OrgBadge;
 use crate::i18n::use_i18n;
 use crate::model::ConversationId;
 use crate::state::{SidePanel, use_app_state};
@@ -48,6 +49,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
             </span>
             <crate::components::profile_views::InMeetingBadge user=user.id />
             {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+            <OrgBadge organization=user.maybe_organization.clone() />
             {user.maybe_custom_status.clone().map(|status| view! { <span title=status.text.clone()>{status.emoji}</span> })}
           </li>
         </For>

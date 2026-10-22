@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Added
+
+- **Brands**: one server under several host names, each with its own name, logo, colors, login text,
+  links and e-mail sender (`[branding]`, `[[brands]]`, `GET /api/v1/brand`). The brand is chosen by the
+  request's host name only; unknown host names get the default brand or `421`. Invitation, activation and
+  digest e-mail and meeting invitations go out as the recipient's brand, share links work only on the
+  host names of the brand that made them, and the web client gets a content security policy per brand.
+  See [docs/branding.md](docs/branding.md).
+- **Organizations**: an optional label per user from a configurable token claim
+  (`[oidc] organization_claim`), shown as a badge and used as a directory filter.
+- Spaces can carry a brand tag (`brand_id`), a theming hint.
+
 ## [1.0.0-beta.1] - 2026-10-22
 
 First public beta. Everything below is new; the protocol, wire types and database schema may still
