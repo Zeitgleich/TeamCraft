@@ -38,8 +38,10 @@ actions run in two steps:
 1. The admin's client creates a **signed admin action** (e.g. "add Anna to #project-a-dev",
    "remove Max from #project-b-internal"), signed with the admin's device key.
 2. The server enforces it immediately for access control (e.g. stops delivering to removed users) and
-   sends it to the group as an MLS **external proposal** (RFC 9420: the workspace's admin key is
-   registered as an `external_senders` entry in every group).
+   hands the signed action to the group's member clients. v1 delivers it as a pending change; the
+   committing member puts it into the commit's authenticated data (e2ee.md §4.6). Later option: send
+   it as an MLS **external proposal** (RFC 9420: the workspace's admin key registered as an
+   `external_senders` entry in every group); the signed action stays the same.
 3. The next online member client checks the signature and the admin's role (§2.3), commits the change
    automatically and, for adds, shares history keys according to the channel's history policy.
    Members see a system message: "Admin Paul added Anna".

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/desktop"]
+# Third-party code, patched into the dependency graph (see crates/vendor/*/VENDORED.md); not ours to lint.
+exclude = ["crates/vendor"]
 
 [workspace.package]
 version = "0.0.0"
@@ -79,3 +81,8 @@ socket2 = "0.6"
 # Auth and configuration
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 figment = { version = "0.10", features = ["toml", "env"] }
+
+# davey 0.1.5 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
+# without the libcrux advisories of the openmls 0.8 stack. See crates/vendor/davey/VENDORED.md.
+[patch.crates-io]
+davey = { path = "crates/vendor/davey" }

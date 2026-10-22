@@ -3,7 +3,7 @@ use rand_core::OsRng;
 
 use super::*;
 use crate::content_key::ContentKeyRing;
-use crate::ids::{MessageId, UserId};
+use crate::ids::{ClientMessageId, UserId};
 use crate::membership::tests::{TestAuthority, TestDirectory, TestUser};
 use crate::membership::{HistoryShare, MembershipError};
 use crate::message::{MessageContext, MessageError, decrypt_message, encrypt_message};
@@ -493,7 +493,6 @@ struct World {
   alice_group: ConversationGroup,
   carol_group: ConversationGroup,
   alice_ring: ContentKeyRing,
-  next_message_id: u64,
 }
 
 struct Client {
@@ -549,7 +548,6 @@ impl World {
       alice_group,
       carol_group,
       alice_ring,
-      next_message_id: 1,
     }
   }
 
@@ -659,7 +657,7 @@ impl World {
       conversation_id: CONVERSATION,
       sender_user_id: self.alice.user.user_id,
       sender_device_id: self.alice.user.device.device_id(),
-      message_id: MessageId::new(self.next_message_id),
+      client_message_id: ClientMessageId::from_bytes([1; 16]),
     }
   }
 

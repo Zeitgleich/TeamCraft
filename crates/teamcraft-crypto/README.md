@@ -8,7 +8,7 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 | Module           | What                                                                       | Design                           |
 |------------------|----------------------------------------------------------------------------|----------------------------------|
 | `secret`         | `SymmetricKey`, `SecretBytes`: zeroized on drop, redacted `Debug`          | security.md                      |
-| `ids`            | Local `UserId`, `DeviceId`, `ConversationId`, `MessageId` newtypes         | –                                |
+| `ids`            | Local ID newtypes; `ClientMessageId` (random 128 bit, bound in the AEAD)   | –                                |
 | `identity`       | Identity key, device keys (Ed25519 + X25519), device certificates          | e2ee.md §2, §3                   |
 | `content_key`    | Content key ring per conversation, random key IDs, rotation policy         | e2ee.md §4.1–§4.3                |
 | `message`        | XChaCha20-Poly1305 message encryption bound to the plaintext metadata      | e2ee.md §4.1, §4.4               |
@@ -22,6 +22,11 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 Dependencies are audited RustCrypto / dalek crates plus `openmls` with `openmls_rust_crypto`.
 Versions follow what `openmls_rust_crypto` already pulls in, so the stack isn't duplicated more
 than `openmls` itself does. Binary encodings use `tls_codec` (already an `openmls` dependency).
+
+Chat and calls share this `openmls` 0.9 stack (ARCHITECTURE.md §6.2): DAVE's `davey` 0.1.5 needs
+`openmls` 0.8, whose `hpke-rs`/`libcrux` versions carry RUSTSEC-2026-0207/-0208/-0212, so the
+workspace uses a vendored `davey` ported to `openmls` 0.9 (`crates/vendor/davey/VENDORED.md`).
+Keep `openmls` versions here and there in lockstep.
 
 ## How the pieces fit
 
@@ -39,41 +44,25 @@ than `openmls` itself does. Binary encodings use `tls_codec` (already an `openml
   from external senders, or that change a member's identity in an update are rejected.
 - **Content keys.** MLS application messages carry only `ContentKeyBundle`s. Message bodies are
   encrypted with the current content key; the AEAD associated data binds conversation, sender user,
-  sender device, message ID and content key ID.
+  sender device, client message ID (random 128 bit, generated before encrypting) and content key ID.
 - **Backup.** The key bag is encrypted with a random backup key; the backup key is stored wrapped by
   each recovery factor. The AAD binds the wrapped key to its user, method and public parameters.
 - **Domain separation.** Every signature and AEAD input is `len(label) || label || body` with a
   `TeamCraft-v1 …` label, which can't collide with MLS's `"MLS 1.0 "` labels, so the device key can
   sign both safely.
 
-## Deviations from the design docs and proposed doc changes
+## Design decisions recorded in the docs
 
-These are deliberate and should be reflected in `docs/e2ee.md` / `docs/admin.md`:
-
-1. **Admin actions without MLS external proposals (admin.md §2.2).** v1 carries the signed admin
-   action in the authenticated data of a commit made by an online member, instead of registering
-   the workspace admin key as an `external_senders` entry and sending an external proposal. The
-   security property is the same (members verify the signature and role before committing); the
-   external-proposal path can be added later without changing the signed action format.
-2. **Device additions need no admin signature (e2ee.md §3, §4.6).** A commit may add further
-   devices of users who are already members without a signed change, because each device is
-   cross-signed by its user's identity key. §4.6 should state this exception.
-3. **Content key IDs are random 128-bit values (e2ee.md §4.2),** not a sequence: two members may
-   rotate concurrently, and random IDs keep both keys usable.
-4. **Content keys use XChaCha20-Poly1305 only.** e2ee.md §2 lists "AES-256-GCM /
-   XChaCha20-Poly1305"; the table should name one algorithm.
-5. **MLS credential format (e2ee.md §3).** The doc should say that the MLS credential carries the
-   signed device certificate (see above), and how the reserved `system:archive` credential (§11)
-   maps onto it.
-6. **Ciphersuite.** `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, matching the Ed25519
-   device keys. Not stated in the docs yet.
+The choices that went beyond the original design draft are now part of `docs/e2ee.md` (§2, §3, §4.2,
+§4.4, §4.6) and `docs/admin.md` §2.2: signed admin actions in the commit's authenticated data
+instead of MLS external proposals for v1, unsigned additions of further cross-signed devices of
+existing members, random 128-bit content key IDs, XChaCha20-Poly1305 only, the MLS credential as
+signed device certificate, the ciphersuite, and client-generated 128-bit message IDs bound in the
+AEAD. Still open in the docs: how the reserved `system:archive` credential (§11) maps onto the
+certificate-based credential.
 
 ## Open questions
 
-- **Message ID before encryption.** The AEAD binds the message ID, so the sender must know it before
-  encrypting. With server-generated Snowflake IDs this costs a round trip per message. Options:
-  client-generated message IDs (random 128 bit, server assigns its Snowflake separately), or bind a
-  client nonce instead of the server ID.
 - **Old-epoch application messages.** Groups keep no past epochs (openmls default), so a key bundle
   sent in epoch *n* is rejected by members already in *n+1*. The server must deliver group messages
   in order, and the sender must re-send its bundle if its epoch was superseded. Alternatively allow
@@ -93,7 +82,8 @@ These are deliberate and should be reflected in `docs/e2ee.md` / `docs/admin.md`
 - **Argon2id cost.** Default 128 MiB, 3 iterations, 1 lane (configurable). "~1 s" (§6.2) still needs
   measuring on phones and in the browser (single-threaded wasm).
 - **IDs.** `ids` holds local newtypes; switch to `teamcraft-proto`'s IDs once this crate may depend
-  on it. The big-endian `u64` encoding is part of signed data and must not change.
+  on it, and move `ClientMessageId` there as a wire type. The big-endian `u64` encoding is part of
+  signed data and must not change.
 - **`cargo deny`:** `openmls_rust_crypto` → `hpke-rs` → `libcrux-*` → `hax-lib-macros` pulls in
   `proc-macro-error2`, flagged unmaintained (RUSTSEC-2026-0173). It's a build-time proc macro, not
   a runtime vulnerability. Needs an `ignore` entry with reason in `deny.toml`, or an upstream fix.

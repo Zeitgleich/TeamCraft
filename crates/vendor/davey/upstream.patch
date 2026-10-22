@@ -1,0 +1,47 @@
+diff --git a/davey/Cargo.toml b/davey/Cargo.toml
+--- a/davey/Cargo.toml
++++ b/davey/Cargo.toml
+@@ -10,9 +10,9 @@
+ edition = "2024"
+ 
+ [dependencies]
+-openmls = { features = ["js"], version = "0.8.1" }
+-openmls_basic_credential = "0.5.0"
+-openmls_rust_crypto = "0.5.1"
++openmls = { features = ["js"], version = "0.9.1" }
++openmls_basic_credential = "0.6.0"
++openmls_rust_crypto = "0.6.0"
+ tracing = "0.1.41"
+ thiserror = "2.0.12"
+ # Crypto utils
+diff --git a/davey/src/session.rs b/davey/src/session.rs
+--- a/davey/src/session.rs
++++ b/davey/src/session.rs
+@@ -2,7 +2,7 @@
+ use napi_derive::napi;
+ use num_derive::FromPrimitive;
+ use openmls::{
+-  group::{ProcessMessageError, *},
++  group::*,
+   prelude::{hash_ref::ProposalRef, tls_codec::Serialize, *},
+   schedule::EpochAuthenticator,
+ };
+@@ -627,13 +627,13 @@
+         ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+           group.merge_staged_commit(&self.provider, *staged_commit)?;
+         }
++        ProcessedMessageContent::OwnPendingCommit => {
++          // This is our own commit, lets merge pending instead
++          debug!("Found own commit, merging pending commit instead.");
++          group.merge_pending_commit(&self.provider)?;
++        }
+         _ => return Err(ProcessCommitError::ProcessedMessageNotStagedCommit),
+       },
+-      Err(ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit)) => {
+-        // This is our own commit, lets merge pending instead
+-        debug!("Found own commit, merging pending commit instead.");
+-        group.merge_pending_commit(&self.provider)?;
+-      }
+       Err(error) => return Err(ProcessCommitError::ProcessingMessageFailed(error)),
+     }
+ 
