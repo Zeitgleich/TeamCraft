@@ -335,6 +335,7 @@ pub struct WorkspacePolicy {
   pub passwords: PasswordPolicy,
   #[serde(default)]
   pub notifications: NotificationDefaults,
+  #[serde(default)]
   pub call_backgrounds: CallBackgroundPolicy,
 }
 
