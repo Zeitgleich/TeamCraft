@@ -56,8 +56,24 @@ data class Conversation(
   @SerialName("is_favorite") val isFavorite: Boolean = false,
   @SerialName("is_muted") val isMuted: Boolean = false,
   @SerialName("can_post") val canPost: Boolean = true,
+  val bookmarks: List<Bookmark> = emptyList(),
 ) {
   val isDirect: Boolean get() = kind == "Direct" || kind == "Group"
+}
+
+/** A link or file pinned to a conversation's header. */
+@Serializable
+data class Bookmark(
+  val emoji: String = "",
+  val title: String,
+  /** `Link` or `File`. */
+  val kind: String,
+  /** The link of a `Link` bookmark; empty for files. */
+  val url: String = "",
+  /** The message whose file a `File` bookmark opens. */
+  @SerialName("maybe_message") val maybeMessage: String? = null,
+) {
+  val isLink: Boolean get() = kind == "Link"
 }
 
 @Serializable

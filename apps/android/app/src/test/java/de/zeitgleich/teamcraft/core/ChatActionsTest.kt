@@ -35,6 +35,14 @@ class ChatActionsTest {
   }
 
   @Test
+  fun archiveChannelSetsOnlyTheArchivedChange() {
+    assertEquals(
+      """{"action":"update_channel","conversation":"7","changes":{"maybe_is_archived":true}}""",
+      ChatActions.archiveChannel("7"),
+    )
+  }
+
+  @Test
   fun actionsAndQueriesAreTagged() {
     assertEquals(
       """{"action":"toggle_reaction","conversation":"7","message":"9","emoji":"👍"}""",

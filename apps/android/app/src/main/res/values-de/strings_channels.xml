@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Search filters -->
+  <string name="search_filter_from">Von</string>
+  <string name="search_filter_in">In</string>
+  <string name="search_filter_date">Datum</string>
+  <string name="search_filter_after">Nach einem Datum…</string>
+  <string name="search_filter_before">Vor einem Datum…</string>
+  <string name="search_filter_has_file">Mit Datei</string>
+  <string name="search_filter_has_link">Mit Link</string>
+  <string name="search_filter_in_thread">In Thread</string>
+  <string name="search_filter_from_title">Nachrichten von</string>
+  <string name="search_filter_in_title">Nachrichten in</string>
+  <string name="search_filter_no_choices">Noch nichts zur Auswahl.</string>
+  <string name="search_filter_remove">Filter entfernen</string>
+
+  <!-- Channel management -->
+  <string name="channel_bookmarks">Lesezeichen</string>
+  <string name="channel_bookmarks_empty">Diese Unterhaltung hat noch keine Lesezeichen.</string>
+  <string name="channel_bookmark_file">Datei – öffnet die Dateiliste</string>
+  <string name="channel_archive">Kanal archivieren</string>
+  <string name="channel_archive_title">%1$s archivieren?</string>
+  <string name="channel_archive_text">Der Kanal ist danach für alle schreibgeschützt. Nachrichten und Dateien bleiben verfügbar.</string>
+  <string name="channel_archive_confirm">Archivieren</string>
+  <string name="channel_leave_title">%1$s verlassen?</string>
+  <string name="channel_leave_text">Du erhältst keine Nachrichten mehr aus dieser Unterhaltung.</string>
+  <string name="channel_leave_confirm">Verlassen</string>
+</resources>

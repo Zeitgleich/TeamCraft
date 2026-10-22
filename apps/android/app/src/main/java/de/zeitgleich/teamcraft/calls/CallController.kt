@@ -4,19 +4,23 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.telecom.DisconnectCause
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.telecom.CallAttributesCompat
 import androidx.core.telecom.CallControlScope
+import androidx.core.telecom.CallEndpointCompat
 import androidx.core.telecom.CallsManager
+import java.nio.ByteBuffer
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.CoreRepository
@@ -24,13 +28,17 @@ import uniffi.teamcraft_ffi.CallListener
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallSession
 import uniffi.teamcraft_ffi.CallStateInfo
+import uniffi.teamcraft_ffi.CameraFrame
 import uniffi.teamcraft_ffi.IncomingCallInfo
+import uniffi.teamcraft_ffi.VideoFrameRgba
+import uniffi.teamcraft_ffi.VideoListener
+import uniffi.teamcraft_ffi.VideoTrackInfo
 
 /**
  * Calls through Android's Telecom stack (Jetpack Core-Telecom): the system knows about the call,
  * so ringing, the lock screen, Bluetooth headsets, car kits and Android Auto all work, and a
  * cellular call puts ours on hold. Media and encryption run in the Rust call engine
- * ([CallSession]); this class connects the two.
+ * ([CallSession]); this class connects the two and hands the camera's frames to the engine.
  */
 class CallController(
   private val context: Context,
@@ -39,29 +47,95 @@ class CallController(
 ) {
   private val callsManager = CallsManager(context)
   private val state = MutableStateFlow<CallStateInfo?>(null)
+  private val wantsCamera = MutableStateFlow(false)
+  private val tracks = MutableStateFlow<List<VideoTrackInfo>>(emptyList())
+  private val frames = MutableStateFlow<Map<UInt, Bitmap>>(emptyMap())
+  private val speaker = MutableStateFlow(false)
   @Volatile private var maybeSession: CallSession? = null
   @Volatile private var maybeTelecomJob: Job? = null
+  @Volatile private var maybeTelecomCall: CallControlScope? = null
+  @Volatile private var endpoints: List<CallEndpointCompat> = emptyList()
   @Volatile private var isStarted = false
+  @Volatile private var isCameraStarting = false
   @Volatile private var maybePermission: CompletableDeferred<Boolean>? = null
+  @Volatile private var options = CallOptions()
 
   /** The call this device is in, as the engine reports it; `null` when idle. */
   val callState: StateFlow<CallStateInfo?> = state
 
+  /** The user turned the camera on; the call screen captures while it is shown. */
+  val isCameraWanted: StateFlow<Boolean> = wantsCamera
+
+  /** Other devices' video tracks in the call. */
+  val videoTracks: StateFlow<List<VideoTrackInfo>> = tracks
+
+  /** The newest decoded frame per video track (by stream id). */
+  val videoFrames: StateFlow<Map<UInt, Bitmap>> = frames
+
+  /** Audio goes to the loudspeaker. */
+  val isSpeakerOn: StateFlow<Boolean> = speaker
+
   /** Registers with Telecom and listens for rings. Safe to call more than once. */
   suspend fun start() {
     if (isStarted) return
-    callsManager.registerAppWithTelecom(CallsManager.CAPABILITY_BASELINE)
+    callsManager.registerAppWithTelecom(CallsManager.CAPABILITY_BASELINE or CallsManager.CAPABILITY_SUPPORTS_VIDEO_CALLING)
     core.core().setCallListener(Listener())
     isStarted = true
   }
 
-  /** Starts (or joins) the conversation's call. */
-  fun startCall(conversationId: String, displayName: String) {
+  /** Starts (or joins) the conversation's call, with the choices of the pre-join dialog. */
+  fun startCall(conversationId: String, displayName: String, callOptions: CallOptions = CallOptions()) {
+    options = callOptions
     addTelecomCall(conversationId, displayName, CallAttributesCompat.DIRECTION_OUTGOING)
   }
 
   fun setMuted(isMuted: Boolean) {
     maybeSession?.setMuted(isMuted)
+  }
+
+  fun setDeafened(isDeafened: Boolean) {
+    maybeSession?.setDeafened(isDeafened)
+  }
+
+  /** Turns the camera on or off; the call screen asks for the permission and captures. */
+  fun setCameraWanted(isWanted: Boolean) {
+    wantsCamera.value = isWanted
+    if (!isWanted) {
+      maybeSession?.stopCamera()
+      CallService.start(context, hasCamera = false)
+    }
+  }
+
+  /**
+   * One camera image from the call screen. The first one publishes the camera track with the
+   * image's upright size; images before the track runs are dropped.
+   */
+  fun pushCameraFrame(frame: CameraFrame, uprightWidth: Int, uprightHeight: Int) {
+    val session = maybeSession ?: return
+    if (session.pushCameraFrame(frame) || isCameraStarting || state.value?.isCameraOn == true) return
+    isCameraStarting = true
+    scope.launch {
+      try {
+        session.startCamera(uprightWidth.toUShort(), uprightHeight.toUShort(), CAMERA_FRAMERATE.toUByte())
+        CallService.start(context, hasCamera = true)
+      } catch (error: Exception) {
+        Log.w(TAG, "the camera could not be published", error)
+        wantsCamera.value = false
+      } finally {
+        isCameraStarting = false
+      }
+    }
+  }
+
+  /** Switches between the loudspeaker and the earpiece (or the headset that is connected). */
+  fun setSpeakerOn(isOn: Boolean) {
+    val call = maybeTelecomCall ?: return
+    val target = if (isOn) {
+      endpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_SPEAKER }
+    } else {
+      endpoints.firstOrNull { it.type != CallEndpointCompat.TYPE_SPEAKER }
+    } ?: return
+    scope.launch { call.requestEndpointChange(target) }
   }
 
   /** Leaves the call; the engine's ended state then ends the Telecom call. */
@@ -76,11 +150,12 @@ class CallController(
 
   private fun addTelecomCall(conversationId: String, displayName: String, direction: Int) {
     if (maybeTelecomJob?.isActive == true) return
+    val isVideo = direction == CallAttributesCompat.DIRECTION_OUTGOING && options.isCameraOn
     val attributes = CallAttributesCompat(
       displayName = displayName,
       address = Uri.fromParts(URI_SCHEME, conversationId, null),
       direction = direction,
-      callType = CallAttributesCompat.CALL_TYPE_AUDIO_CALL,
+      callType = if (isVideo) CallAttributesCompat.CALL_TYPE_VIDEO_CALL else CallAttributesCompat.CALL_TYPE_AUDIO_CALL,
       callCapabilities = CallAttributesCompat.SUPPORTS_SET_INACTIVE,
     )
     maybeTelecomJob = scope.launch {
@@ -92,6 +167,7 @@ class CallController(
           onSetActive = {},
           onSetInactive = { maybeSession?.setMuted(true) },
         ) {
+          maybeTelecomCall = this
           if (direction == CallAttributesCompat.DIRECTION_OUTGOING) {
             launch {
               if (join(conversationId)) setActive() else disconnect(DisconnectCause(DisconnectCause.ERROR))
@@ -99,6 +175,8 @@ class CallController(
           }
           launch { endWithEngine(this@addCall) }
           launch { isMuted.collect { maybeSession?.setMuted(it) } }
+          launch { availableEndpoints.collect { endpoints = it } }
+          launch { currentCallEndpoint.collect { speaker.value = it.type == CallEndpointCompat.TYPE_SPEAKER } }
         }
       } catch (error: Exception) {
         Log.w(TAG, "the Telecom call failed", error)
@@ -122,6 +200,8 @@ class CallController(
   private suspend fun join(conversationId: String): Boolean {
     showCall()
     if (!hasMicrophone() && !requestMicrophone()) return false
+    // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
+    VideoCodecInstaller.ensure(context)
     val session = try {
       core.core().joinCall(conversationId)
     } catch (error: Exception) {
@@ -129,7 +209,11 @@ class CallController(
       return false
     }
     maybeSession = session
-    CallService.start(context)
+    session.setVideoListener(Video())
+    if (options.isMuted) session.setMuted(true)
+    wantsCamera.value = options.isCameraOn
+    options = CallOptions()
+    CallService.start(context, hasCamera = false)
     return true
   }
 
@@ -160,6 +244,10 @@ class CallController(
       session.close()
     }
     maybeSession = null
+    maybeTelecomCall = null
+    wantsCamera.value = false
+    tracks.value = emptyList()
+    frames.value = emptyMap()
     CallService.stop(context)
   }
 
@@ -183,9 +271,30 @@ class CallController(
     }
   }
 
+  /** Other devices' video, on the call's and the decoders' threads. */
+  private inner class Video : VideoListener {
+    override fun onVideoTracks(tracks: List<VideoTrackInfo>) {
+      this@CallController.tracks.value = tracks
+      val live = tracks.map { it.streamId }.toSet()
+      frames.update { current -> current.filterKeys { it in live } }
+    }
+
+    override fun onVideoFrame(frame: VideoFrameRgba) {
+      val bitmap = Bitmap.createBitmap(frame.width.toInt(), frame.height.toInt(), Bitmap.Config.ARGB_8888)
+      // ARGB_8888 is stored as R, G, B, A bytes: the engine's RGBA order.
+      bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(frame.rgba))
+      frames.update { it + (frame.streamId to bitmap) }
+    }
+  }
+
   companion object {
     private const val TAG = "TeamCraftCalls"
+    /** Frames per second the camera sends. */
+    const val CAMERA_FRAMERATE = 15
     /** Telecom needs an address per call; ours names the conversation. */
     const val URI_SCHEME = "teamcraft"
   }
 }
+
+/** What the user chose before joining. */
+data class CallOptions(val isCameraOn: Boolean = false, val isMuted: Boolean = false)

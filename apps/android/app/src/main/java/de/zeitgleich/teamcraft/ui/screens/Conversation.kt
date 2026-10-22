@@ -1,10 +1,12 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.text.format.DateUtils
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -52,6 +54,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -78,9 +81,12 @@ import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.calls.CallOptions
+import de.zeitgleich.teamcraft.core.Bookmark
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
+import de.zeitgleich.teamcraft.core.Conversation
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.core.LinkPreview
 import de.zeitgleich.teamcraft.core.Message
@@ -89,6 +95,7 @@ import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Mentions
+import uniffi.teamcraft_ffi.needsChannelConfirmation
 
 /** Quick reactions in the action sheet. */
 private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "🎉", "😮", "🙏")
@@ -126,7 +133,7 @@ fun ConversationScreen(
     maybeSubtitle = conversation?.topic,
     onBack = onBack,
     actions = {
-      ConversationMenu(viewModel, conversationId, conversation?.isFavorite == true, conversation?.name.orEmpty(), onOpenFiles)
+      ConversationMenu(viewModel, conversationId, conversation, onOpenFiles)
     },
   ) {
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
@@ -222,14 +229,25 @@ private fun ChatScaffold(
 private fun ConversationMenu(
   viewModel: MainViewModel,
   conversationId: String,
-  isFavorite: Boolean,
-  name: String,
+  maybeConversation: Conversation?,
   onOpenFiles: () -> Unit,
 ) {
+  val isFavorite = maybeConversation?.isFavorite == true
+  val name = maybeConversation?.name.orEmpty()
+  val isChannel = maybeConversation?.isDirect == false
   var isOpen by remember { mutableStateOf(false) }
   var isNotifying by remember { mutableStateOf(false) }
-  IconButton(onClick = { viewModel.startCall(conversationId, name) }) {
+  var isShowingBookmarks by remember { mutableStateOf(false) }
+  var maybeConfirming by remember { mutableStateOf<ChannelConfirmation?>(null) }
+  var isPreparingCall by remember { mutableStateOf(false) }
+  IconButton(onClick = { isPreparingCall = true }) {
     Icon(Icons.Filled.Call, contentDescription = stringResource(R.string.call_start))
+  }
+  if (isPreparingCall) {
+    PreJoinDialog(name, onDismiss = { isPreparingCall = false }) { options ->
+      isPreparingCall = false
+      viewModel.startCall(conversationId, name, options)
+    }
   }
   IconButton(onClick = { viewModel.act(ChatActions.setFavorite(conversationId, !isFavorite)) }) {
     Icon(
@@ -246,16 +264,132 @@ private fun ConversationMenu(
       isOpen = false
       onOpenFiles()
     })
+    DropdownMenuItem(text = { Text(stringResource(R.string.channel_bookmarks)) }, onClick = {
+      isOpen = false
+      isShowingBookmarks = true
+    })
     DropdownMenuItem(text = { Text(stringResource(R.string.notifications_conversation)) }, onClick = {
       isOpen = false
       isNotifying = true
     })
+    if (isChannel) {
+      DropdownMenuItem(text = { Text(stringResource(R.string.channel_archive)) }, onClick = {
+        isOpen = false
+        maybeConfirming = ChannelConfirmation.Archive
+      })
+    }
     DropdownMenuItem(text = { Text(stringResource(R.string.leave_channel)) }, onClick = {
       isOpen = false
-      viewModel.act(ChatActions.leaveChannel(conversationId))
+      maybeConfirming = ChannelConfirmation.Leave
     })
   }
   if (isNotifying) ConversationNotificationsDialog(viewModel, conversationId) { isNotifying = false }
+  if (isShowingBookmarks) {
+    BookmarksDialog(
+      bookmarks = maybeConversation?.bookmarks.orEmpty(),
+      onOpenFiles = onOpenFiles,
+      onDismiss = { isShowingBookmarks = false },
+    )
+  }
+  maybeConfirming?.let { confirmation ->
+    ChannelConfirmationDialog(
+      confirmation = confirmation,
+      name = name,
+      onConfirm = {
+        when (confirmation) {
+          ChannelConfirmation.Archive -> viewModel.act(ChatActions.archiveChannel(conversationId))
+          ChannelConfirmation.Leave -> viewModel.act(ChatActions.leaveChannel(conversationId))
+        }
+      },
+      onDismiss = { maybeConfirming = null },
+    )
+  }
+}
+
+/** A channel menu action that asks before it runs. */
+private enum class ChannelConfirmation { Archive, Leave }
+
+@Composable
+private fun ChannelConfirmationDialog(
+  confirmation: ChannelConfirmation,
+  name: String,
+  onConfirm: () -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val (title, text, confirmLabel) = when (confirmation) {
+    ChannelConfirmation.Archive -> Triple(
+      stringResource(R.string.channel_archive_title, name),
+      stringResource(R.string.channel_archive_text),
+      stringResource(R.string.channel_archive_confirm),
+    )
+    ChannelConfirmation.Leave -> Triple(
+      stringResource(R.string.channel_leave_title, name),
+      stringResource(R.string.channel_leave_text),
+      stringResource(R.string.channel_leave_confirm),
+    )
+  }
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(title) },
+    text = { Text(text) },
+    confirmButton = {
+      TextButton(onClick = {
+        onConfirm()
+        onDismiss()
+      }) { Text(confirmLabel, color = MaterialTheme.colorScheme.error) }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+  )
+}
+
+/** The conversation's bookmarks: links open in the browser, files open the Files screen. */
+@Composable
+private fun BookmarksDialog(bookmarks: List<Bookmark>, onOpenFiles: () -> Unit, onDismiss: () -> Unit) {
+  val context = LocalContext.current
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(stringResource(R.string.channel_bookmarks)) },
+    text = {
+      if (bookmarks.isEmpty()) {
+        Text(stringResource(R.string.channel_bookmarks_empty))
+      } else {
+        LazyColumn(Modifier.heightIn(max = 400.dp)) {
+          items(bookmarks) { bookmark ->
+            BookmarkRow(bookmark) {
+              onDismiss()
+              if (bookmark.isLink) openLink(context, bookmark.url) else onOpenFiles()
+            }
+          }
+        }
+      }
+    },
+    confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.ok)) } },
+  )
+}
+
+@Composable
+private fun BookmarkRow(bookmark: Bookmark, onClick: () -> Unit) {
+  Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp)) {
+    Text(
+      listOf(bookmark.emoji, bookmark.title).filter { it.isNotBlank() }.joinToString(" "),
+      style = MaterialTheme.typography.bodyLarge,
+    )
+    Text(
+      if (bookmark.isLink) bookmark.url else stringResource(R.string.channel_bookmark_file),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
+  }
+}
+
+private fun openLink(context: Context, url: String) {
+  try {
+    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+  } catch (failure: ActivityNotFoundException) {
+    // No app handles the link (or it is malformed); nothing sensible to open, so leave it.
+  }
 }
 
 @Composable
@@ -677,6 +811,40 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
   }
   val maybeQuery = Mentions.activeQuery(text)
   val members = snapshot?.conversation(conversationId)?.memberIds?.mapNotNull { snapshot.user(it) } ?: emptyList()
+  fun send() {
+    val options = SendOptions(
+      maybeThread = maybeThread,
+      maybeReplyTo = maybeReply?.message?.id,
+      priority = priority,
+      wantsAcknowledgement = wantsAcknowledgement,
+      isSilent = isSilent,
+      alsoSendToChannel = alsoToChannel,
+      files = files,
+    )
+    viewModel.act(ChatActions.send(conversationId, text.trim(), options))
+    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
+    text = ""
+    files = emptyList()
+    priority = "normal"
+    wantsAcknowledgement = false
+    isSilent = false
+    ReplyTarget.current.value = null
+  }
+  var isConfirmingChannel by remember { mutableStateOf(false) }
+  if (isConfirmingChannel) {
+    AlertDialog(
+      onDismissRequest = { isConfirmingChannel = false },
+      title = { Text(stringResource(R.string.channel_mention_confirm_title)) },
+      text = { Text(pluralStringResource(R.plurals.channel_mention_confirm, members.size, members.size)) },
+      confirmButton = {
+        TextButton(onClick = {
+          isConfirmingChannel = false
+          send()
+        }) { Text(stringResource(R.string.send)) }
+      },
+      dismissButton = { TextButton(onClick = { isConfirmingChannel = false }) { Text(stringResource(R.string.cancel)) } },
+    )
+  }
   Column(Modifier.fillMaxWidth()) {
     if (maybeQuery != null) {
       Mentions.suggestions(maybeQuery, members).forEach { user ->
@@ -745,23 +913,8 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
       }
       IconButton(
         onClick = {
-          val options = SendOptions(
-            maybeThread = maybeThread,
-            maybeReplyTo = maybeReply?.message?.id,
-            priority = priority,
-            wantsAcknowledgement = wantsAcknowledgement,
-            isSilent = isSilent,
-            alsoSendToChannel = alsoToChannel,
-            files = files,
-          )
-          viewModel.act(ChatActions.send(conversationId, text.trim(), options))
-          viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
-          text = ""
-          files = emptyList()
-          priority = "normal"
-          wantsAcknowledgement = false
-          isSilent = false
-          ReplyTarget.current.value = null
+          val confirmOver = viewModel.confirmChannelOver().toUInt()
+          if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) isConfirmingChannel = true else send()
         },
         enabled = text.isNotBlank() || files.isNotEmpty(),
       ) {
@@ -769,6 +922,35 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
       }
     }
   }
+}
+
+/** Before a call: join with the camera on or muted. */
+@Composable
+private fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOptions) -> Unit) {
+  var isCameraOn by rememberSaveable { mutableStateOf(false) }
+  var isMuted by rememberSaveable { mutableStateOf(false) }
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(stringResource(R.string.call_prejoin_title, name)) },
+    text = {
+      Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Switch(checked = isCameraOn, onCheckedChange = { isCameraOn = it })
+          Text(stringResource(R.string.call_prejoin_camera), modifier = Modifier.padding(start = 8.dp))
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Switch(checked = isMuted, onCheckedChange = { isMuted = it })
+          Text(stringResource(R.string.call_prejoin_muted), modifier = Modifier.padding(start = 8.dp))
+        }
+      }
+    },
+    confirmButton = {
+      TextButton(onClick = { onJoin(CallOptions(isCameraOn = isCameraOn, isMuted = isMuted)) }) {
+        Text(stringResource(R.string.call_prejoin_join))
+      }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+  )
 }
 
 /** Drafts are saved (and synced to the user's other devices) after typing pauses this long. */

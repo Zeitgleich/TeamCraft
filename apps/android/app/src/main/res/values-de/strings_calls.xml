@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="call_deafen">Taub schalten</string>
+  <string name="call_undeafen">Ton wieder an</string>
+  <string name="call_camera_on">Kamera an</string>
+  <string name="call_camera_off">Kamera aus</string>
+  <string name="call_camera_flip">Kamera wechseln</string>
+  <string name="call_speaker">Lautsprecher</string>
+  <string name="call_video_waiting">Video startet …</string>
+  <string name="call_video_camera">Kamera einer teilnehmenden Person</string>
+  <string name="call_video_screen">Geteilter Bildschirm einer teilnehmenden Person</string>
+  <string name="call_prejoin_title">%1$s anrufen</string>
+  <string name="call_prejoin_camera">Kamera an</string>
+  <string name="call_prejoin_muted">Stummgeschaltet beitreten</string>
+  <string name="call_prejoin_join">Beitreten</string>
+  <string name="channel_mention_confirm_title">Alle benachrichtigen?</string>
+  <plurals name="channel_mention_confirm">
+    <item quantity="one">Diese Nachricht benachrichtigt %d Mitglied.</item>
+    <item quantity="other">Diese Nachricht benachrichtigt alle %d Mitglieder.</item>
+  </plurals>
+  <string name="mention_title">Erwähnungen auf diesem Gerät</string>
+  <string name="mention_first_name">Mein Vorname zählt als Erwähnung</string>
+  <string name="mention_channel">Bei @channel, @here und @all benachrichtigen</string>
+  <string name="mention_keywords">Stichwörter</string>
+  <string name="mention_keywords_hint">Durch Kommas getrennt. Nachrichten mit diesen Wörtern zählen als Erwähnung, wenn sie dieses Telefon erreichen.</string>
+  <string name="mention_confirm_over">@channel ab so vielen Mitgliedern bestätigen</string>
+  <string name="mention_confirm_over_hint">0 fragt nie.</string>
+  <string name="search_prefetch_title">Suche</string>
+  <string name="search_prefetch">Suchverlauf im WLAN beim Laden herunterladen</string>
+  <string name="search_prefetch_hint">Ältere Nachrichten bleiben ohne Verbindung durchsuchbar. Der Suchindex bleibt verschlüsselt auf diesem Telefon.</string>
+  <string name="search_prefetch_cap">Bis %1$d MB</string>
+</resources>
