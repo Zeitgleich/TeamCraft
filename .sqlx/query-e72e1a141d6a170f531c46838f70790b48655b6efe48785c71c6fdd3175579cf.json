@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_group_members (group_id, user_id)\n         SELECT $1, u FROM unnest($2::bigint[]) AS u ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e72e1a141d6a170f531c46838f70790b48655b6efe48785c71c6fdd3175579cf"
+}

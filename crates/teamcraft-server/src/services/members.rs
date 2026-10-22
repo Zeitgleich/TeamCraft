@@ -3,7 +3,7 @@ use teamcraft_db::MembershipChanges;
 use teamcraft_proto::{
   AddConversationMemberRequest, ChannelRole, ConversationId, ConversationMemberResponse,
   ConversationVisibility, GatewayEvent, ListConversationMembersResponse, Permission, SetReadPositionRequest,
-  SpaceRole, UpdateConversationMemberRequest, UserId,
+  SpaceRole, SystemEventKind, UpdateConversationMemberRequest, UserId,
 };
 
 use super::access::{ConversationAccess, is_guest, load_conversation, require};
@@ -11,6 +11,7 @@ use super::audit::{self, Target as AuditTarget};
 use super::conversations::{can_list_members, ensure_open_channel};
 use super::convert::user_summary;
 use super::notifications;
+use super::system_events;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -31,7 +32,7 @@ pub async fn list_members(
     members: members
       .iter()
       .map(|member| ConversationMemberResponse {
-        user: user_summary(&member.user),
+        user: user_summary(state, &member.user),
         role: member.role.clone(),
       })
       .collect(),
@@ -119,8 +120,16 @@ pub async fn add_member(
   )
   .await?;
   announce_added_user(state, id, &user).await?;
+  system_events::emit(
+    state,
+    id,
+    SystemEventKind::MemberAdded,
+    Some(caller.user.id),
+    Some(user.id),
+  )
+  .await;
   Ok(ConversationMemberResponse {
-    user: user_summary(&user),
+    user: user_summary(state, &user),
     role,
   })
 }
@@ -168,6 +177,12 @@ pub async fn remove_member(
       user_id,
     },
   );
+  let kind = if user_id == caller.user.id {
+    SystemEventKind::MemberLeft
+  } else {
+    SystemEventKind::MemberRemoved
+  };
+  system_events::emit(state, id, kind, Some(caller.user.id), Some(user_id)).await;
   Ok(())
 }
 
@@ -239,6 +254,14 @@ pub async fn update_member(
       &json!({"user_id": user_id.to_string(), "role": role.as_str()}),
     )
     .await?;
+    system_events::emit(
+      state,
+      id,
+      SystemEventKind::RoleChanged,
+      Some(caller.user.id),
+      Some(user_id),
+    )
+    .await;
   }
   let members = state.database.conversation_member_ids(id).await?;
   state
@@ -311,7 +334,7 @@ async fn announce_added_user(
     members,
     &GatewayEvent::MembershipAdd {
       conversation_id: id,
-      user: user_summary(user),
+      user: user_summary(state, user),
     },
   );
   Ok(())

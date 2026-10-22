@@ -261,7 +261,7 @@ pub trait ServerApi {
   fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
   /// Downloads an encrypted blob from a presigned URL.
   fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
-  /// Makes an attachment downloadable without an account (`POST /attachments/{id}/share-links`).
+  /// Makes an attachment downloadable without an account (`POST /shares`; the request names the attachment).
   fn create_share_link(
     &self,
     attachment: AttachmentId,

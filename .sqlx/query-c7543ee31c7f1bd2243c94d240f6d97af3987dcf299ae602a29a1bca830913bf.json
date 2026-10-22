@@ -1,0 +1,131 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, attachment_id, created_by, created_at, expires_at, max_downloads, is_password_protected,\n                download_count, last_downloaded_at, revoked_at IS NOT NULL AS \"is_revoked!\"\n         FROM share_links WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "attachment_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "attachment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "created_by",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "created_by"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "max_downloads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "max_downloads"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "is_password_protected",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "is_password_protected"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "download_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "download_count"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "last_downloaded_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "last_downloaded_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "is_revoked!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "c7543ee31c7f1bd2243c94d240f6d97af3987dcf299ae602a29a1bca830913bf"
+}

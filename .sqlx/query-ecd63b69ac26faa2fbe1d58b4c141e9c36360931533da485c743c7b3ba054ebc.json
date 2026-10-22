@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.user_id AS \"user_id!\", max(m.ends_at) AS \"ends_at!\"\n         FROM meetings m\n         JOIN LATERAL (\n           SELECT m.organizer_user_id AS user_id\n           UNION\n           SELECT a.user_id FROM meeting_attendees a\n            WHERE a.meeting_id = m.id AND a.user_id IS NOT NULL AND a.rsvp <> 'declined'\n         ) u ON true\n         WHERE m.status = 'scheduled' AND m.starts_at <= $2 AND m.ends_at > $2\n           AND u.user_id = ANY($1)\n         GROUP BY u.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "ends_at!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "ecd63b69ac26faa2fbe1d58b4c141e9c36360931533da485c743c7b3ba054ebc"
+}

@@ -1,15 +1,16 @@
 use serde_json::json;
-use teamcraft_db::{NewSpace, NewSpaceMember, SpaceChanges, SpaceListing};
+use teamcraft_db::{ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing};
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
   GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
-  SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UpdateCategoryRequest, UpdateSpaceMemberRequest,
-  UpdateSpaceRequest, UserId, UserKind,
+  SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest,
+  UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
 };
+use time::OffsetDateTime;
 
 use super::access::{is_guest, is_instance_admin, load_space, require};
 use super::audit::{self, Target as AuditTarget};
-use super::convert::{category_response, space_response, user_summary};
+use super::convert::{category_response, offset_date_time, space_response, unix_millis, user_summary};
 use super::{validate_name, validate_text};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -161,7 +162,7 @@ pub async fn join_space(
         space: id,
         user: caller.user.id,
         role: SpaceRole::Member,
-        maybe_expires_at: None,
+        expiry: ExpiryChange::Keep,
         maybe_sponsor: None,
       })
       .await?;
@@ -187,8 +188,10 @@ pub async fn list_space_members(
     members: members
       .iter()
       .map(|member| SpaceMemberResponse {
-        user: user_summary(&member.user),
+        user: user_summary(state, &member.user),
         role: member.role.clone(),
+        maybe_expires_at: member.maybe_expires_at.map(unix_millis),
+        maybe_sponsor_user_id: member.maybe_sponsor,
       })
       .collect(),
   })
@@ -211,6 +214,7 @@ pub async fn add_space_member(
     return Err(ApiError::user_not_found());
   };
   check_role_fits_user(&user.kind, &request.role)?;
+  let expiry = new_member_expiry(state, &request.role, request.maybe_expires_at)?;
 
   state
     .database
@@ -218,7 +222,7 @@ pub async fn add_space_member(
       space: id,
       user: user.id,
       role: request.role.clone(),
-      maybe_expires_at: None,
+      expiry,
       maybe_sponsor: Some(caller.user.id),
     })
     .await?;
@@ -231,10 +235,7 @@ pub async fn add_space_member(
   )
   .await?;
   announce_member(state, id, user.id).await?;
-  Ok(SpaceMemberResponse {
-    user: user_summary(&user),
-    role: request.role,
-  })
+  member_response(state, id, &user, request.role).await
 }
 
 pub async fn update_space_member(
@@ -260,14 +261,16 @@ pub async fn update_space_member(
   if current == SpaceRole::SpaceAdmin && request.role != SpaceRole::SpaceAdmin {
     ensure_not_last_admin(state, id).await?;
   }
+  let expiry = changed_expiry(&request.role, request.maybe_expires_at, request.clears_expiry)?;
   state
     .database
     .upsert_space_member(&NewSpaceMember {
       space: id,
       user: user_id,
       role: request.role.clone(),
-      maybe_expires_at: None,
-      maybe_sponsor: Some(caller.user.id),
+      expiry,
+      // Whoever changes a member's terms does not become their sponsor.
+      maybe_sponsor: None,
     })
     .await?;
   audit::record(
@@ -279,10 +282,7 @@ pub async fn update_space_member(
   )
   .await?;
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
-  Ok(SpaceMemberResponse {
-    user: user_summary(&user),
-    role: request.role,
-  })
+  member_response(state, id, &user, request.role).await
 }
 
 /// Removes a member (or leaves, if `user_id` is the caller). Also removes them from the space's channels.
@@ -305,10 +305,28 @@ pub async fn remove_space_member(
     ensure_not_last_admin(state, id).await?;
   }
 
+  remove_everywhere(state, id, user_id).await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "space_member_removed",
+    Some(AuditTarget::new("space", id)),
+    &json!({"user_id": user_id.to_string()}),
+  )
+  .await?;
+  Ok(())
+}
+
+/// Removes the user from the space and its channels and tells everybody concerned. Used by the
+/// removal endpoint and by the guest expiry job.
+pub async fn remove_everywhere(state: &AppState, id: SpaceId, user_id: UserId) -> Result<(), ApiError> {
   let remaining_before = state.database.list_space_members(id).await?;
   let left_channels = state.database.remove_space_member(id, user_id).await?;
   state.hub.publish(
-    remaining_before.iter().map(|member| member.user.id),
+    remaining_before
+      .iter()
+      .map(|member| member.user.id)
+      .chain([user_id]),
     &GatewayEvent::SpaceMemberRemove {
       space_id: id,
       user_id,
@@ -324,15 +342,71 @@ pub async fn remove_space_member(
       },
     );
   }
-  audit::record(
-    state,
-    Some(caller.user.id),
-    "space_member_removed",
-    Some(AuditTarget::new("space", id)),
-    &json!({"user_id": user_id.to_string()}),
-  )
-  .await?;
   Ok(())
+}
+
+/// The expiry of a newly added member: guests get the given one or the configured default.
+fn new_member_expiry(
+  state: &AppState,
+  role: &SpaceRole,
+  maybe_requested: Option<UnixMillis>,
+) -> Result<ExpiryChange, ApiError> {
+  if *role != SpaceRole::Guest {
+    return match maybe_requested {
+      Some(_) => Err(ApiError::InvalidRequest("only guests expire".into())),
+      None => Ok(ExpiryChange::Keep),
+    };
+  }
+  if let Some(millis) = maybe_requested {
+    return Ok(ExpiryChange::Set(future_time(millis)?));
+  }
+  let days = state.settings.guests.default_expiry_days;
+  Ok(if days == 0 {
+    ExpiryChange::Keep
+  } else {
+    ExpiryChange::Set(OffsetDateTime::now_utc() + time::Duration::days(i64::from(days)))
+  })
+}
+
+fn changed_expiry(
+  role: &SpaceRole,
+  maybe_requested: Option<UnixMillis>,
+  clears: bool,
+) -> Result<ExpiryChange, ApiError> {
+  match (maybe_requested, clears) {
+    (Some(_), true) => Err(ApiError::InvalidRequest(
+      "set or clear the expiry, not both".into(),
+    )),
+    (None, false) => Ok(ExpiryChange::Keep),
+    _ if *role != SpaceRole::Guest => Err(ApiError::InvalidRequest("only guests expire".into())),
+    (Some(millis), false) => Ok(ExpiryChange::Set(future_time(millis)?)),
+    (None, true) => Ok(ExpiryChange::Clear),
+  }
+}
+
+fn future_time(millis: UnixMillis) -> Result<OffsetDateTime, ApiError> {
+  let at = offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
+  if at <= OffsetDateTime::now_utc() {
+    return Err(ApiError::InvalidRequest(
+      "expires_at must be in the future".into(),
+    ));
+  }
+  Ok(at)
+}
+
+async fn member_response(
+  state: &AppState,
+  space: SpaceId,
+  user: &teamcraft_db::User,
+  role: SpaceRole,
+) -> Result<SpaceMemberResponse, ApiError> {
+  let terms = state.database.space_member_terms(space, user.id).await?;
+  Ok(SpaceMemberResponse {
+    user: user_summary(state, user),
+    role,
+    maybe_expires_at: terms.and_then(|(expires, _)| expires).map(unix_millis),
+    maybe_sponsor_user_id: terms.and_then(|(_, sponsor)| sponsor),
+  })
 }
 
 pub async fn list_categories(
@@ -465,7 +539,7 @@ async fn announce_member(state: &AppState, space: SpaceId, user: UserId) -> Resu
       members.iter().map(|m| m.user.id),
       &GatewayEvent::SpaceMemberAdd {
         space_id: space,
-        user: user_summary(&member.user),
+        user: user_summary(state, &member.user),
       },
     );
   }

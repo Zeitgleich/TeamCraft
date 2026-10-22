@@ -42,6 +42,13 @@ pub struct TokenIdentity {
   pub issued_at: i64,
   /// The provider's session ID (`sid` claim), if any.
   pub maybe_session_id: Option<String>,
+  /// How the user authenticated (`amr` claim) and the assurance level reached (`acr`); used for
+  /// the "require MFA" policy.
+  pub authentication_methods: Vec<String>,
+  pub maybe_acr: Option<String>,
+  /// The identity provider vouches for the sign-in; bots and meeting guests are not people at an
+  /// identity provider and exempt from sign-in policy.
+  pub is_exempt_from_session_policy: bool,
 }
 
 /// Who a back-channel logout token ends sessions of.
@@ -70,6 +77,10 @@ struct AccessClaims {
   iat: i64,
   #[serde(default)]
   sid: Option<String>,
+  #[serde(default)]
+  amr: Vec<String>,
+  #[serde(default)]
+  acr: Option<String>,
   #[serde(default)]
   resource_access: HashMap<String, ClientAccess>,
 }
@@ -238,6 +249,9 @@ impl TokenValidator {
       role,
       issued_at: claims.iat,
       maybe_session_id: claims.sid,
+      authentication_methods: claims.amr,
+      maybe_acr: claims.acr,
+      is_exempt_from_session_policy: false,
     })
   }
 }

@@ -321,6 +321,7 @@ fn calls_config(ring_timeout_secs: u64, maybe_token: Option<&str>) -> CallsConfi
     call_idle_secs: 3600,
     maybe_sfu_registration_token: maybe_token.map(|token| token.to_owned().into()),
     ring_timeout_secs,
+    maybe_sfu_control_url: None,
   }
 }
 

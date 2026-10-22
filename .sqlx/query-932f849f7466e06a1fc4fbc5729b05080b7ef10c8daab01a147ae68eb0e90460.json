@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE local_accounts\n         SET password_hash = $3, totp_secret_sealed = $4, is_totp_confirmed = false,\n             activation_digest = NULL, activation_expires_at = NULL\n         WHERE activation_digest = $1 AND activation_expires_at > $2\n         RETURNING user_id, login",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "local_accounts",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "login",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "local_accounts",
+            "name": "login"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Timestamptz",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "932f849f7466e06a1fc4fbc5729b05080b7ef10c8daab01a147ae68eb0e90460"
+}

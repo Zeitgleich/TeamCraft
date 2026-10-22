@@ -26,6 +26,9 @@ p256 = { version = "0.13.2", default-features = false, features = ["arithmetic",
 ed25519-dalek = { version = "2.2.0", features = ["rand_core", "zeroize"] }
 # Key derivation for passkey PRF outputs and rendezvous.
 hkdf = "0.13.0"
+# TOTP codes (RFC 6238) for local accounts: HMAC-SHA1 is what authenticator apps implement.
+hmac = "0.13.0"
+sha1 = "0.11.0"
 # MLS (RFC 9420) for key distribution.
 openmls = "0.9.1"
 openmls_rust_crypto = "0.6.0"

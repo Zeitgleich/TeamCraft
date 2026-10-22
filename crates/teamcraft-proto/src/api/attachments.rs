@@ -38,29 +38,3 @@ pub struct AttachmentResponse {
   pub size_bytes: u64,
   pub is_complete: bool,
 }
-
-/// `POST /api/v1/attachments/{id}/share-links`: makes an attachment's ciphertext downloadable without
-/// an account (e2ee.md §4.5.1). The key travels only in the link's `#fragment`, which the creating
-/// client appends; the server never sees it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct CreateShareLinkRequest {
-  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_expires_at: Option<UnixMillis>,
-  #[serde(rename = "max_downloads", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_max_downloads: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ShareLinkResponse {
-  /// Unguessable token in the public URL.
-  pub share_id: String,
-  pub attachment_id: AttachmentId,
-  /// The public download page, without fragment (`https://chat.example.com/f/<share_id>`).
-  pub url: String,
-  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_expires_at: Option<UnixMillis>,
-  #[serde(rename = "max_downloads", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_max_downloads: Option<u32>,
-  pub download_count: u32,
-  pub is_revoked: bool,
-}

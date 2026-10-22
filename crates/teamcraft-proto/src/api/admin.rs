@@ -45,6 +45,9 @@ pub struct ListAdminConversationsQuery {
   pub maybe_min_members: Option<u32>,
   #[serde(rename = "max_members", default, skip_serializing_if = "Option::is_none")]
   pub maybe_max_members: Option<u32>,
+  /// `true`: only channels without an active channel admin (they need a new owner).
+  #[serde(rename = "orphaned", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_is_orphaned: Option<bool>,
   /// Continue after this channel (ascending IDs).
   #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
   pub maybe_after: Option<ConversationId>,

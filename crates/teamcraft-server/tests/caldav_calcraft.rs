@@ -31,6 +31,7 @@ async fn an_event_we_render_is_accepted_stored_updated_and_deleted_by_calcraft()
     username: USERNAME.into(),
     password: PASSWORD.to_owned().into(),
     request_timeout_secs: 10,
+    maybe_free_busy_url_template: None,
   })
   .unwrap();
   let name = format!("test-{}", std::process::id());

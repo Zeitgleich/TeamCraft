@@ -24,6 +24,7 @@ mod sync;
 mod ui_commands;
 mod workspace;
 pub mod workspace_admin;
+#[cfg(feature = "ui")]
 pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};

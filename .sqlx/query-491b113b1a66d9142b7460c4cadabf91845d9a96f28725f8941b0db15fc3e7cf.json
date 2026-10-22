@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, external_ref AS \"external_ref!\" FROM user_groups WHERE external_ref IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_groups",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "external_ref!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_groups",
+            "name": "external_ref"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "491b113b1a66d9142b7460c4cadabf91845d9a96f28725f8941b0db15fc3e7cf"
+}

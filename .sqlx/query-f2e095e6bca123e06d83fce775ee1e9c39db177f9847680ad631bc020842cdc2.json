@@ -1,0 +1,151 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, user_id, request_public_key, fingerprint, status, required_approvals, created_at, expires_at,\n                combining_admin_id, combining_device_id, result_sealed IS NOT NULL AS \"has_result!\",\n                (SELECT count(*) FROM org_recovery_request_shares s WHERE s.request_id = r.id) AS \"shares_received!\"\n         FROM org_recovery_requests r\n         WHERE ($1::bigint IS NULL OR r.id = $1)\n           AND (NOT $2 OR r.status IN ('pending', 'approved'))\n         ORDER BY r.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "request_public_key",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "request_public_key"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "fingerprint",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "fingerprint"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "required_approvals",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "required_approvals"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "combining_admin_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "combining_admin_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "combining_device_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "combining_device_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "has_result!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "shares_received!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "f2e095e6bca123e06d83fce775ee1e9c39db177f9847680ad631bc020842cdc2"
+}

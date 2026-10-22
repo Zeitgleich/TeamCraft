@@ -191,6 +191,22 @@ define_id!(
   InviteId
 );
 define_id!(
+  /// The instance-wide announcement banner.
+  AnnouncementId
+);
+define_id!(
+  /// A server-written event of a conversation (member added, channel archived, ...).
+  SystemEventId
+);
+define_id!(
+  /// A request to recover a user's backup key with the organization recovery key.
+  RecoveryRequestId
+);
+define_id!(
+  /// A user group (`@devteam`).
+  UserGroupId
+);
+define_id!(
   /// An audit log entry; IDs increase with time.
   AuditEntryId
 );

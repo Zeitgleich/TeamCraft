@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE org_recovery_requests SET status = 'expired' WHERE status IN ('pending', 'approved') AND expires_at <= $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "035173b6570c95767d059f0561ba13110884e2ba88564db82dd6ace691e52ffb"
+}

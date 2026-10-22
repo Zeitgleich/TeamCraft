@@ -28,6 +28,8 @@ pub struct AdminConversationFilter {
   pub maybe_min_members: Option<u32>,
   pub maybe_max_members: Option<u32>,
   pub maybe_after: Option<ConversationId>,
+  /// `Some(true)`: only channels without an active channel admin; `Some(false)`: only the others.
+  pub maybe_is_orphaned: Option<bool>,
   pub limit: i64,
 }
 
@@ -148,7 +150,10 @@ impl Database {
            AND ($6::bigint IS NULL OR t.member_count <= $6)
            AND ($7::int IS NULL OR COALESCE(t.last_message_id, tc_snowflake_floor(t.created_at))
                                    < tc_snowflake_floor(now() - make_interval(days => $7)))
-         ORDER BY t.id LIMIT $8"#,
+           AND ($8::boolean IS NULL OR (NOT EXISTS (
+                 SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id
+                  WHERE m.conversation_id = t.id AND m.role = 'admin' AND u.deactivated_at IS NULL)) = $8)
+         ORDER BY t.id LIMIT $9"#,
       filter.maybe_space.map(to_db),
       filter.maybe_visibility.as_ref().map(ConversationVisibility::as_str),
       filter.maybe_after.map(to_db),
@@ -156,6 +161,7 @@ impl Database {
       filter.maybe_min_members.map(i64::from),
       filter.maybe_max_members.map(i64::from),
       filter.maybe_inactive_days.map(|days| i32::try_from(days).unwrap_or(i32::MAX)),
+      filter.maybe_is_orphaned,
       filter.limit + 1,
     )
     .fetch_all(self.pool())

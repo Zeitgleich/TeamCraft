@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO session_activity (issuer, subject, session_key, started_at, last_seen_at)\n         VALUES ($1, $2, $3, $4, $4)\n         ON CONFLICT (issuer, subject, session_key) DO UPDATE SET started_at = $4, last_seen_at = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fb6a1db0aecf5a097c7523b03fae04af0cd876b73aecd1351fac3059f44f0533"
+}

@@ -213,6 +213,7 @@ fn calls_config(sfu_url: &str) -> CallsConfig {
     call_idle_secs: 3600,
     maybe_sfu_registration_token: Some(SFU_TOKEN.to_owned().into()),
     ring_timeout_secs: 30,
+    maybe_sfu_control_url: None,
   }
 }
 

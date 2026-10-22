@@ -12,7 +12,6 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use teamcraft_db::SnowflakeGenerator;
 use teamcraft_db::testing::TestDatabase;
-use teamcraft_proto::PermissionScheme;
 use tokio::task::JoinHandle;
 
 use crate::auth::test_keys::{TEST_KEY_ID, TEST_MODULUS_B64, TEST_PRIVATE_KEY_PEM};
@@ -23,7 +22,9 @@ use crate::auth::{
 use crate::config::{CallsConfig, MeetingsConfig, RoleNames, StorageConfig};
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
-use crate::meetings::caldav::{CalendarError, CalendarStore};
+use time::OffsetDateTime;
+
+use crate::meetings::caldav::{BusyPeriod, CalendarError, CalendarStore};
 use crate::meetings::mailer::{MailError, Mailer, OutgoingMail};
 use crate::meetings::{MeetingBackends, MeetingService};
 use crate::push::PushDispatcher;
@@ -31,6 +32,9 @@ use crate::rendezvous::RendezvousHub;
 use crate::router::router;
 use crate::security::RateLimits;
 use crate::services::calls::CallService;
+use crate::services::local_accounts::LocalAuth;
+use crate::services::permission_scheme::SchemeStore;
+use crate::services::session::PolicyHolder;
 use crate::state::{AppState, Settings};
 use crate::storage::BlobStore;
 
@@ -41,6 +45,7 @@ pub const TEST_CLIENT: &str = "teamcraft";
 #[derive(Default)]
 pub struct FakeCalendar {
   events: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+  busy: std::sync::Mutex<std::collections::BTreeMap<String, Vec<BusyPeriod>>>,
   is_failing: std::sync::atomic::AtomicBool,
 }
 
@@ -53,6 +58,11 @@ impl FakeCalendar {
   /// Names of all stored events.
   pub fn names(&self) -> Vec<String> {
     self.events.lock().unwrap().keys().cloned().collect()
+  }
+
+  /// What the calendar of `email` answers to free-busy queries from now on.
+  pub fn set_busy(&self, email: &str, periods: Vec<BusyPeriod>) {
+    self.busy.lock().unwrap().insert(email.to_owned(), periods);
   }
 
   /// Makes every following write fail as if the calendar server were down.
@@ -87,6 +97,32 @@ impl CalendarStore for FakeCalendar {
       self.check()?;
       self.events.lock().unwrap().remove(object_name);
       Ok(())
+    })
+  }
+
+  fn busy_periods<'a>(
+    &'a self,
+    email: &'a str,
+    from: OffsetDateTime,
+    to: OffsetDateTime,
+  ) -> BoxFuture<'a, Result<Vec<BusyPeriod>, CalendarError>> {
+    Box::pin(async move {
+      self.check()?;
+      Ok(
+        self
+          .busy
+          .lock()
+          .unwrap()
+          .get(email)
+          .map(|periods| {
+            periods
+              .iter()
+              .filter(|p| p.end > from && p.start < to)
+              .copied()
+              .collect()
+          })
+          .unwrap_or_default(),
+      )
     })
   }
 }
@@ -131,6 +167,7 @@ struct Extras {
   maybe_calls: Option<CallService>,
   maybe_push: Option<PushDispatcher>,
   maybe_meetings: Option<MeetingService>,
+  maybe_mailer: Option<Arc<dyn Mailer>>,
 }
 
 pub struct TestApp {
@@ -152,6 +189,8 @@ pub struct TestUser {
   pub roles: Vec<String>,
   /// The provider's session ID put into the `sid` claim.
   pub maybe_session_id: Option<String>,
+  /// The `amr` claim: how the user signed in.
+  pub authentication_methods: Vec<String>,
 }
 
 pub struct Reply {
@@ -168,7 +207,13 @@ impl TestUser {
       is_email_verified: true,
       roles: roles.iter().map(|role| (*role).to_owned()).collect(),
       maybe_session_id: None,
+      authentication_methods: vec!["pwd".to_owned()],
     }
+  }
+
+  pub fn with_authentication_methods(mut self, methods: &[&str]) -> Self {
+    self.authentication_methods = methods.iter().map(|method| (*method).to_owned()).collect();
+    self
   }
 
   pub fn with_session(mut self, session_id: &str) -> Self {
@@ -242,6 +287,7 @@ impl TestApp {
       call_idle_secs: 3600,
       maybe_sfu_registration_token: None,
       ring_timeout_secs: 30,
+      maybe_sfu_control_url: None,
     };
     Self::start_with_calls_config(&config, signing_key_pem).await
   }
@@ -252,6 +298,32 @@ impl TestApp {
     Self::start_full(
       |_| {},
       Extras {
+        maybe_calls: Some(calls),
+        ..Extras::default()
+      },
+    )
+    .await
+  }
+
+  /// Meetings and calls together (host controls need both).
+  pub async fn start_with_meetings_and_calls(
+    meetings: &MeetingsConfig,
+    calls: &CallsConfig,
+    signing_key_pem: &str,
+  ) -> Option<Self> {
+    let meetings = MeetingService::new(
+      meetings,
+      MeetingBackends {
+        maybe_calendar: Some(Arc::new(FakeCalendar::default())),
+        maybe_mailer: Some(Arc::new(FakeMailer::default())),
+      },
+    )
+    .unwrap();
+    let calls = CallService::new(calls, signing_key_pem.as_bytes()).unwrap();
+    Self::start_full(
+      |_| {},
+      Extras {
+        maybe_meetings: Some(meetings),
         maybe_calls: Some(calls),
         ..Extras::default()
       },
@@ -284,6 +356,21 @@ impl TestApp {
     .await
   }
 
+  /// Like [`Self::start_with`] with the server's own outgoing mail going to `mailer`.
+  pub async fn start_with_mailer(
+    customize: impl FnOnce(&mut Settings),
+    mailer: Arc<dyn Mailer>,
+  ) -> Option<Self> {
+    Self::start_full(
+      customize,
+      Extras {
+        maybe_mailer: Some(mailer),
+        ..Extras::default()
+      },
+    )
+    .await
+  }
+
   /// Like [`Self::start_with`] with the given push dispatcher (tests record or fake the senders).
   pub async fn start_with_push(
     customize: impl FnOnce(&mut Settings),
@@ -305,6 +392,7 @@ impl TestApp {
       maybe_calls,
       maybe_push,
       maybe_meetings,
+      maybe_mailer,
     } = extras;
     let test_db = TestDatabase::create().await?;
     let mut settings = Settings::default();
@@ -347,7 +435,13 @@ impl TestApp {
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
       maybe_calls: maybe_calls.map(Arc::new),
       maybe_meetings: maybe_meetings.map(Arc::new),
-      scheme: Arc::new(PermissionScheme::default()),
+      maybe_mailer,
+      maybe_local: settings
+        .local_accounts
+        .is_enabled
+        .then(|| Arc::new(LocalAuth::new(&settings.local_accounts).unwrap())),
+      policy: Arc::new(PolicyHolder::default()),
+      scheme: Arc::new(SchemeStore::default()),
       rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
       settings: Arc::new(settings),
     };
@@ -401,6 +495,7 @@ impl TestApp {
     let claims = json!({
       "iat": issued_at,
       "sid": user.maybe_session_id,
+      "amr": user.authentication_methods,
       "iss": TEST_ISSUER,
       "sub": user.subject,
       "azp": TEST_CLIENT,

@@ -23,7 +23,7 @@ pub struct OutgoingMail {
   pub subject: String,
   pub text: String,
   pub method: Method,
-  /// The VCALENDAR object (CRLF line endings).
+  /// The VCALENDAR object (CRLF line endings); empty for a plain text message.
   pub ics: String,
 }
 
@@ -89,6 +89,14 @@ impl Mailer for SmtpMailer {
 
 /// The RFC 6047 message for one invitation.
 fn build_message(from: &Mailbox, mail: &OutgoingMail) -> Result<Message, MailError> {
+  if mail.ics.is_empty() {
+    return Message::builder()
+      .from(from.clone())
+      .to(mailbox(&mail.to_address, mail.maybe_to_name.as_deref())?)
+      .subject(mail.subject.clone())
+      .body(mail.text.clone())
+      .map_err(|error| MailError::Build(error.to_string()));
+  }
   let method = match mail.method {
     Method::Request => "REQUEST",
     Method::Cancel => "CANCEL",

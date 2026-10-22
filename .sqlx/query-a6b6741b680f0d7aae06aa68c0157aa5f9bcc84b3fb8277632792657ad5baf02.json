@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meetings SET status = 'ended' WHERE id = $1 AND status = 'scheduled'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a6b6741b680f0d7aae06aa68c0157aa5f9bcc84b3fb8277632792657ad5baf02"
+}

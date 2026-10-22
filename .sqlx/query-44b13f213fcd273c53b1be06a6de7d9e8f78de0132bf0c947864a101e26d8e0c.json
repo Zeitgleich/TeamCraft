@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM session_activity WHERE issuer = $1 AND subject = $2 AND session_key = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "44b13f213fcd273c53b1be06a6de7d9e8f78de0132bf0c947864a101e26d8e0c"
+}

@@ -39,6 +39,12 @@ pub enum ApiError {
   /// A needed backend (e.g. attachment storage) is not configured or not reachable.
   #[error("unavailable: {0}")]
   Unavailable(String),
+  /// The workspace policy requires a second factor and the sign-in had none.
+  #[error("multi-factor authentication is required")]
+  MfaRequired,
+  /// A share link that is unknown, revoked, expired or used up (one answer for all, so links cannot be probed).
+  #[error("this link is not available")]
+  ShareUnavailable,
   #[error("internal error: {0}")]
   Internal(String),
 }
@@ -107,6 +113,34 @@ impl ApiError {
     }
   }
 
+  pub fn recovery_request_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::RecoveryRequestNotFound,
+      what: "recovery request",
+    }
+  }
+
+  pub fn announcement_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::AnnouncementNotFound,
+      what: "announcement",
+    }
+  }
+
+  pub fn avatar_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::AvatarNotFound,
+      what: "avatar",
+    }
+  }
+
+  pub fn user_group_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::UserGroupNotFound,
+      what: "user group",
+    }
+  }
+
   pub fn meeting_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::MeetingNotFound,
@@ -131,9 +165,9 @@ impl ApiError {
   pub fn status(&self) -> StatusCode {
     match self {
       Self::Auth(AuthError::MissingToken | AuthError::InvalidToken(_)) => StatusCode::UNAUTHORIZED,
-      Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated) | Self::Forbidden(_) => {
-        StatusCode::FORBIDDEN
-      },
+      Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
+      | Self::Forbidden(_)
+      | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
       Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
@@ -144,6 +178,7 @@ impl ApiError {
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
       Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+      Self::ShareUnavailable => StatusCode::GONE,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
   }
@@ -157,6 +192,8 @@ impl ApiError {
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
+      Self::MfaRequired => ErrorCode::MfaRequired,
+      Self::ShareUnavailable => ErrorCode::ShareUnavailable,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,

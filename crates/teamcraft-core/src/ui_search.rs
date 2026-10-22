@@ -304,6 +304,7 @@ mod tests {
         maybe_username: Some(name.into()),
         display_name: name.into(),
         kind: UserKind::Member,
+        maybe_email: None,
       };
       records::put_json(&store, Table::Users, &user.to_string(), &summary).unwrap();
     }

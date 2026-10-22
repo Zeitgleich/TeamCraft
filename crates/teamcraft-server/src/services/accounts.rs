@@ -18,6 +18,9 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdenti
       .ok_or_else(|| AuthError::InvalidToken("unknown or revoked bot token".into()))?;
     return Ok(bot_identity(&bot));
   }
+  if let Some(identity) = super::local_accounts::validate_session_token(state, token).await? {
+    return Ok(identity);
+  }
   if let Some(meetings) = &state.maybe_meetings
     && guest::is_guest_token_header(token)
   {
@@ -42,6 +45,9 @@ fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
     role: Role::Guest,
     issued_at: 0,
     maybe_session_id: None,
+    authentication_methods: Vec::new(),
+    maybe_acr: None,
+    is_exempt_from_session_policy: true,
   }
 }
 
@@ -58,6 +64,9 @@ pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i
     role: Role::Guest,
     issued_at,
     maybe_session_id: None,
+    authentication_methods: Vec::new(),
+    maybe_acr: None,
+    is_exempt_from_session_policy: true,
   }
 }
 
@@ -71,6 +80,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   ) {
     return Err(AuthError::InvalidToken("the session has ended".into()).into());
   }
+  super::session::enforce(state, &identity).await?;
   let kind = match identity.role {
     _ if identity.issuer == BOT_ISSUER => UserKind::Bot,
     Role::Guest => UserKind::Guest,
@@ -106,15 +116,24 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   })
 }
 
+/// The expiry guests get when their invite has none, in seconds from now.
+fn guest_default_expiry_secs(state: &AppState) -> Option<f64> {
+  let days = state.settings.guests.default_expiry_days;
+  (days > 0).then(|| f64::from(days) * 86_400.0)
+}
+
 async fn apply_pending_invites(
   state: &AppState,
   user: &teamcraft_db::User,
   email: &str,
 ) -> Result<(), ApiError> {
-  let applied = state.database.accept_pending_invites(user.id, email).await?;
+  let applied = state
+    .database
+    .accept_pending_invites(user.id, email, guest_default_expiry_secs(state))
+    .await?;
   for invite in applied {
     info!(space_id = %invite.space_id, user_id = %user.id, "invite accepted");
-    let summary = super::convert::user_summary(user);
+    let summary = super::convert::user_summary(state, user);
     let members = state.database.list_space_members(invite.space_id).await?;
     state.hub.publish(
       members.iter().map(|member| member.user.id),

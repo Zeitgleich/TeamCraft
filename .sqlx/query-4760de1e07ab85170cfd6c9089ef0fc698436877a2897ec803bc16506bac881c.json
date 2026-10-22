@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE org_recovery_requests SET status = $2 WHERE id = $1 AND status IN ('pending', 'approved')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4760de1e07ab85170cfd6c9089ef0fc698436877a2897ec803bc16506bac881c"
+}

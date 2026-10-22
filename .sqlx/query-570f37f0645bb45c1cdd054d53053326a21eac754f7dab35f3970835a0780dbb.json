@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM permission_overrides WHERE scope_id = $1 AND role = $2 AND permission = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "570f37f0645bb45c1cdd054d53053326a21eac754f7dab35f3970835a0780dbb"
+}

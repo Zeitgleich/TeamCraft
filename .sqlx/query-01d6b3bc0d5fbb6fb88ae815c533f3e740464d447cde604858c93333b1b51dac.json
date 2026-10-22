@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO org_recovery_request_shares (request_id, from_admin_id, sealed) VALUES ($1, $2, $3)\n         ON CONFLICT (request_id, from_admin_id) DO UPDATE SET sealed = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "01d6b3bc0d5fbb6fb88ae815c533f3e740464d447cde604858c93333b1b51dac"
+}

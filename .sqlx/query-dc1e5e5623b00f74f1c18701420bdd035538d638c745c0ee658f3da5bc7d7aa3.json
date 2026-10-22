@@ -1,0 +1,136 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT title, department, phone, time_zone, working_weekdays, working_start_minute,\n                working_end_minute, avatar_key, avatar_content_type, avatar_size_bytes\n         FROM user_profiles WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "department",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "department"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "phone",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "phone"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "time_zone",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "time_zone"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "working_weekdays",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "working_weekdays"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "working_start_minute",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "working_start_minute"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "working_end_minute",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "working_end_minute"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "avatar_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "avatar_key"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "avatar_content_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "avatar_content_type"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "avatar_size_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "avatar_size_bytes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "dc1e5e5623b00f74f1c18701420bdd035538d638c745c0ee658f3da5bc7d7aa3"
+}

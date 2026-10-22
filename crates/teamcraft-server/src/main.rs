@@ -11,7 +11,6 @@ use anyhow::Context;
 use secrecy::ExposeSecret;
 use teamcraft_db::{Database, DatabaseOptions, SnowflakeGenerator};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
-use teamcraft_proto::PermissionScheme;
 use teamcraft_proto::PushProvider;
 use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
@@ -29,8 +28,11 @@ use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
 use teamcraft_server::security::RateLimits;
 use teamcraft_server::services::calls::CallService;
+use teamcraft_server::services::local_accounts::LocalAuth;
+use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
-use teamcraft_server::services::{oidc, retention, urgent};
+use teamcraft_server::services::session::{self, PolicyHolder};
+use teamcraft_server::services::{guests, oidc, retention, urgent};
 use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, Settings};
 use teamcraft_server::storage::BlobStore;
 use tracing::{info, warn};
@@ -119,7 +121,15 @@ async fn run() -> anyhow::Result<()> {
       .context("configuring calls")?
       .map(Arc::new),
     maybe_meetings: build_meetings(&config)?.map(Arc::new),
-    scheme: Arc::new(PermissionScheme::default()),
+    maybe_local: build_local_auth(&config)?.map(Arc::new),
+    maybe_mailer: match &config.mail.smtp {
+      Some(smtp) => {
+        Some(Arc::new(SmtpMailer::new(smtp).context("configuring the mail server")?) as Arc<dyn Mailer>)
+      },
+      None => None,
+    },
+    policy: Arc::new(PolicyHolder::default()),
+    scheme: Arc::new(SchemeStore::default()),
     settings: Arc::new(Settings {
       maybe_oidc_sync: build_oidc_sync(&config)?,
       policy: config.policy.clone(),
@@ -131,6 +141,11 @@ async fn run() -> anyhow::Result<()> {
       integration: config.integration.clone(),
       web: config.web.clone(),
       security: config.security.clone(),
+      guests: config.guests.clone(),
+      mail: config.mail.clone(),
+      local_accounts: config.local_accounts.clone(),
+      presence: config.presence.clone(),
+      shares: config.shares.clone(),
       push: PushSettings {
         ttl: Duration::from_secs(config.push.ttl_secs),
         allow_private_endpoints: config.push.allow_private_endpoints,
@@ -149,7 +164,15 @@ async fn run() -> anyhow::Result<()> {
   if config.retention.is_enabled {
     spawn_retention_job(state.clone());
   }
+  permission_scheme::load_scheme(&state)
+    .await
+    .context("loading the permission scheme")?;
+  session::load_policy(&state)
+    .await
+    .context("loading the workspace policy")?;
   spawn_urgent_scheduler(state.clone());
+  spawn_account_housekeeping(state.clone());
+  spawn_derived_presence(state.clone());
 
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
@@ -183,6 +206,37 @@ fn spawn_session_sweeper(state: AppState) {
   });
 }
 
+/// Keeps derived presence current: "in a meeting" / "in a call" for online users (asking the
+/// calendar server now and then) and the away timeout.
+fn spawn_derived_presence(state: AppState) {
+  tokio::spawn(async move {
+    let settings = state.settings.presence.clone();
+    let mut interval = tokio::time::interval(Duration::from_secs(settings.auto_status_interval_secs.max(1)));
+    let poll_every = Duration::from_secs(settings.calendar_poll_interval_secs.max(1));
+    let mut maybe_last_poll: Option<tokio::time::Instant> = None;
+    loop {
+      interval.tick().await;
+      let is_poll_due = maybe_last_poll.is_none_or(|at| at.elapsed() >= poll_every);
+      if is_poll_due {
+        maybe_last_poll = Some(tokio::time::Instant::now());
+      }
+      if let Some(minutes) = state.policy.get().presence.maybe_away_timeout_minutes {
+        let cutoff = tokio::time::Instant::now().checked_sub(Duration::from_secs(u64::from(minutes) * 60));
+        if let Some(cutoff) = cutoff
+          && let Err(error) = presence::demote_idle_devices(&state, cutoff).await
+        {
+          warn!(%error, "applying the away timeout failed");
+        }
+      }
+      if let Err(error) =
+        presence::refresh_derived_statuses(&state, time::OffsetDateTime::now_utc(), is_poll_due).await
+      {
+        warn!(%error, "refreshing derived statuses failed");
+      }
+    }
+  });
+}
+
 /// Runs the retention job periodically (deletes what is past retention, tops up partitions).
 fn spawn_retention_job(state: AppState) {
   tokio::spawn(async move {
@@ -196,6 +250,16 @@ fn spawn_retention_job(state: AppState) {
       }
     }
   });
+}
+
+/// Local guest accounts, if enabled.
+fn build_local_auth(config: &Config) -> anyhow::Result<Option<LocalAuth>> {
+  if !config.local_accounts.is_enabled {
+    return Ok(None);
+  }
+  LocalAuth::new(&config.local_accounts)
+    .map(Some)
+    .context("configuring local accounts")
 }
 
 /// The meeting feature, if `[meetings]` is configured.
@@ -226,6 +290,24 @@ fn build_meetings(config: &Config) -> anyhow::Result<Option<MeetingService>> {
   )
   .map(Some)
   .context("configuring meetings")
+}
+
+/// Removes guests whose membership expired (and tells their sponsors) and forgets old sessions.
+fn spawn_account_housekeeping(state: AppState) {
+  tokio::spawn(async move {
+    let period = Duration::from_secs(state.settings.guests.expiry_check_interval_secs.max(1));
+    let mut interval = tokio::time::interval(period);
+    loop {
+      interval.tick().await;
+      let now = time::OffsetDateTime::now_utc();
+      if let Err(error) = guests::expire_once(&state, now).await {
+        warn!(%error, "expiring guests failed");
+      }
+      if let Err(error) = session::forget_stale_sessions(&state, now).await {
+        warn!(%error, "forgetting stale sessions failed");
+      }
+    }
+  });
 }
 
 /// Pushes urgent direct messages again until they are acknowledged (PLAN.md §5).
@@ -270,6 +352,7 @@ fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> 
     client_secret: secret,
     roles: oidc.roles.clone(),
     page_size: oidc.sync.page_size,
+    sync_groups: oidc.sync.sync_groups,
   }))
 }
 

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{ConversationVisibility, Role};
+use crate::{ConversationVisibility, Role, SpaceId};
 
 wire_enum! {
   /// A thing a user may be allowed to do. The first block is the PLAN.md §13 list; the last three
@@ -165,6 +165,74 @@ impl PermissionScheme {
   pub fn grants(&self, role: &SchemeRole, permission: &Permission) -> bool {
     self.grants.get(role).is_some_and(|set| set.contains(permission))
   }
+
+  /// What the role may do, sorted by name.
+  pub fn granted_to(&self, role: &SchemeRole) -> Vec<Permission> {
+    let mut granted: Vec<Permission> = self.grants.get(role).into_iter().flatten().cloned().collect();
+    granted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    granted
+  }
+
+  /// A copy with grants added (`true`) and revoked (`false`).
+  pub fn with_changes(&self, changes: &[(SchemeRole, Permission, bool)]) -> Self {
+    let mut grants = self.grants.clone();
+    for (role, permission, is_granted) in changes {
+      let set = grants.entry(role.clone()).or_default();
+      if *is_granted {
+        set.insert(permission.clone());
+      } else {
+        set.remove(permission);
+      }
+    }
+    Self { grants }
+  }
+}
+
+/// Why a scheme change is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SchemeChangeError {
+  #[error("the owner always has every permission")]
+  OwnerIsFixed,
+  #[error("only owners sign the roster and the policy")]
+  SigningIsFixed,
+  #[error("unknown role or permission")]
+  Unknown,
+  #[error("this permission cannot be granted to guests")]
+  NotForGuests,
+  #[error("this role or permission has no meaning inside a space")]
+  NotInSpace,
+}
+
+/// Checks that granting or revoking `permission` for `role` is allowed at the instance or in a space.
+pub fn check_scheme_change(
+  role: &SchemeRole,
+  permission: &Permission,
+  is_grant: bool,
+  is_in_space: bool,
+) -> Result<(), SchemeChangeError> {
+  let Some(scope) = permission.scope() else {
+    return Err(SchemeChangeError::Unknown);
+  };
+  if matches!(role, SchemeRole::Unknown(_)) {
+    return Err(SchemeChangeError::Unknown);
+  }
+  if *role == SchemeRole::Owner {
+    return Err(SchemeChangeError::OwnerIsFixed);
+  }
+  if *permission == Permission::SignWorkspace {
+    return Err(SchemeChangeError::SigningIsFixed);
+  }
+  if is_in_space
+    && (matches!(role, SchemeRole::Admin | SchemeRole::Owner) || scope == PermissionScope::Instance)
+  {
+    return Err(SchemeChangeError::NotInSpace);
+  }
+  let is_guest_safe = matches!(scope, PermissionScope::ChannelContent)
+    || matches!(permission, Permission::CreateDm | Permission::CreateGroupDm);
+  if is_grant && *role == SchemeRole::Guest && !is_guest_safe {
+    return Err(SchemeChangeError::NotForGuests);
+  }
+  Ok(())
 }
 
 impl Default for PermissionScheme {
@@ -271,6 +339,8 @@ pub struct ChannelModeration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceContext {
   pub maybe_role: Option<SpaceRole>,
+  /// Which space it is, so the server can apply the space's own scheme.
+  pub maybe_space_id: Option<SpaceId>,
 }
 
 /// The conversation a permission is evaluated for.
@@ -389,6 +459,85 @@ mod tests {
     Permission::CreateShareLink,
   ];
 
+  mod scheme_changes {
+    use super::*;
+
+    #[test]
+    fn changes_grant_and_revoke_on_a_copy() {
+      let base = PermissionScheme::default();
+      let changed = base.with_changes(&[
+        (SchemeRole::Member, Permission::CreateUserGroup, true),
+        (SchemeRole::Member, Permission::CreateChannel, false),
+      ]);
+      assert!(changed.grants(&SchemeRole::Member, &Permission::CreateUserGroup));
+      assert!(!changed.grants(&SchemeRole::Member, &Permission::CreateChannel));
+      assert!(!base.grants(&SchemeRole::Member, &Permission::CreateUserGroup));
+      assert!(base.grants(&SchemeRole::Member, &Permission::CreateChannel));
+      assert!(
+        changed
+          .granted_to(&SchemeRole::Member)
+          .windows(2)
+          .all(|w| w[0].as_str() <= w[1].as_str())
+      );
+    }
+
+    #[test]
+    fn owners_signing_guest_privileges_and_instance_permissions_in_spaces_are_protected() {
+      use SchemeChangeError as E;
+      let check =
+        |role, permission, grant, in_space| check_scheme_change(&role, &permission, grant, in_space);
+      assert_eq!(
+        check(SchemeRole::Owner, Permission::CreatePost, false, false),
+        Err(E::OwnerIsFixed)
+      );
+      assert_eq!(
+        check(SchemeRole::Admin, Permission::SignWorkspace, true, false),
+        Err(E::SigningIsFixed)
+      );
+      assert_eq!(
+        check(SchemeRole::Guest, Permission::CreateChannel, true, false),
+        Err(E::NotForGuests)
+      );
+      assert_eq!(
+        check(SchemeRole::Guest, Permission::InviteGuest, true, false),
+        Err(E::NotForGuests)
+      );
+      assert_eq!(
+        check(SchemeRole::Guest, Permission::UseChannelMentions, true, false),
+        Ok(())
+      );
+      assert_eq!(
+        check(SchemeRole::Guest, Permission::CreateChannel, false, false),
+        Ok(())
+      );
+      assert_eq!(
+        check(SchemeRole::Member, Permission::CreateUserGroup, true, true),
+        Err(E::NotInSpace)
+      );
+      assert_eq!(
+        check(SchemeRole::Admin, Permission::CreatePost, true, true),
+        Err(E::NotInSpace)
+      );
+      assert_eq!(
+        check(SchemeRole::Member, Permission::CreateChannel, false, true),
+        Ok(())
+      );
+      assert_eq!(
+        check(
+          SchemeRole::Unknown("x".into()),
+          Permission::CreatePost,
+          true,
+          false
+        ),
+        Err(E::Unknown)
+      );
+      assert_eq!(
+        check(SchemeRole::Member, Permission::Unknown("x".into()), true, false),
+        Err(E::Unknown)
+      );
+    }
+  }
+
   mod roles_in_a_plain_channel_they_belong_to {
     use super::*;
 
@@ -442,6 +591,7 @@ mod tests {
     #[test]
     fn space_admin_manages_the_space_and_its_channels() {
       let space = SpaceContext {
+        maybe_space_id: None,
         maybe_role: Some(SpaceRole::SpaceAdmin),
       };
       for permission in [
@@ -470,6 +620,7 @@ mod tests {
     #[test]
     fn space_admin_manages_public_but_not_foreign_private_channels() {
       let space = SpaceContext {
+        maybe_space_id: None,
         maybe_role: Some(SpaceRole::SpaceAdmin),
       };
       let public = non_member_channel(Some(space.clone()), ConversationVisibility::Public);
@@ -520,6 +671,7 @@ mod tests {
       let mut ctx = member_channel_ctx();
       ctx.maybe_role = Some(ChannelRole::Admin);
       ctx.maybe_space = Some(SpaceContext {
+        maybe_space_id: None,
         maybe_role: Some(SpaceRole::SpaceAdmin),
       });
       assert!(!check(
@@ -537,6 +689,7 @@ mod tests {
     #[test]
     fn space_guest_of_an_employee_account_is_treated_as_guest() {
       let space = SpaceContext {
+        maybe_space_id: None,
         maybe_role: Some(SpaceRole::Guest),
       };
       assert!(!check(
@@ -583,7 +736,10 @@ mod tests {
 
     #[test]
     fn manage_spaces_they_are_not_members_of() {
-      let space = SpaceContext { maybe_role: None };
+      let space = SpaceContext {
+        maybe_role: None,
+        maybe_space_id: None,
+      };
       assert!(check(
         &Role::Admin,
         &Permission::ManageSpaceMembers,
@@ -792,9 +948,10 @@ mod tests {
       .filter(|permission| {
         let target = match permission.scope() {
           Some(PermissionScope::Instance) => Target::Instance,
-          Some(PermissionScope::Space) => {
-            Target::Space(maybe_space.clone().unwrap_or(SpaceContext { maybe_role: None }))
-          },
+          Some(PermissionScope::Space) => Target::Space(maybe_space.clone().unwrap_or(SpaceContext {
+            maybe_role: None,
+            maybe_space_id: None,
+          })),
           _ => channel_target.clone(),
         };
         check(role, permission, &target)
@@ -809,12 +966,14 @@ mod tests {
 
   fn member_space() -> SpaceContext {
     SpaceContext {
+      maybe_space_id: None,
       maybe_role: Some(SpaceRole::Member),
     }
   }
 
   fn guest_space() -> SpaceContext {
     SpaceContext {
+      maybe_space_id: None,
       maybe_role: Some(SpaceRole::Guest),
     }
   }

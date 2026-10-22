@@ -24,6 +24,8 @@ const MAX_SIGNATURE_BYTES: usize = 4096;
 const MAX_LINK_PREVIEW_DOMAINS: usize = 500;
 const MAX_DOMAIN_CHARS: usize = 253;
 const MAX_ORG_RECOVERY_ADMINS: u8 = 10;
+const MAX_STATUS_PRESETS: usize = 20;
+const MAX_PRESET_TEXT_CHARS: usize = 100;
 
 pub async fn append(
   state: &AppState,
@@ -45,9 +47,14 @@ pub async fn append(
   {
     return Err(ApiError::device_not_found());
   }
-  if kind == WorkspaceLogKind::Policy {
-    check_policy_payload(request.payload.as_slice(), request.expected_version + 1)?;
-  }
+  let maybe_document = if kind == WorkspaceLogKind::Policy {
+    Some(check_policy_payload(
+      request.payload.as_slice(),
+      request.expected_version + 1,
+    )?)
+  } else {
+    None
+  };
 
   let outcome = state
     .database
@@ -64,6 +71,9 @@ pub async fn append(
   }
 
   let version = request.expected_version + 1;
+  if let Some(document) = maybe_document {
+    state.policy.set(document.policy);
+  }
   audit::record(
     state,
     Some(caller.user.id),
@@ -173,6 +183,34 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
   {
     return Err(ApiError::InvalidRequest(
       "the policy contains values this server does not know".into(),
+    ));
+  }
+  if matches!(
+    policy.directory.display_name_format,
+    teamcraft_proto::DisplayNameFormat::Unknown(_)
+  ) {
+    return Err(ApiError::InvalidRequest(
+      "the policy contains values this server does not know".into(),
+    ));
+  }
+  let presence = &policy.presence;
+  if presence.maybe_away_timeout_minutes == Some(0)
+    || presence.presets.len() > MAX_STATUS_PRESETS
+    || presence.presets.iter().any(|preset| {
+      preset.text.trim().is_empty()
+        || preset.text.chars().count() > MAX_PRESET_TEXT_CHARS
+        || preset
+          .maybe_emoji
+          .as_deref()
+          .is_some_and(|emoji| emoji.chars().count() > MAX_PRESET_TEXT_CHARS)
+        || preset.maybe_duration_minutes == Some(0)
+    })
+  {
+    return Err(ApiError::InvalidRequest("invalid presence policy".into()));
+  }
+  if policy.session.maybe_max_age_hours == Some(0) || policy.session.maybe_idle_timeout_minutes == Some(0) {
+    return Err(ApiError::InvalidRequest(
+      "session limits must be positive; leave them out for no limit".into(),
     ));
   }
   if policy.link_previews.domains.len() > MAX_LINK_PREVIEW_DOMAINS

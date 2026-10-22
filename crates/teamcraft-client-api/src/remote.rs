@@ -196,6 +196,8 @@ pub struct EnrollRequest {
 /// Something the user did that changes data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
+// An action lives for one user gesture; boxing the policy would only add noise at every call site.
+#[allow(clippy::large_enum_variant)]
 pub enum ChatAction {
   PostMessage {
     conversation: ConversationId,

@@ -5,7 +5,7 @@
 //! server. Active calls are tracked in memory: a conversation keeps its call id while tokens are
 //! issued, and gets a new one after `call_idle_secs` without any.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,7 @@ use teamcraft_proto::{
   SfuParticipantReport, UnixMillis, UserId,
 };
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -26,6 +27,27 @@ use crate::auth::{AuthError, AuthenticatedUser};
 use crate::config::CallsConfig;
 use crate::error::ApiError;
 use crate::state::AppState;
+
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What the server asks of the SFU for a meeting host.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SfuControlRequest {
+  pub call_id: CallId,
+  pub by_user_id: UserId,
+  #[serde(flatten)]
+  pub action: SfuControlAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SfuControlAction {
+  MuteAll,
+  RemoveParticipant { user_id: UserId },
+  Lock,
+  Unlock,
+  End,
+}
 
 /// Signs join tokens and tracks the active call of each conversation.
 pub struct CallService {
@@ -38,6 +60,21 @@ pub struct CallService {
   /// Token the SFU reports participants with; `None` disables the reports.
   maybe_sfu_token: Option<Vec<u8>>,
   active: Mutex<HashMap<ConversationId, ActiveCall>>,
+  /// Meetings the host locked, and people the host removed, until the call ends.
+  controls: Mutex<HostControls>,
+  /// Where host controls go.
+  maybe_control: Option<ControlTarget>,
+}
+
+#[derive(Default)]
+struct HostControls {
+  locked: HashSet<ConversationId>,
+  removed: HashSet<(ConversationId, UserId)>,
+}
+
+struct ControlTarget {
+  url: String,
+  client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +131,8 @@ pub enum CallsSetupError {
   ReadKey { path: String, source: std::io::Error },
   #[error("the join token signing key is not an Ed25519 PEM private key: {0}")]
   InvalidKey(#[from] jsonwebtoken::errors::Error),
+  #[error("setting up the SFU control client failed: {0}")]
+  Control(String),
 }
 
 impl ActiveCall {
@@ -136,7 +175,89 @@ impl CallService {
         .as_ref()
         .map(|t| t.expose_secret().as_bytes().to_vec()),
       active: Mutex::new(HashMap::new()),
+      controls: Mutex::new(HostControls::default()),
+      maybe_control: config
+        .maybe_sfu_control_url
+        .as_ref()
+        .map(|url| {
+          Ok::<_, reqwest::Error>(ControlTarget {
+            url: format!("{}/internal/v1/calls/control", url.trim_end_matches('/')),
+            client: reqwest::Client::builder().timeout(CONTROL_TIMEOUT).build()?,
+          })
+        })
+        .transpose()
+        .map_err(|error| CallsSetupError::Control(error.to_string()))?,
     })
+  }
+
+  /// The call id of the conversation's running call.
+  pub fn running_call(&self, conversation_id: ConversationId) -> Option<CallId> {
+    self.snapshot(conversation_id).map(|snapshot| snapshot.call_id)
+  }
+
+  /// Whether host controls can reach the SFU.
+  pub fn has_controls(&self) -> bool {
+    self.maybe_control.is_some()
+  }
+
+  pub fn is_locked(&self, conversation_id: ConversationId) -> bool {
+    self.controls().locked.contains(&conversation_id)
+  }
+
+  pub fn is_removed(&self, conversation_id: ConversationId, user: UserId) -> bool {
+    self.controls().removed.contains(&(conversation_id, user))
+  }
+
+  pub fn set_locked(&self, conversation_id: ConversationId, is_locked: bool) {
+    let mut controls = self.controls();
+    if is_locked {
+      controls.locked.insert(conversation_id);
+    } else {
+      controls.locked.remove(&conversation_id);
+    }
+  }
+
+  pub fn mark_removed(&self, conversation_id: ConversationId, user: UserId) {
+    self.controls().removed.insert((conversation_id, user));
+  }
+
+  fn forget_controls(&self, conversation_id: ConversationId) {
+    let mut controls = self.controls();
+    controls.locked.remove(&conversation_id);
+    controls
+      .removed
+      .retain(|(conversation, _)| *conversation != conversation_id);
+  }
+
+  fn controls(&self) -> std::sync::MutexGuard<'_, HostControls> {
+    self.controls.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  /// Tells the SFU what the host wants (wire format: `POST /internal/v1/calls/control`).
+  pub async fn send_control(&self, request: &SfuControlRequest) -> Result<(), ApiError> {
+    let target = self
+      .maybe_control
+      .as_ref()
+      .ok_or_else(|| ApiError::Unavailable("host controls are not configured".into()))?;
+    let token = self
+      .maybe_sfu_token
+      .as_deref()
+      .ok_or_else(|| ApiError::Unavailable("host controls need the SFU registration token".into()))?;
+    let response = target
+      .client
+      .post(&target.url)
+      .bearer_auth(String::from_utf8_lossy(token))
+      .json(request)
+      .send()
+      .await
+      .map_err(|error| ApiError::Unavailable(format!("the SFU is not reachable: {error}")))?;
+    match response.status() {
+      status if status.is_success() => Ok(()),
+      reqwest::StatusCode::NOT_FOUND => Err(ApiError::call_not_found()),
+      status => Err(ApiError::Unavailable(format!(
+        "the SFU answered with status {status}"
+      ))),
+    }
   }
 
   /// The conversation's current call, or a new one from `new_call_id`.
@@ -235,6 +356,8 @@ impl CallService {
     if call.participants.is_empty() {
       let call_id = call.call_id;
       active.remove(&conversation_id);
+      drop(active);
+      self.forget_controls(conversation_id);
       return LeaveChange::Ended {
         conversation_id,
         call_id,
@@ -256,6 +379,14 @@ impl CallService {
     call.is_ringing = false;
     let started = call.maybe_started?;
     Some(call.snapshot(conversation_id, started.by, started.at))
+  }
+
+  /// Whether a device of the user is in the roster of a running call.
+  pub fn is_in_call(&self, user: UserId) -> bool {
+    self
+      .lock()
+      .values()
+      .any(|call| call.participants.iter().any(|entry| entry.user_id == user))
   }
 
   /// The running call of the conversation: one with at least one participant.
@@ -323,6 +454,9 @@ pub async fn create_join_token(
     return Err(ApiError::device_not_found());
   }
 
+  if access.view.conversation.kind == ConversationKind::Meeting {
+    check_meeting_admission(state, calls, caller, conversation_id).await?;
+  }
   let call_id = calls.call_for(conversation_id, Instant::now(), || state.next_id())?;
   let claims = calls.claims(call_id, caller.user.id, request.device_id, unix_now_secs()?);
   Ok(CallJoinTokenResponse {
@@ -331,6 +465,40 @@ pub async fn create_join_token(
     sfu_url: calls.sfu_url.clone(),
     expires_at: UnixMillis(i64::try_from(claims.exp).unwrap_or(i64::MAX).saturating_mul(1000)),
   })
+}
+
+/// A meeting that is over, a lock and removals by the host keep people out of its call.
+async fn check_meeting_admission(
+  state: &AppState,
+  calls: &CallService,
+  caller: &AuthenticatedUser,
+  conversation_id: ConversationId,
+) -> Result<(), ApiError> {
+  let Some(meeting) = state
+    .database
+    .get_meeting_by_conversation(conversation_id)
+    .await?
+  else {
+    return Ok(());
+  };
+  if meeting.status != teamcraft_proto::MeetingStatus::Scheduled.as_str() {
+    return Err(ApiError::Conflict("the meeting is over".into()));
+  }
+  if calls.is_removed(conversation_id, caller.user.id) {
+    return Err(ApiError::Forbidden(
+      "the host removed you from the meeting".into(),
+    ));
+  }
+  if calls.is_locked(conversation_id)
+    && !state
+      .database
+      .meeting_host_ids(&meeting)
+      .await?
+      .contains(&caller.user.id)
+  {
+    return Err(ApiError::Forbidden("the meeting is locked".into()));
+  }
+  Ok(())
 }
 
 /// The call running in the conversation, for members.
@@ -388,6 +556,7 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
   );
   let change = calls.participant_joined(conversation_id, entry, rings, now);
   let members = state.database.conversation_member_ids(conversation_id).await?;
+  record_join(state, &change, report.user_id).await;
   match change {
     JoinChange::Unchanged => {},
     JoinChange::Started(snapshot) => {
@@ -425,6 +594,7 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
     },
     JoinChange::Updated(snapshot) => publish_update(state, members, &snapshot),
   }
+  refresh_caller_presence(state, report.user_id).await;
   Ok(())
 }
 
@@ -441,6 +611,9 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
   let change = calls.participant_left(conversation_id, entry);
   if matches!(change, LeaveChange::Unchanged) {
     return Ok(());
+  }
+  if let LeaveChange::Ended { call_id, .. } = &change {
+    finish_history(state, *call_id).await;
   }
   let members = state.database.conversation_member_ids(conversation_id).await?;
   match change {
@@ -460,7 +633,15 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
       );
     },
   }
+  refresh_caller_presence(state, report.user_id).await;
   Ok(())
+}
+
+/// Being in a call is part of a user's presence ("in a call"); tell the people who see it.
+async fn refresh_caller_presence(state: &AppState, user: UserId) {
+  if let Err(error) = super::presence::refresh_presence(state, user).await {
+    warn!(%error, "refreshing presence after a call report failed");
+  }
 }
 
 fn calls_of(state: &AppState) -> Result<&Arc<CallService>, ApiError> {
@@ -482,6 +663,81 @@ fn publish_update(state: &AppState, members: Vec<UserId>, snapshot: &CallSnapsho
   );
 }
 
+/// Writes the call into the history the first time we hear of it, and who took part.
+async fn record_join(state: &AppState, change: &JoinChange, user: UserId) {
+  let snapshot = match change {
+    JoinChange::Unchanged => return,
+    JoinChange::Started(snapshot) => {
+      let started_at =
+        super::convert::offset_date_time(snapshot.started_at).unwrap_or_else(OffsetDateTime::now_utc);
+      if let Err(error) = state
+        .database
+        .start_call_record(
+          snapshot.call_id,
+          snapshot.conversation_id,
+          snapshot.started_by,
+          started_at,
+          snapshot.is_ringing,
+        )
+        .await
+      {
+        warn!(%error, "recording the call failed");
+        return;
+      }
+      snapshot
+    },
+    JoinChange::Updated(snapshot) => snapshot,
+  };
+  if let Err(error) = state
+    .database
+    .record_call_participant(snapshot.call_id, user)
+    .await
+  {
+    warn!(%error, "recording a call participant failed");
+  }
+}
+
+/// Closes the history entry; a ringing call that nobody answered is a missed call.
+async fn finish_history(state: &AppState, call_id: CallId) {
+  if let Err(error) = state
+    .database
+    .finish_call_record(call_id, OffsetDateTime::now_utc())
+    .await
+  {
+    warn!(%error, "closing the call record failed");
+  }
+  report_missed(state, call_id).await;
+}
+
+/// Tells the people who were rung and did not join, once per call.
+async fn report_missed(state: &AppState, call_id: CallId) {
+  let missed = match state.database.claim_missed_call(call_id).await {
+    Ok(Some(missed)) => missed,
+    Ok(None) => return,
+    Err(error) => {
+      warn!(%error, "looking for a missed call failed");
+      return;
+    },
+  };
+  let members = match state.database.conversation_member_ids(missed.conversation).await {
+    Ok(members) => members,
+    Err(error) => {
+      warn!(%error, "listing the members of a missed call failed");
+      return;
+    },
+  };
+  for member in members.into_iter().filter(|member| *member != missed.started_by) {
+    super::system_events::emit(
+      state,
+      missed.conversation,
+      teamcraft_proto::SystemEventKind::MissedCall,
+      Some(missed.started_by),
+      Some(member),
+    )
+    .await;
+  }
+}
+
 /// Stops the ringing after the timeout unless somebody joined (or the call ended) meanwhile.
 fn spawn_ring_timeout(state: AppState, conversation_id: ConversationId, call_id: CallId, timeout: Duration) {
   tokio::spawn(async move {
@@ -490,6 +746,7 @@ fn spawn_ring_timeout(state: AppState, conversation_id: ConversationId, call_id:
     let Some(snapshot) = calls.stop_ringing(conversation_id, call_id) else {
       return;
     };
+    report_missed(&state, call_id).await;
     match state.database.conversation_member_ids(conversation_id).await {
       Ok(members) => publish_update(&state, members, &snapshot),
       Err(error) => warn!(%error, "could not publish the end of ringing"),
@@ -615,6 +872,7 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       call_idle_secs: 3600,
       maybe_sfu_registration_token: None,
       ring_timeout_secs: 30,
+      maybe_sfu_control_url: None,
     }
   }
 

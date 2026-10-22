@@ -71,6 +71,18 @@ impl BlobStore {
     action.sign(self.expiry)
   }
 
+  /// Like [`Self::presign_upload`], and the storage also rejects another `Content-Type`.
+  pub fn presign_typed_upload(&self, key: &str, content_length: u64, content_type: &str) -> Url {
+    let mut action = self.bucket.put_object(Some(&self.credentials), key);
+    action
+      .headers_mut()
+      .insert("content-length", content_length.to_string());
+    action
+      .headers_mut()
+      .insert("content-type", content_type.to_owned());
+    action.sign(self.expiry)
+  }
+
   pub fn presign_download(&self, key: &str) -> Url {
     self
       .bucket

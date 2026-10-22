@@ -4,10 +4,11 @@ use std::collections::HashSet;
 
 use teamcraft_db::{PresencePreference, StoredStatus};
 use teamcraft_proto::{
-  CustomStatus, GatewayEvent, ListPresenceResponse, ManualPresence, PresenceState, SetCustomStatusRequest,
-  SetPresenceRequest, SetPresenceResponse, UserId, UserPresence,
+  CustomStatus, GatewayEvent, ListPresenceResponse, ManualPresence, PresenceActivity, PresenceState,
+  SetCustomStatusRequest, SetPresenceRequest, SetPresenceResponse, UserId, UserPresence,
 };
 use time::OffsetDateTime;
+use tracing::warn;
 
 use super::access::is_guest;
 use super::convert::{offset_date_time, unix_millis};
@@ -42,17 +43,120 @@ pub fn derive_state(
   }
 }
 
+/// The status others see: the one the user set, else what the server derived (a call, a meeting).
+/// Nothing if the workspace switched statuses off, and nothing derived for users who appear offline.
+async fn status_of(
+  state: &AppState,
+  user: UserId,
+  presence: &PresenceState,
+  now: OffsetDateTime,
+) -> Result<Option<CustomStatus>, ApiError> {
+  if !state.policy.get().presence.statuses_enabled {
+    return Ok(None);
+  }
+  if let Some(status) = state
+    .database
+    .get_custom_statuses(&[user], now)
+    .await?
+    .remove(&user)
+  {
+    return Ok(Some(status_response(&status)));
+  }
+  if *presence == PresenceState::Offline {
+    return Ok(None);
+  }
+  derived_status(state, user, now).await
+}
+
+/// "In a call" beats "in a meeting"; a meeting known to TeamCraft beats a busy period of the calendar.
+async fn derived_status(
+  state: &AppState,
+  user: UserId,
+  now: OffsetDateTime,
+) -> Result<Option<CustomStatus>, ApiError> {
+  if state
+    .maybe_calls
+    .as_ref()
+    .is_some_and(|calls| calls.is_in_call(user))
+  {
+    return Ok(Some(derived(PresenceActivity::InCall, None)));
+  }
+  let maybe_meeting_end = state.database.users_in_meeting(&[user], now).await?.remove(&user);
+  let maybe_end = maybe_meeting_end.or_else(|| state.hub.busy_until(user, now));
+  Ok(maybe_end.map(|end| derived(PresenceActivity::InMeeting, Some(end))))
+}
+
+fn derived(activity: PresenceActivity, maybe_end: Option<OffsetDateTime>) -> CustomStatus {
+  CustomStatus {
+    maybe_emoji: None,
+    maybe_text: None,
+    maybe_expires_at: maybe_end.map(unix_millis),
+    maybe_activity: Some(activity),
+  }
+}
+
+/// Turns devices that have shown no sign of activity since `cutoff` into idle ones (the workspace's
+/// away timeout) and updates the presence of their users. Returns how many users changed.
+pub async fn demote_idle_devices(state: &AppState, cutoff: tokio::time::Instant) -> Result<usize, ApiError> {
+  let users = state.hub.demote_idle(cutoff);
+  for user in &users {
+    refresh_presence(state, *user).await?;
+  }
+  Ok(users.len())
+}
+
+/// Re-evaluates the derived statuses of everybody online; with `polls_calendar` the calendar
+/// server is asked first who is busy. Returns how many users were looked at.
+pub async fn refresh_derived_statuses(
+  state: &AppState,
+  now: OffsetDateTime,
+  polls_calendar: bool,
+) -> Result<usize, ApiError> {
+  let users = state.hub.online_users();
+  if polls_calendar {
+    poll_calendar(state, &users, now).await;
+  }
+  for user in &users {
+    refresh_presence(state, *user).await?;
+  }
+  Ok(users.len())
+}
+
+/// Asks the calendar server when the given users are busy. A failure only means the old answers stay.
+async fn poll_calendar(state: &AppState, users: &[UserId], now: OffsetDateTime) {
+  let Some(calendar) = state
+    .maybe_meetings
+    .as_ref()
+    .and_then(|meetings| meetings.calendar())
+  else {
+    return;
+  };
+  let lookahead = time::Duration::seconds(
+    i64::try_from(state.settings.presence.calendar_lookahead_secs).unwrap_or(i64::MAX / 4),
+  );
+  let emails = match state.database.get_user_emails(users).await {
+    Ok(emails) => emails,
+    Err(error) => {
+      warn!(%error, "reading the e-mail addresses for the calendar poll failed");
+      return;
+    },
+  };
+  for (user, email) in emails {
+    match calendar.busy_periods(&email, now, now + lookahead).await {
+      Ok(periods) => state
+        .hub
+        .set_busy_periods(user, periods.into_iter().map(|p| (p.start, p.end)).collect()),
+      Err(error) => warn!(%error, user_id = %user, "asking the calendar for busy periods failed"),
+    }
+  }
+}
+
 /// Recomputes the user's presence and tells everyone who shares a conversation if it changed.
 pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let preference = state.database.get_presence_preference(user).await?;
   let now = OffsetDateTime::now_utc();
   let presence = derive_state(&preference, state.hub.device_aggregate(user), now);
-  let maybe_status = state
-    .database
-    .get_custom_statuses(&[user], now)
-    .await?
-    .remove(&user)
-    .map(|status| status_response(&status));
+  let maybe_status = status_of(state, user, &presence, now).await?;
   let snapshot = PresenceSnapshot {
     state: presence.clone(),
     maybe_status: maybe_status.clone(),
@@ -127,18 +231,34 @@ pub async fn list_presence(
   } else {
     requested
   };
-  // Statuses come from the database: users who are offline still show theirs.
-  let mut statuses = state
-    .database
-    .get_custom_statuses(&visible, OffsetDateTime::now_utc())
-    .await?;
+  // Custom statuses come from the database: users who are offline still show theirs.
+  let are_statuses_enabled = state.policy.get().presence.statuses_enabled;
+  let mut statuses = if are_statuses_enabled {
+    state
+      .database
+      .get_custom_statuses(&visible, OffsetDateTime::now_utc())
+      .await?
+  } else {
+    std::collections::HashMap::new()
+  };
   Ok(ListPresenceResponse {
     presences: visible
       .into_iter()
-      .map(|user_id| UserPresence {
-        user_id,
-        state: state.hub.last_presence(user_id).state,
-        maybe_status: statuses.remove(&user_id).map(|status| status_response(&status)),
+      .map(|user_id| {
+        let snapshot = state.hub.last_presence(user_id);
+        let maybe_status = statuses
+          .remove(&user_id)
+          .map(|status| status_response(&status))
+          .or_else(|| {
+            snapshot
+              .maybe_status
+              .filter(|status| status.maybe_activity.is_some() && are_statuses_enabled)
+          });
+        UserPresence {
+          user_id,
+          state: snapshot.state,
+          maybe_status,
+        }
       })
       .collect(),
   })
@@ -181,6 +301,19 @@ pub async fn set_custom_status(
     .as_deref()
     .map(str::trim)
     .filter(|t| !t.is_empty());
+  let policy = state.policy.get();
+  if !policy.presence.statuses_enabled {
+    return Err(ApiError::Forbidden("statuses are switched off".into()));
+  }
+  let maybe_preset =
+    policy.presence.presets.iter().find(|preset| {
+      preset.maybe_emoji.as_deref().map(str::trim) == emoji && Some(preset.text.trim()) == text
+    });
+  if !policy.presence.custom_status_enabled && maybe_preset.is_none() {
+    return Err(ApiError::Forbidden(
+      "custom statuses are switched off; choose one of the presets".into(),
+    ));
+  }
   if emoji.is_none() && text.is_none() {
     return Err(ApiError::InvalidRequest(
       "a status needs an emoji or a text".into(),
@@ -203,7 +336,10 @@ pub async fn set_custom_status(
       }
       Some(at)
     },
-    None => None,
+    // A preset can end by itself.
+    None => maybe_preset
+      .and_then(|preset| preset.maybe_duration_minutes)
+      .map(|minutes| OffsetDateTime::now_utc() + time::Duration::minutes(i64::from(minutes))),
   };
 
   let stored = StoredStatus {
@@ -235,6 +371,7 @@ fn status_response(status: &StoredStatus) -> CustomStatus {
     maybe_emoji: status.maybe_emoji.clone(),
     maybe_text: status.maybe_text.clone(),
     maybe_expires_at: status.maybe_expires_at.map(unix_millis),
+    maybe_activity: None,
   }
 }
 

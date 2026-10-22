@@ -12,6 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
+use teamcraft_crypto::account::subresource_integrity;
+use tracing::error;
+
 use axum::Router;
 use axum::extract::Request;
 use axum::http::header::{
@@ -30,19 +33,43 @@ const REVALIDATE: &str = "no-cache";
 const SHORT_LIVED: &str = "public, max-age=3600";
 const NEVER_STORE: &str = "no-store";
 const INDEX: &str = "index.html";
+const DOWNLOAD_PAGE: &str = "download.html";
+const SRI_OPEN: &str = "{{sri:";
 
 /// The fallback router: static files if a directory is configured, plain 404 otherwise.
 pub fn router(config: &WebConfig) -> Router {
+  let maybe_share = config
+    .maybe_share_page_dir
+    .as_deref()
+    .and_then(|dir| match ShareBundle::load(dir) {
+      Ok(bundle) => Some(bundle),
+      Err(message) => {
+        error!(%message, "the share download page cannot be served");
+        None
+      },
+    });
+  // Only the dedicated download page gets its own policy; the app shell keeps the app's.
+  let share_policy = maybe_share
+    .as_ref()
+    .and_then(|_| HeaderValue::from_str(&config.share_page_content_security_policy).ok());
   let Some(dir) = config.maybe_static_dir.clone() else {
-    return Router::new();
+    return match maybe_share {
+      Some(bundle) => share_routes(Router::new(), bundle).layer(middleware::from_fn(move |request, next| {
+        add_headers(None, share_policy.clone(), request, next)
+      })),
+      None => Router::new(),
+    };
   };
   let files = ServeDir::new(&dir)
     .precompressed_br()
     .precompressed_gzip()
     .fallback(ServeFile::new(dir.join(INDEX)));
   let policy = HeaderValue::from_str(&config.content_security_policy).ok();
-  Router::new()
-    .route("/f/{id}", get(share_page_handler).with_state(dir))
+  let router = match maybe_share {
+    Some(bundle) => share_routes(Router::new(), bundle),
+    None => Router::new().route("/f/{id}", get(share_page_handler).with_state(dir)),
+  };
+  router
     .route(
       "/api/{*rest}",
       get(api_not_found)
@@ -53,8 +80,63 @@ pub fn router(config: &WebConfig) -> Router {
     )
     .fallback_service(files)
     .layer(middleware::from_fn(move |request, next| {
-      add_headers(policy.clone(), request, next)
+      add_headers(policy.clone(), share_policy.clone(), request, next)
     }))
+}
+
+/// `/f/<id>` serves the small download page and `/f-assets/...` its files.
+fn share_routes(router: Router, bundle: ShareBundle) -> Router {
+  let assets = ServeDir::new(&bundle.dir);
+  router
+    .route("/f/{id}", get(bundle_page_handler).with_state(bundle.page))
+    .nest_service("/f-assets", assets)
+}
+
+async fn bundle_page_handler(axum::extract::State(page): axum::extract::State<String>) -> Response {
+  ([(CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
+}
+
+/// The download page of share links with Subresource Integrity values filled in.
+struct ShareBundle {
+  dir: PathBuf,
+  page: String,
+}
+
+impl ShareBundle {
+  /// Reads `download.html` and replaces every `{{sri:<file>}}` by the SRI value of that file of
+  /// the bundle. A missing file or a name outside the bundle is an error: the page must not be
+  /// served without integrity checks.
+  fn load(dir: &Path) -> Result<Self, String> {
+    let template = std::fs::read_to_string(dir.join(DOWNLOAD_PAGE))
+      .map_err(|error| format!("reading {DOWNLOAD_PAGE}: {error}"))?;
+    let mut page = String::with_capacity(template.len() + 256);
+    let mut rest = template.as_str();
+    while let Some(start) = rest.find(SRI_OPEN) {
+      page.push_str(&rest[..start]);
+      let after = &rest[start + SRI_OPEN.len()..];
+      let end = after.find("}}").ok_or("an unterminated {{sri:...}}")?;
+      let name = &after[..end];
+      let is_plain = !name.is_empty()
+        && !name.starts_with('/')
+        && !name
+          .split('/')
+          .any(|part| part.is_empty() || part == "." || part == "..")
+        && name
+          .bytes()
+          .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'/'));
+      if !is_plain {
+        return Err(format!("{name:?} is not a file name inside the bundle"));
+      }
+      let bytes = std::fs::read(dir.join(name)).map_err(|error| format!("reading {name}: {error}"))?;
+      page.push_str(&subresource_integrity(&bytes));
+      rest = &after[end + 2..];
+    }
+    page.push_str(rest);
+    Ok(Self {
+      dir: dir.to_owned(),
+      page,
+    })
+  }
 }
 
 /// The app shell for the download page of a shared file.
@@ -70,11 +152,17 @@ async fn api_not_found() -> StatusCode {
 }
 
 /// Adds cache and security headers according to what was requested.
-async fn add_headers(policy: Option<HeaderValue>, request: Request, next: Next) -> Response {
+async fn add_headers(
+  policy: Option<HeaderValue>,
+  share_policy: Option<HeaderValue>,
+  request: Request,
+  next: Next,
+) -> Response {
   let path = request.uri().path().to_owned();
   let mut response = next.run(request).await;
   let headers = response.headers_mut();
-  if let Some(policy) = policy {
+  let is_share = path.starts_with("/f/") || path.starts_with("/f-assets/");
+  if let Some(policy) = if is_share { share_policy.or(policy) } else { policy } {
     headers.insert(CONTENT_SECURITY_POLICY, policy);
   }
   headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -86,6 +174,9 @@ async fn add_headers(policy: Option<HeaderValue>, request: Request, next: Next) 
     .is_some_and(|kind| kind.starts_with("text/html"));
   let cache = if path.starts_with("/f/") {
     NEVER_STORE
+  } else if path.starts_with("/f-assets/") && !has_content_hash(&path) {
+    // Integrity values pin exact versions of these files.
+    REVALIDATE
   } else if is_page {
     REVALIDATE
   } else if has_content_hash(&path) {

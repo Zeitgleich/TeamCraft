@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE local_accounts\n         SET totp_secret_sealed = $2, is_totp_confirmed = false, totp_last_step = NULL\n         WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "906982bdca3977a6601ca1335dba1128b630d1a60aff60835aa384af07e49922"
+}

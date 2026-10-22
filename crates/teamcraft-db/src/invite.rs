@@ -124,6 +124,7 @@ impl Database {
     &self,
     user: UserId,
     email: &str,
+    guest_default_expiry_secs: Option<f64>,
   ) -> Result<Vec<AppliedInvite>, DbError> {
     let mut tx = self.pool().begin().await?;
     let invites = sqlx::query!(
@@ -140,12 +141,17 @@ impl Database {
     for invite in invites {
       sqlx::query!(
         r#"INSERT INTO space_members (space_id, user_id, role, expires_at, sponsor_user_id)
-           VALUES ($1, $2, $3, $4, $5) ON CONFLICT (space_id, user_id) DO NOTHING"#,
+           VALUES ($1, $2, $3,
+                   COALESCE($4, CASE WHEN $3 = 'guest' AND $6::float8 IS NOT NULL
+                                     THEN now() + make_interval(secs => $6) END),
+                   $5)
+           ON CONFLICT (space_id, user_id) DO NOTHING"#,
         invite.space_id,
         to_db(user),
         invite.space_role,
         invite.expires_at,
         invite.sponsor_user_id,
+        guest_default_expiry_secs,
       )
       .execute(&mut *tx)
       .await?;

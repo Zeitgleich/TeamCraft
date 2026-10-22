@@ -65,6 +65,8 @@ initial_delay_secs = 30
 # Admin API of the realm; derived from the issuer when it looks like <base>/realms/<realm>.
 # admin_url = "http://127.0.0.1:8080/admin/realms/teamcraft-dev"
 page_size = 100
+# Mirror the provider's top-level groups as user groups (@handle) with their members.
+sync_groups = false
 
 [logging]
 # `tracing` filter, e.g. "info" or "teamcraft_server=debug,info". The RUST_LOG variable wins.
@@ -88,6 +90,16 @@ max_text_length = 1000
 default_page_size = 50
 max_page_size = 200
 max_directory_results = 50
+# Largest avatar image in bytes (PNG, JPEG or WebP).
+max_avatar_bytes = 1048576
+# How long a request for organization recovery waits for admin approvals.
+org_recovery_request_ttl_secs = 86400
+# Largest sealed share or sealed backup key the server stores for a recovery.
+max_recovery_blob_bytes = 8192
+# Longest title, department and similar profile text, in characters.
+max_profile_text_chars = 100
+# Most members of one user group.
+max_user_group_members = 5000
 # Unread counts look at this many of the newest unread messages per conversation; a count equal to it
 # means "that many or more" (clients show "1000+"). Keeps the cost independent of huge unread backlogs.
 max_unread_counted = 1000
@@ -161,12 +173,24 @@ read_receipts_default = true
 urgent_repeat_interval_secs = 120
 urgent_max_pushes = 5
 urgent_scheduler_interval_secs = 15
+# While a desktop device of a user is active, pushes to their phones wait this long and are sent only
+# if the message is still unread; 0 pushes at once.
+mobile_push_delay_secs = 120
 
 # Integration channels (ARCHITECTURE.md §4.5): channels flagged `is_integration` receive machine output
 # (logs, monitoring, CI) from a bridge. They push only for @mentions and get this retention.
 [integration]
 # Days; 0 sets no retention. A channel's own retention setting wins.
 default_retention_days = 30
+
+# Guests: external people with a sponsor and an expiry (PLAN.md §12).
+[guests]
+# Guests added or invited without an explicit expiry expire this many days later; 0 = never.
+default_expiry_days = 90
+# If not empty, guests can only be invited with e-mail addresses of these domains and their subdomains.
+allowed_email_domains = []
+# How often expired guests are removed from their spaces and channels (their sponsor is told).
+expiry_check_interval_secs = 3600
 
 # Request limits and response hardening of the API.
 [security]
@@ -198,6 +222,11 @@ auth_failures_per_minute = 30
 [web]
 # static_dir = "/srv/teamcraft/web"
 # content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; ..."
+# The small static download page of share links (/f/<id>): download.html plus the files it uses, served
+# under /f-assets/. {{sri:<file>}} in download.html becomes that file's Subresource Integrity value.
+# Without it /f/<id> serves the app shell.
+# share_page_dir = "/srv/teamcraft/share-page"
+# share_page_content_security_policy = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; ..."
 
 # Meetings (PLAN.md §9): scheduled and instant meetings with their own chat. Without this section the
 # /meetings endpoints answer 503.
@@ -225,6 +254,9 @@ auth_failures_per_minute = 30
 # Prefer TEAMCRAFT_MEETINGS__CALDAV__PASSWORD; an app password works.
 # password = "..."
 # request_timeout_secs = 10
+# Where one user's calendar lives ({email} is their address). With it the server asks for the busy
+# periods of people who are online and shows them as "in a meeting" (CalDAV free-busy report).
+# free_busy_url_template = "https://cal.example.com/dav/calendars/{email}/personal/"
 #
 # Invitations go out as iMIP e-mail (text/calendar + invite.ics). Without this section no mail is sent.
 # [meetings.smtp]
@@ -283,3 +315,42 @@ allow_private_endpoints = false
 # sfu_registration_token = "..."
 # DMs and group DMs ring until somebody else joins or this many seconds pass.
 # ring_timeout_secs = 30
+# Where the SFU takes host controls (mute all, remove, lock, end for everyone) on its internal listener;
+# the registration token above authenticates this server. Without it those controls answer 503.
+# sfu_control_url = "http://sfu.internal:8081"
+
+# E-mail the server sends on its own: invitations to spaces and channels (meeting invitations use [meetings]).
+[mail]
+# public_base_url = "https://chat.example.com"
+# invite_subject = "{inviter} invited you to {space}"
+# invite_body = "{inviter} invited you to \"{space}\" as {role}.\n\nSign in with this e-mail address to join: {url}\n"
+# [mail.smtp]
+# host = "smtp.example.com"
+# port = 587
+# security = "start_tls"
+# username = "teamcraft"
+# password = "set via TEAMCRAFT_MAIL__SMTP__PASSWORD"
+# from_address = "no-reply@example.com"
+# from_name = "TeamCraft"
+
+# Derived presence: "in a meeting" and "in a call" statuses, and the away timeout (PLAN.md §4).
+[presence]
+# How often derived statuses and the away timeout are re-evaluated for online users.
+auto_status_interval_secs = 30
+# How often the calendar server is asked who is busy (needs meetings.caldav.free_busy_url_template).
+calendar_poll_interval_secs = 300
+# Busy periods starting within this time are fetched, so the status switches on at their start.
+calendar_lookahead_secs = 900
+
+# Share links for external download (e2ee.md §4.5.1): anyone with <base>/f/<id>#<file-key> downloads one
+# file's ciphertext; the key stays in the fragment. Who may create links is the create_share_link
+# permission (members yes, guests no by default).
+[shares]
+is_enabled = true
+default_expiry_days = 7
+max_expiry_days = 30
+# Most downloads a link may allow; 0 = no cap. Links made without a limit get the cap.
+max_downloads_cap = 0
+# Public URL of this server without trailing slash; shown as <base>/f/<id> in the API.
+public_base_url = ""
+max_links_per_user = 500

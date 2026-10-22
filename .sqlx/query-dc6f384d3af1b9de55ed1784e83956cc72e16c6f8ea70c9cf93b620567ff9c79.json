@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO space_members (space_id, user_id, role, expires_at, sponsor_user_id)\n           VALUES ($1, $2, $3,\n                   COALESCE($4, CASE WHEN $3 = 'guest' AND $6::float8 IS NOT NULL\n                                     THEN now() + make_interval(secs => $6) END),\n                   $5)\n           ON CONFLICT (space_id, user_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dc6f384d3af1b9de55ed1784e83956cc72e16c6f8ea70c9cf93b620567ff9c79"
+}

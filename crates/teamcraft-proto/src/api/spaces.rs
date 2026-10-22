@@ -69,6 +69,12 @@ pub struct UpdateSpaceRequest {
 pub struct SpaceMemberResponse {
   pub user: UserSummary,
   pub role: SpaceRole,
+  /// When a guest's membership ends (they are removed automatically).
+  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<UnixMillis>,
+  /// The employee responsible for a guest; told when the guest expires.
+  #[serde(rename = "sponsor_user_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sponsor_user_id: Option<UserId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -80,11 +86,20 @@ pub struct ListSpaceMembersResponse {
 pub struct AddSpaceMemberRequest {
   pub user_id: UserId,
   pub role: SpaceRole,
+  /// Guests only; default `[guests] default_expiry_days` from now.
+  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<UnixMillis>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSpaceMemberRequest {
   pub role: SpaceRole,
+  /// Sets a guest's expiry (extend or shorten).
+  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<UnixMillis>,
+  /// Removes a guest's expiry (needs the same permission as setting it).
+  #[serde(default)]
+  pub clears_expiry: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

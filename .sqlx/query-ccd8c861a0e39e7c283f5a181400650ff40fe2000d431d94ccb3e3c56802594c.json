@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_profiles\n         SET avatar_key = pending_avatar_key, avatar_content_type = pending_avatar_content_type,\n             avatar_size_bytes = pending_avatar_size_bytes, pending_avatar_key = NULL,\n             pending_avatar_content_type = NULL, pending_avatar_size_bytes = NULL, updated_at = now()\n         WHERE user_id = $1 AND pending_avatar_key IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ccd8c861a0e39e7c283f5a181400650ff40fe2000d431d94ccb3e3c56802594c"
+}

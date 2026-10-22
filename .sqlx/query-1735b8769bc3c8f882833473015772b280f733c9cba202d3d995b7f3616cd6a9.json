@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO local_accounts (user_id, login, activation_digest, activation_expires_at)\n         VALUES ($1, $2, $3, $4) ON CONFLICT (login) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bytea",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1735b8769bc3c8f882833473015772b280f733c9cba202d3d995b7f3616cd6a9"
+}

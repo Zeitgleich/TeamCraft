@@ -8,7 +8,7 @@ use teamcraft_db::{
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, CreateChannelRequest,
   CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy, ListConversationsQuery,
-  ListConversationsResponse, Permission, SpaceId, Target, UpdateConversationRequest, UserId,
+  ListConversationsResponse, Permission, SpaceId, SystemEventKind, Target, UpdateConversationRequest, UserId,
 };
 
 use super::access::{
@@ -16,6 +16,7 @@ use super::access::{
 };
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{ConversationExtras, conversation_response};
+use super::system_events;
 use super::{validate_name, validate_text};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -81,7 +82,7 @@ pub async fn create_channel(
     state,
     caller,
     Permission::CreateChannel,
-    &space_target(space_access.view.maybe_role.clone()),
+    &space_target(Some(space), space_access.view.maybe_role.clone()),
   )?;
   if space_access.view.space.is_archived {
     return Err(ApiError::Conflict("the space is archived".into()));
@@ -214,6 +215,12 @@ pub async fn update_conversation(
     }
   }
 
+  let kinds = visible_changes(
+    &access.view.conversation,
+    maybe_name.as_deref(),
+    request.maybe_is_archived,
+    request.maybe_moderation.as_ref(),
+  );
   state
     .database
     .update_conversation(
@@ -243,11 +250,36 @@ pub async fn update_conversation(
     &json!({}),
   )
   .await?;
+  for kind in kinds {
+    system_events::emit(state, id, kind, Some(caller.user.id), None).await;
+  }
   let members = state.database.conversation_member_ids(id).await?;
   state
     .hub
     .publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
   get_conversation(state, caller, id).await
+}
+
+/// What members should be told about a settings change.
+fn visible_changes(
+  conversation: &teamcraft_db::Conversation,
+  maybe_name: Option<&str>,
+  maybe_is_archived: Option<bool>,
+  maybe_moderation: Option<&teamcraft_proto::ChannelModeration>,
+) -> Vec<SystemEventKind> {
+  let mut kinds = Vec::new();
+  if maybe_name.is_some_and(|name| conversation.maybe_name.as_deref() != Some(name)) {
+    kinds.push(SystemEventKind::Renamed);
+  }
+  match maybe_is_archived {
+    Some(true) if !conversation.is_archived => kinds.push(SystemEventKind::Archived),
+    Some(false) if conversation.is_archived => kinds.push(SystemEventKind::Unarchived),
+    _ => {},
+  }
+  if maybe_moderation.is_some_and(|moderation| *moderation != conversation.moderation) {
+    kinds.push(SystemEventKind::ModerationChanged);
+  }
+  kinds
 }
 
 /// Retention suited to logs for a channel that just became an integration channel, unless the
@@ -275,7 +307,7 @@ async fn apply_integration_defaults(state: &AppState, id: ConversationId) -> Res
 /// Builds the response of a conversation with participants and the guest badge.
 pub async fn respond(state: &AppState, view: &ConversationView) -> Result<ConversationResponse, ApiError> {
   let extras = extras_for(state, std::slice::from_ref(view)).await?;
-  Ok(conversation_response(view, &extras))
+  Ok(conversation_response(state, view, &extras))
 }
 
 async fn respond_all(
@@ -286,7 +318,7 @@ async fn respond_all(
   Ok(
     views
       .iter()
-      .map(|view| conversation_response(view, &extras))
+      .map(|view| conversation_response(state, view, &extras))
       .collect(),
   )
 }

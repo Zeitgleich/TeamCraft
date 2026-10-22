@@ -22,6 +22,9 @@ pub struct UserSummary {
   pub maybe_username: Option<String>,
   pub display_name: String,
   pub kind: UserKind,
+  /// Only when the directory policy shows e-mail addresses to the viewer.
+  #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_email: Option<String>,
 }
 
 /// `GET /api/v1/users?query=` – the directory. Guests only find people they share a conversation with.

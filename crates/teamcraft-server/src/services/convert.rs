@@ -4,18 +4,56 @@ use std::collections::{HashMap, HashSet};
 
 use teamcraft_db::{Category, ConversationView, Device, Invite, Membership, SpaceView, StoredMessage, User};
 use teamcraft_proto::{
-  Base64Bytes, CategoryResponse, ConversationId, ConversationResponse, DeviceResponse, InviteResponse,
-  MessageResponse, MyMembership, PushProvider, SpaceResponse, UnixMillis, UserSummary,
+  Base64Bytes, CategoryResponse, ConversationId, ConversationResponse, DeviceResponse, DirectoryPolicy,
+  DisplayNameFormat, InviteResponse, MessageResponse, MyMembership, PushProvider, SpaceResponse, UnixMillis,
+  UserSummary,
 };
 use time::OffsetDateTime;
 
-pub fn user_summary(user: &User) -> UserSummary {
+use crate::state::AppState;
+
+/// What others see of a user, shaped by the directory policy (display name format and full name
+/// privacy). E-mail addresses are added only by the directory lookups.
+pub fn user_summary(state: &AppState, user: &User) -> UserSummary {
+  let policy = state.policy.get();
   UserSummary {
     id: user.id,
     maybe_username: user.maybe_username.clone(),
-    display_name: user.display_name.clone(),
+    display_name: presented_name(&policy.directory, user),
     kind: user.kind.clone(),
+    maybe_email: None,
   }
+}
+
+/// The display name as the directory policy wants it shown.
+pub fn presented_name(policy: &DirectoryPolicy, user: &User) -> String {
+  let username = user.maybe_username.as_deref();
+  if !policy.shows_full_name || policy.display_name_format == DisplayNameFormat::Username {
+    return username.unwrap_or(&user.display_name).to_owned();
+  }
+  match policy.display_name_format {
+    DisplayNameFormat::FirstLast => split_name(&user.display_name).map_or_else(
+      || user.display_name.clone(),
+      |(first, last)| format!("{first} {last}"),
+    ),
+    DisplayNameFormat::LastFirst => split_name(&user.display_name).map_or_else(
+      || user.display_name.clone(),
+      |(first, last)| format!("{last}, {first}"),
+    ),
+    _ => user.display_name.clone(),
+  }
+}
+
+/// (first names, last name) of "Ada Lovelace" or "Lovelace, Ada"; `None` for a single word.
+fn split_name(name: &str) -> Option<(String, String)> {
+  let name = name.trim();
+  if let Some((last, first)) = name.split_once(',') {
+    let (last, first) = (last.trim(), first.trim());
+    return (!last.is_empty() && !first.is_empty()).then(|| (first.to_owned(), last.to_owned()));
+  }
+  let (first, last) = name.rsplit_once(char::is_whitespace)?;
+  let (first, last) = (first.trim(), last.trim());
+  (!first.is_empty() && !last.is_empty()).then(|| (first.to_owned(), last.to_owned()))
 }
 
 pub fn unix_millis(time: OffsetDateTime) -> UnixMillis {
@@ -90,7 +128,11 @@ pub struct ConversationExtras {
   pub with_guests: HashSet<ConversationId>,
 }
 
-pub fn conversation_response(view: &ConversationView, extras: &ConversationExtras) -> ConversationResponse {
+pub fn conversation_response(
+  state: &AppState,
+  view: &ConversationView,
+  extras: &ConversationExtras,
+) -> ConversationResponse {
   let conversation = &view.conversation;
   ConversationResponse {
     id: conversation.id,
@@ -110,7 +152,7 @@ pub fn conversation_response(view: &ConversationView, extras: &ConversationExtra
     participants: extras
       .participants
       .get(&conversation.id)
-      .map(|users| users.iter().map(user_summary).collect())
+      .map(|users| users.iter().map(|user| user_summary(state, user)).collect())
       .unwrap_or_default(),
   }
 }

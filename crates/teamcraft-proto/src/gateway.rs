@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId, ErrorBody, LobbyState,
-  MeetingId, MessageId, MessageResponse, MlsMessageResponse, PresenceState, SpaceId, ThreadId, UnixMillis,
-  UserId, UserSummary, WorkspaceLogKind,
+  MeetingId, MessageId, MessageResponse, MlsMessageResponse, PresenceState, RecoveryRequestId, SpaceId,
+  SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
 };
 
 /// Frames sent by the client.
@@ -117,6 +117,32 @@ pub enum GatewayEvent {
   LobbyDecision {
     meeting_id: MeetingId,
     state: LobbyState,
+  },
+  /// Someone changed their profile or avatar. Sent to people who share a conversation with them.
+  ProfileUpdate {
+    user_id: UserId,
+  },
+  /// A request for organization recovery was made or moved on. Sent to the admins, the person
+  /// and the approvers; they fetch the request.
+  OrgRecoveryUpdate {
+    request_id: RecoveryRequestId,
+  },
+  /// The announcement banner changed or ended. Clients fetch it again.
+  AnnouncementUpdate,
+  /// Something happened to a conversation (a member joined, the channel was archived, ...). Sent
+  /// to its members; shown as a system message.
+  SystemEvent {
+    event: SystemEventResponse,
+  },
+  /// A user group was created, changed, deleted or got other members. Sent to everyone online.
+  UserGroupUpdate {
+    group_id: UserGroupId,
+  },
+  /// A guest's membership of a space ran out and they were removed. Sent to the sponsor and the
+  /// space's admins.
+  GuestExpired {
+    space_id: SpaceId,
+    user: UserSummary,
   },
   /// A member acknowledged an urgent message. Sent to the message's sender and to the member's
   /// other devices.
@@ -330,6 +356,7 @@ mod tests {
         maybe_emoji: Some("🌴".into()),
         maybe_text: Some("Vacation".into()),
         maybe_expires_at: Some(crate::UnixMillis(1000)),
+        maybe_activity: None,
       }),
     };
     assert_eq!(

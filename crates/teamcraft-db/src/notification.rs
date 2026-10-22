@@ -111,6 +111,26 @@ impl Database {
     Ok(())
   }
 
+  /// Whether the user's read position in the conversation is at or past the message.
+  pub async fn has_read_message(
+    &self,
+    user: UserId,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> Result<bool, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT COALESCE(last_read_message_id >= $3, false) AS "has_read!"
+         FROM memberships WHERE conversation_id = $1 AND user_id = $2"#,
+      to_db(conversation),
+      to_db(user),
+      to_db(message),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    // Someone who left the conversation has nothing to read.
+    Ok(row.is_none_or(|row| row.has_read))
+  }
+
   /// Members of the conversation who send (and therefore may see) read receipts, with their read
   /// positions. `default_is_enabled` applies to members who never chose.
   pub async fn list_receipt_members(

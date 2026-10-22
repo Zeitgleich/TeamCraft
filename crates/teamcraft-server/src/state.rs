@@ -1,22 +1,26 @@
 use std::sync::Arc;
 
 use teamcraft_db::{Database, SnowflakeGenerator};
-use teamcraft_proto::PermissionScheme;
 
 use crate::auth::{Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use crate::config::{
-  GatewayConfig, IntegrationConfig, LimitsConfig, NotificationsConfig, PolicyConfig, RendezvousConfig,
-  RetentionJobConfig, RoleNames, SecurityConfig, WebConfig,
+  GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig, LocalAccountsConfig, MailConfig,
+  NotificationsConfig, PolicyConfig, PresenceConfig, RendezvousConfig, RetentionJobConfig, RoleNames,
+  SecurityConfig, SharesConfig, WebConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
 use crate::meetings::MeetingService;
+use crate::meetings::mailer::Mailer;
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
 use crate::security::RateLimits;
 use crate::services::calls::CallService;
+use crate::services::local_accounts::LocalAuth;
+use crate::services::permission_scheme::SchemeStore;
+use crate::services::session::PolicyHolder;
 use crate::storage::BlobStore;
 
 /// Shared, cheaply cloneable application state of all handlers.
@@ -36,7 +40,13 @@ pub struct AppState {
   pub maybe_calls: Option<Arc<CallService>>,
   /// Meetings, if configured.
   pub maybe_meetings: Option<Arc<MeetingService>>,
-  pub scheme: Arc<PermissionScheme>,
+  /// Outgoing e-mail of the server (invitations), if `[mail.smtp]` is configured.
+  pub maybe_mailer: Option<Arc<dyn Mailer>>,
+  /// Local guest accounts, if enabled.
+  pub maybe_local: Option<Arc<LocalAuth>>,
+  /// The signed workspace policy in force.
+  pub policy: Arc<PolicyHolder>,
+  pub scheme: Arc<SchemeStore>,
   pub settings: Arc<Settings>,
   pub rate_limits: Arc<RateLimits>,
 }
@@ -55,6 +65,11 @@ pub struct Settings {
   pub integration: IntegrationConfig,
   pub web: WebConfig,
   pub security: SecurityConfig,
+  pub guests: GuestsConfig,
+  pub mail: MailConfig,
+  pub local_accounts: LocalAccountsConfig,
+  pub presence: PresenceConfig,
+  pub shares: SharesConfig,
   pub push: PushSettings,
 }
 
@@ -76,6 +91,7 @@ pub struct OidcSyncSettings {
   pub client_secret: SecretString,
   pub roles: RoleNames,
   pub page_size: u32,
+  pub sync_groups: bool,
 }
 
 /// What the message routing needs from the push configuration.

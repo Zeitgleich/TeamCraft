@@ -147,7 +147,7 @@ pub async fn list_lobby(
       users
         .iter()
         .find(|user| user.id == row.user)
-        .map(|user| entry(user, row))
+        .map(|user| entry(state, user, row))
     })
     .collect();
   Ok(ListLobbyResponse { entries })
@@ -229,7 +229,7 @@ async fn admit_guest(
       members,
       &GatewayEvent::MembershipAdd {
         conversation_id: meeting.conversation,
-        user: user_summary(&user),
+        user: user_summary(state, &user),
       },
     );
   }
@@ -254,7 +254,7 @@ async fn announce_waiting(
     hosts,
     &GatewayEvent::LobbyJoin {
       meeting_id: meeting.id,
-      user: user_summary(&guest.user),
+      user: user_summary(state, &guest.user),
     },
   );
   Ok(())
@@ -299,9 +299,9 @@ fn access_ends_at(service: &MeetingService, meeting: &StoredMeeting) -> OffsetDa
   meeting.ends_at + service.guest_grace()
 }
 
-fn entry(user: &teamcraft_db::User, row: &LobbyRow) -> LobbyEntry {
+fn entry(state: &AppState, user: &teamcraft_db::User, row: &LobbyRow) -> LobbyEntry {
   LobbyEntry {
-    user: user_summary(user),
+    user: user_summary(state, user),
     requested_at: unix_millis(row.requested_at),
   }
 }

@@ -1,15 +1,17 @@
 //! Who gets a push for a new message (e2ee.md §7): the server decides from metadata it has anyway.
 
+use std::time::Duration;
+
 use teamcraft_db::{DueReminder, PushDeviceRow, PushRecipientRow};
 use teamcraft_proto::{
   ConversationId, ConversationKind, DndSchedule, MessageId, NotificationLevel, PushKind, PushMode,
-  PushWakeUp, ThreadId, UserId,
+  PushProvider, PushWakeUp, ThreadId, UserId,
 };
 use time::OffsetDateTime;
 use tracing::{debug, info, warn};
 
 use super::sender::{PushError, PushTarget, Urgency};
-use crate::gateway::DeviceAggregate;
+use crate::gateway::{ActiveDevices, DeviceAggregate};
 use crate::services::notifications;
 use crate::state::AppState;
 
@@ -171,7 +173,7 @@ fn push_to_recipient(
     is_dnd: is_dnd(recipient, now, unix_seconds, event.sender),
     is_followed_thread: recipient.is_following_thread,
     always_pushes: PushMode::from(recipient.push_mode.clone()) == PushMode::Always,
-    devices: state.hub.device_aggregate(recipient.user),
+    devices: blocking_activity(state, recipient),
   });
   let kind = match verdict {
     Ok(kind) => kind,
@@ -180,6 +182,7 @@ fn push_to_recipient(
       return;
     },
   };
+  let delay = mobile_delay(state, recipient);
   for device in &recipient.devices {
     // A device with a live connection already got the event.
     if state.hub.is_device_connected(recipient.user, device.device) {
@@ -192,8 +195,54 @@ fn push_to_recipient(
       maybe_sender_id: Some(event.sender),
       is_urgent: event.is_urgent,
     };
-    spawn_delivery(state.clone(), recipient.user, device.clone(), wake_up);
+    match delay {
+      Some(delay) if is_mobile(&device.provider) => {
+        spawn_delayed_delivery(state.clone(), recipient.user, device.clone(), wake_up, delay);
+      },
+      _ => spawn_delivery(state.clone(), recipient.user, device.clone(), wake_up),
+    }
   }
+}
+
+/// A push to a phone is held back while the user works at a desktop (see
+/// `notifications.mobile_push_delay_secs`).
+fn mobile_delay(state: &AppState, recipient: &PushRecipientRow) -> Option<Duration> {
+  let seconds = state.settings.notifications.mobile_push_delay_secs;
+  if seconds == 0 || PushMode::from(recipient.push_mode.clone()) == PushMode::Always {
+    return None;
+  }
+  let active = active_devices(state, recipient);
+  (active.is_desktop_active && !active.is_mobile_active).then(|| Duration::from_secs(seconds))
+}
+
+/// The user is active on a phone: they see messages there, whatever the desktop does.
+fn blocking_activity(state: &AppState, recipient: &PushRecipientRow) -> DeviceAggregate {
+  let active = active_devices(state, recipient);
+  if active.is_mobile_active {
+    return DeviceAggregate::Active;
+  }
+  // Without a delay, a desktop in use keeps pushes away as before.
+  if active.is_desktop_active && state.settings.notifications.mobile_push_delay_secs == 0 {
+    return DeviceAggregate::Active;
+  }
+  if active.is_desktop_active {
+    DeviceAggregate::Idle
+  } else {
+    state.hub.device_aggregate(recipient.user)
+  }
+}
+
+fn active_devices(state: &AppState, recipient: &PushRecipientRow) -> ActiveDevices {
+  state.hub.active_devices(recipient.user, |device| {
+    recipient
+      .devices
+      .iter()
+      .any(|registered| registered.device == device && is_mobile(&registered.provider))
+  })
+}
+
+fn is_mobile(provider: &PushProvider) -> bool {
+  !matches!(provider, PushProvider::WebPush | PushProvider::Unknown(_))
 }
 
 fn is_dnd(recipient: &PushRecipientRow, now: OffsetDateTime, unix_seconds: i64, sender: UserId) -> bool {
@@ -214,6 +263,33 @@ fn is_scheduled_dnd(recipient: &PushRecipientRow, unix_seconds: i64, sender: Use
       false
     },
   }
+}
+
+/// Waits, then pushes if the message is still unread and no phone of the user shows it by now.
+fn spawn_delayed_delivery(
+  state: AppState,
+  user: UserId,
+  device: PushDeviceRow,
+  wake_up: PushWakeUp,
+  delay: Duration,
+) {
+  tokio::spawn(async move {
+    tokio::time::sleep(delay).await;
+    if let (Some(conversation), Some(message)) = (Some(wake_up.conversation_id), wake_up.maybe_message_id) {
+      match state.database.has_read_message(user, conversation, message).await {
+        Ok(true) => {
+          debug!(user_id = %user, "the message was read meanwhile; no push to the phone");
+          return;
+        },
+        Ok(false) => {},
+        Err(error) => warn!(%error, "checking the read position failed; pushing anyway"),
+      }
+    }
+    if state.hub.is_device_connected(user, device.device) {
+      return;
+    }
+    spawn_delivery(state, user, device, wake_up);
+  });
 }
 
 fn spawn_delivery(state: AppState, user: UserId, device: PushDeviceRow, wake_up: PushWakeUp) {

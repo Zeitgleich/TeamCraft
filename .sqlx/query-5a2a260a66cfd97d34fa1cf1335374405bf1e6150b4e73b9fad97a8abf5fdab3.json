@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT call_id, user_id FROM call_history_participants WHERE call_id = ANY($1) ORDER BY call_id, user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "call_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "call_history_participants",
+            "name": "call_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "call_history_participants",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5a2a260a66cfd97d34fa1cf1335374405bf1e6150b4e73b9fad97a8abf5fdab3"
+}

@@ -5,6 +5,7 @@ use std::time::Duration;
 use teamcraft_proto::{
   CustomStatus, DeviceActivity, DeviceId, GatewayEvent, GatewayServerMessage, PresenceState, UserId,
 };
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -62,6 +63,13 @@ pub enum ResumeError {
   Gap,
 }
 
+/// Which kinds of device of a user are connected and active.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveDevices {
+  pub is_mobile_active: bool,
+  pub is_desktop_active: bool,
+}
+
 /// What a user's devices currently report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceAggregate {
@@ -77,12 +85,16 @@ struct Inner {
   sessions: HashMap<String, Session>,
   by_user: HashMap<UserId, HashSet<String>>,
   last_presence: HashMap<UserId, PresenceSnapshot>,
+  /// Busy periods from the users' calendars, as last polled.
+  busy: HashMap<UserId, Vec<(OffsetDateTime, OffsetDateTime)>>,
 }
 
 struct Session {
   user: UserId,
   device: DeviceId,
   activity: DeviceActivity,
+  /// When the device last said it is active (or did something that shows it is).
+  last_active_at: Instant,
   next_seq: u64,
   buffer: VecDeque<(u64, GatewayEvent)>,
   maybe_sender: Option<mpsc::Sender<GatewayServerMessage>>,
@@ -106,6 +118,7 @@ impl Hub {
       user,
       device,
       activity,
+      last_active_at: Instant::now(),
       next_seq: 1,
       buffer: VecDeque::new(),
       maybe_sender: Some(sender),
@@ -176,8 +189,96 @@ impl Hub {
 
   pub fn set_activity(&self, session_id: &str, activity: DeviceActivity) {
     if let Some(session) = self.lock().sessions.get_mut(session_id) {
+      if activity == DeviceActivity::Active {
+        session.last_active_at = Instant::now();
+      }
       session.activity = activity;
     }
+  }
+
+  /// Notes that the device shows signs of life (it typed, it asked for something).
+  pub fn touch_activity(&self, session_id: &str) {
+    if let Some(session) = self.lock().sessions.get_mut(session_id)
+      && session.activity == DeviceActivity::Active
+    {
+      session.last_active_at = Instant::now();
+    }
+  }
+
+  /// Turns devices that reported active but have not shown a sign since `cutoff` into idle ones
+  /// (the workspace's away timeout). Returns the users whose devices changed.
+  pub fn demote_idle(&self, cutoff: Instant) -> Vec<UserId> {
+    let mut users = HashSet::new();
+    for session in self.lock().sessions.values_mut() {
+      if session.maybe_sender.is_some()
+        && session.activity == DeviceActivity::Active
+        && session.last_active_at < cutoff
+      {
+        session.activity = DeviceActivity::Idle;
+        users.insert(session.user);
+      }
+    }
+    users.into_iter().collect()
+  }
+
+  /// Users with at least one live connection.
+  pub fn online_users(&self) -> Vec<UserId> {
+    let inner = self.lock();
+    inner
+      .by_user
+      .iter()
+      .filter(|(_, ids)| {
+        ids.iter().any(|id| {
+          inner
+            .sessions
+            .get(id)
+            .is_some_and(|session| session.maybe_sender.is_some())
+        })
+      })
+      .map(|(user, _)| *user)
+      .collect()
+  }
+
+  /// Which kinds of device of the user are active. `is_mobile` tells phones from the rest.
+  pub fn active_devices(&self, user: UserId, is_mobile: impl Fn(DeviceId) -> bool) -> ActiveDevices {
+    let inner = self.lock();
+    let mut active = ActiveDevices::default();
+    for session_id in inner.by_user.get(&user).into_iter().flatten() {
+      let Some(session) = inner.sessions.get(session_id) else {
+        continue;
+      };
+      if session.maybe_sender.is_none() || session.activity != DeviceActivity::Active {
+        continue;
+      }
+      if is_mobile(session.device) {
+        active.is_mobile_active = true;
+      } else {
+        active.is_desktop_active = true;
+      }
+    }
+    active
+  }
+
+  /// Remembers when the user's calendar says they are busy (replaces the earlier answer).
+  pub fn set_busy_periods(&self, user: UserId, periods: Vec<(OffsetDateTime, OffsetDateTime)>) {
+    let mut inner = self.lock();
+    if periods.is_empty() {
+      inner.busy.remove(&user);
+    } else {
+      inner.busy.insert(user, periods);
+    }
+  }
+
+  /// The end of the busy period the user is in at `now`, if any.
+  pub fn busy_until(&self, user: UserId, now: OffsetDateTime) -> Option<OffsetDateTime> {
+    self
+      .lock()
+      .busy
+      .get(&user)?
+      .iter()
+      .filter(|(start, end)| *start <= now && now < *end)
+      .map(|(_, end)| *end)
+      .max()
   }
 
   /// Numbers the event per session, buffers it and delivers it to connected sessions of `users`.
@@ -575,6 +676,7 @@ mod tests {
         maybe_emoji: None,
         maybe_text: Some(text.into()),
         maybe_expires_at: None,
+        maybe_activity: None,
       }),
     };
     assert!(hub.record_presence(user(1), snapshot(PresenceState::Online, None)));

@@ -211,15 +211,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .create_share_link(
         attachment,
         &CreateShareLinkRequest {
+          attachment_id: attachment,
           maybe_expires_at: settings.maybe_expires_at.map(UnixMillis),
           maybe_max_downloads: settings.maybe_max_downloads,
+          is_password_protected: settings.maybe_password.is_some(),
         },
       )
       .await?;
     let link = StoredShareLink {
       attachment_id: attachment,
-      share_id: response.share_id,
-      url: format!("{}#{fragment}", response.url),
+      // The server only knows the link's URL when its public URL is configured.
+      url: format!(
+        "{}#{fragment}",
+        response.maybe_url.clone().ok_or(ApiError::Unsupported(
+          "the server has no public URL configured for share links"
+        ))?
+      ),
+      share_id: response.id,
       maybe_expires_at: settings.maybe_expires_at,
       maybe_max_downloads: settings.maybe_max_downloads,
       has_password: settings.maybe_password.is_some(),

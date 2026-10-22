@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE announcements SET ended_at = now() WHERE ended_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "89259734e12b7b395693fb4817bfa8cd89b7339b50de4030ad46eb520bc6674b"
+}

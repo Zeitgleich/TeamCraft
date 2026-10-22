@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO permission_overrides (scope_id, role, permission, effect) VALUES ($1, $2, $3, $4)\n               ON CONFLICT (scope_id, role, permission) DO UPDATE SET effect = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8d5d8026cfcacc0a3028d3dcdd202c247700f5c79454d253c080ef63e63d51b3"
+}

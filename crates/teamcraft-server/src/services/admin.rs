@@ -46,8 +46,10 @@ pub async fn list_space_members(
     members: members
       .iter()
       .map(|m| teamcraft_proto::SpaceMemberResponse {
-        user: super::convert::user_summary(&m.user),
+        user: super::convert::user_summary(state, &m.user),
         role: m.role.clone(),
+        maybe_expires_at: m.maybe_expires_at.map(super::convert::unix_millis),
+        maybe_sponsor_user_id: m.maybe_sponsor,
       })
       .collect(),
   })
@@ -69,6 +71,7 @@ pub async fn list_conversations(
       maybe_inactive_days: query.maybe_inactive_days,
       maybe_min_members: query.maybe_min_members,
       maybe_max_members: query.maybe_max_members,
+      maybe_is_orphaned: query.maybe_is_orphaned,
       maybe_after: query.maybe_after,
       limit: i64::from(limit),
     })
@@ -100,7 +103,7 @@ pub async fn list_conversation_members(
     members: members
       .iter()
       .map(|m| teamcraft_proto::ConversationMemberResponse {
-        user: super::convert::user_summary(&m.user),
+        user: super::convert::user_summary(state, &m.user),
         role: m.role.clone(),
       })
       .collect(),
@@ -398,4 +401,70 @@ fn audit_response(entry: &AuditEntry) -> AuditEntryResponse {
     detail: entry.detail.clone(),
     created_at: unix_millis(entry.created_at),
   }
+}
+
+/// Makes an existing member the admin of a channel, typically one whose admins left or were
+/// deactivated. The new owner must already be a member (membership of end-to-end encrypted
+/// channels is changed by the members' clients, not by this call).
+pub async fn assign_channel_owner(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+  request: teamcraft_proto::AssignChannelOwnerRequest,
+) -> Result<(), ApiError> {
+  require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
+  let view = state
+    .database
+    .get_conversation(conversation, caller.user.id)
+    .await?;
+  if view.is_none_or(|v| v.conversation.kind != ConversationKind::Channel) {
+    return Err(ApiError::conversation_not_found());
+  }
+  let members = state.database.list_conversation_members(conversation).await?;
+  let Some(member) = members
+    .iter()
+    .find(|member| member.user.id == request.user_id && !member.user.is_deactivated)
+  else {
+    return Err(ApiError::Conflict(
+      "the new owner must be an active member of the channel".into(),
+    ));
+  };
+  if member.user.kind != teamcraft_proto::UserKind::Member {
+    return Err(ApiError::InvalidRequest("only members can own channels".into()));
+  }
+  state
+    .database
+    .update_membership(
+      conversation,
+      request.user_id,
+      &teamcraft_db::MembershipChanges {
+        maybe_role: Some(teamcraft_proto::ChannelRole::Admin),
+        ..Default::default()
+      },
+    )
+    .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "channel_owner_assigned",
+    Some(AuditTarget::new("conversation", conversation)),
+    &json!({"user_id": request.user_id.to_string()}),
+  )
+  .await?;
+  super::system_events::emit(
+    state,
+    conversation,
+    teamcraft_proto::SystemEventKind::OwnerAssigned,
+    Some(caller.user.id),
+    Some(request.user_id),
+  )
+  .await;
+  let ids = state.database.conversation_member_ids(conversation).await?;
+  state.hub.publish(
+    ids,
+    &teamcraft_proto::GatewayEvent::ConversationUpdate {
+      conversation_id: conversation,
+    },
+  );
+  Ok(())
 }

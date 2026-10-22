@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT result_sealed FROM org_recovery_requests WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "result_sealed",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "org_recovery_requests",
+            "name": "result_sealed"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "512748d88214dcbbf030ff878b5d9b857101c611442412eaee9533674df7f17c"
+}

@@ -33,6 +33,17 @@ wire_enum! {
   }
 }
 
+wire_enum! {
+  /// What the server derived about a user without them setting a status (PLAN.md §4). Clients show
+  /// it in their own language.
+  pub enum PresenceActivity {
+    /// An accepted meeting or a busy period in the user's calendar is going on.
+    InMeeting => "in_meeting",
+    /// The user is in a call.
+    InCall => "in_call",
+  }
+}
+
 /// A custom status (PLAN.md §4): "🌴 Vacation until Monday". Server-visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CustomStatus {
@@ -43,6 +54,10 @@ pub struct CustomStatus {
   /// After this time the status disappears by itself.
   #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_expires_at: Option<UnixMillis>,
+  /// Set instead of emoji and text when the server derived the status: a meeting or a call. For
+  /// meetings `expires_at` is the end of the meeting or busy period.
+  #[serde(rename = "activity", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_activity: Option<PresenceActivity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

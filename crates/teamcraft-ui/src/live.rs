@@ -341,6 +341,7 @@ pub fn custom_status_to_wire(status: &CustomStatus, now: TimestampMs) -> CustomS
     maybe_emoji: Some(status.emoji.clone()).filter(|emoji| !emoji.is_empty()),
     maybe_text: Some(status.text.clone()).filter(|text| !text.is_empty()),
     maybe_expires_at: maybe_expires_at.map(unix_millis),
+    maybe_activity: None,
   }
 }
 

@@ -519,6 +519,96 @@ mod preferences {
   }
 }
 
+mod mobile_delay {
+  use super::*;
+
+  async fn start_delayed(recorder: &Recorder, delay_secs: u64) -> Option<TestApp> {
+    TestApp::start_with_push(
+      |settings| settings.notifications.mobile_push_delay_secs = delay_secs,
+      recorder.dispatcher(),
+    )
+    .await
+  }
+
+  async fn mention(app: &TestApp, s: &Scene, n: u8) -> String {
+    let id = user_id(app, &s.carol).await;
+    let mut body = message_body(n, &s.alice_device);
+    body["mentioned_user_ids"] = json!([id]);
+    let reply = app
+      .post(&s.alice, &format!("/conversations/{}/messages", s.channel), body)
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    reply.id()
+  }
+
+  #[tokio::test]
+  async fn an_active_desktop_holds_the_phone_back_and_a_read_message_is_never_pushed() {
+    let recorder = Recorder::default();
+    let Some(app) = start_delayed(&recorder, 1).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let _socket = ws::connect(&app, &s.carol, &desktop).await;
+
+    // Unread after the delay: the phone gets its push, but not at once.
+    mention(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+      recorder.seen.lock().unwrap().is_empty(),
+      "held back while the desktop is active"
+    );
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(
+      pushes.iter().map(|p| p.device.clone()).collect::<Vec<_>>(),
+      vec![s.carol_push_device.clone()]
+    );
+
+    // Read on the desktop in the meantime: nothing follows.
+    let message = mention(&app, &s, 2).await;
+    let read = app
+      .put(
+        &s.carol,
+        &format!("/conversations/{}/read-position", s.channel),
+        json!({"message_id": message}),
+      )
+      .await;
+    assert_eq!(read.status, StatusCode::NO_CONTENT, "{}", read.body);
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert_eq!(
+      recorder.seen.lock().unwrap().len(),
+      1,
+      "the read message was not pushed"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_delay_of_zero_pushes_at_once_and_idle_desktops_never_delay() {
+    let recorder = Recorder::default();
+    let Some(app) = start_delayed(&recorder, 0).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let _socket = ws::connect(&app, &s.carol, &desktop).await;
+    mention(&app, &s, 1).await;
+    // With delay 0 an active desktop keeps pushes away like before.
+    assert!(recorder.wait_for(0).await.is_empty());
+    app.stop().await;
+
+    let recorder = Recorder::default();
+    let Some(app) = start_delayed(&recorder, 30).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    mention(&app, &s, 1).await;
+    // Nobody is at a desktop: the phone is pushed immediately.
+    assert_eq!(recorder.wait_for(1).await.len(), 1);
+    app.stop().await;
+  }
+}
+
 mod urgent {
   use teamcraft_server::services::urgent::run_due;
   use time::{Duration as TimeDuration, OffsetDateTime};

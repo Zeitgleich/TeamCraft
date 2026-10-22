@@ -87,6 +87,101 @@ pub struct ComplianceArchivePolicy {
   pub mode: ComplianceArchiveMode,
 }
 
+wire_enum! {
+  /// How display names are shown to others. The server applies it in user responses.
+  pub enum DisplayNameFormat {
+    /// As the identity provider delivers it.
+    AsProvided => "as_provided",
+    /// "Ada Lovelace" from "Lovelace, Ada" or "Ada Lovelace".
+    FirstLast => "first_last",
+    /// "Lovelace, Ada".
+    LastFirst => "last_first",
+    /// The username only.
+    Username => "username",
+  }
+}
+
+/// Session limits the server enforces (PLAN.md §11). Absent limits mean none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SessionPolicy {
+  /// A session ends this long after sign-in, whatever the user does.
+  #[serde(rename = "max_age_hours", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_max_age_hours: Option<u32>,
+  /// A session ends after this long without a request.
+  #[serde(
+    rename = "idle_timeout_minutes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_idle_timeout_minutes: Option<u32>,
+  /// Sign-ins without a second factor are refused: local accounts need a TOTP code, identity
+  /// provider tokens need an `amr` claim of a second factor (or an `acr` of at least two factors).
+  #[serde(default)]
+  pub requires_mfa: bool,
+}
+
+/// A status admins offer: people pick it with one click.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StatusPreset {
+  #[serde(rename = "emoji", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_emoji: Option<String>,
+  pub text: String,
+  /// The status ends by itself after this long, if the person sets no end.
+  #[serde(rename = "duration_minutes", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_duration_minutes: Option<u32>,
+}
+
+/// Which presence features exist (PLAN.md §4, §11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PresencePolicy {
+  /// Statuses of any kind: custom ones and the derived "in a meeting" / "in a call". Off shows
+  /// presence only.
+  pub statuses_enabled: bool,
+  /// People may write their own status. Off leaves them the presets.
+  pub custom_status_enabled: bool,
+  /// A device that reported itself active but has been silent this long counts as idle (clients
+  /// repeat the active report while the user works). Absent: devices decide.
+  #[serde(
+    rename = "away_timeout_minutes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_away_timeout_minutes: Option<u32>,
+  #[serde(default)]
+  pub presets: Vec<StatusPreset>,
+}
+
+impl Default for PresencePolicy {
+  fn default() -> Self {
+    Self {
+      statuses_enabled: true,
+      custom_status_enabled: true,
+      maybe_away_timeout_minutes: None,
+      presets: Vec::new(),
+    }
+  }
+}
+
+/// What the directory shows about people.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DirectoryPolicy {
+  pub display_name_format: DisplayNameFormat,
+  /// Show the full name; off shows only the username (when there is one).
+  pub shows_full_name: bool,
+  /// Show e-mail addresses to members in directory lookups (guests never see them).
+  pub shows_email: bool,
+}
+
+impl Default for DirectoryPolicy {
+  fn default() -> Self {
+    Self {
+      display_name_format: DisplayNameFormat::AsProvided,
+      shows_full_name: true,
+      shows_email: false,
+    }
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -97,6 +192,12 @@ pub struct WorkspacePolicy {
   pub retention: RetentionPolicy,
   pub link_previews: LinkPreviewPolicy,
   pub compliance_archive: ComplianceArchivePolicy,
+  #[serde(default)]
+  pub session: SessionPolicy,
+  #[serde(default)]
+  pub directory: DirectoryPolicy,
+  #[serde(default)]
+  pub presence: PresencePolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -129,6 +230,9 @@ impl Default for WorkspacePolicy {
       compliance_archive: ComplianceArchivePolicy {
         mode: ComplianceArchiveMode::Off,
       },
+      session: SessionPolicy::default(),
+      directory: DirectoryPolicy::default(),
+      presence: PresencePolicy::default(),
     }
   }
 }

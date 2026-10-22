@@ -340,6 +340,20 @@ impl RecoveryRequestKey {
   }
 }
 
+impl RecoveryRequestPublicKey {
+  /// What the recovering device shows and the approving admins compare: eight groups of four hex
+  /// digits from a hash of the key, so a swapped key is noticed.
+  pub fn fingerprint(&self) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(domain::labeled(domain::RECOVERY_REQUEST_FINGERPRINT, &self.0));
+    digest[..16]
+      .chunks(2)
+      .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
+      .collect::<Vec<_>>()
+      .join("-")
+  }
+}
+
 impl fmt::Debug for RecoveryRequestKey {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("RecoveryRequestKey")
@@ -455,6 +469,24 @@ mod tests {
   use crate::membership::tests::TestUser;
 
   const ALICE: UserId = UserId::new(1);
+
+  #[test]
+  fn request_fingerprints_are_stable_distinct_and_readable() {
+    let a = RecoveryRequestPublicKey::from_bytes([1; KEY_LEN]);
+    let b = RecoveryRequestPublicKey::from_bytes([2; KEY_LEN]);
+    assert_eq!(
+      a.fingerprint(),
+      RecoveryRequestPublicKey::from_bytes([1; KEY_LEN]).fingerprint()
+    );
+    assert_ne!(a.fingerprint(), b.fingerprint());
+    let text = a.fingerprint();
+    assert_eq!(text.len(), 8 * 4 + 7);
+    assert!(
+      text
+        .split('-')
+        .all(|group| group.len() == 4 && group.bytes().all(|c| c.is_ascii_hexdigit()))
+    );
+  }
 
   #[test]
   fn two_of_three_recover_a_wrapped_backup_key() {

@@ -105,6 +105,20 @@ pub async fn download_attachment(
   id: AttachmentId,
 ) -> Result<AttachmentDownloadResponse, ApiError> {
   let store = blob_store(state)?;
+  let (attachment, _) = readable_attachment(state, caller, id).await?;
+  Ok(AttachmentDownloadResponse {
+    download_url: store.presign_download(&attachment.s3_key).to_string(),
+    size_bytes: attachment.size_bytes,
+    expires_at: expires_at(store),
+  })
+}
+
+/// A completed attachment the caller may read, with the conversation it belongs to.
+pub async fn readable_attachment(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: AttachmentId,
+) -> Result<(teamcraft_db::Attachment, super::access::ConversationAccess), ApiError> {
   let attachment = state
     .database
     .get_attachment(id)
@@ -126,11 +140,7 @@ pub async fn download_attachment(
   if !attachment.is_complete {
     return Err(ApiError::Conflict("the upload has not been completed".into()));
   }
-  Ok(AttachmentDownloadResponse {
-    download_url: store.presign_download(&attachment.s3_key).to_string(),
-    size_bytes: attachment.size_bytes,
-    expires_at: expires_at(store),
-  })
+  Ok((attachment, access))
 }
 
 fn blob_store(state: &AppState) -> Result<&Arc<BlobStore>, ApiError> {

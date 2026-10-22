@@ -201,6 +201,9 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
 fn is_unauthenticated_endpoint(path: &str) -> bool {
   path == "/api/v1/meetings/join"
     || path == "/api/v1/auth/backchannel-logout"
+    || path.starts_with("/api/v1/shares/")
+    || path == "/api/v1/auth/local/activate"
+    || path == "/api/v1/auth/local/login"
     || path.starts_with("/api/internal/")
 }
 

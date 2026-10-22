@@ -25,6 +25,13 @@ const PUBLIC: &[(&str, &str)] = &[
   ("get", "/api/v1/openapi.json"),
   // The link's token is the credential.
   ("post", "/api/v1/meetings/join"),
+  // Local accounts sign in here: the one-time activation token or the password and the TOTP code
+  // are the credentials; failures are counted per account and per address.
+  ("post", "/api/v1/auth/local/activate"),
+  ("post", "/api/v1/auth/local/login"),
+  // The link's ID is the credential (256 random bits); both answer 410 for anything not usable.
+  ("get", "/api/v1/shares/{share_id}"),
+  ("post", "/api/v1/shares/{share_id}/download"),
   // Authenticated by the logout token's signature.
   ("post", "/api/v1/auth/backchannel-logout"),
   // Authenticated by the SFU's / inbox handler's own bearer token (checked below).

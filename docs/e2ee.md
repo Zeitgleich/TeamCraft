@@ -295,8 +295,27 @@ sharing); nothing below is a new primitive.
 - **Consequences.** The combining admin's device holds `s` for the duration of one recovery, so the
   owner should rotate the org key (new `s`, new shares, members re-wrap) after each recovery. Two
   colluding admins can recover anyone, as stated above; one admin alone cannot.
-- **Server endpoints needed** (not yet there): storing sealed shares per admin device, a recovery
-  request with approvals, and handing the user's wrapped backup keys to the approving admins.
+- **Server endpoints** (`/api/v1/org-recovery`). The server stores opaque sealed bytes, counts approvals,
+  relays material and writes the audit trail; it never sees a share, the org key or a backup key.
+
+  | Step                           | Call                                         | Who                 |
+  |--------------------------------|----------------------------------------------|---------------------|
+  | Store the sealed shares        | `PUT /shares` (key version only grows)       | owner               |
+  | Fetch the shares of my devices | `GET /shares/mine`                           | admin               |
+  | Ask for recovery               | `POST /requests` (request public key)        | the person, new device |
+  | List / read requests           | `GET /requests`, `GET /requests/{id}`        | admins; the person  |
+  | Approve on a device            | `POST /requests/{id}/approve`                | admin (not the person) |
+  | Hand in a share                | `PUT /requests/{id}/share`                   | approver, sealed to the combining device |
+  | Fetch shares and wrapped keys  | `GET /requests/{id}/material`                | combining admin only |
+  | Deliver the sealed backup key  | `PUT /requests/{id}/result`                  | combining admin     |
+  | Fetch it                       | `GET /requests/{id}/result`                  | the person          |
+  | Turn down / withdraw           | `POST /requests/{id}/deny`, `DELETE`         | admin; the person   |
+
+  The approval that reaches the policy's `admins_required` makes that admin's device the combining one;
+  the other approvers see it in the request and seal their shares to it. The server computes the
+  fingerprint of the request key (shown on the recovering device and compared by the admins). A person
+  has one open request, which expires (`limits.org_recovery_request_ttl_secs`). Every step is an audit
+  entry that targets the person, so it appears in their security log.
 
 ### 6.4 Account data in the key bag (implemented)
 

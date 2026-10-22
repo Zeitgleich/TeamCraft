@@ -169,6 +169,7 @@ impl FakeServer {
         maybe_username: Some(name.to_lowercase()),
         display_name: name.to_string(),
         kind: UserKind::Member,
+        maybe_email: None,
       },
     );
     drop(state);
@@ -1454,12 +1455,15 @@ impl ServerApi for FakeServerApi {
       let share_id = format!("share{}", state.next_id::<AttachmentId>());
       state.share_links.insert(share_id.clone(), attachment);
       Ok(ShareLinkResponse {
-        url: format!("https://chat.example.com/f/{share_id}"),
-        share_id,
+        maybe_url: Some(format!("https://chat.example.com/f/{share_id}")),
+        id: share_id,
         attachment_id: attachment,
-        maybe_expires_at: request.maybe_expires_at,
+        created_at: UnixMillis(0),
+        expires_at: request.maybe_expires_at.unwrap_or(UnixMillis(i64::MAX)),
         maybe_max_downloads: request.maybe_max_downloads,
+        is_password_protected: request.is_password_protected,
         download_count: 0,
+        maybe_last_downloaded_at: None,
         is_revoked: false,
       })
     })

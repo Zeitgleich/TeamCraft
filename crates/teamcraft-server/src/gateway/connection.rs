@@ -84,7 +84,7 @@ async fn handshake(
       }
       let ready = GatewayServerMessage::Ready {
         session_id: attached.session_id.clone(),
-        user: crate::services::convert::user_summary(&caller.user),
+        user: crate::services::convert::user_summary(state, &caller.user),
       };
       send(socket, &ready).await.ok()?;
       Some((caller, attached))
@@ -208,6 +208,7 @@ async fn handle_client_message(
       true
     },
     GatewayClientMessage::Typing { conversation_id } => {
+      state.hub.touch_activity(&attached.session_id);
       let now = Instant::now();
       if last_typing
         .get(&conversation_id)

@@ -22,9 +22,9 @@ pub async fn search_users(
       limit: i64::from(state.settings.limits.max_directory_results),
     })
     .await?;
-  Ok(SearchUsersResponse {
-    users: users.iter().map(user_summary).collect(),
-  })
+  let mut summaries: Vec<UserSummary> = users.iter().map(|user| user_summary(state, user)).collect();
+  add_emails(state, caller, &mut summaries).await?;
+  Ok(SearchUsersResponse { users: summaries })
 }
 
 /// One user; guests only see themselves and people they share a conversation with.
@@ -33,7 +33,28 @@ pub async fn get_user(
   caller: &AuthenticatedUser,
   id: UserId,
 ) -> Result<UserSummary, ApiError> {
-  Ok(user_summary(&visible_user(state, caller, id).await?))
+  let mut summary = vec![user_summary(state, &visible_user(state, caller, id).await?)];
+  add_emails(state, caller, &mut summary).await?;
+  summary
+    .pop()
+    .ok_or_else(|| ApiError::Internal("summary missing".into()))
+}
+
+/// Adds e-mail addresses if the directory policy shows them. Guests never see any.
+async fn add_emails(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  summaries: &mut [UserSummary],
+) -> Result<(), ApiError> {
+  if !state.policy.get().directory.shows_email || is_guest(caller) {
+    return Ok(());
+  }
+  let ids: Vec<UserId> = summaries.iter().map(|summary| summary.id).collect();
+  let emails = state.database.get_user_emails(&ids).await?;
+  for summary in summaries {
+    summary.maybe_email = emails.get(&summary.id).cloned();
+  }
+  Ok(())
 }
 
 /// The active user the caller may know about, or `user_not_found`.

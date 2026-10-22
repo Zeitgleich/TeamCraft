@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO call_history_participants (call_id, user_id)\n       SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM call_history WHERE call_id = $1)\n       ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5857c6348fd6f71c348ca404ca5c8a0b7ba9caf6e2ac09c2cbc82e7150571cb2"
+}

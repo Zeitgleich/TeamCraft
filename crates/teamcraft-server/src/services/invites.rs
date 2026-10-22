@@ -5,6 +5,7 @@ use teamcraft_proto::{
   SpaceRole,
 };
 use time::OffsetDateTime;
+use tracing::warn;
 
 use super::access::load_space;
 use super::audit::{self, Target as AuditTarget};
@@ -12,6 +13,8 @@ use super::convert::{invite_response, offset_date_time};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
+use crate::meetings::ical::Method;
+use crate::meetings::mailer::OutgoingMail;
 use crate::state::AppState;
 
 const MAX_EMAIL_CHARS: usize = 254;
@@ -35,33 +38,11 @@ pub async fn create_invite(
   }
 
   let email = normalize_email(&request.email)?;
-  if request.channel_ids.len() > MAX_INVITE_CHANNELS {
-    return Err(ApiError::InvalidRequest("too many channels".into()));
+  if request.role == SpaceRole::Guest {
+    check_guest_domain(state, &email)?;
   }
-  for channel in &request.channel_ids {
-    let view = state.database.get_conversation(*channel, caller.user.id).await?;
-    let belongs = view.is_some_and(|v| {
-      v.conversation.maybe_space_id == Some(space) && v.conversation.kind == ConversationKind::Channel
-    });
-    if !belongs {
-      return Err(ApiError::InvalidRequest(
-        "channel_ids must be channels of this space".into(),
-      ));
-    }
-  }
-  let maybe_expires_at = match request.maybe_expires_at {
-    Some(millis) => {
-      let at =
-        offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
-      if at <= OffsetDateTime::now_utc() {
-        return Err(ApiError::InvalidRequest(
-          "expires_at must be in the future".into(),
-        ));
-      }
-      Some(at)
-    },
-    None => None,
-  };
+  check_channels(state, caller, space, &request.channel_ids).await?;
+  let maybe_expires_at = future_expiry(request.maybe_expires_at)?;
 
   let invite = state
     .database
@@ -83,7 +64,79 @@ pub async fn create_invite(
     &json!({"role": invite.role.as_str()}),
   )
   .await?;
+  send_invite_mail(state, caller, &access.view.space.name, &invite).await;
   Ok(invite_response(&invite))
+}
+
+/// The channels an invite lists must be channels of the space.
+pub async fn check_channels(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  space: SpaceId,
+  channels: &[teamcraft_proto::ConversationId],
+) -> Result<(), ApiError> {
+  if channels.len() > MAX_INVITE_CHANNELS {
+    return Err(ApiError::InvalidRequest("too many channels".into()));
+  }
+  for channel in channels {
+    let view = state.database.get_conversation(*channel, caller.user.id).await?;
+    let belongs = view.is_some_and(|v| {
+      v.conversation.maybe_space_id == Some(space) && v.conversation.kind == ConversationKind::Channel
+    });
+    if !belongs {
+      return Err(ApiError::InvalidRequest(
+        "channel_ids must be channels of this space".into(),
+      ));
+    }
+  }
+  Ok(())
+}
+
+/// An optional expiry given by a client; it must lie in the future.
+pub fn future_expiry(
+  maybe_millis: Option<teamcraft_proto::UnixMillis>,
+) -> Result<Option<OffsetDateTime>, ApiError> {
+  let Some(millis) = maybe_millis else {
+    return Ok(None);
+  };
+  let at = offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
+  if at <= OffsetDateTime::now_utc() {
+    return Err(ApiError::InvalidRequest(
+      "expires_at must be in the future".into(),
+    ));
+  }
+  Ok(Some(at))
+}
+
+/// Mails the invitee, if the server has a mail server. A failure is logged and does not undo the
+/// invite: it is applied at sign-in anyway.
+async fn send_invite_mail(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  space_name: &str,
+  invite: &teamcraft_db::Invite,
+) {
+  let Some(mailer) = &state.maybe_mailer else {
+    return;
+  };
+  let fill = |template: &str| {
+    template
+      .replace("{inviter}", &caller.user.display_name)
+      .replace("{space}", space_name)
+      .replace("{role}", invite.role.as_str())
+      .replace("{url}", &state.settings.mail.public_base_url)
+  };
+  let mail = OutgoingMail {
+    to_address: invite.email.clone(),
+    maybe_to_name: None,
+    subject: fill(&state.settings.mail.invite_subject),
+    text: fill(&state.settings.mail.invite_body),
+    method: Method::Request,
+    ics: String::new(),
+  };
+  if let Err(error) = mailer.send(&mail).await {
+    warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
+  }
 }
 
 pub async fn list_invites(
@@ -119,8 +172,28 @@ pub async fn delete_invite(
   Ok(())
 }
 
+/// Guests may only be invited from the configured domains, if there are any.
+pub fn check_guest_domain(state: &AppState, email: &str) -> Result<(), ApiError> {
+  let allowed = &state.settings.guests.allowed_email_domains;
+  if allowed.is_empty() {
+    return Ok(());
+  }
+  let domain = email.rsplit_once('@').map_or("", |(_, domain)| domain);
+  let is_allowed = allowed.iter().any(|candidate| {
+    let candidate = candidate.trim_start_matches('@').to_lowercase();
+    domain == candidate || domain.ends_with(&format!(".{candidate}"))
+  });
+  if is_allowed {
+    Ok(())
+  } else {
+    Err(ApiError::InvalidRequest(
+      "guests from this e-mail domain are not allowed".into(),
+    ))
+  }
+}
+
 /// Lowercases and sanity-checks an email address; real verification is the identity provider's job.
-fn normalize_email(email: &str) -> Result<String, ApiError> {
+pub fn normalize_email(email: &str) -> Result<String, ApiError> {
   let email = email.trim().to_lowercase();
   let valid = email.len() <= MAX_EMAIL_CHARS
     && !email.chars().any(|c| c.is_whitespace() || c.is_control())

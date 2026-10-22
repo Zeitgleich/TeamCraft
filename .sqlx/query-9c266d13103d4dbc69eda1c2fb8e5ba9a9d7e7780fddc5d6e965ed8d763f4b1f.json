@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_profiles x SET avatar_key = NULL, avatar_content_type = NULL,\n                avatar_size_bytes = NULL, updated_at = now()\n         FROM user_profiles old\n         WHERE x.user_id = $1 AND old.user_id = x.user_id\n         RETURNING old.avatar_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "avatar_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "avatar_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9c266d13103d4dbc69eda1c2fb8e5ba9a9d7e7780fddc5d6e965ed8d763f4b1f"
+}

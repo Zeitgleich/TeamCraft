@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM org_recovery_shares",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "30829be25a226525ea75152e79855609b39a9e4613d9abe4fb7053481db19e1e"
+}

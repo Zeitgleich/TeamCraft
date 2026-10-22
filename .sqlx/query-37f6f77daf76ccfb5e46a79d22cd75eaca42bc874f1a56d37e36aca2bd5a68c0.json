@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE session_activity SET last_seen_at = $4\n           WHERE issuer = $1 AND subject = $2 AND session_key = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "37f6f77daf76ccfb5e46a79d22cd75eaca42bc874f1a56d37e36aca2bd5a68c0"
+}

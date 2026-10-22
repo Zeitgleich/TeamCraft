@@ -39,20 +39,36 @@ pub fn require(
   permission: Permission,
   target: &Target,
 ) -> Result<(), ApiError> {
-  if is_allowed(&state.scheme, &caller.role, &permission, target) {
+  let scheme = state.scheme.for_space(space_of(target));
+  if is_allowed(&scheme, &caller.role, &permission, target) {
     Ok(())
   } else {
     Err(ApiError::Forbidden(format!("missing permission {permission}")))
   }
 }
 
-pub fn space_target(maybe_role: Option<SpaceRole>) -> Target {
-  Target::Space(SpaceContext { maybe_role })
+/// The space a target lies in, whose own scheme applies.
+fn space_of(target: &Target) -> Option<SpaceId> {
+  match target {
+    Target::Instance => None,
+    Target::Space(space) => space.maybe_space_id,
+    Target::Channel(channel) => channel
+      .maybe_space
+      .as_ref()
+      .and_then(|space| space.maybe_space_id),
+  }
+}
+
+pub fn space_target(maybe_space_id: Option<SpaceId>, maybe_role: Option<SpaceRole>) -> Target {
+  Target::Space(SpaceContext {
+    maybe_role,
+    maybe_space_id,
+  })
 }
 
 impl SpaceAccess {
   pub fn target(&self) -> Target {
-    space_target(self.view.maybe_role.clone())
+    space_target(Some(self.view.space.id), self.view.maybe_role.clone())
   }
 }
 
@@ -60,8 +76,9 @@ impl ConversationAccess {
   pub fn target(&self) -> Target {
     let conversation = &self.view.conversation;
     Target::Channel(ChannelContext {
-      maybe_space: conversation.maybe_space_id.map(|_| SpaceContext {
+      maybe_space: conversation.maybe_space_id.map(|space| SpaceContext {
         maybe_role: self.maybe_space_role.clone(),
+        maybe_space_id: Some(space),
       }),
       visibility: conversation.visibility.clone(),
       is_archived: conversation.is_archived,

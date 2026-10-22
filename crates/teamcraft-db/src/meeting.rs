@@ -215,6 +215,37 @@ impl Database {
     Ok(meetings)
   }
 
+  /// Users among `users` that are in a meeting at `now` (organizer, or invited and not declined; not
+  /// cancelled), with the end of the latest such meeting.
+  pub async fn users_in_meeting(
+    &self,
+    users: &[UserId],
+    now: OffsetDateTime,
+  ) -> Result<HashMap<UserId, OffsetDateTime>, DbError> {
+    let raw: Vec<i64> = users.iter().map(|user| to_db(*user)).collect();
+    let rows = sqlx::query!(
+      r#"SELECT u.user_id AS "user_id!", max(m.ends_at) AS "ends_at!"
+         FROM meetings m
+         JOIN LATERAL (
+           SELECT m.organizer_user_id AS user_id
+           UNION
+           SELECT a.user_id FROM meeting_attendees a
+            WHERE a.meeting_id = m.id AND a.user_id IS NOT NULL AND a.rsvp <> 'declined'
+         ) u ON true
+         WHERE m.status = 'scheduled' AND m.starts_at <= $2 AND m.ends_at > $2
+           AND u.user_id = ANY($1)
+         GROUP BY u.user_id"#,
+      &raw,
+      now,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.user_id)?, row.ends_at)))
+      .collect()
+  }
+
   pub async fn list_attendees(&self, meeting: MeetingId) -> Result<Vec<StoredAttendee>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT id, meeting_id, user_id, email, display_name, rsvp FROM meeting_attendees
@@ -320,6 +351,34 @@ impl Database {
     }
     tx.commit().await?;
     Ok(diff)
+  }
+
+  /// The meeting whose chat is this conversation.
+  pub async fn get_meeting_by_conversation(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<Option<StoredMeeting>, DbError> {
+    let id = sqlx::query_scalar!(
+      "SELECT id FROM meetings WHERE conversation_id = $1",
+      to_db(conversation)
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    match id {
+      Some(id) => self.get_meeting(from_db(id)?).await,
+      None => Ok(None),
+    }
+  }
+
+  /// The host ended the meeting for everyone. `false` if it was not scheduled.
+  pub async fn end_meeting(&self, id: MeetingId) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE meetings SET status = 'ended' WHERE id = $1 AND status = 'scheduled'",
+      to_db(id)
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
   }
 
   /// Marks the meeting cancelled and archives its chat. Returns `false` if it was not scheduled.

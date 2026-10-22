@@ -548,16 +548,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn create_share_link(
     &self,
-    attachment: AttachmentId,
+    _attachment: AttachmentId,
     request: &CreateShareLinkRequest,
   ) -> Result<ShareLinkResponse, ApiError> {
-    self
-      .send_json(
-        Method::POST,
-        &format!("/attachments/{attachment}/share-links"),
-        request,
-      )
-      .await
+    self.send_json(Method::POST, "/shares", request).await
   }
 
   async fn register_push(&self, device: DeviceId, request: &RegisterPushRequest) -> Result<(), ApiError> {

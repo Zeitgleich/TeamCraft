@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE local_accounts\n         SET failed_attempts = CASE WHEN failed_attempts + 1 >= $2 THEN 0 ELSE failed_attempts + 1 END,\n             locked_until = CASE WHEN failed_attempts + 1 >= $2 THEN $3 ELSE locked_until END\n         WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c097ad3b8f9ad416dcc47bffdc35ee65f4053a19ccd9c482b40a6d01116cb9e8"
+}

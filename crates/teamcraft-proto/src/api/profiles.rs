@@ -1,0 +1,83 @@
+//! Profiles: the fields people fill in about themselves, and their avatar.
+
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+use crate::wire_enum::wire_enum;
+use crate::{UnixMillis, UserId, Weekday};
+
+wire_enum! {
+  /// Image types accepted for avatars.
+  pub enum AvatarContentType {
+    Png => "image/png",
+    Jpeg => "image/jpeg",
+    Webp => "image/webp",
+  }
+}
+
+/// When somebody usually works, in their own time zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WorkingHours {
+  pub weekdays: Vec<Weekday>,
+  /// Minutes since local midnight, `0..1440`.
+  pub start_minute: u16,
+  /// Minutes since local midnight, after the start and at most 1440.
+  pub end_minute: u16,
+}
+
+/// `GET /api/v1/me/profile` and `GET /api/v1/users/{id}/profile`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ProfileResponse {
+  pub user_id: UserId,
+  #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_title: Option<String>,
+  #[serde(rename = "department", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_department: Option<String>,
+  #[serde(rename = "phone", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_phone: Option<String>,
+  /// IANA name, e.g. `Europe/Berlin`.
+  #[serde(rename = "time_zone", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_time_zone: Option<String>,
+  #[serde(rename = "working_hours", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_working_hours: Option<WorkingHours>,
+  pub has_avatar: bool,
+}
+
+/// `PUT /api/v1/me/profile`: replaces the profile; fields left out are cleared.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateProfileRequest {
+  #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_title: Option<String>,
+  #[serde(rename = "department", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_department: Option<String>,
+  #[serde(rename = "phone", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_phone: Option<String>,
+  #[serde(rename = "time_zone", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_time_zone: Option<String>,
+  #[serde(rename = "working_hours", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_working_hours: Option<WorkingHours>,
+}
+
+/// `POST /api/v1/me/avatar`: announces an upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateAvatarUploadRequest {
+  pub content_type: AvatarContentType,
+  pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateAvatarUploadResponse {
+  /// `PUT` the image here with exactly this `Content-Type` and `Content-Length`.
+  pub upload_url: String,
+  pub content_type: AvatarContentType,
+  pub expires_at: UnixMillis,
+}
+
+/// `GET /api/v1/users/{id}/avatar`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AvatarResponse {
+  pub download_url: String,
+  pub content_type: AvatarContentType,
+  pub size_bytes: u64,
+  pub expires_at: UnixMillis,
+}

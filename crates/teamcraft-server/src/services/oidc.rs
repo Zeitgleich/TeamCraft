@@ -4,18 +4,19 @@
 //! what logout can't: users disabled or deleted at the provider and role changes. The provider is
 //! the authority; a user who loses every TeamCraft role is deactivated like a disabled one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::json;
-use teamcraft_db::OidcUserRow;
-use teamcraft_proto::{DeactivationReason, UserKind};
+use teamcraft_db::{GroupCreateOutcome, NewUserGroup, OidcUserRow};
+use teamcraft_proto::{DeactivationReason, UserGroupId, UserKind};
 use tracing::{debug, info, warn};
 
 use super::admin::deactivate_user;
 use super::audit::{self, Target as AuditTarget};
+use super::user_groups;
 use crate::auth::RoleMapping;
 use crate::error::ApiError;
 use crate::state::{AppState, OidcSyncSettings};
@@ -68,6 +69,9 @@ pub struct SyncReport {
   pub deactivated: u32,
   pub reactivated: u32,
   pub role_changes: u32,
+  pub groups_created: u32,
+  pub groups_changed: u32,
+  pub groups_deleted: u32,
 }
 
 /// Compares our users with the provider and applies the differences. Does nothing if the sync
@@ -145,10 +149,86 @@ pub async fn sync_once(state: &AppState) -> Result<SyncReport, ApiError> {
       },
     }
   }
+  if settings.sync_groups {
+    sync_groups(state, settings, &provider, &mut report).await?;
+  }
   if report != SyncReport::default() {
     info!(?report, "oidc sync finished");
   }
   Ok(report)
+}
+
+/// Mirrors the provider's top-level groups as user groups. The provider is the source of truth for
+/// their name and members; a group that vanished there is deleted here.
+async fn sync_groups(
+  state: &AppState,
+  settings: &OidcSyncSettings,
+  provider: &Provider<'_>,
+  report: &mut SyncReport,
+) -> Result<(), ApiError> {
+  let remote_groups = provider.list_groups().await.map_err(unavailable)?;
+  let mut seen = HashSet::new();
+  for remote in &remote_groups {
+    seen.insert(remote.id.clone());
+    let subjects = provider.group_member_ids(&remote.id).await.map_err(unavailable)?;
+    let members = state
+      .database
+      .find_users_by_subjects(&settings.issuer, &subjects)
+      .await?;
+
+    let (group_id, is_created, is_renamed) =
+      match state.database.find_user_group_by_external_id(&remote.id).await? {
+        Some(group) => {
+          let is_renamed = group.name != remote.name;
+          if is_renamed {
+            state
+              .database
+              .update_user_group(group.id, Some(&remote.name), None, false)
+              .await?;
+          }
+          (group.id, false, is_renamed)
+        },
+        None => {
+          let Some(handle) = user_groups::handle_from_name(&remote.name) else {
+            warn!(group = %remote.id, "the group name cannot become a handle; skipped");
+            continue;
+          };
+          let id: UserGroupId = state.next_id()?;
+          let outcome = state
+            .database
+            .create_user_group(&NewUserGroup {
+              id,
+              handle: &handle,
+              name: &remote.name,
+              maybe_description: None,
+              maybe_external_id: Some(&remote.id),
+              maybe_created_by: None,
+            })
+            .await?;
+          if outcome == GroupCreateOutcome::HandleTaken {
+            warn!(%handle, "the handle of a provider group is taken; skipped");
+            continue;
+          }
+          report.groups_created += 1;
+          (id, true, false)
+        },
+      };
+    let has_new_members = state.database.set_user_group_members(group_id, &members).await?;
+    if !is_created && (is_renamed || has_new_members) {
+      report.groups_changed += 1;
+    }
+    if is_created || is_renamed || has_new_members {
+      user_groups::announce(state, group_id);
+    }
+  }
+  for (id, external_id) in state.database.list_synced_group_external_ids().await? {
+    if !seen.contains(&external_id) {
+      state.database.delete_user_group(id).await?;
+      user_groups::announce(state, id);
+      report.groups_deleted += 1;
+    }
+  }
+  Ok(())
 }
 
 async fn deactivate(state: &AppState, user: &OidcUserRow, note: &str) -> Result<bool, ApiError> {
@@ -176,6 +256,12 @@ struct RemoteUser {
   id: String,
   #[serde(default)]
   enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct RemoteGroup {
+  id: String,
+  name: String,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +339,44 @@ impl<'a> Provider<'a> {
       users.extend(page);
       if count < page_size {
         return Ok(users);
+      }
+    }
+  }
+
+  /// The top-level groups, page by page.
+  async fn list_groups(&self) -> Result<Vec<RemoteGroup>, ProviderError> {
+    let page_size = self.settings.page_size.max(1) as usize;
+    let mut groups = Vec::new();
+    loop {
+      let page: Vec<RemoteGroup> = self
+        .get(&format!(
+          "/groups?first={}&max={page_size}&briefRepresentation=true",
+          groups.len()
+        ))
+        .await?;
+      let count = page.len();
+      groups.extend(page);
+      if count < page_size {
+        return Ok(groups);
+      }
+    }
+  }
+
+  /// The subjects of a group's direct members, page by page.
+  async fn group_member_ids(&self, group: &str) -> Result<Vec<String>, ProviderError> {
+    let page_size = self.settings.page_size.max(1) as usize;
+    let mut ids = Vec::new();
+    loop {
+      let page: Vec<RemoteUser> = self
+        .get(&format!(
+          "/groups/{group}/members?first={}&max={page_size}&briefRepresentation=true",
+          ids.len()
+        ))
+        .await?;
+      let count = page.len();
+      ids.extend(page.into_iter().map(|user| user.id));
+      if count < page_size {
+        return Ok(ids);
       }
     }
   }

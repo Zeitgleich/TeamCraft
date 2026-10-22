@@ -3,7 +3,7 @@ use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
-use crate::ids::{from_db, to_db};
+use crate::ids::{from_db, from_db_opt, to_db};
 use crate::user::User;
 
 #[derive(Debug, Clone)]
@@ -61,6 +61,24 @@ pub struct SpaceChanges<'a> {
 pub struct SpaceMember {
   pub user: User,
   pub role: SpaceRole,
+  pub maybe_expires_at: Option<OffsetDateTime>,
+  pub maybe_sponsor: Option<UserId>,
+}
+
+/// What to do with a member's expiry when their membership is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpiryChange {
+  Keep,
+  Set(OffsetDateTime),
+  Clear,
+}
+
+/// A guest whose membership ran out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredGuest {
+  pub space: SpaceId,
+  pub user: UserId,
+  pub maybe_sponsor: Option<UserId>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +86,8 @@ pub struct NewSpaceMember {
   pub space: SpaceId,
   pub user: UserId,
   pub role: SpaceRole,
-  pub maybe_expires_at: Option<OffsetDateTime>,
+  pub expiry: ExpiryChange,
+  /// `None` keeps the stored sponsor.
   pub maybe_sponsor: Option<UserId>,
 }
 
@@ -217,7 +236,7 @@ impl Database {
   pub async fn list_space_members(&self, space: SpaceId) -> Result<Vec<SpaceMember>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role
+                u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role, m.expires_at, m.sponsor_user_id
          FROM space_members m JOIN users u ON u.id = m.user_id
          WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())
          ORDER BY u.display_name, u.id"#,
@@ -238,6 +257,8 @@ impl Database {
             is_deactivated: row.is_deactivated,
           },
           role: SpaceRole::from(row.role),
+          maybe_expires_at: row.expires_at,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
         })
       })
       .collect()
@@ -249,16 +270,67 @@ impl Database {
       r#"INSERT INTO space_members (space_id, user_id, role, expires_at, sponsor_user_id)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (space_id, user_id) DO UPDATE
-           SET role = EXCLUDED.role, expires_at = EXCLUDED.expires_at, sponsor_user_id = EXCLUDED.sponsor_user_id"#,
+           SET role = EXCLUDED.role,
+               expires_at = CASE WHEN $6 THEN EXCLUDED.expires_at ELSE space_members.expires_at END,
+               sponsor_user_id = COALESCE(EXCLUDED.sponsor_user_id, space_members.sponsor_user_id)"#,
       to_db(member.space),
       to_db(member.user),
       member.role.as_str(),
-      member.maybe_expires_at,
+      match member.expiry {
+        ExpiryChange::Set(at) => Some(at),
+        ExpiryChange::Keep | ExpiryChange::Clear => None,
+      },
       member.maybe_sponsor.map(to_db),
+      member.expiry != ExpiryChange::Keep,
     )
     .execute(self.pool())
     .await?;
     Ok(())
+  }
+
+  /// Guest memberships whose expiry has passed at `now`, oldest first.
+  pub async fn list_expired_guests(
+    &self,
+    now: OffsetDateTime,
+    limit: i64,
+  ) -> Result<Vec<ExpiredGuest>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT space_id, user_id, sponsor_user_id FROM space_members
+         WHERE role = 'guest' AND expires_at IS NOT NULL AND expires_at <= $1
+         ORDER BY expires_at LIMIT $2"#,
+      now,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(ExpiredGuest {
+          space: from_db(row.space_id)?,
+          user: from_db(row.user_id)?,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+        })
+      })
+      .collect()
+  }
+
+  /// Expiry and sponsor of a membership.
+  pub async fn space_member_terms(
+    &self,
+    space: SpaceId,
+    user: UserId,
+  ) -> Result<Option<(Option<OffsetDateTime>, Option<UserId>)>, DbError> {
+    let row = sqlx::query!(
+      "SELECT expires_at, sponsor_user_id FROM space_members WHERE space_id = $1 AND user_id = $2",
+      to_db(space),
+      to_db(user),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    row
+      .map(|row| Ok((row.expires_at, from_db_opt(row.sponsor_user_id)?)))
+      .transpose()
   }
 
   /// Removes the user from the space and from all of its channels. Returns the channels they left.

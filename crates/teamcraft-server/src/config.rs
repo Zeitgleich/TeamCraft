@@ -39,11 +39,21 @@ pub struct Config {
   #[serde(default)]
   pub notifications: NotificationsConfig,
   #[serde(default)]
+  pub presence: PresenceConfig,
+  #[serde(default)]
+  pub shares: SharesConfig,
+  #[serde(default)]
   pub integration: IntegrationConfig,
   #[serde(default)]
   pub web: WebConfig,
   #[serde(default)]
   pub security: SecurityConfig,
+  #[serde(default)]
+  pub guests: GuestsConfig,
+  #[serde(default)]
+  pub mail: MailConfig,
+  #[serde(default)]
+  pub local_accounts: LocalAccountsConfig,
   /// Blob storage for attachments; without it the attachment endpoints answer 503.
   #[serde(default)]
   pub storage: Option<StorageConfig>,
@@ -133,6 +143,9 @@ pub struct OidcSyncConfig {
   pub maybe_admin_url: Option<String>,
   /// Users fetched per request.
   pub page_size: u32,
+  /// Mirror the provider's top-level groups as user groups (`@handle`), members included. The
+  /// handle is made from the group name; groups whose name cannot become a handle are skipped.
+  pub sync_groups: bool,
 }
 
 /// Names of the identity provider's client roles per TeamCraft role (ARCHITECTURE.md §5.1.1).
@@ -175,6 +188,16 @@ pub struct LimitsConfig {
   pub default_page_size: u32,
   pub max_page_size: u32,
   pub max_directory_results: u32,
+  /// Largest avatar image.
+  pub max_avatar_bytes: u64,
+  /// How long a request for organization recovery waits for approvals.
+  pub org_recovery_request_ttl_secs: u64,
+  /// Largest sealed share or sealed backup key.
+  pub max_recovery_blob_bytes: usize,
+  /// Longest title, department and similar profile text, in characters.
+  pub max_profile_text_chars: usize,
+  /// Members of a user group.
+  pub max_user_group_members: usize,
   /// Unread counts look at this many of the newest unread messages per conversation; a count equal
   /// to it means "that many or more" (clients show "1000+").
   pub max_unread_counted: u32,
@@ -267,6 +290,114 @@ pub struct RetentionJobConfig {
   pub partitions_ahead_months: u32,
 }
 
+/// Guests: external people with a sponsor and an expiry (PLAN.md §12).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GuestsConfig {
+  /// Guests added or invited without an explicit expiry expire this many days later; `0` means
+  /// they never do.
+  pub default_expiry_days: u32,
+  /// If not empty, guests can only be invited with e-mail addresses of these domains (and their
+  /// subdomains); lower case, without `@`.
+  pub allowed_email_domains: Vec<String>,
+  /// How often expired guests are removed.
+  pub expiry_check_interval_secs: u64,
+}
+
+impl Default for GuestsConfig {
+  fn default() -> Self {
+    Self {
+      default_expiry_days: 90,
+      allowed_email_domains: Vec::new(),
+      expiry_check_interval_secs: 3600,
+    }
+  }
+}
+
+/// Outgoing e-mail of the server itself: invitations to spaces and channels. (Meeting invitations
+/// have their own settings under `[meetings]`.)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MailConfig {
+  /// The mail server; without it no e-mail is sent and invitations are only applied at sign-in.
+  pub smtp: Option<SmtpConfig>,
+  /// Public base URL of the web client, without trailing slash; the link in invitation e-mail.
+  pub public_base_url: String,
+  /// Placeholders of both texts: `{inviter}`, `{space}`, `{role}` and `{url}`.
+  pub invite_subject: String,
+  pub invite_body: String,
+  /// Activation e-mail of local guest accounts. Placeholders: `{inviter}`, `{space}` and `{url}`
+  /// (the link with the one-time token).
+  pub activation_subject: String,
+  pub activation_body: String,
+}
+
+impl Default for MailConfig {
+  fn default() -> Self {
+    Self {
+      smtp: None,
+      public_base_url: String::new(),
+      invite_subject: "{inviter} invited you to {space}".into(),
+      invite_body:
+        "{inviter} invited you to \"{space}\" as {role}.\n\nSign in with this e-mail address to join: {url}\n"
+          .into(),
+      activation_subject: "{inviter} invited you to {space}".into(),
+      activation_body:
+        "{inviter} invited you to \"{space}\".\n\nSet your password and your authenticator app here: {url}\n"
+          .into(),
+    }
+  }
+}
+
+/// Guests with a password and TOTP of their own, for people who are not in the identity provider
+/// (PLAN.md §12).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LocalAccountsConfig {
+  /// Off by default: without it the endpoints answer 503 and local tokens are not accepted.
+  pub is_enabled: bool,
+  /// Signs session tokens and seals stored TOTP secrets (at least 32 bytes of randomness).
+  /// Prefer `TEAMCRAFT_LOCAL_ACCOUNTS__SESSION_SECRET`.
+  #[serde(rename = "session_secret")]
+  pub maybe_session_secret: Option<SecretString>,
+  /// The activation link is valid this long.
+  pub activation_ttl_hours: u32,
+  /// A session ends after this long, whatever the workspace session policy says (it can only
+  /// shorten it).
+  pub session_ttl_hours: u32,
+  pub min_password_chars: usize,
+  /// Every account needs a TOTP code, not only those that confirmed one.
+  pub require_totp: bool,
+  /// Failed sign-ins in a row that lock the account.
+  pub max_failed_attempts: u32,
+  pub lockout_secs: u64,
+  /// Shown by authenticator apps.
+  pub totp_issuer: String,
+  /// Argon2id cost of password hashes.
+  pub password_memory_kib: u32,
+  pub password_iterations: u32,
+  pub password_parallelism: u32,
+}
+
+impl Default for LocalAccountsConfig {
+  fn default() -> Self {
+    Self {
+      is_enabled: false,
+      maybe_session_secret: None,
+      activation_ttl_hours: 72,
+      session_ttl_hours: 12,
+      min_password_chars: 12,
+      require_totp: true,
+      max_failed_attempts: 5,
+      lockout_secs: 900,
+      totp_issuer: "TeamCraft".into(),
+      password_memory_kib: 19 * 1024,
+      password_iterations: 2,
+      password_parallelism: 1,
+    }
+  }
+}
+
 /// Request limits and response hardening of the HTTP API.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -333,12 +464,26 @@ pub struct WebConfig {
   /// `Content-Security-Policy` of every page and asset. The default allows the app's own origin,
   /// WebAssembly, WebSocket/WebTransport connections and `blob:`/`data:` images and media.
   pub content_security_policy: String,
+  /// Directory with the small static download page for share links: `download.html` and the
+  /// assets it references. `{{sri:<file>}}` in the page becomes the Subresource Integrity value
+  /// (`sha384-...`) of that file in this directory, computed at startup. Without it `/f/<id>`
+  /// serves the app shell.
+  #[serde(rename = "share_page_dir")]
+  pub maybe_share_page_dir: Option<PathBuf>,
+  /// `Content-Security-Policy` of the download page: no inline script, nothing but its own files.
+  pub share_page_content_security_policy: String,
 }
 
 impl Default for WebConfig {
   fn default() -> Self {
     Self {
       maybe_static_dir: None,
+      maybe_share_page_dir: None,
+      share_page_content_security_policy:
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
+        img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'none'; \
+        frame-ancestors 'none'"
+          .into(),
       content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
         img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self' wss: https:; \
         worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -459,6 +604,12 @@ pub struct CalDavConfig {
   pub password: SecretString,
   #[serde(default = "default_caldav_timeout_secs")]
   pub request_timeout_secs: u64,
+  /// Where one user's calendar lives, with `{email}` for their e-mail address, e.g.
+  /// `https://cal.example.com/dav/calendars/{email}/personal/`. When set, the server asks it
+  /// for the busy periods of people who are online (a CalDAV free-busy report) and shows them as
+  /// "in a meeting". The account above needs read access to those calendars.
+  #[serde(rename = "free_busy_url_template", default)]
+  pub maybe_free_busy_url_template: Option<String>,
 }
 
 /// Notification defaults and the persistent-notification scheduler for urgent direct messages
@@ -474,6 +625,64 @@ pub struct NotificationsConfig {
   pub urgent_max_pushes: u32,
   /// How often the scheduler looks for due repeats.
   pub urgent_scheduler_interval_secs: u64,
+  /// While a desktop device of the user is active, pushes to their phones wait this long and are
+  /// sent only if the message is still unread. `0` pushes at once.
+  pub mobile_push_delay_secs: u64,
+}
+
+/// Share links for external download (e2ee.md §4.5.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SharesConfig {
+  /// Off: no links can be created and the public endpoints answer "not available". Who may create
+  /// links is the `create_share_link` permission (members yes, guests no by default).
+  pub is_enabled: bool,
+  /// Links made without an expiry last this long.
+  pub default_expiry_days: u32,
+  /// No link lasts longer than this.
+  pub max_expiry_days: u32,
+  /// Most downloads a link may allow; `0` means no cap. Links made without a limit get the cap.
+  pub max_downloads_cap: u32,
+  /// Public URL of this server without trailing slash; links are `<base>/f/<id>`.
+  pub public_base_url: String,
+  /// Most live (not revoked, not expired) links per person.
+  pub max_links_per_user: usize,
+}
+
+impl Default for SharesConfig {
+  fn default() -> Self {
+    Self {
+      is_enabled: true,
+      default_expiry_days: 7,
+      max_expiry_days: 30,
+      max_downloads_cap: 0,
+      public_base_url: String::new(),
+      max_links_per_user: 500,
+    }
+  }
+}
+
+/// Derived presence: "in a meeting", "in a call" and the away timeout (PLAN.md §4).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PresenceConfig {
+  /// How often derived statuses and the away timeout are re-evaluated for online users.
+  pub auto_status_interval_secs: u64,
+  /// How often the calendar server is asked when online users are busy (needs
+  /// `meetings.caldav.free_busy_url_template`).
+  pub calendar_poll_interval_secs: u64,
+  /// Busy periods starting within this time are fetched, so the status can switch on at their start.
+  pub calendar_lookahead_secs: u64,
+}
+
+impl Default for PresenceConfig {
+  fn default() -> Self {
+    Self {
+      auto_status_interval_secs: 30,
+      calendar_poll_interval_secs: 300,
+      calendar_lookahead_secs: 900,
+    }
+  }
 }
 
 /// Calls (ARCHITECTURE.md §6): the server issues join tokens the SFU verifies with its public key.
@@ -501,6 +710,11 @@ pub struct CallsConfig {
   /// DMs and group DMs ring for this long unless somebody else joins.
   #[serde(default = "default_ring_timeout_secs")]
   pub ring_timeout_secs: u64,
+  /// Where the SFU takes host controls (mute all, remove, lock, end) on its internal listener, e.g.
+  /// `http://sfu.internal:8081`. The registration token above authenticates the server. Without
+  /// it the meeting controls answer 503.
+  #[serde(rename = "sfu_control_url", default)]
+  pub maybe_sfu_control_url: Option<String>,
 }
 
 /// Device-linking relay at /api/v1/rendezvous.
@@ -586,6 +800,7 @@ impl Default for OidcSyncConfig {
       maybe_client_secret: None,
       maybe_admin_url: None,
       page_size: 100,
+      sync_groups: false,
     }
   }
 }
@@ -621,6 +836,11 @@ impl Default for LimitsConfig {
       default_page_size: 50,
       max_page_size: 200,
       max_directory_results: 50,
+      max_avatar_bytes: 1024 * 1024,
+      org_recovery_request_ttl_secs: 86_400,
+      max_recovery_blob_bytes: 8192,
+      max_profile_text_chars: 100,
+      max_user_group_members: 5000,
       max_unread_counted: 1000,
       max_key_packages_per_device: 200,
       max_key_package_bytes: 16 * 1024,
@@ -680,6 +900,7 @@ impl Default for NotificationsConfig {
       urgent_repeat_interval_secs: 120,
       urgent_max_pushes: 5,
       urgent_scheduler_interval_secs: 15,
+      mobile_push_delay_secs: 120,
     }
   }
 }

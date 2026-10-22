@@ -99,6 +99,14 @@ pub async fn set_conversation_retention(
     &json!({"max_age_days": own.maybe_max_age_days, "max_messages": own.maybe_max_messages}),
   )
   .await?;
+  super::system_events::emit(
+    state,
+    conversation,
+    teamcraft_proto::SystemEventKind::RetentionChanged,
+    Some(caller.user.id),
+    None,
+  )
+  .await;
   status(state, own, current.space).await
 }
 

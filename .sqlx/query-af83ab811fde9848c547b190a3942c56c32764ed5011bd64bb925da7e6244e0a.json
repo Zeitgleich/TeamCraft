@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE local_accounts\n         SET totp_last_step = $2, is_totp_confirmed = is_totp_confirmed OR $3\n         WHERE user_id = $1 AND (totp_last_step IS NULL OR totp_last_step < $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af83ab811fde9848c547b190a3942c56c32764ed5011bd64bb925da7e6244e0a"
+}

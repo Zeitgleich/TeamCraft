@@ -207,6 +207,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Meetings are not shown by the shell yet.
       GatewayEvent::MeetingUpdate { .. }
       | GatewayEvent::LobbyJoin { .. }
+      | GatewayEvent::GuestExpired { .. }
+      | GatewayEvent::ProfileUpdate { .. }
+      | GatewayEvent::AnnouncementUpdate
+      | GatewayEvent::OrgRecoveryUpdate { .. }
+      | GatewayEvent::SystemEvent { .. }
+      | GatewayEvent::UserGroupUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),
       // Call roster and ringing go to the app's call handling (media runs outside the core).
       GatewayEvent::CallStart { .. }

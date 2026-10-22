@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role\n         FROM space_members m JOIN users u ON u.id = m.user_id\n         WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())\n         ORDER BY u.display_name, u.id",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role, m.expires_at, m.sponsor_user_id\n         FROM space_members m JOIN users u ON u.id = m.user_id\n         WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())\n         ORDER BY u.display_name, u.id",
   "describe": {
     "columns": [
       {
@@ -74,6 +74,28 @@
             "name": "role"
           }
         }
+      },
+      {
+        "ordinal": 7,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "sponsor_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "sponsor_user_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -88,8 +110,10 @@
       false,
       false,
       null,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "176b5b67e8b0239a558d89b8d8d1dfa9b96ca722b44de90aba6d6fecfbe19800"
+  "hash": "7f9128e07e9bdf3eb43727a4f0d005f25fa0bdac04d5d5c46001458b56c42e0b"
 }

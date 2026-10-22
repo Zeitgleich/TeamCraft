@@ -30,13 +30,15 @@ pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};
 pub use gateway::{GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
-  AttachmentId, AuditEntryId, CallId, CategoryId, ConversationId, DeviceId, Id, IdError, InviteId,
-  MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, SNOWFLAKE_EPOCH_MS,
-  SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId, ThreadId, UserId,
+  AnnouncementId, AttachmentId, AuditEntryId, CallId, CategoryId, ConversationId, DeviceId, Id, IdError,
+  InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, RecoveryRequestId,
+  SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId, SystemEventId,
+  ThreadId, UserGroupId, UserId,
 };
 pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,
-  PermissionScope, SchemeRole, SpaceContext, SpaceRole, Target, is_allowed,
+  PermissionScope, SchemeChangeError, SchemeRole, SpaceContext, SpaceRole, Target, check_scheme_change,
+  is_allowed,
 };
 pub use rendezvous::{RendezvousClientMessage, RendezvousServerMessage};
 pub use role::Role;
