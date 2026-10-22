@@ -180,6 +180,66 @@
         0.5,
         0.5
       ]
+    },
+    {
+      "slug": "meeting-room",
+      "title": "office interior",
+      "author": "Foto Miki (Foto Miki Digital)",
+      "license": "Public Domain Mark 1.0",
+      "page_url": "https://www.flickr.com/photos/96511847@N04/10798088985/",
+      "download_url": "https://live.staticflickr.com/2848/10798088985_5349b83598_k.jpg",
+      "original_file": "meeting-room.jpg",
+      "sha256": "c847d941aae479d53b965edcc2d273ed6a3f7f5706ea32ae865e2d0eb4577f00",
+      "retrieved": "2026-10-23",
+      "focus": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "slug": "open-plan-office",
+      "title": "Media Office",
+      "author": "Foto Miki (Foto Miki Digital)",
+      "license": "Public Domain Mark 1.0",
+      "page_url": "https://www.flickr.com/photos/96511847@N04/10798098696/",
+      "download_url": "https://live.staticflickr.com/2858/10798098696_26a4dfbf5a_k.jpg",
+      "original_file": "open-plan-office.jpg",
+      "sha256": "8080b7fee31ea0760c2311fd7b749c0e02295f2f7505dad67feb7918fba2f5af",
+      "retrieved": "2026-10-23",
+      "focus": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "slug": "home-office",
+      "title": "Modern Luxury Loft / Apartment Architecture Interior",
+      "author": "Foto Miki (Foto Miki Digital)",
+      "license": "Public Domain Mark 1.0",
+      "page_url": "https://www.flickr.com/photos/96511847@N04/9202887270/",
+      "download_url": "https://live.staticflickr.com/7386/9202887270_efb96f4310_k.jpg",
+      "original_file": "home-office.jpg",
+      "sha256": "ef80d9aa7fb90ea2e31519232a7ac60c81b7b355551a400071e55fa34045ac8b",
+      "retrieved": "2026-10-23",
+      "focus": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "slug": "minimal-office",
+      "title": "Contemporary Office",
+      "author": "Foto Miki (Foto Miki Digital)",
+      "license": "Public Domain Mark 1.0",
+      "page_url": "https://www.flickr.com/photos/96511847@N04/9200850507/",
+      "download_url": "https://live.staticflickr.com/3670/9200850507_921df1e4fd_k.jpg",
+      "original_file": "minimal-office.jpg",
+      "sha256": "86a466968866611db0f156ec7ebf59f4f96af9f57c62054f7e6184dcb0df2e58",
+      "retrieved": "2026-10-23",
+      "focus": [
+        0.5,
+        0.5
+      ]
     }
   ]
 }

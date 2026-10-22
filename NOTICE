@@ -20,7 +20,7 @@ davey (crates/vendor/davey/)
   MIT License, see crates/vendor/davey/LICENSE.
 
 Photo backgrounds (assets/backgrounds/)
-  Twelve pictures for background replacement, cropped and scaled by scripts/process-backgrounds.py.
+  Sixteen pictures for background replacement, cropped and scaled by scripts/process-backgrounds.py.
   Each is dedicated to the public domain (CC0 1.0) or marked public domain by its author
   (Public Domain Mark 1.0); no attribution is required. Title, author, source URL, licence and
   retrieval date of every picture: assets/backgrounds/SOURCES.md.
