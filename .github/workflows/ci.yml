@@ -17,6 +17,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: read the code and pull the CI image from ghcr.io; nothing is written.
+permissions:
+  contents: read
+  packages: read
+
 env:
   CARGO_TERM_COLOR: always
   # arm64 runs on pushes to main and on pull requests labelled `arm`; the runner budget is limited.
@@ -58,8 +63,8 @@ jobs:
         # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
         # the dependencies are fetched, and the build output only needs the space later.
         run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
-      - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: check-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -106,8 +111,8 @@ jobs:
         # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
         # the dependencies are fetched, and the build output only needs the space later.
         run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
-      - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -131,8 +136,8 @@ jobs:
     env:
       RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
     steps:
-      - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: audio-processing
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -147,5 +152,5 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
