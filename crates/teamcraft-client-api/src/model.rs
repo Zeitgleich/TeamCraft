@@ -293,7 +293,7 @@ pub struct Message {
 }
 
 /// A followed thread as listed in the threads inbox.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSummary {
   pub conversation: ConversationId,
   pub root: Message,
