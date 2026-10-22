@@ -58,18 +58,24 @@ rusqlite = { version = "0.39", optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 # Gateway WebSocket on native targets.
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+# TLS configuration with an explicit crypto provider for the WebSockets (and HTTP on Android), see
+# src/api/tls.rs; same rustls as reqwest. Mozilla roots for Android and as a fallback.
+rustls = "0.23.46"
+webpki-roots = "1.0.10"
 # Full-text search over decrypted messages and shared index segments (e2ee.md §10.1). Native only:
 # tantivy doesn't target wasm32; the browser falls back to scanning the local store.
 tantivy = { version = "0.27.0", default-features = false, features = ["lz4-compression", "stemmer"] }
 
-[target.'cfg(target_os = "android")'.dependencies]
-# TLS trust without the platform verifier's JNI setup (src/api/tls.rs); same rustls as reqwest.
-rustls = "0.23.46"
-webpki-roots = "1.0.10"
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+# The operating system's roots for the WebSockets (src/api/tls.rs); already in the tree via
+# tokio-tungstenite's native-roots feature.
+rustls-native-certs = "0.8.5"
+
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]
 # OS keystore for the database key (Keychain, Secret Service, Windows Credential Manager). Android
-# keeps it in the Android Keystore, managed by the app.
+# and iOS keep it in the platform keystore, managed by the app (apple-native-keyring-store needs
+# extra features on iOS and the app's shared keychain group covers it anyway).
 keyring = "4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

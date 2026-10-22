@@ -20,7 +20,7 @@ use time::{Duration, OffsetDateTime};
 use tracing::warn;
 
 use super::access::is_guest;
-use super::convert::{offset_date_time, unix_millis};
+use super::convert::{offset_date_time, presented_name, unix_millis};
 use super::{validate_name, validate_text};
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::error::ApiError;
@@ -466,13 +466,13 @@ async fn event_for(
     .chain([meeting.organizer])
     .collect();
   let emails = state.database.get_user_emails(&user_ids).await?;
-  let organizer_user = state.database.get_user(meeting.organizer).await?;
+  let names = presented_names(state, &user_ids).await?;
   let organizer = EventPerson {
     email: emails
       .get(&meeting.organizer)
       .cloned()
       .unwrap_or_else(|| service.organizer_fallback_address().to_owned()),
-    maybe_name: organizer_user.map(|user| user.display_name),
+    maybe_name: names.get(&meeting.organizer).cloned(),
   };
   let attendees = attendees
     .iter()
@@ -484,7 +484,7 @@ async fn event_for(
       Some(EventAttendee {
         person: EventPerson {
           email,
-          maybe_name: attendee.maybe_name.clone(),
+          maybe_name: displayed_name(attendee, &names),
         },
         rsvp: RsvpStatus::from(attendee.rsvp.clone()),
       })
@@ -524,11 +524,16 @@ async fn send_invitations(
     .filter_map(|attendee| attendee.maybe_user)
     .collect();
   let emails = state.database.get_user_emails(&user_ids).await?;
-  let organizer_name = state
-    .database
-    .get_user(meeting.organizer)
-    .await?
-    .map_or_else(String::new, |user| user.display_name);
+  let names = presented_names(
+    state,
+    &user_ids
+      .iter()
+      .copied()
+      .chain([meeting.organizer])
+      .collect::<Vec<_>>(),
+  )
+  .await?;
+  let organizer_name = names.get(&meeting.organizer).cloned().unwrap_or_default();
   let mut undelivered = Vec::new();
   // The instance's mail identity is not for bulk mail: an organizer has an hourly budget. What
   // exceeds it counts as undelivered (the invitees still see the meeting in the app).
@@ -571,7 +576,7 @@ async fn send_invitations(
     let event = event_for(state, service, meeting, join_url).await?;
     let mail = OutgoingMail {
       to_address: address.clone(),
-      maybe_to_name: attendee.maybe_name.clone(),
+      maybe_to_name: displayed_name(attendee, &names),
       subject,
       text,
       method,
@@ -741,6 +746,8 @@ async fn resolve_invitees(
       },
       MeetingInvitee::External { email, maybe_name } => {
         let email = validated_email(email)?;
+        // External invitees get a guest session: the guest rules apply to them as well.
+        super::invites::check_guest_domain(state, &email)?;
         let maybe_name = maybe_name
           .as_deref()
           .map(|name| validate_name(name, "invitee name", MAX_TITLE_CHARS))
@@ -901,6 +908,32 @@ async fn announce(state: &AppState, meeting: &StoredMeeting) -> Result<(), ApiEr
   Ok(())
 }
 
+/// What people see of the users among `attendees`, as the directory policy wants it (the names
+/// stored with the attendee rows are snapshots of the raw display names, never shown).
+async fn presented_attendee_names(
+  state: &AppState,
+  attendees: &[StoredAttendee],
+) -> Result<HashMap<UserId, String>, ApiError> {
+  let ids: Vec<UserId> = attendees
+    .iter()
+    .filter_map(|attendee| attendee.maybe_user)
+    .collect();
+  presented_names(state, &ids).await
+}
+
+async fn presented_names(state: &AppState, ids: &[UserId]) -> Result<HashMap<UserId, String>, ApiError> {
+  let policy = state.policy.get();
+  Ok(
+    state
+      .database
+      .get_users(ids)
+      .await?
+      .iter()
+      .map(|user| (user.id, presented_name(&policy.directory, user)))
+      .collect(),
+  )
+}
+
 async fn respond(
   state: &AppState,
   service: &MeetingService,
@@ -908,6 +941,7 @@ async fn respond(
   undelivered_invitations: Vec<String>,
 ) -> Result<MeetingResponse, ApiError> {
   let attendees = state.database.list_attendees(meeting.id).await?;
+  let names = presented_attendee_names(state, &attendees).await?;
   Ok(MeetingResponse {
     id: meeting.id,
     title: meeting.title.clone(),
@@ -924,17 +958,29 @@ async fn respond(
       .maybe_recurrence_rule
       .as_deref()
       .and_then(parse_recurrence_rule),
-    attendees: attendees.iter().map(attendee_response).collect(),
+    attendees: attendees
+      .iter()
+      .map(|attendee| attendee_response(attendee, &names))
+      .collect(),
     undelivered_invitations,
   })
 }
 
-fn attendee_response(attendee: &StoredAttendee) -> MeetingAttendeeResponse {
+fn attendee_response(attendee: &StoredAttendee, names: &HashMap<UserId, String>) -> MeetingAttendeeResponse {
   MeetingAttendeeResponse {
     maybe_user_id: attendee.maybe_user,
     maybe_email: attendee.maybe_email.clone(),
-    maybe_name: attendee.maybe_name.clone(),
+    maybe_name: displayed_name(attendee, names),
     rsvp: RsvpStatus::from(attendee.rsvp.clone()),
+  }
+}
+
+/// A user attendee under the directory policy's name, an external one under the name the organizer
+/// gave.
+fn displayed_name(attendee: &StoredAttendee, names: &HashMap<UserId, String>) -> Option<String> {
+  match attendee.maybe_user {
+    Some(user) => names.get(&user).cloned().or_else(|| attendee.maybe_name.clone()),
+    None => attendee.maybe_name.clone(),
   }
 }
 

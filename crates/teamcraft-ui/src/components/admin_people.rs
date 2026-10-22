@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use teamcraft_proto::{DisplayNameFormat, PushContentMode, ReplyView, StatusPreset, WorkspacePolicy};
+use teamcraft_proto::{DisplayNameFormat, PushContentMode, StatusPreset, WorkspacePolicy};
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_policy::{
@@ -35,12 +35,6 @@ pub fn PeopleSection() -> impl IntoView {
         };
         (minutes.to_string(), label)
       })
-      .collect()
-  });
-  let reply_options = Signal::derive(move || {
-    ["panel", "inline"]
-      .into_iter()
-      .map(|slug| (slug.to_owned(), i18n.t(&format!("policy-reply-{slug}"))))
       .collect()
   });
 
@@ -116,6 +110,24 @@ pub fn PeopleSection() -> impl IntoView {
       </fieldset>
 
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-threads")}</legend>
+        <CheckRow
+          name="threaded_view"
+          label=Signal::derive(move || i18n.t("policy-threaded-view"))
+          hint=Signal::derive(move || i18n.t("policy-threaded-view-hint"))
+          checked=Signal::derive(move || draft.get().threads.is_threaded_view_enabled)
+          on_change=move |value| policy.edit(|p| p.threads.is_threaded_view_enabled = value)
+        />
+        <CheckRow
+          name="auto_follow"
+          label=Signal::derive(move || i18n.t("policy-auto-follow"))
+          hint=Signal::derive(move || i18n.t("policy-auto-follow-hint"))
+          checked=Signal::derive(move || draft.get().threads.auto_follows_mentioned_threads)
+          on_change=move |value| policy.edit(|p| p.threads.auto_follows_mentioned_threads = value)
+        />
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-notifications")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-notifications-hint")}</p>
         {[PushContentMode::Generic, PushContentMode::Sender, PushContentMode::Full]
@@ -142,23 +154,6 @@ pub fn PeopleSection() -> impl IntoView {
             }
           })
           .collect_view()}
-        <CheckRow
-          name="auto_follow"
-          label=Signal::derive(move || i18n.t("policy-auto-follow"))
-          hint=Signal::derive(move || i18n.t("policy-auto-follow-hint"))
-          checked=Signal::derive(move || draft.get().notifications.auto_follow_mentioned_threads)
-          on_change=move |value| policy.edit(|p| p.notifications.auto_follow_mentioned_threads = value)
-        />
-        <SelectRow
-          id="policy-reply-view"
-          label=Signal::derive(move || i18n.t("policy-reply-view"))
-          options=reply_options
-          selected=Signal::derive(move || draft.get().notifications.reply_view.as_str().to_owned())
-          on_select=move |value: String| {
-            let view = if value == "inline" { ReplyView::Inline } else { ReplyView::Panel };
-            policy.edit(|p| p.notifications.reply_view = view);
-          }
-        />
       </fieldset>
 
       <PolicyFooter policy=policy />

@@ -2,6 +2,7 @@
 //! `teamcraft-media`; these types only describe what the UI shows and lets the user pick.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::BackgroundId;
 
 use crate::model::{ConversationId, UserId};
 
@@ -42,6 +43,17 @@ pub enum BackgroundEffect {
   BlurLight,
   BlurStrong,
   Preset(BackgroundPreset),
+  /// One of the user's own pictures ([`BackgroundImageInfo`]).
+  Custom(BackgroundId),
+}
+
+/// One of the user's own background pictures, as a picker lists it (encrypted on the server,
+/// synced to the user's devices).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundImageInfo {
+  pub id: BackgroundId,
+  pub name: String,
+  pub size_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -74,6 +86,7 @@ impl BackgroundEffect {
       Self::Preset(BackgroundPreset::Bookshelf) => "bookshelf",
       Self::Preset(BackgroundPreset::Sunrise) => "sunrise",
       Self::Preset(BackgroundPreset::Forest) => "forest",
+      Self::Custom(_) => "custom",
     }
   }
 }
@@ -211,6 +224,19 @@ pub enum CallPhase {
 
 #[cfg(test)]
 mod tests {
+
+  #[test]
+  fn own_backgrounds_have_a_stable_wire_format() {
+    let effect = BackgroundEffect::Custom("7".parse().unwrap());
+    assert_eq!(
+      serde_json::to_value(effect).unwrap(),
+      serde_json::json!({"custom": "7"})
+    );
+    assert_eq!(effect.slug(), "custom");
+    let preset: BackgroundEffect = serde_json::from_value(serde_json::json!({"preset": "forest"})).unwrap();
+    assert_eq!(preset, BackgroundEffect::Preset(BackgroundPreset::Forest));
+  }
+
   use super::*;
 
   #[test]

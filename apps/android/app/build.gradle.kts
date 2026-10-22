@@ -2,23 +2,27 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.android)
   alias(libs.plugins.kotlin.compose)
+  // The core's chat messages are client-api JSON; the app mirrors the view models as data classes.
+  alias(libs.plugins.kotlin.serialization)
 }
 
 fun setting(name: String): String = (findProperty("teamcraft.$name") as String?).orEmpty()
 
 android {
-  namespace = "org.teamcraft.android"
+  namespace = "de.zeitgleich.teamcraft"
   compileSdk = 35
   // Same NDK as scripts/build.sh; AGP uses it to strip the Rust library when packaging (UniFFI's
   // binding generator needs the symbols, so the library is built unstripped).
   ndkVersion = "27.2.12479018"
 
   defaultConfig {
-    applicationId = "org.teamcraft.android"
+    applicationId = "de.zeitgleich.teamcraft"
     minSdk = 26
     targetSdk = 35
-    versionCode = 1
-    versionName = "0.1.0"
+    // docs/release.md: versionCode = MAJOR*1000000 + MINOR*10000 + PATCH*100 + stage, where stage is
+    // beta.N -> N, rc.N -> 50+N and the final release -> 99, so every release sorts above the last.
+    versionCode = 1000001
+    versionName = "1.0.0-beta.1"
     // The ABIs scripts/build.sh builds the Rust library for (phones and the x86_64 emulator).
     ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -102,6 +106,7 @@ dependencies {
   implementation(libs.compose.material.icons)
   implementation(libs.compose.ui.tooling.preview)
   implementation(libs.kotlinx.coroutines.android)
+  implementation(libs.kotlinx.serialization.json)
   implementation(libs.appauth)
   implementation(libs.unifiedpush.connector)
   // Calls: Telecom integration and Android Auto calling.

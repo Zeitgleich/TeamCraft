@@ -1,0 +1,327 @@
+# Release (docs/release.md): a tag `v*` builds everything a release ships and attaches it to a
+# **draft** GitHub release, which a maintainer reviews and publishes by hand.
+#
+# - Server and SFU images, multi-arch (amd64 + arm64, each built on a native runner), pushed to
+#   ghcr.io/<owner>/teamcraft-server and -sfu with the release version as tag, with SBOM and
+#   provenance attestations.
+# - Desktop packages from desktop-release.yml (called, not copied), the web client bundle.
+# - Android APKs of both flavors: release builds (signed only when the upload key secrets exist,
+#   unsigned otherwise) and debug-signed builds for testers.
+# - SPDX SBOMs of the source tree and both images, image digests, SHA256SUMS over all files.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Never two runs for the same tag; a re-pushed tag waits for the previous run instead of racing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      image_owner: ${{ steps.version.outputs.image_owner }}
+    steps:
+      - uses: actions/checkout@v5
+      # The tag must match the workspace version, so packages, images and the tag never disagree.
+      - name: Tag matches the workspace version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          version="${TAG#v}"
+          workspace="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          desktop="$(sed -n 's/^  "version": "\(.*\)",/\1/p' apps/desktop/tauri.conf.json)"
+          android="$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' apps/android/app/build.gradle.kts)"
+          for found in "$workspace" "$desktop" "$android"; do
+            if [ "$found" != "$version" ]; then
+              echo "::error::tag $TAG does not match the versions in the tree (Cargo.toml $workspace, tauri.conf.json $desktop, Android $android)"
+              exit 1
+            fi
+          done
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          case "$version" in *-*) is_prerelease=true ;; *) is_prerelease=false ;; esac
+          {
+            echo "version=$version"
+            echo "is_prerelease=$is_prerelease"
+            echo "image_owner=${OWNER,,}"
+          } >> "$GITHUB_OUTPUT"
+
+  image:
+    name: Image ${{ matrix.image }} (${{ matrix.platform }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [teamcraft-server, teamcraft-sfu]
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ needs.version.outputs.image_owner }}/${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+      # Pushed by digest only; the merge job puts both architectures under the version tags.
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: containers/${{ matrix.image }}.Containerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+      - name: Remember the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  image-manifest:
+    name: Image ${{ matrix.image }} (multi-arch tags)
+    needs: [version, image]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [teamcraft-server, teamcraft-sfu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ needs.version.outputs.image_owner }}/${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Semver tags: 1.2.3 and 1.2 for releases; prereleases (1.0.0-beta.1) only get their own tag.
+      # No `latest`: deployments pin a version or a digest (docs/operations.md).
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Create the multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          tags=()
+          while IFS= read -r tag; do [ -n "$tag" ] && tags+=(-t "$tag"); done <<< "$DOCKER_METADATA_OUTPUT_TAGS"
+          sources=()
+          for digest in *; do sources+=("${IMAGE}@sha256:${digest}"); done
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+      - name: Record the manifest digest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          NAME: ${{ matrix.image }}
+        run: |
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
+          mkdir -p out
+          echo "${IMAGE}:${VERSION}@${digest}" > "out/${NAME}.image"
+      - name: SBOM of the image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
+          format: spdx-json
+          output-file: out/${{ matrix.image }}-${{ needs.version.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-${{ matrix.image }}
+          path: out/*
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop
+    needs: version
+    uses: ./.github/workflows/desktop-release.yml
+
+  android:
+    name: Android (full + libre)
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TEAMCRAFT_ANDROID_CACHE: ${{ github.workspace }}/../android-cache
+    steps:
+      # The SDK, NDK and the Rust target directory need ~10 GB; the runner's preinstalled toolchains
+      # we never use make room for them.
+      - name: Free disk space on the runner
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+      - uses: actions/checkout@v5
+      - name: Build image
+        run: docker build -t teamcraft-android-build:local apps/android/docker
+      # Release builds are signed with the upload key when its secrets exist (README.md, "Signing"),
+      # unsigned otherwise. Debug builds are always signed with a throwaway debug key so testers can
+      # install them. Server and identity provider defaults come from repository variables.
+      - name: Upload key (optional)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > apps/android/upload.keystore
+            echo "HAS_UPLOAD_KEY=true" >> "$GITHUB_ENV"
+          fi
+      - name: Build APKs
+        env:
+          SERVER_URL: ${{ vars.TEAMCRAFT_ANDROID_SERVER_URL }}
+          OIDC_ISSUER: ${{ vars.TEAMCRAFT_ANDROID_OIDC_ISSUER }}
+          OIDC_CLIENT_ID: ${{ vars.TEAMCRAFT_ANDROID_OIDC_CLIENT_ID }}
+          OIDC_REDIRECT_SCHEME: ${{ vars.TEAMCRAFT_ANDROID_OIDC_REDIRECT_SCHEME }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          args=(assembleFullRelease assembleLibreRelease assembleFullDebug assembleLibreDebug)
+          [ -n "$SERVER_URL" ] && args+=("-Pteamcraft.serverUrl=$SERVER_URL")
+          [ -n "$OIDC_ISSUER" ] && args+=("-Pteamcraft.oidcIssuer=$OIDC_ISSUER")
+          [ -n "$OIDC_CLIENT_ID" ] && args+=("-Pteamcraft.oidcClientId=$OIDC_CLIENT_ID")
+          [ -n "$OIDC_REDIRECT_SCHEME" ] && args+=("-Pteamcraft.oidcRedirectScheme=$OIDC_REDIRECT_SCHEME")
+          if [ "${HAS_UPLOAD_KEY:-}" = true ]; then
+            args+=("-Pteamcraft.uploadKeystore=/src/apps/android/upload.keystore"
+              "-Pteamcraft.uploadKeystorePassword=$KEYSTORE_PASSWORD"
+              "-Pteamcraft.uploadKeyAlias=$KEY_ALIAS"
+              "-Pteamcraft.uploadKeyPassword=$KEY_PASSWORD")
+          fi
+          apps/android/scripts/docker-build.sh "${args[@]}"
+      - name: Collect APKs
+        run: |
+          mkdir -p out
+          for apk in apps/android/app/build/outputs/apk/*/*/*.apk; do
+            flavor="$(basename "$(dirname "$(dirname "$apk")")")"
+            type="$(basename "$(dirname "$apk")")"
+            suffix=""
+            case "$apk" in *-unsigned.apk) suffix="-unsigned" ;; esac
+            cp "$apk" "out/teamcraft-android-${VERSION}-${flavor}-${type}${suffix}.apk"
+          done
+          rm -f apps/android/upload.keystore
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: out/*.apk
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: [version, image-manifest, desktop, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Source SBOM (Cargo.lock and the Android/Gradle dependencies in the tree)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: teamcraft-source-${{ needs.version.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Assemble the release files
+        run: |
+          mkdir -p dist
+          mv "teamcraft-source-${VERSION}.spdx.json" dist/
+          # Packages of every platform the desktop workflow builds (Windows joins with its jobs).
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+            -o -name '*.flatpak' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
+            -o -name '*.apk' -o -name '*.spdx.json' \) -exec cp {} dist/ \;
+          # The web client: the same trunk build the desktop app embeds, served by the server
+          # ([web] static_dir).
+          tar -C artifacts/ui-dist -czf "dist/teamcraft-web-${VERSION}.tar.gz" .
+          cat artifacts/release-image-*/*.image > dist/images.txt
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          ls -l dist
+          cat dist/images.txt
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[.*\]: / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "### Container images"
+            echo
+            echo '```'
+            cat dist/images.txt
+            echo '```'
+            echo
+            echo "Verify downloads with \`sha256sum -c SHA256SUMS\`."
+          } >> notes.md
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flags=(--draft --verify-tag --title "TeamCraft ${VERSION}" --notes-file notes.md)
+          [ "$IS_PRERELEASE" = true ] && flags+=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" "${flags[@]}" dist/*
+          fi

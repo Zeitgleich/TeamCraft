@@ -195,31 +195,24 @@ wire_enum! {
   }
 }
 
-wire_enum! {
-  /// How replies are shown by default.
-  pub enum ReplyView {
-    /// In a side panel next to the channel.
-    Panel => "panel",
-    /// Inline in the channel, with the thread collapsed under its root.
-    Inline => "inline",
-  }
-}
-
-/// Rules for guests that the server applies. A value set here wins over the server file.
+/// Guest rules the server enforces (PLAN.md §12).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct GuestPolicy {
-  /// Guests can only be invited with these e-mail domains (and their subdomains). Empty: the server
-  /// file decides.
+  /// If not empty, guests need an e-mail address of one of these domains (or a subdomain): they
+  /// can't be invited, added to meetings or sign in otherwise. Lower case, without `@`. The
+  /// server's own `[guests] allowed_email_domains` applies in addition.
   #[serde(default)]
   pub allowed_email_domains: Vec<String>,
-  /// Guests without an explicit expiry expire after this many days; `0` never.
+  /// Guests without an explicit expiry expire after this many days; `0` never. Absent: the server
+  /// file decides.
   #[serde(
     rename = "default_expiry_days",
     default,
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_default_expiry_days: Option<u32>,
-  /// Guests open direct messages only with people they share a conversation with.
+  /// Guests open direct messages only with people they share a conversation with. Absent: the
+  /// server file decides.
   #[serde(
     rename = "dm_only_with_shared_conversations",
     default,
@@ -236,13 +229,10 @@ pub struct PasswordPolicy {
   pub maybe_min_chars: Option<u32>,
 }
 
-/// Defaults for notifications and threads.
+/// What a notification may show (the receiving device applies it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct NotificationDefaults {
   pub push_content: PushContentMode,
-  /// New accounts follow threads they are mentioned in.
-  pub auto_follow_mentioned_threads: bool,
-  pub reply_view: ReplyView,
 }
 
 impl Default for NotificationDefaults {
@@ -250,8 +240,25 @@ impl Default for NotificationDefaults {
     Self {
       // Today's behaviour; admins who want less on lock screens lower it.
       push_content: PushContentMode::Full,
-      auto_follow_mentioned_threads: true,
-      reply_view: ReplyView::Panel,
+    }
+  }
+}
+
+/// Threads (PLAN.md §3): admin options for the threaded view and the auto-follow default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadPolicy {
+  /// Off: the workspace is flat, the server refuses messages that reply in a thread. Existing
+  /// threads stay readable.
+  pub is_threaded_view_enabled: bool,
+  /// Whether people who never chose follow the threads where they are mentioned.
+  pub auto_follows_mentioned_threads: bool,
+}
+
+impl Default for ThreadPolicy {
+  fn default() -> Self {
+    Self {
+      is_threaded_view_enabled: true,
+      auto_follows_mentioned_threads: true,
     }
   }
 }
@@ -272,6 +279,8 @@ pub struct WorkspacePolicy {
   pub directory: DirectoryPolicy,
   #[serde(default)]
   pub presence: PresencePolicy,
+  #[serde(default)]
+  pub threads: ThreadPolicy,
   #[serde(default)]
   pub guests: GuestPolicy,
   #[serde(default)]
@@ -313,6 +322,7 @@ impl Default for WorkspacePolicy {
       session: SessionPolicy::default(),
       directory: DirectoryPolicy::default(),
       presence: PresencePolicy::default(),
+      threads: ThreadPolicy::default(),
       guests: GuestPolicy::default(),
       passwords: PasswordPolicy::default(),
       notifications: NotificationDefaults::default(),

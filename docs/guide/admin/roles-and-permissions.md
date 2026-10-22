@@ -12,7 +12,10 @@ They come from the identity provider's client roles ([Keycloak setup](keycloak.m
 | guest  | External person       | Write and react in conversations they were added to; DMs only with shared contacts |
 
 Inside a space there is also **space admin** (manage the space's channels and members, invite guests)
-and inside a channel **channel admin** (manage members, roles and properties, delete others' posts).
+and inside a channel **channel admin** (manage members, roles and properties, delete others' posts)
+and **moderator** (remove members and delete others' posts and reactions, but no roles, properties,
+privacy, and not admins or moderators). Handing out either role needs `manage_channel_roles`;
+guests cannot hold them.
 
 ## How permissions are decided
 

@@ -24,7 +24,6 @@ const MAX_SIGNATURE_BYTES: usize = 4096;
 const MAX_LINK_PREVIEW_DOMAINS: usize = 500;
 const MAX_DOMAIN_CHARS: usize = 253;
 const MAX_ORG_RECOVERY_ADMINS: u8 = 10;
-const MAX_GUEST_DOMAINS: usize = 100;
 const MAX_GUEST_EXPIRY_DAYS: u32 = 3650;
 const MIN_PASSWORD_CHARS_FLOOR: u32 = 8;
 const MAX_PASSWORD_CHARS_CEILING: u32 = 128;
@@ -126,16 +125,6 @@ pub async fn list(
 }
 
 /// The latest policy (the default one if none was signed yet).
-/// Guest domains in force: the signed policy's list, else the server file's.
-pub fn effective_guest_domains(state: &AppState) -> Vec<String> {
-  let policy = state.policy.get();
-  if policy.guests.allowed_email_domains.is_empty() {
-    state.settings.guests.allowed_email_domains.clone()
-  } else {
-    policy.guests.allowed_email_domains.clone()
-  }
-}
-
 /// Days until a guest without an explicit expiry expires (`0`: never).
 pub fn effective_guest_expiry_days(state: &AppState) -> u32 {
   state
@@ -263,9 +252,6 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
   if matches!(
     policy.notifications.push_content,
     teamcraft_proto::PushContentMode::Unknown(_)
-  ) || matches!(
-    policy.notifications.reply_view,
-    teamcraft_proto::ReplyView::Unknown(_)
   ) {
     return Err(ApiError::InvalidRequest(
       "the policy contains values this server does not know".into(),
@@ -282,22 +268,18 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
       "link_previews.domains must be host names".into(),
     ));
   }
+  let domains = &policy.guests.allowed_email_domains;
+  if domains.len() > MAX_LINK_PREVIEW_DOMAINS || domains.iter().any(|domain| !is_plausible_domain(domain)) {
+    return Err(ApiError::InvalidRequest(
+      "guests.allowed_email_domains must be domain names".into(),
+    ));
+  }
   check_retention(&policy.retention)?;
   Ok(document)
 }
 
 fn check_guest_and_password_policy(policy: &WorkspacePolicy) -> Result<(), ApiError> {
   let guests = &policy.guests;
-  if guests.allowed_email_domains.len() > MAX_GUEST_DOMAINS
-    || guests
-      .allowed_email_domains
-      .iter()
-      .any(|domain| !is_plausible_domain(domain.trim_start_matches('@')))
-  {
-    return Err(ApiError::InvalidRequest(
-      "guests.allowed_email_domains must be host names".into(),
-    ));
-  }
   if guests
     .maybe_default_expiry_days
     .is_some_and(|days| days > MAX_GUEST_EXPIRY_DAYS)
@@ -393,7 +375,7 @@ mod tests {
   fn guest_and_password_rules_are_checked() {
     let ok = |edit: fn(&mut WorkspacePolicy)| check_policy_payload(&payload(1, edit), 1).is_ok();
     assert!(ok(|p| {
-      p.guests.allowed_email_domains = vec!["example.com".into(), "@partner.example".into()];
+      p.guests.allowed_email_domains = vec!["example.com".into(), "partner.example".into()];
       p.guests.maybe_default_expiry_days = Some(30);
       p.passwords.maybe_min_chars = Some(14);
     }));

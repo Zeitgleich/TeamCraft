@@ -237,7 +237,9 @@ effect-bookshelf = Bookshelf
 effect-sunrise = Sunrise
 effect-forest = Forest
 effect-upload = Upload image
-effect-upload-soon = Own backgrounds are not available yet
+effect-upload-too-large = This picture is larger than { $limit }.
+effect-upload-unreadable = The picture could not be read.
+effect-delete = Delete background { $name }
 
 ## Incoming calls
 incoming-title = Incoming call
@@ -925,6 +927,130 @@ notif-browser-denied = Notifications are blocked. Allow them in the browser's si
 notif-browser-allow = Allow notifications
 notif-browser-background = Notifications also arrive when TeamCraft is closed.
 
+log-toolbar-label = Log view options
+log-mode-log = Log
+log-mode-chat = Chat
+log-filter-level = Minimum level
+log-filter-text = Filter log text
+log-follow = Follow
+log-filter-none = No log entries match the filter.
+log-filter-truncated = Showing the newest { $count } matching entries.
+
+# Profiles, people and groups (v1 REST UI)
+profile-edit-title = Edit profile
+profile-unavailable = Profiles are not available here.
+profile-title = Job title
+profile-department = Department
+profile-phone = Phone
+profile-time-zone = Time zone
+profile-local-time = Local time
+profile-hours = Working hours
+profile-hours-days = Working days
+profile-hours-from = From
+profile-hours-to = To
+profile-hours-invalid = Working hours need at least one day and an end after the start.
+profile-avatar-change = Change picture
+profile-avatar-remove = Remove picture
+profile-avatar-type = Pictures must be PNG, JPEG or WebP.
+profile-avatar-size = That picture is too large (2 MB at most).
+profile-avatar-unreadable = The picture could not be read.
+profile-message = Message
+weekday-mon = Mon
+weekday-tue = Tue
+weekday-wed = Wed
+weekday-thu = Thu
+weekday-fri = Fri
+weekday-sat = Sat
+weekday-sun = Sun
+sidebar-people = People
+directory-title = People
+directory-people = People
+directory-groups = Groups
+directory-filter = Find a person
+directory-empty = Nobody found.
+groups-unavailable = User groups need a signed-in session.
+groups-members = { $count ->
+    [one] 1 member
+   *[other] { $count } members
+}
+groups-synced = From the identity provider
+groups-empty = No user groups yet.
+groups-handle = Handle (what follows @)
+groups-name = Name
+groups-add = Add
+groups-remove = Remove
+
+# Composer: mentions, slash commands, formatting
+mention-channel = Notify everyone in this conversation
+composer-suggestions = Suggestions
+composer-format = Formatting
+composer-format-toggle = Formatting toolbar and preview
+composer-preview = Preview
+format-bold = Bold
+format-italic = Italic
+format-strike = Strikethrough
+format-code = Code
+format-code-block = Code block
+settings-composer = Writing
+settings-convert-emoticons = Turn :) and :tada: into emoji
+settings-show-formatting = Show the formatting toolbar and a preview
+slash-missing-argument = Usage: { $usage }
+slash-bad-reminder = Say when: "in 10m", "in 2h", "in 1d" or "at 14:30", then the text.
+slash-help-title = Commands (type // to send a message that starts with a slash):
+slash-not-found = Nothing found for "{ $name }".
+slash-status-set = Status set.
+slash-status-cleared = Status cleared.
+slash-kicked = { $name } was removed from this conversation.
+slash-invited = { $name } was added to this conversation.
+slash-msg-send-there = Conversation opened. Write your message there.
+slash-groupmsg-unsupported = Group conversations are not available yet.
+slash-muted = Conversation muted.
+slash-unmuted = Conversation unmuted.
+slash-reminder-set = Reminder set for { $time }.
+slash-meet-starting = Starting a meeting…
+slash-meet-unavailable = Meetings need a signed-in session.
+reminder-due = Reminder: { $text }
+
+# Meetings: responses and host controls
+meetings-responses = Responses ({ $count })
+meetings-rsvp-awaiting = No answer yet
+meetings-rsvp-summary = { $accepted } accepted · { $tentative } maybe · { $declined } declined · { $awaiting } waiting
+host-controls = Host controls
+host-mute-all = Mute everyone
+host-lock = Lock meeting
+host-unlock = Unlock meeting
+host-end = End for everyone
+host-end-confirm = End the meeting now
+host-remove = Remove
+presence-in-meeting = In a meeting
+
+# Bookmarks
+bookmarks-edit = Edit bookmarks
+bookmarks-edit-title = Bookmarks
+bookmarks-emoji = Emoji
+bookmarks-title = Title
+bookmarks-url = Link
+bookmarks-up = Move up
+bookmarks-down = Move down
+bookmarks-remove = Remove bookmark
+bookmarks-invalid = Every bookmark needs a title, and links must start with https:// or http://.
+action-bookmark-file = Add file to bookmarks
+
+history-title = Edit history
+history-current = Current version
+history-replaced = Replaced { $time }
+
+# Local (guest) sign-in
+login-local-open = Sign in with a guest account
+login-local-title = Guest account
+login-local-email = E-mail address
+login-local-password = Password
+login-local-code = Code from your authenticator app
+login-local-code-hint = This account uses two-factor authentication.
+login-local-refused = E-mail, password or code is wrong.
+login-local-failed = Sign-in did not work
+login-local-submit = Sign in
+
 ## Administration console: permissions, people, announcement, instance
 
 admin-nav-permissions = Permissions
@@ -1006,9 +1132,9 @@ policy-push-full = Full
 policy-push-full-hint = Sender, conversation and the beginning of the text.
 policy-auto-follow = Follow threads people are mentioned in
 policy-auto-follow-hint = The default for people who have not chosen.
-policy-reply-view = Show replies
-policy-reply-panel = In a side panel
-policy-reply-inline = Inline in the channel
+policy-threads = Threads
+policy-threaded-view = Allow replies in threads
+policy-threaded-view-hint = Off makes the workspace flat: the server refuses thread replies. Existing threads stay readable.
 admin-announcement-title = Announcement
 admin-announcement-subtitle = A banner above the app for everybody, for maintenance or news.
 announcement-current = In force now

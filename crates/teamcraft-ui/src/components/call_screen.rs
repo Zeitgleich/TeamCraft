@@ -48,6 +48,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .into_iter()
       .find(|tile| tile.participant.as_ref().is_some_and(|p| p.is_sharing_screen))
   });
+  let host_open = RwSignal::new(false);
   let is_share_layout = move || call.is_sharing_screen.get() || remote_sharer.get().is_some();
 
   // Real calls report who is speaking; the demo rotates the active speaker among people who are not
@@ -275,6 +276,21 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           <span class="muted-text" role="status">{move || i18n.t("call-connecting")}</span>
         </Show>
       </header>
+      {move || {
+        let hub = use_context::<crate::meetings::MeetingsHub>()?;
+        let me = state.me().id;
+        let meeting = hub.hosted_meeting_for(request.conversation, me)?;
+        Some(view! {
+          <div class="call-host">
+            <button class="btn btn-small" aria-expanded=move || host_open.get().to_string() on:click=move |_| host_open.update(|open| *open = !*open)>
+              {move || i18n.t("host-controls")}
+            </button>
+            <Show when=move || host_open.get() fallback=|| ()>
+              <crate::components::meeting_controls::HostControls meeting=meeting conversation=request.conversation />
+            </Show>
+          </div>
+        })
+      }}
       <div class="call-stage-wrap">{stage}</div>
       <Show when=move || effects_open.get() fallback=|| ()>
         <div class="effects-popover" role="dialog" aria-label=move || i18n.t("call-effects")>

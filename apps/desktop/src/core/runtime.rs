@@ -28,8 +28,8 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent,
-  UserId, WorkspacePolicy,
+  BackgroundId, CallJoinTokenResponse, ConversationId, DeviceActivity, DeviceId, GatewayClientMessage,
+  GatewayEvent, UserId, WorkspacePolicy,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -134,6 +134,7 @@ enum Request {
   Action(Box<ChatAction>, oneshot::Sender<Result<(), String>>),
   Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  BackgroundPicture(BackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
   LinkStart {
     device_name: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -290,6 +291,14 @@ impl CoreRuntime {
   pub async fn prepare_call(&self, conversation: ConversationId) -> Result<CallPreparation, String> {
     self
       .ask(|reply| Request::PrepareCall(conversation, reply))
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// One of the user's own background pictures, downloaded and decrypted.
+  pub async fn background_picture(&self, id: BackgroundId) -> Result<Vec<u8>, String> {
+    self
+      .ask(|reply| Request::BackgroundPicture(id, reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -539,7 +548,14 @@ impl Core {
         self.run_queued_commands().await;
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
+      Request::BackgroundPicture(id, reply) => drop(reply.send(self.background_picture(id).await)),
     }
+  }
+
+  async fn background_picture(&mut self, id: BackgroundId) -> Result<Vec<u8>, String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    let picture = client.background_picture(id).await.map_err(describe)?;
+    Ok(picture.expose_secret().to_vec())
   }
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {
@@ -674,23 +690,7 @@ impl Core {
 
   fn snapshot(&self) -> Result<ChatSnapshot, String> {
     let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
-    let mut conversations = Vec::new();
-    for space in backend.spaces() {
-      conversations.extend(backend.space_conversations(space.id));
-    }
-    conversations.extend(backend.direct_conversations());
-    let message_counts = conversations
-      .iter()
-      .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
-      .collect();
-    Ok(ChatSnapshot {
-      me: backend.me(),
-      users: backend.users(),
-      spaces: backend.spaces(),
-      conversations,
-      message_counts,
-      security: self.security_snapshot()?,
-    })
+    Ok(ChatSnapshot::read(backend, self.security_snapshot()?))
   }
 
   /// Fingerprints of the keys this device pinned, and of keys the server showed since.
@@ -715,12 +715,7 @@ impl Core {
 
   fn window(&self, conversation: ConversationId, start: usize, len: usize) -> Result<MessageWindow, String> {
     let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
-    Ok(MessageWindow {
-      conversation,
-      start,
-      total: backend.message_count(conversation),
-      messages: backend.messages(conversation, start, len),
-    })
+    Ok(MessageWindow::read(backend, conversation, start, len))
   }
 
   async fn action(&mut self, action: ChatAction) -> Result<(), String> {
@@ -768,23 +763,6 @@ impl Core {
     }
     let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
     match action {
-      ChatAction::PostMessage {
-        conversation,
-        maybe_thread,
-        body,
-      } => backend.post_message(conversation, maybe_thread, &body),
-      ChatAction::ToggleReaction {
-        conversation,
-        message,
-        emoji,
-      } => backend.toggle_reaction(conversation, message, &emoji),
-      ChatAction::MarkRead { conversation } => backend.mark_read(conversation),
-      ChatAction::SetFavorite {
-        conversation,
-        is_favorite,
-      } => backend.set_favorite(conversation, is_favorite),
-      ChatAction::SetPresence { presence } => backend.set_presence(presence),
-      ChatAction::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
       ChatAction::CreateChannel { .. }
       | ChatAction::OpenDm { .. }
       | ChatAction::AddMember { .. }
@@ -793,8 +771,7 @@ impl Core {
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::AdminJoinChannel { .. } => {},
-      // Message actions, files and workspace management (client-api actions) go to the backend,
-      // which queues what needs the engine as commands.
+      // Everything else goes to the backend, which queues what needs the engine as commands.
       other => {
         if let Some(unhandled) = other.apply_to(backend) {
           tracing::warn!(?unhandled, "chat action not handled");

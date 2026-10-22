@@ -249,7 +249,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await?;
-    let history = self.implicit_history(user)?;
+    let history = self.implicit_history_in(conversation, user).await?;
     self
       .post_admin_change(
         conversation,

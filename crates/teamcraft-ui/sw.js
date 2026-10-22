@@ -51,6 +51,8 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('message', (event) => {
+  // Only pages of this origin talk to the worker; anything else is ignored.
+  if (event.origin !== self.location.origin || !event.source) return;
   const data = event.data || {};
   if (data.type === 'status') {
     event.waitUntil(restored.then(() => event.source.postMessage(statusMessage())));
@@ -59,7 +61,7 @@ self.addEventListener('message', (event) => {
     event.waitUntil(
       (hasPushCode() ? loadPush() : Promise.reject(new Error('this build has no push code')))
         .then(() => event.source.postMessage({ type: 'push', ready: true, reason: '' }))
-        .catch((error) => event.source.postMessage({ type: 'push', ready: false, reason: String(error) })),
+        .catch((error) => event.source.postMessage({ type: 'push', ready: false, reason: reasonOf(error) })),
     );
   } else if (data.type === 'push_database' && typeof data.name === 'string') {
     event.waitUntil(rememberDatabase(data.name));
@@ -122,7 +124,7 @@ async function installVerified() {
     await self.skipWaiting();
   } catch (error) {
     const unsupported = error && error.name === 'NotSupportedError';
-    status = { ...status, state: unsupported ? 'unsupported' : 'rejected', reason: String((error && error.message) || error) };
+    status = { ...status, state: unsupported ? 'unsupported' : 'rejected', reason: reasonOf(error) };
     await broadcast();
     // Unsupported browsers run the app unverified (and say so); a failed check keeps the old version.
     if (unsupported) await self.skipWaiting();
@@ -158,6 +160,11 @@ async function keyFingerprint() {
 function fromBase64(text) {
   const binary = atob(text.replace(/-/g, '+').replace(/_/g, '/'));
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+// What pages (and the stored status) learn about a failure: the message only, never a stack.
+function reasonOf(error) {
+  return error instanceof Error ? error.message : 'unknown error';
 }
 
 function statusMessage() {

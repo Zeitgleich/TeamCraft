@@ -7,8 +7,8 @@ everything includes authentication, JSON and the database round trip.
 
 ```sh
 export DATABASE_URL=postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft   # dev stack
-cargo test -p teamcraft-server --features integration --test perf_history -- --ignored --nocapture
-cargo test -p teamcraft-server --features integration --test perf_gateway -- --ignored --nocapture
+cargo test -p teamcraft-server --features integration --test suite perf_history -- --ignored --nocapture
+cargo test -p teamcraft-server --features integration --test suite perf_gateway -- --ignored --nocapture
 ```
 
 Environment of the numbers below: one machine (24 cores, 62 GB RAM, NVMe) running the test (client

@@ -16,7 +16,7 @@ mod sqlite;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
 pub use memory::MemoryStore;
@@ -154,6 +154,8 @@ pub enum MessageContent {
     target: ClientMessageId,
     is_pinned: bool,
   },
+  /// Replaces the conversation's bookmarks bar for everyone (the newest message wins).
+  Bookmarks { items: Vec<BookmarkItem> },
   /// A change to the conversation, announced by whoever made it (shown as a system message).
   Event { event: ConversationEvent },
   /// Adds or removes the sender's reaction to another message (e2ee.md §4.4: reactions are
@@ -165,6 +167,19 @@ pub enum MessageContent {
   },
   #[serde(other)]
   Unknown,
+}
+
+/// One entry of a channel's bookmarks bar: a link, or a message with a file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkItem {
+  pub emoji: String,
+  pub title: String,
+  /// The link; empty for a file bookmark.
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub url: String,
+  /// The message whose file this bookmarks.
+  #[serde(rename = "message", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_message: Option<ClientMessageId>,
 }
 
 /// What changed in a conversation; sent encrypted by the member who changed it, so every member's
@@ -437,6 +452,7 @@ impl StoredMessage {
         | MessageContent::Edit { .. }
         | MessageContent::Delete { .. }
         | MessageContent::Pin { .. }
+        | MessageContent::Bookmarks { .. }
         | MessageContent::IndexSegment { .. }
     )
   }

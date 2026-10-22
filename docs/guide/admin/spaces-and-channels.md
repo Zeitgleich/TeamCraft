@@ -13,27 +13,34 @@ the server yet (shown as 0).
 
 ## Where to do it
 
-Account menu > **Administration** > Channels (read live from the admin API). Everything below is
-also available through the REST API (OpenAPI document at `/api/v1/openapi.json`, authenticate with
-a bearer token).
+Two places. The **Administration** console (account menu) shows every space and channel, including
+private ones, as metadata and edits what only admins edit. Everything else is done in the normal
+client by anyone whose role allows it, because it needs the encryption keys of a member.
+Everything is also available through the REST API (OpenAPI document at `/api/v1/openapi.json`,
+authenticate with a bearer token).
 
-| Task                                         | Console                  | API                                                                    |
-|----------------------------------------------|--------------------------|------------------------------------------------------------------------|
-| List all spaces, channels, members           | yes                      | `GET /admin/spaces`, `/admin/conversations`, `.../members`             |
-| Set retention per channel                    | yes                      | `PUT /conversations/{id}/retention`, `/spaces/{id}/retention`          |
-| Join a private channel as admin              | yes (visible to members) | core action `AdminJoinChannel`                                         |
-| Create space                                 | not yet                  | `POST /spaces` (admin or owner)                                        |
-| Create channel, rename, topic, categories    | not yet                  | `POST /spaces/{id}/channels`, `PATCH /conversations/{id}`              |
-| Archive, unarchive, change visibility        | not yet                  | `PATCH /conversations/{id}` (`is_archived`, `visibility`)              |
-| Flag as integration channel                  | not yet                  | `PATCH /conversations/{id}` (`is_integration`)                         |
-| Add or remove members, change roles          | not yet                  | `/spaces/{id}/members`, `/conversations/{id}/members`                  |
-| Invite by e-mail (member or guest)           | not yet                  | `POST /spaces/{id}/invites`                                            |
-| Per-channel moderation (deny post, react...) | yes                      | `PUT /admin/conversations/{id}/moderation`                             |
-| Assign an owner to an orphaned channel       | yes                      | `POST /admin/conversations/{id}/owner`                                 |
-| Permission scheme per instance and space     | yes (Permissions)        | `PUT /admin/permission-scheme`, `/admin/spaces/{id}/permission-scheme` |
+| Task                                           | Where                               | API                                                                    |
+|------------------------------------------------|-------------------------------------|------------------------------------------------------------------------|
+| List all spaces, channels, members             | Console                             | `GET /admin/spaces`, `/admin/conversations`, `.../members`             |
+| Set retention per channel or space             | Console                             | `PUT /conversations/{id}/retention`, `/spaces/{id}/retention`          |
+| Join a private channel as admin                | Console (visible to members)        | core action `AdminJoinChannel`                                         |
+| Per-channel moderation (deny post, react...)   | Console                             | `PUT /admin/conversations/{id}/moderation`                             |
+| Assign an owner to an orphaned channel         | Console                             | `POST /admin/conversations/{id}/owner`                                 |
+| Permission scheme per instance and space       | Console (Permissions)               | `PUT /admin/permission-scheme`, `/admin/spaces/{id}/permission-scheme` |
+| Create space, channel, category; rename; topic | Client (channel and space settings) | `POST /spaces`, `/spaces/{id}/channels`, `PATCH /conversations/{id}`   |
+| Archive, unarchive                             | Client (channel settings)           | `PATCH /conversations/{id}` (`is_archived`)                            |
+| Make public / private                          | Client (channel settings)           | `PUT /conversations/{id}/visibility`                                   |
+| Flag as integration channel                    | API                                 | `PATCH /conversations/{id}` (`is_integration`)                         |
+| Add or remove members, change roles            | Client (members panel)              | `/spaces/{id}/members`, `/conversations/{id}/members`                  |
+| Invite by e-mail (member or guest)             | Client (Invite people)              | `POST /spaces/{id}/invites`                                            |
 
-Console items marked *not yet* are placeholders in the current UI: archiving,
-creating users, inviting guests, organization recovery and CSV audit export.
+Not available yet: moving a channel to another space, deleting a channel completely (archive it,
+and let retention remove the content), space templates, default spaces for new users, and CSV
+export of the audit log.
+
+Converting a channel between public and private notifies the members with a system message and is
+audited with the old and new value. Members of a channel that became private keep access; others
+lose it. Cryptographic details: [docs/e2ee.md](../../e2ee.md) §4.7.
 
 ## How changes work without membership
 
@@ -66,4 +73,4 @@ See [Security policy](security-policy.md#retention).
 ## Orphaned channels
 
 When the last owner of a private channel leaves, assign a new owner from the remaining members; you
-do not need to be a member. In the console, select the channel and choose a member under *Assign owner*.
+do not need to be a member. The console button is a placeholder, use the members API.

@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::highlight::{TokenKind, highlight};
 use crate::i18n::use_i18n;
 use crate::markdown::{self, Block, Inline};
 use crate::state::use_app_state;
@@ -26,14 +27,35 @@ pub fn RichText(#[prop(into)] body: String, #[prop(optional, into)] me: String) 
           .collect();
         view! { <p class="md-p">{rendered}</p> }.into_any()
       },
-      Block::Code { maybe_language, code } => view! {
-        <pre class="md-code" data-language=maybe_language.unwrap_or_default()>
-          <code>{code}</code>
-        </pre>
-      }
-      .into_any(),
+      Block::Code { maybe_language, code } => {
+        let tokens = highlight(maybe_language.as_deref(), &code);
+        view! {
+          <pre class="md-code" data-language=maybe_language.unwrap_or_default()>
+            <code>
+              {tokens
+                .into_iter()
+                .map(|token| match token.kind {
+                  TokenKind::Plain => token.text.into_any(),
+                  kind => view! { <span class=token_class(kind)>{token.text}</span> }.into_any(),
+                })
+                .collect_view()}
+            </code>
+          </pre>
+        }
+        .into_any()
+      },
     })
     .collect_view()
+}
+
+fn token_class(kind: TokenKind) -> &'static str {
+  match kind {
+    TokenKind::Plain => "",
+    TokenKind::Keyword => "tok-keyword",
+    TokenKind::Str => "tok-string",
+    TokenKind::Comment => "tok-comment",
+    TokenKind::Number => "tok-number",
+  }
 }
 
 fn render_inlines(inlines: Vec<Inline>, me: String) -> Vec<AnyView> {

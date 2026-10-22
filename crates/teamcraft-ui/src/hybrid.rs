@@ -16,7 +16,7 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
-use teamcraft_proto::{CategoryId, HistoryPolicy};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy};
 
 use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, DeviceInfo, PolicyBlocker, Retention,
@@ -26,7 +26,8 @@ use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
+  Participant,
 };
 use crate::clock::now_ms;
 use crate::live::{LiveScope, LiveServer, POLL_INTERVAL_MS, thread_summary};
@@ -239,6 +240,22 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.mark_read(conversation);
   }
 
+  fn set_bookmarks(
+    &self,
+    conversation: ConversationId,
+    bookmarks: Vec<teamcraft_client_api::model::Bookmark>,
+  ) {
+    self.chat.set_bookmarks(conversation, bookmarks);
+  }
+
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.chat.remove_member(conversation, user);
+  }
+
+  fn open_dm(&self, user: UserId) {
+    self.chat.open_dm(user);
+  }
+
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
     self.chat.set_favorite(conversation, is_favorite);
   }
@@ -296,6 +313,18 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 
   fn saved_items(&self) -> Vec<SavedItem> {
     self.chat.saved_items()
+  }
+
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    self.chat.background_images()
+  }
+
+  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
+    self.chat.add_background_image(name, picture);
+  }
+
+  fn delete_background_image(&self, id: BackgroundId) {
+    self.chat.delete_background_image(id);
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
