@@ -23,7 +23,7 @@ chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["
 # Web Push: ECDH and the VAPID ES256 signature (RFC 8291, RFC 8292).
 p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "std"] }
 # Identity and device signatures; same major version as openmls_basic_credential.
-ed25519-dalek = { version = "2.2.0", features = ["rand_core", "zeroize"] }
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "zeroize"] }
 # Key derivation for passkey PRF outputs and rendezvous.
 hkdf = "0.13.0"
 # TOTP codes (RFC 6238) for local accounts: HMAC-SHA1 is what authenticator apps implement.
