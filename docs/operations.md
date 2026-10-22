@@ -28,6 +28,9 @@ for `chat.example.com`, `sfu.chat.example.com` and, when bundled, `id.` and `s3.
 port 4433 open for calls. The playbook's documentation covers DNS, configuration, secrets (generated
 or sops + age), updating, backups and every component.
 
+Several brands on one server (`docs/branding.md`) are `teamcraft_brands` in the playbook: it adds
+the host names to Caddy and the Keycloak client.
+
 Then point the desktop app at `https://chat.example.com` and sign in. The first device of every user
 creates their keys; set up the recovery passphrase when asked.
 
