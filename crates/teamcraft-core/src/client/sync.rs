@@ -34,6 +34,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.refresh_members(conversation.id).await?;
     }
     self.sync_welcomes().await?;
+    // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
+    self.join_missing_groups().await?;
     for conversation in &conversations {
       if self.has_group(conversation.id)? {
         self.sync_mls(conversation.id).await?;
