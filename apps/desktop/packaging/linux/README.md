@@ -71,12 +71,23 @@ the Flatpak SDK's Rust has no wasm32 target), then the app inside the GNOME SDK.
 | `--socket=wayland`, `--socket=fallback-x11`  | The window; X11 only where Wayland isn't available                      |
 | `--device=dri`                               | GPU: WebKit, the effects shaders, VA-API encoding                        |
 | `--socket=pulseaudio`                        | Microphone and speakers (PipeWire serves the PulseAudio protocol)        |
+| `--filesystem=xdg-run/pipewire-0`            | Screen shares with sound (see below)                                     |
 | `--talk-name=org.freedesktop.secrets`        | The refresh token in the desktop keyring                                 |
 | `--talk-name=org.freedesktop.Notifications`  | Mention and direct-message notifications                                 |
 
 No home directory, no `--device=all`: the camera, screen sharing, push-to-talk, file dialogs and
 the browser all go through portals (Camera, ScreenCast, GlobalShortcuts, FileChooser, OpenURI),
 which ask the user and need no static permission.
+
+**The PipeWire socket** (`xdg-run/pipewire-0`) is the one broad permission: the ScreenCast portal
+carries no sound, so a share's sound is captured by linking other applications' playback streams
+into the app's own capture stream through PipeWire directly. The socket is granted for the app's
+whole lifetime, not only during a share, and it lets the app see the PipeWire graph (which
+applications play sound) and connect to any node. The app only uses it while the user shares
+with sound turned on, links playback streams only (never microphones), and leaves out its own
+process and every process it started (the WebView's helpers). Without the permission (removed
+with `flatpak override --nofilesystem=xdg-run/pipewire-0 de.zeitgleich.teamcraft`) everything
+works except the "with sound" option, which then says it is unavailable.
 
 ### Video inside the sandbox
 

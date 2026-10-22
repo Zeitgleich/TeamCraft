@@ -49,6 +49,18 @@ async fn host_mutes_locks_removes_and_ends() {
     .status();
   assert_eq!(status.as_u16(), 401);
 
+  // The guest shares the computer's sound; "mute all" stops it at the SFU too.
+  guest
+    .start_screen_audio(Box::new(
+      teamcraft_media::system_audio::ManualSystemAudio::default(),
+    ))
+    .await
+    .unwrap();
+  wait_for(&mut guest, |event| {
+    matches!(event, CallEngineEvent::ScreenAudioChanged { is_shared: true, .. })
+  })
+  .await;
+
   send(&client, &control_url, SfuControlAction::MuteAll).await;
   wait_for(&mut guest, |event| {
     matches!(event, CallEngineEvent::MutedByHost { .. })
@@ -56,6 +68,13 @@ async fn host_mutes_locks_removes_and_ends() {
   .await;
   wait_for(&mut guest, |event| {
     matches!(event, CallEngineEvent::MuteChanged(true))
+  })
+  .await;
+  wait_for(&mut guest, |event| {
+    matches!(
+      event,
+      CallEngineEvent::ScreenAudioChanged { is_shared: false, .. }
+    )
   })
   .await;
 

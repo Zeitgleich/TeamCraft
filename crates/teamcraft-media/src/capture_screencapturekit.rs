@@ -1,9 +1,12 @@
 //! Screens and their sound on macOS through ScreenCaptureKit, via the `screencapturekit` crate
-//! (a safe API; our crates have no `unsafe`). Behind the `screencapturekit` feature, macOS 13+.
+//! (a safe API; our crates have no `unsafe`). Behind the `screencapturekit` feature, macOS 14+.
 //!
 //! Compile-checked only (in CI): written against the crate's source, never run on a Mac yet.
 //! The first capture asks for the Screen Recording permission; until it is granted the system
 //! hands out no content and the capture reports [`CaptureError::Denied`].
+//!
+//! What to share is picked in the system's own picker (`SCContentSharingPicker`): a window, an
+//! application or a display, never one of this app's windows.
 //!
 //! Video and sound are separate streams so a share without sound costs nothing extra. The sound
 //! stream sets `excludesCurrentProcessAudio`, so the call's own playback is never captured. Frames
@@ -13,6 +16,9 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
+use screencapturekit::content_sharing_picker::{
+  SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode, SCPickerOutcome,
+};
 use screencapturekit::prelude::*;
 use screencapturekit::screenshot_manager::CGImageExt;
 use tracing::{debug, warn};
@@ -34,9 +40,12 @@ pub enum DisplaySource {
   Index(usize),
 }
 
-/// A shared display.
+/// A display, window or application the user picked.
 pub struct ScreenCaptureKitScreen {
-  source: DisplaySource,
+  filter: SCContentFilter,
+  /// The picked content's size in pixels.
+  width: u32,
+  height: u32,
   format: CaptureFormat,
   maybe_stream: Option<SCStream>,
 }
@@ -77,14 +86,39 @@ impl DisplaySource {
 }
 
 impl ScreenCaptureKitScreen {
-  pub fn open(source: DisplaySource, format: CaptureFormat) -> Result<Self, CaptureError> {
-    // Fails early without the Screen Recording permission.
-    shareable_display(source)?;
-    Ok(Self {
-      source,
-      format,
-      maybe_stream: None,
-    })
+  /// Lets the user pick a window, an application or a display in the system's picker (blocks
+  /// until they did; call it off the main thread). This app's own windows can't be picked.
+  pub fn pick(format: CaptureFormat) -> Result<Self, CaptureError> {
+    let mut config = SCContentSharingPickerConfiguration::new().map_err(device_error)?;
+    config.set_allowed_picker_modes(&[
+      SCContentSharingPickerMode::SingleWindow,
+      SCContentSharingPickerMode::SingleApplication,
+      SCContentSharingPickerMode::SingleDisplay,
+    ]);
+    let content = SCShareableContent::get().map_err(|_| CaptureError::Denied("screen"))?;
+    let own_windows: Vec<u32> = own_windows(&content).iter().map(SCWindow::window_id).collect();
+    config.set_excluded_window_ids(&own_windows);
+    let (picked_tx, picked_rx) = std::sync::mpsc::channel();
+    SCContentSharingPicker::show(&config, move |outcome| {
+      // The share may have been abandoned meanwhile; then nobody waits.
+      let _ = picked_tx.send(outcome);
+    });
+    match picked_rx.recv() {
+      Ok(SCPickerOutcome::Picked(result)) => {
+        let (width, height) = result.pixel_size();
+        Ok(Self {
+          filter: result.filter(),
+          width,
+          height,
+          format,
+          maybe_stream: None,
+        })
+      },
+      // Cancelled in the picker: nothing is shared.
+      Ok(SCPickerOutcome::Cancelled) => Err(CaptureError::Denied("screen")),
+      Ok(SCPickerOutcome::Error(error)) => Err(CaptureError::Device(error)),
+      Err(_) => Err(CaptureError::Device("the picker closed without an answer".into())),
+    }
   }
 }
 
@@ -95,20 +129,14 @@ impl VideoCapture for ScreenCaptureKitScreen {
 
   fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
     self.stop();
-    let display = shareable_display(self.source)?;
-    let filter = SCContentFilter::create()
-      .with_display(&display)
-      .with_excluding_windows(&[])
-      .build()
-      .map_err(device_error)?;
-    let (width, height) = fit(display.width(), display.height(), self.format);
+    let (width, height) = fit(self.width, self.height, self.format);
     let config = SCStreamConfiguration::new()
       .with_width(width)
       .with_height(height)
       .with_pixel_format(PixelFormat::BGRA)
       .with_shows_cursor(true)
       .with_minimum_frame_interval(&CMTime::new(1, i32::from(self.format.framerate.max(1))));
-    let mut stream = SCStream::new(&filter, &config).map_err(device_error)?;
+    let mut stream = SCStream::new(&self.filter, &config).map_err(device_error)?;
     stream
       .add_output_handler(
         ScreenOutput {
@@ -254,6 +282,22 @@ impl SCStreamOutputTrait for AudioOutput {
     };
     self.samples.send(mono);
   }
+}
+
+/// This app's windows (its process), so a share never shows the call itself.
+fn own_windows(content: &SCShareableContent) -> Vec<SCWindow> {
+  let Ok(own_pid) = i32::try_from(std::process::id()) else {
+    return Vec::new();
+  };
+  content
+    .windows()
+    .into_iter()
+    .filter(|window| {
+      window
+        .owning_application()
+        .is_some_and(|application| application.process_id() == own_pid)
+    })
+    .collect()
 }
 
 /// The display to share; errors mean no permission or no such display.

@@ -795,6 +795,11 @@ fn apply_event(roster: &mut Roster, state: &Mutex<CallState>, event: CallEngineE
       }
     },
     CallEngineEvent::MutedByHost { by_user_id } => active.maybe_muted_by_host = Some(by_user_id),
+    // Our shared sound stopped without us (a host's "mute all"): the share goes on without it.
+    CallEngineEvent::ScreenAudioChanged {
+      device_id,
+      is_shared: false,
+    } if Some(device_id) == roster.own_device => active.screen_sound = ScreenShareSound::Off,
     CallEngineEvent::RemovedByHost { by_user_id } => {
       state.maybe_end_reason = Some(CallEndReason::RemovedByHost { by: by_user_id });
       return true;

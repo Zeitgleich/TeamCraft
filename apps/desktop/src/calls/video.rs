@@ -125,17 +125,17 @@ pub(super) fn open_screen(
     .map_err(|error| error.to_string())
 }
 
-/// The main display, or the one a stored token names (`display:N`). The first share asks for the
-/// Screen Recording permission.
+/// What the user picks in the system's picker each time (a window, an application or a display;
+/// never TeamCraft's own windows). The first share asks for the Screen Recording permission. Runs on a blocking thread: the picker waits for the
+/// user.
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
-  maybe_restore_token: Option<&str>,
+  _maybe_restore_token: Option<&str>,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
-  use teamcraft_media::capture_screencapturekit::{DisplaySource, ScreenCaptureKitScreen};
+  use teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen;
 
-  let source = DisplaySource::from_token(maybe_restore_token);
-  ScreenCaptureKitScreen::open(source, SCREEN_FORMAT)
-    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, source.to_token()))
+  ScreenCaptureKitScreen::pick(SCREEN_FORMAT)
+    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
     .map_err(|error| error.to_string())
 }
 

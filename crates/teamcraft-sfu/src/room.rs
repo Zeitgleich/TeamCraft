@@ -112,7 +112,19 @@ impl Rooms {
       .ok_or(RoomError::CallNotFound(call_id))?;
     info!(call_id = %call_id, by_user_id = %by_user_id, ?action, "host control");
     match action {
-      SfuControlAction::MuteAll => lock(&room.state).broadcast(CallEvent::MutedByHost { by_user_id }),
+      SfuControlAction::MuteAll => {
+        let mut state = lock(&room.state);
+        state.broadcast(CallEvent::MutedByHost { by_user_id });
+        // Microphones are muted by the clients (they may unmute); shared sound is stopped here,
+        // so a client that ignores the request can't keep playing into the meeting.
+        for (owner, stream) in state.forwarder.screen_audio_streams() {
+          if state.forwarder.unpublish_screen_audio(owner, stream).is_ok() {
+            state.broadcast(CallEvent::ScreenAudioUnpublished {
+              stream_id: MediaStreamId(stream.0),
+            });
+          }
+        }
+      },
       SfuControlAction::RemoveParticipant { user_id } => {
         lock(&self.control).removed.insert((call_id, *user_id));
         room.close_user(*user_id, CallEvent::RemovedByHost { by_user_id });

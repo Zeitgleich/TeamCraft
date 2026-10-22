@@ -87,7 +87,13 @@ enum Follow {
 struct OwnProcess {
   id: String,
   maybe_binary: Option<String>,
+  /// The parent of a process id (Linux: `/proc`); our child processes (the WebView's web and
+  /// network processes) count as ours, so nothing they play is ever captured.
+  parent_of: fn(u32) -> Option<u32>,
 }
+
+/// How far up the process tree a child of ours is looked for.
+const MAX_PROCESS_DEPTH: usize = 32;
 
 #[derive(Debug, Clone)]
 struct PortInfo {
@@ -343,7 +349,10 @@ impl Graph {
       ObjectType::Client => {
         // The pid the server saw on the socket: ours unless we are in a sandbox with its own
         // pid namespace (Flatpak), where only the client's own properties tell.
-        if props.get(*pw::keys::SEC_PID) == Some(self.own_process.id.as_str()) {
+        if props
+          .get(*pw::keys::SEC_PID)
+          .is_some_and(|pid| self.own_process.is_own_or_child(pid))
+        {
           self.set_client(global.id, ClientKind::Own);
           return Follow::Relink;
         }
@@ -473,20 +482,52 @@ impl OwnProcess {
       maybe_binary: std::env::current_exe()
         .ok()
         .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())),
+      parent_of: parent_from_proc,
     }
+  }
+
+  /// This process or one it started (directly or further down). Misjudging another app's
+  /// process as ours only leaves its sound out, never adds ours.
+  fn is_own_or_child(&self, pid: &str) -> bool {
+    if pid == self.id {
+      return true;
+    }
+    let (Ok(mut current), Ok(own)) = (pid.parse::<u32>(), self.id.parse::<u32>()) else {
+      return false;
+    };
+    for _ in 0..MAX_PROCESS_DEPTH {
+      match (self.parent_of)(current) {
+        Some(parent) if parent == own => return true,
+        // Process 1 (and 0) has no parent of interest.
+        Some(parent) if parent > 1 => current = parent,
+        _ => return false,
+      }
+    }
+    false
   }
 
   /// A client of this process (from its properties). Sandboxes have their own process ids, so
   /// another sandboxed app can have ours; the binary name tells them apart where the client
   /// names it.
   fn owns(&self, props: &DictRef) -> bool {
-    let is_same_id = props.get(*pw::keys::APP_PROCESS_ID) == Some(self.id.as_str());
+    let maybe_pid = props.get(*pw::keys::APP_PROCESS_ID);
+    let is_same_id = maybe_pid == Some(self.id.as_str());
     let is_same_binary = match (props.get(*pw::keys::APP_PROCESS_BINARY), &self.maybe_binary) {
       (Some(binary), Some(own)) => binary == own,
       _ => true,
     };
-    is_same_id && is_same_binary
+    // Our children run other binaries (WebKitWebProcess); their parent tells.
+    let is_child = !is_same_id && maybe_pid.is_some_and(|pid| self.is_own_or_child(pid));
+    (is_same_id && is_same_binary) || is_child
   }
+}
+
+/// The parent process id from `/proc/<pid>/stat` (the field after the command name, which may
+/// itself contain spaces and parentheses).
+fn parent_from_proc(pid: u32) -> Option<u32> {
+  let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+  let (_, after_name) = stat.rsplit_once(')')?;
+  after_name.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Which of our inputs a source channel goes to: left and right channels to their side,
@@ -549,10 +590,39 @@ mod tests {
   }
 
   #[test]
+  fn our_child_processes_count_as_ours() {
+    // 300 is the WebView's web process, started by 200, started by us (100); 400 is another app.
+    let own = OwnProcess {
+      id: "100".into(),
+      maybe_binary: Some("teamcraft-desktop".into()),
+      parent_of: |pid| match pid {
+        300 => Some(200),
+        200 => Some(100),
+        400 => Some(1),
+        _ => None,
+      },
+    };
+    assert!(own.is_own_or_child("100"));
+    assert!(own.is_own_or_child("300"));
+    assert!(!own.is_own_or_child("400"));
+    assert!(!own.is_own_or_child("not a pid"));
+  }
+
+  #[test]
+  fn the_parent_is_read_from_proc() {
+    let child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+    assert_eq!(parent_from_proc(child.id()), Some(std::process::id()));
+    let mut child = child;
+    child.kill().unwrap();
+    child.wait().unwrap();
+  }
+
+  #[test]
   fn other_apps_are_linked_and_ours_is_not() {
     let mut graph = Graph::new(OwnProcess {
       id: "100".into(),
       maybe_binary: Some("teamcraft-desktop".into()),
+      parent_of: |_| None,
     });
     graph.maybe_own_node = Some(1);
     graph.ports.insert(10, port(1, false, "FL"));
@@ -587,6 +657,7 @@ mod tests {
     let mut graph = Graph::new(OwnProcess {
       id: "100".into(),
       maybe_binary: None,
+      parent_of: |_| None,
     });
     graph.playback_nodes.insert(2, Some(91));
     graph.ports.insert(20, port(2, true, "FL"));
@@ -598,6 +669,7 @@ mod tests {
     let mut graph = Graph::new(OwnProcess {
       id: "100".into(),
       maybe_binary: None,
+      parent_of: |_| None,
     });
     graph.maybe_own_node = Some(1);
     graph.ports.insert(10, port(1, false, "FL"));

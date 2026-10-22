@@ -205,6 +205,15 @@ impl Forwarder {
   }
 
   /// Starts forwarding `owner`'s screen sound on `stream_id`; one per participant.
+  /// Everyone's published screen sound: owner and stream.
+  pub fn screen_audio_streams(&self) -> Vec<(DeviceId, StreamId)> {
+    self
+      .participants
+      .iter()
+      .filter_map(|(device, route)| route.maybe_screen_audio.map(|stream| (*device, stream)))
+      .collect()
+  }
+
   /// Whether a participant's audio, screen sound or a video track uses the id.
   pub fn is_stream_in_use(&self, stream_id: StreamId) -> bool {
     self.video_tracks.contains_key(&stream_id)

@@ -483,6 +483,10 @@ async fn run_call(
             stop_screen_audio(&mut engine, &mut maybe_screen_audio);
           }
         }
+        // The SFU stopped our screen sound (a host's "mute all"): stop capturing it too.
+        if maybe_screen_audio.is_some() && !engine.is_sharing_screen_audio() {
+          stop_screen_audio(&mut engine, &mut maybe_screen_audio);
+        }
       },
       Some((kind, frame)) = encoded_rx.recv() => {
         if let Some(stream_id) = io.video.stream_of(&kind) {
