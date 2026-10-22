@@ -5,7 +5,7 @@ use crate::components::avatar::PresenceDot;
 use crate::components::composer::Composer;
 use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
-use crate::components::message_list::MessageList;
+use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::i18n::use_i18n;
 use crate::model::{BookmarkKind, Conversation, ConversationId, ConversationKind};
@@ -33,7 +33,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <KeyChangeBanner conversation=conversation />
         <HuddleBar conversation=conversation />
         <BookmarksBar info=info />
-        <MessageList conversation=conversation />
+        <ChannelFeed conversation=conversation />
         <SeenLine conversation=conversation />
         <Composer conversation=conversation can_post=can_post conversation_name=name />
       </section>

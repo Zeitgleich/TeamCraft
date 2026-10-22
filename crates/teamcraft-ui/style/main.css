@@ -1135,7 +1135,8 @@ select.input {
 }
 
 /* Compact log view for integration channels. Rows have a fixed height so the estimate is exact. */
-.msg-log {
+.msg-log,
+.log-entry {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1145,8 +1146,13 @@ select.input {
   white-space: nowrap;
 }
 
+.msg-log-batch {
+  padding: 0;
+}
+
 .msg-log:hover,
-.msg-log:focus {
+.msg-log:focus,
+.msg-log-batch:focus {
   background: var(--surface-2);
 }
 
@@ -3944,3 +3950,43 @@ select.input {
 .inline-form { display: flex; gap: .5rem; }
 .sidebar-head { display: flex; align-items: center; gap: .25rem; }
 .sidebar-head .space-name { flex: 1; }
+
+/* Toolbar of integration channels: Log/Chat switch, level and text filter, follow. */
+.log-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-mode {
+  display: flex;
+  gap: 4px;
+}
+
+.log-mode [aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.log-filter-text {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+
+.log-follow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.log-notice {
+  margin: 0;
+  padding: 4px 16px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}

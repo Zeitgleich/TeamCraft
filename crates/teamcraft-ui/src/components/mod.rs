@@ -19,6 +19,7 @@ pub mod guest_join;
 pub mod huddle_bar;
 pub mod icons;
 pub mod incoming_call;
+pub mod log_view;
 pub mod login;
 pub mod meetings_view;
 pub mod members_panel;

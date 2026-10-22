@@ -924,3 +924,12 @@ notif-browser-granted = Benachrichtigungen sind in diesem Browser erlaubt.
 notif-browser-denied = Benachrichtigungen sind blockiert. Erlaube sie in den Website-Einstellungen des Browsers.
 notif-browser-allow = Benachrichtigungen erlauben
 notif-browser-background = Benachrichtigungen kommen auch an, wenn TeamCraft geschlossen ist.
+
+log-toolbar-label = Optionen der Protokollansicht
+log-mode-log = Protokoll
+log-mode-chat = Chat
+log-filter-level = Mindeststufe
+log-filter-text = Protokolltext filtern
+log-follow = Mitlaufen
+log-filter-none = Keine Protokolleinträge passen zum Filter.
+log-filter-truncated = Die neuesten { $count } passenden Einträge werden angezeigt.

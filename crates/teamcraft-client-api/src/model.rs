@@ -257,6 +257,20 @@ pub fn as_log_line(mut message: Message) -> Message {
   message
 }
 
+/// Turns a log line back into the chat message the bridge sent (the "chat" view of an integration
+/// channel): a batch is a code block again, a single line gets its `[LEVEL]` prefix back.
+pub fn as_chat_message(message: &mut Message) {
+  let MessageKind::Log(level) = message.kind else {
+    return;
+  };
+  message.body = if message.body.contains('\n') {
+    format!("```\n{}\n```", message.body)
+  } else {
+    format!("[{}] {}", level.slug().to_uppercase(), message.body)
+  };
+  message.kind = MessageKind::User;
+}
+
 pub(crate) fn split_level(body: &str) -> Option<(LogLevel, &str)> {
   let first_end = body.find(char::is_whitespace).unwrap_or(body.len());
   let (first, rest) = body.split_at(first_end);
@@ -343,6 +357,31 @@ mod tests {
     assert_eq!(line("started").kind, MessageKind::Log(LogLevel::Info));
     assert_eq!(line("started").body, "started");
     assert_eq!(line("[DEBUG]").body, "");
+  }
+
+  #[test]
+  fn chat_view_restores_the_message_text() {
+    let mut message = Message {
+      id: id_from_raw(1),
+      conversation: id_from_raw(2),
+      author: id_from_raw(3),
+      kind: MessageKind::Log(LogLevel::Warn),
+      sent_at: 0,
+      body: "slow query".into(),
+      is_edited: false,
+      reactions: Vec::new(),
+      reply_count: 0,
+      maybe_thread: None,
+    };
+    as_chat_message(&mut message);
+    assert_eq!(
+      (message.kind, message.body.as_str()),
+      (MessageKind::User, "[WARN] slow query")
+    );
+    message.kind = MessageKind::Log(LogLevel::Error);
+    message.body = "[INFO] a\n[ERROR] b".into();
+    as_chat_message(&mut message);
+    assert_eq!(message.body, "```\n[INFO] a\n[ERROR] b\n```");
   }
 
   #[test]
