@@ -17,6 +17,22 @@
         }
       }
     },
+    "NSCameraUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft uses the camera for video calls."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft verwendet die Kamera für Videoanrufe."
+          }
+        }
+      }
+    },
     "NSMicrophoneUsageDescription": {
       "localizations": {
         "en": {

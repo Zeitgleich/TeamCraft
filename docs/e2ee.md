@@ -708,6 +708,11 @@ Implemented (`teamcraft-core::search`, first version):
   disk. The browser has no tantivy (it doesn't target wasm32) and scans the store instead.
 - Server gap: segments use the attachment endpoints; a dedicated segment listing would let devices
   find segments without reading the conversation's messages first.
+- Prefetch: the mobile core has a setting (`teamcraft_core::prefetch::SegmentPrefetch`: off, unmetered
+  networks only (default), any network) in the sealed store, and `Client::fetch_index_segments` does the
+  download. The platform decides when it can run: iOS schedules a `BGProcessingTask` (external power and
+  network), the app asks the core with the network's metered flag (`TeamCraft.prefetch_segments`). No size
+  cap yet.
 
 ### 10.2 Optional: vault node for compliance and file contents
 

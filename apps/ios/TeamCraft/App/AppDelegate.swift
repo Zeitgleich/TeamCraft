@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     NotificationCategories.register(in: UNUserNotificationCenter.current())
     // Before anything else: a call push that launches the app is delivered to this registry.
     AppModel.shared.calls.start()
+    // Background tasks must be registered before launch finishes.
+    SegmentPrefetchTask.register()
     return true
   }
 

@@ -63,6 +63,12 @@ targets:
       - sdk: AuthenticationServices.framework
       - sdk: PushKit.framework
       - sdk: UserNotifications.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: BackgroundTasks.framework
+      - sdk: Network.framework
+      - sdk: PhotosUI.framework
+      - sdk: QuickLook.framework
     entitlements:
       path: TeamCraft/Resources/TeamCraft.entitlements
       properties:
@@ -83,7 +89,10 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
-        UILaunchScreen: {}
+        # The brand colour with the white T of the app icon (Assets.xcassets).
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+          UIImageName: LaunchLogo
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
@@ -97,9 +106,12 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         # audio: the call keeps running in the background; voip: lets the extension report incoming
         # calls to CallKit (CXProvider.reportNewIncomingVoIPPushPayload, docs/e2ee.md §7).
-        UIBackgroundModes: [audio, voip, remote-notification]
+        # processing: the search index prefetch (BGProcessingTask while charging and online).
+        UIBackgroundModes: [audio, voip, remote-notification, processing]
+        BGTaskSchedulerPermittedIdentifiers: [de.zeitgleich.teamcraft.segment-prefetch]
         ITSAppUsesNonExemptEncryption: true
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls."
+        NSCameraUsageDescription: "TeamCraft uses the camera for video calls."
         NSUserActivityTypes: [INSendMessageIntent, INStartCallIntent]
         # CFBundleURLTypes: the OIDC redirect (ASWebAuthenticationSession handles it itself, but a
         # registered scheme keeps the dev realm's redirect URI valid on every iOS version).

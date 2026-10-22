@@ -15,13 +15,15 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::datagram::SimulcastLayer;
 use teamcraft_media::openh264_library;
-use teamcraft_media::video::{VideoResolution, simulcast_layers};
+use teamcraft_media::rtp::RtpTimestamp;
+use teamcraft_media::video::{EncodedVideoFrame, VideoResolution, simulcast_layers};
 use teamcraft_media::video_capture::CaptureFormat;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, GatewayEvent, MediaCapabilities,
-  MediaStreamId, UserId, VideoCodec, VideoTrack, VideoTrackKind,
+  MediaStreamId, UserId, VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
@@ -54,6 +56,41 @@ pub trait VideoListener: Send + Sync {
   /// The other devices' video tracks now in the call; each is received and decoded.
   fn on_video_tracks(&self, tracks: Vec<VideoTrackInfo>);
   fn on_video_frame(&self, frame: VideoFrameRgba);
+}
+
+/// Video for apps that do the codec work themselves (iOS: VideoToolbox; OpenH264 can't be
+/// downloaded into an iOS app). The engine encrypts, packetizes and forwards H.264 access units in
+/// Annex B form and hands received ones over undecoded. Used instead of [`VideoListener`] and
+/// `start_camera`: while a listener is set, the core neither decodes nor encodes video itself.
+/// Called from the call thread; implementations hand over to their own queues.
+#[uniffi::export(with_foreign)]
+pub trait EncodedVideoListener: Send + Sync {
+  /// Another device published a camera or screen track; call `watch_encoded_video` to receive it.
+  fn on_remote_video_track(&self, track: RemoteVideoTrack);
+  /// A track was unpublished or its device left.
+  fn on_remote_video_ended(&self, stream_id: String);
+  /// One encoded frame of a watched track.
+  fn on_remote_video_frame(&self, frame: RemoteVideoFrame);
+  /// Encode a keyframe (with SPS and PPS) of the camera soon: a receiver joined or lost a frame.
+  fn on_keyframe_requested(&self);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteVideoTrack {
+  pub stream_id: String,
+  /// The publishing device.
+  pub device_id: String,
+  pub is_screen: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteVideoFrame {
+  pub stream_id: String,
+  pub is_keyframe: bool,
+  /// 90 kHz RTP clock.
+  pub timestamp: u32,
+  /// An H.264 access unit in Annex B form; keyframes carry SPS and PPS.
+  pub data: Vec<u8>,
 }
 
 /// The app's handle on the call this device is in.
@@ -146,6 +183,14 @@ enum Control {
   },
   StopCamera,
   SetVideoListener(Arc<dyn VideoListener>),
+  /// Hold: nothing is sent and nothing is played until released.
+  SetHeld(bool),
+  SetEncodedVideoListener(Arc<dyn EncodedVideoListener>),
+  PublishEncodedCamera(VideoLayerInfo),
+  SendEncodedCameraFrame(EncodedVideoFrame),
+  StopEncodedCamera,
+  WatchEncodedVideo(MediaStreamId),
+  UnwatchEncodedVideo(MediaStreamId),
   Leave,
 }
 
@@ -202,9 +247,61 @@ impl CallSession {
     self.send(Control::StopCamera);
   }
 
+  /// Puts the call on hold (or takes it off): the microphone is silenced and the others aren't
+  /// played. The call stays joined, so resuming is instant.
+  pub fn set_held(&self, is_held: bool) {
+    self.send(Control::SetHeld(is_held));
+  }
+
   /// Leaves the call; the listener gets the ended state.
   pub fn leave(&self) {
     self.send(Control::Leave);
+  }
+
+  /// Remote video and keyframe requests go to `listener` from now on, as encoded frames (see
+  /// [`EncodedVideoListener`]); the core stops decoding remote video itself.
+  pub fn set_encoded_video_listener(&self, listener: Arc<dyn EncodedVideoListener>) {
+    self.send(Control::SetEncodedVideoListener(listener));
+  }
+
+  /// Publishes the camera as one H.264 layer; frames follow with `send_encoded_camera_frame`.
+  pub fn publish_encoded_camera(&self, width: u16, height: u16, max_framerate: u8, max_bitrate_bps: u32) {
+    self.send(Control::PublishEncodedCamera(VideoLayerInfo {
+      layer: 0,
+      width,
+      height,
+      max_framerate,
+      max_bitrate_bps,
+    }));
+  }
+
+  /// One encoded camera frame (H.264, Annex B, SPS and PPS before every keyframe). Dropped until
+  /// the call is secured and the SFU confirmed the track.
+  pub fn send_encoded_camera_frame(&self, data: Vec<u8>, timestamp: u32, is_keyframe: bool) {
+    self.send(Control::SendEncodedCameraFrame(EncodedVideoFrame {
+      codec: VideoCodec::H264,
+      layer: SimulcastLayer::BASE,
+      timestamp: RtpTimestamp(timestamp),
+      is_keyframe,
+      data,
+    }));
+  }
+
+  pub fn stop_encoded_camera(&self) {
+    self.send(Control::StopEncodedCamera);
+  }
+
+  /// Receives the track `stream_id` (from `on_remote_video_track`).
+  pub fn watch_encoded_video(&self, stream_id: String) {
+    if let Some(stream) = parse_stream(&stream_id) {
+      self.send(Control::WatchEncodedVideo(stream));
+    }
+  }
+
+  pub fn unwatch_encoded_video(&self, stream_id: String) {
+    if let Some(stream) = parse_stream(&stream_id) {
+      self.send(Control::UnwatchEncodedVideo(stream));
+    }
   }
 }
 
@@ -348,19 +445,36 @@ async fn run_call(
 ) {
   let mut reason = CallEndReason::Left;
   let mut video = RemoteVideo::default();
+  let mut encoded = EncodedVideoBridge::default();
+  let mut audio = AudioControls::default();
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
         // Leave asked for, or the app dropped the session.
         Some(Control::Leave) | None => break,
+        Some(Control::SetMuted(is_muted)) => {
+          audio.is_muted = is_muted;
+          call.set_muted(audio.is_silent());
+        },
+        Some(Control::SetHeld(is_held)) => {
+          audio.is_held = is_held;
+          call.set_muted(audio.is_silent());
+          call.set_deafened(is_held);
+          state.is_deafened = is_held;
+          context.hub.report(state.clone());
+        },
         Some(control) => {
+          apply_encoded_control(&call, &mut video, &mut encoded, state, &control);
           apply_control(&call, control, context, state, &video).await;
           context.hub.report(state.clone());
         },
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
-          watch_video(&call, &event, context.own_device, &mut video);
+          encoded.report(context.own_device, &event);
+          if !encoded.is_active() {
+            watch_video(&call, &event, context.own_device, &mut video);
+          }
           if let Some(end) = apply_event(state, event) {
             reason = end;
             break;
@@ -410,7 +524,15 @@ async fn apply_control(
       listener.on_video_tracks(video.tracks.values().cloned().collect());
       *lock_listener(&video.listener) = Some(listener);
     },
-    Control::Leave => {},
+    // Handled by the loop and `apply_encoded_control`.
+    Control::SetHeld(_)
+    | Control::SetEncodedVideoListener(_)
+    | Control::PublishEncodedCamera(_)
+    | Control::SendEncodedCameraFrame(_)
+    | Control::StopEncodedCamera
+    | Control::WatchEncodedVideo(_)
+    | Control::UnwatchEncodedVideo(_)
+    | Control::Leave => {},
   }
 }
 
@@ -473,6 +595,139 @@ fn watch_video(call: &NativeCall, event: &CallEngineEvent, own_device: DeviceId,
   if let Some(listener) = maybe_listener {
     listener.on_video_tracks(video.tracks.values().cloned().collect());
   }
+}
+
+/// Mute by the app and hold, which silence the microphone together.
+#[derive(Default)]
+struct AudioControls {
+  is_muted: bool,
+  is_held: bool,
+}
+
+impl AudioControls {
+  fn is_silent(&self) -> bool {
+    self.is_muted || self.is_held
+  }
+}
+
+/// What the call thread keeps for an app that encodes and decodes video itself.
+#[derive(Default)]
+struct EncodedVideoBridge {
+  maybe_listener: Option<Arc<dyn EncodedVideoListener>>,
+  /// The stream id of this device's camera once the SFU announced it.
+  maybe_camera: Option<MediaStreamId>,
+  /// The camera was asked for; the track announcement may still be on its way.
+  is_camera_requested: bool,
+  /// Tracks of other devices that are published now; a listener that registers late (the app sets
+  /// it after the join returned) learns about them when it registers.
+  remote_tracks: Vec<RemoteVideoTrack>,
+}
+
+impl EncodedVideoBridge {
+  fn is_active(&self) -> bool {
+    self.maybe_listener.is_some()
+  }
+
+  fn set_listener(&mut self, listener: Arc<dyn EncodedVideoListener>) {
+    for track in &self.remote_tracks {
+      listener.on_remote_video_track(track.clone());
+    }
+    self.maybe_listener = Some(listener);
+  }
+
+  /// Tells the app's listener what the engine reported, and notes the camera's stream.
+  fn report(&mut self, own_device: DeviceId, event: &CallEngineEvent) {
+    match event {
+      CallEngineEvent::VideoPublished(track) if track.device_id == own_device => {
+        if track.kind == VideoTrackKind::Camera && self.is_camera_requested {
+          self.maybe_camera = Some(track.stream_id);
+        }
+      },
+      CallEngineEvent::VideoPublished(track) => {
+        let remote = RemoteVideoTrack {
+          stream_id: track.stream_id.0.to_string(),
+          device_id: track.device_id.to_string(),
+          is_screen: track.kind == VideoTrackKind::Screen,
+        };
+        self.remote_tracks.push(remote.clone());
+        if let Some(listener) = &self.maybe_listener {
+          listener.on_remote_video_track(remote);
+        }
+      },
+      CallEngineEvent::VideoUnpublished(stream_id) => {
+        if self.maybe_camera == Some(*stream_id) {
+          self.maybe_camera = None;
+        } else {
+          let id = stream_id.0.to_string();
+          self.remote_tracks.retain(|track| track.stream_id != id);
+          if let Some(listener) = &self.maybe_listener {
+            listener.on_remote_video_ended(id);
+          }
+        }
+      },
+      CallEngineEvent::VideoFrame(frame) => {
+        if let Some(listener) = &self.maybe_listener {
+          listener.on_remote_video_frame(RemoteVideoFrame {
+            stream_id: frame.stream_id.0.to_string(),
+            is_keyframe: frame.is_keyframe,
+            timestamp: frame.timestamp.0,
+            data: frame.data.clone(),
+          });
+        }
+      },
+      CallEngineEvent::KeyframeRequested { stream_id, .. } if self.maybe_camera == Some(*stream_id) => {
+        if let Some(listener) = &self.maybe_listener {
+          listener.on_keyframe_requested();
+        }
+      },
+      _ => {},
+    }
+  }
+}
+
+/// Camera and watch requests of an app that does the codec work itself.
+fn apply_encoded_control(
+  call: &NativeCall,
+  video: &mut RemoteVideo,
+  encoded: &mut EncodedVideoBridge,
+  state: &mut CallStateInfo,
+  control: &Control,
+) {
+  match control {
+    Control::SetEncodedVideoListener(listener) => {
+      // Tracks the core already decodes itself are handed over to the app.
+      for stream_id in std::mem::take(&mut video.tracks).into_keys() {
+        call.unwatch_video(stream_id);
+      }
+      encoded.set_listener(listener.clone());
+    },
+    Control::PublishEncodedCamera(layer) => {
+      if !encoded.is_camera_requested {
+        encoded.is_camera_requested = true;
+        state.is_camera_on = true;
+        call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![*layer]);
+      }
+    },
+    Control::SendEncodedCameraFrame(frame) => {
+      if let Some(stream) = encoded.maybe_camera {
+        call.send_video(stream, frame.clone());
+      }
+    },
+    Control::StopEncodedCamera => {
+      encoded.is_camera_requested = false;
+      state.is_camera_on = false;
+      if let Some(stream) = encoded.maybe_camera.take() {
+        call.unpublish_video(stream);
+      }
+    },
+    Control::WatchEncodedVideo(stream) => call.subscribe_video(*stream, Some(0)),
+    Control::UnwatchEncodedVideo(stream) => call.subscribe_video(*stream, None),
+    _ => {},
+  }
+}
+
+fn parse_stream(text: &str) -> Option<MediaStreamId> {
+  text.parse().ok().map(MediaStreamId)
 }
 
 fn track_info(track: &VideoTrack) -> VideoTrackInfo {
@@ -591,7 +846,7 @@ fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{CallId, Id, Snowflake};
+  use teamcraft_proto::{CallId, Id, Snowflake, VideoTrack};
 
   use super::*;
 
@@ -623,6 +878,63 @@ mod tests {
       apply_event(&mut state, CallEngineEvent::EndedByHost { by_user_id: user(1) }),
       Some(CallEndReason::EndedByHost)
     );
+  }
+
+  #[test]
+  fn a_late_encoded_video_listener_learns_about_published_tracks() {
+    let mut video = EncodedVideoBridge::default();
+    let own = device(1);
+    let track = |stream: u32, device_raw: i64| VideoTrack {
+      stream_id: MediaStreamId(stream),
+      device_id: device(device_raw),
+      kind: VideoTrackKind::Camera,
+      codec: VideoCodec::H264,
+      layers: Vec::new(),
+    };
+    video.report(own, &CallEngineEvent::VideoPublished(track(7, 2)));
+    video.report(own, &CallEngineEvent::VideoPublished(track(8, 3)));
+    video.report(own, &CallEngineEvent::VideoUnpublished(MediaStreamId(7)));
+    // Own camera: remembered for sending, not shown as a remote track.
+    video.is_camera_requested = true;
+    video.report(own, &CallEngineEvent::VideoPublished(track(9, 1)));
+    assert_eq!(video.maybe_camera, Some(MediaStreamId(9)));
+
+    let listener = Arc::new(VideoRecorder::default());
+    video.set_listener(listener.clone());
+    assert_eq!(*listener.tracks.lock().unwrap(), vec!["8".to_string()]);
+    assert!(video.is_active());
+  }
+
+  #[test]
+  fn hold_and_mute_silence_the_microphone_together() {
+    let mut audio = AudioControls::default();
+    assert!(!audio.is_silent());
+    audio.is_held = true;
+    assert!(audio.is_silent());
+    audio.is_held = false;
+    audio.is_muted = true;
+    assert!(audio.is_silent());
+  }
+
+  #[derive(Default)]
+  struct VideoRecorder {
+    tracks: Mutex<Vec<String>>,
+  }
+
+  impl EncodedVideoListener for VideoRecorder {
+    fn on_remote_video_track(&self, track: RemoteVideoTrack) {
+      self.tracks.lock().unwrap().push(track.stream_id);
+    }
+
+    fn on_remote_video_ended(&self, _stream_id: String) {}
+
+    fn on_remote_video_frame(&self, _frame: RemoteVideoFrame) {}
+
+    fn on_keyframe_requested(&self) {}
+  }
+
+  fn device(raw: i64) -> DeviceId {
+    DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
   }
 
   #[derive(Default)]

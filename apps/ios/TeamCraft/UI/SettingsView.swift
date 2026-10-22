@@ -9,6 +9,8 @@ struct SettingsView: View {
   @State private var statusEmoji = ""
   @State private var statusText = ""
   @State private var statusExpiry = StatusExpiryValue.never
+  @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
+  @State private var isPrefetchLoaded = false
 
   var body: some View {
     NavigationStack {
@@ -60,6 +62,22 @@ struct SettingsView: View {
         } footer: {
           Text("fingerprint_hint")
         }
+        Section {
+          NavigationLink("rules_title") { NotificationRulesView() }
+        } header: {
+          Text("notifications_title")
+        }
+        Section {
+          Picker("prefetch_title", selection: $prefetch) {
+            Text("prefetch_off").tag(SegmentPrefetchMode.off)
+            Text("prefetch_unmetered").tag(SegmentPrefetchMode.unmeteredOnly)
+            Text("prefetch_always").tag(SegmentPrefetchMode.always)
+          }
+        } header: {
+          Text("search_title")
+        } footer: {
+          Text("prefetch_hint")
+        }
         Section("push_title") {
           switch model.pushStatus {
           case .enabled: Label("push_registered", systemImage: "checkmark.circle")
@@ -78,6 +96,13 @@ struct SettingsView: View {
             }
           }
         }
+      }
+      .task {
+        prefetch = await model.segmentPrefetch()
+        isPrefetchLoaded = true
+      }
+      .onChange(of: prefetch) { _, mode in
+        if isPrefetchLoaded { Task { await model.setSegmentPrefetch(mode) } }
       }
       .navigationTitle("settings_title")
       .navigationBarTitleDisplayMode(.inline)
@@ -177,5 +202,56 @@ struct ApproveLinkView: View {
       try await model.confirmLink()
       step = .done
     } catch { step = .failed }
+  }
+}
+
+/// What counts as a mention besides `@username`: `@channel`, the first name and the user's own
+/// keywords. The core saves the rules in the encrypted store; the notification extension applies
+/// them to pushed messages too.
+struct NotificationRulesView: View {
+  @Environment(AppModel.self) private var model
+
+  @State private var rules = MentionSettings(isFirstNameMention: true, doChannelMentionsNotify: true, keywords: [])
+  @State private var isLoaded = false
+  @State private var newKeyword = ""
+
+  var body: some View {
+    Form {
+      Section {
+        Toggle("rules_first_name", isOn: $rules.isFirstNameMention)
+        Toggle("rules_channel", isOn: $rules.doChannelMentionsNotify)
+      } footer: {
+        Text("rules_hint")
+      }
+      Section("rules_keywords") {
+        ForEach(rules.keywords, id: \.self) { keyword in Text(keyword) }
+          .onDelete { offsets in rules.keywords.remove(atOffsets: offsets) }
+        HStack {
+          TextField("rules_keyword_hint", text: $newKeyword)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .onSubmit(addKeyword)
+          Button("rules_keyword_add", action: addKeyword)
+            .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+      }
+    }
+    .navigationTitle("rules_title")
+    .navigationBarTitleDisplayMode(.inline)
+    .task {
+      rules = await model.mentionSettings()
+      isLoaded = true
+    }
+    .onChange(of: rules) { _, updated in
+      if isLoaded { Task { await model.setMentionSettings(updated) } }
+    }
+  }
+
+  private func addKeyword() {
+    let keyword = newKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
+    newKeyword = ""
+    guard !keyword.isEmpty, !rules.keywords.contains(where: { $0.caseInsensitiveCompare(keyword) == .orderedSame })
+    else { return }
+    rules.keywords.append(keyword)
   }
 }

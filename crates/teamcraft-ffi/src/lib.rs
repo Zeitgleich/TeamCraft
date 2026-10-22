@@ -17,8 +17,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use calls::{
-  CallEndReason, CallListener, CallPhase, CallSession, CallStateInfo, IncomingCallInfo, VideoListener,
-  VideoTrackInfo,
+  CallEndReason, CallListener, CallPhase, CallSession, CallStateInfo, EncodedVideoListener, IncomingCallInfo,
+  RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem,
   OrgRecoveryStart, Presence, PushNotification, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchResult,
+  SegmentPrefetchMode, SegmentPrefetchResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -207,12 +207,40 @@ impl TeamCraft {
   /// Keywords, first name and `@channel` preferences for marking pushed messages as mentions.
   pub async fn set_mention_settings(&self, settings: MentionSettings) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| {
-        Box::pin(async move {
-          engine.set_mention_settings(settings);
-          Ok(())
-        })
-      })
+      .call(move |engine| Box::pin(async move { engine.set_mention_settings(settings) }))
+      .await
+  }
+
+  /// The saved mention preferences (kept in the store, so the push extension applies them too).
+  pub async fn mention_settings(&self) -> Result<MentionSettings, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { Ok(engine.mention_settings()) }))
+      .await
+  }
+
+  /// When search index segments are prefetched; the platform schedules the work (see
+  /// `prefetch_segments`).
+  pub async fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.segment_prefetch() }))
+      .await
+  }
+
+  pub async fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.set_segment_prefetch(mode) }))
+      .await
+  }
+
+  /// Prefetches the search segments like `prefetch_search_segments` if the saved mode allows it
+  /// on the current network (`is_network_metered`); fetches nothing otherwise. For background tasks.
+  pub async fn prefetch_segments(
+    &self,
+    is_network_metered: bool,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.prefetch_segments(is_network_metered, max_total_bytes)))
       .await
   }
 

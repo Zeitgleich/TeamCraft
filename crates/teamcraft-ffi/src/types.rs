@@ -2,6 +2,8 @@
 //! 64-bit unsigned type that matches, and the app only passes them back.
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
+use teamcraft_core::notify_rules::MentionPreferences;
+use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_preview::{PreviewContent, PushPreview};
 use teamcraft_proto::{PushKind, PushProvider};
 
@@ -251,6 +253,55 @@ impl From<teamcraft_core::client::SegmentPrefetch> for SegmentPrefetchResult {
       fetched: u32::try_from(prefetch.fetched).unwrap_or(u32::MAX),
       skipped: u32::try_from(prefetch.skipped).unwrap_or(u32::MAX),
       stored_bytes: prefetch.stored_bytes,
+    }
+  }
+}
+
+/// When the app downloads shared search index segments ahead of time (the core keeps the choice).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SegmentPrefetchMode {
+  Off,
+  /// Only on networks that aren't metered.
+  UnmeteredOnly,
+  Always,
+}
+
+impl From<SegmentPrefetch> for SegmentPrefetchMode {
+  fn from(mode: SegmentPrefetch) -> Self {
+    match mode {
+      SegmentPrefetch::Off => Self::Off,
+      SegmentPrefetch::UnmeteredOnly => Self::UnmeteredOnly,
+      SegmentPrefetch::Always => Self::Always,
+    }
+  }
+}
+
+impl From<SegmentPrefetchMode> for SegmentPrefetch {
+  fn from(mode: SegmentPrefetchMode) -> Self {
+    match mode {
+      SegmentPrefetchMode::Off => Self::Off,
+      SegmentPrefetchMode::UnmeteredOnly => Self::UnmeteredOnly,
+      SegmentPrefetchMode::Always => Self::Always,
+    }
+  }
+}
+
+impl From<MentionPreferences> for MentionSettings {
+  fn from(preferences: MentionPreferences) -> Self {
+    Self {
+      is_first_name_mention: preferences.first_name_is_mention,
+      do_channel_mentions_notify: preferences.channel_mentions_notify,
+      keywords: preferences.keywords,
+    }
+  }
+}
+
+impl From<MentionSettings> for MentionPreferences {
+  fn from(settings: MentionSettings) -> Self {
+    Self {
+      first_name_is_mention: settings.is_first_name_mention,
+      channel_mentions_notify: settings.do_channel_mentions_notify,
+      keywords: settings.keywords,
     }
   }
 }

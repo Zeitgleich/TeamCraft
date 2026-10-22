@@ -16,6 +16,8 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServe
 use teamcraft_core::client::LinkApproval;
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::clock::SystemClock;
+use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
+use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_preview::push_preview;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{SealedSqliteStore, StaticKeySource};
@@ -33,7 +35,7 @@ use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem, Presence,
-  PushNotification, PushService, SearchHitItem, SegmentPrefetchResult,
+  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -169,6 +171,10 @@ impl Engine {
     std::fs::create_dir_all(&directory).map_err(|error| TeamCraftError::Storage(error.to_string()))?;
     let path = directory.join(format!("{}.teamcraft.db", config.account));
     let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
+    // A broken record only costs the preferences, not the store.
+    let mentions: MentionSettings = load_mention_preferences(store.as_ref())
+      .unwrap_or_default()
+      .into();
     let mut engine = Self {
       server_url: config.server_url,
       download_dir: directory.join("downloads"),
@@ -183,7 +189,7 @@ impl Engine {
       maybe_new_link: None,
       maybe_approval: None,
       calls: CallHub::default(),
-      mentions: MentionSettings::default(),
+      mentions,
     };
     if let Some(client) = Client::open(
       engine.api(),
@@ -487,8 +493,41 @@ impl Engine {
     Ok(notification)
   }
 
-  pub(crate) fn set_mention_settings(&mut self, settings: MentionSettings) {
+  /// Remembers the preferences in the store, so a process that opens the store later (the iOS
+  /// notification extension) applies them too.
+  pub(crate) fn set_mention_settings(&mut self, settings: MentionSettings) -> Result<(), TeamCraftError> {
+    save_mention_preferences(self.store.as_ref(), &settings.clone().into())?;
     self.mentions = settings;
+    Ok(())
+  }
+
+  pub(crate) fn mention_settings(&self) -> MentionSettings {
+    self.mentions.clone()
+  }
+
+  pub(crate) fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
+    Ok(load_segment_prefetch(self.store.as_ref())?.into())
+  }
+
+  pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
+    Ok(save_segment_prefetch(self.store.as_ref(), mode.into())?)
+  }
+
+  /// Prefetches the search segments if the saved mode allows it on this network; nothing is
+  /// fetched otherwise.
+  pub(crate) async fn prefetch_segments(
+    &mut self,
+    is_network_metered: bool,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    if !load_segment_prefetch(self.store.as_ref())?.allows(is_network_metered) {
+      return Ok(SegmentPrefetchResult {
+        fetched: 0,
+        skipped: 0,
+        stored_bytes: 0,
+      });
+    }
+    self.prefetch_search_segments(max_total_bytes).await
   }
 
   /// Downloads missing search segments, newest first, within `max_total_bytes`; pauses syncing

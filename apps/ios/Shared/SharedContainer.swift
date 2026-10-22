@@ -32,6 +32,28 @@ struct SharedContainer {
     return url
   }
 
+  /// Files picked for sending, copied here so the core can read them while it uploads (plaintext:
+  /// not in backups, readable after the first unlock so an upload goes on with the phone locked).
+  var uploadsDirectory: URL {
+    var url = dataDirectory.appendingPathComponent("uploads", isDirectory: true)
+    prepare(&url, protection: .completeUntilFirstUserAuthentication)
+    return url
+  }
+
+  /// Removes the copies of picked files older than `age` (uploads that long ago are done), or all
+  /// of them with `age` 0 (sign-out).
+  func pruneUploads(olderThan age: TimeInterval) {
+    let directory = dataDirectory.appendingPathComponent("uploads", isDirectory: true)
+    let cutoff = Date().addingTimeInterval(-age)
+    let files = (try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+    for file in files {
+      let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+      if age <= 0 || (modified ?? .distantPast) < cutoff {
+        try? fileManager.removeItem(at: file)
+      }
+    }
+  }
+
   /// Removes every decrypted download (sign-out).
   func wipeDownloads() {
     try? fileManager.removeItem(at: dataDirectory.appendingPathComponent("downloads", isDirectory: true))
