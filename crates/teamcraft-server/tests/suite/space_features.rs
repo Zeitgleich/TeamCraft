@@ -22,7 +22,7 @@ mod moving_channels {
   use super::*;
 
   #[tokio::test]
-  async fn a_space_admin_moves_a_channel_and_members_keep_it() {
+  async fn a_space_admin_moves_a_channel_once_its_members_belong_to_the_new_space() {
     let app = app!();
     let (alice, carol) = (owner(), member("carol"));
     let source = create_space(&app, &alice, "Project A", "invite_only").await;
@@ -32,12 +32,17 @@ mod moving_channels {
     let channel = create_channel(&app, &alice, &source, "general", "private").await;
     add_channel_member(&app, &alice, &channel, &carol_id).await;
 
+    // Carol is not in the target space: the channel would escape her space membership.
     let path = format!("/conversations/{channel}/space");
+    let refused = app.put(&alice, &path, json!({"space_id": target})).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+
+    add_space_member(&app, &alice, &target, &carol_id, "member").await;
     let moved = app.put(&alice, &path, json!({"space_id": target})).await;
     assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
     assert_eq!(moved.body["space_id"], json!(target));
 
-    // Carol is not a member of the target space but stays in the channel.
+    // Carol keeps the channel.
     let seen = app.get(&carol, &format!("/conversations/{channel}")).await;
     assert_eq!(seen.status, StatusCode::OK, "{}", seen.body);
     assert_eq!(seen.body["space_id"], json!(target));
@@ -87,6 +92,34 @@ mod moving_channels {
 
     let same = app.put(&alice, &path, json!({"space_id": source})).await;
     assert_eq!(same.status, StatusCode::BAD_REQUEST, "{}", same.body);
+    app.stop().await;
+  }
+}
+
+mod space_guests {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_guest_of_the_space_cannot_be_promoted_in_its_channels() {
+    let app = app!();
+    let (alice, carol) = (owner(), member("carol"));
+    let space = create_space(&app, &alice, "Project A", "invite_only").await;
+    let carol_id = user_id(&app, &carol).await;
+    // Carol is a member of the instance but only a guest of this space.
+    add_space_member(&app, &alice, &space, &carol_id, "guest").await;
+    let channel = create_channel(&app, &alice, &space, "general", "private").await;
+    add_channel_member(&app, &alice, &channel, &carol_id).await;
+
+    let path = format!("/conversations/{channel}/members/{carol_id}");
+    for role in ["admin", "moderator"] {
+      let promoted = app.patch(&alice, &path, json!({"role": role})).await;
+      assert_eq!(
+        promoted.status,
+        StatusCode::BAD_REQUEST,
+        "{role}: {}",
+        promoted.body
+      );
+    }
     app.stop().await;
   }
 }

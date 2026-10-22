@@ -236,10 +236,19 @@ pub async fn update_member(
     let Some(target) = members.iter().find(|m| m.user.id == user_id) else {
       return Err(ApiError::user_not_found());
     };
-    if is_privileged(role) && target.user.kind == teamcraft_proto::UserKind::Guest {
-      return Err(ApiError::InvalidRequest(
-        "guests can't be channel admins or moderators".into(),
-      ));
+    if is_privileged(role) {
+      // Guests of the instance or of the channel's space (as in `add_member`).
+      let maybe_space_role = match access.view.conversation.maybe_space_id {
+        Some(space) => state.database.space_role(space, user_id).await?,
+        None => None,
+      };
+      if target.user.kind == teamcraft_proto::UserKind::Guest
+        || matches!(maybe_space_role, None | Some(SpaceRole::Guest))
+      {
+        return Err(ApiError::InvalidRequest(
+          "guests can't be channel admins or moderators".into(),
+        ));
+      }
     }
     if target.role == ChannelRole::Admin
       && *role != ChannelRole::Admin

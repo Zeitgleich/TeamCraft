@@ -274,7 +274,10 @@ pub async fn update_conversation(
 
 /// Moves a channel to another space. The MLS group, memberships and history are untouched: the
 /// space only decides who may browse the channel and which scheme and retention defaults apply.
-/// Needs `manage_space_properties` in the space the channel leaves and in the one it enters.
+/// Needs `manage_space_properties` in the space the channel leaves and in the one it enters, and
+/// every channel member must already belong to the target space: channel members are always space
+/// members, so leaving or expiring from the space (guests) ends the channel membership too, and
+/// guest restrictions follow the space role.
 pub async fn move_channel(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -319,6 +322,12 @@ pub async fn move_channel(
       return Err(ApiError::category_not_found());
     }
   }
+  let outside = members_outside_space(state, id, request.space_id).await?;
+  if outside > 0 {
+    return Err(ApiError::Conflict(format!(
+      "{outside} channel members are not members of the target space; add them to the space first"
+    )));
+  }
   state
     .database
     .move_conversation_to_space(id, request.space_id, request.maybe_category_id)
@@ -337,6 +346,23 @@ pub async fn move_channel(
     .hub
     .publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
   get_conversation(state, caller, id).await
+}
+
+/// How many members of the channel have no active role (guests: not expired) in the space.
+async fn members_outside_space(
+  state: &AppState,
+  conversation: ConversationId,
+  space: SpaceId,
+) -> Result<usize, ApiError> {
+  let in_space: HashSet<UserId> = state
+    .database
+    .list_space_members(space)
+    .await?
+    .into_iter()
+    .map(|member| member.user.id)
+    .collect();
+  let members = state.database.conversation_member_ids(conversation).await?;
+  Ok(members.iter().filter(|user| !in_space.contains(user)).count())
 }
 
 /// Makes a channel public or private. Memberships stay as they are; what changes is who may join
