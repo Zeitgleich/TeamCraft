@@ -64,7 +64,7 @@ async fn missed_mentions_arrive_as_one_content_free_mail_to_people_who_opted_in(
         .all_to(address)
         .await
         .into_iter()
-        .filter(|mail| !seen.contains(&mail.id))
+        .filter(|mail| !seen.contains(&mail.id) && is_digest(mail))
         .collect::<Vec<ReceivedMail>>()
     }
   };
@@ -196,6 +196,11 @@ async fn missed_mentions_arrive_as_one_content_free_mail_to_people_who_opted_in(
   assert_eq!(new_mails(CAROL).await.len(), sent);
 
   stack.stop().await;
+}
+
+/// Other tests of the suite mail the same dev realm addresses (meeting invitations).
+fn is_digest(mail: &ReceivedMail) -> bool {
+  mail.subject.ends_with("in TeamCraft") && mail.subject.contains("new mention")
 }
 
 /// The number in "3 new mentions in TeamCraft" (1 for "1 new mention").
