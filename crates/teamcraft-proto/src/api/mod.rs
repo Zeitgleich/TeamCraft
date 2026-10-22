@@ -3,6 +3,7 @@
 mod admin;
 mod announcements;
 mod attachments;
+mod backgrounds;
 mod bots;
 mod brand;
 mod call_history;
@@ -31,6 +32,7 @@ mod workspace;
 pub use admin::*;
 pub use announcements::*;
 pub use attachments::*;
+pub use backgrounds::*;
 pub use bots::*;
 pub use brand::*;
 pub use call_history::*;

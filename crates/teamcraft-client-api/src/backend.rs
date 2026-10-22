@@ -6,7 +6,7 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
-use teamcraft_proto::{CategoryId, HistoryPolicy, Role};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, Role};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
@@ -14,7 +14,8 @@ use crate::actions::{
 };
 use crate::admin::{AdminChannel, AdminUser, AuditEntry, Retention, SecurityPolicy, SelfJoinOutcome};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
+  Participant,
 };
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
@@ -133,6 +134,14 @@ pub trait ChatBackend {
   fn saved_items(&self) -> Vec<SavedItem> {
     Vec::new()
   }
+  /// The user's own call background pictures.
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    Vec::new()
+  }
+  /// Adds a picture (the host normalizes it to a JPEG without metadata first); it is encrypted,
+  /// uploaded and synced to the user's devices.
+  fn add_background_image(&self, _name: &str, _picture: Vec<u8>) {}
+  fn delete_background_image(&self, _id: BackgroundId) {}
   /// A link to the message that only members of the conversation can open.
   fn permalink(&self, _conversation: ConversationId, _message: MessageId) -> Option<String> {
     None
@@ -153,6 +162,8 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Starts (or finds) the direct conversation with a person; it shows up in the lists when ready.
+  fn open_dm(&self, _user: UserId) {}
   /// Confirms having read a message that asked for acknowledgement.
   fn acknowledge(&self, _conversation: ConversationId, _message: MessageId) {}
 
@@ -201,6 +212,10 @@ pub trait ChatBackend {
   fn delete_category(&self, _space: SpaceId, _category: CategoryId) {}
   /// Adds a person with an explicit history choice ("share history" toggle, e2ee.md §4.3).
   fn add_member_with_history(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
+  /// Replaces the conversation's bookmarks bar (links and files shown under the header).
+  fn set_bookmarks(&self, _conversation: ConversationId, _bookmarks: Vec<crate::model::Bookmark>) {}
+  /// Removes a person from a conversation (and rotates its keys).
+  fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
   /// The conversation includes people from outside the organization (the "external" badge).

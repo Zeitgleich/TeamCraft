@@ -25,6 +25,9 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
+use teamcraft_proto::{
+  BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+};
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -547,6 +550,36 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get(&format!("/attachments/{attachment}/download")).await
   }
 
+  async fn create_background_upload(
+    &self,
+    request: &CreateBackgroundUploadRequest,
+  ) -> Result<CreateBackgroundUploadResponse, ApiError> {
+    self.send_json(Method::POST, "/me/backgrounds", request).await
+  }
+
+  async fn complete_background_upload(&self, background: BackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/me/backgrounds/{background}/complete"),
+        None,
+      )
+      .await
+  }
+
+  async fn download_background(
+    &self,
+    background: BackgroundId,
+  ) -> Result<BackgroundDownloadResponse, ApiError> {
+    self.get(&format!("/me/backgrounds/{background}/download")).await
+  }
+
+  async fn delete_background(&self, background: BackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/me/backgrounds/{background}"), None)
+      .await
+  }
+
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     // Presigned: the URL carries the authorization, so no bearer token goes to object storage.
     send(self.client.put(url).body(bytes)).await.map(|_| ())
@@ -805,10 +838,8 @@ type NativeSocket =
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
-  #[cfg(target_os = "android")]
+  // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
-  #[cfg(not(target_os = "android"))]
-  let maybe_connector = None;
   let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector)
     .await
     .map_err(|error| ApiError::Network(error.to_string()))?;

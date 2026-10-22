@@ -8,6 +8,7 @@ mod account;
 mod actions;
 mod attachments;
 mod attested;
+mod backgrounds;
 mod calls;
 mod devices;
 mod enroll;
@@ -42,9 +43,9 @@ pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, Pending
 pub use gateway::GatewayOutcome;
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use messaging::FlushReport;
-#[cfg(feature = "ui")]
-pub(crate) use messaging::apply_control;
 pub(crate) use messaging::decrypt_content;
+#[cfg(feature = "ui")]
+pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use notifications::TYPING_TIMEOUT_MS;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};

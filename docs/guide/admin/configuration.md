@@ -26,26 +26,32 @@ Keep secrets in the environment or in files mounted by the orchestrator, not in 
 
 ## Sections
 
-| Section                  | Purpose                                                                          | Needed       |
-|--------------------------|----------------------------------------------------------------------------------|--------------|
-| `[server]`               | Listen address (default `[::]:8080`), instance `worker_id` (unique per instance) | yes          |
-| `[database]`             | Postgres URL, pool size                                                          | yes          |
-| `[oidc]`, `[oidc.roles]` | Issuer, client IDs, role name mapping, accepted algorithms                       | yes          |
-| `[oidc.sync]`            | Deprovisioning poll with the service account (off by default)                    | recommended  |
-| `[logging]`              | `tracing` filter, `pretty` or `json`                                             | no           |
-| `[policy]`               | Guest DM scope, invite e-mail verification                                       | no           |
-| `[limits]`               | Message, page, MLS and key bag sizes                                             | no           |
-| `[gateway]`              | Heartbeat, resume window, frame size                                             | no           |
-| `[rendezvous]`           | Device-linking relay limits                                                      | no           |
-| `[storage]`              | S3 endpoint, bucket, keys, attachment size limit (default 100 MiB)               | for files    |
-| `[retention]`            | Background job that enforces retention                                           | no           |
-| `[notifications]`        | Read receipt default, urgent message repeat                                      | no           |
-| `[integration]`          | Default retention (days) of integration channels                                 | no           |
-| `[security]`             | Request size, HSTS, `X-Forwarded-For`, per-minute rate limits                    | no           |
-| `[web]`                  | Directory of the web client and its CSP                                          | for web      |
-| `[meetings]`             | Public URL, guest token secret, CalDAV, SMTP, mail texts                         | for meetings |
-| `[push]`                 | VAPID key for Web Push                                                           | for push     |
-| `[calls]`                | SFU URL, join token signing key                                                  | for calls    |
+| Section                        | Purpose                                                                          | Needed          |
+|--------------------------------|----------------------------------------------------------------------------------|-----------------|
+| `[server]`                     | Listen address (default `[::]:8080`), instance `worker_id` (unique per instance) | yes             |
+| `[database]`                   | Postgres URL, pool size                                                          | yes             |
+| `[oidc]`, `[oidc.roles]`       | Issuer, client IDs, role name mapping, accepted algorithms                       | yes             |
+| `[oidc.sync]`                  | Deprovisioning poll with the service account (off by default)                    | recommended     |
+| `[logging]`                    | `tracing` filter, `pretty` or `json`                                             | no              |
+| `[policy]`                     | Guest DM scope, invite e-mail verification                                       | no              |
+| `[limits]`                     | Message, page, MLS and key bag sizes                                             | no              |
+| `[gateway]`                    | Heartbeat, resume window, frame size                                             | no              |
+| `[rendezvous]`                 | Device-linking relay limits                                                      | no              |
+| `[storage]`                    | S3 endpoint, bucket, keys, attachment size limit (default 100 MiB)               | for files       |
+| `[retention]`                  | Background job that enforces retention                                           | no              |
+| `[notifications]`              | Read receipt default, urgent message repeat                                      | no              |
+| `[integration]`                | Default retention (days) of integration channels                                 | no              |
+| `[guests]`                     | Default guest expiry (90 days), allowed e-mail domains, expiry check interval    | no              |
+| `[local_accounts]`             | Guests with their own password and authenticator code (off by default)           | for such guests |
+| `[mail]`, `[mail.smtp]`        | Invitation and activation e-mail, public URL for links                           | for invitations |
+| `[notifications.email_digest]` | Content-free e-mail digest of missed mentions (off by default)                   | no              |
+| `[presence]`                   | "In a meeting" / "in a call" statuses, calendar polling                          | no              |
+| `[shares]`                     | Share links for external download: expiry, download cap, public URL              | no              |
+| `[security]`                   | Request size, HSTS, `X-Forwarded-For`, per-minute rate limits                    | no              |
+| `[web]`                        | Directory of the web client and its CSP                                          | for web         |
+| `[meetings]`                   | Public URL, guest token secret, CalDAV, SMTP, mail texts                         | for meetings    |
+| `[push]`                       | VAPID key for Web Push                                                           | for push        |
+| `[calls]`                      | SFU URL, join token signing key                                                  | for calls       |
 
 Sections that are optional features (`[storage]`, `[meetings]`, `[calls]`) make their endpoints
 answer **503** when absent.
@@ -71,3 +77,24 @@ guest rules.
 |--------------------------------------------|---------|----------------------------------------------------------------------------|
 | `guests_dm_only_with_shared_conversations` | `true`  | Guests only open DMs with people they share a conversation with            |
 | `invites_require_verified_email`           | `true`  | A pending space invite only applies when the provider verified the address |
+
+## E-mail the server sends
+
+Three kinds of mail, each with its own settings:
+
+| Mail                                      | Settings                                            | Needs                                      |
+|-------------------------------------------|-----------------------------------------------------|--------------------------------------------|
+| Space invitations, guest activation links | `[mail]` texts and `public_base_url`, `[mail.smtp]` | SMTP                                       |
+| Meeting invitations                       | `[meetings.smtp]`, `[meetings.mail_texts]`          | SMTP (can be the same)                     |
+| Digest of missed mentions                 | `[notifications.email_digest]`                      | `[mail.smtp]` and `[mail] public_base_url` |
+
+The **digest** is content-free: it says only how many mentions are still unread ("3 new mentions")
+and links to the app, because the server cannot read messages. People opt in themselves
+(`GET`/`PUT /me/email-digest`; there is no settings switch in the apps yet). Keys:
+`is_enabled` (default `false`), `default_interval_secs` (3600), `min_interval_secs` (900), `grace_secs`
+(300; a mention counts as missed once it is this old and unread), `scheduler_interval_secs` (60) and
+the subject and body texts with `{count}` and `{url}`. A mail that fails is retried after five
+minutes without losing the count.
+
+`[notifications] mobile_push_delay_secs` (120) holds pushes to a person's phones while one of their
+desktops is active and sends them only if the message is still unread; `0` pushes at once.

@@ -7,7 +7,7 @@ devices (design: [docs/e2ee.md](../../e2ee.md) §10).
 ## Use it
 
 Press `Ctrl/Cmd+Shift+F` or choose Search in the sidebar. `Ctrl+Enter` in the quick switcher
-searches for what you typed.
+searches for what you typed, and `/search text` does the same from the composer.
 
 | Query               | Meaning                        |
 |---------------------|--------------------------------|
@@ -21,14 +21,14 @@ searches for what you typed.
 | `after:2026-10-01`  | Newer than a date              |
 | `in-thread`         | Only messages inside threads   |
 
-Filters appear as removable chips. Results show highlighted snippets; you can save a search and see
-recent mentions.
+Words are matched in English and German word forms ("meetings" finds "meeting"), and small typos
+are tolerated on longer words. Filters appear as removable chips; filters your device cannot
+evaluate are flagged. Results show highlighted snippets. You can **save a search** and see your
+**recent mentions**. Saved searches sync across your devices.
 
 ## Limits
 
 - You only find messages your devices can decrypt. After joining a channel with "from join" history
   you cannot search what was written earlier.
 - Retention removes old messages and their index entries.
-- Status: the search engine exists in the client core (desktop and Android), but the **desktop
-  search page currently answers from demo data**. Treat search in the desktop app as *coming soon*.
-  The browser build has no persistent index.
+- The browser build keeps its index in memory for the session; it is rebuilt after a reload.

@@ -6,6 +6,7 @@ pub mod admin;
 pub mod announcements;
 pub mod attachments;
 pub mod audit;
+pub mod backgrounds;
 pub mod bots;
 pub mod call_history;
 pub mod calls;

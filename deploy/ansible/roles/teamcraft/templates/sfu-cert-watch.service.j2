@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart the SFU for a renewed certificate
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user try-restart teamcraft-sfu.service

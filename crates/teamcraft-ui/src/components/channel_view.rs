@@ -2,13 +2,14 @@ use leptos::prelude::*;
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::PresenceDot;
+use crate::components::bookmarks::BookmarksBar;
 use crate::components::composer::Composer;
 use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_list::MessageList;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::i18n::use_i18n;
-use crate::model::{BookmarkKind, Conversation, ConversationId, ConversationKind};
+use crate::model::{Conversation, ConversationId, ConversationKind};
 use crate::state::{Overlay, SidePanel, use_app_state};
 
 /// How far back the seen line looks for the user's own latest message.
@@ -32,7 +33,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <ChannelHeader conversation=conversation info=info />
         <KeyChangeBanner conversation=conversation />
         <HuddleBar conversation=conversation />
-        <BookmarksBar info=info />
+        <BookmarksBar conversation=conversation info=info />
         <MessageList conversation=conversation />
         <SeenLine conversation=conversation />
         <Composer conversation=conversation can_post=can_post conversation_name=name />
@@ -75,6 +76,16 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
     })
   };
 
+  // A direct conversation shows the other person's local time (from their profile).
+  let locale = i18n.locale().tag();
+  let local_time = move || {
+    let conv = info.get()?;
+    if conv.kind != crate::model::ConversationKind::Direct {
+      return None;
+    }
+    let other = conv.member_ids.iter().copied().find(|id| *id != state.me().id)?;
+    crate::components::profile_views::local_time_label(other, locale)
+  };
   let topic = move || {
     info
       .get()
@@ -157,6 +168,15 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
             />
           </Show>
         </div>
+        {move || {
+          info.get().and_then(|conv| {
+            (conv.kind == crate::model::ConversationKind::Direct)
+              .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
+              .flatten()
+              .map(|other| view! { <crate::components::profile_views::InMeetingBadge user=other /> })
+          })
+        }}
+        {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
         <Show when=has_external fallback=|| ()>
           <span class="badge badge-guest" title=move || i18n.t("external-badge-detail")>
             {move || i18n.t("external-badge")}
@@ -220,28 +240,6 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
         </button>
       </div>
     </header>
-  }
-}
-
-/// Pinned links and files under the header. Adding bookmarks is not wired up yet.
-#[component]
-fn BookmarksBar(info: Memo<Option<Conversation>>) -> impl IntoView {
-  let i18n = use_i18n();
-  let bookmarks = move || info.get().map(|conv| conv.bookmarks).unwrap_or_default();
-  view! {
-    <div class="bookmarks-bar" role="toolbar" aria-label=move || i18n.t("bookmarks-label")>
-      <For each=bookmarks key=|bookmark| bookmark.title.clone() let:bookmark>
-        <button class="bookmark" title=bookmark.title.clone()>
-          <span aria-hidden="true">{bookmark.emoji.clone()}</span>
-          <Icon name=if bookmark.kind == BookmarkKind::Link { IconName::Link } else { IconName::File } />
-          <span class="bookmark-title">{bookmark.title.clone()}</span>
-        </button>
-      </For>
-      <button class="bookmark bookmark-add" disabled title=move || i18n.t("bookmarks-add-soon")>
-        <Icon name=IconName::Plus />
-        <span>{move || i18n.t("bookmarks-add")}</span>
-      </button>
-    </div>
   }
 }
 

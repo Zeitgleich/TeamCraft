@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
-use teamcraft_client_api::calls::MediaDevices;
+use teamcraft_client_api::calls::{BackgroundEffect as UiBackgroundEffect, MediaDevices};
 use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_proto::MediaStreamId;
 
@@ -57,6 +57,27 @@ pub async fn call_unwatch_video(
   Ok(())
 }
 
+/// A small JPEG of a preset or one of the user's own backgrounds, for the picker.
+#[tauri::command]
+pub async fn call_background_preview(
+  core: State<'_, CoreHost>,
+  effect: UiBackgroundEffect,
+  width: u32,
+  height: u32,
+) -> Result<tauri::ipc::Response, CommandError> {
+  let maybe_picture = match effect {
+    UiBackgroundEffect::Custom(id) => Some(core.current()?.background_picture(id).await?),
+    _ => None,
+  };
+  let (width, height) = (width.clamp(16, 640), height.clamp(16, 360));
+  let jpeg = tauri::async_runtime::spawn_blocking(move || {
+    video::background_preview(effect, maybe_picture.as_deref(), width, height)
+  })
+  .await
+  .map_err(|error| error.to_string())??;
+  Ok(tauri::ipc::Response::new(jpeg))
+}
+
 #[tauri::command]
 pub async fn call_action(
   app: AppHandle,
@@ -77,7 +98,20 @@ pub async fn call_action(
     CallAction::SelectSpeakers { maybe_device } => calls.select_speakers(maybe_device).await?,
     CallAction::SetCamera { is_on } => calls.set_camera(is_on).await?,
     CallAction::SelectCamera { maybe_device } => calls.select_camera(maybe_device).await?,
-    CallAction::SetBackgroundEffect { effect } => calls.set_background_effect(effect),
+    CallAction::SetBackgroundEffect { effect } => {
+      let maybe_custom = match effect {
+        UiBackgroundEffect::Custom(id) => {
+          let picture = core.current()?.background_picture(id).await?;
+          Some(
+            tauri::async_runtime::spawn_blocking(move || video::decode_background(&picture))
+              .await
+              .map_err(|error| error.to_string())??,
+          )
+        },
+        _ => None,
+      };
+      calls.set_background_effect(effect, maybe_custom);
+    },
     CallAction::StartScreenShare => calls.start_screen_share().await?,
     CallAction::StopScreenShare => calls.stop_screen_share().await,
     CallAction::SetPushToTalk {

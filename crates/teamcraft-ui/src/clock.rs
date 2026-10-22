@@ -247,6 +247,93 @@ fn local_offset_ms(ts: TimestampMs) -> i64 {
   }
 }
 
+/// The time of day at `ts` in an IANA time zone (`Europe/Berlin`), formatted for `locale`. `None`
+/// when the zone is unknown or the platform has no time zone data.
+pub fn time_in_zone(ts: TimestampMs, zone: &str, locale: &str) -> Option<String> {
+  #[cfg(target_arch = "wasm32")]
+  {
+    use wasm_bindgen::{JsCast, JsValue};
+    let options = js_sys::Object::new();
+    for (key, value) in [("hour", "2-digit"), ("minute", "2-digit"), ("timeZone", zone)] {
+      js_sys::Reflect::set(&options, &key.into(), &value.into()).ok()?;
+    }
+    // An unknown zone makes the constructor throw a RangeError; building it through `Reflect` turns
+    // that into a plain `None` (js-sys' own constructor would abort).
+    let global = js_sys::global();
+    let intl = js_sys::Reflect::get(&global, &"Intl".into()).ok()?;
+    let constructor: js_sys::Function = js_sys::Reflect::get(&intl, &"DateTimeFormat".into())
+      .ok()?
+      .dyn_into()
+      .ok()?;
+    let args = js_sys::Array::of2(&JsValue::from_str(locale), &options);
+    let format = js_sys::Reflect::construct(&constructor, &args).ok()?;
+    let format_fn: js_sys::Function = js_sys::Reflect::get(&format, &"format".into())
+      .ok()?
+      .dyn_into()
+      .ok()?;
+    let date = js_sys::Date::new(&JsValue::from_f64(ts as f64));
+    format_fn.call1(&format, &date).ok()?.as_string()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    let _ = (ts, zone, locale);
+    None
+  }
+}
+
+/// The time zone the browser or system uses, as an IANA name.
+pub fn local_time_zone() -> Option<String> {
+  #[cfg(target_arch = "wasm32")]
+  {
+    use wasm_bindgen::JsCast;
+    let intl = js_sys::Reflect::get(&js_sys::global(), &"Intl".into()).ok()?;
+    let constructor: js_sys::Function = js_sys::Reflect::get(&intl, &"DateTimeFormat".into())
+      .ok()?
+      .dyn_into()
+      .ok()?;
+    let format = js_sys::Reflect::construct(&constructor, &js_sys::Array::new()).ok()?;
+    let resolve: js_sys::Function = js_sys::Reflect::get(&format, &"resolvedOptions".into())
+      .ok()?
+      .dyn_into()
+      .ok()?;
+    let resolved = resolve.call0(&format).ok()?;
+    js_sys::Reflect::get(&resolved, &"timeZone".into())
+      .ok()?
+      .as_string()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    None
+  }
+}
+
+/// IANA time zone names the platform knows, for the profile form.
+pub fn time_zone_names() -> Vec<String> {
+  #[cfg(target_arch = "wasm32")]
+  {
+    use wasm_bindgen::JsCast;
+    let names = || -> Option<Vec<String>> {
+      let intl = js_sys::Reflect::get(&js_sys::global(), &"Intl".into()).ok()?;
+      let supported: js_sys::Function = js_sys::Reflect::get(&intl, &"supportedValuesOf".into())
+        .ok()?
+        .dyn_into()
+        .ok()?;
+      let list = supported.call1(&intl, &"timeZone".into()).ok()?;
+      Some(
+        js_sys::Array::from(&list)
+          .iter()
+          .filter_map(|name| name.as_string())
+          .collect(),
+      )
+    };
+    names().unwrap_or_default()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    Vec::new()
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

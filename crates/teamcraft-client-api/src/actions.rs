@@ -302,6 +302,9 @@ pub struct SpaceChanges {
   pub maybe_is_open: Option<bool>,
   #[serde(default)]
   pub maybe_is_archived: Option<bool>,
+  /// The id of a configured brand; an empty string clears the tag.
+  #[serde(default)]
+  pub maybe_brand_id: Option<String>,
 }
 
 /// A new channel.
