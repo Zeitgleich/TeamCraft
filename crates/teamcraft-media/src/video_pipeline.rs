@@ -185,6 +185,14 @@ impl VideoSender {
   }
 }
 
+impl VideoSender {
+  /// The capture ended without being stopped (the share was ended from the system's indicator,
+  /// the shared window closed) or no encoder could be built: the track sends nothing any more.
+  pub fn has_ended(&self) -> bool {
+    self.thread.as_ref().is_some_and(JoinHandle::is_finished)
+  }
+}
+
 impl Drop for VideoSender {
   fn drop(&mut self) {
     let (closed, _) = std_mpsc::channel();
@@ -325,6 +333,28 @@ mod tests {
     let (y, _, _) = decoded[0].planes();
     let average = y.iter().map(|value| u64::from(*value)).sum::<u64>() / y.len() as u64;
     assert!((120..=136).contains(&average), "filtered grey, got {average}");
+  }
+
+  #[test]
+  fn a_sender_whose_capture_or_encoder_ends_reports_it() {
+    let (encoded, _encoded_rx) = mpsc::unbounded_channel();
+    let config = VideoSendConfig {
+      kind: VideoTrackKind::Screen,
+      capture: Box::new(ManualCapture::new(CaptureFormat {
+        resolution: VGA,
+        framerate: 30,
+      })),
+      layers: simulcast_layers(VGA, 30, 800_000, 1),
+      // No encoder: the thread ends at once, as when the system ends the capture.
+      encoders: Arc::new(|_, _| Err(VideoCodecError::Codec("none".into()))),
+      maybe_filter: None,
+    };
+    let sender = VideoSender::start(config, encoded).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !sender.has_ended() && std::time::Instant::now() < deadline {
+      std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(sender.has_ended());
   }
 
   /// Lets the test push into a capture the sender owns.

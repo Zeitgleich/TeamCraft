@@ -79,7 +79,9 @@ impl SystemAudioSender {
 }
 
 impl MonoResampler {
+  /// A rate of 0 (a broken device report) counts as the codec's rate instead of never advancing.
   pub fn new(channels: usize, rate_hz: u32) -> Self {
+    let rate_hz = if rate_hz == 0 { SAMPLE_RATE_HZ } else { rate_hz };
     Self {
       channels: channels.max(1),
       step: f64::from(rate_hz) / f64::from(SAMPLE_RATE_HZ),
@@ -158,6 +160,12 @@ mod tests {
 
   mod resampler {
     use super::*;
+
+    #[test]
+    fn a_zero_rate_does_not_hang() {
+      let mut resampler = MonoResampler::new(1, 0);
+      assert_close(&resampler.process(&[0.5, -0.5]), &[0.5, -0.5]);
+    }
 
     #[test]
     fn stereo_48k_is_averaged_only() {

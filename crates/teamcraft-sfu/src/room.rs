@@ -460,10 +460,16 @@ impl Room {
 }
 
 impl RoomState {
+  /// The next free stream id. The counter wraps after 2^32 publications; ids still in use are
+  /// skipped, so a new stream never takes over someone's (their microphone, say).
   fn allocate_stream_id(&mut self) -> StreamId {
-    let stream_id = StreamId(self.next_stream_id);
-    self.next_stream_id = self.next_stream_id.wrapping_add(1);
-    stream_id
+    loop {
+      let stream_id = StreamId(self.next_stream_id);
+      self.next_stream_id = self.next_stream_id.wrapping_add(1);
+      if !self.forwarder.is_stream_in_use(stream_id) {
+        return stream_id;
+      }
+    }
   }
 
   /// Sends the signaling a forwarding decision caused.

@@ -36,6 +36,9 @@ pub struct OpusEncoderConfig {
   pub has_dtx: bool,
   /// Loss the encoder plans FEC for, in percent.
   pub expected_loss_percent: u8,
+  /// Packet sizes follow the content. Off, every packet has the same size: the SFU then can't
+  /// tell what plays from the sizes (DAVE doesn't pad).
+  pub has_variable_bitrate: bool,
 }
 
 /// What the encoder is tuned for.
@@ -70,6 +73,7 @@ impl Default for OpusEncoderConfig {
       has_inband_fec: true,
       has_dtx: true,
       expected_loss_percent: 5,
+      has_variable_bitrate: true,
     }
   }
 }
@@ -81,6 +85,8 @@ impl OpusEncoderConfig {
       content: AudioContent::Music,
       bitrate_bps: SCREEN_AUDIO_BITRATE_BPS,
       has_dtx: false,
+      // Shared music or video could be recognised from variable packet sizes.
+      has_variable_bitrate: false,
       ..Self::default()
     }
   }
@@ -96,6 +102,7 @@ impl OpusEncoder {
     encoder.set_bitrate(Bitrate::Bits(config.bitrate_bps))?;
     encoder.set_inband_fec(config.has_inband_fec)?;
     encoder.set_dtx(config.has_dtx)?;
+    encoder.set_vbr(config.has_variable_bitrate)?;
     encoder.set_packet_loss_perc(i32::from(config.expected_loss_percent.min(100)))?;
     Ok(Self {
       encoder,

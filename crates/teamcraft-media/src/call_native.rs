@@ -468,11 +468,22 @@ async fn run_call(
               engine.send_screen_audio(&frame, Instant::now());
             }
           },
-          // The capture ended on its own (the shared window closed).
+          // The sound capture ended on its own (the audio device or portal went away).
           _ => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
         }
       },
-      _ = timer_tick.tick() => engine.on_timer(Instant::now()),
+      _ = timer_tick.tick() => {
+        engine.on_timer(Instant::now());
+        // A capture the system ended (the share stopped from the OS indicator or menu bar) ends
+        // its track, and a screen share takes the computer's sound with it: nothing keeps sending
+        // after the user saw the share end.
+        for kind in io.video.ended_kinds() {
+          io.video.stop(&mut engine, &kind);
+          if kind == VideoTrackKind::Screen {
+            stop_screen_audio(&mut engine, &mut maybe_screen_audio);
+          }
+        }
+      },
       Some((kind, frame)) = encoded_rx.recv() => {
         if let Some(stream_id) = io.video.stream_of(&kind) {
           engine.send_video(stream_id, &frame, Instant::now());
@@ -701,6 +712,16 @@ impl VideoState {
     {
       *maybe_stream = Some(stream_id);
     }
+  }
+
+  /// Kinds of own tracks whose capture ended by itself.
+  fn ended_kinds(&self) -> Vec<VideoTrackKind> {
+    self
+      .senders
+      .iter()
+      .filter(|(sender, _)| sender.has_ended())
+      .map(|(sender, _)| sender.kind.clone())
+      .collect()
   }
 
   /// Stops capturing a track of `kind` and unpublishes it.

@@ -205,6 +205,15 @@ impl Forwarder {
   }
 
   /// Starts forwarding `owner`'s screen sound on `stream_id`; one per participant.
+  /// Whether a participant's audio, screen sound or a video track uses the id.
+  pub fn is_stream_in_use(&self, stream_id: StreamId) -> bool {
+    self.video_tracks.contains_key(&stream_id)
+      || self
+        .participants
+        .values()
+        .any(|route| route.audio_stream == stream_id || route.maybe_screen_audio == Some(stream_id))
+  }
+
   pub fn publish_screen_audio(
     &mut self,
     owner: DeviceId,
@@ -874,6 +883,17 @@ mod tests {
         forwarder.unpublish_video(device(2), VIDEO),
         Err(ForwardError::ForeignStream(VIDEO))
       );
+    }
+
+    #[test]
+    fn stream_ids_in_use_are_known() {
+      let (mut forwarder, _) = video_room();
+      // Microphones, the video track and screen sound all count.
+      assert!(forwarder.is_stream_in_use(StreamId(2)));
+      assert!(forwarder.is_stream_in_use(VIDEO));
+      forwarder.publish_screen_audio(device(2), StreamId(77)).unwrap();
+      assert!(forwarder.is_stream_in_use(StreamId(77)));
+      assert!(!forwarder.is_stream_in_use(StreamId(78)));
     }
 
     #[test]
