@@ -128,7 +128,8 @@ enum Request {
     thread: ThreadId,
     reply: oneshot::Sender<Result<Vec<Message>, String>>,
   },
-  Action(ChatAction, oneshot::Sender<Result<(), String>>),
+  // Boxed: ChatAction is large and every other request would pay for its size.
+  Action(Box<ChatAction>, oneshot::Sender<Result<(), String>>),
   Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
   LinkStart {
@@ -229,7 +230,7 @@ impl CoreRuntime {
 
   pub async fn action(&self, action: ChatAction) -> Result<(), String> {
     self
-      .ask(|reply| Request::Action(action, reply))
+      .ask(|reply| Request::Action(Box::new(action), reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -511,7 +512,7 @@ impl Core {
         drop(reply.send(result));
       },
       Request::Action(action, reply) => {
-        let result = self.action(action).await;
+        let result = self.action(*action).await;
         self.changed();
         drop(reply.send(result));
       },

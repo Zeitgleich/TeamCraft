@@ -77,7 +77,7 @@ jobs:
           key: audio-processing
       - name: System packages (ALSA, meson/ninja and libclang for the bundled build)
         run: >
-          apt-get update && apt-get install -y --no-install-recommends
+          apt-get update && apt-get install -y --no-install-recommends cmake
           libasound2-dev meson ninja-build libclang-dev
       - name: Clippy
         run: cargo clippy -p teamcraft-media --all-targets --features native -- -D warnings
