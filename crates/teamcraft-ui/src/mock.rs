@@ -833,16 +833,22 @@ fn demo_conversations() -> Vec<Conversation> {
       emoji: "📘".into(),
       title: "Runbook".into(),
       kind: BookmarkKind::Link,
+      url: "https://example.com/runbook".into(),
+      maybe_message: None,
     },
     Bookmark {
       emoji: "📅".into(),
       title: "Release calendar".into(),
       kind: BookmarkKind::Link,
+      url: "https://example.com/calendar".into(),
+      maybe_message: None,
     },
     Bookmark {
       emoji: "📄".into(),
       title: "architecture-overview.pdf".into(),
       kind: BookmarkKind::File,
+      url: String::new(),
+      maybe_message: None,
     },
   ];
   list[7].is_muted = false;

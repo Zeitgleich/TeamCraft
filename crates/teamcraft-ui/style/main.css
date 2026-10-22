@@ -3997,3 +3997,7 @@ select.input {
 .rsvp-list ul { margin: 0; padding-inline-start: 1.2rem; }
 .call-host { position: absolute; inset-inline-end: 1rem; top: 3.5rem; z-index: 5; }
 .in-meeting-badge { color: var(--accent, #3b7ddd); font-size: .85em; }
+
+.bookmark-edit-list { list-style: none; margin: 0 0 .5rem; padding: 0; }
+.bookmark-row { display: flex; gap: .35rem; align-items: center; margin-bottom: .35rem; }
+.bookmark-row .emoji-input { width: 3.5rem; text-align: center; }

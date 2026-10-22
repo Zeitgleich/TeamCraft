@@ -17,8 +17,9 @@ use teamcraft_client_api::actions::{
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{
-  Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind, PresenceStatus,
-  Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User, UserId,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind,
+  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User,
+  UserId,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -29,11 +30,14 @@ use teamcraft_proto::{
   CategoryId, CreateSpaceRequest, HistoryPolicy, UpdateConversationRequest, UpdateSpaceRequest,
 };
 
+use crate::client::bookmarks_key;
 use crate::client::workspace_admin::ChannelOptions;
 use crate::clock::Clock;
 use crate::error::CoreError;
 use crate::records::{self, Draft};
-use crate::store::{ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
+use crate::store::{
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
+};
 
 /// Bit set on the IDs the UI gets for messages still in the outbox. Real snowflakes stay below it
 /// for decades (41 bits of milliseconds since 2026 shifted by 22).
@@ -326,8 +330,41 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .as_ref()
         .is_some_and(|membership| membership.notification_level == NotificationLevel::None),
       can_post: true,
-      bookmarks: Vec::new(),
+      bookmarks: self.bookmarks_of(response.id),
     }
+  }
+
+  /// The bookmarks bar of a conversation, as the newest applied `Bookmarks` message set it.
+  fn bookmarks_of(&self, conversation: ConversationId) -> Vec<Bookmark> {
+    let items: Vec<BookmarkItem> =
+      records::get_json(&self.store, Table::Account, &bookmarks_key(conversation))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    items
+      .into_iter()
+      .map(|item| {
+        let maybe_message = item.maybe_message.and_then(|client_id| {
+          self
+            .store
+            .message(conversation, client_id)
+            .ok()
+            .flatten()
+            .map(|stored| ui_message_id(&stored))
+        });
+        Bookmark {
+          emoji: item.emoji,
+          title: item.title,
+          kind: if maybe_message.is_some() {
+            BookmarkKind::File
+          } else {
+            BookmarkKind::Link
+          },
+          url: item.url,
+          maybe_message,
+        }
+      })
+      .collect()
   }
 
   fn unread_count(&self, response: &ConversationResponse) -> u32 {
@@ -381,6 +418,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Edit { .. }
       | MessageContent::Delete { .. }
       | MessageContent::Pin { .. }
+      | MessageContent::Bookmarks { .. }
       | MessageContent::Event { .. }
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
@@ -795,6 +833,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       user,
       history,
     });
+  }
+
+  fn set_bookmarks(&self, conversation: ConversationId, bookmarks: Vec<Bookmark>) {
+    self.ui_set_bookmarks(conversation, bookmarks);
   }
 
   fn remove_member(&self, conversation: ConversationId, user: UserId) {

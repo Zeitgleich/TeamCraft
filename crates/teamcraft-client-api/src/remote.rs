@@ -376,6 +376,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  SetBookmarks {
+    conversation: ConversationId,
+    bookmarks: Vec<crate::model::Bookmark>,
+  },
   AddMemberWithHistory {
     conversation: ConversationId,
     user: UserId,
@@ -465,6 +469,10 @@ impl ChatAction {
         history,
       } => backend.add_member_with_history(conversation, user, history),
       Self::RemoveMember { conversation, user } => backend.remove_member(conversation, user),
+      Self::SetBookmarks {
+        conversation,
+        bookmarks,
+      } => backend.set_bookmarks(conversation, bookmarks),
       Self::InviteToSpace { invite } => backend.invite_to_space(invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
       Self::DeleteSavedSearch { id } => backend.delete_saved_search(id),

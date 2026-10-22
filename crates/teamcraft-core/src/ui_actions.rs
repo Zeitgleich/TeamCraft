@@ -5,14 +5,16 @@ use teamcraft_client_api::actions::{
   ForwardedFrom, LinkPreview, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage, PermalinkTarget,
   ReplyPreview, SavedItem, WorkspaceEvent,
 };
-use teamcraft_client_api::model::{ConversationId, Message, MessageId, ThreadId, UserId};
+use teamcraft_client_api::model::{Bookmark, ConversationId, Message, MessageId, ThreadId, UserId};
 use teamcraft_proto::ClientMessageId;
 
 use crate::client::previews::queue_preview;
 use crate::client::{apply_control, forward_content, reply_ref, stored_account_data};
 use crate::link_preview::is_allowed;
 use crate::read_state;
-use crate::store::{ConversationEvent, LocalStore, MessageContent, MessageMeta, Priority, StoredMessage};
+use crate::store::{
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, Priority, StoredMessage,
+};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -213,6 +215,22 @@ impl<S: LocalStore> CoreChatBackend<S> {
       target: target.client_message_id,
       is_pinned,
     });
+  }
+
+  pub(crate) fn ui_set_bookmarks(&self, conversation: ConversationId, bookmarks: Vec<Bookmark>) {
+    let items = bookmarks
+      .into_iter()
+      .map(|bookmark| BookmarkItem {
+        emoji: bookmark.emoji,
+        title: bookmark.title,
+        url: bookmark.url,
+        maybe_message: bookmark
+          .maybe_message
+          .and_then(|message| self.find_stored(conversation, message))
+          .map(|stored| stored.client_message_id),
+      })
+      .collect();
+    self.control(conversation, MessageContent::Bookmarks { items });
   }
 
   pub(crate) fn ui_pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {

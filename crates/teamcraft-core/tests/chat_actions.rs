@@ -10,7 +10,7 @@ mod common;
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::model::{Message, MessageKind, thread_id_of};
+use teamcraft_client_api::model::{Bookmark, BookmarkKind, Message, MessageId, MessageKind, thread_id_of};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_proto::ConversationId;
 
@@ -79,6 +79,56 @@ async fn edits_keep_history_and_deletes_reach_everyone() {
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   assert!(bob_ui.message_extras(channel, &[seen.id])[0].is_deleted);
+}
+
+#[tokio::test]
+async fn bookmarks_replace_the_bar_for_every_member() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  alice_ui.post_message(channel, None, "the spec");
+  run_commands(&mut alice, &alice_ui).await;
+  let spec = last(&alice_ui, channel);
+  let bookmark = |title: &str, url: &str, maybe_message: Option<MessageId>| Bookmark {
+    emoji: "📘".into(),
+    title: title.into(),
+    kind: if maybe_message.is_some() {
+      BookmarkKind::File
+    } else {
+      BookmarkKind::Link
+    },
+    url: url.into(),
+    maybe_message,
+  };
+
+  alice_ui.set_bookmarks(
+    channel,
+    vec![
+      bookmark("Runbook", "https://example.com/runbook", None),
+      bookmark("spec.pdf", "", Some(spec.id)),
+    ],
+  );
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let seen = bob_ui.conversation(channel).unwrap().bookmarks;
+  assert_eq!(
+    seen.iter().map(|b| b.title.as_str()).collect::<Vec<_>>(),
+    ["Runbook", "spec.pdf"]
+  );
+  assert_eq!(seen[0].url, "https://example.com/runbook");
+  assert_eq!(seen[1].maybe_message, Some(last(&bob_ui, channel).id));
+
+  // The newest list wins, also for reordering and removal.
+  bob_ui.set_bookmarks(channel, vec![seen[1].clone()]);
+  run_commands(&mut bob, &bob_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let titles: Vec<String> = alice_ui
+    .conversation(channel)
+    .unwrap()
+    .bookmarks
+    .into_iter()
+    .map(|b| b.title)
+    .collect();
+  assert_eq!(titles, ["spec.pdf"]);
 }
 
 #[tokio::test]

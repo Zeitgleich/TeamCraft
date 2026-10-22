@@ -1012,3 +1012,15 @@ host-end = Für alle beenden
 host-end-confirm = Meeting jetzt beenden
 host-remove = Entfernen
 presence-in-meeting = In einem Meeting
+
+# Bookmarks
+bookmarks-edit = Lesezeichen bearbeiten
+bookmarks-edit-title = Lesezeichen
+bookmarks-emoji = Emoji
+bookmarks-title = Titel
+bookmarks-url = Link
+bookmarks-up = Nach oben
+bookmarks-down = Nach unten
+bookmarks-remove = Lesezeichen entfernen
+bookmarks-invalid = Jedes Lesezeichen braucht einen Titel, und Links müssen mit https:// oder http:// beginnen.
+action-bookmark-file = Datei zu Lesezeichen hinzufügen

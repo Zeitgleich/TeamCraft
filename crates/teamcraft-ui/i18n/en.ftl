@@ -1012,3 +1012,15 @@ host-end = End for everyone
 host-end-confirm = End the meeting now
 host-remove = Remove
 presence-in-meeting = In a meeting
+
+# Bookmarks
+bookmarks-edit = Edit bookmarks
+bookmarks-edit-title = Bookmarks
+bookmarks-emoji = Emoji
+bookmarks-title = Title
+bookmarks-url = Link
+bookmarks-up = Move up
+bookmarks-down = Move down
+bookmarks-remove = Remove bookmark
+bookmarks-invalid = Every bookmark needs a title, and links must start with https:// or http://.
+action-bookmark-file = Add file to bookmarks

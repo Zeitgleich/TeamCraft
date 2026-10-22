@@ -11,6 +11,7 @@ use crate::calls::CallEvent;
 use crate::calls::CallPhase;
 use crate::clock::now_ms;
 use crate::components::admin_console::AdminConsole;
+use crate::components::bookmarks::BookmarksDialog;
 use crate::components::bundle_banner::BundleBanner;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
@@ -220,6 +221,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::BrowseChannels(space) => view! { <BrowseChannelsDialog space=space /> }.into_any(),
         Overlay::ChannelSettings(id) => view! { <ChannelSettingsDialog conversation=id /> }.into_any(),
         Overlay::SpaceSettings(space) => view! { <SpaceSettingsDialog space=space /> }.into_any(),
+        Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
         Overlay::EditProfile => view! { <EditProfileDialog /> }.into_any(),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),

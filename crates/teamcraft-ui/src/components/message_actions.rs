@@ -143,6 +143,31 @@ pub fn MessageMenu(
             <Icon name=IconName::Bookmark />
             <span class="menu-label">{move || if is_saved() { i18n.t("action-unsave") } else { i18n.t("action-save") }}</span>
           </button>
+          <Show when=move || extras.get().is_some_and(|extras| !extras.files.is_empty()) fallback=|| ()>
+            <button
+              class="menu-item"
+              role="menuitem"
+              on:click=move |_| {
+                let Some(file) = extras.get_untracked().and_then(|extras| extras.files.into_iter().next()) else { return };
+                let mut bookmarks = state
+                  .read(|backend| backend.conversation(conversation))
+                  .map(|conv| conv.bookmarks)
+                  .unwrap_or_default();
+                bookmarks.push(crate::model::Bookmark {
+                  emoji: "📎".to_owned(),
+                  title: file.file_name,
+                  kind: crate::model::BookmarkKind::File,
+                  url: String::new(),
+                  maybe_message: Some(id),
+                });
+                state.write(|backend| backend.set_bookmarks(conversation, bookmarks));
+                close();
+              }
+            >
+              <Icon name=IconName::Bookmark />
+              <span class="menu-label">{move || i18n.t("action-bookmark-file")}</span>
+            </button>
+          </Show>
           <button class="menu-item" role="menuitem" on:click=copy_link>
             <Icon name=IconName::Link />
             <span class="menu-label">{move || i18n.t("action-copy-link")}</span>

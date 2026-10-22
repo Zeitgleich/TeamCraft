@@ -784,6 +784,18 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::MarkRead { conversation });
   }
 
+  fn set_bookmarks(
+    &self,
+    conversation: ConversationId,
+    bookmarks: Vec<teamcraft_client_api::model::Bookmark>,
+  ) {
+    self.update_conversation(conversation, |found| found.bookmarks = bookmarks.clone());
+    self.act(ChatAction::SetBookmarks {
+      conversation,
+      bookmarks,
+    });
+  }
+
   fn remove_member(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::RemoveMember { conversation, user });
   }
