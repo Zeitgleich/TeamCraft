@@ -1,0 +1,36 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues: please don't file them here, see SECURITY.md (private reporting).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+  - type: dropdown
+    id: client
+    attributes:
+      label: Client
+      options: [Desktop (Linux), Desktop (macOS), Desktop (Windows), Web, Android, iOS, Server/SFU/bridge]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log lines. Never include message contents, keys or tokens.
+      render: text
