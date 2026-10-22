@@ -56,6 +56,8 @@ targets:
       - sdk: CoreAudio.framework
       - sdk: AudioToolbox.framework
       - sdk: AVFAudio.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreFoundation.framework
       - sdk: CallKit.framework
       - sdk: Intents.framework
       - sdk: AuthenticationServices.framework
@@ -138,6 +140,9 @@ targets:
       - sdk: SystemConfiguration.framework
       - sdk: CoreAudio.framework
       - sdk: AudioToolbox.framework
+      - sdk: AVFAudio.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreFoundation.framework
       - sdk: CallKit.framework
       - sdk: Intents.framework
       - sdk: UserNotifications.framework
