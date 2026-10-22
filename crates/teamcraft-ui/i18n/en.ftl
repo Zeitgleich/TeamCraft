@@ -237,7 +237,9 @@ effect-bookshelf = Bookshelf
 effect-sunrise = Sunrise
 effect-forest = Forest
 effect-upload = Upload image
-effect-upload-soon = Own backgrounds are not available yet
+effect-upload-too-large = This picture is larger than { $limit }.
+effect-upload-unreadable = The picture could not be read.
+effect-delete = Delete background { $name }
 
 ## Incoming calls
 incoming-title = Incoming call
