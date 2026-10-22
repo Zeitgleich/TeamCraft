@@ -386,13 +386,25 @@ mod fcm {
 mod unified_push {
   use super::*;
 
+  use base64::Engine;
+  use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+  use p256::SecretKey;
+  use p256::elliptic_curve::sec1::ToEncodedPoint;
+  use teamcraft_server::push::Vapid;
+  use teamcraft_server::push::crypto::{VapidKey, decrypt_web_push};
+
+  const AUTH: [u8; 16] = [5; 16];
+  /// 32 bytes, base64url: a throwaway VAPID key.
+  const VAPID_PRIVATE: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+
   #[tokio::test]
-  async fn the_sealed_wake_up_is_posted_to_the_distributor_endpoint() {
+  async fn the_wake_up_is_web_push_encrypted_for_the_distributor() {
     let (fake, endpoint) = push_fakes::unified_push().await;
-    let dispatcher = unified_dispatcher(true);
+    let ua = SecretKey::random(&mut rand_core::OsRng);
+    let dispatcher = unified_dispatcher(None, true);
     dispatcher
       .deliver(
-        &target(PushProvider::UnifiedPush, &endpoint),
+        &target(PushProvider::UnifiedPush, &subscription(&endpoint, &ua)),
         &wake_up(PushKind::Mention),
         Urgency::High,
         TTL,
@@ -402,24 +414,77 @@ mod unified_push {
 
     let request = &fake.requests()[0];
     assert_eq!(request.path, "/up/device-1");
+    assert_eq!(request.header("content-encoding"), "aes128gcm");
     assert_eq!(request.header("content-type"), "application/octet-stream");
     assert_eq!(request.header("urgency"), "high");
     assert_eq!(request.header("ttl"), "3600");
-    // The body is the raw sealed wake-up, as the Android app expects it.
+    // No VAPID key configured: no token.
+    assert!(request.headers.get("authorization").is_none());
+    // Only the app (holding the subscription keys) can decrypt; inside is the sealed wake-up.
+    let sealed = decrypt_web_push(&ua, &AUTH, &request.body).unwrap();
     assert_eq!(
-      open_wakeup(&PUSH_KEY, &request.body).unwrap(),
+      open_wakeup(&PUSH_KEY, &sealed).unwrap(),
       wake_up(PushKind::Mention)
     );
   }
 
   #[tokio::test]
-  async fn removed_endpoints_are_gone_and_failures_are_counted() {
+  async fn a_vapid_token_is_sent_when_the_server_has_a_key() {
     let (fake, endpoint) = push_fakes::unified_push().await;
-    let dispatcher = unified_dispatcher(true);
+    let ua = SecretKey::random(&mut rand_core::OsRng);
+    let vapid = Vapid::new(
+      VapidKey::from_base64url(VAPID_PRIVATE).unwrap(),
+      "mailto:ops@example.com".into(),
+    );
+    let dispatcher = unified_dispatcher(Some(vapid), true);
+    dispatcher
+      .deliver(
+        &target(PushProvider::UnifiedPush, &subscription(&endpoint, &ua)),
+        &wake_up(PushKind::Message),
+        Urgency::Normal,
+        TTL,
+      )
+      .await
+      .unwrap();
+    let public_key = VapidKey::from_base64url(VAPID_PRIVATE)
+      .unwrap()
+      .public_key_base64url();
+    let authorization = fake.requests()[0].header("authorization").to_owned();
+    assert!(authorization.starts_with("vapid t="), "{authorization}");
+    assert!(
+      authorization.ends_with(&format!(", k={public_key}")),
+      "{authorization}"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_registration_without_keys_is_not_sent() {
+    let (fake, endpoint) = push_fakes::unified_push().await;
+    let dispatcher = unified_dispatcher(None, true);
+    for token in [endpoint.clone(), format!(r#"{{"endpoint":"{endpoint}"}}"#)] {
+      let result = dispatcher
+        .deliver(
+          &target(PushProvider::UnifiedPush, &token),
+          &wake_up(PushKind::Message),
+          Urgency::Normal,
+          TTL,
+        )
+        .await;
+      assert!(matches!(result, Err(PushError::Invalid(_))), "{token}");
+    }
+    assert!(fake.requests().is_empty());
+  }
+
+  #[tokio::test]
+  async fn removed_endpoints_are_gone_and_failures_are_counted_apart() {
+    let (fake, endpoint) = push_fakes::unified_push().await;
+    let ua = SecretKey::random(&mut rand_core::OsRng);
+    let token = subscription(&endpoint, &ua);
+    let dispatcher = unified_dispatcher(None, true);
     let send = || async {
       dispatcher
         .deliver(
-          &target(PushProvider::UnifiedPush, &endpoint),
+          &target(PushProvider::UnifiedPush, &token),
           &wake_up(PushKind::Message),
           Urgency::Normal,
           TTL,
@@ -432,16 +497,20 @@ mod unified_push {
     assert!(matches!(send().await, Err(PushError::Unavailable(_))));
     fake.set_reply(400, Value::Null);
     assert!(matches!(send().await, Err(PushError::Rejected(400))));
-    assert_eq!(dispatcher.health(&PushProvider::UnifiedPush).failure_count, 2);
+    // The endpoint is the user's: its failures never make UnifiedPush itself failing.
+    let health = dispatcher.health(&PushProvider::UnifiedPush);
+    assert_eq!((health.endpoint_failure_count, health.failure_count), (2, 0));
+    assert!(!health.is_failing());
   }
 
   #[tokio::test]
   async fn endpoints_in_private_networks_are_refused_unless_development_allows_them() {
     let (fake, endpoint) = push_fakes::unified_push().await;
-    let dispatcher = unified_dispatcher(false);
+    let ua = SecretKey::random(&mut rand_core::OsRng);
+    let dispatcher = unified_dispatcher(None, false);
     let result = dispatcher
       .deliver(
-        &target(PushProvider::UnifiedPush, &endpoint),
+        &target(PushProvider::UnifiedPush, &subscription(&endpoint, &ua)),
         &wake_up(PushKind::Message),
         Urgency::Normal,
         TTL,
@@ -451,8 +520,21 @@ mod unified_push {
     assert!(fake.requests().is_empty());
   }
 
-  fn unified_dispatcher(allow_private_endpoints: bool) -> PushDispatcher {
-    let sender = UnifiedPushSender::new(Duration::from_secs(5), allow_private_endpoints).unwrap();
+  /// What the Android app registers: the distributor's endpoint with its Web Push keys.
+  fn subscription(endpoint: &str, ua: &SecretKey) -> String {
+    json!({
+      "endpoint": endpoint,
+      "keys": {
+        "p256dh": URL_SAFE_NO_PAD.encode(ua.public_key().to_encoded_point(false).as_bytes()),
+        "auth": URL_SAFE_NO_PAD.encode(AUTH),
+      }
+    })
+    .to_string()
+  }
+
+  fn unified_dispatcher(maybe_vapid: Option<Vapid>, allow_private_endpoints: bool) -> PushDispatcher {
+    let sender =
+      UnifiedPushSender::new(maybe_vapid, Duration::from_secs(5), allow_private_endpoints).unwrap();
     PushDispatcher::new(4).with_sender(&PushProvider::UnifiedPush, Arc::new(sender))
   }
 }

@@ -390,8 +390,12 @@ max_asset_bytes = 524288
 vapid_subject = "mailto:admin@example.com"
 ttl_secs = 3600
 request_timeout_secs = 10
+# Per pool: APNs/FCM share one, Web Push/UnifiedPush (endpoints users chose) another.
 max_concurrent_sends = 32
-# Development only: allow http and private addresses as Web Push and UnifiedPush endpoints.
+# Web Push/UnifiedPush sends one user may have in flight, so unresponsive endpoints only hold up their owner.
+max_concurrent_sends_per_user = 4
+# Development only: allow http and private addresses as Web Push and UnifiedPush endpoints, and plain
+# http APNs/FCM base URLs (local fakes).
 allow_private_endpoints = false
 
 # iOS (APNs, token authentication). Give the .p8 key inline (prefer TEAMCRAFT_PUSH__APNS__KEY) or as a

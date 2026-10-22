@@ -312,9 +312,14 @@ pub struct PushConfig {
   /// How long push services may hold a wake-up for an offline device.
   pub ttl_secs: u64,
   pub request_timeout_secs: u64,
-  /// Pushes sent in parallel.
+  /// Pushes sent in parallel, per pool: APNs and FCM share one, Web Push and UnifiedPush (endpoints
+  /// users chose) another.
   pub max_concurrent_sends: usize,
-  /// Accept Web Push and UnifiedPush endpoints on private addresses and plain http. For development only.
+  /// Pushes one user may have in flight to Web Push and UnifiedPush endpoints, so endpoints that
+  /// never answer only hold up their owner.
+  pub max_concurrent_sends_per_user: usize,
+  /// Accept Web Push and UnifiedPush endpoints on private addresses and plain http, and plain http
+  /// APNs/FCM URLs (local fakes). For development only.
   pub allow_private_endpoints: bool,
   pub apns: ApnsConfig,
   pub fcm: FcmConfig,
@@ -1183,6 +1188,7 @@ impl Default for PushConfig {
       ttl_secs: 3600,
       request_timeout_secs: 10,
       max_concurrent_sends: 32,
+      max_concurrent_sends_per_user: 4,
       allow_private_endpoints: false,
       apns: ApnsConfig::default(),
       fcm: FcmConfig::default(),

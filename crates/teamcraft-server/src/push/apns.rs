@@ -53,7 +53,7 @@ pub struct ApnsSender {
 }
 
 struct CachedToken {
-  jwt: String,
+  jwt: SecretString,
   issued_at: u64,
 }
 
@@ -120,7 +120,7 @@ impl ApnsSender {
   }
 
   /// The provider token, signed again when the cached one is old.
-  fn provider_token(&self, now: u64) -> Result<String, PushError> {
+  fn provider_token(&self, now: u64) -> Result<SecretString, PushError> {
     let mut cached = self.cached_token.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(token) = cached.as_ref()
       && now.saturating_sub(token.issued_at) < TOKEN_LIFETIME_SECS
@@ -133,8 +133,9 @@ impl ApnsSender {
       iss: &self.team_id,
       iat: now,
     };
-    let jwt = jsonwebtoken::encode(&header, &claims, &self.key)
-      .map_err(|_| PushError::Invalid("signing the APNs provider token failed".into()))?;
+    let jwt: SecretString = jsonwebtoken::encode(&header, &claims, &self.key)
+      .map_err(|_| PushError::Invalid("signing the APNs provider token failed".into()))?
+      .into();
     *cached = Some(CachedToken {
       jwt: jwt.clone(),
       issued_at: now,
@@ -145,6 +146,14 @@ impl ApnsSender {
   fn forget_provider_token(&self) {
     *self.cached_token.lock().unwrap_or_else(|p| p.into_inner()) = None;
   }
+}
+
+/// `bearer <token>`, marked sensitive so it never shows in debug output.
+fn authorization_header(token: &SecretString) -> Result<reqwest::header::HeaderValue, PushError> {
+  let mut value = reqwest::header::HeaderValue::try_from(format!("bearer {}", token.expose_secret()))
+    .map_err(|_| PushError::Invalid("the APNs provider token is not a header value".into()))?;
+  value.set_sensitive(true);
+  Ok(value)
 }
 
 impl PushSender for ApnsSender {
@@ -194,7 +203,7 @@ impl PushSender for ApnsSender {
       let response = self
         .http
         .post(format!("{}/3/device/{}", self.base_url, target.token))
-        .header("authorization", format!("bearer {}", self.provider_token(now)?))
+        .header("authorization", authorization_header(&self.provider_token(now)?)?)
         .header("apns-topic", topic)
         .header("apns-push-type", push_type)
         .header("apns-priority", priority)

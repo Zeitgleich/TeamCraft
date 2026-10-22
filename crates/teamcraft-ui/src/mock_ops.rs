@@ -544,6 +544,7 @@ fn push_status(
       0
     },
     failure_count: 0,
+    endpoint_failure_count: 0,
     maybe_last_success_at: is_active.then_some(UnixMillis(now - 60_000)),
     maybe_last_failure_at: None,
     maybe_last_error: None,
