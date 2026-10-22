@@ -41,6 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-linux-${{ matrix.arch }}
+          cache-bin: "false"
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
       - name: Build packages

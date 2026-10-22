@@ -64,7 +64,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: check-${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/speed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Format
@@ -115,7 +116,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/speed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Test
@@ -139,7 +141,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: audio-processing
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/speed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
       - name: Clippy
         run: cargo clippy -p teamcraft-media --all-targets --features native -- -D warnings
       - name: Test
