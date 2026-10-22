@@ -112,11 +112,10 @@ jobs:
       - name: Build dmg
         working-directory: apps/desktop
         run: cargo tauri build --target ${{ matrix.target }} --bundles dmg
-        env:
-          # Signing and notarization are left out on purpose (the dmg is unsigned). To enable them,
-          # add these repository secrets and pass them here, as described in the Tauri macOS guide:
-          #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
-          #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+        # Signing and notarization are left out on purpose (the dmg is unsigned). To enable them,
+        # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
+        #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+        #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.target }}
