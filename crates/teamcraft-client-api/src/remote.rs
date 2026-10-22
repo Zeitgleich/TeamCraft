@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy};
+use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy, OrgBackgroundId};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
@@ -13,7 +13,7 @@ use crate::actions::{
 use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallRequest, IncomingCall, MediaDevices,
-  PushToTalk, RemoteVideoTrack, RunningCall,
+  OrgBackgroundRule, OrgBackgrounds, PushToTalk, RemoteVideoTrack, RunningCall,
 };
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
@@ -324,6 +324,17 @@ pub enum ChatAction {
   DeleteBackgroundImage {
     id: BackgroundId,
   },
+  /// Owners: an organization background (JPEG or PNG; the host normalizes it).
+  AddOrgBackground {
+    name: String,
+    picture: Base64Bytes,
+  },
+  DeleteOrgBackground {
+    id: OrgBackgroundId,
+  },
+  SetOrgBackgroundRule {
+    rule: OrgBackgroundRule,
+  },
   MarkUnread {
     conversation: ConversationId,
     from: MessageId,
@@ -430,6 +441,9 @@ impl ChatAction {
       } => backend.set_saved(conversation, message, is_saved),
       Self::AddBackgroundImage { name, picture } => backend.add_background_image(&name, picture.into_vec()),
       Self::DeleteBackgroundImage { id } => backend.delete_background_image(id),
+      Self::AddOrgBackground { name, picture } => backend.add_org_background(&name, picture.into_vec()),
+      Self::DeleteOrgBackground { id } => backend.delete_org_background(id),
+      Self::SetOrgBackgroundRule { rule } => backend.set_org_background_rule(rule),
       Self::MarkUnread { conversation, from } => backend.mark_unread(conversation, from),
       Self::SetDraft {
         conversation,
@@ -492,6 +506,7 @@ pub enum ChatQuery {
   },
   SavedItems,
   BackgroundImages,
+  OrgBackgrounds,
   Permalink {
     conversation: ConversationId,
     message: MessageId,
@@ -542,6 +557,7 @@ pub enum ChatAnswer {
   Messages { messages: Vec<Message> },
   SavedItems { items: Vec<SavedItem> },
   BackgroundImages { images: Vec<BackgroundImageInfo> },
+  OrgBackgrounds { backgrounds: OrgBackgrounds },
   Link { maybe_link: Option<String> },
   PermalinkTarget { maybe_target: Option<PermalinkTarget> },
   Message { maybe_message: Option<MessageId> },
@@ -576,6 +592,9 @@ impl ChatQuery {
       },
       Self::BackgroundImages => ChatAnswer::BackgroundImages {
         images: backend.background_images(),
+      },
+      Self::OrgBackgrounds => ChatAnswer::OrgBackgrounds {
+        backgrounds: backend.org_backgrounds(),
       },
       Self::Permalink {
         conversation,

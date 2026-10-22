@@ -2,7 +2,7 @@
 //! `teamcraft-media`; these types only describe what the UI shows and lets the user pick.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::BackgroundId;
+use teamcraft_proto::{BackgroundId, CallBackgroundMode, OrgBackgroundId};
 
 use crate::model::{ConversationId, UserId};
 
@@ -45,6 +45,109 @@ pub enum BackgroundEffect {
   Preset(BackgroundPreset),
   /// One of the user's own pictures ([`BackgroundImageInfo`]).
   Custom(BackgroundId),
+  /// One of the organization's pictures ([`OrgBackgrounds`]).
+  Org(OrgBackgroundId),
+}
+
+/// The organization's call backgrounds and the rule for them (admin.md §3.6), from the
+/// owner-signed policy the client verified.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgBackgrounds {
+  pub mode: CallBackgroundMode,
+  /// Whether guests are exempt (shown to admins; `applies_to_me` already accounts for it).
+  #[serde(default = "is_exempt_by_default")]
+  pub guests_exempt: bool,
+  /// In the order the picker shows them (before presets and own pictures).
+  pub images: Vec<OrgBackgroundInfo>,
+  #[serde(default)]
+  pub maybe_default: Option<OrgBackgroundId>,
+  /// Whether the rule applies to the signed-in user (guests may be exempt).
+  pub applies_to_me: bool,
+}
+
+/// What an owner sets for the organization's backgrounds (the pictures themselves are added and
+/// removed one by one).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgBackgroundRule {
+  pub mode: CallBackgroundMode,
+  #[serde(default)]
+  pub maybe_default: Option<OrgBackgroundId>,
+  pub guests_exempt: bool,
+  /// The pictures in their new order (all of them, each once).
+  pub order: Vec<OrgBackgroundId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgBackgroundInfo {
+  pub id: OrgBackgroundId,
+  pub name: String,
+}
+
+fn is_exempt_by_default() -> bool {
+  true
+}
+
+impl Default for OrgBackgrounds {
+  fn default() -> Self {
+    Self {
+      mode: CallBackgroundMode::Free,
+      guests_exempt: true,
+      images: Vec::new(),
+      maybe_default: None,
+      applies_to_me: false,
+    }
+  }
+}
+
+impl OrgBackgrounds {
+  /// The rule that applies to this user; a mode this client doesn't know is treated as
+  /// `org_only` (restrictive, but leaves blur and no background).
+  pub fn rule(&self) -> CallBackgroundMode {
+    match &self.mode {
+      _ if !self.applies_to_me => CallBackgroundMode::Free,
+      CallBackgroundMode::Unknown(_) => CallBackgroundMode::OrgOnly,
+      mode => mode.clone(),
+    }
+  }
+
+  /// Whether the picker may offer `effect`.
+  pub fn allows(&self, effect: BackgroundEffect) -> bool {
+    let is_listed = |id: OrgBackgroundId| self.images.iter().any(|image| image.id == id);
+    match (self.rule(), effect) {
+      (_, BackgroundEffect::Org(id)) => is_listed(id),
+      (CallBackgroundMode::Required, _) => false,
+      (CallBackgroundMode::OrgOnly, effect) => {
+        matches!(
+          effect,
+          BackgroundEffect::None | BackgroundEffect::BlurLight | BackgroundEffect::BlurStrong
+        )
+      },
+      _ => true,
+    }
+  }
+
+  /// Whether the camera may only send with an organization background behind the person.
+  pub fn is_required(&self) -> bool {
+    self.rule() == CallBackgroundMode::Required
+  }
+
+  /// What the camera uses when the user asked for `requested`: the request if allowed, else the
+  /// default organization background (or the first one if a background is required), else none.
+  pub fn effective(&self, requested: BackgroundEffect) -> BackgroundEffect {
+    if self.allows(requested) {
+      return requested;
+    }
+    let fallback = self
+      .maybe_default
+      .filter(|id| self.images.iter().any(|image| image.id == *id))
+      .or_else(|| {
+        self
+          .is_required()
+          .then(|| self.images.first().map(|image| image.id))
+          .flatten()
+      });
+    fallback.map_or(BackgroundEffect::None, BackgroundEffect::Org)
+  }
 }
 
 /// One of the user's own background pictures, as a picker lists it (encrypted on the server,
@@ -87,6 +190,7 @@ impl BackgroundEffect {
       Self::Preset(BackgroundPreset::Sunrise) => "sunrise",
       Self::Preset(BackgroundPreset::Forest) => "forest",
       Self::Custom(_) => "custom",
+      Self::Org(_) => "org",
     }
   }
 }
@@ -224,6 +328,83 @@ pub enum CallPhase {
 
 #[cfg(test)]
 mod tests {
+
+  mod org_backgrounds {
+    use super::*;
+
+    fn org(mode: CallBackgroundMode, maybe_default: Option<&str>, applies_to_me: bool) -> OrgBackgrounds {
+      OrgBackgrounds {
+        mode,
+        guests_exempt: true,
+        images: ["1", "2"]
+          .iter()
+          .map(|id| OrgBackgroundInfo {
+            id: id.parse().unwrap(),
+            name: format!("Picture {id}"),
+          })
+          .collect(),
+        maybe_default: maybe_default.map(|id| id.parse().unwrap()),
+        applies_to_me,
+      }
+    }
+
+    fn picture(id: &str) -> BackgroundEffect {
+      BackgroundEffect::Org(id.parse().unwrap())
+    }
+
+    #[test]
+    fn free_allows_everything_listed() {
+      let policy = org(CallBackgroundMode::Free, None, true);
+      for effect in BackgroundEffect::ALL {
+        assert!(policy.allows(effect), "{effect:?}");
+      }
+      assert!(policy.allows(BackgroundEffect::Custom("9".parse().unwrap())));
+      assert!(policy.allows(picture("2")));
+      assert!(
+        !policy.allows(picture("3")),
+        "an organization picture that was removed"
+      );
+      assert_eq!(policy.effective(picture("3")), BackgroundEffect::None);
+    }
+
+    #[test]
+    fn org_only_leaves_blur_and_none() {
+      let policy = org(CallBackgroundMode::OrgOnly, Some("2"), true);
+      assert!(policy.allows(BackgroundEffect::BlurStrong) && policy.allows(BackgroundEffect::None));
+      assert!(!policy.allows(BackgroundEffect::Preset(BackgroundPreset::Forest)));
+      assert!(!policy.allows(BackgroundEffect::Custom("9".parse().unwrap())));
+      assert_eq!(
+        policy.effective(BackgroundEffect::Custom("9".parse().unwrap())),
+        picture("2")
+      );
+      assert!(!policy.is_required());
+      assert_eq!(
+        org(CallBackgroundMode::OrgOnly, None, true)
+          .effective(BackgroundEffect::Preset(BackgroundPreset::Office)),
+        BackgroundEffect::None
+      );
+    }
+
+    #[test]
+    fn required_always_ends_with_an_org_picture() {
+      let policy = org(CallBackgroundMode::Required, None, true);
+      assert!(policy.is_required());
+      assert!(!policy.allows(BackgroundEffect::None) && !policy.allows(BackgroundEffect::BlurLight));
+      assert_eq!(policy.effective(BackgroundEffect::None), picture("1"));
+      assert_eq!(policy.effective(picture("2")), picture("2"));
+      let with_default = org(CallBackgroundMode::Required, Some("2"), true);
+      assert_eq!(with_default.effective(BackgroundEffect::BlurLight), picture("2"));
+    }
+
+    #[test]
+    fn exempt_users_and_unknown_modes() {
+      let guest = org(CallBackgroundMode::Required, None, false);
+      assert!(!guest.is_required() && guest.allows(BackgroundEffect::None));
+      let newer = org(CallBackgroundMode::Unknown("by_team".into()), None, true);
+      assert_eq!(newer.rule(), CallBackgroundMode::OrgOnly);
+      assert!(newer.allows(BackgroundEffect::BlurLight));
+    }
+  }
 
   #[test]
   fn own_backgrounds_have_a_stable_wire_format() {
