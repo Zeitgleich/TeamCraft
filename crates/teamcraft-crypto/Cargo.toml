@@ -1,5 +1,6 @@
 [package]
 name = "teamcraft-crypto"
+description = "All TeamCraft cryptography: device keys, content keys, attachments, key bag, MLS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,4 +10,34 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+# Versions follow what openmls_rust_crypto already pulls in, so the RustCrypto stack is not duplicated.
 [dependencies]
+# Password-based key wrapping for the backup key (e2ee.md §6.2 fallback).
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+# Message, key bag and attachment encryption (XChaCha20-Poly1305, STREAM for chunks).
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc", "stream"] }
+# Identity and device signatures; same major version as openmls_basic_credential.
+ed25519-dalek = { version = "2.2.0", features = ["rand_core", "zeroize"] }
+# Key derivation for passkey PRF outputs and rendezvous.
+hkdf = "0.13.0"
+# MLS (RFC 9420) for key distribution.
+openmls = "0.9.1"
+openmls_rust_crypto = "0.6.0"
+openmls_traits = "0.6.0"
+# Randomness source shared with ed25519-dalek and openmls_rust_crypto.
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+sha2 = "0.11.0"
+# Constant-time comparisons of keys and fingerprints.
+subtle = "2.6.1"
+thiserror = "2.0.21"
+# Binary encoding of signed and encrypted structures (already an openmls dependency).
+tls_codec = { version = "0.5.0", features = ["derive", "std"] }
+# Device key agreement (rendezvous, key transfer).
+x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
+zeroize = { version = "1.9.1", features = ["derive"] }
+
+# Browser builds: route all RNG backends to WebCrypto.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2.17", features = ["js"] }
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
+openmls = { version = "0.9.1", features = ["js"] }

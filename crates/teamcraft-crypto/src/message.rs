@@ -1,0 +1,325 @@
+//! Message encryption with conversation content keys (e2ee.md §4.1, §4.4).
+//!
+//! The ciphertext is bound to the plaintext metadata the server stores next to it – conversation,
+//! sender user and device, message ID and content key ID – so the server can't move a ciphertext to
+//! another conversation, attribute it to another sender or replay it under another message ID.
+//! Re-delivery under the *same* message ID is deduplicated by message ID in the client.
+
+use rand_core::CryptoRngCore;
+use tls_codec::{DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize};
+
+use crate::aead::{self, NONCE_LEN};
+use crate::content_key::{ContentKeyId, ContentKeyRing};
+use crate::domain;
+use crate::ids::{ConversationId, DeviceId, MessageId, UserId};
+use crate::secret::SecretBytes;
+
+const ENCRYPTED_MESSAGE_VERSION: u8 = 1;
+
+/// Plaintext metadata of a message that the encryption is bound to (e2ee.md §4.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct MessageContext {
+  pub conversation_id: ConversationId,
+  pub sender_user_id: UserId,
+  pub sender_device_id: DeviceId,
+  pub message_id: MessageId,
+}
+
+/// An encrypted message body as stored on the server.
+#[derive(Clone, Debug, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct EncryptedMessage {
+  version: u8,
+  content_key_id: ContentKeyId,
+  nonce: [u8; NONCE_LEN],
+  ciphertext: Vec<u8>,
+}
+
+/// Associated data: everything in [`MessageContext`] plus the key ID and format version.
+#[derive(TlsSerialize, TlsSize)]
+struct MessageAad {
+  version: u8,
+  context: MessageContext,
+  content_key_id: ContentKeyId,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MessageError {
+  #[error("conversation has no current content key")]
+  NoCurrentKey,
+  #[error("content key {0:?} is not available on this device")]
+  UnknownKey(ContentKeyId),
+  #[error("key ring belongs to conversation {ring} but the message to conversation {message}")]
+  WrongConversation {
+    ring: ConversationId,
+    message: ConversationId,
+  },
+  #[error("unsupported encrypted message version {0}")]
+  UnsupportedVersion(u8),
+  #[error("encryption failed")]
+  EncryptionFailed,
+  #[error("message could not be decrypted (wrong key, wrong metadata or tampered)")]
+  DecryptionFailed,
+  #[error("encoding failed: {0}")]
+  Encoding(#[from] tls_codec::Error),
+}
+
+/// Encrypts a message body with the conversation's current content key.
+pub fn encrypt_message(
+  ring: &ContentKeyRing,
+  context: &MessageContext,
+  plaintext: &[u8],
+  rng: &mut impl CryptoRngCore,
+) -> Result<EncryptedMessage, MessageError> {
+  ensure_conversation(ring, context)?;
+  let key = ring.current().ok_or(MessageError::NoCurrentKey)?;
+  let aad = message_aad(context, key.id())?;
+  let (nonce, ciphertext) =
+    aead::seal(key.key(), &aad, plaintext, rng).map_err(|_| MessageError::EncryptionFailed)?;
+  Ok(EncryptedMessage {
+    version: ENCRYPTED_MESSAGE_VERSION,
+    content_key_id: key.id(),
+    nonce,
+    ciphertext,
+  })
+}
+
+/// Decrypts a message body. `context` must come from the message's plaintext metadata, not from
+/// inside the ciphertext.
+pub fn decrypt_message(
+  ring: &ContentKeyRing,
+  context: &MessageContext,
+  message: &EncryptedMessage,
+) -> Result<SecretBytes, MessageError> {
+  ensure_conversation(ring, context)?;
+  if message.version != ENCRYPTED_MESSAGE_VERSION {
+    return Err(MessageError::UnsupportedVersion(message.version));
+  }
+  let key = ring
+    .get(message.content_key_id)
+    .ok_or(MessageError::UnknownKey(message.content_key_id))?;
+  let aad = message_aad(context, key.id())?;
+  aead::open(key.key(), &message.nonce, &aad, &message.ciphertext).map_err(|_| MessageError::DecryptionFailed)
+}
+
+impl EncryptedMessage {
+  pub fn content_key_id(&self) -> ContentKeyId {
+    self.content_key_id
+  }
+
+  pub fn to_bytes(&self) -> Result<Vec<u8>, MessageError> {
+    Ok(self.tls_serialize_detached()?)
+  }
+
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, MessageError> {
+    Ok(Self::tls_deserialize_exact_bytes(bytes)?)
+  }
+}
+
+fn ensure_conversation(ring: &ContentKeyRing, context: &MessageContext) -> Result<(), MessageError> {
+  if ring.conversation_id() == context.conversation_id {
+    Ok(())
+  } else {
+    Err(MessageError::WrongConversation {
+      ring: ring.conversation_id(),
+      message: context.conversation_id,
+    })
+  }
+}
+
+fn message_aad(context: &MessageContext, content_key_id: ContentKeyId) -> Result<Vec<u8>, MessageError> {
+  let aad = MessageAad {
+    version: ENCRYPTED_MESSAGE_VERSION,
+    context: *context,
+    content_key_id,
+  };
+  Ok(domain::labeled(
+    domain::MESSAGE_AAD,
+    &aad.tls_serialize_detached()?,
+  ))
+}
+
+#[cfg(test)]
+mod tests {
+  use rand_core::OsRng;
+
+  use super::*;
+  use crate::content_key::ContentKey;
+
+  const CONVERSATION: ConversationId = ConversationId::new(100);
+  const PLAINTEXT: &[u8] = b"Release is on Friday";
+
+  #[test]
+  fn round_trip_through_bytes() {
+    let ring = ring_with_key();
+    let context = context();
+    let encrypted = encrypt_message(&ring, &context, PLAINTEXT, &mut OsRng).unwrap();
+    let decoded = EncryptedMessage::from_bytes(&encrypted.to_bytes().unwrap()).unwrap();
+    let plaintext = decrypt_message(&ring, &context, &decoded).unwrap();
+    assert_eq!(plaintext.expose_secret(), PLAINTEXT);
+  }
+
+  #[test]
+  fn old_keys_still_decrypt_after_rotation() {
+    let mut ring = ring_with_key();
+    let context = context();
+    let old = encrypt_message(&ring, &context, PLAINTEXT, &mut OsRng).unwrap();
+    ring.rotate(&mut OsRng);
+    let new = encrypt_message(&ring, &context, PLAINTEXT, &mut OsRng).unwrap();
+
+    assert_ne!(old.content_key_id(), new.content_key_id());
+    assert_eq!(
+      decrypt_message(&ring, &context, &old).unwrap().expose_secret(),
+      PLAINTEXT
+    );
+    assert_eq!(
+      decrypt_message(&ring, &context, &new).unwrap().expose_secret(),
+      PLAINTEXT
+    );
+  }
+
+  #[test]
+  fn encrypting_twice_gives_different_ciphertexts() {
+    let ring = ring_with_key();
+    let first = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+    let second = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+    assert_ne!(first, second);
+  }
+
+  mod rejection {
+    use super::*;
+
+    #[test]
+    fn rejects_tampered_ciphertext_and_nonce() {
+      let ring = ring_with_key();
+      let encrypted = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+
+      let mut flipped_body = encrypted.clone();
+      flipped_body.ciphertext[0] ^= 1;
+      let mut flipped_tag = encrypted.clone();
+      let last = flipped_tag.ciphertext.len() - 1;
+      flipped_tag.ciphertext[last] ^= 1;
+      let mut flipped_nonce = encrypted.clone();
+      flipped_nonce.nonce[0] ^= 1;
+      let mut truncated = encrypted;
+      truncated.ciphertext.truncate(5);
+
+      for tampered in [flipped_body, flipped_tag, flipped_nonce, truncated] {
+        assert!(matches!(
+          decrypt_message(&ring, &context(), &tampered),
+          Err(MessageError::DecryptionFailed)
+        ));
+      }
+    }
+
+    #[test]
+    fn rejects_moved_or_reattributed_message() {
+      // Replaying a ciphertext under another message ID, sender or device must fail.
+      let ring = ring_with_key();
+      let encrypted = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+      let replayed = MessageContext {
+        message_id: MessageId::new(2),
+        ..context()
+      };
+      let other_sender = MessageContext {
+        sender_user_id: UserId::new(99),
+        ..context()
+      };
+      let other_device = MessageContext {
+        sender_device_id: DeviceId::new(99),
+        ..context()
+      };
+
+      for wrong in [replayed, other_sender, other_device] {
+        assert!(matches!(
+          decrypt_message(&ring, &wrong, &encrypted),
+          Err(MessageError::DecryptionFailed)
+        ));
+      }
+    }
+
+    #[test]
+    fn rejects_other_conversation() {
+      let ring = ring_with_key();
+      let encrypted = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+      let mut other_ring = ContentKeyRing::new(ConversationId::new(101));
+      other_ring.insert(ring.current().unwrap().duplicate()).unwrap();
+      let moved = MessageContext {
+        conversation_id: ConversationId::new(101),
+        ..context()
+      };
+
+      assert!(matches!(
+        decrypt_message(&ring, &moved, &encrypted),
+        Err(MessageError::WrongConversation { .. })
+      ));
+      // Even with the same key material under the other conversation, the AAD differs.
+      assert!(matches!(
+        decrypt_message(&other_ring, &moved, &encrypted),
+        Err(MessageError::DecryptionFailed)
+      ));
+    }
+
+    #[test]
+    fn rejects_wrong_key_material_under_same_id() {
+      let ring = ring_with_key();
+      let encrypted = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+      let mut attacker_ring = ContentKeyRing::new(CONVERSATION);
+      let wrong = ContentKey::from_parts(
+        encrypted.content_key_id(),
+        crate::secret::SymmetricKey::generate(&mut OsRng),
+      );
+      attacker_ring.insert(wrong).unwrap();
+
+      assert!(matches!(
+        decrypt_message(&attacker_ring, &context(), &encrypted),
+        Err(MessageError::DecryptionFailed)
+      ));
+    }
+
+    #[test]
+    fn rejects_unknown_key_and_missing_current_key() {
+      // A removed member keeps old keys but never receives the rotated one (e2ee.md §4.1).
+      let mut ring = ring_with_key();
+      let removed_members_ring = ContentKeyRing::new(CONVERSATION);
+      ring.rotate(&mut OsRng);
+      let encrypted = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+
+      assert!(matches!(
+        decrypt_message(&removed_members_ring, &context(), &encrypted),
+        Err(MessageError::UnknownKey(_))
+      ));
+      assert!(matches!(
+        encrypt_message(&removed_members_ring, &context(), PLAINTEXT, &mut OsRng),
+        Err(MessageError::NoCurrentKey)
+      ));
+    }
+
+    #[test]
+    fn rejects_unknown_version_and_malformed_bytes() {
+      let ring = ring_with_key();
+      let mut encrypted = encrypt_message(&ring, &context(), PLAINTEXT, &mut OsRng).unwrap();
+      encrypted.version = 9;
+      assert!(matches!(
+        decrypt_message(&ring, &context(), &encrypted),
+        Err(MessageError::UnsupportedVersion(9))
+      ));
+      assert!(EncryptedMessage::from_bytes(&[]).is_err());
+      assert!(EncryptedMessage::from_bytes(&[1; 10]).is_err());
+    }
+  }
+
+  fn ring_with_key() -> ContentKeyRing {
+    let mut ring = ContentKeyRing::new(CONVERSATION);
+    ring.rotate(&mut OsRng);
+    ring
+  }
+
+  fn context() -> MessageContext {
+    MessageContext {
+      conversation_id: CONVERSATION,
+      sender_user_id: UserId::new(1),
+      sender_device_id: DeviceId::new(10),
+      message_id: MessageId::new(1),
+    }
+  }
+}
