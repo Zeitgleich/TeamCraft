@@ -9,6 +9,7 @@ mod admin;
 mod admin_extras;
 mod attachments;
 mod authz;
+mod backgrounds;
 mod bots;
 mod caldav_calcraft;
 mod call_e2e;
