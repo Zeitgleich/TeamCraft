@@ -57,6 +57,14 @@ async fn members_get_the_signed_pictures_and_refuse_swapped_ones() {
   // A server that swaps the stored picture is caught by the hash in the signed policy.
   server.swap_org_background(lobby, b"something else entirely".to_vec());
   assert!(bob.client.org_background_picture(lobby).await.is_err());
+  // A larger blob isn't even read past the size the policy states.
+  server.swap_org_background(lobby, vec![0; 10 * 1024 * 1024]);
+  assert!(matches!(
+    bob.client.org_background_picture(lobby).await,
+    Err(teamcraft_core::CoreError::Api(
+      teamcraft_core::api::ApiError::BlobTooLarge { .. }
+    ))
+  ));
 
   // Removing the default clears it, and the picture is gone for everybody.
   alice.client.delete_org_background(garden).await.unwrap();

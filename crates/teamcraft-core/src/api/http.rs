@@ -626,6 +626,25 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .map_err(|error| ApiError::Network(error.to_string()))
   }
 
+  async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+    let mut response = send(self.client.get(url)).await?;
+    if response.content_length().is_some_and(|length| length > max_bytes) {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    let mut blob = Vec::new();
+    while let Some(chunk) = response
+      .chunk()
+      .await
+      .map_err(|error| ApiError::Network(error.to_string()))?
+    {
+      if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+        return Err(ApiError::BlobTooLarge { max_bytes });
+      }
+      blob.extend_from_slice(&chunk);
+    }
+    Ok(blob)
+  }
+
   async fn create_share_link(
     &self,
     _attachment: AttachmentId,
@@ -957,5 +976,47 @@ mod tests {
   #[test]
   fn token_is_redacted() {
     assert!(!format!("{:?}", StaticToken("secret".into())).contains("secret"));
+  }
+
+  /// Serves one HTTP response per connection: `body`, with or without a content length.
+  async fn blob_server(body: Vec<u8>, has_length: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+      while let Ok((mut socket, _)) = listener.accept().await {
+        let mut request = [0u8; 1024];
+        let _ = socket.read(&mut request).await;
+        let head = if has_length {
+          format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+          )
+        } else {
+          "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned()
+        };
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(&body).await;
+      }
+    });
+    format!("http://{address}/blob")
+  }
+
+  #[tokio::test]
+  async fn capped_downloads_stop_at_the_cap() {
+    let api = HttpServerApi::new("http://[::1]:1", StaticToken("t".into()));
+    let declared = blob_server(vec![7; 100], true).await;
+    assert!(matches!(
+      api.get_blob_capped(&declared, 50).await,
+      Err(ApiError::BlobTooLarge { max_bytes: 50 })
+    ));
+    assert_eq!(api.get_blob_capped(&declared, 100).await.unwrap().len(), 100);
+    // Without a content length the stream is counted as it arrives.
+    let undeclared = blob_server(vec![7; 100_000], false).await;
+    assert!(matches!(
+      api.get_blob_capped(&undeclared, 1000).await,
+      Err(ApiError::BlobTooLarge { .. })
+    ));
   }
 }

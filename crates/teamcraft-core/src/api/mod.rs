@@ -302,6 +302,9 @@ pub trait ServerApi {
   fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
   /// Downloads an encrypted blob from a presigned URL.
   fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
+  /// Like [`Self::get_blob`], but stops reading (and fails) once the blob grows past `max_bytes`,
+  /// so a hostile server or storage can't make the client buffer an unbounded download.
+  fn get_blob_capped(&self, url: &str, max_bytes: u64) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
   /// Makes an attachment downloadable without an account (`POST /shares`; the request names the attachment).
   fn create_share_link(
     &self,
@@ -365,6 +368,9 @@ pub enum ApiError {
   Token(String),
   #[error("not supported on this platform yet: {0}")]
   Unsupported(&'static str),
+  /// A downloaded blob was larger than it may be.
+  #[error("the download is larger than {max_bytes} bytes")]
+  BlobTooLarge { max_bytes: u64 },
 }
 
 impl ApiError {

@@ -1773,6 +1773,14 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+    let blob = self.get_blob(url).await?;
+    if blob.len() as u64 > max_bytes {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    Ok(blob)
+  }
+
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
     if let Some(raw) = url.strip_prefix(ORG_BACKGROUND_SCHEME) {
       return self.with(|state, _| {

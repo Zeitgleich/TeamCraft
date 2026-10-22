@@ -30,7 +30,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .find(|image| image.id == id)
       .ok_or_else(|| CoreError::Corrupt("the workspace policy doesn't list this background".into()))?;
     let download = self.api.download_org_background(id).await?;
-    let picture = self.api.get_blob(&download.download_url).await?;
+    // The signed policy says how large the picture is; nothing larger is read.
+    let picture = self
+      .api
+      .get_blob_capped(&download.download_url, listed.size_bytes)
+      .await?;
     if !ciphertext_matches(&picture, listed.sha256.as_slice()) {
       return Err(CoreError::Corrupt(
         "the organization background doesn't match the signed policy".into(),
