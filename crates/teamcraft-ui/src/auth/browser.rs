@@ -22,14 +22,25 @@ use crate::clock::now_ms;
 const PENDING_KEY: &str = "teamcraft.oidc.pending";
 const SIGNED_IN_HINT_KEY: &str = "teamcraft.signed_in";
 const AUTOLOGIN_TRIED_KEY: &str = "teamcraft.autologin_tried";
+/// The bearer token of a local account, for the life of the tab.
+const LOCAL_SESSION_KEY: &str = "teamcraft.local_session";
 const SCOPE: &str = "openid";
 /// Refresh this long before the access token expires.
 const REFRESH_MARGIN_MS: i64 = 30_000;
 
 pub struct BrowserAuth {
   config: AppConfig,
+  /// Set while a local account (guest) is signed in instead of an identity provider account.
+  local: RefCell<Option<LocalSession>>,
   tokens: RefCell<Option<Tokens>>,
   discovery: RefCell<Option<Discovery>>,
+}
+
+/// The session of a local account: the server issues the token, there is no refresh.
+#[derive(Clone, Serialize, Deserialize)]
+struct LocalSession {
+  token: String,
+  expires_at_ms: i64,
 }
 
 struct Tokens {
@@ -62,12 +73,21 @@ impl BrowserAuth {
   pub fn new(config: AppConfig) -> Self {
     Self {
       config,
+      local: RefCell::new(None),
       tokens: RefCell::new(None),
       discovery: RefCell::new(None),
     }
   }
 
   async fn restore_inner(&self) -> Result<bool, AuthError> {
+    if let Some(stored) = session_get(LOCAL_SESSION_KEY)
+      && let Ok(session) = serde_json::from_str::<LocalSession>(&stored)
+      && session.expires_at_ms > now_ms()
+    {
+      *self.local.borrow_mut() = Some(session);
+      return Ok(true);
+    }
+    session_remove(LOCAL_SESSION_KEY);
     let params = location_params();
     if let Some(error) = params.get("error") {
       let description = params.get("error_description").unwrap_or(error);
@@ -165,7 +185,58 @@ impl BrowserAuth {
     }
   }
 
+  async fn login_local_inner(
+    &self,
+    login: String,
+    password: String,
+    maybe_totp: Option<String>,
+  ) -> Result<(), AuthError> {
+    let request = serde_json::json!({
+      "login": login,
+      "password": password,
+      "totp_code": maybe_totp.filter(|code| !code.trim().is_empty()),
+    });
+    let headers = [
+      ("Content-Type".to_owned(), "application/json".to_owned()),
+      ("Accept".to_owned(), "application/json".to_owned()),
+    ];
+    let response = fetch(
+      "POST",
+      &self.config.api_url("/api/v1/auth/local/login"),
+      &headers,
+      Some(request.to_string().into_bytes()),
+    )
+    .await
+    .map_err(AuthError::Network)?;
+    if response.status != 200 {
+      let code = serde_json::from_slice::<teamcraft_proto::ErrorBody>(&response.body)
+        .map(|body| body.error_code.as_str().to_owned())
+        .unwrap_or_else(|_| format!("http_{}", response.status));
+      return Err(AuthError::Denied(code));
+    }
+    let granted: teamcraft_proto::LocalLoginResponse = serde_json::from_slice(&response.body)
+      .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
+    let session = LocalSession {
+      token: granted.access_token.clone(),
+      expires_at_ms: granted.expires_at.0,
+    };
+    if let Ok(text) = serde_json::to_string(&session) {
+      session_set(LOCAL_SESSION_KEY, &text);
+    }
+    *self.local.borrow_mut() = Some(session);
+    Ok(())
+  }
+
   async fn access_token(&self) -> Result<String, AuthError> {
+    let local = self.local.borrow().clone();
+    if let Some(session) = local {
+      if session.expires_at_ms <= now_ms() {
+        *self.local.borrow_mut() = None;
+        session_remove(LOCAL_SESSION_KEY);
+        return Err(AuthError::NotSignedIn);
+      }
+      return Ok(session.token);
+    }
     let needs_refresh = match self.tokens.borrow().as_ref() {
       None => return Err(AuthError::NotSignedIn),
       Some(tokens) => tokens.expires_at_ms - REFRESH_MARGIN_MS <= now_ms(),
@@ -262,8 +333,33 @@ impl Authenticator for BrowserAuth {
     })
   }
 
+  fn login_local(
+    &self,
+    login: String,
+    password: String,
+    maybe_totp: Option<String>,
+  ) -> LocalFuture<'_, Result<(), AuthError>> {
+    Box::pin(self.login_local_inner(login, password, maybe_totp))
+  }
+
   fn logout(&self) -> LocalFuture<'_, Result<(), AuthError>> {
     Box::pin(async move {
+      let local = self.local.borrow_mut().take();
+      session_remove(LOCAL_SESSION_KEY);
+      if let Some(session) = local {
+        let headers = [("Authorization".to_owned(), format!("Bearer {}", session.token))];
+        if let Err(error) = fetch(
+          "POST",
+          &self.config.api_url("/api/v1/auth/local/logout"),
+          &headers,
+          None,
+        )
+        .await
+        {
+          tracing::warn!(%error, "could not end the local session on the server");
+        }
+        return Ok(());
+      }
       let maybe_refresh = self.tokens.replace(None).and_then(|tokens| tokens.maybe_refresh);
       local_remove(SIGNED_IN_HINT_KEY);
       session_remove(AUTOLOGIN_TRIED_KEY);

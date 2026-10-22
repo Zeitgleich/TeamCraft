@@ -81,6 +81,12 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
         let marker = &rest[..1];
         delimited(rest, marker).map(|(inner, used)| (Inline::Italic(parse_inline(inner)), used))
       },
+      // A backslash before punctuation makes it literal (`\\_` is an underscore).
+      '\\' => rest[1..]
+        .chars()
+        .next()
+        .filter(char::is_ascii_punctuation)
+        .map(|escaped| (Inline::Text(escaped.to_string()), 1 + escaped.len_utf8())),
       '@' if before_is_boundary => mention(rest),
       'h' | 't' if before_is_boundary => link(rest),
       _ => None,
@@ -146,6 +152,18 @@ fn link(rest: &str) -> Option<(Inline, usize)> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn escaped_punctuation_is_literal() {
+    let text: String = parse_inline("¯\\\\\\_(ツ)\\_/¯")
+      .into_iter()
+      .map(|inline| match inline {
+        Inline::Text(text) => text,
+        other => format!("{other:?}"),
+      })
+      .collect();
+    assert_eq!(text, "¯\\_(ツ)_/¯");
+  }
 
   #[test]
   fn plain_text_stays_text() {

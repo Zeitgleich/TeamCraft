@@ -167,7 +167,6 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       .find(|extras| extras.message == message_id)
   });
   let is_editing = RwSignal::new(false);
-  let is_history_open = RwSignal::new(false);
 
   let gutter = match (is_grouped, author.clone()) {
     (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
@@ -200,33 +199,13 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     view! {
       <button
         class="edited link-btn"
-        aria-expanded=move || is_history_open.get().to_string()
-        on:click=move |_| is_history_open.update(|open| *open = !*open)
+        aria-haspopup="dialog"
+        on:click=move |_| state.overlay.set(crate::state::Overlay::EditHistory(conversation, message_id))
       >
         {move || i18n.t("message-edited")}
       </button>
     }
   });
-  let history = move || {
-    (is_history_open.get() && !extras.get().is_none_or(|extras| extras.edits.is_empty())).then(|| {
-      let edits = extras.get().map(|extras| extras.edits).unwrap_or_default();
-      view! {
-        <ol class="edit-history" aria-label=move || i18n.t("message-history")>
-          {edits
-            .into_iter()
-            .map(|edit| {
-              view! {
-                <li>
-                  <time>{crate::clock::format_date_time(edit.replaced_at, locale)}</time>
-                  <span translate="no">{edit.body}</span>
-                </li>
-              }
-            })
-            .collect_view()}
-        </ol>
-      }
-    })
-  };
   let quote = move || {
     extras.get().and_then(|extras| extras.maybe_reply).map(|reply| {
       let name = state
@@ -434,7 +413,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
           {rendered_body}
           {edited}
           {badges}
-        </div> {attachments} {history} {acknowledge} {reaction_chips} {replies}
+        </div> {attachments} {acknowledge} {reaction_chips} {replies}
       </div>
       {actions}
     </div>

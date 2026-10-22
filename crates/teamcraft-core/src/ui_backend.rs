@@ -16,10 +16,13 @@ use teamcraft_client_api::actions::{
   FileInfo, MessageExtras, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
-  Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind, PresenceStatus,
-  Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User, UserId,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind,
+  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User,
+  UserId,
 };
+use teamcraft_proto::BackgroundId;
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, ListConversationMembersResponse, MessageId, NotificationLevel, PresenceState,
@@ -29,11 +32,14 @@ use teamcraft_proto::{
   CategoryId, CreateSpaceRequest, HistoryPolicy, UpdateConversationRequest, UpdateSpaceRequest,
 };
 
+use crate::client::bookmarks_key;
 use crate::client::workspace_admin::ChannelOptions;
 use crate::clock::Clock;
 use crate::error::CoreError;
 use crate::records::{self, Draft};
-use crate::store::{ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
+use crate::store::{
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
+};
 
 /// Bit set on the IDs the UI gets for messages still in the outbox. Real snowflakes stay below it
 /// for decades (41 bits of milliseconds since 2026 shifted by 22).
@@ -80,6 +86,14 @@ pub enum CoreCommand {
   },
   DeleteSavedSearch {
     id: u64,
+  },
+  /// One of the user's own call backgrounds: encrypted, uploaded and recorded in the key bag.
+  AddBackground {
+    name: String,
+    picture: Vec<u8>,
+  },
+  DeleteBackground {
+    id: BackgroundId,
   },
   /// The server's pin flag (the encrypted pin message is already in the outbox).
   SetServerPin {
@@ -154,6 +168,10 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
     history: HistoryPolicy,
+  },
+  RemoveMember {
+    conversation: ConversationId,
+    user: UserId,
   },
   InviteToSpace {
     space: SpaceId,
@@ -322,8 +340,41 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .as_ref()
         .is_some_and(|membership| membership.notification_level == NotificationLevel::None),
       can_post: true,
-      bookmarks: Vec::new(),
+      bookmarks: self.bookmarks_of(response.id),
     }
+  }
+
+  /// The bookmarks bar of a conversation, as the newest applied `Bookmarks` message set it.
+  fn bookmarks_of(&self, conversation: ConversationId) -> Vec<Bookmark> {
+    let items: Vec<BookmarkItem> =
+      records::get_json(&self.store, Table::Account, &bookmarks_key(conversation))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    items
+      .into_iter()
+      .map(|item| {
+        let maybe_message = item.maybe_message.and_then(|client_id| {
+          self
+            .store
+            .message(conversation, client_id)
+            .ok()
+            .flatten()
+            .map(|stored| ui_message_id(&stored))
+        });
+        Bookmark {
+          emoji: item.emoji,
+          title: item.title,
+          kind: if maybe_message.is_some() {
+            BookmarkKind::File
+          } else {
+            BookmarkKind::Link
+          },
+          url: item.url,
+          maybe_message,
+        }
+      })
+      .collect()
   }
 
   fn unread_count(&self, response: &ConversationResponse) -> u32 {
@@ -377,6 +428,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Edit { .. }
       | MessageContent::Delete { .. }
       | MessageContent::Pin { .. }
+      | MessageContent::Bookmarks { .. }
       | MessageContent::Event { .. }
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
@@ -652,6 +704,30 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_saved_items()
   }
 
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    self
+      .read(crate::client::stored_account_data(&self.store))
+      .backgrounds()
+      .into_iter()
+      .map(|(id, entry)| BackgroundImageInfo {
+        id,
+        name: entry.name.clone(),
+        size_bytes: entry.size_bytes,
+      })
+      .collect()
+  }
+
+  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
+    self.command(CoreCommand::AddBackground {
+      name: name.to_string(),
+      picture,
+    });
+  }
+
+  fn delete_background_image(&self, id: BackgroundId) {
+    self.command(CoreCommand::DeleteBackground { id });
+  }
+
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
     self.ui_draft(conversation, maybe_thread)
   }
@@ -791,6 +867,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       user,
       history,
     });
+  }
+
+  fn set_bookmarks(&self, conversation: ConversationId, bookmarks: Vec<Bookmark>) {
+    self.ui_set_bookmarks(conversation, bookmarks);
+  }
+
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::RemoveMember { conversation, user });
   }
 
   fn invite_to_space(&self, invite: SpaceInvite) {

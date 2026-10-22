@@ -25,10 +25,11 @@ use teamcraft_media::call_engine::CallStats;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_proto::{DeviceId, GatewayEvent, MediaCapabilities, UserId};
-use teamcraft_server::config::CallsConfig;
+use teamcraft_server::config::{CallsConfig, MailTexts, MeetingsConfig};
 use teamcraft_server::testing::{TEST_ISSUER, TestApp, TestUser};
 use teamcraft_sfu::auth::{JwtJoinTokenConfig, JwtJoinTokenVerifier};
 use teamcraft_sfu::config::SfuConfig;
+use teamcraft_sfu::control::control_router;
 use teamcraft_sfu::reporting::HttpReporter;
 use teamcraft_sfu::server::{CALL_PATH, Sfu};
 use wtransport::Identity;
@@ -129,6 +130,152 @@ async fn dm_call_rings_and_both_sides_hear_each_other() {
   app.stop().await;
 }
 
+/// A meeting's host mutes everyone, removes a participant and ends the meeting through the
+/// server; the real SFU carries it out on the media connections and the native clients see it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn meeting_host_controls_reach_the_participants_through_the_sfu() {
+  let sfu = bind_sfu();
+  let port = sfu.local_addr().unwrap().port();
+  let certificate_hash = *sfu.certificate_hash().as_ref();
+  let sfu_url = format!(
+    "https://{}{CALL_PATH}",
+    SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
+  );
+  // The SFU's control endpoint listens before the server starts, so the server knows its URL.
+  let control_listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+    .await
+    .unwrap();
+  let control_url = format!("http://{}", control_listener.local_addr().unwrap());
+  let mut config = calls_config(&sfu_url);
+  config.maybe_sfu_control_url = Some(control_url);
+  let Some(app) = TestApp::start_with_meetings_and_calls(&meetings_config(), &config, SIGNING_KEY_PEM).await
+  else {
+    return;
+  };
+  let sfu = sfu.with_reporter(Arc::new(HttpReporter::new(app.base_url.clone(), SFU_TOKEN)));
+  let router = control_router(sfu.control(), SFU_TOKEN);
+  tokio::spawn(async move { axum::serve(control_listener, router).await });
+  tokio::spawn(sfu.run());
+
+  let (host, carol, dave) = (owner(), member("carol"), member("dave"));
+  let ids = [
+    user_id(&app, &host).await,
+    user_id(&app, &carol).await,
+    user_id(&app, &dave).await,
+  ];
+  let devices = [
+    register_device(&app, &host).await,
+    register_device(&app, &carol).await,
+    register_device(&app, &dave).await,
+  ];
+  let created = app
+    .post(
+      &host,
+      "/meetings",
+      json!({
+        "title": "Review",
+        "starts_at": 1_893_488_400_000_i64,
+        "ends_at": 1_893_492_000_000_i64,
+        "invitees": [
+          {"kind": "user", "user_id": ids[1]},
+          {"kind": "user", "user_id": ids[2]},
+        ],
+      }),
+    )
+    .await;
+  assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+  let meeting = created.body["id"].as_str().unwrap().to_owned();
+  let chat = created.body["conversation_id"].as_str().unwrap().to_owned();
+  let pairs: Vec<(&str, &str)> = ids
+    .iter()
+    .map(String::as_str)
+    .zip(devices.iter().map(String::as_str))
+    .collect();
+  let mut authenticators = authenticators(&pairs);
+  let users = [&host, &carol, &dave];
+  let mut calls = Vec::new();
+  for index in 0..3 {
+    let roster: Vec<&str> = devices
+      .iter()
+      .enumerate()
+      .filter(|(other, _)| *other != index)
+      .map(|(_, device)| device.as_str())
+      .collect();
+    calls.push(
+      join_with_roster(
+        &app,
+        users[index],
+        &ids[index],
+        &devices[index],
+        &chat,
+        &roster,
+        &mut authenticators,
+        certificate_hash,
+      )
+      .await,
+    );
+  }
+  let mut dave_call = calls.pop().unwrap();
+  let mut carol_call = calls.pop().unwrap();
+  let mut host_call = calls.pop().unwrap();
+  for call in [&mut host_call, &mut carol_call, &mut dave_call] {
+    wait_for(call, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
+  }
+  let controls = format!("/meetings/{meeting}/controls");
+
+  let muted = app.post(&host, &controls, json!({"action": "mute_all"})).await;
+  assert_eq!(muted.status, StatusCode::NO_CONTENT, "{}", muted.body);
+  for call in [&mut carol_call, &mut dave_call] {
+    wait_for(call, |event| matches!(event, CallEngineEvent::MutedByHost { .. })).await;
+  }
+
+  let removed = app
+    .post(
+      &host,
+      &controls,
+      json!({"action": "remove_participant", "user_id": ids[2]}),
+    )
+    .await;
+  assert_eq!(removed.status, StatusCode::NO_CONTENT, "{}", removed.body);
+  wait_for(&mut dave_call, |event| {
+    matches!(event, CallEngineEvent::RemovedByHost { .. })
+  })
+  .await;
+  assert!(
+    ends(&mut dave_call).await,
+    "the removed participant's connection closes"
+  );
+  let again = app
+    .post(
+      &dave,
+      &format!("/conversations/{chat}/call/join-token"),
+      json!({"device_id": devices[2]}),
+    )
+    .await;
+  assert_eq!(again.status, StatusCode::FORBIDDEN, "{}", again.body);
+
+  let ended = app.post(&host, &controls, json!({"action": "end"})).await;
+  assert_eq!(ended.status, StatusCode::NO_CONTENT, "{}", ended.body);
+  for call in [&mut host_call, &mut carol_call] {
+    wait_for(call, |event| matches!(event, CallEngineEvent::EndedByHost { .. })).await;
+    assert!(ends(call).await, "everyone is disconnected");
+  }
+  let after = app
+    .post(
+      &carol,
+      &format!("/conversations/{chat}/call/join-token"),
+      json!({"device_id": devices[1]}),
+    )
+    .await;
+  assert_eq!(
+    after.status,
+    StatusCode::CONFLICT,
+    "the meeting is over: {}",
+    after.body
+  );
+  app.stop().await;
+}
+
 /// Requests a join token from the server and joins through the SFU with a test tone.
 #[allow(clippy::too_many_arguments)]
 async fn join(
@@ -169,6 +316,87 @@ async fn join(
   config.maybe_trusted_roster = Some(vec![other_device.parse().unwrap()]);
   config.maybe_authenticator = authenticators.remove(device);
   NativeCall::join(config).await.unwrap()
+}
+
+/// Joins `conversation`'s call trusting `roster`'s devices, sending silence.
+#[allow(clippy::too_many_arguments)]
+async fn join_with_roster(
+  app: &TestApp,
+  user: &TestUser,
+  user_id: &str,
+  device: &str,
+  conversation: &str,
+  roster: &[&str],
+  authenticators: &mut HashMap<String, Arc<dyn CallKeyAuthenticator>>,
+  certificate_hash: [u8; 32],
+) -> NativeCall {
+  let reply = app
+    .post(
+      user,
+      &format!("/conversations/{conversation}/call/join-token"),
+      json!({ "device_id": device }),
+    )
+    .await;
+  assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+  let engine = CallEngineConfig {
+    user_id: user_id.parse::<UserId>().unwrap(),
+    device_id: device.parse::<DeviceId>().unwrap(),
+    capabilities: MediaCapabilities::default(),
+    bwe: BweConfig::default(),
+  };
+  let mut config = NativeCallConfig::new(
+    reply.body["sfu_url"].as_str().unwrap().to_owned(),
+    reply.body["token"].as_str().unwrap().to_owned(),
+    engine,
+  );
+  config.maybe_certificate_hash = Some(certificate_hash);
+  config.maybe_trusted_roster = Some(roster.iter().map(|device| device.parse().unwrap()).collect());
+  config.maybe_authenticator = authenticators.remove(device);
+  NativeCall::join(config).await.unwrap()
+}
+
+/// The next event matching `predicate` within five seconds; fails on trust problems.
+async fn wait_for(call: &mut NativeCall, predicate: impl Fn(&CallEngineEvent) -> bool) -> CallEngineEvent {
+  tokio::time::timeout(Duration::from_secs(5), async {
+    loop {
+      let event = call.next_event().await.expect("call ended before the event");
+      assert!(
+        !matches!(
+          event,
+          CallEngineEvent::UntrustedRoster | CallEngineEvent::UnauthenticatedKeys
+        ),
+        "{event:?}"
+      );
+      if predicate(&event) {
+        return event;
+      }
+    }
+  })
+  .await
+  .expect("event did not arrive")
+}
+
+/// Whether the call's event stream ends within five seconds.
+async fn ends(call: &mut NativeCall) -> bool {
+  tokio::time::timeout(Duration::from_secs(5), async {
+    while call.next_event().await.is_some() {}
+  })
+  .await
+  .is_ok()
+}
+
+fn meetings_config() -> MeetingsConfig {
+  MeetingsConfig {
+    public_base_url: "https://chat.example.com".into(),
+    organizer_fallback_address: "meetings@example.com".into(),
+    caldav: None,
+    max_invitees: 5,
+    guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
+    guest_grace_secs: 7200,
+    maybe_inbox_token: None,
+    smtp: None,
+    mail_texts: MailTexts::default(),
+  }
 }
 
 /// Lets the call run, fails on trust problems, then leaves.

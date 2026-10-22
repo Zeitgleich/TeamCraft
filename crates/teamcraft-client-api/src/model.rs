@@ -188,6 +188,12 @@ pub struct Bookmark {
   pub emoji: String,
   pub title: String,
   pub kind: BookmarkKind,
+  /// The link of a [`BookmarkKind::Link`]; empty for files.
+  #[serde(default)]
+  pub url: String,
+  /// The message whose file a [`BookmarkKind::File`] opens.
+  #[serde(default)]
+  pub maybe_message: Option<MessageId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
