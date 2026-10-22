@@ -148,6 +148,29 @@ mod tests {
   use super::*;
 
   const BODY: &[u8] = br#"{"token":"abc"}"#;
+  // Known answer shared with the gateway repository (docs/api.md §2): the same file is checked there.
+  const KNOWN_ANSWER: &str = include_str!("../../teamcraft-proto/tests/fixtures/push_gateway/signature.json");
+
+  #[test]
+  fn the_known_answer_of_the_contract_matches() {
+    let fixture: serde_json::Value = serde_json::from_str(KNOWN_ANSWER).unwrap();
+    let text = |name: &str| fixture[name].as_str().unwrap().to_owned();
+    let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let seed: [u8; 32] = [0x07; 32];
+    assert_eq!(text("seed_hex"), hex(&seed));
+    let key = GatewayServerKey::from_secret(&SymmetricKey::from_bytes(seed));
+    assert_eq!(hex(key.public_key().as_bytes()), text("public_key_hex"));
+    assert_eq!(key.public_key().server_id(), text("server_id"));
+    let body = text("body");
+    let request = GatewayRequest {
+      method: "POST",
+      path: "/v1/push",
+      timestamp_ms: fixture["timestamp_ms"].as_u64().unwrap(),
+      body: body.as_bytes(),
+    };
+    // Ed25519 is deterministic: the signature is the same bytes everywhere.
+    assert_eq!(hex(&key.sign(&request)), text("signature_hex"));
+  }
 
   #[test]
   fn a_signature_verifies_for_the_same_request() {
@@ -213,7 +236,7 @@ mod tests {
   fn request(body: &[u8]) -> GatewayRequest<'_> {
     GatewayRequest {
       method: "POST",
-      path: "/api/v1/push",
+      path: "/v1/push",
       timestamp_ms: 1,
       body,
     }

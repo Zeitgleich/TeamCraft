@@ -10,12 +10,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Added
 
-- **Push gateway** (`teamcraft-push-gateway`, container image `teamcraft-push-gateway`): the publisher of the
-  store apps runs it with the APNs and FCM credentials; every server, the publisher's own included, sends
-  its sealed wake-ups through it with `[push.gateway]`. The gateway sees device tokens and ciphertext only;
-  servers authenticate with their own key pair, and per-server and per-token limits, quotas and a block
-  list bound abuse. Servers with self-built apps keep `[push.apns]` / `[push.fcm]`
-  ([docs/push-gateway.md](docs/push-gateway.md)).
+- **Push gateway support**: `[push.gateway]` sends the APNs and FCM wake-ups of the store apps through the
+  publisher's push gateway (its own project, `teamcraft-push-gateway`), which holds the credentials that
+  only the publisher has; every server, the publisher's own included, uses it the same way. The gateway
+  sees device tokens and ciphertext only; the server authenticates with its own key pair. Servers with
+  self-built apps keep `[push.apns]` / `[push.fcm]` ([docs/push-gateway.md](docs/push-gateway.md)).
 - **Activity feed**: mentions, reactions to your messages and replies in your threads in one list with
   an unread state and a jump to the message. Built by the client from decrypted messages; the read
   mark follows you across devices.

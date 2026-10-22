@@ -18,9 +18,11 @@ use teamcraft_proto::{
   GATEWAY_SIGNATURE_HEADER, GATEWAY_TIMESTAMP_HEADER, GatewayErrorBody, GatewayErrorCode, GatewayPushRequest,
   GatewayRegisterRequest, GatewayUrgency, PushProvider,
 };
-use teamcraft_push_providers::{BoxFuture, ProviderError, PushMessage, TokenSender, Urgency};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
+
+use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
+use crate::auth::BoxFuture;
 
 /// What the client needs to reach a gateway.
 pub struct GatewaySettings {
@@ -45,12 +47,12 @@ pub struct GatewaySender {
 }
 
 impl GatewayClient {
-  pub fn new(settings: GatewaySettings) -> Result<Arc<Self>, ProviderError> {
+  pub fn new(settings: GatewaySettings) -> Result<Arc<Self>, PushError> {
     let http = reqwest::Client::builder()
       .timeout(settings.timeout)
       .redirect(reqwest::redirect::Policy::none())
       .build()
-      .map_err(|e| ProviderError::Unavailable(e.without_url().to_string()))?;
+      .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
     Ok(Arc::new(Self {
       base_url: settings.url.trim_end_matches('/').to_owned(),
       server_id: settings.key.public_key().server_id(),
@@ -73,19 +75,19 @@ impl GatewayClient {
   }
 
   /// Makes the gateway know this server's public key. Idempotent; safe to repeat.
-  pub async fn register(&self) -> Result<(), ProviderError> {
+  pub async fn register(&self) -> Result<(), PushError> {
     let body = serde_json::to_vec(&GatewayRegisterRequest {
       public_key: Base64Bytes::new(self.key.public_key().as_bytes().to_vec()),
     })
-    .map_err(|_| ProviderError::Invalid("encoding the registration failed".into()))?;
+    .map_err(|_| PushError::Invalid("encoding the registration failed".into()))?;
     self.post(GATEWAY_REGISTER_PATH, body).await?;
     info!(server_id = %self.server_id, "registered at the push gateway");
     Ok(())
   }
 
-  async fn push(&self, request: &GatewayPushRequest) -> Result<(), ProviderError> {
+  async fn push(&self, request: &GatewayPushRequest) -> Result<(), PushError> {
     let body = serde_json::to_vec(request)
-      .map_err(|_| ProviderError::Invalid("encoding the gateway request failed".into()))?;
+      .map_err(|_| PushError::Invalid("encoding the gateway request failed".into()))?;
     match self.post(GATEWAY_PUSH_PATH, body.clone()).await {
       // The gateway lost us (new database) or this is the first push: register and try once more.
       Err(GatewayFailure::UnknownServer) => {
@@ -115,7 +117,7 @@ impl GatewayClient {
       .body(body)
       .send()
       .await
-      .map_err(|e| GatewayFailure::Provider(ProviderError::Unavailable(e.without_url().to_string())))?;
+      .map_err(|e| GatewayFailure::Provider(PushError::Unavailable(e.without_url().to_string())))?;
     let status = response.status();
     if status.is_success() {
       return Ok(());
@@ -129,12 +131,12 @@ impl GatewayClient {
   }
 }
 
-impl TokenSender for GatewaySender {
+impl PushSender for GatewaySender {
   fn send<'a>(
     &'a self,
-    token: &'a str,
+    target: &'a PushTarget,
     message: &'a PushMessage,
-  ) -> BoxFuture<'a, Result<(), ProviderError>> {
+  ) -> BoxFuture<'a, Result<(), PushError>> {
     Box::pin(async move {
       let mut request_id = [0u8; GATEWAY_REQUEST_ID_LEN];
       OsRng.fill_bytes(&mut request_id);
@@ -149,7 +151,7 @@ impl TokenSender for GatewaySender {
             Urgency::High => GatewayUrgency::High,
           },
           ttl_secs: u32::try_from(message.ttl.as_secs()).unwrap_or(u32::MAX),
-          token: token.to_owned(),
+          token: target.token.clone(),
           sealed: Base64Bytes::new(message.sealed.clone()),
         })
         .await
@@ -158,14 +160,14 @@ impl TokenSender for GatewaySender {
 }
 
 /// Reads the server's gateway key from a base64url string (32 bytes).
-pub fn parse_gateway_key(encoded: &str) -> Result<GatewayServerKey, ProviderError> {
+pub fn parse_gateway_key(encoded: &str) -> Result<GatewayServerKey, PushError> {
   let bytes = Zeroizing::new(
     URL_SAFE_NO_PAD
       .decode(encoded.trim())
-      .map_err(|_| ProviderError::Invalid("the gateway key is not base64url".into()))?,
+      .map_err(|_| PushError::Invalid("the gateway key is not base64url".into()))?,
   );
   let secret = SymmetricKey::from_slice(&bytes)
-    .ok_or_else(|| ProviderError::Invalid("the gateway key must be 32 bytes".into()))?;
+    .ok_or_else(|| PushError::Invalid("the gateway key must be 32 bytes".into()))?;
   Ok(GatewayServerKey::from_secret(&secret))
 }
 
@@ -193,14 +195,14 @@ pub fn load_or_create_gateway_key(path: &Path) -> std::io::Result<GatewayServerK
 enum GatewayFailure {
   /// The gateway does not know our key (yet).
   UnknownServer,
-  Provider(ProviderError),
+  Provider(PushError),
 }
 
-impl From<GatewayFailure> for ProviderError {
+impl From<GatewayFailure> for PushError {
   fn from(failure: GatewayFailure) -> Self {
     match failure {
       // Registering did not help: the gateway keeps refusing us.
-      GatewayFailure::UnknownServer => ProviderError::Rejected(401),
+      GatewayFailure::UnknownServer => PushError::Rejected(401),
       GatewayFailure::Provider(error) => error,
     }
   }
@@ -211,7 +213,15 @@ impl From<GatewayFailure> for ProviderError {
 fn classify(status: u16, maybe_code: Option<GatewayErrorCode>) -> GatewayFailure {
   let failure = match (status, &maybe_code) {
     (_, Some(GatewayErrorCode::UnknownServer)) => return GatewayFailure::UnknownServer,
-    (410, _) | (_, Some(GatewayErrorCode::TokenGone)) => ProviderError::Gone,
+    (410, _) | (_, Some(GatewayErrorCode::TokenGone)) => PushError::Gone,
+    // The gateway's own credentials or setup: the operator's to fix; shows as failing, deletes nothing.
+    (_, Some(GatewayErrorCode::ProviderRejected | GatewayErrorCode::ProviderNotConfigured)) => {
+      warn!(
+        status,
+        "the push gateway cannot reach the push service with its credentials"
+      );
+      PushError::Rejected(status)
+    },
     (
       _,
       Some(
@@ -221,10 +231,10 @@ fn classify(status: u16, maybe_code: Option<GatewayErrorCode>) -> GatewayFailure
         | GatewayErrorCode::ProviderUnavailable,
       ),
     )
-    | (429 | 500..=599, _) => ProviderError::Unavailable(format!("gateway status {status}")),
+    | (429 | 500..=599, _) => PushError::Unavailable(format!("gateway status {status}")),
     _ => {
       warn!(status, code = ?maybe_code.as_ref().map(GatewayErrorCode::as_str), "the push gateway refused the push");
-      ProviderError::Rejected(status)
+      PushError::Rejected(status)
     },
   };
   GatewayFailure::Provider(failure)
@@ -240,10 +250,10 @@ fn now_millis() -> u64 {
 mod tests {
   use super::*;
 
-  fn class(status: u16, code: Option<GatewayErrorCode>) -> ProviderError {
+  fn class(status: u16, code: Option<GatewayErrorCode>) -> PushError {
     match classify(status, code) {
       GatewayFailure::Provider(error) => error,
-      GatewayFailure::UnknownServer => ProviderError::Rejected(0),
+      GatewayFailure::UnknownServer => PushError::Rejected(0),
     }
   }
 
@@ -251,7 +261,7 @@ mod tests {
   fn only_a_dead_token_makes_the_server_forget_the_device() {
     assert!(matches!(
       class(410, Some(GatewayErrorCode::TokenGone)),
-      ProviderError::Gone
+      PushError::Gone
     ));
     for refusal in [
       GatewayErrorCode::ServerBlocked,
@@ -259,7 +269,7 @@ mod tests {
       GatewayErrorCode::ProviderRejected,
       GatewayErrorCode::InvalidRequest,
     ] {
-      assert!(matches!(class(403, Some(refusal)), ProviderError::Rejected(403)));
+      assert!(matches!(class(403, Some(refusal)), PushError::Rejected(403)));
     }
   }
 
@@ -272,7 +282,7 @@ mod tests {
       (502, Some(GatewayErrorCode::ProviderUnavailable)),
       (503, None),
     ] {
-      assert!(matches!(class(status, code), ProviderError::Unavailable(_)));
+      assert!(matches!(class(status, code), PushError::Unavailable(_)));
     }
   }
 

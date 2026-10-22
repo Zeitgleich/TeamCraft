@@ -20,7 +20,7 @@ Read before changing behaviour:
 | [docs/notifications.md](docs/notifications.md) | Threads, unread counts, notifications, urgent                 |
 | [docs/bridge.md](docs/bridge.md)               | Integration bridge: webhooks and logs into encrypted channels |
 | [docs/meetings.md](docs/meetings.md)           | Meetings, invitations, guests and lobby                       |
-| [docs/push-gateway.md](docs/push-gateway.md)   | Push gateway for store apps: API, limits, threat model, ops   |
+| [docs/push-gateway.md](docs/push-gateway.md)   | Push gateway for store apps (own repo): server side, contract |
 | [docs/operations.md](docs/operations.md)       | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
 | [docs/release.md](docs/release.md)             | Versions and the release procedure                            |
 
@@ -33,9 +33,7 @@ teamcraft/
 │   ├── teamcraft-crypto/    # All cryptography: MLS, keys, key bag, rendezvous (wasm-compatible)
 │   ├── teamcraft-media/     # RTP, jitter buffer, codecs, DAVE, video effects shaders
 │   ├── teamcraft-core/      # Client logic shared by desktop, web and mobile
-│   ├── teamcraft-push-providers/ # APNs and FCM senders (shared by server and push gateway)
 │   ├── teamcraft-server/    # REST API + gateway (binary)
-│   ├── teamcraft-push-gateway/ # Push gateway for store apps (binary)
 │   └── teamcraft-sfu/       # Media forwarding (binary)
 ├── docs/                    # Design documents
 └── .claude/rules/           # Detailed rules (code style, testing, API, security)

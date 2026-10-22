@@ -1,4 +1,5 @@
-//! Wire types of the push gateway API (docs/push-gateway.md). A server talks to a gateway with
+//! Wire types of the push gateway API (docs/push-gateway.md; the contract lives in the gateway
+//! repository, docs/api.md, and is pinned by tests/fixtures/push_gateway/). A server talks to a gateway with
 //! these; the gateway sees device tokens and sealed wake-ups, never users, devices or keys.
 
 use serde::{Deserialize, Serialize};
@@ -14,9 +15,9 @@ pub const GATEWAY_TIMESTAMP_HEADER: &str = "x-teamcraft-timestamp";
 /// Base64url (no padding) Ed25519 signature over the request (`teamcraft_crypto::push_gateway`).
 pub const GATEWAY_SIGNATURE_HEADER: &str = "x-teamcraft-signature";
 
-pub const GATEWAY_PUSH_PATH: &str = "/api/v1/push";
-pub const GATEWAY_REGISTER_PATH: &str = "/api/v1/servers";
-pub const GATEWAY_INFO_PATH: &str = "/api/v1/info";
+pub const GATEWAY_PUSH_PATH: &str = "/v1/push";
+pub const GATEWAY_REGISTER_PATH: &str = "/v1/servers";
+pub const GATEWAY_INFO_PATH: &str = "/v1/info";
 
 /// Length of [`GatewayPushRequest::request_id`].
 pub const GATEWAY_REQUEST_ID_LEN: usize = 16;
@@ -135,7 +136,56 @@ pub struct GatewayErrorBody {
 
 #[cfg(test)]
 mod tests {
+  use serde::de::DeserializeOwned;
+  use serde_json::Value;
+
   use super::*;
+
+  // The contract fixtures (docs/api.md in the gateway repository, identical copies in both
+  // repositories): what the gateway accepts and answers, byte for byte.
+  const PUSH_REQUEST: &str = include_str!("../../tests/fixtures/push_gateway/push_request.json");
+
+  #[test]
+  fn the_contract_fixtures_parse_and_serialize_back_unchanged() {
+    fn check<T: Serialize + DeserializeOwned>(fixture: &str) -> T {
+      let parsed: T = serde_json::from_str(fixture).unwrap();
+      let expected: Value = serde_json::from_str(fixture).unwrap();
+      assert_eq!(serde_json::to_value(&parsed).unwrap(), expected, "{fixture}");
+      parsed
+    }
+
+    let request: GatewayPushRequest = check(PUSH_REQUEST);
+    assert_eq!(request.provider, PushProvider::Apns);
+    assert_eq!(request.kind, PushKind::Message);
+    assert_eq!(request.urgency, GatewayUrgency::High);
+    assert_eq!(request.ttl_secs, 3600);
+    assert_eq!(request.request_id.as_slice(), [1u8; GATEWAY_REQUEST_ID_LEN]);
+    assert_eq!(request.sealed.as_slice(), b"\x01hello");
+    let _: GatewayPushResponse = check(include_str!(
+      "../../tests/fixtures/push_gateway/push_response.json"
+    ));
+    let register: GatewayRegisterRequest = check(include_str!(
+      "../../tests/fixtures/push_gateway/register_request.json"
+    ));
+    assert_eq!(register.public_key.as_slice().len(), 32);
+    let response: GatewayRegisterResponse = check(include_str!(
+      "../../tests/fixtures/push_gateway/register_response.json"
+    ));
+    assert_eq!(response.limits.burst, 200);
+    let info: GatewayInfoResponse = check(include_str!(
+      "../../tests/fixtures/push_gateway/info_response.json"
+    ));
+    assert_eq!(info.providers, [PushProvider::Apns, PushProvider::Fcm]);
+    let limited: GatewayErrorBody = check(include_str!(
+      "../../tests/fixtures/push_gateway/error_rate_limited.json"
+    ));
+    assert_eq!(limited.error_code, GatewayErrorCode::RateLimited);
+    assert_eq!(limited.maybe_retry_after_secs, Some(2));
+    let gone: GatewayErrorBody = check(include_str!(
+      "../../tests/fixtures/push_gateway/error_token_gone.json"
+    ));
+    assert_eq!(gone.error_code, GatewayErrorCode::TokenGone);
+  }
 
   #[test]
   fn error_codes_are_stable_and_unknown_ones_survive() {

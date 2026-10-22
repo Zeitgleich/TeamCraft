@@ -1,25 +1,19 @@
-//! The server's gateway client against the real push gateway and local fake APNs and FCM:
-//! server → gateway → push service, and what comes back (dead tokens, limits, blocks). No database
-//! needed.
+//! The server's gateway client against a fake push gateway (docs/push-gateway.md): what it signs and
+//! sends, registration, and how each answer maps onto the server's push errors. The real gateway is
+//! tested in its own repository against the same contract fixtures. No database needed.
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use crate::common::push_fakes::{self, *};
+use crate::common::fake_gateway::FakeGateway;
 
-use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use rand_core::OsRng;
 use serde_json::json;
 use teamcraft_crypto::push_gateway::GatewayServerKey;
-use teamcraft_proto::{ConversationId, DeviceId, Id, PushKind, PushProvider, PushWakeUp, Snowflake, UserId};
-use teamcraft_push_gateway::app::{AppState, api_router};
-use teamcraft_push_gateway::config::GatewayConfig;
-use teamcraft_push_gateway::providers::Providers;
-use teamcraft_push_gateway::store::Store;
-use teamcraft_push_providers::{ApnsSender, ApnsSettings, FcmSender, FcmSettings, ServiceAccount};
+use teamcraft_proto::{
+  ConversationId, DeviceId, GatewayUrgency, Id, PushKind, PushProvider, PushWakeUp, Snowflake, UserId,
+};
 use teamcraft_server::push::crypto::open_wakeup;
 use teamcraft_server::push::{
   GatewayClient, GatewaySettings, PushDispatcher, PushError, PushTarget, Urgency,
@@ -29,180 +23,210 @@ const PUSH_KEY: [u8; 32] = [7; 32];
 const TTL: Duration = Duration::from_secs(3600);
 const APNS_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-pub(crate) struct Stack {
-  pub(crate) gateway: AppState,
-  pub(crate) apns: Fake,
-  pub(crate) fcm: Fake,
-  pub(crate) client: Arc<GatewayClient>,
-  pub(crate) dispatcher: PushDispatcher,
-}
-
 #[tokio::test]
-async fn a_message_reaches_apns_through_the_gateway_with_the_sealed_wake_up_intact() {
-  let stack = Stack::start(|_| {}).await;
+async fn a_push_is_signed_and_carries_the_sealed_wake_up_the_device_can_open() {
+  let stack = Stack::start().await;
 
-  stack
-    .dispatcher
-    .deliver(
-      &target(PushProvider::Apns, APNS_TOKEN),
-      &wake_up(PushKind::Message),
-      Urgency::High,
-      TTL,
-    )
-    .await
-    .unwrap();
+  deliver(
+    &stack,
+    PushProvider::Apns,
+    APNS_TOKEN,
+    PushKind::Message,
+    Urgency::High,
+  )
+  .await
+  .unwrap();
 
-  let request = &stack.apns.requests()[0];
-  assert_eq!(request.path, format!("/3/device/{APNS_TOKEN}"));
-  assert_eq!(request.header("apns-push-type"), "alert");
-  // Only the device can open it: the gateway and Apple handled ciphertext.
-  let body = request.json();
-  let opened = open_wakeup(&PUSH_KEY, &sealed_from(body["w"].as_str().unwrap())).unwrap();
+  let pushes = stack.fake.pushes();
+  assert_eq!(pushes.len(), 1);
+  let push = &pushes[0];
+  assert_eq!(push.provider, PushProvider::Apns);
+  assert_eq!(push.kind, PushKind::Message);
+  assert_eq!(push.urgency, GatewayUrgency::High);
+  assert_eq!(push.ttl_secs, 3600);
+  assert_eq!(push.token, APNS_TOKEN);
+  assert_eq!(push.request_id.as_slice().len(), 16);
+  // Only the device can open it: the gateway and Apple handle ciphertext.
+  let opened = open_wakeup(&PUSH_KEY, push.sealed.as_slice()).unwrap();
   assert_eq!(opened, wake_up(PushKind::Message));
 }
 
 #[tokio::test]
-async fn calls_use_the_voip_topic_and_fcm_gets_a_data_message() {
-  let stack = Stack::start(|_| {}).await;
+async fn provider_kind_and_urgency_follow_the_registration_and_the_wake_up() {
+  let stack = Stack::start().await;
 
-  stack
-    .dispatcher
-    .deliver(
-      &target(PushProvider::Apns, APNS_TOKEN),
-      &wake_up(PushKind::Call),
-      Urgency::Normal,
-      TTL,
-    )
-    .await
-    .unwrap();
-  stack
-    .dispatcher
-    .deliver(
-      &target(PushProvider::Fcm, "fcm-token"),
-      &wake_up(PushKind::Mention),
-      Urgency::Normal,
-      TTL,
-    )
-    .await
-    .unwrap();
+  deliver(
+    &stack,
+    PushProvider::Fcm,
+    "fcm-token",
+    PushKind::Call,
+    Urgency::Normal,
+  )
+  .await
+  .unwrap();
+  deliver(
+    &stack,
+    PushProvider::Apns,
+    APNS_TOKEN,
+    PushKind::Mention,
+    Urgency::Normal,
+  )
+  .await
+  .unwrap();
 
-  let apns = &stack.apns.requests()[0];
-  assert_eq!(apns.header("apns-push-type"), "voip");
-  assert_eq!(apns.header("apns-topic"), format!("{APNS_BUNDLE_ID}.voip"));
-  let fcm = &stack.fcm.requests()[0].json()["message"];
-  assert_eq!(fcm["token"], "fcm-token");
-  let opened = open_wakeup(&PUSH_KEY, &sealed_from(fcm["data"]["w"].as_str().unwrap())).unwrap();
-  assert_eq!(opened.kind, PushKind::Mention);
+  let pushes = stack.fake.pushes();
+  assert_eq!(
+    (&pushes[0].provider, &pushes[0].kind, &pushes[0].urgency),
+    (&PushProvider::Fcm, &PushKind::Call, &GatewayUrgency::Normal)
+  );
+  assert_eq!(
+    (&pushes[1].provider, &pushes[1].kind),
+    (&PushProvider::Apns, &PushKind::Mention)
+  );
 }
 
 #[tokio::test]
-async fn the_first_push_registers_the_server_at_the_gateway() {
-  let stack = Stack::start(|_| {}).await;
-  assert!(
-    stack
-      .gateway
-      .store
-      .get_server(stack.client.server_id())
-      .await
-      .unwrap()
-      .is_none()
-  );
-
-  stack
-    .dispatcher
-    .deliver(
-      &target(PushProvider::Apns, APNS_TOKEN),
-      &wake_up(PushKind::Message),
+async fn every_push_has_its_own_request_id() {
+  let stack = Stack::start().await;
+  for _ in 0..3 {
+    deliver(
+      &stack,
+      PushProvider::Apns,
+      APNS_TOKEN,
+      PushKind::Message,
       Urgency::Normal,
-      TTL,
+    )
+    .await
+    .unwrap();
+  }
+  let mut ids: Vec<_> = stack
+    .fake
+    .pushes()
+    .iter()
+    .map(|push| push.request_id.as_slice().to_vec())
+    .collect();
+  ids.sort();
+  ids.dedup();
+  assert_eq!(ids.len(), 3);
+}
+
+mod registration {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_first_push_registers_the_key_once() {
+    let stack = Stack::start().await;
+    assert_eq!(stack.fake.registrations(), 0);
+
+    for _ in 0..2 {
+      deliver(
+        &stack,
+        PushProvider::Apns,
+        APNS_TOKEN,
+        PushKind::Message,
+        Urgency::Normal,
+      )
+      .await
+      .unwrap();
+    }
+
+    assert_eq!(stack.fake.registrations(), 1);
+    assert_eq!(stack.fake.pushes().len(), 2);
+  }
+
+  #[tokio::test]
+  async fn a_gateway_that_forgot_the_server_learns_it_again() {
+    let stack = Stack::start().await;
+    deliver(
+      &stack,
+      PushProvider::Apns,
+      APNS_TOKEN,
+      PushKind::Message,
+      Urgency::Normal,
+    )
+    .await
+    .unwrap();
+    stack.fake.forget_servers();
+
+    deliver(
+      &stack,
+      PushProvider::Apns,
+      APNS_TOKEN,
+      PushKind::Message,
+      Urgency::Normal,
     )
     .await
     .unwrap();
 
-  assert!(
-    stack
-      .gateway
-      .store
-      .get_server(stack.client.server_id())
-      .await
-      .unwrap()
-      .is_some()
-  );
+    assert_eq!(stack.fake.registrations(), 2);
+    assert_eq!(stack.fake.pushes().len(), 2);
+  }
+
+  #[tokio::test]
+  async fn explicit_registration_at_startup_works_and_a_server_id_is_stable() {
+    let stack = Stack::start().await;
+    stack.client.register().await.unwrap();
+    assert_eq!(stack.fake.registrations(), 1);
+    assert_eq!(stack.client.server_id().len(), 32);
+  }
 }
 
 mod what_comes_back {
   use super::*;
 
-  #[tokio::test]
-  async fn a_dead_apns_token_makes_the_server_forget_the_registration() {
-    let stack = Stack::start(|_| {}).await;
-    stack.apns.set_reply(410, json!({"reason": "Unregistered"}));
-
-    let result = stack
-      .dispatcher
-      .deliver(
-        &target(PushProvider::Apns, APNS_TOKEN),
-        &wake_up(PushKind::Message),
-        Urgency::Normal,
-        TTL,
-      )
-      .await;
-
-    assert!(matches!(result, Err(PushError::Gone)), "{result:?}");
-  }
-
-  #[tokio::test]
-  async fn a_dead_fcm_token_makes_the_server_forget_the_registration() {
-    let stack = Stack::start(|_| {}).await;
+  async fn answer(status: u16, code: &str) -> Result<(), PushError> {
+    let stack = Stack::start().await;
     stack
-      .fcm
-      .set_reply(404, json!({"error": {"status": "UNREGISTERED"}}));
-
-    let result = stack
-      .dispatcher
-      .deliver(
-        &target(PushProvider::Fcm, "fcm-token"),
-        &wake_up(PushKind::Message),
-        Urgency::Normal,
-        TTL,
-      )
-      .await;
-
-    assert!(matches!(result, Err(PushError::Gone)), "{result:?}");
+      .fake
+      .set_reply(Some((status, json!({"error_code": code, "message": code}))));
+    // Registered already, so the answer is about the push.
+    stack.client.register().await.unwrap();
+    deliver(
+      &stack,
+      PushProvider::Apns,
+      APNS_TOKEN,
+      PushKind::Message,
+      Urgency::Normal,
+    )
+    .await
   }
 
   #[tokio::test]
-  async fn rate_limits_and_outages_are_retryable_and_never_delete_devices() {
-    let stack = Stack::start(|config| {
-      config.limits.burst = 1;
-      config.limits.pushes_per_second = 1;
-    })
-    .await;
-    deliver(&stack, APNS_TOKEN).await.unwrap();
-    let limited = deliver(&stack, &APNS_TOKEN.replace('0', "1")).await;
-    assert!(matches!(limited, Err(PushError::Unavailable(_))), "{limited:?}");
-
-    stack.apns.set_reply(503, json!({"reason": "ServiceUnavailable"}));
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    let outage = deliver(&stack, &APNS_TOKEN.replace('0', "2")).await;
-    assert!(matches!(outage, Err(PushError::Unavailable(_))), "{outage:?}");
+  async fn a_dead_token_makes_the_server_forget_the_registration() {
+    assert!(matches!(answer(410, "token_gone").await, Err(PushError::Gone)));
   }
 
   #[tokio::test]
-  async fn a_blocked_server_is_rejected_without_losing_its_devices() {
-    let stack = Stack::start(|_| {}).await;
-    deliver(&stack, APNS_TOKEN).await.unwrap();
-    stack
-      .gateway
-      .store
-      .set_blocked(stack.client.server_id(), Some("abuse"), 1)
-      .await
-      .unwrap();
+  async fn limits_and_outages_are_retryable_and_never_delete_devices() {
+    for (status, code) in [
+      (429, "rate_limited"),
+      (429, "quota_exceeded"),
+      (429, "token_rate_limited"),
+      (502, "provider_unavailable"),
+      (503, "unknown_future_code"),
+    ] {
+      let result = answer(status, code).await;
+      assert!(
+        matches!(result, Err(PushError::Unavailable(_))),
+        "{code}: {result:?}"
+      );
+    }
+  }
 
-    let result = deliver(&stack, APNS_TOKEN).await;
-
-    assert!(matches!(result, Err(PushError::Rejected(403))), "{result:?}");
-    assert_eq!(stack.apns.requests().len(), 1);
+  #[tokio::test]
+  async fn a_refusal_of_the_server_itself_is_not_held_against_its_devices() {
+    for (status, code) in [
+      (403, "server_blocked"),
+      (401, "unauthorized"),
+      (502, "provider_rejected"),
+      (501, "provider_not_configured"),
+    ] {
+      let result = answer(status, code).await;
+      assert!(
+        matches!(result, Err(PushError::Rejected(rejected)) if rejected == status),
+        "{code}: {result:?}"
+      );
+    }
   }
 
   #[tokio::test]
@@ -213,8 +237,10 @@ mod what_comes_back {
       timeout: Duration::from_secs(1),
     })
     .unwrap();
-    let dispatcher =
-      PushDispatcher::new(4).with_token_sender(&PushProvider::Apns, client.sender(PushProvider::Apns));
+    let dispatcher = PushDispatcher::new(4).with_sender(
+      &PushProvider::Apns,
+      std::sync::Arc::new(client.sender(PushProvider::Apns)),
+    );
 
     let result = dispatcher
       .deliver(
@@ -229,71 +255,48 @@ mod what_comes_back {
   }
 }
 
-impl Stack {
-  pub(crate) async fn start(configure: impl FnOnce(&mut GatewayConfig)) -> Self {
-    let (apns, apns_url) = push_fakes::apns().await;
-    let (fcm, fcm_url) = push_fakes::fcm().await;
-    let timeout = Duration::from_secs(5);
-    let providers = Providers {
-      maybe_apns: Some(Arc::new(
-        ApnsSender::new(ApnsSettings {
-          key_pem: APNS_KEY_PEM.to_owned().into(),
-          key_id: APNS_KEY_ID.into(),
-          team_id: APNS_TEAM_ID.into(),
-          bundle_id: APNS_BUNDLE_ID.into(),
-          base_url: apns_url,
-          alert_text: "New message".into(),
-          timeout,
-        })
-        .unwrap(),
-      )),
-      maybe_fcm: Some(Arc::new(
-        FcmSender::new(FcmSettings {
-          account: ServiceAccount::from_json(&fcm_service_account_json(&fcm_url)).unwrap(),
-          base_url: fcm_url,
-          timeout,
-        })
-        .unwrap(),
-      )),
-    };
-    let mut config = GatewayConfig::default();
-    // Blocks and limit changes apply at once.
-    config.database.server_cache_secs = 0;
-    configure(&mut config);
-    let gateway = AppState::new(config, Store::open(Path::new(":memory:")).unwrap(), providers);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let service = api_router(gateway.clone()).into_make_service_with_connect_info::<SocketAddr>();
-    tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+pub(crate) struct Stack {
+  pub(crate) fake: FakeGateway,
+  pub(crate) client: std::sync::Arc<GatewayClient>,
+  pub(crate) dispatcher: PushDispatcher,
+}
 
+impl Stack {
+  pub(crate) async fn start() -> Self {
+    let (fake, url) = FakeGateway::start().await;
     let client = GatewayClient::new(GatewaySettings {
       url,
       key: GatewayServerKey::generate(&mut OsRng),
-      timeout,
+      timeout: Duration::from_secs(5),
     })
     .unwrap();
     let dispatcher = PushDispatcher::new(4)
-      .with_token_sender(&PushProvider::Apns, client.sender(PushProvider::Apns))
-      .with_token_sender(&PushProvider::Fcm, client.sender(PushProvider::Fcm));
+      .with_sender(
+        &PushProvider::Apns,
+        std::sync::Arc::new(client.sender(PushProvider::Apns)),
+      )
+      .with_sender(
+        &PushProvider::Fcm,
+        std::sync::Arc::new(client.sender(PushProvider::Fcm)),
+      );
     Self {
-      gateway,
-      apns,
-      fcm,
+      fake,
       client,
       dispatcher,
     }
   }
 }
 
-async fn deliver(stack: &Stack, token: &str) -> Result<(), PushError> {
+async fn deliver(
+  stack: &Stack,
+  provider: PushProvider,
+  token: &str,
+  kind: PushKind,
+  urgency: Urgency,
+) -> Result<(), PushError> {
   stack
     .dispatcher
-    .deliver(
-      &target(PushProvider::Apns, token),
-      &wake_up(PushKind::Message),
-      Urgency::Normal,
-      TTL,
-    )
+    .deliver(&target(provider, token), &wake_up(kind), urgency, TTL)
     .await
 }
 

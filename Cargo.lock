@@ -10191,46 +10191,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "teamcraft-push-gateway"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "figment",
- "rand_core 0.6.4",
- "reqwest",
- "rusqlite",
- "secrecy",
- "serde",
- "serde_json",
- "teamcraft-crypto",
- "teamcraft-ops",
- "teamcraft-proto",
- "teamcraft-push-providers",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "teamcraft-push-providers"
-version = "1.0.0"
-dependencies = [
- "base64 0.22.1",
- "jsonwebtoken",
- "reqwest",
- "secrecy",
- "serde",
- "serde_json",
- "teamcraft-proto",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "teamcraft-server"
 version = "1.0.0"
 dependencies = [
@@ -10256,8 +10216,6 @@ dependencies = [
  "teamcraft-media",
  "teamcraft-ops",
  "teamcraft-proto",
- "teamcraft-push-gateway",
- "teamcraft-push-providers",
  "teamcraft-sfu",
  "thiserror 2.0.21",
  "time",

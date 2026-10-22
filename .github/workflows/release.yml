@@ -1,8 +1,8 @@
 # Release (docs/release.md): a tag `v*` builds everything a release ships and attaches it to a
 # **draft** GitHub release, which a maintainer reviews and publishes by hand.
 #
-# - Server, SFU and push gateway images, multi-arch (amd64 + arm64, each built on a native runner), pushed to
-#   ghcr.io/<owner>/teamcraft-server, -sfu and -push-gateway: the version tag, X.Y and `latest` for releases, only
+# - Server and SFU images, multi-arch (amd64 + arm64, each built on a native runner), pushed to
+#   ghcr.io/<owner>/teamcraft-server and -sfu: the version tag, X.Y and `latest` for releases, only
 #   the version for prereleases. Signed with cosign (keyless) and with a build provenance attestation.
 # - Desktop packages from desktop-release.yml (called, not copied), the web client bundle.
 # - Android APKs of both flavors: release builds (signed only when the upload key secrets exist,
@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [teamcraft-server, teamcraft-sfu, teamcraft-push-gateway]
+        image: [teamcraft-server, teamcraft-sfu]
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -118,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [teamcraft-server, teamcraft-sfu, teamcraft-push-gateway]
+        image: [teamcraft-server, teamcraft-sfu]
     runs-on: ubuntu-latest
     permissions:
       contents: read

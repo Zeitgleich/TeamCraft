@@ -472,9 +472,9 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
   if let Some(settings) = apns_settings(config)? {
     let sender = ApnsSender::new(settings).context("push.apns")?;
     info!("APNs enabled (direct)");
-    dispatcher = dispatcher.with_token_sender(&PushProvider::Apns, sender);
+    dispatcher = dispatcher.with_sender(&PushProvider::Apns, Arc::new(sender));
   } else if let Some(gateway) = &maybe_gateway {
-    dispatcher = dispatcher.with_token_sender(&PushProvider::Apns, gateway.sender(PushProvider::Apns));
+    dispatcher = dispatcher.with_sender(&PushProvider::Apns, Arc::new(gateway.sender(PushProvider::Apns)));
   }
   if let Some(json) = secret_from_config(
     push.fcm.maybe_service_account.as_ref(),
@@ -500,9 +500,9 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
     })
     .context("push.fcm.service_account")?;
     info!("FCM enabled (direct)");
-    dispatcher = dispatcher.with_token_sender(&PushProvider::Fcm, sender);
+    dispatcher = dispatcher.with_sender(&PushProvider::Fcm, Arc::new(sender));
   } else if let Some(gateway) = &maybe_gateway {
-    dispatcher = dispatcher.with_token_sender(&PushProvider::Fcm, gateway.sender(PushProvider::Fcm));
+    dispatcher = dispatcher.with_sender(&PushProvider::Fcm, Arc::new(gateway.sender(PushProvider::Fcm)));
   }
   if push.unified_push.is_enabled {
     // Distributors may check a VAPID token; the same key as Web Push signs it when there is one.

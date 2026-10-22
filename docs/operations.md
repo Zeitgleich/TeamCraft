@@ -183,7 +183,7 @@ key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start; you
 
 The APNs and FCM rows above are for **self-built, self-signed apps**: with `[push.apns]` or `[push.fcm]`
 set, the server sends to that provider directly and never to the gateway. Web Push and UnifiedPush
-never use the gateway. Running a gateway is only for whoever publishes apps ([push-gateway.md §7](push-gateway.md)).
+never use the gateway. Running a gateway is only for whoever publishes apps (its own repository, see [push-gateway.md](push-gateway.md)).
 
 Common settings in `[push]`: `ttl_secs` (how long a push service holds a wake-up for an offline
 device), `request_timeout_secs`, `max_concurrent_sends` (per pool: APNs/FCM, and Web Push/UnifiedPush),

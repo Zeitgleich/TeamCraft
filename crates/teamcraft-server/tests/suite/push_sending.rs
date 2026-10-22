@@ -1102,8 +1102,8 @@ mod providers {
     })
     .unwrap();
     let dispatcher = PushDispatcher::new(8)
-      .with_token_sender(&PushProvider::Apns, apns_sender)
-      .with_token_sender(&PushProvider::Fcm, fcm_sender)
+      .with_sender(&PushProvider::Apns, Arc::new(apns_sender))
+      .with_sender(&PushProvider::Fcm, Arc::new(fcm_sender))
       .with_sender(
         &PushProvider::UnifiedPush,
         Arc::new(UnifiedPushSender::new(None, timeout, true).unwrap()),
@@ -1280,14 +1280,14 @@ mod providers {
   }
 }
 
-/// The whole server with APNs and FCM behind the real push gateway: message in, sealed wake-up out,
+/// The whole server with APNs and FCM behind a (fake) push gateway: message in, sealed wake-up out,
 /// and what the gateway says about a token decides what the server keeps.
 mod via_gateway {
   use super::*;
   use crate::push_gateway::Stack;
 
   async fn start() -> Option<(TestApp, Stack)> {
-    let mut stack = Stack::start(|_| {}).await;
+    let mut stack = Stack::start().await;
     // The app takes the dispatcher; the rest of the stack stays for the assertions.
     let dispatcher = std::mem::replace(&mut stack.dispatcher, PushDispatcher::new(1));
     let app = TestApp::start_with_push(
@@ -1335,15 +1335,15 @@ mod via_gateway {
 
     let message = send(&app, &alice, &channel, &alice_device, 1).await;
 
-    for sealed in [
-      push_fakes::sealed_from(stack.apns.wait_for(1).await[0].json()["w"].as_str().unwrap()),
-      push_fakes::sealed_from(
-        stack.fcm.wait_for(1).await[0].json()["message"]["data"]["w"]
-          .as_str()
-          .unwrap(),
-      ),
-    ] {
-      let wake_up = open_wakeup(&PUSH_KEY_BYTES, &sealed).unwrap();
+    let pushes = stack.fake.wait_for(2).await;
+    assert_eq!(pushes.len(), 2);
+    let providers: Vec<_> = pushes
+      .iter()
+      .map(|push| push.provider.as_str().to_owned())
+      .collect();
+    assert!(providers.contains(&"apns".to_owned()) && providers.contains(&"fcm".to_owned()));
+    for push in &pushes {
+      let wake_up = open_wakeup(&PUSH_KEY_BYTES, push.sealed.as_slice()).unwrap();
       assert_eq!(wake_up.kind, PushKind::Message);
       assert_eq!(wake_up.conversation_id.to_string(), channel);
       assert_eq!(wake_up.maybe_message_id.unwrap().to_string(), message);
@@ -1365,7 +1365,7 @@ mod via_gateway {
   }
 
   #[tokio::test]
-  async fn a_token_the_gateway_reports_dead_is_forgotten_but_a_block_is_not_held_against_it() {
+  async fn only_a_token_the_gateway_reports_dead_is_forgotten() {
     let Some((app, stack)) = start().await else {
       return;
     };
@@ -1375,29 +1375,22 @@ mod via_gateway {
     set_level(&app, &carol, &channel, "all").await;
     let phone = register(&app, &carol, "apns", APNS_TOKEN).await;
 
-    // The gateway is blocking this server: the push fails, the registration stays.
+    // The gateway blocks this server: the push fails, the registration stays.
+    stack.fake.set_reply(Some((
+      403,
+      json!({"error_code": "server_blocked", "message": "blocked"}),
+    )));
     send(&app, &alice, &channel, &alice_device, 1).await;
-    assert_eq!(stack.apns.wait_for(1).await.len(), 1);
-    stack
-      .gateway
-      .store
-      .set_blocked(stack.client.server_id(), Some("test"), 1)
-      .await
-      .unwrap();
-    send(&app, &alice, &channel, &alice_device, 2).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(stack.apns.requests().len(), 1, "blocked: nothing reaches Apple");
+    assert!(stack.fake.pushes().is_empty());
     assert!(has_push(&app.get(&carol, "/devices").await.body, &phone));
 
-    // Apple says the token is dead: the gateway tells the server, which drops the registration.
-    stack
-      .gateway
-      .store
-      .set_blocked(stack.client.server_id(), None, 2)
-      .await
-      .unwrap();
-    stack.apns.set_reply(410, json!({"reason": "Unregistered"}));
-    send(&app, &alice, &channel, &alice_device, 3).await;
+    // The push service says the token is dead: the server drops the registration.
+    stack.fake.set_reply(Some((
+      410,
+      json!({"error_code": "token_gone", "message": "dead"}),
+    )));
+    send(&app, &alice, &channel, &alice_device, 2).await;
     for _ in 0..50 {
       if !has_push(&app.get(&carol, "/devices").await.body, &phone) {
         break;
