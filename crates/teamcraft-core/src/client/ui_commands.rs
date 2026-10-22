@@ -97,6 +97,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         data.delete_saved_search(id, now);
         true
       }),
+      CoreCommand::AddBackground { name, picture } => self.add_background(name, picture).await.map(|_| ()),
+      CoreCommand::DeleteBackground { id } => self.delete_background(id).await,
       CoreCommand::SetServerPin {
         conversation,
         target,
@@ -163,6 +165,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .add_member_with_history(conversation, user, Some(history))
           .await
       },
+      CoreCommand::RemoveMember { conversation, user } => self.remove_member(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,
         email,

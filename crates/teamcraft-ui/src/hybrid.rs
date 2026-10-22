@@ -236,6 +236,22 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.mark_read(conversation);
   }
 
+  fn set_bookmarks(
+    &self,
+    conversation: ConversationId,
+    bookmarks: Vec<teamcraft_client_api::model::Bookmark>,
+  ) {
+    self.chat.set_bookmarks(conversation, bookmarks);
+  }
+
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.chat.remove_member(conversation, user);
+  }
+
+  fn open_dm(&self, user: UserId) {
+    self.chat.open_dm(user);
+  }
+
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
     self.chat.set_favorite(conversation, is_favorite);
   }

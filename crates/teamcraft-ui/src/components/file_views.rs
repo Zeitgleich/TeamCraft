@@ -244,7 +244,7 @@ pub fn Gallery(conversation: ConversationId, start: MessageId) -> impl IntoView 
 }
 
 /// A `blob:` URL for small image bytes; `None` where the browser refuses.
-fn blob_url(bytes: &[u8], media_type: &str) -> Option<String> {
+pub(crate) fn blob_url(bytes: &[u8], media_type: &str) -> Option<String> {
   let array = js_sys::Uint8Array::from(bytes);
   let parts = js_sys::Array::of1(&array);
   let options = web_sys::BlobPropertyBag::new();

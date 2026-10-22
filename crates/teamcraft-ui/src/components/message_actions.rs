@@ -143,6 +143,31 @@ pub fn MessageMenu(
             <Icon name=IconName::Bookmark />
             <span class="menu-label">{move || if is_saved() { i18n.t("action-unsave") } else { i18n.t("action-save") }}</span>
           </button>
+          <Show when=move || extras.get().is_some_and(|extras| !extras.files.is_empty()) fallback=|| ()>
+            <button
+              class="menu-item"
+              role="menuitem"
+              on:click=move |_| {
+                let Some(file) = extras.get_untracked().and_then(|extras| extras.files.into_iter().next()) else { return };
+                let mut bookmarks = state
+                  .read(|backend| backend.conversation(conversation))
+                  .map(|conv| conv.bookmarks)
+                  .unwrap_or_default();
+                bookmarks.push(crate::model::Bookmark {
+                  emoji: "📎".to_owned(),
+                  title: file.file_name,
+                  kind: crate::model::BookmarkKind::File,
+                  url: String::new(),
+                  maybe_message: Some(id),
+                });
+                state.write(|backend| backend.set_bookmarks(conversation, bookmarks));
+                close();
+              }
+            >
+              <Icon name=IconName::Bookmark />
+              <span class="menu-label">{move || i18n.t("action-bookmark-file")}</span>
+            </button>
+          </Show>
           <button class="menu-item" role="menuitem" on:click=copy_link>
             <Icon name=IconName::Link />
             <span class="menu-label">{move || i18n.t("action-copy-link")}</span>
@@ -206,6 +231,92 @@ pub(crate) fn copy_to_clipboard(text: &str) {
   };
   // A refused write (no permission, insecure context) leaves the clipboard as it was.
   drop(write_text.call1(&clipboard, &text.into()));
+}
+
+/// All versions of an edited message, newest first, with the changed words marked.
+#[component]
+pub fn EditHistoryDialog(conversation: ConversationId, message: MessageId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let locale = i18n.locale().tag();
+  let current = state
+    .read(|backend| backend.thread(conversation, crate::model::thread_id_of(message)))
+    .into_iter()
+    .find(|candidate| candidate.id == message)
+    .map(|found| found.body)
+    .or_else(|| {
+      state
+        .read(|backend| backend.messages(conversation, 0, usize::MAX))
+        .into_iter()
+        .find(|candidate| candidate.id == message)
+        .map(|found| found.body)
+    })
+    .unwrap_or_default();
+  let edits = state
+    .read(|backend| backend.message_extras(conversation, &[message]))
+    .into_iter()
+    .find(|extras| extras.message == message)
+    .map(|extras| extras.edits)
+    .unwrap_or_default();
+  // Versions oldest to newest: every earlier body, then the current one.
+  let mut versions: Vec<(Option<i64>, String)> = edits
+    .iter()
+    .map(|edit| (Some(edit.replaced_at), edit.body.clone()))
+    .collect();
+  versions.push((None, current));
+  let rows: Vec<_> = versions
+    .iter()
+    .enumerate()
+    .map(|(index, (replaced_at, body))| {
+      let before = if index == 0 {
+        ""
+      } else {
+        versions[index - 1].1.as_str()
+      };
+      (*replaced_at, crate::diff::word_diff(before, body), index == 0)
+    })
+    .rev()
+    .collect();
+  view! {
+    <Modal labelled_by="history-title">
+      <header class="modal-head">
+        <h2 id="history-title">{move || i18n.t("history-title")}</h2>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <ol class="modal-body history-versions">
+        {rows
+          .into_iter()
+          .map(|(replaced_at, diff, is_first)| {
+            let label = match replaced_at {
+              None => i18n.t("history-current"),
+              Some(at) => i18n.t_with("history-replaced", &[("time", &format_date_time(at, locale))]),
+            };
+            view! {
+              <li>
+                <h3>{label}</h3>
+                <p translate="no">
+                  {diff
+                    .into_iter()
+                    .filter(|(change, _)| *change != crate::diff::Change::Removed || !is_first)
+                    .map(|(change, word)| {
+                      let class = match change {
+                        crate::diff::Change::Same => "",
+                        crate::diff::Change::Added => "diff-added",
+                        crate::diff::Change::Removed => "diff-removed",
+                      };
+                      view! { <span class=class>{word}</span>" " }
+                    })
+                    .collect_view()}
+                </p>
+              </li>
+            }
+          })
+          .collect_view()}
+      </ol>
+    </Modal>
+  }
 }
 
 /// Pick a conversation, add a comment, forward.

@@ -30,10 +30,10 @@ pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};
 pub use gateway::{GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
-  AnnouncementId, AttachmentId, AuditEntryId, CallId, CategoryId, ConversationId, DeviceId, Id, IdError,
-  InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, RecoveryRequestId,
-  SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId, SystemEventId,
-  ThreadId, UserGroupId, UserId,
+  AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId, Id,
+  IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId,
+  RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId,
+  SystemEventId, ThreadId, UserGroupId, UserId,
 };
 pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,

@@ -224,6 +224,10 @@ define_id!(
   AttachmentId
 );
 define_id!(
+  /// A user's own call background picture (encrypted, synced across the user's devices).
+  BackgroundId
+);
+define_id!(
   /// An entry of a conversation's MLS delivery queue; IDs increase in delivery order.
   MlsMessageId
 );

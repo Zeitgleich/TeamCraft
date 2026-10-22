@@ -10,7 +10,7 @@
 mod codec_library;
 pub mod commands;
 pub(crate) mod push_to_talk;
-mod video;
+pub(crate) mod video;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_media::call_video::ReceivedVideoFrame;
-use teamcraft_media::effects::EffectHandle;
+use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId,
@@ -78,6 +78,8 @@ struct CallState {
   speakers: AudioDeviceChoice,
   maybe_camera: Option<String>,
   background: UiBackgroundEffect,
+  /// The user's own picture when `background` is one ([`UiBackgroundEffect::Custom`]).
+  maybe_custom_background: Option<Arc<BackgroundImage>>,
   /// Changes the effect of the running camera without restarting it.
   maybe_effect_handle: Option<EffectHandle>,
   /// Lets the screen picker remember the last choice.
@@ -374,14 +376,21 @@ impl CallHost {
       return Ok(());
     }
     self.ensure_video_codec().await?;
-    let (maybe_camera, background) = {
+    let (maybe_camera, background, maybe_custom) = {
       let state = lock(&self.state);
-      (state.maybe_camera.clone(), state.background)
+      (
+        state.maybe_camera.clone(),
+        state.background,
+        state.maybe_custom_background.clone(),
+      )
     };
     let maybe_model = self.maybe_segmentation_model.clone();
     let (capture, maybe_effects) = tokio::task::spawn_blocking(move || {
       let capture = video::open_camera(maybe_camera.as_deref())?;
-      Ok::<_, String>((capture, video::effects_filter(background, maybe_model.as_deref())))
+      Ok::<_, String>((
+        capture,
+        video::effects_filter(background, maybe_custom.as_ref(), maybe_model.as_deref()),
+      ))
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -411,14 +420,21 @@ impl CallHost {
     Ok(())
   }
 
-  pub fn set_background_effect(&self, effect: UiBackgroundEffect) {
+  /// `maybe_custom`: the decoded picture for [`UiBackgroundEffect::Custom`]
+  /// ([`video::decode_background`]).
+  pub fn set_background_effect(
+    &self,
+    effect: UiBackgroundEffect,
+    maybe_custom: Option<Arc<BackgroundImage>>,
+  ) {
     let maybe_handle = {
       let mut state = lock(&self.state);
       state.background = effect;
+      state.maybe_custom_background = maybe_custom.clone();
       state.maybe_effect_handle.clone()
     };
     match maybe_handle {
-      Some(handle) => handle.set(video::media_effect(effect)),
+      Some(handle) => handle.set(video::media_effect(effect, maybe_custom.as_ref())),
       None if effect != UiBackgroundEffect::None && self.is_camera_on() => {
         tracing::warn!("background effects are unavailable (no segmentation model or GPU)");
       },

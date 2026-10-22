@@ -46,6 +46,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
             <span class="member-name" translate="no">
               {user.display_name.clone()}
             </span>
+            <crate::components::profile_views::InMeetingBadge user=user.id />
             {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
             {user.maybe_custom_status.clone().map(|status| view! { <span title=status.text.clone()>{status.emoji}</span> })}
           </li>
