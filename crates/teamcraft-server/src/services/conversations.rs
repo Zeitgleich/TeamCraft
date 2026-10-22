@@ -410,20 +410,29 @@ async fn open_participants_conversation(
   kind: ConversationKind,
   others: Vec<UserId>,
 ) -> Result<Created<ConversationResponse>, ApiError> {
-  let sharing = if state.settings.policy.guests_dm_only_with_shared_conversations {
-    Some(state.database.users_sharing_conversation(caller.user.id).await?)
-  } else {
-    None
-  };
   let users = state.database.get_users(&others).await?;
   if users.len() != others.len() || users.iter().any(|user| user.is_deactivated) {
     return Err(ApiError::user_not_found());
   }
-  for user in &users {
-    // A DM involving a guest needs a conversation the two already share (PLAN.md §12).
-    let involves_guest = is_guest(caller) || user.kind == teamcraft_proto::UserKind::Guest;
-    if involves_guest && sharing.as_ref().is_some_and(|shared| !shared.contains(&user.id)) {
-      return Err(ApiError::user_not_found());
+  // A DM involving a guest needs a conversation the guest already shares with every other
+  // participant (PLAN.md §12): in a group DM, two members who both know the guest still must not
+  // meet a guest who knows only one of them.
+  if state.settings.policy.guests_dm_only_with_shared_conversations {
+    let guests: Vec<UserId> = users
+      .iter()
+      .filter(|user| user.kind == teamcraft_proto::UserKind::Guest)
+      .map(|user| user.id)
+      .chain(is_guest(caller).then_some(caller.user.id))
+      .collect();
+    for guest in guests {
+      let known = state.database.users_sharing_conversation(guest).await?;
+      let everybody = others.iter().copied().chain([caller.user.id]);
+      if everybody
+        .filter(|participant| *participant != guest)
+        .any(|participant| !known.contains(&participant))
+      {
+        return Err(ApiError::user_not_found());
+      }
     }
   }
 
