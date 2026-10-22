@@ -203,6 +203,8 @@ pub trait ChatBackend {
   fn delete_category(&self, _space: SpaceId, _category: CategoryId) {}
   /// Adds a person with an explicit history choice ("share history" toggle, e2ee.md §4.3).
   fn add_member_with_history(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
+  /// Removes a person from a conversation (and rotates its keys).
+  fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
   /// The conversation includes people from outside the organization (the "external" badge).

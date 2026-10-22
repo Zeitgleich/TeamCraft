@@ -372,6 +372,10 @@ pub enum ChatAction {
     space: SpaceId,
     category: CategoryId,
   },
+  RemoveMember {
+    conversation: ConversationId,
+    user: UserId,
+  },
   AddMemberWithHistory {
     conversation: ConversationId,
     user: UserId,
@@ -460,6 +464,7 @@ impl ChatAction {
         user,
         history,
       } => backend.add_member_with_history(conversation, user, history),
+      Self::RemoveMember { conversation, user } => backend.remove_member(conversation, user),
       Self::InviteToSpace { invite } => backend.invite_to_space(invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
       Self::DeleteSavedSearch { id } => backend.delete_saved_search(id),

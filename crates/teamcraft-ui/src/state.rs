@@ -108,6 +108,10 @@ pub struct AppState {
   pub reply_target: RwSignal<Option<ReplyTarget>>,
   /// The person whose direct conversation was asked for and is not there yet.
   pub pending_dm: RwSignal<Option<UserId>>,
+  /// Short messages shown over the app until dismissed (reminders).
+  pub toasts: RwSignal<Vec<String>>,
+  /// A conversation to open as soon as it appears in the lists (after joining it).
+  pub pending_open: RwSignal<Option<ConversationId>>,
   pub jump_to_latest: RwSignal<u64>,
   /// A request to scroll a conversation's feed to a message index (jump to date).
   pub jump_to_index: RwSignal<Option<(ConversationId, usize)>>,
@@ -133,6 +137,8 @@ impl AppState {
       device_prompt: RwSignal::new(None),
       reply_target: RwSignal::new(None),
       pending_dm: RwSignal::new(None),
+      toasts: RwSignal::new(Vec::new()),
+      pending_open: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
       settings,
@@ -143,6 +149,12 @@ impl AppState {
   /// the desktop shell), so views re-read.
   pub fn backend_changed(&self) {
     self.revision.update(|revision| *revision += 1);
+    if let Some(conversation) = self.pending_open.get_untracked()
+      && self.read(|backend| backend.conversation(conversation)).is_some()
+    {
+      self.pending_open.set(None);
+      self.open_conversation(conversation);
+    }
     if let Some(user) = self.pending_dm.get_untracked()
       && let Some(conversation) = self.direct_with(user)
     {

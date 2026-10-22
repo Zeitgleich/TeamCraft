@@ -784,6 +784,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::MarkRead { conversation });
   }
 
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::RemoveMember { conversation, user });
+  }
+
   fn open_dm(&self, user: UserId) {
     self.act(ChatAction::OpenDm { user });
   }

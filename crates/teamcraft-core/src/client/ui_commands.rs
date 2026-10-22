@@ -151,6 +151,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .add_member_with_history(conversation, user, Some(history))
           .await
       },
+      CoreCommand::RemoveMember { conversation, user } => self.remove_member(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,
         email,

@@ -155,6 +155,10 @@ pub enum CoreCommand {
     user: UserId,
     history: HistoryPolicy,
   },
+  RemoveMember {
+    conversation: ConversationId,
+    user: UserId,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -791,6 +795,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       user,
       history,
     });
+  }
+
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::RemoveMember { conversation, user });
   }
 
   fn invite_to_space(&self, invite: SpaceInvite) {

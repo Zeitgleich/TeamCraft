@@ -236,6 +236,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.mark_read(conversation);
   }
 
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.chat.remove_member(conversation, user);
+  }
+
   fn open_dm(&self, user: UserId) {
     self.chat.open_dm(user);
   }

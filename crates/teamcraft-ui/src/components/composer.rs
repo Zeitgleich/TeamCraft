@@ -6,11 +6,18 @@ use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, O
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::composer_commands::{self, Notice, Outcome};
 use crate::components::icons::{Icon, IconName};
+use crate::components::rich_text::RichText;
+use crate::groups::use_groups;
 use crate::i18n::use_i18n;
+use crate::mention::{self, TriggerKind};
+use crate::model::User;
 use crate::model::{ConversationId, ThreadId};
 use crate::notifier::needs_channel_confirmation;
 use crate::settings::SendMode;
+use crate::slash::{self, Parsed};
 use crate::state::use_app_state;
 
 /// How long typing pauses before the draft is stored.
@@ -26,6 +33,87 @@ struct PendingFile {
   name: String,
   media_type: String,
   bytes: Vec<u8>,
+}
+
+/// One line in the picker under the input.
+#[derive(Clone, Debug, PartialEq)]
+struct Suggestion {
+  /// What replaces the typed word (after the `@` or `/`).
+  insert: String,
+  label: String,
+  detail: String,
+  person: Option<User>,
+}
+
+const MAX_SUGGESTIONS: usize = 8;
+
+/// People and groups whose name starts with, or contains, what was typed after `@`.
+fn mention_suggestions(
+  query: &str,
+  people: &[User],
+  groups: &[teamcraft_proto::UserGroupResponse],
+  channel_label: &str,
+) -> Vec<Suggestion> {
+  let needle = query.to_lowercase();
+  let rank = |names: &[&str]| -> Option<u8> {
+    names
+      .iter()
+      .map(|name| name.to_lowercase())
+      .filter_map(|name| {
+        if name.starts_with(&needle) {
+          Some(0)
+        } else if name.contains(&needle) {
+          Some(1)
+        } else {
+          None
+        }
+      })
+      .min()
+  };
+  let mut ranked: Vec<(u8, Suggestion)> = Vec::new();
+  if "channel".starts_with(&needle) {
+    ranked.push((
+      0,
+      Suggestion {
+        insert: "channel".to_owned(),
+        label: "@channel".to_owned(),
+        detail: channel_label.to_owned(),
+        person: None,
+      },
+    ));
+  }
+  for user in people.iter().filter(|user| !user.is_bot) {
+    if let Some(score) = rank(&[&user.username, &user.display_name]) {
+      ranked.push((
+        score,
+        Suggestion {
+          insert: user.username.clone(),
+          label: user.display_name.clone(),
+          detail: format!("@{}", user.username),
+          person: Some(user.clone()),
+        },
+      ));
+    }
+  }
+  for group in groups {
+    if let Some(score) = rank(&[&group.handle, &group.name]) {
+      ranked.push((
+        score,
+        Suggestion {
+          insert: group.handle.clone(),
+          label: group.name.clone(),
+          detail: format!("@{}", group.handle),
+          person: None,
+        },
+      ));
+    }
+  }
+  ranked.sort_by_key(|(score, suggestion)| (*score, suggestion.label.to_lowercase()));
+  ranked
+    .into_iter()
+    .map(|(_, suggestion)| suggestion)
+    .take(MAX_SUGGESTIONS)
+    .collect()
 }
 
 /// Message composer for a channel or, with `maybe_thread`, for a thread reply.
@@ -48,6 +136,18 @@ pub fn Composer(
   let attachments = RwSignal::new(Vec::<PendingFile>::new());
   let upload_error = RwSignal::new(None::<String>);
   let is_drag_over = RwSignal::new(false);
+  let notice = RwSignal::new(None::<Notice>);
+  let suggestions = RwSignal::new(Vec::<Suggestion>::new());
+  let selected_suggestion = RwSignal::new(0_usize);
+  let indexed_suggestions = Memo::new(move |_| {
+    suggestions
+      .get()
+      .into_iter()
+      .enumerate()
+      .collect::<Vec<(usize, Suggestion)>>()
+  });
+  let live_text = RwSignal::new(String::new());
+  let show_formatting = Memo::new(move |_| state.settings.prefs.get().composer.show_formatting);
 
   let attachment_list = move || {
     attachments
@@ -108,9 +208,49 @@ pub fn Composer(
     let Some(element) = input.get_untracked() else {
       return;
     };
-    let text = element.value();
+    let mut text = element.value();
     if text.trim().is_empty() && attachments.with_untracked(Vec::is_empty) {
       return;
+    }
+    // Slash commands run on the client; a command that sends something falls through to the send.
+    if attachments.with_untracked(Vec::is_empty) {
+      match slash::parse(&text) {
+        Parsed::Invalid(error) => {
+          notice.set(Some(Notice::Text(composer_commands::explain_error(i18n, &error))));
+          return;
+        },
+        Parsed::Command(command) => {
+          let outcome = composer_commands::run(state, i18n, conversation, command);
+          let sends = match outcome {
+            Outcome::Send(body) => {
+              text = body;
+              notice.set(None);
+              true
+            },
+            Outcome::Notice(shown) => {
+              notice.set(Some(shown));
+              false
+            },
+            Outcome::Done => {
+              notice.set(None);
+              false
+            },
+          };
+          if !sends {
+            element.set_value("");
+            suggestions.set(Vec::new());
+            live_text.set(String::new());
+            is_empty.set(true);
+            state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
+            resize();
+            return;
+          }
+        },
+        Parsed::Message(message) => text = message,
+      }
+    }
+    if state.settings.prefs.get_untracked().composer.convert_emoticons {
+      text = crate::emoji::convert(&text);
     }
     if !is_confirmed {
       let members = state
@@ -160,6 +300,8 @@ pub fn Composer(
     element.set_value("");
     draft_generation.update(|generation| *generation += 1);
     state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
+    suggestions.set(Vec::new());
+    live_text.set(String::new());
     attachments.set(Vec::new());
     is_empty.set(true);
     resize();
@@ -169,8 +311,103 @@ pub fn Composer(
   };
   let send = move || send_checked(false);
 
+  // The picker under the input: people and user groups after `@`, commands after a leading `/`.
+  let groups = use_groups();
+  let refresh_suggestions = move || {
+    let Some(element) = input.get_untracked() else {
+      return;
+    };
+    let cursor = element.selection_start().ok().flatten().unwrap_or(0) as usize;
+    let Some(found) = mention::trigger(&element.value(), cursor) else {
+      suggestions.set(Vec::new());
+      return;
+    };
+    let list = match found.kind {
+      TriggerKind::Command => slash::matching_commands(&found.query)
+        .into_iter()
+        .map(|(name, usage)| Suggestion {
+          insert: name.to_owned(),
+          label: format!("/{name} {usage}").trim_end().to_owned(),
+          detail: String::new(),
+          person: None,
+        })
+        .collect(),
+      TriggerKind::Mention => {
+        let people = state.read(|backend| backend.users());
+        let groups = groups.map(|hub| hub.groups()).unwrap_or_default();
+        mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
+      },
+    };
+    selected_suggestion.set(0);
+    suggestions.set(list);
+  };
+  let accept_suggestion = move |index: usize| {
+    let Some(chosen) = suggestions.with_untracked(|list| list.get(index).cloned()) else {
+      return;
+    };
+    let Some(element) = input.get_untracked() else {
+      return;
+    };
+    let value = element.value();
+    let cursor = element.selection_start().ok().flatten().unwrap_or(0) as usize;
+    if let Some(found) = mention::trigger(&value, cursor) {
+      let (text, at) = mention::complete(&value, &found, cursor, &chosen.insert);
+      element.set_value(&text);
+      drop(element.set_selection_range(at as u32, at as u32));
+      is_empty.set(text.trim().is_empty());
+      save_draft();
+    }
+    suggestions.set(Vec::new());
+    drop(element.focus());
+  };
+  // Formatting buttons wrap the selection in Markdown markers.
+  let wrap = move |left: &'static str, right: &'static str| {
+    let Some(element) = input.get_untracked() else {
+      return;
+    };
+    let start = element.selection_start().ok().flatten().unwrap_or(0) as usize;
+    let end = element.selection_end().ok().flatten().unwrap_or(0) as usize;
+    let (text, from, to) = mention::wrap_selection(&element.value(), start, end, left, right);
+    element.set_value(&text);
+    drop(element.set_selection_range(from as u32, to as u32));
+    drop(element.focus());
+    is_empty.set(text.trim().is_empty());
+    live_text.set(text);
+    resize();
+    save_draft();
+  };
+
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
-    if ev.key() != "Enter" || ev.is_composing() {
+    if ev.is_composing() {
+      return;
+    }
+    let listed = suggestions.with_untracked(Vec::len);
+    if listed > 0 {
+      match ev.key().as_str() {
+        "ArrowDown" => {
+          ev.prevent_default();
+          selected_suggestion.update(|at| *at = (*at + 1) % listed);
+          return;
+        },
+        "ArrowUp" => {
+          ev.prevent_default();
+          selected_suggestion.update(|at| *at = (*at + listed - 1) % listed);
+          return;
+        },
+        "Enter" | "Tab" => {
+          ev.prevent_default();
+          accept_suggestion(selected_suggestion.get_untracked());
+          return;
+        },
+        "Escape" => {
+          ev.prevent_default();
+          suggestions.set(Vec::new());
+          return;
+        },
+        _ => {},
+      }
+    }
+    if ev.key() != "Enter" {
       return;
     }
     let modifier = ev.ctrl_key() || ev.meta_key();
@@ -196,6 +433,15 @@ pub fn Composer(
     );
     resize();
     save_draft();
+    refresh_suggestions();
+    if show_formatting.get_untracked() {
+      live_text.set(
+        input
+          .get_untracked()
+          .map(|element| element.value())
+          .unwrap_or_default(),
+      );
+    }
   };
 
   // Reads the files into memory; the core encrypts and uploads them when the message is sent.
@@ -349,6 +595,55 @@ pub fn Composer(
               }
             })
         }}
+        {move || {
+          notice.get().map(|shown| match shown {
+            Notice::Text(message) => view! { <p class="composer-notice" role="status">{message}</p> }.into_any(),
+            Notice::Help => view! {
+              <div class="composer-notice composer-help" role="status">
+                <p>{move || i18n.t("slash-help-title")}</p>
+                <ul>
+                  {slash::COMMANDS
+                    .iter()
+                    .map(|(name, usage)| view! { <li><code>{format!("/{name} {usage}").trim_end().to_owned()}</code></li> })
+                    .collect_view()}
+                </ul>
+              </div>
+            }
+            .into_any(),
+          })
+        }}
+        <Show when=move || !suggestions.with(Vec::is_empty) fallback=|| ()>
+          <ul class="suggestions" role="listbox" aria-label=move || i18n.t("composer-suggestions")>
+            <For each=move || indexed_suggestions.get() key=|(index, item)| (*index, item.label.clone()) let:entry>
+              {
+                let (index, item) = entry;
+                view! {
+                  <li role="option" aria-selected=move || (selected_suggestion.get() == index).to_string()>
+                    <button
+                      type="button"
+                      class="suggestion"
+                      class:current=move || selected_suggestion.get() == index
+                      on:mousedown=move |ev| { ev.prevent_default(); accept_suggestion(index); }
+                    >
+                      {item.person.clone().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}
+                      <span translate="no">{item.label.clone()}</span>
+                      <span class="suggestion-detail" translate="no">{item.detail.clone()}</span>
+                    </button>
+                  </li>
+                }
+              }
+            </For>
+          </ul>
+        </Show>
+        <Show when=move || show_formatting.get() fallback=|| ()>
+          <div class="format-toolbar" role="toolbar" aria-label=move || i18n.t("composer-format")>
+            <button type="button" class="icon-btn" title=move || i18n.t("format-bold") aria-label=move || i18n.t("format-bold") on:click=move |_| wrap("**", "**")><strong>"B"</strong></button>
+            <button type="button" class="icon-btn" title=move || i18n.t("format-italic") aria-label=move || i18n.t("format-italic") on:click=move |_| wrap("_", "_")><em>"I"</em></button>
+            <button type="button" class="icon-btn" title=move || i18n.t("format-strike") aria-label=move || i18n.t("format-strike") on:click=move |_| wrap("~~", "~~")><s>"S"</s></button>
+            <button type="button" class="icon-btn" title=move || i18n.t("format-code") aria-label=move || i18n.t("format-code") on:click=move |_| wrap("`", "`")><code>"<>"</code></button>
+            <button type="button" class="icon-btn" title=move || i18n.t("format-code-block") aria-label=move || i18n.t("format-code-block") on:click=move |_| wrap("```\n", "\n```")><code>"{}"</code></button>
+          </div>
+        </Show>
         <div class="composer-box">
           <label class="visually-hidden" for=format!("composer-{conversation}-{}", maybe_thread.map_or_else(String::new, |thread| thread.to_string()))>
             {move || i18n.t("composer-label")}
@@ -366,6 +661,12 @@ pub fn Composer(
             node_ref=input
             on:keydown=on_keydown
             on:input=on_input
+            on:click=move |_| refresh_suggestions()
+            on:keyup=move |ev| {
+              if matches!(ev.key().as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+                refresh_suggestions();
+              }
+            }
             on:paste=on_paste
             data-composer=if maybe_thread.is_some() { "thread" } else { "channel" }
           ></textarea>
@@ -392,6 +693,19 @@ pub fn Composer(
             >
               <Icon name=IconName::Smile />
             </button>
+            <button
+              type="button"
+              class="icon-btn"
+              aria-pressed=move || show_formatting.get().to_string()
+              aria-label=move || i18n.t("composer-format-toggle")
+              title=move || i18n.t("composer-format-toggle")
+              on:click=move |_| {
+                state.settings.prefs.update(|prefs| prefs.composer.show_formatting = !prefs.composer.show_formatting);
+                live_text.set(input.get_untracked().map(|element| element.value()).unwrap_or_default());
+              }
+            >
+              <span aria-hidden="true">"Aa"</span>
+            </button>
             <span class="composer-hint">
               {move || match state.settings.send_mode.get() {
                 SendMode::Enter => i18n.t("composer-hint-enter"),
@@ -409,6 +723,11 @@ pub fn Composer(
             </button>
           </div>
         </div>
+        <Show when=move || show_formatting.get() && !live_text.with(|text| text.trim().is_empty()) fallback=|| ()>
+          <div class="composer-preview" aria-label=move || i18n.t("composer-preview")>
+            {move || view! { <RichText body=live_text.get() me=state.me().username /> }}
+          </div>
+        </Show>
         <p class="markdown-hint">{move || i18n.t("composer-markdown-hint")}</p>
       </Show>
     </div>

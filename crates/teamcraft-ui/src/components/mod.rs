@@ -14,6 +14,7 @@ pub mod call_screen;
 pub mod call_video;
 pub mod channel_view;
 pub mod composer;
+pub mod composer_commands;
 pub mod directory_view;
 pub mod file_views;
 pub mod guest_join;

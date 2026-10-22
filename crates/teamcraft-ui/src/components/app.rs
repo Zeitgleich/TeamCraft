@@ -18,6 +18,7 @@ use crate::components::channel_view::ChannelView;
 use crate::components::directory_view::DirectoryView;
 use crate::components::file_views::{FilesPanel, Gallery};
 use crate::components::guest_join::GuestJoinPage;
+use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
@@ -101,6 +102,22 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if !tauri::is_available() {
     open_conversations_from_notifications(state);
   }
+  let indexed_toasts = Memo::new(move |_| {
+    state
+      .toasts
+      .get()
+      .into_iter()
+      .enumerate()
+      .collect::<Vec<(usize, String)>>()
+  });
+  // `/remind` reminders come due while the app is open.
+  crate::reactive::use_interval(REMINDER_CHECK_MS, move || {
+    for reminder in crate::components::composer_commands::due_reminders(now_ms()) {
+      let message = i18n.t_with("reminder-due", &[("text", &reminder.text)]);
+      state.toasts.update(|list| list.push(message.clone()));
+      leptos::task::spawn_local(async move { tauri::notify("TeamCraft", Some(&message)).await });
+    }
+  });
   if tauri::is_available() {
     connect_calls(state);
   }
@@ -169,6 +186,23 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         _ => None,
       }}
       <IncomingCallDialog />
+      <Show when=move || !state.toasts.with(Vec::is_empty) fallback=|| ()>
+        <div class="toasts" role="status">
+          <For each=move || indexed_toasts.get() key=|(index, text)| (*index, text.clone()) let:entry>
+            {
+              let (index, text) = entry;
+              view! {
+                <div class="toast">
+                  <span>{text}</span>
+                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.toasts.update(|list| { if index < list.len() { list.remove(index); } })>
+                    <Icon name=IconName::Close />
+                  </button>
+                </div>
+              }
+            }
+          </For>
+        </div>
+      </Show>
       {move || match state.overlay.get() {
         Overlay::QuickSwitcher => view! { <QuickSwitcher /> }.into_any(),
         Overlay::CustomStatus => view! { <CustomStatusDialog /> }.into_any(),
@@ -441,6 +475,8 @@ fn connect_calls(state: AppState) {
 
 /// How often the idle check runs.
 const IDLE_CHECK_MS: u64 = 10_000;
+/// How often `/remind` reminders are checked.
+const REMINDER_CHECK_MS: u64 = 15_000;
 const MS_PER_MINUTE: f64 = 60_000.0;
 
 /// No input for the configured time marks this device idle (the server then shows the user as
