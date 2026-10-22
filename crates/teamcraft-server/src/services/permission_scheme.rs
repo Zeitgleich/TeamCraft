@@ -251,7 +251,8 @@ async fn apply(
   if request.changes.len() > MAX_CHANGES_PER_REQUEST {
     return Err(ApiError::InvalidRequest("too many changes".into()));
   }
-  let mut edits = Vec::with_capacity(request.changes.len());
+  // Grows with the checked changes; never sized from the request.
+  let mut edits = Vec::new();
   for change in &request.changes {
     if matches!(change.effect, OverrideEffect::Unknown(_)) {
       return Err(ApiError::InvalidRequest("unknown effect".into()));
