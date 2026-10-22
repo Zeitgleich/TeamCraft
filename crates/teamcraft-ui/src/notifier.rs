@@ -72,7 +72,8 @@ pub fn decide(input: &PolicyInput) -> Decision {
     return Decision::Skip(SkipReason::Viewing);
   }
   let id = input.conversation.id.to_string();
-  if input.prefs.is_muted(&id) {
+  let maybe_space = input.conversation.maybe_space.map(|space| space.to_string());
+  if input.prefs.is_muted_in(&id, maybe_space.as_deref()) {
     return Decision::Skip(SkipReason::Muted);
   }
   if input.me.presence == PresenceStatus::DoNotDisturb || is_in_dnd_schedule(input) {
@@ -89,7 +90,7 @@ pub fn decide(input: &PolicyInput) -> Decision {
       return Decision::Skip(SkipReason::ThreadNotFollowedByPreference);
     }
   }
-  match input.prefs.effective_level(&id) {
+  match input.prefs.effective_level_in(&id, maybe_space.as_deref()) {
     NotifyLevel::Nothing => Decision::Skip(SkipReason::LevelNothing),
     NotifyLevel::All => Decision::Notify,
     NotifyLevel::Mentions => {
@@ -466,6 +467,35 @@ mod tests {
       decide(&input(&prefs, ConversationKind::Public, "@alice")),
       Decision::Skip(SkipReason::Muted)
     );
+  }
+
+  #[test]
+  fn a_muted_space_silences_its_channels_unless_they_have_their_own_setting() {
+    let space = id_from_raw::<crate::model::SpaceId>(3);
+    let mut prefs = NotificationPrefs::default();
+    prefs.set_space(
+      &space.to_string(),
+      ConversationNotify {
+        maybe_level: Some(NotifyLevel::Nothing),
+        mute: MuteFor::Off,
+      },
+    );
+    let mut candidate = input(&prefs, ConversationKind::Public, "@alice");
+    let mut in_space = candidate.conversation.clone();
+    in_space.maybe_space = Some(space);
+    candidate.conversation = Box::leak(Box::new(in_space));
+    assert_eq!(decide(&candidate), Decision::Skip(SkipReason::Muted));
+
+    let mut own = prefs.clone();
+    own.set_conversation(
+      &candidate.conversation.id.to_string(),
+      ConversationNotify {
+        maybe_level: Some(NotifyLevel::All),
+        mute: MuteFor::Off,
+      },
+    );
+    candidate.prefs = Box::leak(Box::new(own));
+    assert_eq!(decide(&candidate), Decision::Notify);
   }
 
   #[test]

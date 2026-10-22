@@ -208,6 +208,11 @@ pub enum ConversationEvent {
   Unarchived,
   MadePrivate,
   MadePublic,
+  /// The channel moved to another space (named here as the mover saw it).
+  Moved {
+    #[serde(default)]
+    space: String,
+  },
   /// From a newer client.
   #[serde(other)]
   Unknown,

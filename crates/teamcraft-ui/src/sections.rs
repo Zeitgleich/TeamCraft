@@ -1,6 +1,6 @@
 //! Pure grouping of conversations into sidebar sections.
 
-use crate::model::{Conversation, SidebarCategory};
+use crate::model::{Conversation, SidebarCategory, SpaceId};
 use crate::prefs::SidebarSort;
 
 /// Sidebar sections in display order.
@@ -122,6 +122,57 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   sections
 }
 
+/// The channels of one space in the grouped sidebar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpaceGroup {
+  pub space: SpaceId,
+  pub name: String,
+  /// Channels first, then integrations; unread and favorite ones are in [`GroupedSidebar::top`].
+  pub conversations: Vec<Conversation>,
+}
+
+/// The "all spaces in one sidebar" layout: unread and favorite conversations of every space on top,
+/// then one group per space, then the direct messages.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupedSidebar {
+  pub top: Vec<Section>,
+  pub spaces: Vec<SpaceGroup>,
+  pub direct: Vec<Section>,
+}
+
+/// Splits [`build_sections`] by space. `spaces` gives the order and names of the groups; a channel
+/// of a space not listed there goes into no group. Spaces without channels are omitted.
+pub fn build_grouped(
+  spaces: &[(SpaceId, String)],
+  conversations: &[Conversation],
+  options: &SidebarOptions,
+) -> GroupedSidebar {
+  let mut top = Vec::new();
+  let mut direct = Vec::new();
+  let mut channels: Vec<Conversation> = Vec::new();
+  for section in build_sections(conversations, options) {
+    match section.kind {
+      SectionKind::Unreads | SectionKind::Favorites => top.push(section),
+      SectionKind::DirectMessages => direct.push(section),
+      SectionKind::Channels | SectionKind::Integrations => channels.extend(section.conversations),
+    }
+  }
+  let spaces = spaces
+    .iter()
+    .map(|(space, name)| SpaceGroup {
+      space: *space,
+      name: name.clone(),
+      conversations: channels
+        .iter()
+        .filter(|conversation| conversation.maybe_space == Some(*space))
+        .cloned()
+        .collect(),
+    })
+    .filter(|group| !group.conversations.is_empty())
+    .collect();
+  GroupedSidebar { top, spaces, direct }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -178,6 +229,39 @@ mod tests {
       .collect();
     assert_eq!(names, ["Amy", "bob"]);
     assert_eq!(sections[0].hidden_count, 1);
+  }
+
+  #[test]
+  fn the_grouped_layout_splits_channels_by_space() {
+    let (a, b) = (id_from_raw::<SpaceId>(1), id_from_raw::<SpaceId>(2));
+    let mut list = vec![
+      conversation(1, SidebarCategory::Channels, 0, false),
+      conversation(2, SidebarCategory::Channels, 4, false),
+      conversation(3, SidebarCategory::Integrations, 0, false),
+      conversation(4, SidebarCategory::DirectMessages, 0, false),
+      conversation(5, SidebarCategory::Channels, 0, true),
+    ];
+    list[0].maybe_space = Some(a);
+    list[1].maybe_space = Some(b);
+    list[2].maybe_space = Some(a);
+    list[4].maybe_space = Some(b);
+    let spaces = [
+      (a, "Project A".to_owned()),
+      (b, "Project B".to_owned()),
+      (id_from_raw(3), "Empty".to_owned()),
+    ];
+    let grouped = build_grouped(&spaces, &list, &SidebarOptions::plain(true));
+
+    let top: Vec<SectionKind> = grouped.top.iter().map(|section| section.kind).collect();
+    assert_eq!(top, [SectionKind::Unreads, SectionKind::Favorites]);
+    let names: Vec<&str> = grouped.spaces.iter().map(|group| group.name.as_str()).collect();
+    assert_eq!(
+      names,
+      ["Project A"],
+      "Project B only has an unread and a favorite channel, both on top"
+    );
+    assert_eq!(grouped.spaces[0].conversations.len(), 2);
+    assert_eq!(grouped.direct[0].conversations.len(), 1);
   }
 
   #[test]

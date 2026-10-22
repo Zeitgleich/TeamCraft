@@ -7,8 +7,8 @@ use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
-use crate::model::{Conversation, ConversationKind, PresenceStatus};
-use crate::sections::{SectionKind, build_sections};
+use crate::model::{Conversation, ConversationKind, PresenceStatus, SpaceId};
+use crate::sections::{GroupedSidebar, SectionKind, SpaceGroup, build_grouped, build_sections};
 use crate::state::{MainView, Overlay, use_app_state};
 
 /// Channel sidebar: search, threads, then the categories of the current space.
@@ -28,28 +28,68 @@ pub fn Sidebar() -> impl IntoView {
         .map(|s| s.name)
     })
   });
+  let is_grouped = Memo::new(move |_| {
+    state
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.is_grouped_by_space)
+  });
+  let spaces = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .spaces()
+        .into_iter()
+        .map(|space| (space.id, space.name))
+        .collect::<Vec<_>>()
+    })
+  });
   let conversations = Memo::new(move |_| {
     let space = state.space.get();
+    let is_grouped = is_grouped.get();
     state.read(|backend| {
-      let mut list = backend.space_conversations(space);
+      let mut list = if is_grouped {
+        backend
+          .spaces()
+          .into_iter()
+          .flat_map(|space| backend.space_conversations(space.id))
+          .collect()
+      } else {
+        backend.space_conversations(space)
+      };
       list.extend(backend.direct_conversations());
       list
     })
   });
+  let collapsed_spaces = RwSignal::new(HashSet::<SpaceId>::new());
   let show_all_dms = RwSignal::new(false);
-  let sections = Memo::new(move |_| {
+  // Conversations with the notification settings applied: one muted there (or through its space)
+  // looks muted here too.
+  let listed = Memo::new(move |_| {
     let prefs = state.settings.prefs.get();
-    let limit = if show_all_dms.get() {
+    let mut list = conversations.get();
+    for conversation in &mut list {
+      let maybe_space = conversation.maybe_space.map(|space| space.to_string());
+      conversation.is_muted |= prefs
+        .notifications
+        .is_muted_in(&conversation.id.to_string(), maybe_space.as_deref());
+    }
+    list
+  });
+  let dm_limit = move || {
+    if show_all_dms.get() {
       0
     } else {
-      prefs.sidebar.dm_limit as usize
-    };
-    let mut list = conversations.get();
-    // A conversation muted in the notification settings looks muted here too.
-    for conversation in &mut list {
-      conversation.is_muted |= prefs.notifications.is_muted(&conversation.id.to_string());
+      state.settings.prefs.with(|prefs| prefs.sidebar.dm_limit as usize)
     }
-    build_sections(&list, &state.settings.sidebar_options(limit))
+  };
+  let sections =
+    Memo::new(move |_| build_sections(&listed.get(), &state.settings.sidebar_options(dm_limit())));
+  let grouped = Memo::new(move |_| {
+    build_grouped(
+      &spaces.get(),
+      &listed.get(),
+      &state.settings.sidebar_options(dm_limit()),
+    )
   });
   let thread_unread = Memo::new(move |_| {
     state.read(|backend| {
@@ -65,7 +105,7 @@ pub fn Sidebar() -> impl IntoView {
     <nav class="sidebar" aria-label=move || i18n.t("sidebar-label")>
       <div class="sidebar-head">
         <h2 class="space-name" translate="no">
-          {move || space_name.get().unwrap_or_default()}
+          {move || if is_grouped.get() { i18n.t("sidebar-all-spaces") } else { space_name.get().unwrap_or_default() }}
         </h2>
         <button class="icon-btn" aria-label=move || i18n.t("browse-title") title=move || i18n.t("browse-title") on:click=move |_| state.overlay.set(Overlay::BrowseChannels(state.space.get_untracked()))>
           <Icon name=IconName::List />
@@ -73,9 +113,11 @@ pub fn Sidebar() -> impl IntoView {
         <button class="icon-btn" aria-label=move || i18n.t("channel-new-title") title=move || i18n.t("channel-new-title") on:click=move |_| state.overlay.set(Overlay::NewChannel(state.space.get_untracked()))>
           <Icon name=IconName::Plus />
         </button>
-        <button class="icon-btn" aria-label=move || i18n.t("space-settings-title") title=move || i18n.t("space-settings-title") on:click=move |_| state.overlay.set(Overlay::SpaceSettings(state.space.get_untracked()))>
-          <Icon name=IconName::Sliders />
-        </button>
+        <Show when=move || !is_grouped.get() fallback=|| ()>
+          <button class="icon-btn" aria-label=move || i18n.t("space-settings-title") title=move || i18n.t("space-settings-title") on:click=move |_| state.overlay.set(Overlay::SpaceSettings(state.space.get_untracked()))>
+            <Icon name=IconName::Sliders />
+          </button>
+        </Show>
       </div>
       <button class="jump-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
         <Icon name=IconName::Search />
@@ -137,19 +179,158 @@ pub fn Sidebar() -> impl IntoView {
         <span class="sb-name">{move || i18n.t("sidebar-search")}</span>
       </button>
       <div class="sidebar-scroll">
-        <For each=move || sections.get() key=|section| {
-          let state: Vec<_> = section
-            .conversations
-            .iter()
-            .map(|c| (c.id, c.unread_count, c.mention_count, c.is_favorite))
-            .collect();
-          (section.kind, state)
-        } let:section>
-          <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all_dms collapsed=collapsed />
-        </For>
+        {move || {
+          if is_grouped.get() {
+            view! { <GroupedSections grouped=grouped show_all=show_all_dms collapsed=collapsed collapsed_spaces=collapsed_spaces /> }
+              .into_any()
+          } else {
+            view! {
+              <For each=move || sections.get() key=section_key let:section>
+                <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all_dms collapsed=collapsed />
+              </For>
+            }
+              .into_any()
+          }
+        }}
       </div>
       <CallPill />
     </nav>
+  }
+}
+
+/// What makes a section look different on screen: its kind and the state of its rows.
+type SectionKey = (SectionKind, Vec<(crate::model::ConversationId, u32, u32, bool)>);
+
+fn section_key(section: &crate::sections::Section) -> SectionKey {
+  let rows = section
+    .conversations
+    .iter()
+    .map(|c| (c.id, c.unread_count, c.mention_count, c.is_favorite))
+    .collect();
+  (section.kind, rows)
+}
+
+/// The grouped layout: unread and favorite conversations, one collapsible group per space, then
+/// the direct messages.
+#[component]
+fn GroupedSections(
+  grouped: Memo<GroupedSidebar>,
+  show_all: RwSignal<bool>,
+  collapsed: RwSignal<HashSet<SectionKind>>,
+  collapsed_spaces: RwSignal<HashSet<SpaceId>>,
+) -> impl IntoView {
+  view! {
+    <For each=move || grouped.get().top key=section_key let:section>
+      <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all collapsed=collapsed />
+    </For>
+    <For
+      each=move || grouped.get().spaces
+      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count)).collect::<Vec<_>>())
+      let:group
+    >
+      <SpaceGroupSection group=group collapsed=collapsed_spaces />
+    </For>
+    <For each=move || grouped.get().direct key=section_key let:section>
+      <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all collapsed=collapsed />
+    </For>
+  }
+}
+
+/// The channels of one space, under a header with the space's name, a mute toggle and its settings.
+#[component]
+fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let space = group.space;
+  let space_id = space.to_string();
+  let is_collapsed = move || collapsed.with(|set| set.contains(&space));
+  let mentions: u32 = group.conversations.iter().map(|conv| conv.mention_count).sum();
+  let list_id = format!("sb-space-{space_id}");
+  let is_muted = {
+    let space_id = space_id.clone();
+    Memo::new(move |_| {
+      state
+        .settings
+        .prefs
+        .with(|prefs| prefs.notifications.is_space_muted(&space_id))
+    })
+  };
+  let name = group.name.clone();
+  let toggle_label = {
+    let name = name.clone();
+    move || {
+      i18n.t_with(
+        if is_muted.get() {
+          "space-unmute"
+        } else {
+          "space-mute"
+        },
+        &[("name", &name)],
+      )
+    }
+  };
+
+  view! {
+    <section class="sb-section sb-space-group" class:muted=move || is_muted.get()>
+      <div class="sb-section-head sb-space-head">
+        <button
+          class="sb-space-toggle"
+          aria-expanded=move || (!is_collapsed()).to_string()
+          aria-controls=list_id.clone()
+          on:click=move |_| {
+            collapsed.update(|set| {
+              if !set.remove(&space) {
+                set.insert(space);
+              }
+            });
+          }
+        >
+          <Icon name=IconName::ChevronDown class="chevron" />
+          <span translate="no">{name.clone()}</span>
+          {move || (is_collapsed() && mentions > 0).then(|| view! { <span class="badge-count">{mentions}</span> })}
+        </button>
+        <button
+          class="icon-btn icon-btn-small"
+          aria-pressed=move || is_muted.get().to_string()
+          aria-label=toggle_label.clone()
+          title=toggle_label.clone()
+          on:click={
+            let space_id = space_id.clone();
+            move |_| {
+              state.settings.prefs.update(|prefs| {
+                let muted = prefs.notifications.is_space_muted(&space_id);
+                prefs.notifications.set_space(&space_id, space_mute_entry(!muted));
+              })
+            }
+          }
+        >
+          <Icon name=IconName::Bell />
+        </button>
+        <button
+          class="icon-btn icon-btn-small"
+          aria-label=move || i18n.t("space-settings-title")
+          title=move || i18n.t("space-settings-title")
+          on:click=move |_| state.overlay.set(Overlay::SpaceSettings(space))
+        >
+          <Icon name=IconName::Sliders />
+        </button>
+      </div>
+      <ul id=list_id hidden=is_collapsed>
+        {group.conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
+      </ul>
+    </section>
+  }
+}
+
+/// The notification entry of a muted (or unmuted) space: "mute space" silences it until undone.
+pub fn space_mute_entry(is_muted: bool) -> crate::prefs::ConversationNotify {
+  crate::prefs::ConversationNotify {
+    maybe_level: None,
+    mute: if is_muted {
+      crate::prefs::MuteFor::Forever
+    } else {
+      crate::prefs::MuteFor::Off
+    },
   }
 }
 

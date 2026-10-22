@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations SET space_id = $2, category_id = $3 WHERE id = $1 AND kind = 'channel'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3267f20e8f80e5d6dc159e3a4686367696459d55e7935c4f90f71535da7a0395"
+}

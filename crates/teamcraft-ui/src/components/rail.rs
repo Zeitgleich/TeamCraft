@@ -32,6 +32,12 @@ fn SpaceButton(space: Space) -> impl IntoView {
   let i18n = use_i18n();
   let id = space.id;
   let is_current = move || state.space.get() == id;
+  let is_muted = move || {
+    state
+      .settings
+      .prefs
+      .with(|prefs| prefs.notifications.is_space_muted(&id.to_string()))
+  };
   let label = {
     let name = space.name.clone();
     move || {
@@ -63,6 +69,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
       <button
         class="space-btn"
         class:current=is_current
+        class:muted=is_muted
         style:--hue=space.hue.to_string()
         aria-label=label.clone()
         title=label
@@ -84,7 +91,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
       >
         <span aria-hidden="true">{initials(&space.name)}</span>
         {(space.mention_count > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{space.mention_count}</span> })}
-        {(space.mention_count == 0 && space.unread_count > 0).then(|| view! { <span class="dot-unread" aria-hidden="true"></span> })}
+        {move || (space.mention_count == 0 && space.unread_count > 0 && !is_muted()).then(|| view! { <span class="dot-unread" aria-hidden="true"></span> })}
       </button>
     </li>
   }

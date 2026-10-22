@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE memberships SET notification_level = 'mentions', muted_until = NULL,\n                                notification_overridden = false\n         WHERE conversation_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bd2b178e07644e37ffbb6b0fae4f02aea05b16e59af466450e2acf3b6b51453e"
+}

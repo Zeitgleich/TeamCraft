@@ -31,7 +31,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
-  CategoryId, CreateSpaceRequest, HistoryPolicy, UpdateConversationRequest, UpdateSpaceRequest,
+  CategoryId, ConversationNotificationSettings, CreateSpaceRequest, HistoryPolicy, MoveChannelRequest,
+  UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
 };
 
 use crate::client::bookmarks_key;
@@ -151,6 +152,10 @@ pub enum CoreCommand {
   UpdateChannel {
     conversation: ConversationId,
     request: Box<UpdateConversationRequest>,
+  },
+  MoveChannel {
+    conversation: ConversationId,
+    request: MoveChannelRequest,
   },
   RefreshChannelBrowser {
     space: SpaceId,
@@ -359,13 +364,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
       unread_count: self.unread_count(response),
       mention_count: 0,
       is_favorite,
-      is_muted: response
-        .maybe_my_membership
-        .as_ref()
-        .is_some_and(|membership| membership.notification_level == NotificationLevel::None),
+      is_muted: self.is_muted(response),
       can_post: true,
       bookmarks: self.bookmarks_of(response.id),
     }
+  }
+
+  /// Whether notifications of the conversation are off now: its level is none or a mute time has
+  /// not passed yet, with the space's setting standing in for a conversation the member never
+  /// configured.
+  fn is_muted(&self, response: &ConversationResponse) -> bool {
+    let Some(membership) = &response.maybe_my_membership else {
+      return false;
+    };
+    let own = ConversationNotificationSettings {
+      level: membership.notification_level.clone(),
+      maybe_muted_until: membership.maybe_muted_until,
+      is_inherited: membership.is_notification_inherited,
+    };
+    let maybe_space: Option<SpaceResponse> = response
+      .maybe_space_id
+      .and_then(|space| self.read(records::get_json(&self.store, Table::Spaces, &space.to_string())));
+    let effective = effective_notifications(
+      &own,
+      maybe_space
+        .as_ref()
+        .and_then(|space| space.maybe_my_notifications.as_ref()),
+    );
+    effective.level == NotificationLevel::None
+      || effective
+        .maybe_muted_until
+        .is_some_and(|until| until.0 > self.now_ms())
   }
 
   /// The bookmarks bar of a conversation, as the newest applied `Bookmarks` message set it.
@@ -575,9 +604,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn spaces(&self) -> Vec<Space> {
     let spaces: Vec<SpaceResponse> = self.read(records::list_json(&self.store, Table::Spaces));
+    // A channel moved into a space keeps its members, who may not belong to the space itself.
+    let conversations = self.conversations_raw();
     spaces
       .into_iter()
-      .filter(|space| space.maybe_my_role.is_some())
+      .filter(|space| space.maybe_my_role.is_some() || has_channel_in(&conversations, space.id))
       .map(|space| Space {
         id: space.id,
         name: space.name,
@@ -996,8 +1027,16 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::Unarchived
     | ConversationEvent::MadePrivate
     | ConversationEvent::MadePublic
+    | ConversationEvent::Moved { .. }
     | ConversationEvent::Unknown => (MessageKind::User, sender),
   }
+}
+
+/// Whether the user is in a channel of the space.
+fn has_channel_in(conversations: &[ConversationResponse], space: SpaceId) -> bool {
+  conversations.iter().any(|conversation| {
+    conversation.maybe_space_id == Some(space) && conversation.maybe_my_membership.is_some()
+  })
 }
 
 fn is_deleted(message: &StoredMessage) -> bool {

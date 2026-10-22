@@ -41,12 +41,20 @@ impl Database {
     maybe_thread: Option<ThreadId>,
   ) -> Result<Vec<PushRecipientRow>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT m.user_id, m.notification_level, m.muted_until, u.presence_pref, u.dnd_until,
+      r#"SELECT m.user_id,
+                -- A conversation the member never configured follows their setting for its space.
+                CASE WHEN m.notification_overridden OR sm.notification_level IS NULL
+                     THEN m.notification_level ELSE sm.notification_level END AS "notification_level!",
+                CASE WHEN m.notification_overridden THEN m.muted_until
+                     ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,
+                u.presence_pref, u.dnd_until,
                 COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.dnd_schedule,
                 tf.user_id IS NOT NULL AS "is_following_thread!",
                 d.id AS device_id, d.push_provider AS "push_provider!", d.push_token AS "push_token!",
                 d.push_key AS "push_key!"
          FROM memberships m
+         JOIN conversations c ON c.id = m.conversation_id
+         LEFT JOIN space_members sm ON sm.space_id = c.space_id AND sm.user_id = m.user_id
          JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL
          JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL
          LEFT JOIN user_notification_settings s ON s.user_id = u.id

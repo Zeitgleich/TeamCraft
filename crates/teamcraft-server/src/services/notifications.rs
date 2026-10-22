@@ -1,16 +1,16 @@
 //! Notification preferences: per user (DND schedule, push mode, receipts, thread follow) and per
 //! conversation (level, mute time). The push routing reads them (`push::routing`).
 
-use teamcraft_db::{Conversation, StoredUserSettings};
+use teamcraft_db::{Conversation, StoredSpaceNotifications, StoredUserSettings};
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationNotificationSettings, DndSchedule, GatewayEvent,
   MINUTES_PER_DAY, MessageId, NotificationLevel, NotificationSettings, PushMode, ReadReceipt,
-  ReadReceiptsResponse, UserId,
+  ReadReceiptsResponse, SpaceId, SpaceNotificationSettings, UserId,
 };
 use time::OffsetDateTime;
 
-use super::access::load_conversation;
-use super::convert::{offset_date_time, unix_millis};
+use super::access::{load_conversation, load_space};
+use super::convert::{offset_date_time, space_notification_settings, unix_millis};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -74,6 +74,7 @@ pub async fn get_conversation_settings(
   Ok(ConversationNotificationSettings {
     level: membership.notification_level,
     maybe_muted_until: membership.maybe_muted_until.map(unix_millis),
+    is_inherited: membership.is_notification_inherited,
   })
 }
 
@@ -87,6 +88,13 @@ pub async fn put_conversation_settings(
   let access = load_conversation(state, caller, conversation).await?;
   if !access.is_member() {
     return Err(ApiError::Forbidden("not a member of this conversation".into()));
+  }
+  if request.is_inherited {
+    state
+      .database
+      .clear_conversation_notifications(conversation, caller.user.id)
+      .await?;
+    return get_conversation_settings(state, caller, conversation).await;
   }
   if matches!(request.level, NotificationLevel::Unknown(_)) {
     return Err(ApiError::InvalidRequest("unknown notification level".into()));
@@ -102,6 +110,48 @@ pub async fn put_conversation_settings(
     .set_conversation_notifications(conversation, caller.user.id, &request.level, maybe_muted_until)
     .await?;
   Ok(request)
+}
+
+/// The caller's notification setting for a whole space.
+pub async fn get_space_settings(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  space: SpaceId,
+) -> Result<SpaceNotificationSettings, ApiError> {
+  let access = load_space(state, caller, space).await?;
+  if access.view.maybe_role.is_none() {
+    return Err(ApiError::Forbidden("not a member of this space".into()));
+  }
+  Ok(space_notification_settings(&access.view.notifications))
+}
+
+/// Sets the caller's notification level and mute time for a whole space: the channels in it follow
+/// unless the caller configured them individually.
+pub async fn put_space_settings(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  space: SpaceId,
+  request: SpaceNotificationSettings,
+) -> Result<SpaceNotificationSettings, ApiError> {
+  get_space_settings(state, caller, space).await?;
+  if matches!(request.maybe_level, Some(NotificationLevel::Unknown(_))) {
+    return Err(ApiError::InvalidRequest("unknown notification level".into()));
+  }
+  let maybe_muted_until = request
+    .maybe_muted_until
+    .map(|millis| {
+      offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("muted_until is out of range".into()))
+    })
+    .transpose()?;
+  let stored = StoredSpaceNotifications {
+    maybe_level: request.maybe_level,
+    maybe_muted_until,
+  };
+  state
+    .database
+    .set_space_notifications(space, caller.user.id, &stored)
+    .await?;
+  Ok(space_notification_settings(&stored))
 }
 
 /// The read positions of the members who send receipts, for a caller who sends them too.

@@ -1,6 +1,6 @@
 //! Notification preferences: per user and per conversation (PLAN.md §5).
 
-use teamcraft_proto::{ConversationId, MessageId, NotificationLevel, UserId};
+use teamcraft_proto::{ConversationId, MessageId, NotificationLevel, SpaceId, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
@@ -29,6 +29,13 @@ impl Default for StoredUserSettings {
       maybe_dnd_schedule: None,
     }
   }
+}
+
+/// A member's notification setting for a whole space as stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredSpaceNotifications {
+  pub maybe_level: Option<NotificationLevel>,
+  pub maybe_muted_until: Option<OffsetDateTime>,
 }
 
 /// A member's read position in a conversation where they send read receipts.
@@ -100,12 +107,70 @@ impl Database {
     maybe_muted_until: Option<OffsetDateTime>,
   ) -> Result<(), DbError> {
     sqlx::query!(
-      r#"UPDATE memberships SET notification_level = $3, muted_until = $4
+      r#"UPDATE memberships SET notification_level = $3, muted_until = $4, notification_overridden = true
          WHERE conversation_id = $1 AND user_id = $2"#,
       to_db(conversation),
       to_db(user),
       level.as_str(),
       maybe_muted_until,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Drops the member's own setting of one conversation so it follows the space again.
+  pub async fn clear_conversation_notifications(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"UPDATE memberships SET notification_level = 'mentions', muted_until = NULL,
+                                notification_overridden = false
+         WHERE conversation_id = $1 AND user_id = $2"#,
+      to_db(conversation),
+      to_db(user),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// The member's notification setting for a whole space.
+  pub async fn get_space_notifications(
+    &self,
+    space: SpaceId,
+    user: UserId,
+  ) -> Result<StoredSpaceNotifications, DbError> {
+    let row = sqlx::query!(
+      "SELECT notification_level, muted_until FROM space_members WHERE space_id = $1 AND user_id = $2",
+      to_db(space),
+      to_db(user),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map_or_else(StoredSpaceNotifications::default, |row| {
+      StoredSpaceNotifications {
+        maybe_level: row.notification_level.map(NotificationLevel::from),
+        maybe_muted_until: row.muted_until,
+      }
+    }))
+  }
+
+  /// Replaces the member's notification setting for a space.
+  pub async fn set_space_notifications(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    settings: &StoredSpaceNotifications,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE space_members SET notification_level = $3, muted_until = $4 WHERE space_id = $1 AND user_id = $2",
+      to_db(space),
+      to_db(user),
+      settings.maybe_level.as_ref().map(NotificationLevel::as_str),
+      settings.maybe_muted_until,
     )
     .execute(self.pool())
     .await?;

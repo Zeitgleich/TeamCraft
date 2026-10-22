@@ -1,9 +1,10 @@
-use teamcraft_proto::{CategoryId, JoinPolicy, SpaceId, SpaceRole, UserId};
+use teamcraft_proto::{CategoryId, JoinPolicy, NotificationLevel, SpaceId, SpaceRole, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, from_db_opt, to_db};
+use crate::notification::StoredSpaceNotifications;
 use crate::user::User;
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,8 @@ pub enum SpaceListing {
 pub struct SpaceView {
   pub space: Space,
   pub maybe_role: Option<SpaceRole>,
+  /// The viewer's notification setting for the space (default for non-members).
+  pub notifications: StoredSpaceNotifications,
 }
 
 #[derive(Debug, Clone)]
@@ -169,13 +172,18 @@ impl Database {
   ) -> Result<Vec<SpaceView>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,
-                s.archived_at IS NOT NULL AS "is_archived!", m.role AS "role?"
+                s.archived_at IS NOT NULL AS "is_archived!", m.role AS "role?",
+                m.notification_level AS "notification_level?", m.muted_until AS "muted_until?"
          FROM spaces s
          LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1
               AND (m.expires_at IS NULL OR m.expires_at > now())
          WHERE ($2::bigint IS NULL OR s.id = $2)
            AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL
-                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))
+                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL)
+                -- A channel moved into a space keeps its members, who may not be members of it.
+                OR EXISTS (SELECT 1 FROM conversations c
+                           JOIN memberships cm ON cm.conversation_id = c.id AND cm.user_id = $1
+                           WHERE c.space_id = s.id))
          ORDER BY s.name, s.id"#,
       to_db(viewer),
       maybe_space.map(to_db),
@@ -199,6 +207,10 @@ impl Database {
             maybe_brand_id: row.brand_id,
           },
           maybe_role: row.role.map(SpaceRole::from),
+          notifications: StoredSpaceNotifications {
+            maybe_level: row.notification_level.map(NotificationLevel::from),
+            maybe_muted_until: row.muted_until,
+          },
         })
       })
       .collect()

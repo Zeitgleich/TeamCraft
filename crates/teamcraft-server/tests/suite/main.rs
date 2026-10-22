@@ -53,6 +53,7 @@ mod retention;
 mod security;
 mod session_policy;
 mod shares;
+mod space_features;
 mod status;
 mod threads;
 mod user_groups;

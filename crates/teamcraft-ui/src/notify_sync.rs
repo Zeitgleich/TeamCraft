@@ -14,7 +14,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
   ConversationNotificationSettings, DndSchedule as DndWire, DndWindow, ListConversationsResponse,
-  NotificationLevel, NotificationSettings, PushMode, UnixMillis, Weekday,
+  ListSpacesResponse, NotificationLevel, NotificationSettings, PushMode, SpaceNotificationSettings,
+  UnixMillis, Weekday,
 };
 
 use crate::auth::{ApiMethod, Authenticator};
@@ -57,6 +58,7 @@ struct Confirmed {
   is_loaded: bool,
   maybe_global: Option<NotificationSettings>,
   conversations: BTreeMap<String, ConversationNotify>,
+  spaces: BTreeMap<String, ConversationNotify>,
 }
 
 impl NotificationSync {
@@ -86,9 +88,20 @@ impl NotificationSync {
     let conversations = self
       .get::<ListConversationsResponse>("/api/v1/conversations")
       .await;
+    let spaces = self.get::<ListSpacesResponse>("/api/v1/spaces").await;
     let now = now_ms();
     let mut state = confirmed.borrow_mut();
     settings.prefs.update(|prefs| {
+      if let Some(list) = &spaces {
+        for space in &list.spaces {
+          if let Some(mine) = &space.maybe_my_notifications {
+            let notify = space_from_server(mine, now);
+            let id = space.id.to_string();
+            prefs.notifications.set_space(&id, notify);
+            state.spaces.insert(id, notify);
+          }
+        }
+      }
       if let Some(global) = &global {
         apply_global(prefs, global);
       }
@@ -98,6 +111,7 @@ impl NotificationSync {
             let notify = notify_from_server(
               membership.notification_level.clone(),
               membership.maybe_muted_until,
+              membership.is_notification_inherited,
               now,
             );
             let id = conversation.id.to_string();
@@ -113,7 +127,7 @@ impl NotificationSync {
   }
 
   fn send_changes(&self, prefs: &Preferences, confirmed: &Rc<RefCell<Confirmed>>) {
-    let (maybe_global, changed_conversations) = {
+    let (maybe_global, changed_conversations, changed_spaces) = {
       let state = confirmed.borrow();
       if !state.is_loaded {
         return;
@@ -137,13 +151,35 @@ impl NotificationSync {
           (wanted != known).then(|| (id.clone(), wanted))
         })
         .collect();
-      (global, changed)
+      let space_ids: std::collections::BTreeSet<&String> = prefs
+        .notifications
+        .spaces
+        .keys()
+        .chain(state.spaces.keys())
+        .collect();
+      let changed_spaces: Vec<(String, ConversationNotify)> = space_ids
+        .into_iter()
+        .filter_map(|id| {
+          let wanted = prefs.notifications.space(id);
+          let known = state.spaces.get(id).copied().unwrap_or_default();
+          (wanted != known).then(|| (id.clone(), wanted))
+        })
+        .collect();
+      (global, changed, changed_spaces)
     };
     if let Some(global) = maybe_global {
       confirmed.borrow_mut().maybe_global = Some(global.clone());
       self.put(
         "/api/v1/me/notification-settings".to_owned(),
         serde_json::to_string(&global).ok(),
+      );
+    }
+    for (id, notify) in changed_spaces {
+      confirmed.borrow_mut().spaces.insert(id.clone(), notify);
+      let wire = space_to_server(&notify, now_ms());
+      self.put(
+        format!("/api/v1/spaces/{id}/notification-settings"),
+        serde_json::to_string(&wire).ok(),
       );
     }
     for (id, notify) in changed_conversations {
@@ -269,42 +305,90 @@ pub fn dnd_from_server(server: &DndWire) -> DndSchedule {
   }
 }
 
+/// A conversation's setting for the server. The default setting means "follow the space", which the
+/// server stores as no setting of its own.
 pub fn notify_to_server(notify: &ConversationNotify, now: TimestampMs) -> ConversationNotificationSettings {
+  if *notify == ConversationNotify::default() {
+    return ConversationNotificationSettings {
+      level: NotificationLevel::Mentions,
+      maybe_muted_until: None,
+      is_inherited: true,
+    };
+  }
   let level = match notify.maybe_level {
-    // The server stores one level per conversation; "follow the global level" is its default.
+    // Only a mute time was set: the server still stores a level next to it.
     None | Some(NotifyLevel::Mentions) => NotificationLevel::Mentions,
     Some(NotifyLevel::All) => NotificationLevel::All,
     Some(NotifyLevel::Nothing) => NotificationLevel::None,
   };
-  let maybe_muted_until = match notify.mute {
-    MuteFor::Off => None,
-    MuteFor::OneHour => Some(now + MS_PER_HOUR),
-    MuteFor::UntilTomorrow => Some(end_of_local_day(now)),
-    MuteFor::Forever => Some(now + FOREVER_MS),
-  };
   ConversationNotificationSettings {
     level,
-    maybe_muted_until: maybe_muted_until.map(UnixMillis),
+    maybe_muted_until: mute_until(notify.mute, now).map(UnixMillis),
+    is_inherited: false,
   }
 }
 
 pub fn notify_from_server(
   level: NotificationLevel,
   maybe_muted_until: Option<UnixMillis>,
+  is_inherited: bool,
   now: TimestampMs,
 ) -> ConversationNotify {
+  if is_inherited {
+    return ConversationNotify::default();
+  }
+  let mute = mute_from(maybe_muted_until, now);
   let maybe_level = match level {
     NotificationLevel::All => Some(NotifyLevel::All),
     NotificationLevel::None => Some(NotifyLevel::Nothing),
+    // With a mute time the level is only a placeholder; without one the member chose "mentions".
+    NotificationLevel::Mentions if mute == MuteFor::Off => Some(NotifyLevel::Mentions),
     NotificationLevel::Mentions | NotificationLevel::Unknown(_) => None,
   };
-  let mute = match maybe_muted_until.map(|until| until.0 - now) {
+  ConversationNotify { maybe_level, mute }
+}
+
+/// A space's setting for the server: the level is optional, so "no choice" stays distinct from
+/// "mentions".
+pub fn space_to_server(notify: &ConversationNotify, now: TimestampMs) -> SpaceNotificationSettings {
+  SpaceNotificationSettings {
+    maybe_level: notify.maybe_level.map(|level| match level {
+      NotifyLevel::All => NotificationLevel::All,
+      NotifyLevel::Mentions => NotificationLevel::Mentions,
+      NotifyLevel::Nothing => NotificationLevel::None,
+    }),
+    maybe_muted_until: mute_until(notify.mute, now).map(UnixMillis),
+  }
+}
+
+pub fn space_from_server(server: &SpaceNotificationSettings, now: TimestampMs) -> ConversationNotify {
+  ConversationNotify {
+    maybe_level: server.maybe_level.as_ref().and_then(|level| match level {
+      NotificationLevel::All => Some(NotifyLevel::All),
+      NotificationLevel::Mentions => Some(NotifyLevel::Mentions),
+      NotificationLevel::None => Some(NotifyLevel::Nothing),
+      NotificationLevel::Unknown(_) => None,
+    }),
+    mute: mute_from(server.maybe_muted_until, now),
+  }
+}
+
+fn mute_until(mute: MuteFor, now: TimestampMs) -> Option<TimestampMs> {
+  match mute {
+    MuteFor::Off => None,
+    MuteFor::OneHour => Some(now + MS_PER_HOUR),
+    MuteFor::UntilTomorrow => Some(end_of_local_day(now)),
+    MuteFor::Forever => Some(now + FOREVER_MS),
+  }
+}
+
+fn mute_from(maybe_muted_until: Option<UnixMillis>, now: TimestampMs) -> MuteFor {
+  match maybe_muted_until.map(|until| until.0 - now) {
     Some(remaining) if remaining > FOREVER_THRESHOLD_MS => MuteFor::Forever,
     Some(remaining) if remaining > MS_PER_HOUR => MuteFor::UntilTomorrow,
     Some(remaining) if remaining > 0 => MuteFor::OneHour,
     _ => MuteFor::Off,
-  };
-  ConversationNotify { maybe_level, mute }
+  }
 }
 
 fn parse_minutes(text: &str) -> Option<u16> {
@@ -406,7 +490,7 @@ mod tests {
     ] {
       let wire = notify_to_server(&notify, NOW);
       assert_eq!(
-        notify_from_server(wire.level, wire.maybe_muted_until, NOW),
+        notify_from_server(wire.level, wire.maybe_muted_until, wire.is_inherited, NOW),
         notify
       );
     }
@@ -416,8 +500,45 @@ mod tests {
   fn an_expired_mute_reads_back_as_off() {
     let past = Some(UnixMillis(NOW - 1));
     assert_eq!(
-      notify_from_server(NotificationLevel::Mentions, past, NOW).mute,
+      notify_from_server(NotificationLevel::Mentions, past, false, NOW).mute,
       MuteFor::Off
     );
+  }
+
+  #[test]
+  fn the_default_follows_the_space_and_an_explicit_mentions_level_does_not() {
+    let inherited = notify_to_server(&ConversationNotify::default(), NOW);
+    assert!(inherited.is_inherited);
+    let explicit = ConversationNotify {
+      maybe_level: Some(NotifyLevel::Mentions),
+      mute: MuteFor::Off,
+    };
+    let wire = notify_to_server(&explicit, NOW);
+    assert!(!wire.is_inherited);
+    assert_eq!(
+      notify_from_server(wire.level, wire.maybe_muted_until, false, NOW),
+      explicit
+    );
+  }
+
+  #[test]
+  fn space_settings_map_both_ways() {
+    for notify in [
+      ConversationNotify::default(),
+      ConversationNotify {
+        maybe_level: Some(NotifyLevel::Nothing),
+        mute: MuteFor::Off,
+      },
+      ConversationNotify {
+        maybe_level: Some(NotifyLevel::Mentions),
+        mute: MuteFor::Forever,
+      },
+      ConversationNotify {
+        maybe_level: None,
+        mute: MuteFor::OneHour,
+      },
+    ] {
+      assert_eq!(space_from_server(&space_to_server(&notify, NOW), NOW), notify);
+    }
   }
 }

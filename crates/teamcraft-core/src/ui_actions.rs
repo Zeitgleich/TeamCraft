@@ -431,6 +431,10 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
     ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { by: actor },
     ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { by: actor },
     ConversationEvent::MadePublic => WorkspaceEvent::MadePublic { by: actor },
+    ConversationEvent::Moved { space } => WorkspaceEvent::Moved {
+      by: actor,
+      space: space.clone(),
+    },
     ConversationEvent::Joined
     | ConversationEvent::Left
     | ConversationEvent::Renamed { .. }

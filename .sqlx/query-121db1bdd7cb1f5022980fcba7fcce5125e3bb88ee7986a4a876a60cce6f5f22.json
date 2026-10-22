@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE memberships SET notification_level = $3, muted_until = $4\n         WHERE conversation_id = $1 AND user_id = $2",
+  "query": "UPDATE space_members SET notification_level = $3, muted_until = $4 WHERE space_id = $1 AND user_id = $2",
   "describe": {
     "columns": [],
     "parameters": {
@@ -13,5 +13,5 @@
     },
     "nullable": []
   },
-  "hash": "8266e2d62c22a031cde3e0a4c9dca606ecad39ccb73d311c7a3355d9cb9595f4"
+  "hash": "121db1bdd7cb1f5022980fcba7fcce5125e3bb88ee7986a4a876a60cce6f5f22"
 }

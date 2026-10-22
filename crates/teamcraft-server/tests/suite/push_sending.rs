@@ -447,6 +447,48 @@ mod preferences {
   }
 
   #[tokio::test]
+  async fn a_muted_space_silences_its_channels_unless_they_have_their_own_setting() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let spaces = app.get(&s.carol, "/spaces").await;
+    let space = spaces.body["spaces"][0]["id"].as_str().unwrap().to_owned();
+    let channel_path = format!("/conversations/{}/notification-settings", s.channel);
+
+    let muted = app
+      .put(
+        &s.carol,
+        &format!("/spaces/{space}/notification-settings"),
+        json!({"level": "none"}),
+      )
+      .await;
+    assert_eq!(muted.status, StatusCode::OK, "{}", muted.body);
+    mention(&app, &s, 1).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "the space is muted");
+
+    // A level chosen for the channel itself overrides the space.
+    app.put(&s.carol, &channel_path, json!({"level": "all"})).await;
+    mention(&app, &s, 2).await;
+    assert_eq!(
+      recorder.wait_for(1).await.len(),
+      1,
+      "the channel has its own level"
+    );
+
+    // Dropping the channel's own setting hands it back to the space.
+    app
+      .put(
+        &s.carol,
+        &channel_path,
+        json!({"level": "all", "is_inherited": true}),
+      )
+      .await;
+    mention(&app, &s, 3).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1, "the space is muted again");
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn the_dnd_schedule_silences_everyone_except_allowed_senders() {
     let recorder = Recorder::default();
     let Some(app) = start(&recorder).await else { return };

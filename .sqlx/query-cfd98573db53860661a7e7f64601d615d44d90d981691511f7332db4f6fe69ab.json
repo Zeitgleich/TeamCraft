@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.user_id, m.notification_level, m.muted_until, u.presence_pref, u.dnd_until,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.dnd_schedule,\n                tf.user_id IS NOT NULL AS \"is_following_thread!\",\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         LEFT JOIN threads_followed tf ON tf.user_id = u.id AND tf.conversation_id = m.conversation_id\n                                      AND tf.thread_id = $3 AND tf.state = 'following'\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
+  "query": "SELECT m.user_id,\n                -- A conversation the member never configured follows their setting for its space.\n                CASE WHEN m.notification_overridden OR sm.notification_level IS NULL\n                     THEN m.notification_level ELSE sm.notification_level END AS \"notification_level!\",\n                CASE WHEN m.notification_overridden THEN m.muted_until\n                     ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,\n                u.presence_pref, u.dnd_until,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.dnd_schedule,\n                tf.user_id IS NOT NULL AS \"is_following_thread!\",\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN conversations c ON c.id = m.conversation_id\n         LEFT JOIN space_members sm ON sm.space_id = c.space_id AND sm.user_id = m.user_id\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         LEFT JOIN threads_followed tf ON tf.user_id = u.id AND tf.conversation_id = m.conversation_id\n                                      AND tf.thread_id = $3 AND tf.state = 'following'\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
   "describe": {
     "columns": [
       {
@@ -16,25 +16,15 @@
       },
       {
         "ordinal": 1,
-        "name": "notification_level",
+        "name": "notification_level!",
         "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "memberships",
-            "name": "notification_level"
-          }
-        }
+        "origin": "Expression"
       },
       {
         "ordinal": 2,
         "name": "muted_until",
         "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "memberships",
-            "name": "muted_until"
-          }
-        }
+        "origin": "Expression"
       },
       {
         "ordinal": 3,
@@ -135,8 +125,8 @@
     },
     "nullable": [
       false,
-      false,
-      true,
+      null,
+      null,
       false,
       true,
       null,
@@ -148,5 +138,5 @@
       true
     ]
   },
-  "hash": "4734538bed702c78bbb107c56027124bf0d3abe962b3a89382d3d5993954d4a7"
+  "hash": "cfd98573db53860661a7e7f64601d615d44d90d981691511f7332db4f6fe69ab"
 }
