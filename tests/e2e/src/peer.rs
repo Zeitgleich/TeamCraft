@@ -48,7 +48,14 @@ impl Peer {
         enrollment_options(device_name),
       )
       .await
-      .unwrap_or_else(|error| panic!("enrolling {user}: {error}"));
+      .unwrap_or_else(|error| {
+        let log = stack.server_log();
+        let tail: Vec<&str> = log.lines().rev().take(25).collect();
+        panic!(
+          "enrolling {user}: {error}\nserver log (newest first):\n{}",
+          tail.join("\n")
+        )
+      });
     let (gateway, _) = client.connect_gateway().await.expect("gateway connects");
     Peer {
       name: user.to_owned(),

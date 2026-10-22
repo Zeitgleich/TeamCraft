@@ -381,7 +381,7 @@ async fn set_value(page: &Page, selector: &str, value: &str) {
   assert!(done, "no input {selector}");
 }
 
-async fn wait_for_element(page: &Page, selector: &str) -> chromiumoxide::element::Element {
+pub(crate) async fn wait_for_element(page: &Page, selector: &str) -> chromiumoxide::element::Element {
   let deadline = Instant::now() + WAIT;
   loop {
     if let Ok(element) = page.find_element(selector).await {
@@ -401,7 +401,7 @@ async fn body_text(page: &Page) -> String {
     .unwrap_or_default()
 }
 
-async fn wait_for_text(page: &Page, needle: &str) {
+pub(crate) async fn wait_for_text(page: &Page, needle: &str) {
   let deadline = Instant::now() + WAIT;
   loop {
     if body_text(page).await.contains(needle) {
@@ -417,7 +417,7 @@ async fn wait_for_text(page: &Page, needle: &str) {
 }
 
 /// Clicks the first button, link or list entry whose text contains `text`.
-async fn click_text(page: &Page, text: &str) {
+pub(crate) async fn click_text(page: &Page, text: &str) {
   let script = format!(
     "(() => {{ const el = [...document.querySelectorAll('button, a, li, [role=button], [role=link], [role=treeitem], [role=option]')].find(e => e.innerText.includes({text:?})); if (!el) return false; el.click(); return true; }})()"
   );

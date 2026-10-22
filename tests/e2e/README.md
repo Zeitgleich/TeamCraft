@@ -44,11 +44,14 @@ Postgres, dropped afterwards), so tests are independent and run in parallel (abo
 | `email_digest.rs`     | Content-free digest of missed mentions: opt-in, batched, skips what was read in time                                                        |
 | `web.rs` (`browser`)  | The web client in headless Chromium: Keycloak login page, welcome screen, the channel list shows the account's channels                     |
 
+The `acceptance_*` scenarios cover the v1 sections of PLAN.md one by one; what each proves, the known gaps
+and the bugs found are in [docs/acceptance.md](../../docs/acceptance.md).
+
 ### Ignored
 
-| Test                                                               | Why                                                                                                                                                                                                                                                                                                                 |
-|--------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `web::a_message_written_in_the_web_client_reaches_a_second_client` | The web build is read-only: it has no client core, so a message typed in the browser stays in memory and is never encrypted or sent (`crates/teamcraft-ui/src/server_backend.rs`). The test is complete (browser types, a second client waits) and runs with `--ignored` once the web client runs `teamcraft-core`. |
+| Test                                                            | Why                                                               |
+|-----------------------------------------------------------------|-------------------------------------------------------------------|
+| `acceptance_people::a_time_zone_that_does_not_exist_is_refused` | Bug: `PUT /me/profile` accepts time zones that are not IANA names |
 
 ## How it works
 
