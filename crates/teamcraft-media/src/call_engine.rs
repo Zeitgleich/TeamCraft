@@ -366,6 +366,12 @@ impl CallEngine {
     }
   }
 
+  /// Screen sound is asked for or being sent (not after the SFU stopped it, e.g. a host's
+  /// "mute all").
+  pub fn is_sharing_screen_audio(&self) -> bool {
+    self.screen_audio != ScreenAudioState::Off
+  }
+
   pub fn unpublish_screen_audio(&mut self) {
     if let ScreenAudioState::Publishing(stream) = self.screen_audio {
       self.signal(CallClientMessage::UnpublishScreenAudio {

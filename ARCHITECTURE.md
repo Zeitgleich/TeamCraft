@@ -314,8 +314,12 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   Opus stream per device (music mode, 64 kbit/s). The SFU forwards it to everyone regardless of
   the speaker selection. It is encrypted with the device's DAVE audio key, like the microphone.
   Capture: PipeWire on Linux (other applications' playback streams linked into our capture,
-  ours left out), WASAPI process loopback excluding our process tree on Windows, and
-  ScreenCaptureKit with `excludesCurrentProcessAudio` on macOS. The sender's echo canceller also
+  ours and those of processes we started, like the WebView's helpers, left out), WASAPI process
+  loopback excluding our process tree on Windows, and ScreenCaptureKit with
+  `excludesCurrentProcessAudio` on macOS. The desktop WebView may play no media at all
+  (`media-src 'none'`), so its helper processes have nothing of the call to play. The Flatpak
+  needs the PipeWire socket for this; apps/desktop/packaging/linux/README.md explains what that
+  grants. "Mute all" by a meeting host also stops everyone's shared sound, at the SFU. The sender's echo canceller also
   gets the shared sound as far-end signal, so the microphone doesn't send it a second time.
 - **Video effects** (background blur, background images, light correction) run on the sending device
   before encoding – the SFU only ever sees encrypted frames. Pipeline per platform: [PLAN.md](PLAN.md) §8.
