@@ -10,9 +10,10 @@ Your admin gave you an account in one of two ways.
 - **Company login:** an account with the **guest** role in the identity provider. You sign in like
   everybody else ([Getting started](getting-started.md)).
 - **Guest account with its own password:** for people who are not in the identity provider. You get
-  an e-mail with an **activation link** (valid for 72 hours by default). There you set a password and
-  connect an **authenticator app** (a time-based code). Then, on the sign-in screen, choose **Sign in
-  with a guest account** and enter e-mail, password and the code. Five wrong attempts in a row lock
+  an e-mail with an **activation link** (valid for 72 hours by default) to choose a password and
+  connect an **authenticator app** (a time-based code). *The activation page in the app is coming
+  soon; until then your admin completes this step with you through the API.* Then, on the sign-in
+  screen, choose **Sign in with a guest account** and enter e-mail, password and the code. Five wrong attempts in a row lock
   the account for 15 minutes; sessions last at most 12 hours.
 
 - You see **only** the spaces and channels you were added to and nothing else; the user directory
