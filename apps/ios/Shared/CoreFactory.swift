@@ -61,6 +61,8 @@ struct CoreFactory {
     } else {
       throw CoreFactoryError.noAccount
     }
+    // Created with its protection class before the core writes into it.
+    _ = container.downloadsDirectory
     let config = AppConfig(
       serverUrl: environment.serverURL.absoluteString,
       dataDir: container.dataDirectory.path,

@@ -15,11 +15,26 @@ struct SharedContainer {
     self.fileManager = fileManager
   }
 
-  /// The folder the Rust core keeps its sealed database and downloads in.
+  /// The folder the Rust core keeps its sealed database and downloads in. Not in backups (the
+  /// database key never leaves the device, so a restored copy is useless); the database is
+  /// readable after the first unlock, because the extension opens it while the phone is locked.
   var dataDirectory: URL {
-    let url = containerRoot.appendingPathComponent("teamcraft", isDirectory: true)
-    try? fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+    var url = containerRoot.appendingPathComponent("teamcraft", isDirectory: true)
+    prepare(&url, protection: .completeUntilFirstUserAuthentication)
     return url
+  }
+
+  /// Where the core writes decrypted downloads (`downloads` below the data directory). Plaintext,
+  /// so: unreadable while the phone is locked, not in backups, wiped on sign-out.
+  var downloadsDirectory: URL {
+    var url = dataDirectory.appendingPathComponent("downloads", isDirectory: true)
+    prepare(&url, protection: .complete)
+    return url
+  }
+
+  /// Removes every decrypted download (sign-out).
+  func wipeDownloads() {
+    try? fileManager.removeItem(at: dataDirectory.appendingPathComponent("downloads", isDirectory: true))
   }
 
   /// The cross-process lock file (see `ProcessLock`).
@@ -42,6 +57,16 @@ struct SharedContainer {
   var displayName: String? {
     get { defaults.string(forKey: Self.displayNameKey) }
     nonmutating set { defaults.set(newValue, forKey: Self.displayNameKey) }
+  }
+
+  /// Creates `url` with a data protection class (new files inside inherit it) and keeps it out of backups.
+  private func prepare(_ url: inout URL, protection: FileProtectionType) {
+    try? fileManager.createDirectory(
+      at: url, withIntermediateDirectories: true, attributes: [.protectionKey: protection])
+    try? fileManager.setAttributes([.protectionKey: protection], ofItemAtPath: url.path)
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try? url.setResourceValues(values)
   }
 
   private var containerRoot: URL {

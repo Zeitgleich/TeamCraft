@@ -13,6 +13,10 @@ struct NotificationContentBuilder {
   /// What is shown while nothing could be decrypted (or the extension ran out of time).
   func generic(from original: UNNotificationContent) -> UNNotificationContent {
     guard let content = original.mutableCopy() as? UNMutableNotificationContent else { return original }
+    // Nothing was decrypted, so nothing in the payload is trusted: no conversation, no actions.
+    content.userInfo = [:]
+    content.categoryIdentifier = ""
+    content.threadIdentifier = ""
     if content.title.isEmpty { content.title = fallbackSender }
     if content.body.isEmpty { content.body = fallbackText }
     return content
@@ -34,9 +38,8 @@ struct NotificationContentBuilder {
     content.body = text.text
     content.threadIdentifier = notification.conversationId
     content.categoryIdentifier = NotificationCategories.messageCategory
-    var userInfo = content.userInfo
-    userInfo[NotificationCategories.conversationKey] = notification.conversationId
-    content.userInfo = userInfo
+    // Only what the core decrypted; the server-supplied userInfo is dropped.
+    content.userInfo = [NotificationCategories.conversationKey: notification.conversationId]
     content.sound = notification.isSilent ? nil : .default
     if notification.isUrgent {
       content.interruptionLevel = .timeSensitive

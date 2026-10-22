@@ -13,7 +13,8 @@ enum NotificationCategories {
     let reply = UNTextInputNotificationAction(
       identifier: replyAction,
       title: String(localized: "notification_reply"),
-      options: [],
+      // Unlock first: a reply sends as the user.
+      options: [.authenticationRequired],
       textInputButtonTitle: String(localized: "send"),
       textInputPlaceholder: String(localized: "composer_hint"))
     let markRead = UNNotificationAction(

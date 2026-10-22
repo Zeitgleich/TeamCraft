@@ -135,6 +135,7 @@ final class AppModel {
       }
       maybeCore = nil
       vault.clear()
+      container.wipeDownloads()
       container.activeAccount = nil
       container.displayName = nil
       UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
@@ -291,7 +292,11 @@ final class AppModel {
   }
 
   /// A notification's tap or action (reply, mark as read).
+  /// The conversation ID comes from the notification, which a forged push could fill: it is only
+  /// acted on if the local store knows that conversation (the extension sets it from the decrypted
+  /// payload, and drops it when it decrypted nothing).
   func handle(notificationAction identifier: String, conversationId: String, replyText: String?) async {
+    guard await conversations().contains(where: { $0.id == conversationId }) else { return }
     switch identifier {
     case NotificationCategories.replyAction:
       if let replyText, !replyText.isEmpty {
