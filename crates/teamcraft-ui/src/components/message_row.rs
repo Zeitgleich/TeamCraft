@@ -5,7 +5,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
 use crate::i18n::use_i18n;
-use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User};
+use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, thread_id_of};
 use crate::state::use_app_state;
 
 /// Messages by the same author closer together than this share one header.
@@ -118,7 +118,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
   let author = state.read(|backend| backend.user(message.author));
   let me = state.me();
   let time = format_time(message.sent_at, locale);
-  let thread_root = message.maybe_thread_root.unwrap_or(message.id);
+  let thread_root = message.maybe_thread.unwrap_or_else(|| thread_id_of(message.id));
   let conversation = message.conversation;
   let message_id = message.id;
   let reply_count = message.reply_count;
@@ -266,7 +266,7 @@ fn date_divider(message: &Message, maybe_prev: Option<&Message>) -> Option<i64> 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::{ConversationId, MessageId, UserId};
+  use crate::model::{ConversationId, MessageId, UserId, id_from_raw};
 
   #[test]
   fn grouping_needs_same_author_and_short_gap() {
@@ -287,16 +287,16 @@ mod tests {
 
   fn message(id: u64, author: u64, sent_at: i64) -> Message {
     Message {
-      id: MessageId(id),
-      conversation: ConversationId(1),
-      author: UserId(author),
+      id: id_from_raw::<MessageId>(id),
+      conversation: id_from_raw::<ConversationId>(1),
+      author: id_from_raw::<UserId>(author),
       kind: MessageKind::User,
       sent_at,
       body: String::new(),
       is_edited: false,
       reactions: Vec::new(),
       reply_count: 0,
-      maybe_thread_root: None,
+      maybe_thread: None,
     }
   }
 }

@@ -82,7 +82,7 @@ pub fn build_sections(conversations: &[Conversation], show_unreads_group: bool) 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::{ConversationId, ConversationKind};
+  use crate::model::{ConversationId, ConversationKind, id_from_raw};
 
   #[test]
   fn each_conversation_appears_once() {
@@ -120,7 +120,7 @@ mod tests {
 
   fn conversation(id: u64, category: SidebarCategory, unread: u32, is_favorite: bool) -> Conversation {
     Conversation {
-      id: ConversationId(id),
+      id: id_from_raw::<ConversationId>(id),
       maybe_space: None,
       kind: ConversationKind::Public,
       category,

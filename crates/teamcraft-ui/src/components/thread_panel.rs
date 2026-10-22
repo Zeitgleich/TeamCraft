@@ -4,21 +4,21 @@ use crate::components::composer::Composer;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, Message, MessageId};
+use crate::model::{ConversationId, Message, ThreadId};
 use crate::state::{SidePanel, use_app_state};
 
 /// Right-hand thread view: root message, replies and a reply composer.
 #[component]
 pub fn ThreadPanel(
   conversation: ConversationId,
-  root: MessageId,
+  thread: ThreadId,
   /// Embedded in the threads inbox, where closing returns to the empty state.
   #[prop(default = false)]
   embedded: bool,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let thread = Memo::new(move |_| state.read(|backend| backend.thread(conversation, root)));
+  let thread_messages = Memo::new(move |_| state.read(|backend| backend.thread(conversation, thread)));
   let conv_name = Memo::new(move |_| {
     state
       .read(|backend| backend.conversation(conversation))
@@ -60,7 +60,7 @@ pub fn ThreadPanel(
         {move || {
           let mut prev: Option<Message> = None;
           let mut out = Vec::new();
-          for (index, message) in thread.get().into_iter().enumerate() {
+          for (index, message) in thread_messages.get().into_iter().enumerate() {
             if index == 1 {
               out.push(
                 view! {
@@ -81,7 +81,7 @@ pub fn ThreadPanel(
       </div>
       <Composer
         conversation=conversation
-        maybe_root=root
+        maybe_thread=thread
         placeholder_key="composer-placeholder-reply"
         can_post=can_post
       />

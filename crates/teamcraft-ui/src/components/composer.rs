@@ -4,7 +4,7 @@ use wasm_bindgen::JsCast;
 
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, MessageId};
+use crate::model::{ConversationId, ThreadId};
 use crate::settings::SendMode;
 use crate::state::use_app_state;
 
@@ -12,11 +12,11 @@ use crate::state::use_app_state;
 const MAX_INPUT_HEIGHT_PX: i32 = 220;
 const PLACEHOLDER_EMOJI: &str = "🙂";
 
-/// Message composer for a channel or, with `maybe_root`, for a thread reply.
+/// Message composer for a channel or, with `maybe_thread`, for a thread reply.
 #[component]
 pub fn Composer(
   conversation: ConversationId,
-  #[prop(optional)] maybe_root: Option<MessageId>,
+  #[prop(optional)] maybe_thread: Option<ThreadId>,
   /// i18n key of the placeholder text.
   #[prop(default = "composer-placeholder")]
   placeholder_key: &'static str,
@@ -62,12 +62,12 @@ pub fn Composer(
     } else {
       format!("{text}\n{}", names.join(", "))
     };
-    state.write(|backend| backend.post_message(conversation, maybe_root, &body));
+    state.write(|backend| backend.post_message(conversation, maybe_thread, &body));
     element.set_value("");
     attachments.set(Vec::new());
     is_empty.set(true);
     resize();
-    if maybe_root.is_none() {
+    if maybe_thread.is_none() {
       state.jump_to_latest.update(|value| *value += 1);
     }
   };
@@ -153,11 +153,11 @@ pub fn Composer(
           </ul>
         </Show>
         <div class="composer-box">
-          <label class="visually-hidden" for=format!("composer-{conversation}-{}", maybe_root.map_or(0, |root| root.0))>
+          <label class="visually-hidden" for=format!("composer-{conversation}-{}", maybe_thread.map_or_else(String::new, |thread| thread.to_string()))>
             {move || i18n.t("composer-label")}
           </label>
           <textarea
-            id=format!("composer-{conversation}-{}", maybe_root.map_or(0, |root| root.0))
+            id=format!("composer-{conversation}-{}", maybe_thread.map_or_else(String::new, |thread| thread.to_string()))
             class="composer-input"
             rows="1"
             name="message"
@@ -169,7 +169,7 @@ pub fn Composer(
             node_ref=input
             on:keydown=on_keydown
             on:input=on_input
-            data-composer=if maybe_root.is_some() { "thread" } else { "channel" }
+            data-composer=if maybe_thread.is_some() { "thread" } else { "channel" }
           ></textarea>
           <div class="composer-toolbar">
             <input type="file" multiple hidden node_ref=file_input on:change=on_files tabindex="-1" />

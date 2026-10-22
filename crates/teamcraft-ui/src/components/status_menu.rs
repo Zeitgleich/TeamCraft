@@ -2,6 +2,9 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use teamcraft_proto::Role;
+
+use crate::admin::AdminSection;
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
@@ -24,6 +27,7 @@ pub fn StatusMenu() -> impl IntoView {
   let i18n = use_i18n();
   let menu = NodeRef::<html::Div>::new();
   let me = Memo::new(move |_| state.me());
+  let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));
 
   Effect::new(move |_| {
     if let Some(element) = menu.get() {
@@ -119,6 +123,17 @@ pub fn StatusMenu() -> impl IntoView {
         })
         .collect_view()}
       <div class="menu-sep" role="separator"></div>
+      <Show when=move || is_admin.get() fallback=|| ()>
+        <button
+          class="menu-item"
+          role="menuitem"
+          tabindex="-1"
+          on:click=move |_| state.open_admin(AdminSection::Channels)
+        >
+          <Icon name=IconName::Shield />
+          <span class="menu-label">{move || i18n.t("menu-administration")}</span>
+        </button>
+      </Show>
       <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::Settings)>
         <Icon name=IconName::Sliders />
         <span class="menu-label">{move || i18n.t("menu-settings")}</span>

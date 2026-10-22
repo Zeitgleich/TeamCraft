@@ -9,30 +9,72 @@ use std::collections::HashMap;
 use crate::backend::ChatBackend;
 use crate::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, LogLevel, Message,
-  MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent,
-  ThreadSummary, TimestampMs, User, UserId,
+  MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
+  ThreadSummary, TimestampMs, User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
 };
 
 /// Number of lines in the large log channel.
 pub const LOG_CHANNEL_LINES: usize = 50_000;
 
 const MINUTE: i64 = 60_000;
-const ME: UserId = UserId(1);
-const BOT: UserId = UserId(100);
 
-const SPACE_A: SpaceId = SpaceId(1);
-const SPACE_B: SpaceId = SpaceId(2);
-
-const CH_GENERAL: ConversationId = ConversationId(10);
-const CH_ANNOUNCEMENTS: ConversationId = ConversationId(11);
-const CH_ENGINEERING: ConversationId = ConversationId(12);
-const CH_DESIGN: ConversationId = ConversationId(13);
-const CH_LEADERSHIP: ConversationId = ConversationId(14);
-const CH_CI: ConversationId = ConversationId(15);
-const CH_APP_LOGS: ConversationId = ConversationId(16);
-const CH_B_GENERAL: ConversationId = ConversationId(20);
-const CH_B_PLANNING: ConversationId = ConversationId(21);
 const DM_FIRST: u64 = 30;
+
+fn dm_first() -> u64 {
+  DM_FIRST
+}
+
+fn me() -> UserId {
+  id_from_raw(1)
+}
+
+fn bot() -> UserId {
+  id_from_raw(100)
+}
+
+fn space_a() -> SpaceId {
+  id_from_raw(1)
+}
+
+fn space_b() -> SpaceId {
+  id_from_raw(2)
+}
+
+fn ch_general() -> ConversationId {
+  id_from_raw(10)
+}
+
+fn ch_announcements() -> ConversationId {
+  id_from_raw(11)
+}
+
+fn ch_engineering() -> ConversationId {
+  id_from_raw(12)
+}
+
+fn ch_design() -> ConversationId {
+  id_from_raw(13)
+}
+
+fn ch_leadership() -> ConversationId {
+  id_from_raw(14)
+}
+
+fn ch_ci() -> ConversationId {
+  id_from_raw(15)
+}
+
+fn ch_app_logs() -> ConversationId {
+  id_from_raw(16)
+}
+
+fn ch_b_general() -> ConversationId {
+  id_from_raw(20)
+}
+
+fn ch_b_planning() -> ConversationId {
+  id_from_raw(21)
+}
 
 const SENTENCES: &[&str] = &[
   "Morning everyone, the staging deploy finished without errors.",
@@ -109,9 +151,13 @@ impl Rng {
   }
 }
 
+#[path = "mock_ops.rs"]
+mod ops;
+
 pub struct MockBackend {
   now: TimestampMs,
   state: RefCell<State>,
+  ops: RefCell<ops::OpsState>,
 }
 
 struct State {
@@ -132,14 +178,14 @@ impl MockBackend {
       users,
       spaces: vec![
         Space {
-          id: SPACE_A,
+          id: space_a(),
           name: "Project A".into(),
           hue: 215,
           unread_count: 0,
           mention_count: 0,
         },
         Space {
-          id: SPACE_B,
+          id: space_b(),
           name: "Project B".into(),
           hue: 28,
           unread_count: 0,
@@ -153,8 +199,10 @@ impl MockBackend {
     };
     state.seed_messages(now);
     state.refresh_space_badges();
+    let users_snapshot = state.users.clone();
     Self {
       now,
+      ops: RefCell::new(ops::OpsState::new(now, &users_snapshot)),
       state: RefCell::new(state),
     }
   }
@@ -244,24 +292,24 @@ impl ChatBackend for MockBackend {
       .map_or_else(Vec::new, |all| all[start..end].to_vec())
   }
 
-  fn thread(&self, conversation: ConversationId, root: MessageId) -> Vec<Message> {
+  fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
     let state = self.state.borrow();
-    let mut thread: Vec<Message> = state
+    let mut messages: Vec<Message> = state
       .messages
       .get(&conversation)
-      .and_then(|all| all.iter().find(|message| message.id == root))
+      .and_then(|all| all.iter().find(|message| message.id == root_message_of(thread)))
       .cloned()
       .into_iter()
       .collect();
     if let Some(replies) = state.replies.get(&conversation) {
-      thread.extend(
+      messages.extend(
         replies
           .iter()
-          .filter(|reply| reply.maybe_thread_root == Some(root))
+          .filter(|reply| reply.maybe_thread == Some(thread))
           .cloned(),
       );
     }
-    thread
+    messages
   }
 
   fn followed_threads(&self) -> Vec<ThreadSummary> {
@@ -274,7 +322,7 @@ impl ChatBackend for MockBackend {
       for root in roots.iter().filter(|message| message.reply_count > 0) {
         let thread_replies: Vec<&Message> = replies
           .iter()
-          .filter(|reply| reply.maybe_thread_root == Some(root.id))
+          .filter(|reply| reply.maybe_thread == Some(thread_id_of(root.id)))
           .collect();
         let Some(last) = thread_replies.last() else {
           continue;
@@ -286,19 +334,19 @@ impl ChatBackend for MockBackend {
           }
         }
         // Only threads the user takes part in are "followed".
-        if !participants.contains(&ME) {
+        if !participants.contains(&me()) {
           continue;
         }
         let unread = thread_replies
           .iter()
-          .filter(|reply| reply.author != ME)
+          .filter(|reply| reply.author != me())
           .count()
           .min(3) as u32;
         summaries.push(ThreadSummary {
           conversation: *conversation,
           root: root.clone(),
           reply_count: thread_replies.len() as u32,
-          unread_replies: if last.author == ME { 0 } else { unread },
+          unread_replies: if last.author == me() { 0 } else { unread },
           last_reply_at: last.sent_at,
           participant_ids: participants,
           has_mention: last.body.contains("@alex"),
@@ -309,33 +357,33 @@ impl ChatBackend for MockBackend {
     summaries
   }
 
-  fn post_message(&self, conversation: ConversationId, maybe_root: Option<MessageId>, body: &str) {
+  fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
     let body = body.trim();
     if body.is_empty() {
       return;
     }
     let mut state = self.state.borrow_mut();
-    let id = MessageId(state.next_message_id);
+    let id = id_from_raw::<MessageId>(state.next_message_id);
     state.next_message_id += 1;
     let message = Message {
       id,
       conversation,
-      author: ME,
+      author: me(),
       kind: MessageKind::User,
       sent_at: self.now + state.next_message_id as i64 % 1000,
       body: body.to_owned(),
       is_edited: false,
       reactions: Vec::new(),
       reply_count: 0,
-      maybe_thread_root: maybe_root,
+      maybe_thread,
     };
-    match maybe_root {
-      Some(root) => {
-        if let Some(root_message) = state
-          .messages
-          .get_mut(&conversation)
-          .and_then(|all| all.iter_mut().find(|message| message.id == root))
-        {
+    match maybe_thread {
+      Some(thread) => {
+        if let Some(root_message) = state.messages.get_mut(&conversation).and_then(|all| {
+          all
+            .iter_mut()
+            .find(|message| message.id == root_message_of(thread))
+        }) {
           root_message.reply_count += 1;
         }
         state.replies.entry(conversation).or_default().push(message);
@@ -425,25 +473,25 @@ impl ChatBackend for MockBackend {
 impl State {
   fn seed_messages(&mut self, now: TimestampMs) {
     let seeds: [(ConversationId, usize); 8] = [
-      (CH_GENERAL, 60),
-      (CH_ANNOUNCEMENTS, 6),
-      (CH_ENGINEERING, 420),
-      (CH_DESIGN, 80),
-      (CH_LEADERSHIP, 25),
-      (CH_B_GENERAL, 40),
-      (CH_B_PLANNING, 30),
-      (ConversationId(DM_FIRST), 18),
+      (ch_general(), 60),
+      (ch_announcements(), 6),
+      (ch_engineering(), 420),
+      (ch_design(), 80),
+      (ch_leadership(), 25),
+      (ch_b_general(), 40),
+      (ch_b_planning(), 30),
+      (id_from_raw(DM_FIRST), 18),
     ];
     for (conversation, count) in seeds {
       self.generate_conversation(conversation, count, now);
     }
     for dm in DM_FIRST + 1..DM_FIRST + 6 {
-      self.generate_conversation(ConversationId(dm), 12, now);
+      self.generate_conversation(id_from_raw::<ConversationId>(dm), 12, now);
     }
   }
 
   fn generate_conversation(&mut self, conversation: ConversationId, count: usize, now: TimestampMs) {
-    let mut rng = Rng::new(conversation.0 + 7);
+    let mut rng = Rng::new(raw_id(conversation) + 7);
     let human_ids: Vec<UserId> = self
       .users
       .iter()
@@ -463,7 +511,7 @@ impl State {
       if rng.below(4) == 0 {
         author = members[rng.below(members.len())];
       }
-      let id = MessageId(conversation.0 * 100_000 + index as u64 + 1);
+      let id = id_from_raw::<MessageId>(raw_id(conversation) * 100_000 + index as u64 + 1);
       let kind = if rng.below(40) == 0 {
         MessageKind::System(if rng.below(2) == 0 {
           SystemEvent::Joined
@@ -487,7 +535,7 @@ impl State {
         is_edited: rng.below(12) == 0,
         reactions: Vec::new(),
         reply_count: 0,
-        maybe_thread_root: None,
+        maybe_thread: None,
       };
       if matches!(message.kind, MessageKind::User) {
         for _ in 0..rng.below(3) {
@@ -510,17 +558,17 @@ impl State {
           message.reply_count = reply_count as u32;
           for reply_index in 0..reply_count {
             let replier = if reply_index % 2 == 0 {
-              ME
+              me()
             } else {
               members[rng.below(members.len())]
             };
-            let body = if reply_index == reply_count - 1 && replier != ME && rng.below(3) == 0 {
+            let body = if reply_index == reply_count - 1 && replier != me() && rng.below(3) == 0 {
               "@alex does that match what you saw yesterday?".to_owned()
             } else {
               SENTENCES[rng.below(SENTENCES.len())].to_owned()
             };
             replies.push(Message {
-              id: MessageId(id.0 * 100 + reply_index as u64 + 1),
+              id: id_from_raw::<MessageId>(raw_id(id) * 100 + reply_index as u64 + 1),
               conversation,
               author: replier,
               kind: MessageKind::User,
@@ -529,7 +577,7 @@ impl State {
               is_edited: false,
               reactions: Vec::new(),
               reply_count: 0,
-              maybe_thread_root: Some(id),
+              maybe_thread: Some(thread_id_of(id)),
             });
           }
         }
@@ -566,16 +614,18 @@ impl State {
 }
 
 fn log_lines(conversation: ConversationId) -> Option<usize> {
-  match conversation {
-    CH_CI => Some(2_400),
-    CH_APP_LOGS => Some(LOG_CHANNEL_LINES),
-    _ => None,
+  if conversation == ch_ci() {
+    Some(2_400)
+  } else if conversation == ch_app_logs() {
+    Some(LOG_CHANNEL_LINES)
+  } else {
+    None
   }
 }
 
 /// Builds log line `index` without storing it; the newest line has the largest index.
 fn log_line(conversation: ConversationId, index: usize, total: usize, now: TimestampMs) -> Message {
-  let mut rng = Rng::new(index as u64 ^ (conversation.0 << 32));
+  let mut rng = Rng::new(index as u64 ^ (raw_id(conversation) << 32));
   let (level, texts) = match rng.below(100) {
     0..=3 => (LogLevel::Error, LOG_ERROR),
     4..=14 => (LogLevel::Warn, LOG_WARN),
@@ -585,16 +635,16 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
   let service = LOG_SERVICES[rng.below(LOG_SERVICES.len())];
   let text = texts[rng.below(texts.len())];
   Message {
-    id: MessageId(conversation.0 * 1_000_000 + index as u64 + 1),
+    id: id_from_raw::<MessageId>(raw_id(conversation) * 1_000_000 + index as u64 + 1),
     conversation,
-    author: BOT,
+    author: bot(),
     kind: MessageKind::Log(level),
     sent_at: now - (total - index) as i64 * 1500,
     body: format!("[{service}] {text} seq={index}"),
     is_edited: false,
     reactions: Vec::new(),
     reply_count: 0,
-    maybe_thread_root: None,
+    maybe_thread: None,
   }
 }
 
@@ -613,7 +663,7 @@ fn demo_users() -> Vec<User> {
   let mut users: Vec<User> = people
     .into_iter()
     .map(|(id, username, display_name, presence, avatar_hue)| User {
-      id: UserId(id),
+      id: id_from_raw::<UserId>(id),
       username: username.into(),
       display_name: display_name.into(),
       presence,
@@ -634,7 +684,7 @@ fn demo_users() -> Vec<User> {
     expiry: crate::model::StatusExpiry::ThisWeek,
   });
   users.push(User {
-    id: BOT,
+    id: bot(),
     username: "build-bot".into(),
     display_name: "Build Bot".into(),
     presence: PresenceStatus::Online,
@@ -650,7 +700,7 @@ fn demo_users() -> Vec<User> {
 type DemoDirect = (u64, &'static str, ConversationKind, &'static [u64], u32, u32);
 
 fn demo_conversations() -> Vec<Conversation> {
-  let everyone: Vec<UserId> = (1..=8).map(UserId).collect();
+  let everyone: Vec<UserId> = (1..=8).map(id_from_raw::<UserId>).collect();
   let channel = |id: ConversationId,
                  space: SpaceId,
                  kind: ConversationKind,
@@ -677,8 +727,8 @@ fn demo_conversations() -> Vec<Conversation> {
   use SidebarCategory::{Channels, Integrations};
   let mut list = vec![
     channel(
-      CH_GENERAL,
-      SPACE_A,
+      ch_general(),
+      space_a(),
       Public,
       Channels,
       "general",
@@ -687,8 +737,8 @@ fn demo_conversations() -> Vec<Conversation> {
       0,
     ),
     channel(
-      CH_ANNOUNCEMENTS,
-      SPACE_A,
+      ch_announcements(),
+      space_a(),
       Public,
       Channels,
       "announcements",
@@ -697,8 +747,8 @@ fn demo_conversations() -> Vec<Conversation> {
       0,
     ),
     channel(
-      CH_ENGINEERING,
-      SPACE_A,
+      ch_engineering(),
+      space_a(),
       Public,
       Channels,
       "engineering",
@@ -707,8 +757,8 @@ fn demo_conversations() -> Vec<Conversation> {
       2,
     ),
     channel(
-      CH_DESIGN,
-      SPACE_A,
+      ch_design(),
+      space_a(),
       Public,
       Channels,
       "design",
@@ -717,8 +767,8 @@ fn demo_conversations() -> Vec<Conversation> {
       0,
     ),
     channel(
-      CH_LEADERSHIP,
-      SPACE_A,
+      ch_leadership(),
+      space_a(),
       Private,
       Channels,
       "leadership",
@@ -727,8 +777,8 @@ fn demo_conversations() -> Vec<Conversation> {
       0,
     ),
     channel(
-      CH_CI,
-      SPACE_A,
+      ch_ci(),
+      space_a(),
       Integration,
       Integrations,
       "ci-builds",
@@ -737,8 +787,8 @@ fn demo_conversations() -> Vec<Conversation> {
       0,
     ),
     channel(
-      CH_APP_LOGS,
-      SPACE_A,
+      ch_app_logs(),
+      space_a(),
       Integration,
       Integrations,
       "app-logs",
@@ -747,8 +797,8 @@ fn demo_conversations() -> Vec<Conversation> {
       0,
     ),
     channel(
-      CH_B_GENERAL,
-      SPACE_B,
+      ch_b_general(),
+      space_b(),
       Public,
       Channels,
       "general",
@@ -757,8 +807,8 @@ fn demo_conversations() -> Vec<Conversation> {
       0,
     ),
     channel(
-      CH_B_PLANNING,
-      SPACE_B,
+      ch_b_planning(),
+      space_b(),
       Public,
       Channels,
       "planning",
@@ -827,13 +877,13 @@ fn demo_conversations() -> Vec<Conversation> {
   ];
   for (id, name, kind, members, unread, mentions) in dms {
     list.push(Conversation {
-      id: ConversationId(id),
+      id: id_from_raw::<ConversationId>(id),
       maybe_space: None,
       kind,
       category: SidebarCategory::DirectMessages,
       name: name.into(),
       topic: String::new(),
-      member_ids: members.iter().copied().map(UserId).collect(),
+      member_ids: members.iter().copied().map(id_from_raw::<UserId>).collect(),
       unread_count: unread,
       mention_count: mentions,
       is_favorite: id == DM_FIRST,
@@ -854,9 +904,9 @@ mod tests {
   #[test]
   fn log_channel_is_generated_lazily_and_stable() {
     let backend = MockBackend::new(NOW);
-    assert_eq!(backend.message_count(CH_APP_LOGS), LOG_CHANNEL_LINES);
-    let first = backend.messages(CH_APP_LOGS, 49_990, 10);
-    let again = backend.messages(CH_APP_LOGS, 49_990, 10);
+    assert_eq!(backend.message_count(ch_app_logs()), LOG_CHANNEL_LINES);
+    let first = backend.messages(ch_app_logs(), 49_990, 10);
+    let again = backend.messages(ch_app_logs(), 49_990, 10);
     assert_eq!(first, again);
     assert_eq!(first.len(), 10);
     assert!(first.windows(2).all(|pair| pair[0].sent_at < pair[1].sent_at));
@@ -865,20 +915,20 @@ mod tests {
   #[test]
   fn ranges_are_clipped() {
     let backend = MockBackend::new(NOW);
-    assert!(backend.messages(CH_GENERAL, 10_000, 5).is_empty());
-    assert_eq!(backend.messages(CH_GENERAL, 55, 100).len(), 5);
+    assert!(backend.messages(ch_general(), 10_000, 5).is_empty());
+    assert_eq!(backend.messages(ch_general(), 55, 100).len(), 5);
   }
 
   #[test]
   fn posting_a_reply_bumps_the_thread_count() {
     let backend = MockBackend::new(NOW);
     let root = backend
-      .messages(CH_GENERAL, 0, 60)
+      .messages(ch_general(), 0, 60)
       .into_iter()
       .find(|m| matches!(m.kind, MessageKind::User));
     let root = root.expect("demo data contains user messages");
-    backend.post_message(CH_GENERAL, Some(root.id), "reply");
-    let thread = backend.thread(CH_GENERAL, root.id);
+    backend.post_message(ch_general(), Some(thread_id_of(root.id)), "reply");
+    let thread = backend.thread(ch_general(), thread_id_of(root.id));
     assert_eq!(thread.last().map(|m| m.body.as_str()), Some("reply"));
     assert_eq!(thread[0].reply_count, root.reply_count + 1);
   }
@@ -887,19 +937,19 @@ mod tests {
   fn reaction_toggle_adds_and_removes() {
     let backend = MockBackend::new(NOW);
     let message = backend
-      .messages(CH_DESIGN, 0, 80)
+      .messages(ch_design(), 0, 80)
       .into_iter()
       .find(|m| m.reactions.is_empty());
     let message = message.expect("some message has no reactions");
-    backend.toggle_reaction(CH_DESIGN, message.id, "🎉");
+    backend.toggle_reaction(ch_design(), message.id, "🎉");
     let after = backend
-      .messages(CH_DESIGN, 0, 80)
+      .messages(ch_design(), 0, 80)
       .into_iter()
       .find(|m| m.id == message.id);
     assert_eq!(after.map(|m| m.reactions.len()), Some(1));
-    backend.toggle_reaction(CH_DESIGN, message.id, "🎉");
+    backend.toggle_reaction(ch_design(), message.id, "🎉");
     let after = backend
-      .messages(CH_DESIGN, 0, 80)
+      .messages(ch_design(), 0, 80)
       .into_iter()
       .find(|m| m.id == message.id);
     assert_eq!(after.map(|m| m.reactions.len()), Some(0));

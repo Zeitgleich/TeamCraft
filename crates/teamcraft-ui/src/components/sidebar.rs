@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 
 use crate::components::avatar::PresenceDot;
+use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationKind, PresenceStatus};
@@ -84,6 +85,7 @@ pub fn Sidebar() -> impl IntoView {
           <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
         </For>
       </div>
+      <CallPill />
     </nav>
   }
 }

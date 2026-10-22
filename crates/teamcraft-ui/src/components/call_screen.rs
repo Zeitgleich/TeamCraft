@@ -1,0 +1,342 @@
+use std::cell::Cell;
+
+use leptos::prelude::*;
+
+use crate::calls::{CallKind, CallLayout, CallRequest, Participant};
+use crate::components::call_video::{BackgroundPicker, VideoTile};
+use crate::components::icons::{Icon, IconName};
+use crate::i18n::use_i18n;
+use crate::model::{User, UserId};
+use crate::reactive::use_interval;
+use crate::state::use_app_state;
+
+const SPEAKER_ROTATE_MS: u64 = 2400;
+const CLOCK_TICK_MS: u64 = 1000;
+
+/// Everything a tile needs, for remote participants and for the user.
+#[derive(Clone, Debug, PartialEq)]
+struct TileData {
+  user: User,
+  participant: Option<Participant>,
+}
+
+/// The in-call screen: gallery, active speaker or shared-screen layout with the control bar.
+#[component]
+pub fn CallScreen(request: CallRequest) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let call = state.call;
+  let conversation = Memo::new(move |_| state.read(|backend| backend.conversation(request.conversation)));
+  let remote = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .call_participants(request.conversation)
+        .into_iter()
+        .filter_map(|participant| {
+          backend.user(participant.user).map(|user| TileData {
+            user,
+            participant: Some(participant),
+          })
+        })
+        .collect::<Vec<_>>()
+    })
+  });
+  let remote_sharer = Memo::new(move |_| {
+    remote
+      .get()
+      .into_iter()
+      .find(|tile| tile.participant.as_ref().is_some_and(|p| p.is_sharing_screen))
+  });
+  let is_share_layout = move || call.is_sharing_screen.get() || remote_sharer.get().is_some();
+
+  // Simulated speech: rotate the active speaker among people who are not muted.
+  let speaking = RwSignal::new(None::<UserId>);
+  let rotation = Cell::new(0_usize);
+  use_interval(SPEAKER_ROTATE_MS, move || {
+    let candidates: Vec<UserId> = remote
+      .get_untracked()
+      .into_iter()
+      .filter(|tile| tile.participant.as_ref().is_some_and(|p| !p.is_muted))
+      .map(|tile| tile.user.id)
+      .collect();
+    if candidates.is_empty() {
+      speaking.set(None);
+    } else {
+      rotation.set(rotation.get() + 1);
+      speaking.set(candidates.get(rotation.get() % candidates.len()).copied());
+    }
+  });
+  let elapsed = RwSignal::new(0_u32);
+  use_interval(CLOCK_TICK_MS, move || elapsed.update(|seconds| *seconds += 1));
+  let clock = move || format!("{:02}:{:02}", elapsed.get() / 60, elapsed.get() % 60);
+
+  let effects_open = RwSignal::new(false);
+
+  let title = move || {
+    let name = conversation.get().map(|conv| conv.name).unwrap_or_default();
+    match request.kind {
+      CallKind::Direct => i18n.t_with("call-title-direct", &[("name", &name)]),
+      CallKind::Group => i18n.t_with("call-title-group", &[("name", &name)]),
+      CallKind::Huddle => i18n.t_with("call-title-huddle", &[("name", &name)]),
+    }
+  };
+  let participant_count = move || remote.get().len() + 1;
+
+  let self_tile = move |is_large: bool| {
+    view! {
+      <VideoTile
+        user=state.me()
+        is_self=true
+        is_large=is_large
+        is_muted=Signal::derive(move || !call.is_mic_on.get())
+        is_camera_on=call.is_camera_on
+        has_hand_raised=call.has_hand_raised
+        effect=call.effect
+        is_mirrored=call.mirror_self_view
+      />
+    }
+  };
+  let remote_tile = move |tile: TileData, is_large: bool| {
+    let participant = tile.participant.unwrap_or(Participant {
+      user: tile.user.id,
+      is_muted: false,
+      is_camera_on: true,
+      has_hand_raised: false,
+      is_sharing_screen: false,
+    });
+    let id = tile.user.id;
+    view! {
+      <VideoTile
+        user=tile.user
+        is_large=is_large
+        is_muted=participant.is_muted
+        is_camera_on=participant.is_camera_on
+        has_hand_raised=participant.has_hand_raised
+        is_speaking=Signal::derive(move || speaking.get() == Some(id))
+      />
+    }
+  };
+
+  let stage = move || {
+    let remote_tiles = remote.get();
+    if is_share_layout() {
+      let sharer_name = match remote_sharer.get() {
+        Some(tile) => tile.user.display_name,
+        None => String::new(),
+      };
+      let is_me_sharing = call.is_sharing_screen.get();
+      let banner = if is_me_sharing {
+        i18n.t("share-banner-self")
+      } else {
+        i18n.t_with("share-banner-remote", &[("name", &sharer_name)])
+      };
+      let label = i18n.t_with(
+        "share-screen-label",
+        &[(
+          "name",
+          &if is_me_sharing {
+            me_name(state)
+          } else {
+            sharer_name
+          },
+        )],
+      );
+      let strip: Vec<_> = remote_tiles
+        .into_iter()
+        .map(|tile| remote_tile(tile, false).into_any())
+        .collect();
+      return view! {
+        <div class="stage stage-share">
+          <div class="share-main">
+            <div class="share-banner" role="status">
+              <Icon name=IconName::Monitor />
+              <span>{banner}</span>
+              <Show when=move || call.is_sharing_screen.get() fallback=|| ()>
+                <button class="btn btn-small" on:click=move |_| call.is_sharing_screen.set(false)>
+                  {move || i18n.t("share-stop")}
+                </button>
+              </Show>
+            </div>
+            <div class="shared-screen" role="img" aria-label=label>
+              <div class="mock-window">
+                <div class="mock-titlebar"><span></span><span></span><span></span></div>
+                <div class="mock-body">
+                  <div class="mock-sidebar"></div>
+                  <div class="mock-content">
+                    <div class="mock-line wide"></div>
+                    <div class="mock-line"></div>
+                    <div class="mock-line"></div>
+                    <div class="mock-chart"></div>
+                    <div class="mock-line wide"></div>
+                    <div class="mock-line"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="filmstrip filmstrip-side">{self_tile(false)} {strip}</div>
+        </div>
+      }
+      .into_any();
+    }
+    match call.layout.get() {
+      CallLayout::Gallery => {
+        let total = remote_tiles.len() + 1;
+        let columns = match total {
+          0..=1 => 1,
+          2..=4 => 2,
+          5..=9 => 3,
+          _ => 4,
+        };
+        let tiles: Vec<_> = remote_tiles
+          .into_iter()
+          .map(|tile| remote_tile(tile, false).into_any())
+          .collect();
+        view! {
+          <div class="stage stage-gallery" style=format!("--cols: {columns}")>
+            {tiles} {self_tile(false)}
+          </div>
+        }
+        .into_any()
+      },
+      CallLayout::ActiveSpeaker => {
+        let focus = speaking
+          .get()
+          .and_then(|id| remote_tiles.iter().position(|tile| tile.user.id == id))
+          .unwrap_or(0);
+        let mut others = remote_tiles;
+        let main = if others.is_empty() {
+          None
+        } else {
+          Some(others.remove(focus))
+        };
+        let strip: Vec<_> = others
+          .into_iter()
+          .map(|tile| remote_tile(tile, false).into_any())
+          .collect();
+        view! {
+          <div class="stage stage-speaker">
+            <div class="speaker-main">
+              {match main {
+                Some(tile) => remote_tile(tile, true).into_any(),
+                None => self_tile(true).into_any(),
+              }}
+            </div>
+            <div class="filmstrip">
+              {strip}
+              {self_tile(false)}
+            </div>
+          </div>
+        }
+        .into_any()
+      },
+    }
+  };
+
+  view! {
+    <section class="call-screen" aria-labelledby="call-title">
+      <header class="call-header">
+        <div class="call-heading">
+          <h1 id="call-title">{title}</h1>
+          <span class="call-meta">
+            <time aria-label=move || i18n.t_with("call-elapsed", &[("time", &clock())])>{clock}</time>
+            <span>{move || i18n.t_count("call-participants", participant_count())}</span>
+          </span>
+        </div>
+        <span class="e2ee-pill" title=move || i18n.t("call-encrypted-detail")>
+          <Icon name=IconName::Shield />
+          <span>{move || i18n.t("call-encrypted")}</span>
+          <span class="mono" translate="no">{move || i18n.t_with("call-verification-code", &[("code", "48 20 17")])}</span>
+        </span>
+      </header>
+      <div class="call-stage-wrap">{stage}</div>
+      <Show when=move || effects_open.get() fallback=|| ()>
+        <div class="effects-popover" role="dialog" aria-label=move || i18n.t("call-effects")>
+          <h2>{move || i18n.t("call-effects")}</h2>
+          <BackgroundPicker effect=call.effect />
+        </div>
+      </Show>
+      <footer class="call-controls" role="toolbar" aria-label=move || i18n.t("call-controls-label")>
+        <ControlButton
+          is_off=Signal::derive(move || !call.is_mic_on.get())
+          icon=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff })
+          label=Signal::derive(move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") })
+          on_press=move || call.is_mic_on.update(|on| *on = !*on)
+        />
+        <ControlButton
+          is_off=Signal::derive(move || !call.is_camera_on.get())
+          icon=Signal::derive(move || if call.is_camera_on.get() { IconName::Video } else { IconName::VideoOff })
+          label=Signal::derive(move || if call.is_camera_on.get() { i18n.t("control-camera-off") } else { i18n.t("control-camera-on") })
+          on_press=move || call.is_camera_on.update(|on| *on = !*on)
+        />
+        <ControlButton
+          is_active=Signal::derive(move || call.is_sharing_screen.get())
+          icon=IconName::Monitor
+          label=Signal::derive(move || if call.is_sharing_screen.get() { i18n.t("share-stop") } else { i18n.t("share-start") })
+          on_press=move || call.is_sharing_screen.update(|on| *on = !*on)
+        />
+        <ControlButton
+          is_active=Signal::derive(move || call.has_hand_raised.get())
+          icon=IconName::Hand
+          label=Signal::derive(move || if call.has_hand_raised.get() { i18n.t("call-hand-lower") } else { i18n.t("call-hand-raise") })
+          on_press=move || call.has_hand_raised.update(|on| *on = !*on)
+        />
+        <ControlButton
+          is_active=Signal::derive(move || effects_open.get())
+          icon=IconName::Image
+          label=Signal::derive(move || i18n.t("call-effects"))
+          on_press=move || effects_open.update(|open| *open = !*open)
+        />
+        <ControlButton
+          icon=Signal::derive(move || if call.layout.get() == CallLayout::Gallery { IconName::Spotlight } else { IconName::Grid })
+          label=Signal::derive(move || {
+            if call.layout.get() == CallLayout::Gallery { i18n.t("call-layout-speaker") } else { i18n.t("call-layout-gallery") }
+          })
+          on_press=move || {
+            call
+              .layout
+              .update(|layout| {
+                *layout = if *layout == CallLayout::Gallery { CallLayout::ActiveSpeaker } else { CallLayout::Gallery };
+              })
+          }
+        />
+        <ControlButton
+          icon=IconName::Minimize
+          label=Signal::derive(move || i18n.t("call-minimize"))
+          on_press=move || call.is_minimized.set(true)
+        />
+        <button class="leave-btn" on:click=move |_| call.leave()>
+          <Icon name=IconName::Phone class="hangup" />
+          <span>{move || i18n.t("call-leave")}</span>
+        </button>
+      </footer>
+    </section>
+  }
+}
+
+fn me_name(state: crate::state::AppState) -> String {
+  state.me().display_name
+}
+
+#[component]
+fn ControlButton(
+  #[prop(into)] icon: Signal<IconName>,
+  #[prop(into)] label: Signal<String>,
+  on_press: impl Fn() + 'static,
+  #[prop(into, default = Signal::stored(false))] is_off: Signal<bool>,
+  #[prop(into, default = Signal::stored(false))] is_active: Signal<bool>,
+) -> impl IntoView {
+  view! {
+    <button
+      class="control-btn"
+      class:off=move || is_off.get()
+      class:active=move || is_active.get()
+      aria-label=move || label.get()
+      title=move || label.get()
+      aria-pressed=move || (is_off.get() || is_active.get()).to_string()
+      on:click=move |_| on_press()
+    >
+      <Icon name=icon />
+    </button>
+  }
+}

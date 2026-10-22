@@ -167,3 +167,284 @@ shortcut-threads = Open threads
 shortcut-close = Close dialog or side panel
 shortcut-messages = Move between messages
 shortcut-open-thread = Open the thread of the focused message
+
+## Calls and huddles
+call-start-audio = Start audio call
+call-start-video = Start video call
+huddle-start = Start a huddle
+huddle-join = Join huddle
+huddle-leave = Leave huddle
+huddle-in-progress = Huddle in progress
+huddle-bar-label = Huddle
+call-title-direct = Call with { $name }
+call-title-group = Call in { $name }
+call-title-huddle = Huddle in { $name }
+call-open = Open call
+call-in-progress = In a call
+call-pill-label = Call in progress
+call-controls-label = Call controls
+call-leave = Leave
+call-minimize = Back to chat
+call-effects = Background effects
+call-layout-gallery = Gallery view
+call-layout-speaker = Active speaker view
+call-hand-raise = Raise hand
+call-hand-lower = Lower hand
+call-participants = { $count ->
+    [one] { $count } person
+   *[other] { $count } people
+  }
+call-elapsed = Call time { $time }
+call-encrypted = End-to-end encrypted
+call-encrypted-detail = Only people in this call can see and hear it. Compare the code to check.
+call-verification-code = Code { $code }
+control-mic-mute = Mute microphone
+control-mic-unmute = Unmute microphone
+control-camera-off = Turn camera off
+control-camera-on = Turn camera on
+share-start = Share screen
+share-stop = Stop sharing
+share-banner-self = You are sharing your screen
+share-banner-remote = { $name } is sharing their screen
+share-screen-label = Screen shared by { $name }
+tile-you = You
+tile-muted = muted
+tile-hand = hand raised
+tile-speaking = speaking
+
+## Pre-join screen
+prejoin-quick-controls = Microphone and camera
+prejoin-direct-hint = Check your devices before you start the call.
+prejoin-nobody = Nobody has joined yet.
+prejoin-people-in-call = { $count ->
+    [one] { $count } person is in the call.
+   *[other] { $count } people are in the call.
+  }
+prejoin-camera = Camera
+prejoin-microphone = Microphone
+prejoin-speaker = Speaker
+prejoin-mic-level = Microphone level
+prejoin-test-speaker = Test speaker
+prejoin-testing-speaker = Playing…
+prejoin-effects = Background
+prejoin-effects-hint = Effects are applied on your device before your video is sent.
+prejoin-mirror = Mirror my video
+prejoin-join = Join now
+effect-none = None
+effect-blur-light = Light blur
+effect-blur-strong = Strong blur
+effect-office = Office
+effect-bookshelf = Bookshelf
+effect-sunrise = Sunrise
+effect-forest = Forest
+effect-upload = Upload image
+effect-upload-soon = Own backgrounds are not available yet
+
+## Incoming calls
+incoming-title = Incoming call
+incoming-audio = { $name } is calling you
+incoming-video = { $name } is video calling you
+incoming-decline = Decline
+incoming-accept-audio = Accept with audio
+incoming-accept-video = Accept with video
+
+## Demo triggers
+settings-demo-title = Demo
+settings-demo-hint = These buttons simulate events that the server will send later.
+settings-demo-incoming = Simulate an incoming call
+
+## Administration
+menu-administration = Administration
+admin-title = Administration
+admin-nav-label = Administration sections
+admin-nav-channels = Spaces and channels
+admin-nav-users = Users and guests
+admin-nav-security = Security policy
+admin-nav-retention = Retention
+admin-nav-audit = Audit log
+admin-back = Back to chat
+admin-metadata-only = Metadata only
+admin-metadata-detail = Admins manage rooms without being able to read them: no message text, files or reactions are shown.
+admin-soon = Not available yet
+admin-search = Search
+admin-search-placeholder = Search by name…
+admin-filter = Filter
+admin-empty = Nothing matches.
+admin-detail-label = Details
+
+admin-channels-title = Spaces and channels
+admin-channels-subtitle = Every space and channel, including private ones you are not a member of.
+admin-filter-all = All
+admin-filter-private = Private
+admin-filter-guests = With guests
+admin-filter-inactive = Inactive
+admin-filter-orphaned = No owner
+admin-col-channel = Channel
+admin-col-space = Space
+admin-col-members = Members
+admin-col-owner = Owner
+admin-col-activity = Last activity
+admin-col-storage = Storage
+admin-channel-select = Select a channel to see its details.
+admin-kind-private = Private
+admin-orphaned = No owner
+admin-guests = Guests
+admin-messages = Messages
+admin-history = History for new members
+admin-history-from_join = From the moment of joining
+admin-history-full = Complete history
+admin-retention = Retention
+admin-retention-days = { $count ->
+    [one] { $count } day
+   *[other] { $count } days
+  }
+admin-retention-messages = { $count ->
+    [one] { $count } message
+   *[other] { $count } messages
+  }
+admin-retention-forever = Keep everything
+admin-no-content = Message text, files and reactions are end-to-end encrypted and not visible to admins.
+admin-join = Add myself to this channel
+admin-assign-owner = Assign owner
+admin-archive = Archive
+admin-join-done = You joined the channel. Members see a message with an admin badge.
+admin-join-approval = Request sent. A channel owner has to approve before you can join.
+admin-join-disabled = The security policy does not allow admins to join private channels.
+
+admin-users-title = Users and guests
+admin-users-subtitle = Accounts, devices and external guests.
+admin-users-tabs = Account type
+admin-tab-users = Users
+admin-tab-guests = Guests
+admin-invite-user = Create user
+admin-invite-guest = Invite guest
+admin-col-user = User
+admin-col-role = Role
+admin-col-devices = Devices
+admin-col-last-seen = Last seen
+admin-col-spaces = Spaces
+admin-col-sponsor = Sponsor
+admin-col-expires = Expires
+admin-user-select = Select a user to see their devices.
+admin-role-owner = Owner
+admin-role-admin = Admin
+admin-role-member = Member
+admin-role-guest = Guest
+admin-role-unknown = Other
+admin-deactivated = Deactivated
+admin-devices = Devices
+admin-device-remove = Remove
+admin-device-confirm = Remove device
+admin-no-devices = No devices registered.
+admin-deactivate = Deactivate user
+admin-deactivate-confirm = Deactivate and revoke sessions
+admin-reactivate = Reactivate user
+admin-recovery-start = Start recovery
+admin-recovery-needs-second = A second admin has to approve before the key bag can be unwrapped.
+admin-recovery-off = Organization recovery is turned off for this account type.
+admin-recovery-started = Recovery started. It needs approval from a second admin and is logged.
+
+admin-security-title = Security policy
+admin-security-subtitle = Signed workspace settings that every client enforces itself.
+policy-self-join = Admins joining private channels
+policy-self-join-hint = An admin can add themselves to a private channel and read its history. This is never silent.
+policy-self-join-visible = Visible
+policy-self-join-visible-hint = Allowed. Members see a message with an admin badge.
+policy-self-join-owner_approval = Owner approval
+policy-self-join-owner_approval-hint = A channel owner has to approve first.
+policy-self-join-disabled = Disabled
+policy-self-join-disabled-hint = Admins cannot join private channels.
+policy-recovery = Organization recovery
+policy-recovery-hint = Lets admins restore access when someone loses all devices and their passkey.
+policy-recovery-members = Allow for members
+policy-recovery-guests = Allow for guests
+policy-recovery-approvals = Admins that must approve
+policy-admins = { $count } admins
+policy-signin = Sign-in
+policy-mfa = Require multi-factor authentication
+policy-mfa-guests = Require it for guests too
+policy-session = Session length
+policy-days = { $count ->
+    [one] { $count } day
+   *[other] { $count } days
+  }
+policy-idle = Sign out after inactivity
+policy-minutes = { $count } minutes
+policy-sharing = Guests and messaging
+policy-guest-domains = Allowed guest email domains
+policy-history = Default history for new members
+policy-dm = Who can start direct messages
+policy-dm-anyone = Anyone
+policy-dm-shared_spaces = Only people who share a space
+policy-signing = Current policy version { $version }. Changes are signed with your device key.
+policy-saved = Saved as policy version { $version }.
+policy-reset = Discard changes
+policy-save = Save policy
+
+admin-retention-title = Retention
+admin-retention-subtitle = Keep the last N days and/or N messages, whichever is stricter. Channel owners can choose less, up to { $days } days.
+retention-days = Days
+retention-messages = Messages
+retention-pinned = Keep pinned messages
+retention-actions = Actions
+retention-forever = Keep all
+retention-invalid = Enter a whole number from 1 up to the instance limit, or leave empty.
+
+admin-audit-title = Audit log
+admin-audit-subtitle = Admin actions, recoveries and device changes. Metadata only, never message content.
+audit-filter-action = Action
+audit-all-actions = All actions
+audit-export = Export
+audit-col-time = Time
+audit-col-actor = By
+audit-col-action = Action
+audit-col-target = Affected
+audit-col-detail = Details
+audit-policy-changed = Policy changed
+audit-retention-changed = Retention changed
+audit-device-removed = Device removed
+audit-user-deactivated = User deactivated
+audit-user-reactivated = User reactivated
+audit-recovery-started = Recovery started
+audit-admin-joined-channel = Admin joined channel
+audit-owner-assigned = Owner assigned
+audit-guest-invited = Guest invited
+audit-channel-archived = Channel archived
+
+## Device approval, linking and key changes
+settings-tab-devices = Devices
+settings-devices-hint = Devices that can read your messages. Remove any device you no longer use or recognize.
+settings-device-current = This device
+settings-device-link = Link a new device
+settings-demo-login = Simulate a login on a new device
+settings-demo-link = Show the QR linking screen
+settings-demo-key-change = Open a chat with a changed security key
+approval-title = New login
+approval-question = Someone signed in on { $device }. Approve this device?
+approval-code-label = Code { $code }
+approval-compare = Compare this code with the one on the new device. Approve only if they match.
+approval-location = Near
+approval-warning = If you did not just sign in, choose "Not me". Approving gives the new device access to your messages.
+approval-approve = Approve
+approval-deny = Not me
+approval-approved = Device approved. It is receiving your keys now.
+approval-denied = Request denied. Review your devices in Settings if you are unsure.
+link-title = Link this device
+link-qr-label = QR code to link this device
+link-qr-note = Demo code, not a real login.
+link-step-open = On a device you are already signed in on, open Settings and choose Devices.
+link-step-scan = Choose Link a new device and scan this code.
+link-step-code = Check that both screens show the same code, then approve.
+link-waiting = Waiting for approval…
+link-done = Device linked. Your messages are loading.
+link-alternative = No camera? Sign in here and approve the code on your other device instead.
+link-simulate = Simulate approval
+key-changed-title = { $name }'s security key changed
+key-changed-body = This normally happens only after a full account reset. Check with { $name } through another channel before you share anything sensitive.
+key-verify = Compare keys
+key-accept = Accept new key
+key-verify-title = Compare { $name }'s key
+key-verify-body = Read the new key out loud to the person, for example in a call, and check that it matches what they see in their own security settings.
+key-new = New key
+key-old = Previous key
+key-mark-verified = Mark as verified

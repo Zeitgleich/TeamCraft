@@ -4,10 +4,13 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 
-use crate::backend::ChatBackend;
-use crate::model::{Conversation, ConversationId, MessageId, SpaceId, User};
+use crate::admin::AdminSection;
+use crate::backend::Backend;
+use crate::calls::CallState;
+use crate::model::{Conversation, ConversationId, SpaceId, ThreadId, User};
 use crate::reactive::get_if_observed;
 use crate::sections::build_sections;
+use crate::security::DeviceApproval;
 use crate::settings::Settings;
 
 /// What fills the main column.
@@ -16,6 +19,8 @@ pub enum MainView {
   Conversation(ConversationId),
   /// The threads inbox, optionally with one thread open in the side panel.
   Threads,
+  /// The administration console (admins only).
+  Admin(AdminSection),
 }
 
 /// What the right-hand panel shows.
@@ -24,7 +29,7 @@ pub enum SidePanel {
   Closed,
   Thread {
     conversation: ConversationId,
-    root: MessageId,
+    thread: ThreadId,
   },
   Members,
 }
@@ -38,17 +43,26 @@ pub enum Overlay {
   CustomStatus,
   Settings,
   Shortcuts,
+  /// Another device of the user asks for approval.
+  DeviceApproval,
+  /// QR code and code of this (new) device while it waits to be linked.
+  LinkDevice,
+  /// Compare the old and new identity key of someone in a conversation.
+  VerifyKey(ConversationId),
 }
 
 #[derive(Clone, Copy)]
 pub struct AppState {
-  backend: StoredValue<Rc<dyn ChatBackend>, LocalStorage>,
+  backend: StoredValue<Rc<dyn Backend>, LocalStorage>,
   /// Bumped after every backend mutation; reading data through [`AppState::read`] subscribes to it.
   revision: RwSignal<u64>,
   pub space: RwSignal<SpaceId>,
   pub view: RwSignal<MainView>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
+  pub call: CallState,
+  /// The login waiting for the user's approval, shown while the overlay is `DeviceApproval`.
+  pub device_prompt: RwSignal<Option<DeviceApproval>>,
   /// Bumped when the composer sent a message, so the feed scrolls to it.
   pub jump_to_latest: RwSignal<u64>,
   pub settings: Settings,
@@ -56,7 +70,7 @@ pub struct AppState {
 
 impl AppState {
   pub fn new(
-    backend: Rc<dyn ChatBackend>,
+    backend: Rc<dyn Backend>,
     settings: Settings,
     first_space: SpaceId,
     first: ConversationId,
@@ -68,19 +82,21 @@ impl AppState {
       view: RwSignal::new(MainView::Conversation(first)),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
+      call: CallState::new(),
+      device_prompt: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
       settings,
     }
   }
 
   /// Reads from the backend and re-runs the calling reactive scope after any mutation.
-  pub fn read<R>(&self, read: impl FnOnce(&dyn ChatBackend) -> R) -> R {
+  pub fn read<R>(&self, read: impl FnOnce(&dyn Backend) -> R) -> R {
     get_if_observed(self.revision);
     self.backend.with_value(|backend| read(backend.as_ref()))
   }
 
   /// Applies a mutation and notifies every reader.
-  pub fn write<R>(&self, write: impl FnOnce(&dyn ChatBackend) -> R) -> R {
+  pub fn write<R>(&self, write: impl FnOnce(&dyn Backend) -> R) -> R {
     let result = self.backend.with_value(|backend| write(backend.as_ref()));
     self.revision.update(|revision| *revision += 1);
     result
@@ -93,7 +109,7 @@ impl AppState {
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),
-      MainView::Threads => None,
+      MainView::Threads | MainView::Admin(_) => None,
     }
   }
 
@@ -118,14 +134,36 @@ impl AppState {
     }
   }
 
+  pub fn open_admin(&self, section: AdminSection) {
+    self.view.set(MainView::Admin(section));
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  /// Leaves the administration console and returns to the first conversation of the current space.
+  pub fn exit_admin(&self) {
+    let space = self.space.get_untracked();
+    let first = self.read(|backend| {
+      backend
+        .space_conversations(space)
+        .into_iter()
+        .next()
+        .map(|conv| conv.id)
+    });
+    match first {
+      Some(id) => self.open_conversation(id),
+      None => self.open_threads(),
+    }
+  }
+
   pub fn open_threads(&self) {
     self.view.set(MainView::Threads);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
   }
 
-  pub fn open_thread(&self, conversation: ConversationId, root: MessageId) {
-    self.panel.set(SidePanel::Thread { conversation, root });
+  pub fn open_thread(&self, conversation: ConversationId, thread: ThreadId) {
+    self.panel.set(SidePanel::Thread { conversation, thread });
   }
 
   pub fn close_overlay(&self) {

@@ -4,11 +4,17 @@ use leptos::ev;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::calls::CallPhase;
 use crate::clock::now_ms;
+use crate::components::admin_console::AdminConsole;
+use crate::components::call_prejoin::PreJoinScreen;
+use crate::components::call_screen::CallScreen;
 use crate::components::channel_view::ChannelView;
+use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::members_panel::MembersPanel;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
+use crate::components::security_ui::{DeviceApprovalDialog, LinkDeviceDialog, VerifyKeyDialog};
 use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
@@ -17,13 +23,13 @@ use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::mock::MockBackend;
-use crate::model::{ConversationId, SpaceId};
+use crate::model::id_from_raw;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
 
 /// Conversation opened at start (`#engineering` in the demo data).
-const START_SPACE: SpaceId = SpaceId(1);
-const START_CONVERSATION: ConversationId = ConversationId(12);
+const START_SPACE_RAW: u64 = 1;
+const START_CONVERSATION_RAW: u64 = 12;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -33,9 +39,14 @@ pub fn App() -> impl IntoView {
   Effect::new(move |_| i18n.set_locale(settings.locale.get()));
 
   let backend = Rc::new(MockBackend::new(now_ms()));
-  let state = AppState::new(backend, settings, START_SPACE, START_CONVERSATION);
+  let state = AppState::new(
+    backend,
+    settings,
+    id_from_raw(START_SPACE_RAW),
+    id_from_raw(START_CONVERSATION_RAW),
+  );
   provide_context(state);
-  state.open_conversation(START_CONVERSATION);
+  state.open_conversation(id_from_raw(START_CONVERSATION_RAW));
 
   apply_theme(settings.theme);
   apply_language_attribute();
@@ -49,19 +60,23 @@ pub fn App() -> impl IntoView {
     <div class="app">
       <TopBar />
       <div class="app-body">
-        <SpaceRail />
-        <Sidebar />
+        // The administration console takes the whole window, like a system console.
+        <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
+          <SpaceRail />
+          <Sidebar />
+        </Show>
         <main id="main-content" class="main" tabindex="-1">
           {move || match state.view.get() {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
             MainView::Threads => view! { <ThreadsInbox /> }.into_any(),
+            MainView::Admin(section) => view! { <AdminConsole section=section /> }.into_any(),
           }}
         </main>
-        <Show when=move || state.view.get() != MainView::Threads fallback=|| ()>
+        <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
           {move || match state.panel.get() {
             SidePanel::Closed => ().into_any(),
-            SidePanel::Thread { conversation, root } => {
-              view! { <ThreadPanel conversation=conversation root=root /> }.into_any()
+            SidePanel::Thread { conversation, thread } => {
+              view! { <ThreadPanel conversation=conversation thread=thread /> }.into_any()
             },
             SidePanel::Members => match state.current_conversation_id() {
               Some(id) => view! { <MembersPanel conversation=id /> }.into_any(),
@@ -70,11 +85,24 @@ pub fn App() -> impl IntoView {
           }}
         </Show>
       </div>
+      {move || match state.call.phase.get() {
+        CallPhase::PreJoin => {
+          state.call.maybe_request.get().map(|request| view! { <PreJoinScreen request=request /> }.into_any())
+        },
+        CallPhase::Active if !state.call.is_minimized.get() => {
+          state.call.maybe_request.get().map(|request| view! { <CallScreen request=request /> }.into_any())
+        },
+        _ => None,
+      }}
+      <IncomingCallDialog />
       {move || match state.overlay.get() {
         Overlay::QuickSwitcher => view! { <QuickSwitcher /> }.into_any(),
         Overlay::CustomStatus => view! { <CustomStatusDialog /> }.into_any(),
         Overlay::Settings => view! { <SettingsModal /> }.into_any(),
         Overlay::Shortcuts => view! { <ShortcutsModal /> }.into_any(),
+        Overlay::DeviceApproval => view! { <DeviceApprovalDialog /> }.into_any(),
+        Overlay::LinkDevice => view! { <LinkDeviceDialog /> }.into_any(),
+        Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
     </div>

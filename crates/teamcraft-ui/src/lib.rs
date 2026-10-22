@@ -4,7 +4,9 @@
 //! ships a mock implementation ([`mock::MockBackend`]) so the shell can be developed and reviewed
 //! without a server.
 
+pub mod admin;
 pub mod backend;
+pub mod calls;
 pub mod clock;
 pub mod components;
 pub mod i18n;
@@ -13,6 +15,7 @@ pub mod mock;
 pub mod model;
 pub mod reactive;
 pub mod sections;
+pub mod security;
 pub mod settings;
 pub mod state;
 

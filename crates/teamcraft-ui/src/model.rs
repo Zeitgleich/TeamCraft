@@ -1,40 +1,31 @@
 //! View models the UI renders. The mock backend produces them today; the real client core
 //! (`teamcraft-core`) will map decrypted data into the same shapes.
 
-use std::fmt;
+pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
 
-/// Declares a `Copy` newtype around a `u64` snowflake. Replace with the shared macro from
-/// `teamcraft-proto` once the UI depends on it.
-macro_rules! id_newtype {
-  ($(#[$meta:meta])* $name:ident) => {
-    $(#[$meta])*
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    pub struct $name(pub u64);
-
-    impl fmt::Display for $name {
-      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-      }
-    }
-  };
+/// Builds a typed ID from a small integer. Mock data and tests use it; real IDs come from the server.
+pub fn id_from_raw<T: Id>(raw: u64) -> T {
+  let value = i64::try_from(raw).unwrap_or(i64::MAX);
+  match Snowflake::new(value) {
+    Ok(snowflake) => T::from_snowflake(snowflake),
+    // Invariant: `value` is clamped to 0..=i64::MAX above, which `Snowflake::new` always accepts.
+    Err(_) => unreachable!("clamped value is never negative"),
+  }
 }
 
-id_newtype!(
-  /// Identifies a space (a project inside the workspace).
-  SpaceId
-);
-id_newtype!(
-  /// Identifies a channel, DM or group DM.
-  ConversationId
-);
-id_newtype!(
-  /// Identifies a message inside its conversation.
-  MessageId
-);
-id_newtype!(
-  /// Identifies a user.
-  UserId
-);
+/// The numeric value of an ID, for deriving other mock IDs and sorting.
+pub fn raw_id(id: impl Id) -> u64 {
+  u64::try_from(id.snowflake().get()).unwrap_or(0)
+}
+
+/// A thread is identified by its root message (proto: "ThreadId is the ID of its root message").
+pub fn thread_id_of(root: MessageId) -> ThreadId {
+  ThreadId::from_snowflake(root.snowflake())
+}
+
+pub fn root_message_of(thread: ThreadId) -> MessageId {
+  MessageId::from_snowflake(thread.snowflake())
+}
 
 /// Milliseconds since the Unix epoch.
 pub type TimestampMs = i64;
@@ -258,8 +249,8 @@ pub struct Message {
   pub is_edited: bool,
   pub reactions: Vec<Reaction>,
   pub reply_count: u32,
-  /// Set on replies: the root message of the thread.
-  pub maybe_thread_root: Option<MessageId>,
+  /// Set on replies: the thread they belong to.
+  pub maybe_thread: Option<ThreadId>,
 }
 
 /// A followed thread as listed in the threads inbox.

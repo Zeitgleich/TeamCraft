@@ -12,6 +12,7 @@ rust-version = "1.88"
 workspace = true
 
 [dependencies]
+teamcraft-proto.workspace = true
 leptos = { version = "0.8.22", features = ["csr"] }
 # Browser bindings: DOM access for focus, scroll measurement, storage and clipboard-free helpers.
 wasm-bindgen = "0.2"
@@ -24,6 +25,8 @@ web-sys = { version = "0.3", features = [
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"
 unic-langid = "0.9"
+# Real QR codes for device linking (pure Rust, no image support needed).
+qrcode = { version = "0.14", default-features = false }
 tracing = "0.1"
 console_error_panic_hook = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }

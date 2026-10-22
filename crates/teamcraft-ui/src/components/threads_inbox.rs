@@ -6,7 +6,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
 use crate::components::thread_panel::ThreadPanel;
 use crate::i18n::use_i18n;
-use crate::model::ThreadSummary;
+use crate::model::{ThreadSummary, thread_id_of};
 use crate::state::{SidePanel, use_app_state};
 
 /// All followed threads with unread replies, plus the selected thread beside the list.
@@ -50,8 +50,8 @@ pub fn ThreadsInbox() -> impl IntoView {
       </div>
       <div class="threads-detail-col">
         {move || match state.panel.get() {
-          SidePanel::Thread { conversation, root } => {
-            view! { <ThreadPanel conversation=conversation root=root embedded=true /> }.into_any()
+          SidePanel::Thread { conversation, thread } => {
+            view! { <ThreadPanel conversation=conversation thread=thread embedded=true /> }.into_any()
           },
           _ => {
             view! {
@@ -77,12 +77,12 @@ fn ThreadCard(thread: ThreadSummary) -> impl IntoView {
     .read(|backend| backend.conversation(thread.conversation))
     .map(|c| c.name)
     .unwrap_or_default();
-  let (conversation, root_id) = (thread.conversation, thread.root.id);
+  let (conversation, thread_id) = (thread.conversation, thread_id_of(thread.root.id));
   let is_selected = move || {
     state.panel.get()
       == SidePanel::Thread {
         conversation,
-        root: root_id,
+        thread: thread_id,
       }
   };
   let unread = thread.unread_replies;
@@ -101,7 +101,7 @@ fn ThreadCard(thread: ThreadSummary) -> impl IntoView {
         class:selected=is_selected
         class:unread={unread > 0}
         aria-current=move || is_selected().then_some("true")
-        on:click=move |_| state.open_thread(conversation, root_id)
+        on:click=move |_| state.open_thread(conversation, thread_id)
       >
         <span class="thread-card-top">
           {author.map(|user| view! { <span class="thread-author" translate="no">{user.display_name}</span> })}

@@ -1,6 +1,8 @@
 //! Virtualized message feed. Only the rows near the viewport are in the DOM; the rest is represented
 //! by two spacer heights. Row heights are estimated first and corrected by measuring rendered rows.
 
+use std::cell::Cell;
+
 use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
@@ -20,6 +22,22 @@ const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
 const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
 const MEASURE_EPSILON: f32 = 0.5;
+
+thread_local! {
+  /// ID of the list that is currently mounted; 0 when none is.
+  static ACTIVE_LIST: Cell<u64> = const { Cell::new(0) };
+  static NEXT_LIST: Cell<u64> = const { Cell::new(1) };
+}
+
+/// Runs `callback` on the next animation frame unless the list that asked for it was unmounted in
+/// the meantime. Touching signals of a disposed list would panic.
+fn defer_while_alive(list_id: u64, callback: impl FnOnce() + 'static) {
+  request_animation_frame(move || {
+    if ACTIVE_LIST.get() == list_id {
+      callback();
+    }
+  });
+}
 
 /// The slice of rows to render plus the spacer sizes around it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,6 +91,14 @@ pub fn compute_window(heights: &[f32], scroll_top: f64, viewport: f64) -> Window
 pub fn MessageList(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  let list_id = NEXT_LIST.get();
+  NEXT_LIST.set(list_id + 1);
+  ACTIVE_LIST.set(list_id);
+  on_cleanup(move || {
+    if ACTIVE_LIST.get() == list_id {
+      ACTIVE_LIST.set(0);
+    }
+  });
   let container = NodeRef::<html::Div>::new();
   let rows = NodeRef::<html::Div>::new();
 
@@ -152,7 +178,7 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
     }
     if stick_to_bottom.get_untracked() {
       layout_rev.update(|rev| *rev += 1);
-      request_animation_frame(scroll_to_bottom);
+      defer_while_alive(list_id, scroll_to_bottom);
     } else {
       let corrected = container_element.scroll_top() as f64 + shift_above_anchor;
       container_element.set_scroll_top(corrected as i32);
@@ -160,7 +186,7 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
       layout_rev.update(|rev| *rev += 1);
     }
   };
-  let schedule_measure = move || request_animation_frame(measure);
+  let schedule_measure = move || defer_while_alive(list_id, measure);
 
   // Re-measure whenever the rendered range changes.
   Effect::new(move |_| {
@@ -176,7 +202,7 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
   Effect::new(move |_| {
     count.track();
     if stick_to_bottom.get_untracked() {
-      request_animation_frame(scroll_to_bottom);
+      defer_while_alive(list_id, scroll_to_bottom);
     }
   });
   // The composer asks for the latest message after sending.
@@ -184,15 +210,24 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
     let latest = state.jump_to_latest.get();
     if previous.is_some_and(|previous| previous != latest) {
       stick_to_bottom.set(true);
-      request_animation_frame(scroll_to_bottom);
+      defer_while_alive(list_id, scroll_to_bottom);
     }
     latest
+  });
+  // The jump bar takes space from the feed, so the viewport size changes when it appears.
+  Effect::new(move |_| {
+    stick_to_bottom.track();
+    defer_while_alive(list_id, move || {
+      if let Some(element) = container.get_untracked() {
+        viewport.set(f64::from(element.client_height()));
+      }
+    });
   });
   // Initial viewport size.
   Effect::new(move |_| {
     if let Some(element) = container.get() {
       viewport.set(f64::from(element.client_height()));
-      request_animation_frame(scroll_to_bottom);
+      defer_while_alive(list_id, scroll_to_bottom);
     }
   });
   let _ = window_event_listener(ev::resize, move |_| {

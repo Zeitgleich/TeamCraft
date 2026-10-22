@@ -1,0 +1,152 @@
+//! Building blocks shared by the pre-join screen and the call screen: self preview, participant tiles
+//! and the background effect picker. No real video here: tiles show a stylised camera image so the
+//! layouts and effects can be reviewed without media.
+
+use leptos::prelude::*;
+
+use crate::calls::BackgroundEffect;
+use crate::components::icons::{Icon, IconName};
+use crate::i18n::use_i18n;
+use crate::model::User;
+
+/// A participant tile (or the self preview). `effect` only applies to the user's own camera.
+#[component]
+pub fn VideoTile(
+  user: User,
+  #[prop(default = false)] is_self: bool,
+  #[prop(into)] is_muted: Signal<bool>,
+  #[prop(into)] is_camera_on: Signal<bool>,
+  #[prop(into, default = Signal::stored(false))] is_speaking: Signal<bool>,
+  #[prop(into, default = Signal::stored(false))] has_hand_raised: Signal<bool>,
+  #[prop(into, default = Signal::stored(BackgroundEffect::None))] effect: Signal<BackgroundEffect>,
+  #[prop(into, default = Signal::stored(false))] is_mirrored: Signal<bool>,
+  #[prop(default = false)] is_large: bool,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let name = if is_self {
+    String::new()
+  } else {
+    user.display_name.clone()
+  };
+  let display = user.display_name.clone();
+  let hue = user.avatar_hue;
+  let initials = user.initials();
+
+  view! {
+    <div
+      class="tile"
+      class:tile-speaking=move || is_speaking.get()
+      class:tile-large=is_large
+      style=format!("--hue: {hue}")
+      role="group"
+      aria-label=move || {
+        let mut parts = vec![if is_self { i18n.t("tile-you") } else { display.clone() }];
+        if is_muted.get() {
+          parts.push(i18n.t("tile-muted"));
+        }
+        if has_hand_raised.get() {
+          parts.push(i18n.t("tile-hand"));
+        }
+        if is_speaking.get() {
+          parts.push(i18n.t("tile-speaking"));
+        }
+        parts.join(", ")
+      }
+    >
+      <div class=move || format!("video-surface effect-{}", if is_self { effect.get().slug() } else { "none" })>
+        <Show
+          when=move || is_camera_on.get()
+          fallback={
+            let initials = initials.clone();
+            move || view! { <span class="tile-initials" aria-hidden="true">{initials.clone()}</span> }
+          }
+        >
+          <div class="scene" aria-hidden="true"></div>
+          <div class="silhouette" class:mirrored=move || is_mirrored.get() aria-hidden="true"></div>
+        </Show>
+      </div>
+      <div class="tile-label">
+        {(!is_self).then(|| view! { <span class="tile-name" translate="no">{name.clone()}</span> })}
+        {is_self.then(|| view! { <span class="tile-name">{move || i18n.t("tile-you")}</span> })}
+        <Show when=move || is_muted.get() fallback=|| ()>
+          <Icon name=IconName::MicOff class="tile-badge" />
+        </Show>
+      </div>
+      <Show when=move || has_hand_raised.get() fallback=|| ()>
+        <span class="tile-hand" aria-hidden="true">
+          <Icon name=IconName::Hand />
+        </span>
+      </Show>
+    </div>
+  }
+}
+
+/// Radio group of background effects. Presets are shipped; uploading an own image is a placeholder.
+#[component]
+pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
+  let i18n = use_i18n();
+  let move_selection = move |ev: web_sys::KeyboardEvent| {
+    let all = BackgroundEffect::ALL;
+    let position = all
+      .iter()
+      .position(|candidate| *candidate == effect.get_untracked())
+      .unwrap_or(0);
+    let next = match ev.key().as_str() {
+      "ArrowRight" | "ArrowDown" => (position + 1) % all.len(),
+      "ArrowLeft" | "ArrowUp" => (position + all.len() - 1) % all.len(),
+      _ => return,
+    };
+    ev.prevent_default();
+    effect.set(all[next]);
+    focus_effect_tile(all[next]);
+  };
+
+  view! {
+    <div
+      class="effect-grid"
+      role="radiogroup"
+      aria-label=move || i18n.t("prejoin-effects")
+      on:keydown=move_selection
+    >
+      {BackgroundEffect::ALL
+        .into_iter()
+        .map(|option| {
+          view! {
+            <button
+              type="button"
+              class="effect-tile"
+              role="radio"
+              id=format!("effect-{}", option.slug())
+              aria-checked=move || (effect.get() == option).to_string()
+              tabindex=move || if effect.get() == option { "0" } else { "-1" }
+              on:click=move |_| effect.set(option)
+            >
+              <span class=format!("effect-swatch effect-{}", option.slug()) aria-hidden="true">
+                <span class="scene"></span>
+              </span>
+              <span class="effect-name">{move || i18n.t(&format!("effect-{}", option.slug()))}</span>
+            </button>
+          }
+        })
+        .collect_view()}
+      <button type="button" class="effect-tile" disabled title=move || i18n.t("effect-upload-soon")>
+        <span class="effect-swatch effect-upload" aria-hidden="true">
+          <Icon name=IconName::Plus />
+        </span>
+        <span class="effect-name">{move || i18n.t("effect-upload")}</span>
+      </button>
+    </div>
+  }
+}
+
+fn focus_effect_tile(option: BackgroundEffect) {
+  use wasm_bindgen::JsCast;
+
+  let target = web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.get_element_by_id(&format!("effect-{}", option.slug())))
+    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+  if let Some(target) = target {
+    drop(target.focus());
+  }
+}
