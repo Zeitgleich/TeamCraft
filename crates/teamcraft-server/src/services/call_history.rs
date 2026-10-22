@@ -3,6 +3,7 @@
 use teamcraft_db::StoredCall;
 use teamcraft_proto::{CallHistoryEntry, ListCallHistoryQuery, ListCallHistoryResponse};
 
+use super::access::is_guest;
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -22,7 +23,12 @@ pub async fn list_call_history(
     .clamp(1, limits.max_page_size);
   let mut calls = state
     .database
-    .list_call_history(caller.user.id, query.maybe_before, i64::from(limit))
+    .list_call_history(
+      caller.user.id,
+      query.maybe_before,
+      i64::from(limit),
+      !is_guest(caller),
+    )
     .await?;
   let has_more = calls.len() > limit as usize;
   calls.truncate(limit as usize);
@@ -42,6 +48,7 @@ fn entry(call: &StoredCall, caller: &AuthenticatedUser) -> CallHistoryEntry {
     started_at: unix_millis(call.started_at),
     maybe_ended_at: call.maybe_ended_at.map(unix_millis),
     participants: call.participants.clone(),
-    is_missed: call.was_ringing && !did_join && !is_starter,
+    // Only a call that rang while the caller was in the conversation can have been missed.
+    is_missed: call.was_ringing && call.was_member_at_start && !did_join && !is_starter,
   }
 }

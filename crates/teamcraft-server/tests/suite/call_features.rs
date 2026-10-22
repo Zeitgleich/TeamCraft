@@ -131,6 +131,35 @@ mod history {
   }
 
   #[tokio::test]
+  async fn calls_from_before_someone_joined_stay_hidden_like_the_messages() {
+    let Some(app) = TestApp::start_with_calls_config(&calls_config(60, None), SIGNING_KEY_PEM).await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let (alice_id, carol_id) = (user_id(&app, &alice).await, user_id(&app, &carol).await);
+    let space = create_space(&app, &alice, "Project A", "invite_only").await;
+    add_space_member(&app, &alice, &space, &carol_id, "member").await;
+    // New channels share history from the join on.
+    let channel = create_channel(&app, &alice, &space, "general", "private").await;
+    let alice_device = register_device(&app, &alice).await;
+    let call = call_id(&app, &alice, &channel, &alice_device).await;
+    report(&app, "joined", &call, &alice_id, &alice_device).await;
+    report(&app, "left", &call, &alice_id, &alice_device).await;
+
+    add_channel_member(&app, &alice, &channel, &carol_id).await;
+    let carols = app.get(&carol, "/calls/history").await;
+    assert_eq!(carols.status, StatusCode::OK, "{}", carols.body);
+    assert_eq!(
+      carols.body["calls"],
+      json!([]),
+      "the earlier call is not hers to see"
+    );
+    let alices = app.get(&alice, "/calls/history").await;
+    assert_eq!(alices.body["calls"].as_array().unwrap().len(), 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn an_unanswered_ring_becomes_a_missed_call_in_the_dm() {
     let Some(s) = dm(1).await else { return };
     let mut bob_socket = ws::connect(&s.app, &s.bob, &s.bob_device).await;

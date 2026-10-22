@@ -18,6 +18,8 @@ pub struct StoredCall {
   pub maybe_ended_at: Option<OffsetDateTime>,
   pub was_ringing: bool,
   pub participants: Vec<UserId>,
+  /// The viewer was a member of the conversation when the call started.
+  pub was_member_at_start: bool,
 }
 
 /// A ringing call nobody answered, to be reported once.
@@ -106,22 +108,30 @@ impl Database {
       .transpose()
   }
 
-  /// Calls of the conversations the user belongs to, newest first (at most `limit + 1`).
+  /// Calls of the conversations the user belongs to, newest first (at most `limit + 1`). Like
+  /// messages, calls from before the user joined only show in conversations that share their full
+  /// history, and never to guests (`may_see_full_history` false).
   pub async fn list_call_history(
     &self,
     user: UserId,
     maybe_before: Option<CallId>,
     limit: i64,
+    may_see_full_history: bool,
   ) -> Result<Vec<StoredCall>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT h.call_id, h.conversation_id, h.started_by, h.started_at, h.ended_at, h.was_ringing
+      r#"SELECT h.call_id, h.conversation_id, h.started_by, h.started_at, h.ended_at, h.was_ringing,
+                h.call_id >= tc_snowflake_floor(m.joined_at) AS "was_member_at_start!"
          FROM call_history h
          JOIN memberships m ON m.conversation_id = h.conversation_id AND m.user_id = $1
+         JOIN conversations c ON c.id = h.conversation_id
          WHERE ($2::bigint IS NULL OR h.call_id < $2)
+           -- Call IDs are snowflakes: the same cut as for messages.
+           AND (h.call_id >= tc_snowflake_floor(m.joined_at) OR ($4 AND c.history_policy = 'full'))
          ORDER BY h.call_id DESC LIMIT $3"#,
       to_db(user),
       maybe_before.map(to_db),
       limit + 1,
+      may_see_full_history,
     )
     .fetch_all(self.pool())
     .await?;
@@ -150,6 +160,7 @@ impl Database {
           maybe_ended_at: row.ended_at,
           was_ringing: row.was_ringing,
           participants: participants.remove(&row.call_id).unwrap_or_default(),
+          was_member_at_start: row.was_member_at_start,
         })
       })
       .collect()
