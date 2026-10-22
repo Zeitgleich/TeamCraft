@@ -1,5 +1,6 @@
 [package]
 name = "teamcraft-core"
+description = "Client logic shared by desktop, web and mobile: local store, sync engine, enrollment"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,4 +11,43 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["sqlcipher"]
+# Encrypted local database (SQLCipher) on native targets. Links the system libcrypto.
+sqlcipher = ["dep:rusqlite"]
+# Adapter implementing the UI's backend traits (crates/teamcraft-ui).
+ui = ["dep:teamcraft-ui"]
+# Tests against the running dev stack (README.md): server on 8081, Keycloak on 8080.
+integration = []
+
 [dependencies]
+teamcraft-proto.workspace = true
+teamcraft-crypto = { path = "../teamcraft-crypto" }
+# Same MLS stack as teamcraft-crypto; the provider's storage is persisted in the local store.
+openmls_rust_crypto = "0.6.0"
+openmls_traits = "0.6.0"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Randomness for client message IDs and keys; same version as teamcraft-crypto.
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+zeroize = "1.9.1"
+# Async plumbing shared by the gateway abstraction and the in-process fake server.
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# REST client; uses fetch in the browser.
+reqwest.workspace = true
+teamcraft-ui = { path = "../teamcraft-ui", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).
+rusqlite = { version = "0.39", features = ["bundled-sqlcipher"], optional = true }
+# OS keystore for the database key (Keychain, Secret Service, Windows Credential Manager).
+keyring = "4"
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+# Gateway WebSocket on native targets.
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }

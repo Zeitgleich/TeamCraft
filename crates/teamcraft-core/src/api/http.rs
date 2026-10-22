@@ -1,0 +1,499 @@
+//! [`ServerApi`] over HTTP (reqwest; `fetch` in the browser) and the gateway WebSocket
+//! (tokio-tungstenite on native targets).
+
+use std::fmt;
+
+use reqwest::{Method, RequestBuilder, Response};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use teamcraft_proto::{
+  AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
+  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest, DeviceId,
+  DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
+  KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
+  ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
+  ListMlsMessagesResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, PostMlsCommitRequest,
+  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest,
+  SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+};
+use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
+
+use super::{ApiError, GatewayConnection, ServerApi};
+
+/// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
+pub trait AccessTokenSource {
+  fn access_token(&self) -> Result<String, ApiError>;
+}
+
+/// A fixed token (tests, command-line tools).
+pub struct StaticToken(pub String);
+
+pub struct HttpServerApi<T> {
+  client: reqwest::Client,
+  base_url: String,
+  tokens: T,
+}
+
+impl<T: AccessTokenSource> HttpServerApi<T> {
+  /// `base_url` without trailing slash, e.g. `https://chat.example.com`.
+  pub fn new(base_url: impl Into<String>, tokens: T) -> Self {
+    Self {
+      client: reqwest::Client::new(),
+      base_url: base_url.into().trim_end_matches('/').to_string(),
+      tokens,
+    }
+  }
+
+  fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
+    let token = self.tokens.access_token()?;
+    Ok(
+      self
+        .client
+        .request(method, format!("{}/api/v1{path}", self.base_url))
+        .bearer_auth(token),
+    )
+  }
+
+  async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, ApiError> {
+    decode(send(self.request(Method::GET, path)?).await?).await
+  }
+
+  async fn send_json<B: Serialize, R: DeserializeOwned>(
+    &self,
+    method: Method,
+    path: &str,
+    body: &B,
+  ) -> Result<R, ApiError> {
+    decode(send(self.request(method, path)?.json(body)).await?).await
+  }
+
+  async fn send_without_response<B: Serialize>(
+    &self,
+    method: Method,
+    path: &str,
+    maybe_body: Option<&B>,
+  ) -> Result<(), ApiError> {
+    let mut request = self.request(method, path)?;
+    if let Some(body) = maybe_body {
+      request = request.json(body);
+    }
+    send(request).await.map(|_| ())
+  }
+
+  fn gateway_url(&self) -> String {
+    let websocket_base = if let Some(rest) = self.base_url.strip_prefix("https://") {
+      format!("wss://{rest}")
+    } else if let Some(rest) = self.base_url.strip_prefix("http://") {
+      format!("ws://{rest}")
+    } else {
+      self.base_url.clone()
+    };
+    format!("{websocket_base}/api/v1/gateway")
+  }
+}
+
+impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
+  type Gateway = HttpGateway;
+
+  async fn me(&self) -> Result<GetMeResponse, ApiError> {
+    self.get("/me").await
+  }
+
+  async fn user(&self, user: UserId) -> Result<UserSummary, ApiError> {
+    self.get(&format!("/users/{user}")).await
+  }
+
+  async fn register_device(&self, request: &RegisterDeviceRequest) -> Result<DeviceResponse, ApiError> {
+    self.send_json(Method::POST, "/devices", request).await
+  }
+
+  async fn list_user_devices(&self, user: UserId) -> Result<ListDevicesResponse, ApiError> {
+    self.get(&format!("/users/{user}/devices")).await
+  }
+
+  async fn put_identity_key(
+    &self,
+    request: &UploadIdentityKeyRequest,
+  ) -> Result<IdentityKeyResponse, ApiError> {
+    self.send_json(Method::PUT, "/me/identity-key", request).await
+  }
+
+  async fn identity_key(&self, user: UserId) -> Result<IdentityKeyResponse, ApiError> {
+    self.get(&format!("/users/{user}/identity-key")).await
+  }
+
+  async fn upload_key_packages(
+    &self,
+    device: DeviceId,
+    request: &UploadKeyPackagesRequest,
+  ) -> Result<KeyPackageStatusResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/devices/{device}/key-packages"), request)
+      .await
+  }
+
+  async fn key_package_status(&self, device: DeviceId) -> Result<KeyPackageStatusResponse, ApiError> {
+    self.get(&format!("/devices/{device}/key-packages")).await
+  }
+
+  async fn claim_key_packages(
+    &self,
+    user: UserId,
+    request: &ClaimKeyPackagesRequest,
+  ) -> Result<ClaimKeyPackagesResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/users/{user}/key-packages/claim"),
+        request,
+      )
+      .await
+  }
+
+  async fn list_spaces(&self) -> Result<ListSpacesResponse, ApiError> {
+    self.get("/spaces").await
+  }
+
+  async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {
+    self.get("/conversations").await
+  }
+
+  async fn conversation(&self, conversation: ConversationId) -> Result<ConversationResponse, ApiError> {
+    self.get(&format!("/conversations/{conversation}")).await
+  }
+
+  async fn list_members(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<ListConversationMembersResponse, ApiError> {
+    self.get(&format!("/conversations/{conversation}/members")).await
+  }
+
+  async fn create_channel(
+    &self,
+    space: SpaceId,
+    request: &CreateChannelRequest,
+  ) -> Result<ConversationResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/spaces/{space}/channels"), request)
+      .await
+  }
+
+  async fn create_dm(&self, request: &CreateDmRequest) -> Result<ConversationResponse, ApiError> {
+    self.send_json(Method::POST, "/dms", request).await
+  }
+
+  async fn add_member(
+    &self,
+    conversation: ConversationId,
+    request: &AddConversationMemberRequest,
+  ) -> Result<ConversationMemberResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/members"),
+        request,
+      )
+      .await
+  }
+
+  async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/conversations/{conversation}/members/{user}"),
+        None,
+      )
+      .await
+  }
+
+  async fn update_member(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    request: &UpdateConversationMemberRequest,
+  ) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/members/{user}");
+    self
+      .send_without_response(Method::PATCH, &path, Some(request))
+      .await
+  }
+
+  async fn set_read_position(
+    &self,
+    conversation: ConversationId,
+    request: &SetReadPositionRequest,
+  ) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/read-position");
+    self
+      .send_without_response(Method::PUT, &path, Some(request))
+      .await
+  }
+
+  async fn set_presence(&self, request: &SetPresenceRequest) -> Result<(), ApiError> {
+    self
+      .send_without_response(Method::PUT, "/me/presence", Some(request))
+      .await
+  }
+
+  async fn send_message(
+    &self,
+    conversation: ConversationId,
+    request: &SendMessageRequest,
+  ) -> Result<MessageResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/messages"),
+        request,
+      )
+      .await
+  }
+
+  async fn list_messages(
+    &self,
+    conversation: ConversationId,
+    query: &ListMessagesQuery,
+  ) -> Result<ListMessagesResponse, ApiError> {
+    let parameters = query_string(&[
+      ("before", query.maybe_before.map(|id| id.to_string())),
+      ("after", query.maybe_after.map(|id| id.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self
+      .get(&format!("/conversations/{conversation}/messages{parameters}"))
+      .await
+  }
+
+  async fn post_mls_commit(
+    &self,
+    conversation: ConversationId,
+    request: &PostMlsCommitRequest,
+  ) -> Result<PostMlsCommitResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/mls/commits"),
+        request,
+      )
+      .await
+  }
+
+  async fn post_mls_message(
+    &self,
+    conversation: ConversationId,
+    request: &PostMlsMessageRequest,
+  ) -> Result<MlsMessageResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/mls/messages"),
+        request,
+      )
+      .await
+  }
+
+  async fn list_mls_messages(
+    &self,
+    conversation: ConversationId,
+    query: &ListMlsMessagesQuery,
+  ) -> Result<ListMlsMessagesResponse, ApiError> {
+    let parameters = mls_query(query);
+    self
+      .get(&format!("/conversations/{conversation}/mls{parameters}"))
+      .await
+  }
+
+  async fn list_welcomes(
+    &self,
+    device: DeviceId,
+    query: &ListMlsMessagesQuery,
+  ) -> Result<ListMlsMessagesResponse, ApiError> {
+    let parameters = mls_query(query);
+    self.get(&format!("/devices/{device}/welcomes{parameters}")).await
+  }
+
+  async fn put_key_bag(&self, request: &PutKeyBagRequest) -> Result<KeyBagResponse, ApiError> {
+    self.send_json(Method::PUT, "/me/key-bag", request).await
+  }
+
+  async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
+    self.get("/me/key-bag").await
+  }
+
+  async fn connect_gateway(&self) -> Result<HttpGateway, ApiError> {
+    HttpGateway::connect(&self.gateway_url()).await
+  }
+
+  fn gateway_token(&self) -> Result<String, ApiError> {
+    self.tokens.access_token()
+  }
+}
+
+impl<T> fmt::Debug for HttpServerApi<T> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("HttpServerApi")
+      .field("base_url", &self.base_url)
+      .finish_non_exhaustive()
+  }
+}
+
+impl AccessTokenSource for StaticToken {
+  fn access_token(&self) -> Result<String, ApiError> {
+    Ok(self.0.clone())
+  }
+}
+
+impl fmt::Debug for StaticToken {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("StaticToken([redacted])")
+  }
+}
+
+/// The gateway WebSocket on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct HttpGateway {
+  socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+}
+
+/// Browser gateway: not implemented yet (web-sys WebSocket); see the crate README.
+#[cfg(target_arch = "wasm32")]
+pub struct HttpGateway;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HttpGateway {
+  async fn connect(url: &str) -> Result<Self, ApiError> {
+    let (socket, _) = tokio_tungstenite::connect_async(url)
+      .await
+      .map_err(|error| ApiError::Network(error.to_string()))?;
+    Ok(Self { socket })
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GatewayConnection for HttpGateway {
+  async fn send(&mut self, message: &GatewayClientMessage) -> Result<(), ApiError> {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let text = serde_json::to_string(message).map_err(|error| ApiError::Decode(error.to_string()))?;
+    self
+      .socket
+      .send(Message::text(text))
+      .await
+      .map_err(|error| ApiError::Network(error.to_string()))
+  }
+
+  async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    loop {
+      match self.socket.next().await? {
+        Ok(Message::Text(text)) => {
+          return Some(
+            serde_json::from_str(text.as_str()).map_err(|error| ApiError::Decode(error.to_string())),
+          );
+        },
+        Ok(Message::Close(_)) => return None,
+        // Pings are answered by tungstenite; binary frames aren't used by the gateway.
+        Ok(_) => {},
+        Err(error) => return Some(Err(ApiError::Network(error.to_string()))),
+      }
+    }
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl HttpGateway {
+  async fn connect(_url: &str) -> Result<Self, ApiError> {
+    Err(ApiError::Unsupported("gateway WebSocket in the browser"))
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl GatewayConnection for HttpGateway {
+  async fn send(&mut self, _message: &GatewayClientMessage) -> Result<(), ApiError> {
+    Err(ApiError::Unsupported("gateway WebSocket in the browser"))
+  }
+
+  async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
+    None
+  }
+}
+
+impl fmt::Debug for HttpGateway {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("HttpGateway")
+  }
+}
+
+async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
+  let response = request
+    .send()
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?;
+  let status = response.status();
+  if status.is_success() {
+    return Ok(response);
+  }
+  let maybe_body = response.json::<ErrorBody>().await.ok();
+  Err(ApiError::Status {
+    status: status.as_u16(),
+    maybe_body,
+  })
+}
+
+async fn decode<R: DeserializeOwned>(response: Response) -> Result<R, ApiError> {
+  response
+    .json()
+    .await
+    .map_err(|error| ApiError::Decode(error.to_string()))
+}
+
+fn mls_query(query: &ListMlsMessagesQuery) -> String {
+  query_string(&[
+    ("after", query.maybe_after.map(|id| id.to_string())),
+    ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+  ])
+}
+
+/// `?a=1&b=2` from the present parameters. Values are IDs and numbers, so no escaping is needed.
+fn query_string(parameters: &[(&str, Option<String>)]) -> String {
+  let pairs: Vec<String> = parameters
+    .iter()
+    .filter_map(|(name, maybe_value)| maybe_value.as_ref().map(|value| format!("{name}={value}")))
+    .collect();
+  if pairs.is_empty() {
+    String::new()
+  } else {
+    format!("?{}", pairs.join("&"))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn query_string_skips_absent_parameters() {
+    assert_eq!(
+      query_string(&[("before", None), ("limit", Some("50".into()))]),
+      "?limit=50"
+    );
+    assert_eq!(query_string(&[("after", None)]), "");
+  }
+
+  #[test]
+  fn gateway_url_follows_the_scheme() {
+    let api = HttpServerApi::new("https://chat.example.com/", StaticToken("t".into()));
+    assert_eq!(api.gateway_url(), "wss://chat.example.com/api/v1/gateway");
+    let api = HttpServerApi::new("http://127.0.0.1:8081", StaticToken("t".into()));
+    assert_eq!(api.gateway_url(), "ws://127.0.0.1:8081/api/v1/gateway");
+  }
+
+  #[test]
+  fn token_is_redacted() {
+    assert!(!format!("{:?}", StaticToken("secret".into())).contains("secret"));
+  }
+}

@@ -119,6 +119,11 @@ impl ChangeId {
     Self(bytes)
   }
 
+  /// Restores a change ID from local storage (replay protection survives restarts).
+  pub fn from_bytes(bytes: [u8; 16]) -> Self {
+    Self(bytes)
+  }
+
   pub fn as_bytes(&self) -> &[u8; 16] {
     &self.0
   }

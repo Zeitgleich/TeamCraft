@@ -14,7 +14,7 @@ mod group;
 
 use std::fmt;
 
-use openmls::prelude::{Ciphersuite, KeyPackage, KeyPackageIn, ProtocolVersion};
+use openmls::prelude::{Capabilities, Ciphersuite, ExtensionType, KeyPackage, KeyPackageIn, ProtocolVersion};
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as _, Serialize as _};
 
@@ -86,8 +86,32 @@ pub fn create_key_package(
   device: &DeviceKeyPair,
   certificate: &SignedDeviceCertificate,
 ) -> Result<Vec<u8>, MlsError> {
+  build_key_package(provider, device, certificate, KeyPackage::builder())
+}
+
+/// Creates the device's last-resort key package (RFC 9420 §16.8): the server hands it out when the
+/// regular ones are used up, and its private key survives joining, so it can be used repeatedly.
+pub fn create_last_resort_key_package(
+  provider: &impl OpenMlsProvider,
+  device: &DeviceKeyPair,
+  certificate: &SignedDeviceCertificate,
+) -> Result<Vec<u8>, MlsError> {
+  // The leaf must announce support for the last_resort extension the key package carries.
+  let capabilities = Capabilities::new(None, None, Some(&[ExtensionType::LastResort]), None, None);
+  let builder = KeyPackage::builder()
+    .leaf_node_capabilities(capabilities)
+    .mark_as_last_resort();
+  build_key_package(provider, device, certificate, builder)
+}
+
+fn build_key_package(
+  provider: &impl OpenMlsProvider,
+  device: &DeviceKeyPair,
+  certificate: &SignedDeviceCertificate,
+  builder: openmls::prelude::KeyPackageBuilder,
+) -> Result<Vec<u8>, MlsError> {
   let credential = credential::credential_with_key(certificate)?;
-  let bundle = KeyPackage::builder()
+  let bundle = builder
     .build(CIPHERSUITE, provider, device, credential)
     .map_err(|error| MlsError::openmls("key package creation", error))?;
   Ok(bundle.key_package().tls_serialize_detached()?)

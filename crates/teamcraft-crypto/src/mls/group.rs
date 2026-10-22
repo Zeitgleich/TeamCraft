@@ -117,8 +117,41 @@ impl ConversationGroup {
     Ok(Self::from_group(conversation_id, group))
   }
 
+  /// Loads a group from the provider's storage, with the change IDs applied so far (persisted by
+  /// the caller next to the MLS state). `None` if the provider has no state for the conversation.
+  pub fn load(
+    provider: &impl OpenMlsProvider,
+    conversation_id: ConversationId,
+    applied_changes: impl IntoIterator<Item = ChangeId>,
+  ) -> Result<Option<Self>, MlsError> {
+    let maybe_group = MlsGroup::load(provider.storage(), &group_id(conversation_id))
+      .map_err(|error| MlsError::openmls("loading group", error))?;
+    Ok(maybe_group.map(|group| {
+      let mut loaded = Self::from_group(conversation_id, group);
+      loaded.applied_changes.extend(applied_changes);
+      loaded
+    }))
+  }
+
   pub fn conversation_id(&self) -> ConversationId {
     self.conversation_id
+  }
+
+  /// Signed changes this group has committed or accepted; persist them with the MLS state.
+  pub fn applied_changes(&self) -> impl Iterator<Item = &ChangeId> {
+    self.applied_changes.iter()
+  }
+
+  /// Removes the group's state from the provider's storage, e.g. after this device was removed.
+  pub fn delete(mut self, provider: &impl OpenMlsProvider) -> Result<(), MlsError> {
+    self
+      .group
+      .delete(provider.storage())
+      .map_err(|error| MlsError::openmls("deleting group", error))
+  }
+
+  pub fn has_pending_commit(&self) -> bool {
+    self.group.pending_commit().is_some()
   }
 
   pub fn epoch(&self) -> u64 {

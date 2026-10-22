@@ -713,3 +713,73 @@ fn member(user: &TestUser) -> GroupMember {
     device_id: user.device.device_id(),
   }
 }
+
+#[test]
+fn group_survives_reload_from_storage() {
+  let mut world = World::new();
+  let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+  world.commit_change(&change, &[world.bob.key_package()]);
+  let applied: Vec<ChangeId> = world.alice_group.applied_changes().copied().collect();
+  assert!(!world.alice_group.has_pending_commit());
+
+  let reloaded = ConversationGroup::load(&world.alice.provider, CONVERSATION, applied)
+    .unwrap()
+    .unwrap();
+  assert_eq!(reloaded.epoch(), world.alice_group.epoch());
+  assert_eq!(reloaded.members().unwrap(), world.alice_group.members().unwrap());
+  assert!(
+    reloaded
+      .applied_changes()
+      .any(|id| *id == change.unverified().change_id())
+  );
+  assert!(
+    ConversationGroup::load(&world.alice.provider, ConversationId::new(99), [])
+      .unwrap()
+      .is_none()
+  );
+}
+
+#[test]
+fn last_resort_key_package_can_be_used_twice() {
+  let mut world = World::new();
+  let last_resort = crate::mls::create_last_resort_key_package(
+    &world.bob.provider,
+    &world.bob.user.device,
+    &world.bob.user.certificate,
+  )
+  .unwrap();
+  let add_bob = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+  let output = world.commit_change(&add_bob, std::slice::from_ref(&last_resort));
+  world.bob_joins(&output);
+
+  // A second conversation reuses the same last-resort package.
+  let mut other = ConversationGroup::create(
+    &world.alice.provider,
+    &world.alice.user.device,
+    &world.alice.user.certificate,
+    ConversationId::new(77),
+  )
+  .unwrap();
+  let change = MembershipChange::new(ConversationId::new(77), add(BOB, HistoryShare::Full), &mut OsRng)
+    .sign(&world.alice.user.device, world.alice.user.certificate.clone())
+    .unwrap();
+  let output = other
+    .commit_membership_change(
+      &world.alice.provider,
+      &world.alice.user.device,
+      &change,
+      &[last_resort],
+      &world.directory,
+      &world.authority,
+    )
+    .unwrap();
+  other.confirm_commit(&world.alice.provider).unwrap();
+  let welcome = output.maybe_welcome.unwrap();
+  ConversationGroup::join(
+    &world.bob.provider,
+    &welcome,
+    ConversationId::new(77),
+    &world.directory,
+  )
+  .unwrap();
+}

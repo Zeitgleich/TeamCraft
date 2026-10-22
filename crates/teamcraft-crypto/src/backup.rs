@@ -139,6 +139,11 @@ impl BackupKey {
     Self(key)
   }
 
+  /// The raw key, for keeping it in the device's encrypted local store after a recovery.
+  pub fn into_key(self) -> SymmetricKey {
+    self.0
+  }
+
   pub(crate) fn key(&self) -> &SymmetricKey {
     &self.0
   }
