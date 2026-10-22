@@ -8,11 +8,13 @@
 //! there.
 
 mod compositor;
+mod presets;
 mod segmentation;
 
 use std::sync::Arc;
 
 pub use compositor::Compositor;
+pub use presets::{PRESET_HEIGHT, PRESET_WIDTH, PresetBackground};
 pub use segmentation::{EllipseSegmenter, PersonSegmenter, SegmentationMask};
 #[cfg(feature = "segmentation")]
 pub use segmentation::{SegmentationModel, TensorLayout, TractSegmenter};

@@ -9,11 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 
-use teamcraft_client_api::calls::BackgroundEffect as UiBackgroundEffect;
+use teamcraft_client_api::calls::{
+  BackgroundEffect as UiBackgroundEffect, BackgroundPreset as UiBackgroundPreset,
+};
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{
-  BackgroundEffect, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsPipeline,
-  SegmentationModel, TractSegmenter,
+  BackgroundEffect, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsPipeline, PRESET_HEIGHT,
+  PRESET_WIDTH, PresetBackground, SegmentationModel, TractSegmenter,
 };
 use teamcraft_media::video::{VideoResolution, simulcast_layers};
 use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
@@ -253,10 +255,25 @@ pub(super) fn media_effect(effect: UiBackgroundEffect) -> BackgroundEffect {
     UiBackgroundEffect::BlurLight => BackgroundEffect::Blur(BlurStrength::Light),
     UiBackgroundEffect::BlurStrong => BackgroundEffect::Blur(BlurStrength::Strong),
     UiBackgroundEffect::Preset(preset) => {
-      // The preset images aren't bundled yet; keep the background rather than guess one.
-      warn!(?preset, "background images are not available yet");
-      BackgroundEffect::None
+      match preset_background(preset).render(PRESET_WIDTH, PRESET_HEIGHT) {
+        Ok(image) => BackgroundEffect::Image(Arc::new(image)),
+        // Only an empty size fails, and the preset size isn't empty; keep the real background.
+        Err(error) => {
+          warn!(%error, ?preset, "preset background not drawn");
+          BackgroundEffect::None
+        },
+      }
     },
+  }
+}
+
+/// The UI's preset as the media layer's drawing of it.
+pub(super) fn preset_background(preset: UiBackgroundPreset) -> PresetBackground {
+  match preset {
+    UiBackgroundPreset::Office => PresetBackground::Office,
+    UiBackgroundPreset::Bookshelf => PresetBackground::Bookshelf,
+    UiBackgroundPreset::Sunrise => PresetBackground::Sunrise,
+    UiBackgroundPreset::Forest => PresetBackground::Forest,
   }
 }
 
@@ -341,6 +358,10 @@ mod tests {
       BackgroundEffect::Blur(BlurStrength::Light)
     );
     assert_eq!(media_effect(UiBackgroundEffect::None), BackgroundEffect::None);
+    assert!(matches!(
+      media_effect(UiBackgroundEffect::Preset(UiBackgroundPreset::Sunrise)),
+      BackgroundEffect::Image(image) if image.width() == PRESET_WIDTH
+    ));
   }
 
   fn layer_resolution(layer: &VideoLayerInfo) -> VideoResolution {
