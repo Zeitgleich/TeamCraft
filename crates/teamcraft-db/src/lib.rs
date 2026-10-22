@@ -14,6 +14,7 @@ mod conversation;
 mod database;
 mod device;
 mod device_list;
+mod email_digest;
 mod error;
 mod identity;
 mod ids;
@@ -61,6 +62,7 @@ pub use conversation::{
 pub use database::{Database, DatabaseOptions};
 pub use device::{Device, NewDevice};
 pub use device_list::{DeviceList, DeviceListOutcome};
+pub use email_digest::{DueDigest, StoredEmailDigest};
 pub use error::DbError;
 pub use identity::{IdentityKey, IdentityKeyOutcome, NewIdentityKey};
 pub use invite::{AppliedInvite, Invite, NewInvite};

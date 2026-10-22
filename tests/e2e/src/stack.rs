@@ -59,6 +59,8 @@ pub struct SfuHandle {
 pub struct StackBuilder {
   has_calls: bool,
   has_meetings: bool,
+  has_mail: bool,
+  has_local_accounts: bool,
   retention_interval_secs: Option<u64>,
   web_dir: Option<PathBuf>,
   maybe_port: Option<u16>,
@@ -75,6 +77,20 @@ impl StackBuilder {
   /// Configures meetings with invitations through the dev stack's Mailpit.
   pub fn with_meetings(mut self) -> Self {
     self.has_meetings = true;
+    self
+  }
+
+  /// Configures the server's own mail (`[mail.smtp]`: activation and notification e-mail) to go to
+  /// Mailpit.
+  pub fn with_mail(mut self) -> Self {
+    self.has_mail = true;
+    self
+  }
+
+  /// Enables local accounts (password + TOTP), for guests without an identity provider account.
+  /// Sign-in without a code is allowed until a code was confirmed, unless the policy requires MFA.
+  pub fn with_local_accounts(mut self) -> Self {
+    self.has_local_accounts = true;
     self
   }
 
@@ -107,7 +123,7 @@ impl StackBuilder {
   /// `cargo test --workspace --all-features` green on machines without Docker.
   pub async fn start(self) -> Option<Stack> {
     let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
-    if let Err(reason) = check_dev_stack(self.has_meetings, self.has_calls).await {
+    if let Err(reason) = check_dev_stack(self.has_meetings || self.has_mail, self.has_calls).await {
       assert!(
         !is_required,
         "the dev stack is required (E2E_REQUIRED=1): {reason}"
@@ -240,6 +256,33 @@ impl Stack {
     }
     if let Some(web_dir) = &settings.web_dir {
       envs.push(("TEAMCRAFT_WEB__STATIC_DIR".into(), web_dir.display().to_string()));
+    }
+    if settings.has_mail {
+      envs.extend([
+        ("TEAMCRAFT_MAIL__PUBLIC_BASE_URL".into(), base_url.clone()),
+        ("TEAMCRAFT_MAIL__SMTP__HOST".into(), "127.0.0.1".into()),
+        ("TEAMCRAFT_MAIL__SMTP__PORT".into(), "1025".into()),
+        ("TEAMCRAFT_MAIL__SMTP__SECURITY".into(), "none".into()),
+        (
+          "TEAMCRAFT_MAIL__SMTP__FROM_ADDRESS".into(),
+          "noreply@example.com".into(),
+        ),
+      ]);
+    }
+    if settings.has_local_accounts {
+      envs.extend([
+        ("TEAMCRAFT_LOCAL_ACCOUNTS__IS_ENABLED".into(), "true".into()),
+        (
+          "TEAMCRAFT_LOCAL_ACCOUNTS__SESSION_SECRET".into(),
+          "e2e-local-session-secret-0123456789abcdef".into(),
+        ),
+        ("TEAMCRAFT_LOCAL_ACCOUNTS__REQUIRE_TOTP".into(), "false".into()),
+        (
+          "TEAMCRAFT_LOCAL_ACCOUNTS__PASSWORD_MEMORY_KIB".into(),
+          "1024".into(),
+        ),
+        ("TEAMCRAFT_LOCAL_ACCOUNTS__PASSWORD_ITERATIONS".into(), "1".into()),
+      ]);
     }
     if settings.has_meetings {
       envs.extend([

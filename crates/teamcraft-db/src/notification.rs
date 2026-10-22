@@ -10,7 +10,8 @@ use crate::ids::{from_db, from_db_opt, to_db};
 /// The user-level preferences as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredUserSettings {
-  pub auto_follow_mentioned_threads: bool,
+  /// `None`: the workspace default applies (signed policy, `threads`).
+  pub maybe_auto_follow_mentioned_threads: Option<bool>,
   /// `away_only` or `always`.
   pub push_mode: String,
   /// `None`: the instance default applies.
@@ -22,7 +23,7 @@ pub struct StoredUserSettings {
 impl Default for StoredUserSettings {
   fn default() -> Self {
     Self {
-      auto_follow_mentioned_threads: true,
+      maybe_auto_follow_mentioned_threads: None,
       push_mode: "away_only".into(),
       maybe_send_read_receipts: None,
       maybe_dnd_schedule: None,
@@ -51,7 +52,7 @@ impl Database {
     .await?;
     Ok(
       row.map_or_else(StoredUserSettings::default, |row| StoredUserSettings {
-        auto_follow_mentioned_threads: row.auto_follow_mentioned_threads,
+        maybe_auto_follow_mentioned_threads: row.auto_follow_mentioned_threads,
         push_mode: row.push_mode,
         maybe_send_read_receipts: row.send_read_receipts,
         maybe_dnd_schedule: row.dnd_schedule,
@@ -69,7 +70,7 @@ impl Database {
     sqlx::query!(
       "UPDATE users SET auto_follow_mentioned_threads = $2 WHERE id = $1",
       to_db(user),
-      settings.auto_follow_mentioned_threads,
+      settings.maybe_auto_follow_mentioned_threads,
     )
     .execute(&mut *tx)
     .await?;

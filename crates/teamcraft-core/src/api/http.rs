@@ -113,6 +113,33 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     send(request).await.map(|_| ())
   }
 
+  /// An authenticated request to `/api/v1{path}` with a JSON body, answered with the raw JSON
+  /// text (empty for no content): for shells that call plain server endpoints (notification
+  /// settings, meetings) without a typed method here. `method` is an HTTP verb.
+  pub async fn raw_request(
+    &self,
+    method: &str,
+    path: &str,
+    maybe_body: Option<String>,
+  ) -> Result<String, ApiError> {
+    if !path.starts_with('/') || path.contains("..") {
+      return Err(ApiError::Decode(format!("not an API path: {path}")));
+    }
+    let method =
+      Method::from_bytes(method.as_bytes()).map_err(|error| ApiError::Decode(error.to_string()))?;
+    let mut request = self.request(method, path)?;
+    if let Some(body) = maybe_body {
+      request = request
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body);
+    }
+    send(request)
+      .await?
+      .text()
+      .await
+      .map_err(|error| ApiError::Decode(error.to_string()))
+  }
+
   fn gateway_url(&self) -> String {
     self.websocket_url("/api/v1/gateway")
   }

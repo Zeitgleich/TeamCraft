@@ -1,7 +1,7 @@
 //! Managing spaces and channels through the core: creating and editing them, the channel browser
 //! and joining, categories, invitations, and announcing changes as encrypted system messages.
 
-use teamcraft_crypto::membership::MembershipAction;
+use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
   CategoryId, ConversationId, ConversationResponse, ConversationVisibility, CreateCategoryRequest,
   CreateChannelRequest, CreateInviteRequest, CreateSpaceRequest, HistoryPolicy, ListCategoriesResponse,
@@ -110,7 +110,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &conversation.to_string(),
       &response,
     )?;
-    let history = self.implicit_history(self.account.user_id)?;
+    // Nobody chose to show the past to somebody joining on their own: history from the join on
+    // (e2ee.md §4.7). Members' clients refuse a self-add that says otherwise.
+    let history = HistoryShare::FromJoin;
     self
       .post_admin_change(
         conversation,

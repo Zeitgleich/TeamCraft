@@ -252,6 +252,42 @@ its own. See [admin.md](admin.md) §2.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
   external senders, or whose update changes a member's user or device are rejected.
 
+### 4.7 Converting a channel between private and public
+
+`PUT /api/v1/conversations/{id}/visibility` (permission `convert_channel_privacy`: channel owners, space
+admins and instance admins by default; `PATCH` with `visibility` goes through the same code) turns a channel
+public or private. Public channels are listed in the channel browser and any space member (never a guest)
+may join them; private ones are invitation-only and invisible to non-members. What it means for the
+encryption, and what does and does not hold:
+
+- **The MLS group does not change.** Conversion neither adds nor removes anybody and doesn't rotate keys;
+  everybody who is in stays in, in both directions. It only changes who the *server* lets join from now
+  on. The server still can't add a device to the group (§3): a member who joined a public channel is
+  brought into the group by an existing member's client, like any other addition (§4.3, §4.6), and reads
+  nothing until then.
+- **History is not signed per channel.** "Public" and the channel's `history_policy` are the server's
+  word; no signed record says what a channel's newcomers may read. So clients decide on their own, and
+  only ever lower what they share: when a member's client adds somebody **without an explicit choice**
+  into a channel the server calls public, it shares history from the join on, whatever the signed
+  workspace default says, because the newcomer may have joined by themselves and nobody chose to show
+  them the past. **Full history in a public channel needs an explicit choice** by the member who adds
+  the person ("share history" in the add dialog). A dishonest server can make a public channel look
+  private; then the usual default for roster members applies, which is what a private add would give them.
+- **Self-joins** sign `from_join` for themselves, and a member's client refuses to commit a signed self-add
+  that asks for more (a modified client can't talk the group into showing it the past).
+- **`history_policy` in the conversion request** is therefore a *hint* the server stores and shows (and
+  that the add dialog can preselect); it is not what protects the past. What protects it is the rule
+  above. Converting to public never gives anyone history they didn't have, and can't take anything back
+  from people who already read it.
+- **Going private again** keeps everybody who joined while it was public. Removing them is an explicit
+  member removal, which rotates the keys (§4.2).
+- Guests stay what they were: they can't join public channels on their own and are always `from_join`.
+- Integration channels (bridge output) stay private; archived channels are converted after unarchiving.
+- Members get a `privacy_changed` system event, the audit log records `conversation_visibility_changed`
+  with the old and new value (metadata only).
+- *Later:* a signed per-channel history record (like the roster) would let clients trust "this channel
+  shares its past with newcomers" without the server's word.
+
 ## 5. Adding a device (Threema/WhatsApp style)
 
 Two ways, the user picks whichever is convenient:

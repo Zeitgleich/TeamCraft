@@ -3,9 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::model::Message as MessageView;
@@ -43,19 +44,22 @@ pub(crate) type Job = Box<dyn for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, 
 /// Outbox messages get IDs with this bit set in the UI view model (teamcraft-core ui_backend).
 const PENDING_ID_BIT: i64 = 1 << 62;
 
-type Api = HttpServerApi<ForeignTokens>;
-type Store = Arc<SealedSqliteStore>;
-type CoreClient = Client<Api, Store>;
+pub(crate) type Api = HttpServerApi<ForeignTokens>;
+pub(crate) type Store = Arc<SealedSqliteStore>;
+pub(crate) type CoreClient = Client<Api, Store>;
 
 pub(crate) struct Engine {
   server_url: String,
+  /// Where downloaded files are decrypted to (inside the app's private storage).
+  download_dir: PathBuf,
   tokens: ForeignTokens,
   listener: Arc<dyn EventListener>,
-  store: Store,
-  client: ClientSlot,
+  pub(crate) store: Store,
+  pub(crate) client: ClientSlot,
   maybe_backend: Option<CoreChatBackend<Store>>,
   /// The enrolled identity's fingerprint (empty before enrollment).
-  identity_fingerprint: String,
+  pub(crate) identity_fingerprint: String,
+  pub(crate) maybe_recovery: Option<crate::bridge::PendingRecovery>,
   maybe_link_offer: Option<LinkOffer>,
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
@@ -63,7 +67,7 @@ pub(crate) struct Engine {
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
-enum ClientSlot {
+pub(crate) enum ClientSlot {
   Missing,
   Idle(Box<CoreClient>),
   Running {
@@ -80,7 +84,7 @@ struct PendingApproval {
 
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
-struct ForeignTokens(Arc<dyn TokenProvider>);
+pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
 
 /// Starts the engine thread and waits until the store is open.
 pub(crate) fn spawn(
@@ -102,7 +106,9 @@ pub(crate) fn spawn(
         },
       };
       LocalSet::new().block_on(&runtime, async move {
-        let mut engine = match Engine::open(config, ForeignTokens(tokens), listener) {
+        // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
+        // goes nowhere on Android, so the error carries the message and location instead.
+        let mut engine = match open_reporting_panics(config, ForeignTokens(tokens), listener) {
           Ok(engine) => engine,
           Err(error) => {
             let _ = ready.send(Err(error));
@@ -119,6 +125,30 @@ pub(crate) fn spawn(
     .map_err(|error| TeamCraftError::Core(error.to_string()))?;
   opened.recv().map_err(|_| TeamCraftError::EngineStopped)??;
   Ok(jobs)
+}
+
+/// [`Engine::open`], with a panic turned into an error that says where it happened.
+fn open_reporting_panics(
+  config: AppConfig,
+  tokens: ForeignTokens,
+  listener: Arc<dyn EventListener>,
+) -> Result<Engine, TeamCraftError> {
+  let report = Arc::new(Mutex::new(String::new()));
+  let previous_hook = std::panic::take_hook();
+  let hook_report = report.clone();
+  std::panic::set_hook(Box::new(move |info| {
+    if let Ok(mut report) = hook_report.lock() {
+      *report = info.to_string();
+    }
+  }));
+  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| Engine::open(config, tokens, listener)));
+  std::panic::set_hook(previous_hook);
+  opened.unwrap_or_else(|_| {
+    let message = report.lock().map(|report| report.clone()).unwrap_or_default();
+    Err(TeamCraftError::Core(format!(
+      "opening the engine panicked: {message}"
+    )))
+  })
 }
 
 impl Engine {
@@ -138,12 +168,14 @@ impl Engine {
     let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
     let mut engine = Self {
       server_url: config.server_url,
+      download_dir: directory.join("downloads"),
       tokens,
       listener,
       store,
       client: ClientSlot::Missing,
       maybe_backend: None,
       identity_fingerprint: String::new(),
+      maybe_recovery: None,
       maybe_link_offer: None,
       maybe_new_link: None,
       maybe_approval: None,
@@ -153,7 +185,7 @@ impl Engine {
       engine.api(),
       engine.store.clone(),
       Box::new(SystemClock),
-      ClientSettings::default(),
+      engine.client_settings(),
     )? {
       engine.adopt(client);
     }
@@ -435,7 +467,7 @@ impl Engine {
     Ok(preview.into())
   }
 
-  async fn complete_enrollment(
+  pub(crate) async fn complete_enrollment(
     &mut self,
     options: EnrollmentOptions,
   ) -> Result<AccountState, TeamCraftError> {
@@ -444,7 +476,7 @@ impl Engine {
         self.api(),
         self.store.clone(),
         Box::new(SystemClock),
-        ClientSettings::default(),
+        self.client_settings(),
         options,
       )
       .await?;
@@ -491,7 +523,7 @@ impl Engine {
             self.api(),
             self.store.clone(),
             Box::new(SystemClock),
-            ClientSettings::default(),
+            self.client_settings(),
           ) {
             self.attach_call_sink(&mut client);
             self.client = ClientSlot::Idle(Box::new(client));
@@ -501,8 +533,24 @@ impl Engine {
     }
   }
 
+  /// Runs `operation` on the client with syncing paused, then resumes it and tells the app.
+  pub(crate) async fn with_client<F>(&mut self, operation: F) -> Result<(), TeamCraftError>
+  where
+    F: for<'a> FnOnce(&'a mut CoreClient) -> LocalFuture<'a, Result<(), teamcraft_core::CoreError>>,
+  {
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = operation(&mut client).await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    self.listener.on_change();
+    Ok(result?)
+  }
+
   /// Hands the UI adapter's queued commands to the sync loop, or runs them right away.
-  async fn dispatch_commands(&mut self) -> Result<(), TeamCraftError> {
+  pub(crate) async fn dispatch_commands(&mut self) -> Result<(), TeamCraftError> {
     let commands = self.backend()?.drain_commands();
     match &mut self.client {
       ClientSlot::Running { handle, .. } => {
@@ -522,7 +570,7 @@ impl Engine {
     Ok(())
   }
 
-  fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
+  pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
     self.maybe_backend.as_ref().ok_or(TeamCraftError::NotEnrolled)
   }
 
@@ -542,7 +590,14 @@ impl Engine {
     MessageItem::from_view(message, author_name, is_pending)
   }
 
-  fn api(&self) -> Api {
+  fn client_settings(&self) -> ClientSettings {
+    ClientSettings {
+      maybe_download_dir: Some(self.download_dir.clone()),
+      ..ClientSettings::default()
+    }
+  }
+
+  pub(crate) fn api(&self) -> Api {
     HttpServerApi::new(self.server_url.clone(), self.tokens.clone())
   }
 }
@@ -590,7 +645,7 @@ fn enrollment_options(device_name: String, secret: EnrollmentSecret) -> Enrollme
   }
 }
 
-fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamCraftError> {
+pub(crate) fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamCraftError> {
   text
     .parse()
     .map_err(|_| TeamCraftError::InvalidInput(format!("not an ID: {text}")))
