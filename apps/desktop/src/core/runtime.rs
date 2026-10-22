@@ -28,8 +28,8 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent,
-  UserId, WorkspacePolicy,
+  BackgroundId, CallJoinTokenResponse, ConversationId, DeviceActivity, DeviceId, GatewayClientMessage,
+  GatewayEvent, UserId, WorkspacePolicy,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -134,6 +134,7 @@ enum Request {
   Action(Box<ChatAction>, oneshot::Sender<Result<(), String>>),
   Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  BackgroundPicture(BackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
   LinkStart {
     device_name: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -290,6 +291,14 @@ impl CoreRuntime {
   pub async fn prepare_call(&self, conversation: ConversationId) -> Result<CallPreparation, String> {
     self
       .ask(|reply| Request::PrepareCall(conversation, reply))
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// One of the user's own background pictures, downloaded and decrypted.
+  pub async fn background_picture(&self, id: BackgroundId) -> Result<Vec<u8>, String> {
+    self
+      .ask(|reply| Request::BackgroundPicture(id, reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -539,7 +548,14 @@ impl Core {
         self.run_queued_commands().await;
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
+      Request::BackgroundPicture(id, reply) => drop(reply.send(self.background_picture(id).await)),
     }
+  }
+
+  async fn background_picture(&mut self, id: BackgroundId) -> Result<Vec<u8>, String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    let picture = client.background_picture(id).await.map_err(describe)?;
+    Ok(picture.expose_secret().to_vec())
   }
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {

@@ -16,10 +16,12 @@ use teamcraft_client_api::actions::{
   FileInfo, MessageExtras, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind, PresenceStatus,
   Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User, UserId,
 };
+use teamcraft_proto::BackgroundId;
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, ListConversationMembersResponse, MessageId, NotificationLevel, PresenceState,
@@ -80,6 +82,14 @@ pub enum CoreCommand {
   },
   DeleteSavedSearch {
     id: u64,
+  },
+  /// One of the user's own call backgrounds: encrypted, uploaded and recorded in the key bag.
+  AddBackground {
+    name: String,
+    picture: Vec<u8>,
+  },
+  DeleteBackground {
+    id: BackgroundId,
   },
   /// The server's pin flag (the encrypted pin message is already in the outbox).
   SetServerPin {
@@ -650,6 +660,30 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn saved_items(&self) -> Vec<SavedItem> {
     self.ui_saved_items()
+  }
+
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    self
+      .read(crate::client::stored_account_data(&self.store))
+      .backgrounds()
+      .into_iter()
+      .map(|(id, entry)| BackgroundImageInfo {
+        id,
+        name: entry.name.clone(),
+        size_bytes: entry.size_bytes,
+      })
+      .collect()
+  }
+
+  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
+    self.command(CoreCommand::AddBackground {
+      name: name.to_string(),
+      picture,
+    });
+  }
+
+  fn delete_background_image(&self, id: BackgroundId) {
+    self.command(CoreCommand::DeleteBackground { id });
   }
 
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {

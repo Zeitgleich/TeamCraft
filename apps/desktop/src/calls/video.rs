@@ -14,8 +14,8 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{
-  BackgroundEffect, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsPipeline, PRESET_HEIGHT,
-  PRESET_WIDTH, PresetBackground, SegmentationModel, TractSegmenter,
+  BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsPipeline,
+  PRESET_HEIGHT, PRESET_WIDTH, PresetBackground, SegmentationModel, TractSegmenter,
 };
 use teamcraft_media::video::{VideoResolution, simulcast_layers};
 use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
@@ -127,6 +127,7 @@ pub(super) fn screen_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
 /// comes from `TEAMCRAFT_SEGMENTATION_MODEL`, else from the app's resources.
 pub(super) fn effects_filter(
   effect: UiBackgroundEffect,
+  maybe_custom: Option<&Arc<BackgroundImage>>,
   maybe_bundled_model: Option<&Path>,
 ) -> Option<(FrameFilter, EffectHandle)> {
   let path = model_path(maybe_bundled_model)?;
@@ -152,7 +153,14 @@ pub(super) fn effects_filter(
       return None;
     },
   };
-  Some(EffectsPipeline::new(Box::new(segmenter), compositor, media_effect(effect)).into_frame_filter())
+  Some(
+    EffectsPipeline::new(
+      Box::new(segmenter),
+      compositor,
+      media_effect(effect, maybe_custom),
+    )
+    .into_frame_filter(),
+  )
 }
 
 fn model_path(maybe_bundled_model: Option<&Path>) -> Option<PathBuf> {
@@ -165,6 +173,8 @@ fn model_path(maybe_bundled_model: Option<&Path>) -> Option<PathBuf> {
   }
   bundled.map(Path::to_path_buf)
 }
+
+const PREVIEW_JPEG_QUALITY: u8 = 80;
 
 /// Version of the frame message the webview decodes (see [`video_message`]).
 const VIDEO_MESSAGE_VERSION: u8 = 1;
@@ -248,8 +258,12 @@ fn timestamp_us(frame: &ReceivedVideoFrame) -> u64 {
   u64::from(frame.timestamp.0) * 1_000_000 / 90_000
 }
 
-/// The UI's effect as the media layer's.
-pub(super) fn media_effect(effect: UiBackgroundEffect) -> BackgroundEffect {
+/// The UI's effect as the media layer's; `maybe_custom` is the user's picture for
+/// [`UiBackgroundEffect::Custom`], already fetched and decoded.
+pub(super) fn media_effect(
+  effect: UiBackgroundEffect,
+  maybe_custom: Option<&Arc<BackgroundImage>>,
+) -> BackgroundEffect {
   match effect {
     UiBackgroundEffect::None => BackgroundEffect::None,
     UiBackgroundEffect::BlurLight => BackgroundEffect::Blur(BlurStrength::Light),
@@ -264,7 +278,42 @@ pub(super) fn media_effect(effect: UiBackgroundEffect) -> BackgroundEffect {
         },
       }
     },
+    UiBackgroundEffect::Custom(_) => match maybe_custom {
+      Some(image) => BackgroundEffect::Image(Arc::clone(image)),
+      None => {
+        warn!("own background picture not loaded; keeping the real background");
+        BackgroundEffect::None
+      },
+    },
   }
+}
+
+/// A picture file of the user's (JPEG or PNG) ready for the compositor: decoded and scaled to the
+/// preset size (calls send at most 720p). Blocking: decoding takes a moment.
+pub(crate) fn decode_background(picture: &[u8]) -> Result<Arc<BackgroundImage>, String> {
+  BackgroundImage::decode(picture)
+    .map(|image| Arc::new(image.fit_within(PRESET_WIDTH, PRESET_HEIGHT)))
+    .map_err(|error| error.to_string())
+}
+
+/// A small JPEG of a background for the picker: presets are drawn at that size, the user's own
+/// pictures are scaled down.
+pub(crate) fn background_preview(
+  effect: UiBackgroundEffect,
+  maybe_custom: Option<&[u8]>,
+  width: u32,
+  height: u32,
+) -> Result<Vec<u8>, String> {
+  let image = match (effect, maybe_custom) {
+    (UiBackgroundEffect::Preset(preset), _) => preset_background(preset).render(width, height),
+    (UiBackgroundEffect::Custom(_), Some(picture)) => {
+      BackgroundImage::decode(picture).map(|image| image.fit_within(width, height))
+    },
+    _ => return Err("only presets and own pictures have a preview".into()),
+  };
+  image
+    .and_then(|image| image.to_jpeg(PREVIEW_JPEG_QUALITY))
+    .map_err(|error| error.to_string())
 }
 
 /// The UI's preset as the media layer's drawing of it.
@@ -352,14 +401,47 @@ mod tests {
   }
 
   #[test]
+  fn own_pictures_and_presets_get_previews() {
+    let photo = BackgroundImage::new(1600, 1200, vec![90; 1600 * 1200 * 4])
+      .unwrap()
+      .to_jpeg(80)
+      .unwrap();
+    let custom = UiBackgroundEffect::Custom("7".parse().unwrap());
+    let preview = background_preview(custom, Some(&photo), 160, 90).unwrap();
+    let decoded = BackgroundImage::decode(&preview).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (120, 90));
+    let preset = background_preview(
+      UiBackgroundEffect::Preset(UiBackgroundPreset::Office),
+      None,
+      160,
+      90,
+    )
+    .unwrap();
+    assert_eq!(BackgroundImage::decode(&preset).unwrap().width(), 160);
+    assert!(background_preview(UiBackgroundEffect::BlurLight, None, 160, 90).is_err());
+
+    // In a call the picture is scaled to the compositor's size and used as the background.
+    let image = decode_background(&photo).unwrap();
+    assert_eq!((image.width(), image.height()), (960, 720));
+    assert!(matches!(
+      media_effect(custom, Some(&image)),
+      BackgroundEffect::Image(_)
+    ));
+    assert_eq!(media_effect(custom, None), BackgroundEffect::None);
+  }
+
+  #[test]
   fn ui_effects_map_to_media_effects() {
     assert_eq!(
-      media_effect(UiBackgroundEffect::BlurLight),
+      media_effect(UiBackgroundEffect::BlurLight, None),
       BackgroundEffect::Blur(BlurStrength::Light)
     );
-    assert_eq!(media_effect(UiBackgroundEffect::None), BackgroundEffect::None);
+    assert_eq!(
+      media_effect(UiBackgroundEffect::None, None),
+      BackgroundEffect::None
+    );
     assert!(matches!(
-      media_effect(UiBackgroundEffect::Preset(UiBackgroundPreset::Sunrise)),
+      media_effect(UiBackgroundEffect::Preset(UiBackgroundPreset::Sunrise), None),
       BackgroundEffect::Image(image) if image.width() == PRESET_WIDTH
     ));
   }
