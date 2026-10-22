@@ -77,7 +77,13 @@ fn healthcheck() -> ExitCode {
 
 #[tokio::main]
 async fn run() -> anyhow::Result<()> {
-  let config = Config::load(config_path().as_deref()).context("loading configuration")?;
+  let mut config = Config::load(config_path().as_deref()).context("loading configuration")?;
+  allow_web_connections(&mut config);
+  config
+    .web
+    .validate()
+    .map_err(anyhow::Error::msg)
+    .context("checking [web]")?;
   logging::init(&config.logging)?;
 
   let database = Database::connect(
@@ -104,6 +110,8 @@ async fn run() -> anyhow::Result<()> {
     hub: Arc::new(Hub::new(HubOptions {
       resume_window: Duration::from_secs(config.gateway.resume_window_secs),
       buffer_events: config.gateway.resume_buffer_events,
+      max_sessions_per_device: config.gateway.max_sessions_per_device,
+      max_sessions_per_user: config.gateway.max_sessions_per_user,
     })),
     rendezvous: Arc::new(RendezvousHub::new(&config.rendezvous)),
     maybe_blob_store: config
@@ -250,6 +258,22 @@ fn spawn_retention_job(state: AppState) {
       }
     }
   });
+}
+
+/// The web client talks to the identity provider, the SFU and the storage: its policy allows
+/// exactly those origins (and the ones listed in `web.connect_origins`), not all of https.
+fn allow_web_connections(config: &mut Config) {
+  let mut urls = vec![config.oidc.issuer.as_str()];
+  if let Some(calls) = &config.calls {
+    urls.push(&calls.sfu_url);
+  }
+  if let Some(storage) = &config.storage {
+    urls.push(&storage.endpoint);
+  }
+  let urls: Vec<String> = urls.into_iter().map(str::to_owned).collect();
+  config
+    .web
+    .allow_connections_to(&urls.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// Local guest accounts, if enabled.

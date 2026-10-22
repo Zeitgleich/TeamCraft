@@ -28,6 +28,7 @@ pub struct AdminConversationFilter {
   pub maybe_min_members: Option<u32>,
   pub maybe_max_members: Option<u32>,
   pub maybe_after: Option<ConversationId>,
+  pub maybe_member: Option<UserId>,
   /// `Some(true)`: only channels without an active channel admin; `Some(false)`: only the others.
   pub maybe_is_orphaned: Option<bool>,
   pub limit: i64,
@@ -144,6 +145,8 @@ impl Database {
              AND ($1::bigint IS NULL OR c.space_id = $1)
              AND ($2::text IS NULL OR c.visibility = $2)
              AND ($3::bigint IS NULL OR c.id > $3)
+             AND ($10::bigint IS NULL OR EXISTS (
+                   SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = $10))
          ) t
          WHERE ($4::boolean IS NULL OR (t.guest_count > 0) = $4)
            AND ($5::bigint IS NULL OR t.member_count >= $5)
@@ -163,6 +166,7 @@ impl Database {
       filter.maybe_inactive_days.map(|days| i32::try_from(days).unwrap_or(i32::MAX)),
       filter.maybe_is_orphaned,
       filter.limit + 1,
+      filter.maybe_member.map(to_db),
     )
     .fetch_all(self.pool())
     .await?;

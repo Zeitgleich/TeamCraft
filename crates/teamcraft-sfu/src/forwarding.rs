@@ -30,6 +30,8 @@ use crate::layers::{LayerAllocationConfig, LayerAllocator, TrackDemand, full_dem
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
 /// Keyframe requests per track and layer are sent at most this often.
+/// Video tracks (camera, screen share) one participant may publish at the same time.
+const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
 const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Routing state of one room.
@@ -208,6 +210,15 @@ impl Forwarder {
       return Err(ForwardError::InvalidPublication(
         "layers must be numbered 0, 1, 2 in order",
       ));
+    }
+    let is_new_stream = !self.video_tracks.contains_key(&stream_id);
+    let published = self
+      .video_tracks
+      .values()
+      .filter(|route| route.track.device_id == owner)
+      .count();
+    if is_new_stream && published >= MAX_VIDEO_TRACKS_PER_PARTICIPANT {
+      return Err(ForwardError::InvalidPublication("too many video tracks"));
     }
     let track = VideoTrack {
       stream_id: MediaStreamId(stream_id.0),
@@ -649,6 +660,49 @@ mod tests {
           "length {len}"
         );
       }
+    }
+
+    #[test]
+    fn a_participant_publishes_a_bounded_number_of_tracks() {
+      let (mut forwarder, _) = video_room();
+      let layers = three_layers();
+      // `video_room` already has one track of device 1.
+      for id in 1..MAX_VIDEO_TRACKS_PER_PARTICIPANT {
+        let stream = StreamId(100 + u32::try_from(id).unwrap());
+        assert!(
+          forwarder
+            .publish_video(
+              device(1),
+              stream,
+              VideoTrackKind::Camera,
+              VideoCodec::Av1,
+              layers.clone()
+            )
+            .is_ok()
+        );
+      }
+      assert!(matches!(
+        forwarder.publish_video(
+          device(1),
+          StreamId(999),
+          VideoTrackKind::Camera,
+          VideoCodec::Av1,
+          layers.clone()
+        ),
+        Err(ForwardError::InvalidPublication(_))
+      ));
+      // Re-publishing an existing stream is not a new track.
+      assert!(
+        forwarder
+          .publish_video(
+            device(1),
+            StreamId(100),
+            VideoTrackKind::Camera,
+            VideoCodec::Av1,
+            layers
+          )
+          .is_ok()
+      );
     }
 
     #[test]

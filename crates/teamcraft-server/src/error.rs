@@ -155,6 +155,13 @@ impl ApiError {
     }
   }
 
+  pub fn device_list_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::DeviceListNotFound,
+      what: "device list",
+    }
+  }
+
   pub fn identity_key_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::IdentityKeyNotFound,
@@ -206,7 +213,7 @@ impl ApiError {
   }
 
   /// Client-facing text. Internal details stay in the logs.
-  fn public_message(&self) -> String {
+  pub fn public_message(&self) -> String {
     match self {
       Self::Auth(AuthError::KeysUnavailable(_)) => "authentication is temporarily unavailable".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),

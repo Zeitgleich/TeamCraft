@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE device_lists SET sequence = $3, signed_list = $4, updated_at = now()\n           WHERE user_id = $1 AND sequence = $2 RETURNING sequence",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sequence",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "device_lists",
+            "name": "sequence"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ddd1913edae396ef721cdba840865f2059272d18e5349823e1d6cebf391464b8"
+}

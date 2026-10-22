@@ -397,6 +397,27 @@ mod host_controls {
   }
 
   #[tokio::test]
+  async fn a_deactivated_user_is_dropped_from_the_running_call() {
+    let Some(s) = running_meeting(HttpStatus::NO_CONTENT, true).await else {
+      return;
+    };
+    let reply = s
+      .app
+      .post(
+        &s.host,
+        &format!("/admin/users/{}/deactivate", s.carol_id),
+        json!({}),
+      )
+      .await;
+    assert!(reply.status.is_success(), "{}", reply.body);
+    let sent = s.seen.lock().unwrap().last().expect("the SFU was told").1.clone();
+    assert_eq!(sent["call_id"], s.call.as_str());
+    assert_eq!(sent["action"], "remove_participant");
+    assert_eq!(sent["user_id"], s.carol_id.as_str());
+    s.app.stop().await;
+  }
+
+  #[tokio::test]
   async fn only_hosts_may_and_the_host_cannot_be_removed() {
     let Some(s) = running_meeting(HttpStatus::NO_CONTENT, true).await else {
       return;

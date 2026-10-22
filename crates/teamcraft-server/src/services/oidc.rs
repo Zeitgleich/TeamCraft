@@ -29,7 +29,9 @@ pub async fn backchannel_logout(state: &AppState, logout_token: &str) -> Result<
   let now = i64::try_from(jsonwebtoken::get_current_timestamp()).unwrap_or(i64::MAX);
 
   if let Some(subject) = &identity.maybe_subject {
-    state.revocations.revoke_subject(subject, now);
+    state
+      .revocations
+      .revoke_subject(state.validator.issuer(), subject, now);
     if let Some(user) = state
       .database
       .find_user_by_oidc_subject(state.validator.issuer(), subject)
@@ -47,7 +49,9 @@ pub async fn backchannel_logout(state: &AppState, logout_token: &str) -> Result<
     }
   }
   if let Some(session) = &identity.maybe_session_id {
-    state.revocations.revoke_session(session, now);
+    state
+      .revocations
+      .revoke_session(state.validator.issuer(), session, now);
     state.hub.revoke_oidc_session(session);
     if identity.maybe_subject.is_none() {
       audit::record(

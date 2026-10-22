@@ -320,6 +320,7 @@ mod system_events {
 
 mod orphaned_channels {
   use super::*;
+  use teamcraft_server::testing::TestUser;
 
   #[tokio::test]
   async fn channels_without_an_active_admin_get_a_new_owner() {
@@ -338,9 +339,10 @@ mod orphaned_channels {
       "alice is the admin"
     );
 
-    // Alice leaves the company.
+    // Alice leaves the company. Only owners may deactivate an owner, so a second owner does it.
+    let olivia = TestUser::new("olivia", &["owner"]);
     let deactivated = app
-      .post(&bob, &format!("/admin/users/{alice_id}/deactivate"), json!({}))
+      .post(&olivia, &format!("/admin/users/{alice_id}/deactivate"), json!({}))
       .await;
     assert_eq!(deactivated.status, StatusCode::NO_CONTENT, "{}", deactivated.body);
     let listed = app.get(&bob, "/admin/conversations?orphaned=true").await;

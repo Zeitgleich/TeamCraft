@@ -43,6 +43,9 @@ pub struct Hub {
 pub struct HubOptions {
   pub resume_window: Duration,
   pub buffer_events: usize,
+  /// Sessions one device may have; opening more drops the oldest (waiting ones first).
+  pub max_sessions_per_device: usize,
+  pub max_sessions_per_user: usize,
 }
 
 /// A connection attached to a session.
@@ -85,11 +88,14 @@ struct Inner {
   sessions: HashMap<String, Session>,
   by_user: HashMap<UserId, HashSet<String>>,
   last_presence: HashMap<UserId, PresenceSnapshot>,
+  next_created_seq: u64,
   /// Busy periods from the users' calendars, as last polled.
   busy: HashMap<UserId, Vec<(OffsetDateTime, OffsetDateTime)>>,
 }
 
 struct Session {
+  /// Order of creation, to drop the oldest first.
+  created_seq: u64,
   user: UserId,
   device: DeviceId,
   activity: DeviceActivity,
@@ -114,7 +120,10 @@ impl Hub {
   pub fn open_session(&self, user: UserId, device: DeviceId, activity: DeviceActivity) -> Attached {
     let session_id = new_session_id();
     let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+    let mut inner = self.lock();
+    inner.next_created_seq += 1;
     let session = Session {
+      created_seq: inner.next_created_seq,
       user,
       device,
       activity,
@@ -125,9 +134,9 @@ impl Hub {
       maybe_detached_at: None,
       maybe_oidc_session: None,
     };
-    let mut inner = self.lock();
     inner.by_user.entry(user).or_default().insert(session_id.clone());
     inner.sessions.insert(session_id.clone(), session);
+    self.evict_excess_sessions(&mut inner, user, device);
     Attached {
       session_id,
       replay: Vec::new(),
@@ -184,6 +193,37 @@ impl Hub {
     if let Some(session) = self.lock().sessions.get_mut(session_id) {
       session.maybe_sender = None;
       session.maybe_detached_at = Some(Instant::now());
+    }
+  }
+
+  /// Keeps the number of sessions of the device and of the user within the options by dropping
+  /// the oldest, those waiting to be resumed first. Dropping a session closes its connection.
+  fn evict_excess_sessions(&self, inner: &mut Inner, user: UserId, device: DeviceId) {
+    for (limit, only_device) in [
+      (self.options.max_sessions_per_device, Some(device)),
+      (self.options.max_sessions_per_user, None),
+    ] {
+      loop {
+        let mut candidates: Vec<(bool, u64, String)> = inner
+          .by_user
+          .get(&user)
+          .into_iter()
+          .flatten()
+          .filter_map(|id| inner.sessions.get(id).map(|session| (id, session)))
+          .filter(|(_, session)| only_device.is_none_or(|device| session.device == device))
+          .map(|(id, session)| (session.maybe_sender.is_some(), session.created_seq, id.clone()))
+          .collect();
+        if candidates.len() <= limit.max(1) {
+          break;
+        }
+        // Waiting (detached) sessions go first, then the oldest.
+        candidates.sort();
+        let victim = candidates.remove(0).2;
+        inner.sessions.remove(&victim);
+        if let Some(set) = inner.by_user.get_mut(&user) {
+          set.remove(&victim);
+        }
+      }
     }
   }
 
@@ -468,6 +508,8 @@ mod tests {
   const OPTIONS: HubOptions = HubOptions {
     resume_window: Duration::from_secs(60),
     buffer_events: 3,
+    max_sessions_per_device: 100,
+    max_sessions_per_user: 100,
   };
 
   #[tokio::test(start_paused = true)]
@@ -567,6 +609,57 @@ mod tests {
     );
   }
 
+  mod session_caps {
+    use super::*;
+
+    fn capped(per_device: usize, per_user: usize) -> Hub {
+      Hub::new(HubOptions {
+        max_sessions_per_device: per_device,
+        max_sessions_per_user: per_user,
+        ..OPTIONS
+      })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_keeps_its_newest_sessions_and_waiting_ones_go_first() {
+      let hub = capped(2, 100);
+      let mut first = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let second = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      // The older one is live, the newer one waits to be resumed: the waiting one is dropped first.
+      hub.detach(&second.session_id);
+      let third = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      assert!(
+        hub
+          .resume_session(&second.session_id, user(1), device(1), 0)
+          .is_err()
+      );
+      hub.publish([user(1)], &event(1));
+      assert_eq!(seqs(&mut first.receiver), vec![1]);
+      drop(third);
+
+      // With all live, the oldest goes and its connection ends.
+      let fourth = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      assert!(
+        first.receiver.recv().await.is_none(),
+        "the oldest connection was closed"
+      );
+      drop(fourth);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_cap_per_user_counts_all_devices_and_other_users_are_untouched() {
+      let hub = capped(10, 3);
+      let mut oldest = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let _b = hub.open_session(user(1), device(2), DeviceActivity::Active);
+      let _c = hub.open_session(user(1), device(3), DeviceActivity::Active);
+      let mut other = hub.open_session(user(2), device(9), DeviceActivity::Active);
+      let _d = hub.open_session(user(1), device(4), DeviceActivity::Active);
+      assert!(oldest.receiver.recv().await.is_none());
+      hub.publish([user(2)], &event(1));
+      assert_eq!(seqs(&mut other.receiver), vec![1]);
+    }
+  }
+
   #[tokio::test(start_paused = true)]
   async fn sweep_removes_only_expired_detached_sessions() {
     let hub = Hub::new(OPTIONS);
@@ -602,6 +695,8 @@ mod tests {
     let hub = Hub::new(HubOptions {
       resume_window: Duration::from_secs(60),
       buffer_events: 5000,
+      max_sessions_per_device: 100,
+      max_sessions_per_user: 100,
     });
     let attached = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let id = attached.session_id.clone();

@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO device_lists (user_id, sequence, signed_list) VALUES ($1, $2, $3)\n           ON CONFLICT DO NOTHING RETURNING sequence",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sequence",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "device_lists",
+            "name": "sequence"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fcb8a5cdf84b401dfadd39af600b4241ab67436409b181099a68b5e35332679c"
+}

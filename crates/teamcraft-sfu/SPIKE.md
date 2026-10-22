@@ -111,7 +111,7 @@ Chrome reported `maxDatagramSize = 1024` at connection start.
 ## Trying it
 
 ```sh
-TEAMCRAFT_SFU_DEV_HTTP='[::]:8080' cargo run -p teamcraft-sfu   # SFU on [::]:4433
+TEAMCRAFT_SFU_BIND='[::1]:4433' TEAMCRAFT_SFU_DEV_HTTP='[::1]:8080' TEAMCRAFT_SFU_INSECURE_DEV_TOKENS=1 cargo run -p teamcraft-sfu   # SFU on [::1]:4433
 # open http://127.0.0.1:8080/ and/or http://[::1]:8080/ in two tabs or browsers, click Connect
 cargo test -p teamcraft-sfu --test dave_call -- --nocapture   # native DAVE call + numbers
 ```

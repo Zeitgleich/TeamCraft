@@ -51,7 +51,7 @@ pub fn router(config: &WebConfig) -> Router {
   // Only the dedicated download page gets its own policy; the app shell keeps the app's.
   let share_policy = maybe_share
     .as_ref()
-    .and_then(|_| HeaderValue::from_str(&config.share_page_content_security_policy).ok());
+    .map(|_| policy_header(&config.share_page_content_security_policy));
   let Some(dir) = config.maybe_static_dir.clone() else {
     return match maybe_share {
       Some(bundle) => share_routes(Router::new(), bundle).layer(middleware::from_fn(move |request, next| {
@@ -64,7 +64,7 @@ pub fn router(config: &WebConfig) -> Router {
     .precompressed_br()
     .precompressed_gzip()
     .fallback(ServeFile::new(dir.join(INDEX)));
-  let policy = HeaderValue::from_str(&config.content_security_policy).ok();
+  let policy = Some(policy_header(&config.resolved_content_security_policy()));
   let router = match maybe_share {
     Some(bundle) => share_routes(Router::new(), bundle),
     None => Router::new().route("/f/{id}", get(share_page_handler).with_state(dir)),
@@ -139,6 +139,13 @@ impl ShareBundle {
   }
 }
 
+/// The header value of a policy. One that is not a valid header value (startup validation refuses
+/// it, so this is a fallback) becomes the strictest policy: nothing is better than serving the
+/// pages without any.
+fn policy_header(policy: &str) -> HeaderValue {
+  HeaderValue::from_str(policy).unwrap_or_else(|_| HeaderValue::from_static("default-src 'none'"))
+}
+
 /// The app shell for the download page of a shared file.
 async fn share_page_handler(axum::extract::State(dir): axum::extract::State<PathBuf>) -> Response {
   match tokio::fs::read(dir.join(INDEX)).await {
@@ -177,7 +184,7 @@ async fn add_headers(
   } else if path.starts_with("/f-assets/") && !has_content_hash(&path) {
     // Integrity values pin exact versions of these files.
     REVALIDATE
-  } else if is_page {
+  } else if is_page || is_loader_script(&path) {
     REVALIDATE
   } else if has_content_hash(&path) {
     IMMUTABLE
@@ -190,6 +197,12 @@ async fn add_headers(
       .insert(CACHE_CONTROL, HeaderValue::from_static(cache));
   }
   response
+}
+
+/// `init.js` and `sw.js` start the app and the service worker: a stale copy after a deploy would
+/// point to removed assets, so they are revalidated like the page.
+fn is_loader_script(path: &str) -> bool {
+  matches!(path.rsplit('/').next(), Some("init.js" | "sw.js"))
 }
 
 /// Whether the file name ends in a hash before the extension: `name-<16 or more hex digits>.ext`.

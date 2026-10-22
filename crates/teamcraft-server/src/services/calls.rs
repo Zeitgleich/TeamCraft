@@ -644,6 +644,29 @@ async fn refresh_caller_presence(state: &AppState, user: UserId) {
   }
 }
 
+/// Drops `user` from the conversation's running call, if any. Called when the user loses access
+/// to the conversation: a join token alone can't be recalled, so the SFU is told to close the
+/// session. Best effort; the SFU's token lifetime bounds a failure (security-review C9).
+pub async fn evict_from_call(state: &AppState, conversation_id: ConversationId, user: UserId) {
+  let Some(calls) = state.maybe_calls.as_ref() else {
+    return;
+  };
+  let Some(call_id) = calls.running_call(conversation_id) else {
+    return;
+  };
+  if !calls.has_controls() {
+    return;
+  }
+  let request = SfuControlRequest {
+    call_id,
+    by_user_id: user,
+    action: SfuControlAction::RemoveParticipant { user_id: user },
+  };
+  if let Err(error) = calls.send_control(&request).await {
+    warn!(%conversation_id, %error, "evicting a removed member from the call failed");
+  }
+}
+
 fn calls_of(state: &AppState) -> Result<&Arc<CallService>, ApiError> {
   state
     .maybe_calls

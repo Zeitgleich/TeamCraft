@@ -59,6 +59,9 @@ are in parts A to E below.
    recommended client).
 5. Server hardening (D1–D16) and DAVE availability (C4–C6).
 
+
+**Fix status (branch `fix/security-server`):** D1–D16, B7, C7, C8, C10 are fixed (D13 mitigated), C9 is mitigated, and the server side of A2, A4 and A8 is in place. Not fixed here: C6 (needs the DAVE flow rework), the client-side findings (C1–C5, C11–C13, A-series) and the Keycloak realm audience split (A15). Each finding below has a status line with its commit.
+
 ## Part A: trust anchors, membership and key rotation
 
 Scope: `teamcraft-core` (trust.rs, attestation.rs, workspace.rs, client/{mod,enroll,groups,workspace,sync,gateway,messaging,linking,org_recovery}.rs) and `teamcraft-crypto` (identity.rs, membership.rs, workspace.rs, message.rs, content_key.rs, mls/*). Threat model: the VPS server is malicious; Keycloak (separate host) is the second trust anchor.
@@ -99,6 +102,8 @@ All paths are relative to the worktree root. Line numbers were checked against t
 
 #### 2. High: pins and the workspace root are per device, so every new device or reinstall is a fresh TOFU window
 
+**Server status:** `05f3e57` (`fix/security-server`). Server side of the fix: a `KeyBagUpdate` gateway event tells a user's other devices to fetch a changed key bag (which carries the pins and the workspace root).
+
 **Location:** pinned identities live in the local store, `crates/teamcraft-core/src/records.rs:272-284` (`Table::PinnedIdentities`). The workspace state, including `maybe_root`, also lives in the local store: `client/workspace.rs:68-70`, `Table::Workspace`. The key bag (`crypto/src/key_bag.rs`) holds only the identity key and content key rings. Genesis acceptance is at `crates/teamcraft-core/src/workspace.rs:157-175`: the genesis roster vouches for itself (`owner_directory(&document)`), and `RootChanged` is only checked against a root this same device pinned earlier.
 
 **Exploit.**
@@ -133,6 +138,8 @@ Old members reject the commit and stall in their epoch. The new members and Mall
 **Fix.** Bind a change to group state. Include the epoch (or the group's tree hash or confirmed transcript hash) in the signed change and reject it unless it equals the current epoch. Alternatively, put an expiry or timestamp in it and require it to be fresh. Also carry the applied-change set, or a hash chain of it, in a GroupContext extension so that joiners inherit it. At a minimum, refuse an `AddUser` for a user whose most recent change in the group was a removal signed after it.
 
 #### 4. High: device revocation is not enforced by cryptography
+
+**Server status:** `54bc175` (`fix/security-server`). Server side of the fix: `GET /api/v1/users/{user_id}/device-list` and `PUT /api/v1/me/device-list` store the signed list as an opaque blob with a compare-and-swap on a sequence number that only goes up.
 
 **Location:**
 - `DeviceCertificate` (`crypto/src/identity.rs:59-66`) has no expiry, no serial and no revocation list.
@@ -191,6 +198,8 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 
 #### 8. Medium: the server can make honest clients sign removals of anyone
 
+**Server status:** `05f3e57` (`fix/security-server`). Server side of the fix: `GET /api/v1/admin/conversations?user_id=` lists the channels a user is in, so the admin client can sign the removals itself.
+
 **Location:** `gateway.rs:163-178` (`MembershipRemove`) → `queue_user_removal`, and `gateway.rs:187` (`DeviceRemove`) → `queue_device_removal`. Both are committed as `ChangeSource::Own` in `client/workspace.rs:337-356`. The client signs `RemoveUser`/`RemoveDevice` with its own device key because the server said so.
 
 **Exploit.** The server sends a `MembershipRemove{conv, victim}` event to one online member. That client creates a validly signed "Alice removed victim" and commits it. Every member accepts it, because Alice is a member (trust.rs:78-80). Membership integrity and the audit attribution are both forged. This does not directly break confidentiality, but it gives the server unilateral kick power. It can also clear a target's legitimate devices before a fake-device attack.
@@ -236,6 +245,8 @@ All of these affect availability, not confidentiality. Consider only dropping a 
 `RotationPolicy` and `RotationReason` (`crypto/src/content_key.rs:17-59`) are not used anywhere in `teamcraft-core`. Keys rotate only on adds with `FromJoin` and on removals. e2ee.md §4.2's "every N messages or every 7 days" is missing. That widens the exposure if a key leaks.
 
 #### 15. Info (uncertain): attestation design points to settle before implementing #1
+
+**Server status:** not changed (`fix/security-server`). The server no longer relies on `aud` (D12); rejecting tokens that carry the Keycloak `account` audience would refuse the stock tokens of a default realm, so separating the audiences stays a realm configuration task.
 
 - The claim is a user attribute that anyone holding the user's access token with the `account` audience can write (`attestation.rs:163-207`). If the access token the client presents to the TeamCraft server carries that audience, the server could rewrite the attribute. It could not mint an ID token itself, but the next legitimate token refresh would carry the attacker's fingerprint. Use separate tokens or audiences for the TeamCraft API and the Keycloak account API, and make the server reject tokens with the `account` audience. I could not confirm which token the apps send to the server.
 - The verifier must map the token's `sub` to the TeamCraft `UserId`. That mapping is server data, so put the `UserId` (or `sub`) into the signed claim, or verify `sub` against a value inside the identity-key upload signed by the identity key.
@@ -445,6 +456,8 @@ roster identity key. Check devices against a signed device list or revocation lo
 ---
 
 ### B7: Web Push SSRF check covers IP literals only (Medium; server-side, outside the E2EE threat model)
+
+**Status: fixed** in `9548566` (`fix/security-server`), same change as D1.
 
 **Location:** `crates/teamcraft-server/src/push/web_push.rs:41-75`. `check_endpoint` blocks private
 IP literals and a few name suffixes. A DNS name that resolves (or rebinds) to `10.x`, `127.x`,
@@ -675,6 +688,8 @@ with full history. The same applies to `api_request` with the user's bearer toke
 
 #### 8. Low: web CSP and header gaps
 
+**Status: fixed** in `8a121e6` (`fix/security-server`). `connect-src` is generated from the configuration (`web.connect_origins`, issuer, SFU and storage origins) instead of allowing any HTTPS host, an invalid configured CSP is a startup error (and the fallback is `default-src 'none'`), and `init.js` and `sw.js` are served `no-cache`. Trusted Types are not in the default CSP; operators can add `require-trusted-types-for 'script'` through `content_security_policy`.
+
 Default CSP (`config.rs:342-344`): `script-src 'self' 'wasm-unsafe-eval'`, no inline scripts (the
 inline loader is moved out by `scripts/externalize-init.sh`), plus `frame-ancestors 'none'`,
 `base-uri 'none'`, `form-action 'self'`. That is good. The gaps:
@@ -821,6 +836,8 @@ audio level to occupy a speaker slot (minor).
 
 #### 6. Low: no commit timeout in the DAVE coordinator
 
+**Status: not fixed** (`fix/security-server`). The coordinator has no clock; a commit timeout needs a timer per transition and a decision on which committer to drop, which touches the DAVE flow that the media/SFU work is changing. Left for that work.
+
 `on_commit` accepts only commits from the current transition's committers
 (`dave_coordinator.rs:119-129`), and `start_transition` returns early while a transition is in
 flight (`dave_coordinator.rs:171-173`). No timer exists. A committer that never commits blocks all
@@ -834,6 +851,8 @@ this is insider DoS only.
 
 #### 7. Low: SFU memory DoS by an authenticated participant
 
+**Status: fixed** in `f139904` (`fix/security-server`). Signaling queues are bounded (`signaling_queue_len`, default 256) and a participant that overflows is disconnected; a participant may publish at most four video tracks; one source address may hold 16 unjoined sessions (`max_prejoin_sessions_per_ip`).
+
 - `signal_tx` is `mpsc::unbounded_channel` (`server.rs:187`). The writer blocks on QUIC flow
   control (`server.rs:342-349`). A client that never reads its signaling stream accumulates
   `TransportFeedback` every 100 ms (`server.rs:241-252`) plus broadcasts without bound. Use a
@@ -845,6 +864,8 @@ this is insider DoS only.
   (20 s) before the token is checked (`server.rs:164-185`). Consider a per-IP connection limit.
 
 #### 9. Low: token replay and no revocation
+
+**Status: mitigated** in `d2afd85` (`fix/security-server`). Removing a member from a channel or space, or deactivating a user, now tells the SFU to close that user's session in the running call. Join tokens are still not one-time: replay within the token lifetime (default 60 s) is accepted, because a one-time `jti` would break client reconnects without a client change.
 
 Tokens have no `jti` or nonce, and the SFU keeps no replay cache (`auth.rs:92-118`). Within the
 60 s TTL (or up to the 300 s SFU cap), a leaked token can be used again after the legitimate
@@ -859,6 +880,8 @@ leave. (uncertain: I didn't find any roster refresh path; there may be UI-level 
   add an authenticated server-to-SFU kick.
 
 #### 10. Low: dev mode can fail open
+
+**Status: fixed** in `3a71381` (`fix/security-server`). Unsigned dev tokens need `TEAMCRAFT_SFU_INSECURE_DEV_TOKENS=1` together with loopback `TEAMCRAFT_SFU_BIND` and dev HTTP addresses; otherwise all joins are rejected and the reason is logged.
 
 `main.rs:120-141`: when `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY` is unset and `TEAMCRAFT_SFU_DEV_HTTP`
 is set, the SFU accepts unsigned `dev:<call>:<user>:<device>` tokens. Anyone can then join any
@@ -909,6 +932,8 @@ No critical or high findings. No SQL injection found.
 
 #### 1. Web Push SSRF via DNS (medium)
 
+**Status: fixed** in `9548566` (`fix/security-server`). Hostnames are resolved through a resolver that drops non-public addresses, the connection uses the checked address, redirects are off, and the private-range list covers NAT64, 6to4, Teredo, site-local, multicast and documentation ranges. Developer mode can still allow private targets.
+
 **Location:** `crates/teamcraft-server/src/push/web_push.rs:40-73` (`check_endpoint`), `:152-163` (POST),
 called at registration from `crates/teamcraft-server/src/services/devices.rs:163-167`.
 
@@ -932,6 +957,8 @@ only hand out those. Extend `is_private_ip` with the ranges above.
 
 #### 2. Admin can deactivate owners and other admins (medium)
 
+**Status: fixed** in `f3c437e` (`fix/security-server`). Deactivating, reactivating and revoking devices need a rank at least as high as the target's (owner above admin above everyone else); only an owner may act on an owner.
+
 **Location:** `crates/teamcraft-server/src/services/admin.rs:149-176` (`deactivate_user_as_admin`),
 `:254-262` (`revoke_user_device`), `crates/teamcraft-server/src/services/devices.rs:108-140`.
 
@@ -950,6 +977,8 @@ another admin's devices to force re-enrollment. Audit entries exist, but the act
 `revoke_user_device` and `reactivate_user`. Add tests for the role × target-role matrix.
 
 #### 3. ID tokens accepted as access tokens; raw ID tokens published (medium, uncertain)
+
+**Status: fixed** in `a73700f` (`fix/security-server`). The `typ` claim must be `Bearer` (or absent), so ID tokens no longer pass as access tokens.
 
 **Location:** `crates/teamcraft-server/src/auth/validator.rs:190-242` (`verify`), `:245-255`
 (`is_issued_to`); `crates/teamcraft-server/src/services/identity.rs:84-90, 114-131`;
@@ -978,6 +1007,8 @@ not a usable bearer token.
 
 #### 4. Gateway frames are not rate-limited; unbounded `last_typing` (medium)
 
+**Status: fixed** in `d30c1d9` (`fix/security-server`). A token bucket limits client frames per connection (`gateway.max_client_frames_per_minute`, `client_frame_burst`), activity changes are limited to one per second, and the typing map is capped and only filled after a successful check.
+
 **Location:** `crates/teamcraft-server/src/gateway/connection.rs:196-262`.
 
 After `Identify`, every frame is processed without any rate limit (the HTTP `RateLimits` only sees the
@@ -1000,6 +1031,8 @@ LRU/time-pruned map).
 
 #### 5. Unbounded gateway sessions per user (low-medium)
 
+**Status: fixed** in `d30c1d9` (`fix/security-server`). `gateway.max_sessions_per_device` and `max_sessions_per_user` evict the oldest sessions.
+
 **Location:** `crates/teamcraft-server/src/gateway/hub.rs:102-124` (`open_session`), `:184-216`
 (`publish`), sweep at `:325`.
 
@@ -1016,6 +1049,8 @@ then cloned thousands of times under the global lock (memory and latency for all
 same device – and cap sessions per user.
 
 #### 6. iMIP REPLY spoofing and amplification (low-medium)
+
+**Status: fixed** in `41a28bf` (`fix/security-server`). A reply is accepted only from the envelope sender that matches the attendee it answers for (`X-Envelope-Sender` is required), and the attendee and line counts are capped.
 
 **Location:** `crates/teamcraft-server/src/meetings/ical.rs:148-196` (`parse_reply`),
 `crates/teamcraft-server/src/services/meetings.rs:328-375` (`receive_reply`, `apply_email_rsvp`,
@@ -1038,6 +1073,8 @@ the authenticated envelope sender and match it, cap lines/entries in the parser,
 
 #### 7. Missing per-user quotas (low-medium)
 
+**Status: fixed** in `508368a` (`fix/security-server`). New `limits.max_devices_per_user`, `max_pending_attachments_per_user`, `max_attachment_bytes_per_user` and `max_meeting_mails_per_user_per_hour`.
+
 **Locations:**
 
 - Devices: `crates/teamcraft-server/src/services/devices.rs:17-59` – no limit per user. Every
@@ -1055,6 +1092,8 @@ the authenticated envelope sender and match it, cap lines/entries in the parser,
 user per hour) as the "Limits everywhere" rule in `.claude/rules/security.md` asks.
 
 #### 8. Denied guests keep a working session (low)
+
+**Status: fixed** in `8d51173` (`fix/security-server`). Denying a guest deactivates the account, so every session ends and later requests get 403.
 
 **Location:** `crates/teamcraft-server/src/services/meeting_guests.rs:185-208` (`deny`),
 `crates/teamcraft-server/src/services/accounts.rs:21-29`.
@@ -1075,6 +1114,8 @@ persist it), and reject guest tokens whose lobby entry is `denied`.
 
 #### 9. Logout tokens are replayable (low)
 
+**Status: fixed** in `a73700f` (`fix/security-server`). Logout tokens must be recent (10 minutes) and their `jti` is remembered; a replay is refused.
+
 **Location:** `crates/teamcraft-server/src/auth/validator.rs:150-187`; effect in
 `crates/teamcraft-server/src/services/oidc.rs:25-60`.
 
@@ -1092,6 +1133,8 @@ than a few minutes, keep a short-lived `jti` replay cache, and also check `typ`/
 
 #### 10. Gateway error frames leak internal error text; gateway auth failures not throttled (low)
 
+**Status: fixed** in `d30c1d9` (`fix/security-server`). Error frames carry the public message only, and failed gateway handshakes count towards the per-IP authentication throttle.
+
 **Location:** `crates/teamcraft-server/src/gateway/connection.rs:145-151` (and `:219-223`); same
 pattern in `crates/teamcraft-server/src/rendezvous/connection.rs:118-121` callers.
 
@@ -1107,6 +1150,8 @@ irrelevant for 256-bit bot tokens and signed JWTs, but inconsistent).
 `record_auth_failure` for failed handshakes.
 
 #### 11. Server does not enforce `admin_self_join` / admin channel management (low, design)
+
+**Status: fixed** in `9bf6710` (`fix/security-server`). Adding oneself to a private channel as a non-member admin is refused unless the signed policy `admin_self_join` is `visible`.
 
 **Location:** `crates/teamcraft-server/src/services/members.rs:68-127` (`add_member`),
 `services/conversations.rs:176-252` (`update_conversation`), `permission.rs:336-344`
@@ -1124,6 +1169,8 @@ an owner approval record for `owner_approval`).
 
 #### 12. Client binding via `aud` only (low)
 
+**Status: fixed** in `a73700f` (`fix/security-server`). The client binding requires `azp` to equal the configured client; `aud` is no longer used.
+
 **Location:** `crates/teamcraft-server/src/auth/validator.rs:202-220, 246-255`.
 
 `validate_aud = false`; a token is accepted if `azp == client_id` *or* `aud` contains the client ID.
@@ -1136,6 +1183,8 @@ and `aud` validation; document that other realm clients must not get TeamCraft c
 
 #### 13. Presigned upload URL is reusable (low)
 
+**Status: mitigated** in `09a80f1` (`fix/security-server`). The misleading doc comment is corrected. Open: a SigV4 presigned PUT can still be repeated until it expires; clients detect tampering through the attachment AEAD.
+
 **Location:** `crates/teamcraft-server/src/storage.rs:64-72`.
 
 The doc comment says "accepts exactly one upload", but a SigV4 presigned PUT can be repeated until it
@@ -1147,6 +1196,8 @@ detects tampering, so impact is integrity-DoS only.
 Garage) or a short expiry.
 
 #### 14. Secret-bearing types with `Debug` / no zeroization (low)
+
+**Status: fixed** in `09a80f1` (`fix/security-server`). `PushTarget` redacts its `Debug` output and zeroizes token and push key on drop, `RegisterPushRequest` redacts its fields, and the bridge keeps its source token in a `SecretString`.
 
 - `RegisterPushRequest` (`crates/teamcraft-proto/src/api/users.rs:68-73`) derives `Debug` with
   `token` and `push_key` (the 256-bit key that seals push payloads).
@@ -1163,12 +1214,16 @@ None is currently logged (I grepped all `tracing` macros), so this is a hardenin
 
 #### 15. Revocations keyed by subject only (info)
 
+**Status: fixed** in `a73700f` (`fix/security-server`). Revocations are keyed by issuer plus subject or session.
+
 `Revocations` (`crates/teamcraft-server/src/auth/revocations.rs:22-44`) stores subjects without
 issuer. Bot subjects are user IDs and guest subjects are invite IDs (decimal snowflakes), IdP
 subjects are UUIDs, so collisions are not practical today. Key the map by `(issuer, subject)` to keep
 it that way.
 
 #### 16. Reverse-proxy default (info, operational)
+
+**Status: fixed** in `09a80f1` (`fix/security-server`). The server warns once when requests look like they come through an unconfigured reverse proxy; docs/operations.md and `teamcraft.example.toml` say what a proxy has to set.
 
 With `trust_forwarded_for = false` (default, `config.rs:306-308`) behind a reverse proxy, every client
 has the proxy's address: all users share one 1200/min bucket, and 30 bad tokens per minute from

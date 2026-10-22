@@ -127,6 +127,8 @@ impl CalendarStore for FakeCalendar {
   }
 }
 
+static NEXT_LOGOUT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// A mail server for tests: remembers what was sent and can be told to refuse addresses.
 #[derive(Default)]
 pub struct FakeMailer {
@@ -331,6 +333,31 @@ impl TestApp {
     .await
   }
 
+  /// Like [`Self::start_with_meetings`] with the settings changed first.
+  pub async fn start_with_meetings_and_settings(
+    config: &MeetingsConfig,
+    calendar: Arc<dyn CalendarStore>,
+    mailer: Arc<dyn Mailer>,
+    customize: impl FnOnce(&mut Settings),
+  ) -> Option<Self> {
+    let meetings = MeetingService::new(
+      config,
+      MeetingBackends {
+        maybe_calendar: Some(calendar),
+        maybe_mailer: Some(mailer),
+      },
+    )
+    .unwrap();
+    Self::start_full(
+      customize,
+      Extras {
+        maybe_meetings: Some(meetings),
+        ..Extras::default()
+      },
+    )
+    .await
+  }
+
   /// Like [`Self::start`] with meetings enabled. Calendar writes go to `calendar`, invitation mail
   /// to `mailer`.
   pub async fn start_with_meetings(
@@ -430,6 +457,8 @@ impl TestApp {
       hub: Arc::new(Hub::new(HubOptions {
         resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
         buffer_events: settings.gateway.resume_buffer_events,
+        max_sessions_per_device: settings.gateway.max_sessions_per_device,
+        max_sessions_per_user: settings.gateway.max_sessions_per_user,
       })),
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
@@ -492,7 +521,12 @@ impl TestApp {
 
   /// Like [`Self::token`] with a chosen issue time.
   pub fn token_issued_at(&self, user: &TestUser, issued_at: i64) -> String {
-    let claims = json!({
+    self.token_with(user, issued_at, &json!({}))
+  }
+
+  /// Like [`Self::token_issued_at`] with claims added or replaced (`null` removes one).
+  pub fn token_with(&self, user: &TestUser, issued_at: i64, overrides: &Value) -> String {
+    let mut claims = json!({
       "iat": issued_at,
       "sid": user.maybe_session_id,
       "amr": user.authentication_methods,
@@ -507,6 +541,11 @@ impl TestApp {
       "email_verified": user.is_email_verified,
       "resource_access": { TEST_CLIENT: { "roles": user.roles } },
     });
+    if let (Some(base), Some(extra)) = (claims.as_object_mut(), overrides.as_object()) {
+      for (key, value) in extra {
+        base.insert(key.clone(), value.clone());
+      }
+    }
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(TEST_KEY_ID.into());
     encode(
@@ -523,7 +562,7 @@ impl TestApp {
       "iss": TEST_ISSUER,
       "aud": TEST_CLIENT,
       "iat": jsonwebtoken::get_current_timestamp(),
-      "jti": "logout-token-1",
+      "jti": format!("logout-token-{}", NEXT_LOGOUT_TOKEN.fetch_add(1, Ordering::SeqCst)),
       "sub": maybe_subject,
       "sid": maybe_session_id,
       "events": {"http://schemas.openid.net/event/backchannel-logout": {}},

@@ -16,7 +16,7 @@ use teamcraft_proto::{
   SfuControlAction, TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tracing::{debug, info, trace, warn};
 use wtransport::Connection;
 
@@ -32,6 +32,7 @@ use crate::{
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 /// QUIC application close code for connections a meeting host ended.
 const CLOSED_BY_HOST: u32 = 0x4801;
+const SIGNALING_OVERFLOW: u32 = 0x4802;
 
 /// All rooms of this SFU.
 pub struct Rooms {
@@ -57,7 +58,7 @@ pub struct Room {
 #[derive(Clone)]
 pub struct ParticipantHandle {
   pub connection: Connection,
-  pub signal_tx: UnboundedSender<Outgoing>,
+  pub signal_tx: Sender<Outgoing>,
 }
 
 struct RoomState {
@@ -524,9 +525,17 @@ fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent) {
 }
 
 fn send(handle: &ParticipantHandle, event: CallEvent) {
-  // The receiver only disappears when the session ends, which also removes the participant.
-  if handle.signal_tx.send(Outgoing::Event(event)).is_err() {
-    warn!("signaling channel closed");
+  match handle.signal_tx.try_send(Outgoing::Event(event)) {
+    Ok(()) => {},
+    // A participant that doesn't drain its signaling stream would make the queue grow without bound.
+    Err(TrySendError::Full(_)) => {
+      warn!("signaling queue full, disconnecting the participant");
+      handle
+        .connection
+        .close(SIGNALING_OVERFLOW.into(), b"signaling queue overflow");
+    },
+    // The receiver only disappears when the session ends, which also removes the participant.
+    Err(TrySendError::Closed(_)) => warn!("signaling channel closed"),
   }
 }
 

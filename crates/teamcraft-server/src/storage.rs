@@ -61,8 +61,11 @@ impl BlobStore {
     self.max_attachment_bytes
   }
 
-  /// A URL that accepts exactly one upload of exactly `content_length` bytes to `key`.
-  /// The length is part of the signature, so the storage rejects other sizes.
+  /// A URL that accepts uploads of exactly `content_length` bytes to `key` until it expires.
+  /// The length is part of the signature, so the storage rejects other sizes. A presigned PUT can
+  /// be repeated within its lifetime, also after the upload was completed; readers detect a swapped
+  /// blob because the file's AEAD and hash are inside the encrypted message (e2ee.md §4.5), and
+  /// the lifetime is short (`presign_expiry_secs`).
   pub fn presign_upload(&self, key: &str, content_length: u64) -> Url {
     let mut action = self.bucket.put_object(Some(&self.credentials), key);
     action

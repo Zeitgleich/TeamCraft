@@ -41,6 +41,22 @@ impl Database {
     Ok(())
   }
 
+  /// What the user has announced: attachments not yet uploaded and the bytes of all of them.
+  pub async fn attachment_usage_of(&self, user: UserId) -> Result<(u64, u64), DbError> {
+    let row = sqlx::query!(
+      r#"SELECT count(*) FILTER (WHERE completed_at IS NULL) AS "pending!",
+                COALESCE(sum(size_bytes), 0)::bigint AS "bytes!"
+         FROM attachments WHERE uploader_user_id = $1"#,
+      to_db(user),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok((
+      u64::try_from(row.pending).unwrap_or(u64::MAX),
+      u64::try_from(row.bytes).unwrap_or(u64::MAX),
+    ))
+  }
+
   pub async fn get_attachment(&self, id: AttachmentId) -> Result<Option<Attachment>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, uploader_user_id, conversation_id, size_bytes, s3_key, created_at,

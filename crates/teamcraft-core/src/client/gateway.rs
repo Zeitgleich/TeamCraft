@@ -210,6 +210,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::GuestExpired { .. }
       | GatewayEvent::ProfileUpdate { .. }
       | GatewayEvent::AnnouncementUpdate
+      | GatewayEvent::KeyBagUpdate { .. }
       | GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }

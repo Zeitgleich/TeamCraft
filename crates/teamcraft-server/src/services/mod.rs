@@ -11,6 +11,7 @@ pub mod call_history;
 pub mod calls;
 pub mod conversations;
 pub mod convert;
+pub mod device_lists;
 pub mod devices;
 pub mod directory;
 pub mod guests;

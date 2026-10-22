@@ -12,6 +12,7 @@ mod call_history;
 mod conversation;
 mod database;
 mod device;
+mod device_list;
 mod error;
 mod identity;
 mod ids;
@@ -56,6 +57,7 @@ pub use conversation::{
 };
 pub use database::{Database, DatabaseOptions};
 pub use device::{Device, NewDevice};
+pub use device_list::{DeviceList, DeviceListOutcome};
 pub use error::DbError;
 pub use identity::{IdentityKey, IdentityKeyOutcome, NewIdentityKey};
 pub use invite::{AppliedInvite, Invite, NewInvite};

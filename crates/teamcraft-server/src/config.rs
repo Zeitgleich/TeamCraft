@@ -211,6 +211,17 @@ pub struct LimitsConfig {
   pub max_welcomes_per_commit: usize,
   /// Encrypted key bag plus wrapped backup keys of one user.
   pub max_key_bag_bytes: usize,
+  /// One signed device list.
+  pub max_device_list_bytes: usize,
+  /// Active devices one user may have; registering more fails until one is revoked.
+  pub max_devices_per_user: usize,
+  /// Attachments one user may have announced but not finished uploading.
+  pub max_pending_attachments_per_user: usize,
+  /// Bytes of attachments one user may have stored or announced in total.
+  pub max_attachment_bytes_per_user: u64,
+  /// Meeting e-mails (invitations, updates, cancellations) one organizer's meetings may send per
+  /// hour; the rest of the invitees are told in the app only.
+  pub max_meeting_mails_per_user_per_hour: u32,
 }
 
 /// WebSocket gateway behaviour.
@@ -233,6 +244,15 @@ pub struct GatewayConfig {
   pub presence_offline_grace_secs: u64,
   /// Largest accepted client frame.
   pub max_frame_bytes: usize,
+  /// Frames one connection may send per minute on average (heartbeats and typing included);
+  /// a connection above it is closed.
+  pub max_client_frames_per_minute: u32,
+  /// Frames a connection may send in a burst before the average applies.
+  pub client_frame_burst: u32,
+  /// Sessions (live or waiting to be resumed) one device may have; the oldest are dropped.
+  pub max_sessions_per_device: usize,
+  /// Sessions one user may have in total.
+  pub max_sessions_per_user: usize,
 }
 
 /// S3-compatible blob storage (Garage in development). Everything stored there is encrypted by the
@@ -462,8 +482,12 @@ pub struct WebConfig {
   #[serde(rename = "static_dir")]
   pub maybe_static_dir: Option<PathBuf>,
   /// `Content-Security-Policy` of every page and asset. The default allows the app's own origin,
-  /// WebAssembly, WebSocket/WebTransport connections and `blob:`/`data:` images and media.
+  /// WebAssembly and `blob:`/`data:` images and media. `{connect_src}` stands for the origins the
+  /// app may talk to: its own, the identity provider's, the SFU's, the storage's and
+  /// `connect_origins`; a policy without it is used as written.
   pub content_security_policy: String,
+  /// Further origins (`https://...`, `wss://...`) the web client may connect to.
+  pub connect_origins: Vec<String>,
   /// Directory with the small static download page for share links: `download.html` and the
   /// assets it references. `{{sri:<file>}}` in the page becomes the Subresource Integrity value
   /// (`sha384-...`) of that file in this directory, computed at startup. Without it `/f/<id>`
@@ -479,16 +503,68 @@ impl Default for WebConfig {
     Self {
       maybe_static_dir: None,
       maybe_share_page_dir: None,
+      connect_origins: Vec::new(),
       share_page_content_security_policy:
         "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
         img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'none'; \
         frame-ancestors 'none'"
           .into(),
       content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
-        img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self' wss: https:; \
+        img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src {connect_src}; \
         worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         .into(),
     }
+  }
+}
+
+impl WebConfig {
+  /// Adds the origins of the identity provider, the SFU and the storage to the ones the web client
+  /// may connect to. Unparseable URLs are skipped here and reported by their own sections.
+  pub fn allow_connections_to(&mut self, urls: &[&str]) {
+    for url in urls {
+      if let Ok(parsed) = url::Url::parse(url) {
+        let origin = parsed.origin().ascii_serialization();
+        if origin != "null" && !self.connect_origins.contains(&origin) {
+          self.connect_origins.push(origin);
+        }
+      }
+    }
+  }
+
+  /// The policy as it is sent: `{connect_src}` replaced by `'self'` and the allowed origins.
+  pub fn resolved_content_security_policy(&self) -> String {
+    let mut sources = vec!["'self'".to_owned()];
+    sources.extend(self.connect_origins.iter().cloned());
+    self
+      .content_security_policy
+      .replace("{connect_src}", &sources.join(" "))
+  }
+
+  /// Rejects a configuration that would send no policy or a broken one.
+  pub fn validate(&self) -> Result<(), String> {
+    for (name, policy) in [
+      ("content_security_policy", self.resolved_content_security_policy()),
+      (
+        "share_page_content_security_policy",
+        self.share_page_content_security_policy.clone(),
+      ),
+    ] {
+      if policy.trim().is_empty() || axum::http::HeaderValue::from_str(&policy).is_err() {
+        return Err(format!("web.{name} is empty or not a valid header value"));
+      }
+    }
+    for origin in &self.connect_origins {
+      let is_plain = origin
+        .bytes()
+        .all(|b| b.is_ascii_graphic() && !matches!(b, b';' | b','));
+      let has_scheme = ["https://", "wss://", "http://", "ws://"]
+        .iter()
+        .any(|s| origin.starts_with(s));
+      if !is_plain || !has_scheme {
+        return Err(format!("web.connect_origins: {origin:?} is not an origin"));
+      }
+    }
+    Ok(())
   }
 }
 
@@ -848,6 +924,11 @@ impl Default for LimitsConfig {
       max_mls_payload_bytes: 1024 * 1024,
       max_welcomes_per_commit: 500,
       max_key_bag_bytes: 1024 * 1024,
+      max_device_list_bytes: 64 * 1024,
+      max_devices_per_user: 20,
+      max_pending_attachments_per_user: 20,
+      max_attachment_bytes_per_user: 20 * 1024 * 1024 * 1024,
+      max_meeting_mails_per_user_per_hour: 200,
     }
   }
 }
@@ -863,6 +944,10 @@ impl Default for GatewayConfig {
       connection_max_age_secs: 3600,
       presence_offline_grace_secs: 5,
       max_frame_bytes: 64 * 1024,
+      max_client_frames_per_minute: 300,
+      client_frame_burst: 60,
+      max_sessions_per_device: 4,
+      max_sessions_per_user: 32,
     }
   }
 }
@@ -1033,6 +1118,65 @@ mod tests {
   use secrecy::ExposeSecret;
 
   use super::*;
+
+  #[test]
+  fn the_web_policy_allows_only_the_origins_the_app_needs() {
+    let mut web = WebConfig::default();
+    let policy = web.resolved_content_security_policy();
+    assert!(policy.contains("connect-src 'self';"), "{policy}");
+    assert!(!policy.contains("https:") && !policy.contains("wss:"), "{policy}");
+
+    web.allow_connections_to(&[
+      "https://auth.example.com/realms/company",
+      "https://sfu.example.com:4433/call",
+      "http://storage.example.com:3900",
+      "https://auth.example.com/other-path",
+      "not a url",
+    ]);
+    let policy = web.resolved_content_security_policy();
+    assert!(
+      policy.contains(
+        "connect-src 'self' https://auth.example.com https://sfu.example.com:4433 http://storage.example.com:3900;"
+      ),
+      "{policy}"
+    );
+    assert!(web.validate().is_ok());
+  }
+
+  #[test]
+  fn a_broken_web_policy_is_refused_at_startup() {
+    let with_policy = |policy: &str| WebConfig {
+      content_security_policy: policy.into(),
+      ..WebConfig::default()
+    };
+    assert!(
+      with_policy("default-src 'self'\nscript-src *")
+        .validate()
+        .is_err(),
+      "a newline"
+    );
+    assert!(with_policy("  ").validate().is_err());
+    let with_origins = |origins: &[&str]| WebConfig {
+      connect_origins: origins.iter().map(|o| (*o).to_owned()).collect(),
+      ..WebConfig::default()
+    };
+    assert!(with_origins(&["https://ok.example.com", "*"]).validate().is_err());
+    assert!(
+      with_origins(&["https://a.example.com; script-src *"])
+        .validate()
+        .is_err()
+    );
+    assert!(
+      with_origins(&["https://ok.example.com", "wss://ok.example.com"])
+        .validate()
+        .is_ok()
+    );
+    // A policy written out without the placeholder is used as written.
+    assert_eq!(
+      with_policy("default-src 'none'").resolved_content_security_policy(),
+      "default-src 'none'"
+    );
+  }
 
   const MINIMAL: &str = r#"
     [database]

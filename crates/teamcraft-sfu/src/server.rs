@@ -25,6 +25,7 @@ use wtransport::{
 use crate::{
   auth::{JoinGrant, JoinTokenVerifier},
   config::SfuConfig,
+  prejoin::PreJoinLimiter,
   reporting::{NoReporter, ParticipantReporter},
   room::{ParticipantHandle, Room, RoomError, Rooms},
   signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
@@ -35,6 +36,8 @@ use crate::{
 const PERIODIC_INTERVAL: Duration = Duration::from_millis(100);
 
 /// HTTP path of the WebTransport session.
+const PRE_JOIN_LIMIT: u32 = 0x4803;
+
 pub const CALL_PATH: &str = "/call";
 
 /// A bound SFU, ready to [`Sfu::run`].
@@ -49,6 +52,7 @@ struct Shared {
   rooms: Rooms,
   verifier: Arc<dyn JoinTokenVerifier>,
   reporter: Arc<dyn ParticipantReporter>,
+  prejoin: Arc<PreJoinLimiter>,
 }
 
 /// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
@@ -62,7 +66,7 @@ struct ParticipantSession {
   connection: Connection,
   room: Arc<Room>,
   grant: JoinGrant,
-  signal_tx: mpsc::UnboundedSender<Outgoing>,
+  signal_tx: mpsc::Sender<Outgoing>,
   max_bytes: usize,
 }
 
@@ -119,6 +123,7 @@ impl Sfu {
         rooms,
         verifier,
         reporter: Arc::new(NoReporter),
+        prejoin: Arc::new(PreJoinLimiter::default()),
       }),
     })
   }
@@ -174,8 +179,16 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     return Ok(());
   }
   let connection = request.accept().await?;
+  let remote_ip = connection.remote_address().ip().to_canonical();
+  let Some(prejoin_slot) = shared
+    .prejoin
+    .try_acquire(remote_ip, shared.config.max_prejoin_sessions_per_ip)
+  else {
+    connection.close(PRE_JOIN_LIMIT.into(), b"too many sessions");
+    return Ok(());
+  };
   // Dual-stack sockets report IPv4 peers as IPv4-mapped IPv6; log them in their canonical form.
-  debug!(remote_ip = %connection.remote_address().ip().to_canonical(), "session accepted");
+  debug!(%remote_ip, "session accepted");
   let (mut send, mut recv) = tokio::time::timeout(shared.config.join_timeout, connection.accept_bi())
     .await
     .map_err(|_| SessionError::JoinTimeout)??;
@@ -199,7 +212,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     },
   };
 
-  let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+  let (signal_tx, signal_rx) = mpsc::channel(shared.config.signaling_queue_len.max(1));
   let handle = ParticipantHandle {
     connection: connection.clone(),
     signal_tx: signal_tx.clone(),
@@ -217,6 +230,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     },
   };
 
+  drop(prejoin_slot);
   shared.reporter.joined(grant);
   let session = ParticipantSession {
     connection,
@@ -246,7 +260,7 @@ impl ParticipantSession {
     &self,
     send: SendStream,
     mut recv: RecvStream,
-    signal_rx: mpsc::UnboundedReceiver<Outgoing>,
+    signal_rx: mpsc::Receiver<Outgoing>,
   ) -> Result<(), SessionError> {
     let writer = tokio::spawn(write_signaling(send, signal_rx));
     let signaling = async {
@@ -276,7 +290,7 @@ impl ParticipantSession {
           // Fails only when the writer task ended, i.e. the session is closing anyway.
           let _ = self
             .signal_tx
-            .send(Outgoing::Event(CallEvent::TransportFeedback { feedback }));
+            .try_send(Outgoing::Event(CallEvent::TransportFeedback { feedback }));
         }
       }
     };
@@ -364,11 +378,11 @@ impl ParticipantSession {
     // Fails only when the writer task ended, i.e. the session is closing anyway.
     let _ = self
       .signal_tx
-      .send(Outgoing::Error(ErrorBody::new(error_code, message)));
+      .try_send(Outgoing::Error(ErrorBody::new(error_code, message)));
   }
 }
 
-async fn write_signaling(mut send: SendStream, mut signal_rx: mpsc::UnboundedReceiver<Outgoing>) {
+async fn write_signaling(mut send: SendStream, mut signal_rx: mpsc::Receiver<Outgoing>) {
   let mut sequence = EventSequence::default();
   while let Some(outgoing) = signal_rx.recv().await {
     if let Err(error) = write_message(&mut send, &sequence.frame(outgoing)).await {

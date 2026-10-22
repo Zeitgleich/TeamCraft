@@ -203,7 +203,16 @@ pub async fn deny(
       state: LobbyState::Denied,
     },
   );
-  state.hub.revoke_user(guest);
+  // The guest's session token would otherwise stay valid until the meeting ends: the account is
+  // deactivated, which also ends their connections.
+  super::admin::deactivate_user(
+    state,
+    Some(caller.user.id),
+    guest,
+    teamcraft_proto::DeactivationReason::Admin,
+    "turned away in the meeting lobby",
+  )
+  .await?;
   Ok(())
 }
 

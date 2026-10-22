@@ -74,6 +74,7 @@ pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i
 /// pending invites for the verified email and rejects deactivated accounts.
 pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<AuthenticatedUser, ApiError> {
   if state.revocations.is_revoked(
+    &identity.issuer,
     &identity.subject,
     identity.maybe_session_id.as_deref(),
     identity.issued_at,

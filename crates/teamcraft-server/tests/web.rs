@@ -32,6 +32,8 @@ impl Site {
     )
     .unwrap();
     std::fs::write(dir.join("favicon.ico"), b"ico").unwrap();
+    std::fs::write(dir.join("init.js"), b"import('./x.js')").unwrap();
+    std::fs::write(dir.join("sw.js"), b"self.skipWaiting()").unwrap();
     Self { dir }
   }
 }
@@ -121,6 +123,26 @@ async fn hashed_assets_are_cached_for_a_year_and_other_files_briefly() {
   assert_eq!(header(&wasm, "content-type"), "application/wasm");
   let (_, icon, _) = get(&app, "/favicon.ico").await;
   assert_eq!(header(&icon, "cache-control"), "public, max-age=3600");
+  // The loader scripts have no hash in their name and must not outlive a deploy.
+  for path in ["/init.js", "/sw.js"] {
+    let (status, headers, _) = get(&app, path).await;
+    assert_eq!(status, StatusCode::OK, "{path}");
+    assert_eq!(header(&headers, "cache-control"), "no-cache", "{path}");
+  }
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn the_policy_lets_the_app_connect_to_itself_and_not_to_the_whole_internet() {
+  let site = Site::create();
+  let Some(app) = start(&site).await else { return };
+  let (_, headers, _) = get(&app, "/").await;
+  let policy = header(&headers, "content-security-policy");
+  assert!(policy.contains("connect-src 'self';"), "{policy}");
+  assert!(
+    !policy.contains("https:") && !policy.contains("wss:") && !policy.contains('{'),
+    "{policy}"
+  );
   app.stop().await;
 }
 

@@ -119,3 +119,37 @@ async fn empty_and_oversized_bags_are_rejected() {
   );
   app.stop().await;
 }
+
+#[tokio::test]
+async fn the_users_devices_hear_about_a_new_key_bag() {
+  use std::time::Duration;
+
+  use teamcraft_proto::GatewayEvent;
+
+  let app = app!();
+  let (alice, bob) = (owner(), member("bob"));
+  let device = register_device(&app, &alice).await;
+  let bob_device = register_device(&app, &bob).await;
+  let mut socket = ws::connect(&app, &alice, &device).await;
+  let mut other = ws::connect(&app, &bob, &bob_device).await;
+  let quiet = Duration::from_millis(400);
+  ws::events(&mut socket, quiet).await;
+  ws::events(&mut other, quiet).await;
+
+  let put = app.put(&alice, "/me/key-bag", bag(0, "Ym9uZTE=")).await;
+  assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+  let events = ws::events(&mut socket, quiet).await;
+  assert!(
+    events
+      .iter()
+      .any(|event| matches!(event, GatewayEvent::KeyBagUpdate { version: 1 })),
+    "{events:?}"
+  );
+  let bobs = ws::events(&mut other, quiet).await;
+  assert!(
+    !bobs
+      .iter()
+      .any(|event| matches!(event, GatewayEvent::KeyBagUpdate { .. }))
+  );
+  app.stop().await;
+}

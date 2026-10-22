@@ -35,6 +35,9 @@ exists; clients can still read what they have stored locally.
 - TLS terminates at the proxy. It must pass WebSocket upgrades on `/api/v1/gateway` and
   `/api/v1/rendezvous` and not buffer them. Set `[security] trust_forwarded_for = true` and
   `hsts = true` once the proxy sets `X-Forwarded-For` (the last entry is used) and serves HTTPS only.
+  **Without `trust_forwarded_for` behind a proxy, every client has the proxy's address**: they share one
+  rate limit, and bad tokens from anybody block everybody. The server warns once when it sees
+  `X-Forwarded-For` from a private address.
 - Never expose `/api/internal/` to the internet: it is for the SFU and the mail inbox handler, and is
   protected by bearer tokens, but there is no reason to publish it.
 - Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `4433` reachable

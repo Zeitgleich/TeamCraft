@@ -68,11 +68,41 @@ wire_enum! {
 /// `PUT /api/v1/devices/{id}/push`: registers (or replaces) the device's push channel. The push key
 /// is a random 256-bit key shared with the server so push payloads are opaque to Apple/Google.
 /// Sending pushes is not part of this endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RegisterPushRequest {
   pub provider: PushProvider,
   pub token: String,
   pub push_key: Base64Bytes,
+}
+
+// The token and the key must not end up in logs, not even through a `{:?}` of a request.
+impl std::fmt::Debug for RegisterPushRequest {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("RegisterPushRequest")
+      .field("provider", &self.provider)
+      .field("token", &"[redacted]")
+      .field("push_key", &"[redacted]")
+      .finish()
+  }
+}
+
+#[cfg(test)]
+mod push_request_tests {
+  use super::*;
+
+  #[test]
+  fn debug_output_hides_the_token_and_the_key() {
+    let request: RegisterPushRequest = serde_json::from_str(
+      r#"{"provider":"fcm","token":"secret-device-token","push_key":"c2VjcmV0LXB1c2gta2V5LWJ5dGVzLTMyLWxvbmctMDA="}"#,
+    )
+    .unwrap();
+    let text = format!("{request:?}");
+    assert!(
+      !text.contains("secret-device-token") && !text.contains("c2VjcmV0"),
+      "{text}"
+    );
+    assert!(text.contains("Fcm") || text.contains("fcm"));
+  }
 }
 
 /// `PUT /api/v1/devices/{id}/certificate`: replaces the device's cross-signature once the final device
@@ -86,6 +116,24 @@ pub struct SetDeviceCertificateRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListDevicesResponse {
   pub devices: Vec<DeviceResponse>,
+}
+
+/// A user's device list, signed by their identity key (e2ee.md §3). Opaque to the server, which
+/// only keeps the newest one: `GET /api/v1/users/{user_id}/device-list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DeviceListResponse {
+  /// The list's own sequence number (the server compares it on update).
+  pub sequence: u64,
+  pub signed_list: Base64Bytes,
+}
+
+/// `PUT /api/v1/me/device-list`: replaces the list if `expected_sequence` is the stored one (0 for
+/// none), so two devices updating at once don't overwrite each other (`version_conflict`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutDeviceListRequest {
+  pub expected_sequence: u64,
+  pub sequence: u64,
+  pub signed_list: Base64Bytes,
 }
 
 /// Query of `GET /api/v1/users`.
