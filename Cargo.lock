@@ -9826,7 +9826,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-bridge"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -9851,7 +9851,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-client-api"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -9860,7 +9860,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-core"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "futures-channel",
@@ -9897,7 +9897,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-crypto"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -9930,7 +9930,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-db"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "sqlx",
  "teamcraft-proto",
@@ -9942,7 +9942,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-desktop"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -9976,7 +9976,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-e2e"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -9995,7 +9995,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-ffi"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "rand_core 0.6.4",
  "reqwest",
@@ -10014,7 +10014,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-media"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -10067,7 +10067,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-ops"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "socket2",
  "thiserror 2.0.21",
@@ -10076,7 +10076,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-proto"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -10087,7 +10087,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-server"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -10126,7 +10126,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-sfu"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -10149,7 +10149,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-ui"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "console_error_panic_hook",
  "fluent-bundle",
@@ -10179,14 +10179,14 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-uniffi-bindgen"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "teamcraft-web-sw"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "teamcraft-core",
 ]
