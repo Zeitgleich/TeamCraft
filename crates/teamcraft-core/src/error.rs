@@ -68,6 +68,9 @@ pub enum CoreError {
   /// A browser API failed or is missing (no service worker, permission denied, ...).
   #[error("browser: {0}")]
   Browser(String),
+  /// The app asked for something that can't be done as asked (a caller bug or stale UI state).
+  #[error("invalid request: {0}")]
+  InvalidRequest(String),
   #[error("local data is unreadable: {0}")]
   Corrupt(String),
 }

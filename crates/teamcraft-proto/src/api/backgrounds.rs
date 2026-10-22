@@ -43,7 +43,7 @@ pub struct CreateOrgBackgroundUploadRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CreateOrgBackgroundUploadResponse {
   pub id: OrgBackgroundId,
-  /// Presigned `PUT` URL, typed `image/jpeg`.
+  /// Presigned `PUT` URL; send the picture with `Content-Length` equal to `size_bytes`.
   pub upload_url: String,
   pub expires_at: UnixMillis,
 }

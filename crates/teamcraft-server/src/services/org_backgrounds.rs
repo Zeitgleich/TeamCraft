@@ -21,8 +21,6 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::BlobStore;
 
-const CONTENT_TYPE: &str = "image/jpeg";
-
 pub async fn create_upload(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -52,9 +50,7 @@ pub async fn create_upload(
     .await?;
   Ok(CreateOrgBackgroundUploadResponse {
     id,
-    upload_url: store
-      .presign_typed_upload(&key, request.size_bytes, CONTENT_TYPE)
-      .to_string(),
+    upload_url: store.presign_upload(&key, request.size_bytes).to_string(),
     expires_at: expires_at(store),
   })
 }

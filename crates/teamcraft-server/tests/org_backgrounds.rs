@@ -103,7 +103,7 @@ async fn the_policy_lists_only_uploaded_pictures_and_listed_ones_stay() {
   app.stop().await;
 }
 
-/// Announces, uploads (typed `image/jpeg`) and completes a picture; returns its id.
+/// Announces, uploads and completes a picture; returns its id.
 async fn upload(app: &TestApp, admin: &TestUser) -> String {
   let announced = app
     .post(admin, "/admin/backgrounds", json!({"size_bytes": PICTURE.len()}))
@@ -111,14 +111,7 @@ async fn upload(app: &TestApp, admin: &TestUser) -> String {
   assert_eq!(announced.status, StatusCode::CREATED, "{}", announced.body);
   let id = announced.body["id"].as_str().unwrap().to_owned();
   let url = announced.body["upload_url"].as_str().unwrap();
-  let put = app
-    .http
-    .put(url)
-    .header("content-type", "image/jpeg")
-    .body(PICTURE.to_vec())
-    .send()
-    .await
-    .unwrap();
+  let put = app.http.put(url).body(PICTURE.to_vec()).send().await.unwrap();
   assert_eq!(put.status(), StatusCode::OK);
   let completed = app
     .post(admin, &format!("/admin/backgrounds/{id}/complete"), json!({}))

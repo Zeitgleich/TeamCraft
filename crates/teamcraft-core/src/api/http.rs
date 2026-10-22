@@ -27,6 +27,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+  CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
+  OrgBackgroundId,
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
@@ -577,6 +579,36 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn delete_background(&self, background: BackgroundId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/me/backgrounds/{background}"), None)
+      .await
+  }
+
+  async fn create_org_background_upload(
+    &self,
+    request: &CreateOrgBackgroundUploadRequest,
+  ) -> Result<CreateOrgBackgroundUploadResponse, ApiError> {
+    self.send_json(Method::POST, "/admin/backgrounds", request).await
+  }
+
+  async fn complete_org_background_upload(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/backgrounds/{background}/complete"),
+        None,
+      )
+      .await
+  }
+
+  async fn download_org_background(
+    &self,
+    background: OrgBackgroundId,
+  ) -> Result<OrgBackgroundDownloadResponse, ApiError> {
+    self.get(&format!("/org-backgrounds/{background}/download")).await
+  }
+
+  async fn delete_org_background(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/admin/backgrounds/{background}"), None)
       .await
   }
 

@@ -35,6 +35,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+  CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
+  OrgBackgroundId,
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
@@ -282,6 +284,20 @@ pub trait ServerApi {
     background: BackgroundId,
   ) -> impl Future<Output = Result<BackgroundDownloadResponse, ApiError>>;
   fn delete_background(&self, background: BackgroundId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Admins: announces an organization background (stored unencrypted, hash in the policy).
+  fn create_org_background_upload(
+    &self,
+    request: &CreateOrgBackgroundUploadRequest,
+  ) -> impl Future<Output = Result<CreateOrgBackgroundUploadResponse, ApiError>>;
+  fn complete_org_background_upload(
+    &self,
+    background: OrgBackgroundId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  fn download_org_background(
+    &self,
+    background: OrgBackgroundId,
+  ) -> impl Future<Output = Result<OrgBackgroundDownloadResponse, ApiError>>;
+  fn delete_org_background(&self, background: OrgBackgroundId) -> impl Future<Output = Result<(), ApiError>>;
   /// Uploads an encrypted blob to a presigned URL (object storage, not the API).
   fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
   /// Downloads an encrypted blob from a presigned URL.
