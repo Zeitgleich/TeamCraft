@@ -44,6 +44,9 @@ wire_enum! {
     RemovedFromCall => "removed_from_call",
     ProtocolViolation => "protocol_violation",
     InvalidKeyPackage => "invalid_key_package",
+    /// The request arrived on a host name that is not configured (docs/branding.md §3).
+    UnknownHost => "unknown_host",
+    BrandAssetNotFound => "brand_asset_not_found",
     Internal => "internal",
     Unavailable => "unavailable",
   }
@@ -146,6 +149,8 @@ mod tests {
       ErrorCode::AnnouncementNotFound,
       ErrorCode::RecoveryRequestNotFound,
       ErrorCode::ShareUnavailable,
+      ErrorCode::UnknownHost,
+      ErrorCode::BrandAssetNotFound,
       ErrorCode::UserGroupNotFound,
       ErrorCode::Conflict,
       ErrorCode::EpochConflict,

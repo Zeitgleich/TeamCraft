@@ -19,6 +19,7 @@ use crate::auth::{
   AuthError, BoxFuture, JwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator,
   ValidatorOptions,
 };
+use crate::brand::BrandRegistry;
 use crate::config::{CallsConfig, MeetingsConfig, RoleNames, StorageConfig};
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
@@ -472,6 +473,9 @@ impl TestApp {
       policy: Arc::new(PolicyHolder::default()),
       scheme: Arc::new(SchemeStore::default()),
       rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
+      brands: Arc::new(
+        BrandRegistry::build(&settings.branding, &settings.brands, &settings.web, &settings.mail).unwrap(),
+      ),
       settings: Arc::new(settings),
     };
 

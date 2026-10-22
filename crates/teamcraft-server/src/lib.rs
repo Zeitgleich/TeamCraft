@@ -3,6 +3,7 @@
 //! The binary in `main.rs` only wires configuration, logging and the listener together.
 
 pub mod auth;
+pub mod brand;
 pub mod config;
 pub mod error;
 pub mod extract;

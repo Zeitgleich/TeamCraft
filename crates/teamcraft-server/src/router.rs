@@ -26,7 +26,7 @@ use crate::handlers::{
   create_user_group_handler, delete_category_handler, delete_invite_handler, delete_my_avatar_handler,
   delete_user_group_handler, deny_guest_handler, deny_recovery_request_handler, dismiss_announcement_handler,
   download_attachment_handler, download_share_handler, follow_thread_handler, gateway_handler,
-  get_announcement_handler, get_call_handler, get_conversation_handler,
+  get_announcement_handler, get_brand_asset_handler, get_brand_handler, get_brand_theme_handler, get_call_handler, get_conversation_handler,
   get_conversation_notification_settings_handler, get_conversation_retention_handler,
   get_identity_key_handler, get_key_bag_handler, get_me_handler, get_meeting_handler,
   get_my_lobby_state_handler, get_my_org_recovery_shares_handler, get_my_profile_handler,
@@ -57,6 +57,7 @@ use crate::handlers::{
   update_conversation_member_handler, update_meeting_handler, update_space_handler,
   update_space_member_handler, update_user_group_handler, upload_key_packages_handler,
 };
+use crate::brand;
 use crate::openapi::openapi_json_handler;
 use crate::security;
 use crate::state::AppState;
@@ -64,6 +65,9 @@ use crate::web;
 
 pub fn router(state: AppState) -> Router {
   let api_v1 = Router::new()
+    .route("/brand", get(get_brand_handler))
+    .route("/brand/theme.css", get(get_brand_theme_handler))
+    .route("/brand/assets/{slot}", get(get_brand_asset_handler))
     .route("/me", get(get_me_handler))
     .route("/push/web-key", get(get_web_push_key_handler))
     .route("/gateway", get(gateway_handler))
@@ -431,6 +435,7 @@ pub fn router(state: AppState) -> Router {
     .layer(DefaultBodyLimit::max(
       state.settings.security.max_request_body_bytes,
     ))
+    .layer(middleware::from_fn_with_state(state.clone(), brand::resolve_brand))
     .layer(middleware::from_fn_with_state(state.clone(), security::guard))
     .layer(TraceLayer::new_for_http())
     .with_state(state)
