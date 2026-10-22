@@ -54,11 +54,12 @@ safe Media Foundation transform wrapper first; none of the maintained crates off
 
 ## Echo cancellation
 
-WebRTC's audio processing module builds from source with Meson, Ninja and MSVC
-(`RUSTFLAGS="--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"`). The
-experimental `windows-audio-processing` CI job tries this; when it is green on a real run, the release
-workflow can set the flags for Windows as it does for the other platforms. Until then Windows calls work
-without echo cancellation (headsets are fine, speakers will echo).
+Not available on Windows yet, so calls on speakers echo (headsets are fine). WebRTC's audio processing
+module builds from source with Meson, but the `webrtc-audio-processing-sys` crate's build script passes
+GCC-style flags (`-Wno-unused-parameter`, `-std=c++17`, `nm`) that MSVC's `cl` rejects; an experimental CI
+job proved that. Ways forward: patch the build script for MSVC/clang-cl (upstream or a vendored copy), build
+with the MinGW target (`x86_64-pc-windows-gnu`), or switch to a pure-Rust echo canceller behind
+`AudioProcessor`. The release workflow clears the audio-processing flags for Windows meanwhile.
 
 ## Code signing
 

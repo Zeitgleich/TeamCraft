@@ -141,8 +141,8 @@ jobs:
 
   # The Windows desktop client: the Tauri shell and the call media with Media Foundation cameras and
   # Windows Graphics Capture. Not --all-features: the `gstreamer` feature needs GStreamer's MSVC
-  # runtime and `pipewire`/`v4l2` are Linux-only. WebRTC audio processing is opt-in and not built
-  # here (see the experimental job below).
+  # runtime and `pipewire`/`v4l2` are Linux-only. WebRTC audio processing is not built on Windows
+  # (see apps/desktop/packaging/windows/README.md).
   windows:
     runs-on: windows-latest
     env:
@@ -170,33 +170,6 @@ jobs:
         run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,effects,segmentation,openh264-source
       - name: Check (ARM64, cross-compiled)
         run: cargo check --target aarch64-pc-windows-msvc -p teamcraft-desktop
-
-  # Echo cancellation on Windows (WebRTC audio processing built with meson and MSVC). Experimental:
-  # failures don't block merging until a real Windows run proves the build.
-  windows-audio-processing:
-    runs-on: windows-latest
-    continue-on-error: true
-    env:
-      RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
-      CC: cl
-      CXX: cl
-      # WebRTC uses C++20 designated initializers; MSVC needs the switch spelled out.
-      CXXFLAGS: /std:c++20
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: audio-processing
-      - uses: ilammy/setup-nasm@v1
-      # Meson otherwise picks the image's MinGW compiler, whose headers clash with abseil.
-      - uses: ilammy/msvc-dev-cmd@v1
-      - name: Meson and ninja
-        run: pip install meson ninja
-      - name: Test
-        run: cargo test -p teamcraft-media --features native
 
   deny:
     runs-on: ubuntu-latest
