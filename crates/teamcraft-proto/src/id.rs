@@ -48,6 +48,15 @@ impl Snowflake {
     (self.0 >> (SNOWFLAKE_SEQUENCE_BITS + SNOWFLAKE_WORKER_BITS)) + SNOWFLAKE_EPOCH_MS
   }
 
+  /// An `after` cursor for history paging by time: every ID generated at `unix_millis` or later is
+  /// greater than it, every earlier one is not. Times before the epoch give [`Snowflake::ZERO`].
+  pub fn cursor_before(unix_millis: i64) -> Snowflake {
+    let since_epoch = unix_millis.saturating_sub(SNOWFLAKE_EPOCH_MS).max(0);
+    let first_in_millisecond =
+      since_epoch.saturating_mul(1 << (SNOWFLAKE_SEQUENCE_BITS + SNOWFLAKE_WORKER_BITS));
+    Snowflake(first_in_millisecond.saturating_sub(1).max(0))
+  }
+
   pub fn worker(self) -> u16 {
     ((self.0 >> SNOWFLAKE_SEQUENCE_BITS) & ((1 << SNOWFLAKE_WORKER_BITS) - 1)) as u16
   }
@@ -289,6 +298,20 @@ mod tests {
     assert_eq!(flake.unix_millis(), SNOWFLAKE_EPOCH_MS + 5_000);
     assert_eq!(flake.worker(), 7);
     assert_eq!(flake.sequence(), 42);
+  }
+
+  #[test]
+  fn time_cursors_separate_milliseconds() {
+    let at = |millis: i64, worker: i64, sequence: i64| {
+      Snowflake::new((millis << 22) | (worker << 12) | sequence).unwrap()
+    };
+    let cursor = Snowflake::cursor_before(SNOWFLAKE_EPOCH_MS + 5_000);
+    assert!(at(5_000, 0, 0) > cursor);
+    assert!(at(5_000, 1023, 4095) > cursor);
+    assert!(at(4_999, 1023, 4095) <= cursor);
+    assert_eq!(Snowflake::cursor_before(SNOWFLAKE_EPOCH_MS), Snowflake::ZERO);
+    assert_eq!(Snowflake::cursor_before(0), Snowflake::ZERO);
+    assert_eq!(Snowflake::cursor_before(i64::MIN), Snowflake::ZERO);
   }
 
   #[test]

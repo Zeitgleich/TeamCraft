@@ -20,8 +20,9 @@ use teamcraft_client_api::calls::{
   BackgroundImageInfo, OrgBackgroundInfo, OrgBackgroundRule, OrgBackgrounds,
 };
 use teamcraft_client_api::model::{
-  Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind, PresenceStatus,
-  Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User, UserId,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind,
+  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User,
+  UserId,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -33,11 +34,14 @@ use teamcraft_proto::{
   CategoryId, CreateSpaceRequest, HistoryPolicy, UpdateConversationRequest, UpdateSpaceRequest,
 };
 
+use crate::client::bookmarks_key;
 use crate::client::workspace_admin::ChannelOptions;
 use crate::clock::Clock;
 use crate::error::CoreError;
 use crate::records::{self, Draft};
-use crate::store::{ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
+use crate::store::{
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
+};
 
 /// Bit set on the IDs the UI gets for messages still in the outbox. Real snowflakes stay below it
 /// for decades (41 bits of milliseconds since 2026 shifted by 22).
@@ -178,6 +182,10 @@ pub enum CoreCommand {
     user: UserId,
     history: HistoryPolicy,
   },
+  RemoveMember {
+    conversation: ConversationId,
+    user: UserId,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -185,6 +193,16 @@ pub enum CoreCommand {
     channels: Vec<ConversationId>,
     maybe_expires_at: Option<i64>,
   },
+  /// "Jump to date": load the history from `at_ms` on and note that the request is answered.
+  LoadHistoryAt {
+    conversation: ConversationId,
+    at_ms: i64,
+  },
+}
+
+/// Where the engine notes (in the sync state) which "jump to date" request it answered last.
+pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
+  format!("history-jump/{conversation}")
 }
 
 /// Text that must not show up in logs (a share link password); `Debug` prints `[redacted]`.
@@ -345,8 +363,41 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .as_ref()
         .is_some_and(|membership| membership.notification_level == NotificationLevel::None),
       can_post: true,
-      bookmarks: Vec::new(),
+      bookmarks: self.bookmarks_of(response.id),
     }
+  }
+
+  /// The bookmarks bar of a conversation, as the newest applied `Bookmarks` message set it.
+  fn bookmarks_of(&self, conversation: ConversationId) -> Vec<Bookmark> {
+    let items: Vec<BookmarkItem> =
+      records::get_json(&self.store, Table::Account, &bookmarks_key(conversation))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    items
+      .into_iter()
+      .map(|item| {
+        let maybe_message = item.maybe_message.and_then(|client_id| {
+          self
+            .store
+            .message(conversation, client_id)
+            .ok()
+            .flatten()
+            .map(|stored| ui_message_id(&stored))
+        });
+        Bookmark {
+          emoji: item.emoji,
+          title: item.title,
+          kind: if maybe_message.is_some() {
+            BookmarkKind::File
+          } else {
+            BookmarkKind::Link
+          },
+          url: item.url,
+          maybe_message,
+        }
+      })
+      .collect()
   }
 
   fn unread_count(&self, response: &ConversationResponse) -> u32 {
@@ -400,6 +451,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Edit { .. }
       | MessageContent::Delete { .. }
       | MessageContent::Pin { .. }
+      | MessageContent::Bookmarks { .. }
       | MessageContent::Event { .. }
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
@@ -843,6 +895,19 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_browse_channels(space)
   }
 
+  fn request_history_at(&self, conversation: ConversationId, at: i64) {
+    self.command(CoreCommand::LoadHistoryAt {
+      conversation,
+      at_ms: at,
+    });
+  }
+
+  fn is_history_loaded(&self, conversation: ConversationId, at: i64) -> bool {
+    let key = history_jump_key(conversation);
+    let answered: Option<i64> = self.read(records::get_json(&self.store, Table::SyncState, &key));
+    answered == Some(at)
+  }
+
   fn join_channel(&self, conversation: ConversationId) {
     self.command(CoreCommand::JoinChannel { conversation });
   }
@@ -880,6 +945,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       user,
       history,
     });
+  }
+
+  fn set_bookmarks(&self, conversation: ConversationId, bookmarks: Vec<Bookmark>) {
+    self.ui_set_bookmarks(conversation, bookmarks);
+  }
+
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::RemoveMember { conversation, user });
   }
 
   fn invite_to_space(&self, invite: SpaceInvite) {

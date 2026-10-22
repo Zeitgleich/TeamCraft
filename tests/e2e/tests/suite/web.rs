@@ -31,6 +31,96 @@ async fn the_web_client_signs_in_through_keycloak_and_shows_the_accounts_channel
   rig.finish().await;
 }
 
+/// The v1 UI on the real core: mention picker, slash commands, emoticons, bookmarks, profile and the
+/// people directory. Screenshots of each step land in `target/e2e-artifacts/v1-*.png`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_web_client_offers_the_v1_chat_features() {
+  let Some(rig) = Rig::start().await else { return };
+  rig
+    .browser
+    .screenshot_on_failure("web-v1-features", |page| async move {
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      click_text(&page, "browser-channel").await;
+      let composer = wait_for_element(&page, "textarea").await;
+
+      // The mention picker completes people (Carol is in the channel).
+      composer
+        .click()
+        .await
+        .unwrap()
+        .type_str("hello @car")
+        .await
+        .unwrap();
+      wait_for_text(&page, "@carol").await;
+      shot(&page, "v1-mention-picker").await;
+      composer.press_key("Enter").await.unwrap();
+      assert_eq!(textarea_value(&page).await, "hello @carol ");
+
+      // Emoticons become emoji on send.
+      composer
+        .type_str(":)")
+        .await
+        .unwrap()
+        .press_key("Enter")
+        .await
+        .unwrap();
+      wait_for_text(&page, "hello @carol 🙂").await;
+
+      // Slash commands run on the client.
+      composer
+        .type_str("/shrug")
+        .await
+        .unwrap()
+        .press_key("Enter")
+        .await
+        .unwrap();
+      wait_for_text(&page, "¯\\_(ツ)_/¯").await;
+      composer
+        .type_str("/remind in 5m stand up")
+        .await
+        .unwrap()
+        .press_key("Enter")
+        .await
+        .unwrap();
+      wait_for_text(&page, "Reminder set").await;
+      shot(&page, "v1-slash-commands").await;
+
+      // Bookmarks: add a link through the editor.
+      click_text(&page, "Edit bookmarks").await;
+      wait_for_element(&page, ".bookmark-edit-list").await;
+      click_text(&page, "Add bookmark").await;
+      set_value(&page, "input[aria-label=Title]", "Runbook").await;
+      set_value(&page, "input[aria-label=Link]", "https://example.com/runbook").await;
+      shot(&page, "v1-bookmark-editor").await;
+      click_selector(&page, ".modal-foot button[type=submit]").await;
+      wait_for_text(&page, "Runbook").await;
+      shot(&page, "v1-bookmarks-bar").await;
+
+      // The profile form saves, and the directory shows it.
+      page
+        .evaluate("document.querySelector('.avatar-btn').click()")
+        .await
+        .unwrap();
+      click_text(&page, "Edit profile").await;
+      let title = wait_for_element(&page, "#profile-title-field").await;
+      title
+        .click()
+        .await
+        .unwrap()
+        .type_str("Release engineer")
+        .await
+        .unwrap();
+      shot(&page, "v1-profile-form").await;
+      click_selector(&page, ".modal-foot button[type=submit]").await;
+      click_text(&page, "People").await;
+      wait_for_text(&page, "Release engineer").await;
+      shot(&page, "v1-people").await;
+    })
+    .await;
+  rig.finish().await;
+}
+
 /// The service worker carries the Rust push code: it loads in the browser and instantiates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_service_worker_loads_its_push_code() {
@@ -240,6 +330,55 @@ async fn sign_in_as_alice(page: &Page) {
     .await
     .unwrap();
   click_text(page, "Unlock").await;
+}
+
+/// Saves a screenshot as `target/e2e-artifacts/<name>.png` (kept after passing runs too).
+async fn shot(page: &Page, name: &str) {
+  use chromiumoxide::page::ScreenshotParams;
+  let dir = teamcraft_e2e::browser::artifact_dir();
+  let _ = std::fs::create_dir_all(&dir);
+  let _ = page
+    .save_screenshot(
+      ScreenshotParams::builder().full_page(true).build(),
+      dir.join(format!("{name}.png")),
+    )
+    .await;
+}
+
+async fn textarea_value(page: &Page) -> String {
+  page
+    .evaluate("document.querySelector('textarea').value")
+    .await
+    .ok()
+    .and_then(|result| result.into_value::<String>().ok())
+    .unwrap_or_default()
+}
+
+async fn click_selector(page: &Page, selector: &str) {
+  let script = format!(
+    "(() => {{ const el = document.querySelector({selector:?}); if (!el) return false; el.click(); return true; }})()"
+  );
+  let clicked = page
+    .evaluate(script)
+    .await
+    .unwrap()
+    .into_value::<bool>()
+    .unwrap_or(false);
+  assert!(clicked, "nothing to click for {selector}");
+}
+
+/// Sets an input's value the way a user edit would (the app listens for `change`).
+async fn set_value(page: &Page, selector: &str, value: &str) {
+  let script = format!(
+    "(() => {{ const el = document.querySelector({selector:?}); if (!el) return false; el.value = {value:?}; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()"
+  );
+  let done = page
+    .evaluate(script)
+    .await
+    .unwrap()
+    .into_value::<bool>()
+    .unwrap_or(false);
+  assert!(done, "no input {selector}");
 }
 
 async fn wait_for_element(page: &Page, selector: &str) -> chromiumoxide::element::Element {

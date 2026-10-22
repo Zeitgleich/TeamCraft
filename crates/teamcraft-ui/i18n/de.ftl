@@ -237,7 +237,9 @@ effect-bookshelf = Bücherregal
 effect-sunrise = Sonnenaufgang
 effect-forest = Wald
 effect-upload = Bild hochladen
-effect-upload-soon = Eigene Hintergründe sind noch nicht verfügbar
+effect-upload-too-large = Dieses Bild ist größer als { $limit }.
+effect-upload-unreadable = Das Bild konnte nicht gelesen werden.
+effect-delete = Hintergrund { $name } löschen
 
 ## Eingehende Anrufe
 incoming-title = Eingehender Anruf
@@ -946,3 +948,127 @@ notif-browser-granted = Benachrichtigungen sind in diesem Browser erlaubt.
 notif-browser-denied = Benachrichtigungen sind blockiert. Erlaube sie in den Website-Einstellungen des Browsers.
 notif-browser-allow = Benachrichtigungen erlauben
 notif-browser-background = Benachrichtigungen kommen auch an, wenn TeamCraft geschlossen ist.
+
+log-toolbar-label = Optionen der Protokollansicht
+log-mode-log = Protokoll
+log-mode-chat = Chat
+log-filter-level = Mindeststufe
+log-filter-text = Protokolltext filtern
+log-follow = Mitlaufen
+log-filter-none = Keine Protokolleinträge passen zum Filter.
+log-filter-truncated = Die neuesten { $count } passenden Einträge werden angezeigt.
+
+# Profiles, people and groups (v1 REST UI)
+profile-edit-title = Profil bearbeiten
+profile-unavailable = Profile sind hier nicht verfügbar.
+profile-title = Position
+profile-department = Abteilung
+profile-phone = Telefon
+profile-time-zone = Zeitzone
+profile-local-time = Ortszeit
+profile-hours = Arbeitszeiten
+profile-hours-days = Arbeitstage
+profile-hours-from = Von
+profile-hours-to = Bis
+profile-hours-invalid = Arbeitszeiten brauchen mindestens einen Tag und ein Ende nach dem Beginn.
+profile-avatar-change = Bild ändern
+profile-avatar-remove = Bild entfernen
+profile-avatar-type = Bilder müssen PNG, JPEG oder WebP sein.
+profile-avatar-size = Das Bild ist zu groß (höchstens 2 MB).
+profile-avatar-unreadable = Das Bild konnte nicht gelesen werden.
+profile-message = Nachricht
+weekday-mon = Mo
+weekday-tue = Di
+weekday-wed = Mi
+weekday-thu = Do
+weekday-fri = Fr
+weekday-sat = Sa
+weekday-sun = So
+sidebar-people = Personen
+directory-title = Personen
+directory-people = Personen
+directory-groups = Gruppen
+directory-filter = Person suchen
+directory-empty = Niemand gefunden.
+groups-unavailable = Benutzergruppen brauchen eine angemeldete Sitzung.
+groups-members = { $count ->
+    [one] 1 Mitglied
+   *[other] { $count } Mitglieder
+}
+groups-synced = Vom Identitätsanbieter
+groups-empty = Noch keine Benutzergruppen.
+groups-handle = Kürzel (was auf @ folgt)
+groups-name = Name
+groups-add = Hinzufügen
+groups-remove = Entfernen
+
+# Composer: mentions, slash commands, formatting
+mention-channel = Alle in dieser Unterhaltung benachrichtigen
+composer-suggestions = Vorschläge
+composer-format = Formatierung
+composer-format-toggle = Formatierungsleiste und Vorschau
+composer-preview = Vorschau
+format-bold = Fett
+format-italic = Kursiv
+format-strike = Durchgestrichen
+format-code = Code
+format-code-block = Codeblock
+settings-composer = Schreiben
+settings-convert-emoticons = :) und :tada: in Emoji umwandeln
+settings-show-formatting = Formatierungsleiste und Vorschau zeigen
+slash-missing-argument = Aufruf: { $usage }
+slash-bad-reminder = Sag wann: „in 10m“, „in 2h“, „in 1d“ oder „at 14:30“, dann der Text.
+slash-help-title = Befehle (mit // sendest du eine Nachricht, die mit einem Schrägstrich beginnt):
+slash-not-found = Nichts gefunden für „{ $name }“.
+slash-status-set = Status gesetzt.
+slash-status-cleared = Status gelöscht.
+slash-kicked = { $name } wurde aus dieser Unterhaltung entfernt.
+slash-invited = { $name } wurde zu dieser Unterhaltung hinzugefügt.
+slash-msg-send-there = Unterhaltung geöffnet. Schreibe deine Nachricht dort.
+slash-groupmsg-unsupported = Gruppenunterhaltungen sind noch nicht verfügbar.
+slash-muted = Unterhaltung stummgeschaltet.
+slash-unmuted = Stummschaltung aufgehoben.
+slash-reminder-set = Erinnerung gesetzt für { $time }.
+slash-meet-starting = Meeting wird gestartet …
+slash-meet-unavailable = Meetings brauchen eine angemeldete Sitzung.
+reminder-due = Erinnerung: { $text }
+
+# Meetings: responses and host controls
+meetings-responses = Antworten ({ $count })
+meetings-rsvp-awaiting = Noch keine Antwort
+meetings-rsvp-summary = { $accepted } zugesagt · { $tentative } vielleicht · { $declined } abgesagt · { $awaiting } ausstehend
+host-controls = Host-Steuerung
+host-mute-all = Alle stummschalten
+host-lock = Meeting sperren
+host-unlock = Meeting entsperren
+host-end = Für alle beenden
+host-end-confirm = Meeting jetzt beenden
+host-remove = Entfernen
+presence-in-meeting = In einem Meeting
+
+# Bookmarks
+bookmarks-edit = Lesezeichen bearbeiten
+bookmarks-edit-title = Lesezeichen
+bookmarks-emoji = Emoji
+bookmarks-title = Titel
+bookmarks-url = Link
+bookmarks-up = Nach oben
+bookmarks-down = Nach unten
+bookmarks-remove = Lesezeichen entfernen
+bookmarks-invalid = Jedes Lesezeichen braucht einen Titel, und Links müssen mit https:// oder http:// beginnen.
+action-bookmark-file = Datei zu Lesezeichen hinzufügen
+
+history-title = Bearbeitungsverlauf
+history-current = Aktuelle Version
+history-replaced = Ersetzt { $time }
+
+# Local (guest) sign-in
+login-local-open = Mit einem Gastkonto anmelden
+login-local-title = Gastkonto
+login-local-email = E-Mail-Adresse
+login-local-password = Passwort
+login-local-code = Code deiner Authenticator-App
+login-local-code-hint = Dieses Konto nutzt Zwei-Faktor-Authentifizierung.
+login-local-refused = E-Mail, Passwort oder Code ist falsch.
+login-local-failed = Die Anmeldung hat nicht funktioniert
+login-local-submit = Anmelden

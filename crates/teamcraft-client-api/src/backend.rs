@@ -174,6 +174,8 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Starts (or finds) the direct conversation with a person; it shows up in the lists when ready.
+  fn open_dm(&self, _user: UserId) {}
   /// Confirms having read a message that asked for acknowledgement.
   fn acknowledge(&self, _conversation: ConversationId, _message: MessageId) {}
 
@@ -222,8 +224,20 @@ pub trait ChatBackend {
   fn delete_category(&self, _space: SpaceId, _category: CategoryId) {}
   /// Adds a person with an explicit history choice ("share history" toggle, e2ee.md §4.3).
   fn add_member_with_history(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
+  /// Replaces the conversation's bookmarks bar (links and files shown under the header).
+  fn set_bookmarks(&self, _conversation: ConversationId, _bookmarks: Vec<crate::model::Bookmark>) {}
+  /// Removes a person from a conversation (and rotates its keys).
+  fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
+  /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
+  /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
+  fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}
+  /// Whether the request for `at` was answered (also when it failed or found nothing). Backends
+  /// that hold the whole history always say yes.
+  fn is_history_loaded(&self, _conversation: ConversationId, _at: i64) -> bool {
+    true
+  }
   /// The conversation includes people from outside the organization (the "external" badge).
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false

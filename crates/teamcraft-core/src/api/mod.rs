@@ -6,7 +6,7 @@
 
 pub mod fake;
 mod http;
-#[cfg(target_os = "android")]
+#[cfg(not(target_arch = "wasm32"))]
 mod tls;
 #[cfg(target_arch = "wasm32")]
 mod web_socket;
@@ -371,6 +371,10 @@ pub enum ApiError {
   /// A downloaded blob was larger than it may be.
   #[error("the download is larger than {max_bytes} bytes")]
   BlobTooLarge { max_bytes: u64 },
+  /// The server URL is not `https://` (plain `http://` is only allowed to a loopback address, for
+  /// development): no request or token is sent.
+  #[error("the server address must use https: {0}")]
+  InsecureServerUrl(String),
 }
 
 impl ApiError {
