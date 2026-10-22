@@ -149,9 +149,15 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
+      # WebRTC audio processing is built with Meson for the host architecture only, so only the arm64
+      # slice gets echo cancellation; the x86_64 slice is built without it (a per-target flag, which
+      # the workflow-wide RUSTFLAGS would override, hence the unset).
       - name: Build the universal executable
         working-directory: apps/desktop
-        run: cargo tauri build --config tauri.models.conf.json --target universal-apple-darwin --no-bundle
+        run: |
+          unset RUSTFLAGS
+          export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
+          cargo tauri build --config tauri.models.conf.json --target universal-apple-darwin --no-bundle
         env:
           PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
           PKG_CONFIG_ALLOW_CROSS: "1"
