@@ -6,8 +6,14 @@
   "build": {
     "frontendDist": "../../crates/teamcraft-ui/dist",
     "devUrl": "http://127.0.0.1:8082",
-    "beforeDevCommand": "trunk serve --config ../../crates/teamcraft-ui/Trunk.toml",
-    "beforeBuildCommand": "CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=true trunk build --release --config ../../crates/teamcraft-ui/Trunk.toml"
+    "beforeDevCommand": {
+      "script": "trunk serve",
+      "cwd": "../../crates/teamcraft-ui"
+    },
+    "beforeBuildCommand": {
+      "script": "CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=true trunk build --release",
+      "cwd": "../../crates/teamcraft-ui"
+    }
   },
   "app": {
     "withGlobalTauri": true,
@@ -19,27 +25,48 @@
   "bundle": {
     "active": true,
     "category": "Business",
+    "publisher": "TeamCraft contributors",
+    "copyright": "Copyright (C) TeamCraft contributors. AGPL-3.0-or-later.",
+    "license": "AGPL-3.0-or-later",
+    "homepage": "https://github.com/Zeitgleich/TeamCraft",
     "shortDescription": "End-to-end encrypted team chat",
-    "targets": [
-      "deb",
-      "rpm",
-      "appimage",
-      "dmg"
-    ],
+    "longDescription": "Self-hosted business team chat with calls and meetings. Messages are end-to-end encrypted; the server only stores ciphertext.",
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
+      "icons/64x64.png",
       "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
       "icons/icon.png"
     ],
     "macOS": {
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true,
+      "entitlements": "packaging/macos/Entitlements.plist",
+      "dmg": {
+        "windowSize": {
+          "width": 600,
+          "height": 400
+        }
+      }
     },
     "linux": {
       "deb": {
-        "depends": [
-          "libwebkit2gtk-4.1-0",
-          "libgtk-3-0"
+        "section": "net",
+        "priority": "optional",
+        "recommends": [
+          "gnome-keyring"
         ]
+      },
+      "rpm": {
+        "release": "1",
+        "recommends": [
+          "gnome-keyring"
+        ]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
       }
     }
   }

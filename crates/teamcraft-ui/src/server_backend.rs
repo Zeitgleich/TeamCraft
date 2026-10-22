@@ -17,7 +17,7 @@ use crate::admin::{
   AdminChannel, AdminUser, AuditEntry, DeviceInfo, Retention, SecurityPolicy, SelfJoinOutcome,
 };
 use crate::auth::{AuthError, Authenticator};
-use crate::backend::{AdminBackend, CallBackend, ChatBackend, SecurityBackend};
+use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevices, Participant};
 use crate::mock::MockBackend;
 use crate::model::{
@@ -25,6 +25,7 @@ use crate::model::{
   PresenceStatus, SidebarCategory, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
   id_from_raw, raw_id,
 };
+use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::security::KeyChange;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -446,6 +447,30 @@ impl ChatBackend for ServerBackend {
   }
 }
 
+impl SearchBackend for ServerBackend {
+  /// Search needs decrypted messages, which the server cannot offer; until `teamcraft-core` provides
+  /// the local index, the mock answers so the screens can be used.
+  fn search(&self, query: &ParsedQuery) -> SearchResults {
+    self.mock.search(query)
+  }
+
+  fn recent_mentions(&self) -> Vec<SearchHit> {
+    self.mock.recent_mentions()
+  }
+
+  fn saved_searches(&self) -> Vec<SavedSearch> {
+    self.mock.saved_searches()
+  }
+
+  fn save_search(&self, name: &str, query: &str) {
+    self.mock.save_search(name, query);
+  }
+
+  fn delete_saved_search(&self, id: u64) {
+    self.mock.delete_saved_search(id);
+  }
+}
+
 impl CallBackend for ServerBackend {
   fn media_devices(&self) -> MediaDevices {
     self.mock.media_devices()
@@ -536,6 +561,18 @@ impl SecurityBackend for ServerBackend {
   }
 
   fn acknowledge_key_change(&self, _conversation: ConversationId) {}
+
+  fn my_identity_fingerprint(&self) -> String {
+    self.mock.my_identity_fingerprint()
+  }
+
+  fn contact_verification(&self, user: UserId) -> crate::security::ContactVerification {
+    self.mock.contact_verification(user)
+  }
+
+  fn set_contact_verified(&self, user: UserId, is_verified: bool) {
+    self.mock.set_contact_verified(user, is_verified);
+  }
 }
 
 #[cfg(test)]

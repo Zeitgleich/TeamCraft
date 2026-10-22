@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use crate::admin::AdminSection;
 use crate::backend::Backend;
 use crate::calls::CallState;
-use crate::model::{Conversation, ConversationId, SpaceId, ThreadId, User, id_from_raw};
+use crate::model::{Conversation, ConversationId, SpaceId, ThreadId, User, UserId, id_from_raw};
 use crate::reactive::get_if_observed;
 use crate::sections::build_sections;
 use crate::security::DeviceApproval;
@@ -21,6 +21,8 @@ pub enum MainView {
   Threads,
   /// The administration console (admins only).
   Admin(AdminSection),
+  /// Message search; the query lives in [`AppState::search_query`].
+  Search,
 }
 
 /// What the right-hand panel shows.
@@ -49,6 +51,8 @@ pub enum Overlay {
   LinkDevice,
   /// Compare the old and new identity key of someone in a conversation.
   VerifyKey(ConversationId),
+  /// Compare the safety number with a contact (Settings > Devices and security).
+  VerifyContact(UserId),
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +64,8 @@ pub struct AppState {
   pub view: RwSignal<MainView>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
+  /// Text of the search box, kept when leaving and re-entering the search page.
+  pub search_query: RwSignal<String>,
   pub call: CallState,
   /// The login waiting for the user's approval, shown while the overlay is `DeviceApproval`.
   pub device_prompt: RwSignal<Option<DeviceApproval>>,
@@ -82,6 +88,7 @@ impl AppState {
       view: RwSignal::new(view),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
+      search_query: RwSignal::new(String::new()),
       call: CallState::new(),
       device_prompt: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
@@ -109,7 +116,7 @@ impl AppState {
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),
-      MainView::Threads | MainView::Admin(_) => None,
+      MainView::Threads | MainView::Admin(_) | MainView::Search => None,
     }
   }
 
@@ -156,6 +163,16 @@ impl AppState {
     }
   }
 
+  /// Opens the search page, optionally with a query already filled in.
+  pub fn open_search(&self, maybe_query: Option<&str>) {
+    if let Some(query) = maybe_query {
+      self.search_query.set(query.to_owned());
+    }
+    self.view.set(MainView::Search);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
   pub fn open_threads(&self) {
     self.view.set(MainView::Threads);
     self.panel.set(SidePanel::Closed);
@@ -173,13 +190,13 @@ impl AppState {
   /// All conversations listed in the sidebar of the current space, in sidebar order.
   pub fn navigable_conversations(&self) -> Vec<Conversation> {
     let space = self.space.get();
-    let show_unreads_group = self.settings.show_unreads_group.get();
+    let options = self.settings.sidebar_options(usize::MAX);
     let all = self.read(|backend| {
       let mut list = backend.space_conversations(space);
       list.extend(backend.direct_conversations());
       list
     });
-    build_sections(&all, show_unreads_group)
+    build_sections(&all, &options)
       .into_iter()
       .flat_map(|section| section.conversations)
       .collect()

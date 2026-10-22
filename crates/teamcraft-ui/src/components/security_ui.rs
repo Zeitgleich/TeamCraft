@@ -6,7 +6,7 @@ use qrcode::{Color, QrCode};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
-use crate::model::ConversationId;
+use crate::model::{ConversationId, UserId};
 use crate::security::group_fingerprint;
 use crate::state::{Overlay, use_app_state};
 
@@ -272,4 +272,49 @@ pub fn VerifyKeyDialog(conversation: ConversationId) -> impl IntoView {
     </Modal>
   }
   .into_any()
+}
+
+/// Compare the safety number with a contact over another channel and record the result.
+#[component]
+pub fn VerifyContactDialog(user: UserId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let name = state
+    .read(|backend| backend.user(user))
+    .map(|found| found.display_name)
+    .unwrap_or_default();
+  let verification = Memo::new(move |_| state.read(|backend| backend.contact_verification(user)));
+  let title_name = name.clone();
+
+  view! {
+    <Modal labelled_by="verify-contact-title" class="modal-small">
+      <header class="modal-head">
+        <h2 id="verify-contact-title" translate="no">{move || i18n.t_with("contact-verify-title", &[("name", &title_name)])}</h2>
+        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <div class="modal-body">
+        <p>{move || i18n.t_with("contact-verify-body", &[("name", &name)])}</p>
+        <p class="fingerprint" translate="no">{move || verification.get().safety_number}</p>
+        <p class="status-line" role="status">
+          {move || if verification.get().is_verified { i18n.t("contact-verified") } else { i18n.t("contact-not-verified") }}
+        </p>
+      </div>
+      <footer class="modal-foot">
+        <span class="grow"></span>
+        <button class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("close")}</button>
+        <button
+          class="btn btn-primary"
+          data-autofocus
+          on:click=move |_| {
+            let is_verified = verification.get_untracked().is_verified;
+            state.write(|backend| backend.set_contact_verified(user, !is_verified));
+          }
+        >
+          {move || if verification.get().is_verified { i18n.t("contact-unmark") } else { i18n.t("key-mark-verified") }}
+        </button>
+      </footer>
+    </Modal>
+  }
 }

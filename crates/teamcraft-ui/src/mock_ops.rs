@@ -11,7 +11,7 @@ use crate::admin::{
 use crate::backend::{AdminBackend, CallBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevice, MediaDevices, Participant};
 use crate::model::{ConversationId, ConversationKind, DeviceId, PresenceStatus, TimestampMs, UserId, raw_id};
-use crate::security::KeyChange;
+use crate::security::{ContactVerification, KeyChange, demo_fingerprint, demo_safety_number};
 
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
@@ -26,6 +26,7 @@ pub(super) struct OpsState {
   audit: Vec<AuditEntry>,
   next_audit_id: u64,
   acknowledged_key_changes: Vec<ConversationId>,
+  verified_contacts: Vec<UserId>,
 }
 
 impl OpsState {
@@ -37,6 +38,8 @@ impl OpsState {
       audit: demo_audit(now),
       next_audit_id: 1000,
       acknowledged_key_changes: Vec::new(),
+      // Sam was compared in person already.
+      verified_contacts: vec![id_from_raw(2)],
     }
   }
 
@@ -256,6 +259,26 @@ impl SecurityBackend for MockBackend {
 
   fn acknowledge_key_change(&self, conversation: ConversationId) {
     self.ops.borrow_mut().acknowledged_key_changes.push(conversation);
+  }
+
+  fn my_identity_fingerprint(&self) -> String {
+    demo_fingerprint(raw_id(self.state.borrow().users[0].id))
+  }
+
+  fn contact_verification(&self, user: UserId) -> ContactVerification {
+    let me = raw_id(self.state.borrow().users[0].id);
+    ContactVerification {
+      safety_number: demo_safety_number(me, raw_id(user)),
+      is_verified: self.ops.borrow().verified_contacts.contains(&user),
+    }
+  }
+
+  fn set_contact_verified(&self, user: UserId, is_verified: bool) {
+    let mut ops = self.ops.borrow_mut();
+    ops.verified_contacts.retain(|known| *known != user);
+    if is_verified {
+      ops.verified_contacts.push(user);
+    }
   }
 }
 

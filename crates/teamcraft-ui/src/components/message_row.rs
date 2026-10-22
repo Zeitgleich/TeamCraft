@@ -149,7 +149,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
         </span>
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
-        {status.map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
+        {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
         <time class="msg-time" datetime=message.sent_at.to_string()>
           {time.clone()}
         </time>

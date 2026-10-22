@@ -1,0 +1,50 @@
+# Flatpak manifest (draft). The binary is built by the release workflow (build only, no publishing)
+# and consumed here, so the manifest needs no Rust toolchain and no network at build time.
+#
+#   cargo tauri build --no-bundle            # in apps/desktop, produces target/release/teamcraft-desktop
+#   flatpak-builder --user --install --force-clean build-dir apps/desktop/packaging/linux/org.teamcraft.desktop.yml
+#
+# The GNOME runtime ships WebKitGTK 4.1, which Tauri 2 uses.
+app-id: org.teamcraft.desktop
+runtime: org.gnome.Platform
+runtime-version: "48"
+sdk: org.gnome.Sdk
+command: teamcraft-desktop
+
+finish-args:
+  - --share=network          # server connection and the loopback listener of the OIDC login
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri             # GPU for rendering and video effects
+  - --device=all             # camera (V4L2); narrower once the camera portal is used
+  - --socket=pulseaudio      # microphone and speakers
+  - --talk-name=org.freedesktop.secrets        # refresh token in the system keyring
+  - --talk-name=org.freedesktop.Notifications  # desktop notifications
+
+modules:
+  - name: teamcraft-desktop
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 teamcraft-desktop /app/bin/teamcraft-desktop
+      - install -Dm644 org.teamcraft.desktop.desktop /app/share/applications/org.teamcraft.desktop.desktop
+      - install -Dm644 org.teamcraft.desktop.metainfo.xml /app/share/metainfo/org.teamcraft.desktop.metainfo.xml
+      - install -Dm644 icon-128.png /app/share/icons/hicolor/128x128/apps/org.teamcraft.desktop.png
+      - install -Dm644 icon-256.png /app/share/icons/hicolor/256x256/apps/org.teamcraft.desktop.png
+      - install -Dm644 icon-512.png /app/share/icons/hicolor/512x512/apps/org.teamcraft.desktop.png
+    sources:
+      - type: file
+        path: ../../../../target/release/teamcraft-desktop
+      - type: file
+        path: org.teamcraft.desktop.desktop
+      - type: file
+        path: org.teamcraft.desktop.metainfo.xml
+      - type: file
+        path: ../../icons/128x128.png
+        dest-filename: icon-128.png
+      - type: file
+        path: ../../icons/128x128@2x.png
+        dest-filename: icon-256.png
+      - type: file
+        path: ../../icons/icon.png
+        dest-filename: icon-512.png

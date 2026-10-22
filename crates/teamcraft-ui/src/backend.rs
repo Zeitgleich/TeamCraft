@@ -13,6 +13,7 @@ use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
   ThreadId, ThreadSummary, User, UserId,
 };
+use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 
 pub trait ChatBackend {
   /// The signed-in user, including the presence and custom status they chose.
@@ -79,9 +80,26 @@ pub trait SecurityBackend {
   /// A changed identity key of someone in this conversation that the user has not acknowledged.
   fn key_change(&self, conversation: ConversationId) -> Option<crate::security::KeyChange>;
   fn acknowledge_key_change(&self, conversation: ConversationId);
+  /// Fingerprint of the user's own identity key.
+  fn my_identity_fingerprint(&self) -> String;
+  /// Safety number and trust state of a contact.
+  fn contact_verification(&self, user: UserId) -> crate::security::ContactVerification;
+  fn set_contact_verified(&self, user: UserId, is_verified: bool);
+}
+
+/// Full-text search over everything the user can read. `teamcraft-core` will answer from encrypted
+/// index segments on the device; the UI only sees this interface.
+pub trait SearchBackend {
+  /// Messages matching the query, newest first. An empty query returns nothing.
+  fn search(&self, query: &ParsedQuery) -> SearchResults;
+  /// Messages that mention the user, newest first.
+  fn recent_mentions(&self) -> Vec<SearchHit>;
+  fn saved_searches(&self) -> Vec<SavedSearch>;
+  fn save_search(&self, name: &str, query: &str);
+  fn delete_saved_search(&self, id: u64);
 }
 
 /// Everything the UI needs from the client core.
-pub trait Backend: ChatBackend + CallBackend + AdminBackend + SecurityBackend {}
+pub trait Backend: ChatBackend + CallBackend + AdminBackend + SecurityBackend + SearchBackend {}
 
-impl<T: ChatBackend + CallBackend + AdminBackend + SecurityBackend> Backend for T {}
+impl<T: ChatBackend + CallBackend + AdminBackend + SecurityBackend + SearchBackend> Backend for T {}

@@ -35,8 +35,21 @@ pub fn Sidebar() -> impl IntoView {
       list
     })
   });
-  let sections =
-    Memo::new(move |_| build_sections(&conversations.get(), state.settings.show_unreads_group.get()));
+  let show_all_dms = RwSignal::new(false);
+  let sections = Memo::new(move |_| {
+    let prefs = state.settings.prefs.get();
+    let limit = if show_all_dms.get() {
+      0
+    } else {
+      prefs.sidebar.dm_limit as usize
+    };
+    let mut list = conversations.get();
+    // A conversation muted in the notification settings looks muted here too.
+    for conversation in &mut list {
+      conversation.is_muted |= prefs.notifications.is_muted(&conversation.id.to_string());
+    }
+    build_sections(&list, &state.settings.sidebar_options(limit))
+  });
   let thread_unread = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -73,6 +86,15 @@ pub fn Sidebar() -> impl IntoView {
           (unread > 0).then(|| view! { <span class="badge-count">{unread}</span> })
         }}
       </button>
+      <button
+        class="sb-item"
+        class:current=move || state.view.get() == MainView::Search
+        aria-current=move || (state.view.get() == MainView::Search).then_some("page")
+        on:click=move |_| state.open_search(None)
+      >
+        <Icon name=IconName::Search />
+        <span class="sb-name">{move || i18n.t("sidebar-search")}</span>
+      </button>
       <div class="sidebar-scroll">
         <For each=move || sections.get() key=|section| {
           let state: Vec<_> = section
@@ -82,7 +104,7 @@ pub fn Sidebar() -> impl IntoView {
             .collect();
           (section.kind, state)
         } let:section>
-          <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
+          <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all_dms collapsed=collapsed />
         </For>
       </div>
       <CallPill />
@@ -94,6 +116,8 @@ pub fn Sidebar() -> impl IntoView {
 fn SidebarSection(
   kind: SectionKind,
   conversations: Vec<Conversation>,
+  hidden: usize,
+  show_all: RwSignal<bool>,
   collapsed: RwSignal<HashSet<SectionKind>>,
 ) -> impl IntoView {
   let i18n = use_i18n();
@@ -122,6 +146,14 @@ fn SidebarSection(
       <ul id=list_id hidden=is_collapsed>
         {conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
       </ul>
+      {(hidden > 0)
+        .then(|| {
+          view! {
+            <button class="sb-more" hidden=is_collapsed on:click=move |_| show_all.set(true)>
+              {move || i18n.t_count("sidebar-show-more", hidden)}
+            </button>
+          }
+        })}
     </section>
   }
 }

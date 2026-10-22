@@ -4,6 +4,8 @@
 use leptos::prelude::*;
 
 use crate::i18n::Locale;
+use crate::prefs::Preferences;
+use crate::sections::SidebarOptions;
 
 const KEY_THEME: &str = "teamcraft.theme";
 const KEY_LOCALE: &str = "teamcraft.locale";
@@ -11,6 +13,7 @@ const KEY_SEND_MODE: &str = "teamcraft.send_mode";
 const KEY_UNREADS_GROUP: &str = "teamcraft.unreads_group";
 const KEY_SHOW_JOIN_LEAVE: &str = "teamcraft.show_join_leave";
 const KEY_BACKEND: &str = "teamcraft.backend";
+const KEY_PREFS: &str = "teamcraft.prefs";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
@@ -116,9 +119,22 @@ pub struct Settings {
   /// Show conversations with unread messages in a separate "Unreads" group at the top.
   pub show_unreads_group: RwSignal<bool>,
   pub show_join_leave: RwSignal<bool>,
+  /// Notifications, privacy, calls, display and sidebar options (one JSON document).
+  pub prefs: RwSignal<Preferences>,
 }
 
 impl Settings {
+  /// Sidebar grouping from the current preferences. `usize::MAX` as limit shows every DM (keyboard
+  /// navigation must reach conversations that the list currently hides).
+  pub fn sidebar_options(&self, dm_limit: usize) -> SidebarOptions {
+    let prefs = self.prefs.get();
+    SidebarOptions {
+      show_unreads_group: self.show_unreads_group.get(),
+      sort: prefs.sidebar.sort,
+      dm_limit: if dm_limit == usize::MAX { 0 } else { dm_limit },
+    }
+  }
+
   /// Loads stored preferences and keeps them stored whenever they change.
   pub fn load() -> Self {
     let settings = Self {
@@ -127,6 +143,7 @@ impl Settings {
       send_mode: RwSignal::new(load(KEY_SEND_MODE, SendMode::from_slug).unwrap_or(SendMode::Enter)),
       show_unreads_group: RwSignal::new(load(KEY_UNREADS_GROUP, parse_bool).unwrap_or(true)),
       show_join_leave: RwSignal::new(load(KEY_SHOW_JOIN_LEAVE, parse_bool).unwrap_or(true)),
+      prefs: RwSignal::new(load(KEY_PREFS, |text| Some(Preferences::from_json(text))).unwrap_or_default()),
     };
     persist(KEY_THEME, settings.theme, |theme| theme.slug().to_owned());
     persist(KEY_LOCALE, settings.locale, |locale| locale.tag().to_owned());
@@ -137,6 +154,7 @@ impl Settings {
     persist(KEY_SHOW_JOIN_LEAVE, settings.show_join_leave, |value| {
       value.to_string()
     });
+    persist(KEY_PREFS, settings.prefs, |prefs| prefs.to_json());
     settings
   }
 }
@@ -152,7 +170,11 @@ fn browser_locale() -> Locale {
     .unwrap_or(Locale::En)
 }
 
-fn persist<T: Copy + Send + Sync + 'static>(key: &'static str, signal: RwSignal<T>, encode: fn(T) -> String) {
+fn persist<T: Clone + Send + Sync + 'static>(
+  key: &'static str,
+  signal: RwSignal<T>,
+  encode: fn(T) -> String,
+) {
   Effect::new(move |_| {
     let value = encode(signal.get());
     if let Some(storage) = local_storage()

@@ -78,7 +78,12 @@ pub fn QuickSwitcher() -> impl IntoView {
       },
       "Enter" => {
         ev.prevent_default();
-        open_selected();
+        // Ctrl/Cmd+Enter searches messages for the text instead of jumping to a conversation.
+        if ev.ctrl_key() || ev.meta_key() {
+          state.open_search(Some(query.get_untracked().trim()));
+        } else {
+          open_selected();
+        }
       },
       _ => {},
     }
@@ -149,6 +154,13 @@ pub fn QuickSwitcher() -> impl IntoView {
       <footer class="switcher-foot">
         <span><kbd>"↑"</kbd><kbd>"↓"</kbd>{move || i18n.t("switcher-hint-navigate")}</span>
         <span><kbd>"↵"</kbd>{move || i18n.t("switcher-hint-open")}</span>
+        <button
+          class="link-btn"
+          on:click=move |_| state.open_search(Some(query.get_untracked().trim()))
+        >
+          <kbd>"Ctrl+↵"</kbd>
+          {move || i18n.t("switcher-search-messages")}
+        </button>
         <span><kbd>"Esc"</kbd>{move || i18n.t("switcher-hint-close")}</span>
       </footer>
     </Modal>

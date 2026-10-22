@@ -65,6 +65,18 @@ frame rate because only the visible rows are in the DOM.
   linking dialog (real QR code of a demo payload), Devices tab in Settings, key-change banner with a
   fingerprint comparison dialog.
 
+- **Search** (PLAN.md §7): `Ctrl/Cmd+Shift+F` or the sidebar item opens the search page: words, "phrases",
+  `from:`, `in:`, `has:file`, `has:link`, `before:`, `after:`, `in-thread`, removable filter chips (unreadable
+  filters are flagged), highlighted snippets, saved searches and recent mentions. The logic is in
+  `src/search.rs` behind `SearchBackend`; the mock answers today, `teamcraft-core` will answer from the local
+  index. `Ctrl+Enter` in the quick switcher searches for its text.
+- **Settings** (PLAN.md §4, §5): notifications (levels, push timing, keywords, highlight-only keywords, thread
+  replies, DND schedule, per-conversation level and mute), display (density, status in messages), sidebar
+  (sort, DM limit), language, privacy, devices and security (sign out devices, identity fingerprint, safety
+  numbers), calls (default devices, join behaviour, audio processing, background). Values are one JSON
+  document (`src/prefs.rs`); notification and privacy values are saved but enforced by the notification engine
+  later, call and sidebar values already apply.
+
 Demo triggers: Settings > Advanced simulates an incoming call, a new login, the QR linking screen and
 a chat with a changed security key, standing in for events the server will send later.
 
@@ -159,7 +171,7 @@ libgtk-3-dev libsoup-3.0-dev`). macOS needs only Xcode command line tools.
 cargo install tauri-cli --version "^2" --locked   # once
 cd apps/desktop
 cargo tauri dev        # starts `trunk serve` and opens the window
-cargo tauri build      # release bundles (deb, rpm, AppImage on Linux; dmg on macOS)
+cargo tauri build      # release bundles (deb, rpm, AppImage on Linux; dmg on macOS), see apps/desktop/packaging/README.md
 ```
 
 Without the Tauri CLI, build the UI first and then run the shell with the embedded files:

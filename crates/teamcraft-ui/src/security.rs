@@ -32,6 +32,43 @@ pub struct KeyChange {
   pub changed_at: TimestampMs,
 }
 
+/// What the user compares with a contact out of band (call, in person) to trust their keys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContactVerification {
+  /// Twelve groups of five digits, identical on both sides.
+  pub safety_number: String,
+  pub is_verified: bool,
+}
+
+/// Placeholder derivation for demo data: a stable pseudo-fingerprint (32 hex characters) from a seed.
+/// The real value comes from the identity keys in `teamcraft-crypto`.
+pub fn demo_fingerprint(seed: u64) -> String {
+  let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+  (0..4)
+    .map(|_| {
+      state ^= state << 13;
+      state ^= state >> 7;
+      state ^= state << 17;
+      format!("{:08x}", state as u32)
+    })
+    .collect()
+}
+
+/// Placeholder safety number: the same for both people whichever order the seeds come in.
+pub fn demo_safety_number(a: u64, b: u64) -> String {
+  let (low, high) = if a <= b { (a, b) } else { (b, a) };
+  let mut state = (low.wrapping_mul(31) ^ high.wrapping_mul(0x9E37_79B9)) | 1;
+  (0..12)
+    .map(|_| {
+      state ^= state << 13;
+      state ^= state >> 7;
+      state ^= state << 17;
+      format!("{:05}", state % 100_000)
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
 /// Groups a hex fingerprint into blocks of four characters: "ab12 cd34 …".
 pub fn group_fingerprint(fingerprint: &str) -> String {
   let chars: Vec<char> = fingerprint.chars().filter(|ch| !ch.is_whitespace()).collect();
@@ -57,6 +94,15 @@ mod tests {
       code: "4719".into(),
     };
     assert_eq!(approval.spaced_code(), "4 7 1 9");
+  }
+
+  #[test]
+  fn demo_values_are_stable_and_symmetric() {
+    assert_eq!(demo_fingerprint(7), demo_fingerprint(7));
+    assert_ne!(demo_fingerprint(7), demo_fingerprint(8));
+    assert_eq!(demo_fingerprint(1).len(), 32);
+    assert_eq!(demo_safety_number(1, 2), demo_safety_number(2, 1));
+    assert_eq!(demo_safety_number(1, 2).split(' ').count(), 12);
   }
 
   #[test]

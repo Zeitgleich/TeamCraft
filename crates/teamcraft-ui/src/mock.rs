@@ -97,6 +97,9 @@ const SENTENCES: &[&str] = &[
   "Latency dropped from 340 ms to 90 ms after the index change. Nice.",
   "I added a _short_ checklist to the template, feedback welcome.",
   "Mockups are in the shared folder, see https://example.com/mockups/v3 for the walkthrough.",
+  "Attached the numbers as quarterly-report.pdf, they are final.",
+  "Heads up @alex, the staging deploy is waiting for your approval.",
+  "Saved the failing screenshot as login-error.png for the ticket.",
 ];
 
 const CODE_SNIPPET: &str = "Here is the snippet:\n```rust\nfn retry<T>(mut op: impl FnMut() -> Option<T>) -> Option<T> {\n  (0..3).find_map(|_| op())\n}\n```";
@@ -153,11 +156,14 @@ impl Rng {
 
 #[path = "mock_ops.rs"]
 mod ops;
+#[path = "mock_search.rs"]
+mod search_impl;
 
 pub struct MockBackend {
   now: TimestampMs,
   state: RefCell<State>,
   ops: RefCell<ops::OpsState>,
+  search: RefCell<search_impl::SearchState>,
 }
 
 struct State {
@@ -203,6 +209,7 @@ impl MockBackend {
     Self {
       now,
       ops: RefCell::new(ops::OpsState::new(now, &users_snapshot)),
+      search: RefCell::new(search_impl::SearchState::new()),
       state: RefCell::new(state),
     }
   }

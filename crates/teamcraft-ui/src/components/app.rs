@@ -16,8 +16,12 @@ use crate::components::login::SessionGate;
 use crate::components::members_panel::MembersPanel;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
-use crate::components::security_ui::{DeviceApprovalDialog, LinkDeviceDialog, VerifyKeyDialog};
+use crate::components::search_view::SearchView;
+use crate::components::security_ui::{
+  DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
+};
 use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
+use crate::components::settings_tabs::apply_call_prefs;
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
 use crate::components::thread_panel::ThreadPanel;
@@ -36,6 +40,7 @@ pub fn App() -> impl IntoView {
   // The settings signal is the source of truth; mirror it into the translator.
   Effect::new(move |_| i18n.set_locale(settings.locale.get()));
   apply_theme(settings.theme);
+  apply_density(settings);
   apply_language_attribute();
 
   match BackendMode::load() {
@@ -54,6 +59,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let start = initial_location(backend.as_ref());
   let state = AppState::new(backend, settings, start);
   provide_context(state);
+  // Call defaults follow the settings (and set the initial state of the call session).
+  let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
+  Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
   if let Some((_, conversation)) = start {
     state.open_conversation(conversation);
   }
@@ -77,6 +85,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
             MainView::Threads => view! { <ThreadsInbox /> }.into_any(),
             MainView::Admin(section) => view! { <AdminConsole section=section /> }.into_any(),
+            MainView::Search => view! { <SearchView /> }.into_any(),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
@@ -109,6 +118,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Shortcuts => view! { <ShortcutsModal /> }.into_any(),
         Overlay::DeviceApproval => view! { <DeviceApprovalDialog /> }.into_any(),
         Overlay::LinkDevice => view! { <LinkDeviceDialog /> }.into_any(),
+        Overlay::VerifyContact(user) => view! { <VerifyContactDialog user=user /> }.into_any(),
         Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
@@ -138,6 +148,11 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
       });
       return;
     }
+  }
+  if modifier && ev.shift_key() && !ev.alt_key() && key == "f" {
+    ev.prevent_default();
+    state.open_search(None);
+    return;
   }
   if ev.alt_key() && !modifier {
     match ev.code().as_str() {
@@ -189,6 +204,20 @@ fn apply_theme(theme: RwSignal<Theme>) {
     };
     if result.is_err() {
       tracing::debug!("could not apply theme attribute");
+    }
+  });
+}
+
+/// Mirrors the message density into `data-density` on `<html>` for the CSS.
+fn apply_density(settings: Settings) {
+  Effect::new(move |_| {
+    let density = settings.prefs.get().display.density;
+    if let Some(root) = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|doc| doc.document_element())
+      && root.set_attribute("data-density", density.slug()).is_err()
+    {
+      tracing::debug!("could not apply density attribute");
     }
   });
 }

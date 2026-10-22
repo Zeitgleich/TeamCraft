@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.teamcraft.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>TeamCraft</name>
+  <summary>End-to-end encrypted team chat with calls and meetings</summary>
+  <description>
+    <p>TeamCraft is a self-hosted business team chat. Spaces, channels, threads, calls and meetings run on your own server, and every message is end-to-end encrypted: the server only stores ciphertext.</p>
+    <p>You need an account on a TeamCraft server of your organization.</p>
+  </description>
+  <developer id="org.teamcraft">
+    <name>TeamCraft contributors</name>
+  </developer>
+  <launchable type="desktop-id">org.teamcraft.desktop.desktop</launchable>
+  <provides>
+    <binary>teamcraft-desktop</binary>
+  </provides>
+  <url type="homepage">https://github.com/Zeitgleich/TeamCraft</url>
+  <url type="bugtracker">https://github.com/Zeitgleich/TeamCraft/issues</url>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-audio">intense</content_attribute>
+    <content_attribute id="social-contacts">intense</content_attribute>
+  </content_rating>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+  </categories>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">720</display_length>
+  </requires>
+  <releases>
+    <release version="0.0.0" date="2026-10-22">
+      <description>
+        <p>Development build.</p>
+      </description>
+    </release>
+  </releases>
+</component>

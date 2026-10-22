@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TeamCraft
+GenericName=Team chat
+Comment=End-to-end encrypted team chat with calls and meetings
+Exec=teamcraft-desktop
+Icon=org.teamcraft.desktop
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+Keywords=chat;messenger;team;call;meeting;
+StartupWMClass=teamcraft-desktop
