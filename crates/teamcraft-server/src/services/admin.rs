@@ -6,12 +6,13 @@ use teamcraft_db::{
   AuditQuery, UserStatusFilter,
 };
 use teamcraft_proto::{
-  AdminConversationSummary, AdminDeviceResponse, AdminSpaceSummary, AdminUserStatus, AdminUserSummary,
-  AuditEntryId, AuditEntryResponse, ConversationId, ConversationKind, DeactivateUserRequest,
-  DeactivationReason, DeviceId, GatewayEvent, Id, ListAdminConversationsQuery,
+  AdminConversationSummary, AdminDeviceResponse, AdminInstanceResponse, AdminSpaceSummary, AdminUserStatus,
+  AdminUserSummary, AuditEntryId, AuditEntryResponse, ConversationId, ConversationKind,
+  DeactivateUserRequest, DeactivationReason, DeviceId, GatewayEvent, Id, ListAdminConversationsQuery,
   ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersQuery,
   ListAdminUsersResponse, ListAuditQuery, ListAuditResponse, ListConversationMembersResponse,
-  ListSpaceMembersResponse, Permission, PushProvider, SpaceId, Target, UnixMillis, UserId,
+  ListSpaceMembersResponse, Permission, PushProvider, PushProviderState, PushProviderStatus, SfuStatus,
+  SpaceId, StorageStatus, Target, UnixMillis, UserId,
 };
 
 use super::access::require;
@@ -500,4 +501,67 @@ pub async fn assign_channel_owner(
     },
   );
   Ok(())
+}
+
+/// What the instance runs on: media server, push providers and storage (admin.md §3.4).
+pub async fn instance_status(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+) -> Result<AdminInstanceResponse, ApiError> {
+  require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
+  let sfu = match &state.maybe_calls {
+    Some(calls) => SfuStatus {
+      is_configured: true,
+      maybe_url: Some(calls.sfu_url().to_owned()),
+      is_reporting_enabled: calls.is_reporting_enabled(),
+      has_host_controls: calls.has_controls(),
+      maybe_last_contact_at: calls.last_sfu_contact(),
+      active_calls: u32::try_from(calls.active_call_count()).unwrap_or(u32::MAX),
+    },
+    None => SfuStatus {
+      is_configured: false,
+      maybe_url: None,
+      is_reporting_enabled: false,
+      has_host_controls: false,
+      maybe_last_contact_at: None,
+      active_calls: 0,
+    },
+  };
+  let counts = state.database.admin_push_device_counts().await?;
+  let push = [
+    PushProvider::WebPush,
+    PushProvider::Fcm,
+    PushProvider::UnifiedPush,
+    PushProvider::Apns,
+  ]
+  .into_iter()
+  .map(|provider| {
+    let state_of = match state.push.sender_state(&provider) {
+      Some(true) => PushProviderState::Active,
+      Some(false) => PushProviderState::NotImplemented,
+      None => PushProviderState::NotConfigured,
+    };
+    let wire_name = provider.as_str();
+    PushProviderStatus {
+      device_count: counts
+        .iter()
+        .find(|count| count.provider == wire_name)
+        .map_or(0, |count| u32::try_from(count.device_count).unwrap_or(u32::MAX)),
+      provider,
+      state: state_of,
+    }
+  })
+  .collect();
+  let totals = state.database.admin_storage_totals().await?;
+  Ok(AdminInstanceResponse {
+    sfu,
+    push,
+    storage: StorageStatus {
+      is_configured: state.maybe_blob_store.is_some(),
+      attachment_count: totals.attachment_count,
+      attachment_bytes: totals.attachment_bytes,
+      index_segment_bytes: totals.index_segment_bytes,
+    },
+    is_telephony_available: false,
+  })
 }

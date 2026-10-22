@@ -583,7 +583,7 @@ async fn fail(
 
 fn check_password_rules(state: &AppState, password: &str) -> Result<(), ApiError> {
   let length = password.chars().count();
-  let minimum = state.settings.local_accounts.min_password_chars;
+  let minimum = super::workspace::effective_min_password_chars(state);
   if length < minimum {
     return Err(ApiError::InvalidRequest(format!(
       "the password needs at least {minimum} characters"

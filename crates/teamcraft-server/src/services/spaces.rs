@@ -361,7 +361,7 @@ fn new_member_expiry(
   if let Some(millis) = maybe_requested {
     return Ok(ExpiryChange::Set(future_time(millis)?));
   }
-  let days = state.settings.guests.default_expiry_days;
+  let days = super::workspace::effective_guest_expiry_days(state);
   Ok(if days == 0 {
     ExpiryChange::Keep
   } else {

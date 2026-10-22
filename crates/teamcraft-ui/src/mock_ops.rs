@@ -1,16 +1,26 @@
 //! Mock data for calls, administration and device security. Child module of `mock` so it can read the
 //! demo users and conversations the chat part owns.
 
-use teamcraft_proto::{HistoryPolicy, Role};
+use std::collections::HashMap;
+
+use teamcraft_proto::{
+  ALL_PERMISSIONS, AdminInstanceResponse, AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse,
+  ChannelModeration, GuestPolicy, HistoryPolicy, OverrideEffect, Permission, PermissionScheme,
+  PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role, SchemeChange,
+  SchemeOverride, SchemeRole, SchemeRoleResponse, SessionPolicy, SetAnnouncementRequest, SfuStatus,
+  StorageStatus, UnixMillis, WorkspacePolicy,
+};
 
 use super::{MockBackend, dm_first, id_from_raw};
 use crate::admin::{
-  AdminChannel, AdminSelfJoin, AdminUser, AuditAction, AuditEntry, DeviceInfo, DmScope, GuestInfo, Retention,
-  SecurityPolicy, SelfJoinOutcome,
+  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, GuestInfo,
+  Retention, SelfJoinOutcome,
 };
 use crate::backend::{AdminBackend, CallBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevice, MediaDevices, Participant};
-use crate::model::{ConversationId, ConversationKind, DeviceId, PresenceStatus, TimestampMs, UserId, raw_id};
+use crate::model::{
+  ConversationId, ConversationKind, DeviceId, PresenceStatus, SpaceId, TimestampMs, UserId, raw_id,
+};
 use crate::security::{ContactVerification, KeyChange, demo_fingerprint, demo_safety_number};
 
 const MINUTE: i64 = 60_000;
@@ -20,7 +30,12 @@ const MIB: u64 = 1024 * 1024;
 
 /// Admin-only state: policy, audit log and per-user devices. Reset on reload like the rest of the mock.
 pub(super) struct OpsState {
-  policy: SecurityPolicy,
+  policy_version: u64,
+  policy: WorkspacePolicy,
+  scheme_changes: HashMap<Option<SpaceId>, Vec<SchemeChange>>,
+  moderation: HashMap<ConversationId, ChannelModeration>,
+  announcement: Option<AnnouncementResponse>,
+  audit_filter: AuditFilter,
   channels: Vec<AdminChannel>,
   users: Vec<AdminUser>,
   audit: Vec<AuditEntry>,
@@ -32,7 +47,12 @@ pub(super) struct OpsState {
 impl OpsState {
   pub(super) fn new(now: TimestampMs, users: &[crate::model::User]) -> Self {
     Self {
+      policy_version: 12,
       policy: default_policy(),
+      scheme_changes: HashMap::new(),
+      moderation: HashMap::new(),
+      announcement: None,
+      audit_filter: AuditFilter::default(),
       channels: demo_channels(now),
       users: demo_admin_users(now, users),
       audit: demo_audit(now),
@@ -124,16 +144,223 @@ impl AdminBackend for MockBackend {
     self.ops.borrow().users.clone()
   }
 
-  fn security_policy(&self) -> SecurityPolicy {
-    self.ops.borrow().policy.clone()
+  fn workspace_policy(&self) -> (u64, WorkspacePolicy) {
+    let ops = self.ops.borrow();
+    (ops.policy_version, ops.policy.clone())
   }
 
-  fn set_security_policy(&self, mut policy: SecurityPolicy) {
+  fn set_workspace_policy(&self, policy: WorkspacePolicy) {
     let mut ops = self.ops.borrow_mut();
-    policy.version = ops.policy.version + 1;
-    let detail = format!("policy version {}", policy.version);
+    ops.policy_version += 1;
+    let detail = format!("policy version {}", ops.policy_version);
     ops.policy = policy;
     ops.record(self.now, AuditAction::PolicyChanged, "security policy", &detail);
+  }
+
+  fn admin_spaces(&self) -> Vec<AdminSpace> {
+    let mut names: Vec<String> = self
+      .ops
+      .borrow()
+      .channels
+      .iter()
+      .map(|c| c.space_name.clone())
+      .collect();
+    names.sort();
+    names.dedup();
+    names
+      .into_iter()
+      .enumerate()
+      .filter(|(_, name)| !name.is_empty())
+      .map(|(index, name)| AdminSpace {
+        id: id_from_raw(900 + index as u64),
+        name,
+      })
+      .collect()
+  }
+
+  fn permission_scheme(&self, maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
+    let ops = self.ops.borrow();
+    let at = |scope: Option<SpaceId>| ops.scheme_changes.get(&scope).cloned().unwrap_or_default();
+    let edits = |changes: &[SchemeChange]| -> Vec<(SchemeRole, Permission, bool)> {
+      changes
+        .iter()
+        .filter_map(|change| match change.effect {
+          OverrideEffect::Grant => Some((change.role.clone(), change.permission.clone(), true)),
+          OverrideEffect::Revoke => Some((change.role.clone(), change.permission.clone(), false)),
+          _ => None,
+        })
+        .collect()
+    };
+    let instance = PermissionScheme::default().with_changes(&edits(&at(None)));
+    let own = maybe_space.map(|space| at(Some(space))).unwrap_or_default();
+    let scheme = if maybe_space.is_some() {
+      instance.with_changes(&edits(&own))
+    } else {
+      instance
+    };
+    let own = if maybe_space.is_some() { own } else { at(None) };
+    PermissionSchemeResponse {
+      roles: [
+        SchemeRole::Guest,
+        SchemeRole::Member,
+        SchemeRole::SpaceAdmin,
+        SchemeRole::ChannelAdmin,
+        SchemeRole::Admin,
+        SchemeRole::Owner,
+      ]
+      .into_iter()
+      .map(|role| SchemeRoleResponse {
+        granted: ALL_PERMISSIONS
+          .iter()
+          .filter(|permission| scheme.grants(&role, permission))
+          .cloned()
+          .collect(),
+        overrides: own
+          .iter()
+          .filter(|change| change.role == role)
+          .map(|change| SchemeOverride {
+            permission: change.permission.clone(),
+            effect: change.effect.clone(),
+          })
+          .collect(),
+        role,
+      })
+      .collect(),
+    }
+  }
+
+  fn change_permissions(&self, maybe_space: Option<SpaceId>, changes: Vec<SchemeChange>) {
+    let mut ops = self.ops.borrow_mut();
+    let list = ops.scheme_changes.entry(maybe_space).or_default();
+    for change in changes {
+      list.retain(|existing| !(existing.role == change.role && existing.permission == change.permission));
+      if change.effect != OverrideEffect::Inherit {
+        list.push(change);
+      }
+    }
+    let target = if maybe_space.is_some() {
+      "space scheme"
+    } else {
+      "instance scheme"
+    };
+    ops.record(
+      self.now,
+      AuditAction::PermissionsChanged,
+      target,
+      "permissions changed",
+    );
+  }
+
+  fn channel_moderation(&self, channel: ConversationId) -> ChannelModeration {
+    self
+      .ops
+      .borrow()
+      .moderation
+      .get(&channel)
+      .cloned()
+      .unwrap_or_default()
+  }
+
+  fn set_channel_moderation(&self, channel: ConversationId, moderation: ChannelModeration) {
+    let mut ops = self.ops.borrow_mut();
+    ops.moderation.insert(channel, moderation);
+    let name = ops
+      .channels
+      .iter()
+      .find(|c| c.id == channel)
+      .map(|c| format!("#{}", c.name));
+    ops.record(
+      self.now,
+      AuditAction::ModerationChanged,
+      &name.unwrap_or_default(),
+      "moderation changed",
+    );
+  }
+
+  fn channel_member_candidates(&self, channel: ConversationId) -> Vec<UserId> {
+    let _ = channel;
+    self
+      .ops
+      .borrow()
+      .users
+      .iter()
+      .filter(|u| u.is_active)
+      .take(4)
+      .map(|u| u.user.id)
+      .collect()
+  }
+
+  fn assign_channel_owner(&self, channel: ConversationId, user: UserId) {
+    let mut ops = self.ops.borrow_mut();
+    let Some(entry) = ops.channels.iter_mut().find(|c| c.id == channel) else {
+      return;
+    };
+    entry.maybe_owner = Some(user);
+    let name = format!("#{}", entry.name);
+    ops.record(self.now, AuditAction::OwnerAssigned, &name, "");
+  }
+
+  fn announcement(&self) -> Option<AnnouncementResponse> {
+    self.ops.borrow().announcement.clone()
+  }
+
+  fn set_announcement(&self, announcement: SetAnnouncementRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.announcement = Some(AnnouncementResponse {
+      id: id_from_raw(1),
+      text: announcement.text,
+      level: announcement.level,
+      is_dismissible: announcement.is_dismissible,
+      created_at: UnixMillis(self.now),
+      maybe_expires_at: announcement.maybe_expires_at,
+      is_dismissed: false,
+    });
+    ops.record(self.now, AuditAction::AnnouncementChanged, "announcement", "set");
+  }
+
+  fn clear_announcement(&self) {
+    let mut ops = self.ops.borrow_mut();
+    ops.announcement = None;
+    ops.record(
+      self.now,
+      AuditAction::AnnouncementChanged,
+      "announcement",
+      "cleared",
+    );
+  }
+
+  fn instance_status(&self) -> Option<AdminInstanceResponse> {
+    Some(AdminInstanceResponse {
+      sfu: SfuStatus {
+        is_configured: true,
+        maybe_url: Some("https://sfu.example.com:4433/call".to_owned()),
+        is_reporting_enabled: true,
+        has_host_controls: true,
+        maybe_last_contact_at: Some(UnixMillis(self.now - 4_000)),
+        active_calls: 2,
+      },
+      push: vec![
+        push_status(PushProvider::WebPush, PushProviderState::Active, 14),
+        push_status(PushProvider::Fcm, PushProviderState::NotImplemented, 9),
+        push_status(PushProvider::UnifiedPush, PushProviderState::NotImplemented, 1),
+        push_status(PushProvider::Apns, PushProviderState::NotConfigured, 0),
+      ],
+      storage: StorageStatus {
+        is_configured: true,
+        attachment_count: 1_842,
+        attachment_bytes: 3 * 1024 * MIB + 412 * MIB,
+        index_segment_bytes: 96 * MIB,
+      },
+      is_telephony_available: false,
+    })
+  }
+
+  fn audit_filter(&self) -> AuditFilter {
+    self.ops.borrow().audit_filter
+  }
+
+  fn set_audit_filter(&self, filter: AuditFilter) {
+    self.ops.borrow_mut().audit_filter = filter;
   }
 
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
@@ -200,9 +427,9 @@ impl AdminBackend for MockBackend {
   fn admin_join_channel(&self, channel: ConversationId) -> SelfJoinOutcome {
     let mut ops = self.ops.borrow_mut();
     let outcome = match ops.policy.admin_self_join {
-      AdminSelfJoin::Visible => SelfJoinOutcome::Joined,
-      AdminSelfJoin::OwnerApproval => SelfJoinOutcome::ApprovalRequested,
-      AdminSelfJoin::Disabled => SelfJoinOutcome::Disabled,
+      AdminSelfJoinWire::Visible => SelfJoinOutcome::Joined,
+      AdminSelfJoinWire::OwnerApproval => SelfJoinOutcome::ApprovalRequested,
+      AdminSelfJoinWire::Disabled | AdminSelfJoinWire::Unknown(_) => SelfJoinOutcome::Disabled,
     };
     if outcome == SelfJoinOutcome::Joined
       && let Some(name) = ops
@@ -282,20 +509,28 @@ impl SecurityBackend for MockBackend {
   }
 }
 
-fn default_policy() -> SecurityPolicy {
-  SecurityPolicy {
-    version: 12,
-    admin_self_join: AdminSelfJoin::Visible,
-    org_recovery_for_members: true,
-    org_recovery_for_guests: false,
-    recovery_approvals_required: 2,
-    requires_mfa: true,
-    requires_mfa_for_guests: true,
-    guest_email_domains: "example.com, partner.example".into(),
-    session_days: 30,
-    idle_timeout_minutes: 120,
-    default_history: HistoryPolicy::FromJoin,
-    dm_scope: DmScope::Anyone,
+fn default_policy() -> WorkspacePolicy {
+  let defaults = WorkspacePolicy::default();
+  WorkspacePolicy {
+    history_default: HistoryPolicy::FromJoin,
+    session: SessionPolicy {
+      requires_mfa: true,
+      maybe_max_age_hours: Some(30 * 24),
+      maybe_idle_timeout_minutes: Some(120),
+    },
+    guests: GuestPolicy {
+      allowed_email_domains: vec!["example.com".to_owned(), "partner.example".to_owned()],
+      ..GuestPolicy::default()
+    },
+    ..defaults
+  }
+}
+
+fn push_status(provider: PushProvider, state: PushProviderState, device_count: u32) -> PushProviderStatus {
+  PushProviderStatus {
+    provider,
+    state,
+    device_count,
   }
 }
 
@@ -709,11 +944,11 @@ mod tests {
     let backend = MockBackend::new(NOW);
     let channel = id_from_raw(41);
     assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Joined);
-    let mut policy = backend.security_policy();
-    policy.admin_self_join = AdminSelfJoin::Disabled;
-    backend.set_security_policy(policy);
+    let (_, mut policy) = backend.workspace_policy();
+    policy.admin_self_join = AdminSelfJoinWire::Disabled;
+    backend.set_workspace_policy(policy);
     assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Disabled);
-    assert_eq!(backend.security_policy().version, 13);
+    assert_eq!(backend.workspace_policy().0, 13);
   }
 
   #[test]

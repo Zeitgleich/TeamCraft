@@ -47,7 +47,7 @@ mod workspace_log;
 
 pub use admin::{
   AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow,
-  DeactivationEffects, UserStatusFilter,
+  DeactivationEffects, PushDeviceCount, StorageTotals, UserStatusFilter,
 };
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
 pub use attachment::{Attachment, NewAttachment};

@@ -14,8 +14,9 @@ use std::time::Duration;
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
-  CustomStatus as CustomStatusWire, ListPresenceResponse, ListThreadsResponse, PresenceState,
-  ReadReceiptsResponse, ThreadSummary as ThreadWire, UnreadResponse, UserPresence,
+  AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
+  ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
+  ThreadSummary as ThreadWire, UnreadResponse, UserPresence,
 };
 
 use crate::auth::{ApiMethod, Authenticator};
@@ -61,6 +62,7 @@ pub struct LiveState {
   threads: Vec<ThreadWire>,
   presence: HashMap<UserId, UserPresence>,
   receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
+  announcement: Option<AnnouncementResponse>,
 }
 
 impl LiveServer {
@@ -102,6 +104,7 @@ impl LiveServer {
       .get::<ListThreadsResponse>(&format!("/api/v1/threads?limit={THREAD_PAGE}"))
       .await;
     let presence = self.presence(&scope.users).await;
+    let announcement = self.get::<GetAnnouncementResponse>("/api/v1/announcement").await;
     let mut receipts = HashMap::new();
     for conversation in &scope.direct {
       let path = format!("/api/v1/conversations/{conversation}/read-receipts");
@@ -133,8 +136,33 @@ impl LiveServer {
         .presence
         .extend(presence.into_iter().map(|entry| (entry.user_id, entry)));
       state.receipts.extend(receipts);
+      if let Some(announcement) = announcement {
+        state.announcement = announcement.maybe_announcement;
+      }
     }
     self.changed();
+  }
+
+  /// The instance announcement, unless this user dismissed it.
+  pub fn announcement(&self) -> Option<AnnouncementResponse> {
+    self
+      .state
+      .borrow()
+      .announcement
+      .clone()
+      .filter(|banner| !banner.is_dismissed)
+  }
+
+  pub fn dismiss_announcement(&self, id: AnnouncementId) {
+    if let Some(banner) = self.state.borrow_mut().announcement.as_mut() {
+      banner.is_dismissed = true;
+    }
+    self.changed();
+    self.send(
+      ApiMethod::Post,
+      format!("/api/v1/announcement/{id}/dismiss"),
+      Some("{}".to_owned()),
+    );
   }
 
   /// Unread and mention counts of the conversation, once the server has answered.

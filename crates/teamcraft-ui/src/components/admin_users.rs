@@ -161,11 +161,11 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
   let pending_device = RwSignal::new(None::<DeviceId>);
   let confirm_deactivate = RwSignal::new(false);
   let recovery_started = RwSignal::new(false);
-  let policy = state.read(|backend| backend.security_policy());
+  let (_, policy) = state.read(|backend| backend.workspace_policy());
   let can_recover = if entry.maybe_guest.is_some() {
-    policy.org_recovery_for_guests
+    policy.org_recovery.is_enabled_for_guests
   } else {
-    policy.org_recovery_for_members
+    policy.org_recovery.is_enabled_for_members
   };
   let is_active = entry.is_active;
 

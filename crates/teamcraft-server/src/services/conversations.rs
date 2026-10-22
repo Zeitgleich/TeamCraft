@@ -421,7 +421,7 @@ async fn open_participants_conversation(
   // A DM involving a guest needs a conversation the guest already shares with every other
   // participant (PLAN.md §12): in a group DM, two members who both know the guest still must not
   // meet a guest who knows only one of them.
-  if state.settings.policy.guests_dm_only_with_shared_conversations {
+  if super::workspace::effective_guest_dm_restriction(state) {
     let guests: Vec<UserId> = users
       .iter()
       .filter(|user| user.kind == teamcraft_proto::UserKind::Guest)

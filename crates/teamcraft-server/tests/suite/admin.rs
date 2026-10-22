@@ -44,6 +44,7 @@ mod overview {
       "/admin/conversations",
       "/admin/users",
       "/admin/audit",
+      "/admin/instance",
     ] {
       let reply = app.get(&carol, path).await;
       assert_eq!(
@@ -58,6 +59,25 @@ mod overview {
       StatusCode::FORBIDDEN
     );
     assert_eq!(app.get(&admin(), "/admin/spaces").await.status, StatusCode::OK);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_instance_status_lists_push_providers_and_storage() {
+    let app = app!();
+    let reply = app.get(&admin(), "/admin/instance").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.body;
+    assert_eq!(body["sfu"]["is_configured"], false);
+    assert_eq!(body["is_telephony_available"], false);
+    let providers: Vec<&str> = body["push"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|entry| entry["provider"].as_str().unwrap())
+      .collect();
+    assert_eq!(providers, ["webpush", "fcm", "unifiedpush", "apns"]);
+    assert!(body["storage"]["attachment_bytes"].is_number());
     app.stop().await;
   }
 

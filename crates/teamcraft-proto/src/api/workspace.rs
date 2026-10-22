@@ -230,6 +230,19 @@ impl Default for DirectoryPolicy {
   }
 }
 
+wire_enum! {
+  /// What a push notification shows on the lock screen. Applied by the receiving device when it opens
+  /// the sealed wake-up payload, so the push service never sees more than "something arrived".
+  pub enum PushContentMode {
+    /// "New message" only.
+    Generic => "generic",
+    /// The sender and the conversation, not the text.
+    Sender => "sender",
+    /// Sender, conversation and the beginning of the text.
+    Full => "full",
+  }
+}
+
 /// Guest rules the server enforces (PLAN.md §12).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct GuestPolicy {
@@ -238,6 +251,45 @@ pub struct GuestPolicy {
   /// server's own `[guests] allowed_email_domains` applies in addition.
   #[serde(default)]
   pub allowed_email_domains: Vec<String>,
+  /// Guests without an explicit expiry expire after this many days; `0` never. Absent: the server
+  /// file decides.
+  #[serde(
+    rename = "default_expiry_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_default_expiry_days: Option<u32>,
+  /// Guests open direct messages only with people they share a conversation with. Absent: the
+  /// server file decides.
+  #[serde(
+    rename = "dm_only_with_shared_conversations",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_dm_only_with_shared_conversations: Option<bool>,
+}
+
+/// Rules for accounts that live in TeamCraft instead of the identity provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PasswordPolicy {
+  /// Shortest password; absent: the server file decides.
+  #[serde(rename = "min_chars", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_min_chars: Option<u32>,
+}
+
+/// What a notification may show (the receiving device applies it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct NotificationDefaults {
+  pub push_content: PushContentMode,
+}
+
+impl Default for NotificationDefaults {
+  fn default() -> Self {
+    Self {
+      // Today's behaviour; admins who want less on lock screens lower it.
+      push_content: PushContentMode::Full,
+    }
+  }
 }
 
 /// Threads (PLAN.md §3): admin options for the threaded view and the auto-follow default.
@@ -280,6 +332,10 @@ pub struct WorkspacePolicy {
   #[serde(default)]
   pub guests: GuestPolicy,
   #[serde(default)]
+  pub passwords: PasswordPolicy,
+  #[serde(default)]
+  pub notifications: NotificationDefaults,
+  #[serde(default)]
   pub call_backgrounds: CallBackgroundPolicy,
 }
 
@@ -318,6 +374,8 @@ impl Default for WorkspacePolicy {
       presence: PresencePolicy::default(),
       threads: ThreadPolicy::default(),
       guests: GuestPolicy::default(),
+      passwords: PasswordPolicy::default(),
+      notifications: NotificationDefaults::default(),
       call_backgrounds: CallBackgroundPolicy::default(),
     }
   }

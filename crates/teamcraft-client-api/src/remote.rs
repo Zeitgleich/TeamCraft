@@ -144,6 +144,10 @@ pub struct ChatSnapshot {
 pub struct SecuritySnapshot {
   pub my_fingerprint: String,
   pub contacts: Vec<ContactKeys>,
+  /// What notifications may show, from the policy this device verified. `None` (not known yet, or
+  /// an older shell) is treated as the strictest mode.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_push_content: Option<teamcraft_proto::PushContentMode>,
 }
 
 /// What this device pinned for one contact, and a different key the server has shown since.
@@ -299,6 +303,8 @@ pub enum ChatAction {
   /// Signs and publishes a workspace policy version. Owners and admins form the first signed roster
   /// when the workspace has none yet (the signer becomes the root of trust).
   PublishPolicy {
+    /// The policy the editor started from; the core refuses to sign unless it is the one it verified.
+    base: teamcraft_proto::WorkspacePolicy,
     policy: teamcraft_proto::WorkspacePolicy,
     #[serde(default)]
     owners: Vec<UserId>,
