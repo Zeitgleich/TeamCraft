@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tracing::info;
 
 use crate::error::DbError;
@@ -33,10 +33,15 @@ impl Default for DatabaseOptions {
 impl Database {
   /// Connects lazily-validated: fails if the server is unreachable.
   pub async fn connect(url: &str, options: &DatabaseOptions) -> Result<Self, DbError> {
+    // JIT compilation costs tens to hundreds of milliseconds and only pays off for long analytical
+    // queries; with it on, the first runs of our short queries on a partitioned table (whose plan
+    // cost is high because of the partition count) spend all their time compiling. Found by the
+    // load test (docs/performance.md).
+    let connect_options = url.parse::<PgConnectOptions>()?.options([("jit", "off")]);
     let pool = PgPoolOptions::new()
       .max_connections(options.max_connections)
       .acquire_timeout(options.acquire_timeout)
-      .connect(url)
+      .connect_with(connect_options)
       .await?;
     Ok(Self::from_pool(pool))
   }

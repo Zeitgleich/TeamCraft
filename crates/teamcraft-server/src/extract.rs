@@ -23,7 +23,12 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
     axum::Json::<T>::from_request(request, state)
       .await
       .map(|axum::Json(value)| Self(value))
-      .map_err(|rejection: JsonRejection| ApiError::InvalidRequest(rejection.body_text()))
+      .map_err(|rejection: JsonRejection| match rejection.status() {
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE => {
+          ApiError::PayloadTooLarge("request body is too large".into())
+        },
+        _ => ApiError::InvalidRequest(rejection.body_text()),
+      })
   }
 }
 

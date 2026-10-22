@@ -1,0 +1,1 @@
+{"title": "Sprint", "starts_at": 1893488400000, "ends_at": 1893492000000, "invitees": [{"kind": "user", "user_id": "4"}, {"kind": "external", "email": "a@example.org", "name": "A"}], "recurrence": {"frequency": "weekly", "interval": 2, "count": 3}, "has_lobby": false}

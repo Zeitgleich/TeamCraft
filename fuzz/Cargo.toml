@@ -1,0 +1,72 @@
+[package]
+name = "teamcraft-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde = "1"
+time = "0.3"
+serde_json = "1"
+teamcraft-bridge = { path = "../crates/teamcraft-bridge" }
+teamcraft-core = { path = "../crates/teamcraft-core" }
+teamcraft-crypto = { path = "../crates/teamcraft-crypto" }
+teamcraft-proto = { path = "../crates/teamcraft-proto" }
+teamcraft-server = { path = "../crates/teamcraft-server" }
+
+# Not part of the main workspace (nightly toolchain, sanitizers); same patches as the root.
+[workspace]
+
+[patch.crates-io]
+davey = { path = "../crates/vendor/davey" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "proto_requests"
+path = "fuzz_targets/proto_requests.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_gateway"
+path = "fuzz_targets/proto_gateway.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bridge_ingest"
+path = "fuzz_targets/bridge_ingest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "imip"
+path = "fuzz_targets/imip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "workspace_log"
+path = "fuzz_targets/workspace_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_decoders"
+path = "fuzz_targets/crypto_decoders.rs"
+test = false
+doc = false
+bench = false

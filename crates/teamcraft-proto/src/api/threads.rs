@@ -62,7 +62,9 @@ pub struct SetThreadReadRequest {
   pub message_id: MessageId,
 }
 
-/// Unread state of one conversation (top-level messages; thread replies count in the threads).
+/// Unread state of one conversation (top-level messages; thread replies count in the threads). The
+/// counts cover at most the newest `limits.max_unread_counted` (default 1000) unread messages: a count
+/// at that value means "that many or more", and mentions are counted among those messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ConversationUnread {
   pub conversation_id: ConversationId,

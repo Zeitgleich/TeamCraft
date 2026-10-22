@@ -238,23 +238,38 @@ impl Database {
   }
 
   /// Unread top-level messages per conversation (only those with something unread). Messages from
-  /// before the user joined and the user's own messages don't count.
+  /// before the user joined and the user's own messages don't count. At most `max_counted` of the
+  /// newest unread messages of a conversation are looked at, so the answer is `max_counted` for "that
+  /// many or more" and the cost no longer depends on how long the user has not read a huge channel;
+  /// mentions are counted among those messages.
   pub async fn conversation_unread_counts(
     &self,
     user: UserId,
+    max_counted: u32,
   ) -> Result<Vec<ConversationUnreadRow>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT ms.conversation_id,
-                COUNT(m.id) AS "unread!",
-                COUNT(m.id) FILTER (WHERE ms.user_id = ANY(m.mentioned_user_ids)) AS "mentions!"
+                counted.unread AS "unread!",
+                counted.mentions AS "mentions!"
          FROM memberships ms
-         JOIN messages m ON m.conversation_id = ms.conversation_id
-         WHERE ms.user_id = $1 AND m.thread_id IS NULL AND m.sender_user_id <> ms.user_id
-           AND m.id > COALESCE(ms.last_read_message_id, 0)
-           AND m.id >= tc_snowflake_floor(ms.joined_at)
-         GROUP BY ms.conversation_id
+         CROSS JOIN LATERAL (
+           SELECT COUNT(*) AS unread,
+                  COUNT(*) FILTER (WHERE ms.user_id = ANY(newest.mentioned_user_ids)) AS mentions
+           FROM (
+             SELECT m.mentioned_user_ids
+             FROM messages m
+             WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL
+               AND m.sender_user_id <> ms.user_id
+               AND m.id > COALESCE(ms.last_read_message_id, 0)
+               AND m.id >= tc_snowflake_floor(ms.joined_at)
+             ORDER BY m.id DESC
+             LIMIT $2
+           ) newest
+         ) counted
+         WHERE ms.user_id = $1 AND counted.unread > 0
          ORDER BY ms.conversation_id"#,
       to_db(user),
+      i64::from(max_counted),
     )
     .fetch_all(self.pool())
     .await?;

@@ -33,6 +33,9 @@ pub enum ApiError {
   KeyPackageExhausted,
   #[error("payload too large: {0}")]
   PayloadTooLarge(String),
+  /// Too many requests; retry after this many seconds.
+  #[error("too many requests, retry in {retry_after_secs} seconds")]
+  RateLimited { retry_after_secs: u64 },
   /// A needed backend (e.g. attachment storage) is not configured or not reachable.
   #[error("unavailable: {0}")]
   Unavailable(String),
@@ -139,6 +142,7 @@ impl ApiError {
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. } => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+      Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
       Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -158,6 +162,7 @@ impl ApiError {
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
       Self::VersionConflict { .. } => ErrorCode::VersionConflict,
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
+      Self::RateLimited { .. } => ErrorCode::RateLimited,
       Self::Unavailable(_) => ErrorCode::Unavailable,
       Self::Database(_) | Self::Internal(_) => ErrorCode::Internal,
     }
@@ -189,6 +194,11 @@ impl IntoResponse for ApiError {
       _ => {},
     }
     let mut response = (self.status(), Json(body)).into_response();
+    if let Self::RateLimited { retry_after_secs } = &self {
+      response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(*retry_after_secs));
+    }
     if self.status() == StatusCode::UNAUTHORIZED {
       response
         .headers_mut()

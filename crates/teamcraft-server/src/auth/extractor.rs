@@ -28,8 +28,64 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
   async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
     let token = bearer_token(parts)?;
     let identity = accounts::validate_token(state, token).await?;
-    accounts::authenticate(state, identity).await
+    let caller = accounts::authenticate(state, identity).await?;
+    if is_write(&parts.method) {
+      state.rate_limits.check_user_write(caller.user.id)?;
+    }
+    Ok(caller)
   }
+}
+
+/// An instance admin (role admin or owner). Rejects everybody else with 403 *before* the request
+/// body is parsed, so ordinary users learn nothing about the endpoint's input. The services check
+/// the finer permission again.
+#[derive(Debug, Clone)]
+pub struct AdminUser(pub AuthenticatedUser);
+
+impl FromRequestParts<AppState> for AdminUser {
+  type Rejection = ApiError;
+
+  async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    let caller = AuthenticatedUser::from_request_parts(parts, state).await?;
+    if crate::services::access::is_instance_admin(&caller) {
+      Ok(Self(caller))
+    } else {
+      Err(ApiError::Forbidden("administrators only".into()))
+    }
+  }
+}
+
+/// The SFU, authenticated by its registration token (checked before the body is parsed).
+#[derive(Debug, Clone, Copy)]
+pub struct SfuCaller;
+
+impl FromRequestParts<AppState> for SfuCaller {
+  type Rejection = ApiError;
+
+  async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    crate::services::calls::authenticate_sfu(state, bearer_token(parts).ok())?;
+    Ok(Self)
+  }
+}
+
+/// The inbox handler that forwards RSVP e-mail, authenticated by its token.
+#[derive(Debug, Clone, Copy)]
+pub struct InboxCaller;
+
+impl FromRequestParts<AppState> for InboxCaller {
+  type Rejection = ApiError;
+
+  async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    crate::services::meetings::authenticate_inbox(state, bearer_token(parts).ok())?;
+    Ok(Self)
+  }
+}
+
+fn is_write(method: &axum::http::Method) -> bool {
+  !matches!(
+    *method,
+    axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+  )
 }
 
 fn bearer_token(parts: &Parts) -> Result<&str, AuthError> {

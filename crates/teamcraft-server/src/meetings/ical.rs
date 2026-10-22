@@ -71,7 +71,7 @@ pub fn render_event(event: &EventData<'_>, maybe_method: Option<Method>) -> Stri
     ));
   }
   lines.push("BEGIN:VEVENT".to_owned());
-  lines.push(format!("UID:{}", event.uid));
+  lines.push(format!("UID:{}", plain(event.uid)));
   lines.push(format!("DTSTAMP:{}", format_utc(event.stamp)));
   lines.push(format!("DTSTART:{}", format_utc(event.starts_at)));
   lines.push(format!("DTEND:{}", format_utc(event.ends_at)));
@@ -83,7 +83,7 @@ pub fn render_event(event: &EventData<'_>, maybe_method: Option<Method>) -> Stri
   };
   lines.push(format!("DESCRIPTION:{}", escape_text(&description)));
   lines.push(format!("LOCATION:{}", escape_text(event.join_url)));
-  lines.push(format!("URL:{}", event.join_url));
+  lines.push(format!("URL:{}", plain(event.join_url)));
   if let Some(rule) = event.maybe_recurrence_rule {
     lines.push(format!("RRULE:{rule}"));
   }
@@ -97,14 +97,14 @@ pub fn render_event(event: &EventData<'_>, maybe_method: Option<Method>) -> Stri
   lines.push(format!(
     "ORGANIZER{}:mailto:{}",
     common_name(&event.organizer),
-    event.organizer.email
+    plain(&event.organizer.email)
   ));
   for attendee in &event.attendees {
     lines.push(format!(
       "ATTENDEE{};PARTSTAT={};RSVP=TRUE:mailto:{}",
       common_name(&attendee.person),
       partstat(&attendee.rsvp),
-      attendee.person.email
+      plain(&attendee.person.email)
     ));
   }
   lines.push("END:VEVENT".to_owned());
@@ -227,6 +227,13 @@ fn common_name(person: &EventPerson) -> String {
     },
     None => String::new(),
   }
+}
+
+/// A value that is not TEXT (URI, UID, mailto address): it cannot be escaped, so control characters
+/// that would end the line are dropped. The values come from the server and the identity provider,
+/// not from invitees, but a content line must never be breakable by its values.
+fn plain(value: &str) -> String {
+  value.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// RFC 5545 §3.3.11 TEXT escaping.
@@ -361,6 +368,27 @@ mod tests {
         assert!(line.len() <= FOLD_OCTETS, "{} octets: {line}", line.len());
       }
       assert!(unfolded(&ics).contains(&format!("SUMMARY:{title}")));
+    }
+
+    #[test]
+    fn values_that_are_not_text_cannot_break_their_line() {
+      // Found by fuzzing: a line break in the join URL ended the URL line.
+      let mut data = event();
+      data.join_url = "https://x.example/\r\nEND:VEVENT";
+      data.uid = "1@x\nSUMMARY:evil";
+      data.organizer.email = "o@x.example\r\nATTENDEE:mailto:evil@x.example".into();
+      let ics = render_event(&data, None);
+      for line in ics.strip_suffix("\r\n").unwrap().split("\r\n") {
+        assert!(!line.contains(['\r', '\n']), "{line:?}");
+      }
+      assert_eq!(
+        unfolded(&ics)
+          .split("\r\n")
+          .filter(|line| *line == "END:VEVENT")
+          .count(),
+        1
+      );
+      assert!(!unfolded(&ics).contains("\r\nSUMMARY:evil"));
     }
 
     #[test]

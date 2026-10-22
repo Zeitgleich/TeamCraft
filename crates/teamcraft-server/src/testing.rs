@@ -29,6 +29,7 @@ use crate::meetings::{MeetingBackends, MeetingService};
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
 use crate::router::router;
+use crate::security::RateLimits;
 use crate::services::calls::CallService;
 use crate::state::{AppState, Settings};
 use crate::storage::BlobStore;
@@ -308,6 +309,9 @@ impl TestApp {
     let test_db = TestDatabase::create().await?;
     let mut settings = Settings::default();
     settings.gateway.presence_offline_grace_secs = 0;
+    // Tests make many requests (and fail many authentications) from one address; the ones about
+    // rate limits switch the limits on again.
+    settings.security.rate_limits.is_enabled = false;
     customize(&mut settings);
 
     let keys = JwksCache::new(
@@ -344,6 +348,7 @@ impl TestApp {
       maybe_calls: maybe_calls.map(Arc::new),
       maybe_meetings: maybe_meetings.map(Arc::new),
       scheme: Arc::new(PermissionScheme::default()),
+      rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
       settings: Arc::new(settings),
     };
 
@@ -351,7 +356,12 @@ impl TestApp {
     let addr = listener.local_addr().unwrap();
     let app = router(state.clone());
     let server = tokio::spawn(async move {
-      axum::serve(listener, app).await.unwrap();
+      axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+      )
+      .await
+      .unwrap();
     });
     Some(Self {
       http: reqwest::Client::new(),
@@ -366,6 +376,11 @@ impl TestApp {
   /// `true` if the table (e.g. a message partition) exists.
   pub async fn table_exists(&self, name: &str) -> bool {
     self.test_db.table_exists(name).await
+  }
+
+  /// A pool on the throwaway database, for tests that seed or inspect it directly.
+  pub fn sql_pool(&self) -> &teamcraft_db::testing::PgPool {
+    &self.test_db.pool
   }
 
   pub async fn stop(self) {

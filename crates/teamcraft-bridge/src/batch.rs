@@ -75,7 +75,8 @@ impl Batcher {
     mentions: &Mentions,
     now: Instant,
   ) -> Option<OutgoingBatch> {
-    let text = cut(&line.text, self.limits.max_line_bytes);
+    // Fences are broken before the cut, so the size limits count what is really sent.
+    let text = cut(&break_fences(&line.text), self.limits.max_line_bytes);
     let entry = self.pending.entry(conversation).or_insert_with(|| Pending {
       started_at: now,
       lines: Vec::new(),
@@ -161,7 +162,7 @@ fn render(conversation: ConversationId, pending: Pending) -> OutgoingBatch {
   }
   text.push_str("```\n");
   for line in &pending.lines {
-    text.push_str(&line.replace("```", "`\u{200b}``"));
+    text.push_str(line);
     text.push('\n');
   }
   text.push_str("```");
@@ -175,6 +176,26 @@ fn render(conversation: ConversationId, pending: Pending) -> OutgoingBatch {
     },
     line_count,
   }
+}
+
+/// Never lets three backticks follow each other, so no line can close the code block: a zero-width
+/// space goes in front of every third backtick of a run.
+fn break_fences(line: &str) -> String {
+  let mut out = String::with_capacity(line.len());
+  let mut run = 0;
+  for c in line.chars() {
+    if c == '`' {
+      if run == 2 {
+        out.push('\u{200b}');
+        run = 0;
+      }
+      run += 1;
+    } else {
+      run = 0;
+    }
+    out.push(c);
+  }
+  out
 }
 
 /// Cuts at a character boundary and marks the cut.
@@ -301,6 +322,17 @@ mod tests {
       let text = batcher.take_all().remove(0).text;
       let body = text.lines().nth(1).unwrap();
       assert!(body.len() <= 40 && body.ends_with("..."), "{body}");
+    }
+
+    #[test]
+    fn long_runs_of_backticks_cannot_end_the_block_either() {
+      // Found by fuzzing: replacing "```" pieces by piece re-formed fences across the pieces.
+      let (mut batcher, start) = (Batcher::new(LIMITS), Instant::now());
+      for line_text in ["``````````", "`` ` `` ```` ``", "a```b````c`````d"] {
+        batcher.push(conversation(1), line(line_text), &Mentions::default(), start);
+      }
+      let text = batcher.take_all().remove(0).text;
+      assert_eq!(text.matches("```").count(), 2, "{text}");
     }
 
     #[test]

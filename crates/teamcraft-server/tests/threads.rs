@@ -335,6 +335,29 @@ mod unread {
   }
 }
 
+mod caps {
+  use super::*;
+
+  #[tokio::test]
+  async fn unread_counts_stop_at_the_configured_limit() {
+    let Some(app) = TestApp::start_with(|s| s.limits.max_unread_counted = 3).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    for n in 1..=5 {
+      let ids = if n == 5 { vec![s.alice_id.as_str()] } else { vec![] };
+      send_in(&app, &s.bob, &s.channel, &s.bob_device, n, None, &ids).await;
+    }
+
+    let counts = unread(&app, &s.alice).await;
+
+    // Five unread messages, but only the newest three are looked at; the mention is the newest.
+    assert_eq!(counts.body["conversations"][0]["unread_count"], 3);
+    assert_eq!(counts.body["conversations"][0]["mention_count"], 1);
+    app.stop().await;
+  }
+}
+
 mod gateway {
   use super::*;
 

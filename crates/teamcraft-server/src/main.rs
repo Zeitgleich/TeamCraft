@@ -1,6 +1,7 @@
 //! Entry point: configuration, logging, database, then serve.
 
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{ApnsSender, FcmSender, PushDispatcher, UnifiedPushSender, WebPushSender};
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
+use teamcraft_server::security::RateLimits;
 use teamcraft_server::services::calls::CallService;
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::{oidc, retention, urgent};
@@ -128,11 +130,13 @@ async fn run() -> anyhow::Result<()> {
       notifications: config.notifications.clone(),
       integration: config.integration.clone(),
       web: config.web.clone(),
+      security: config.security.clone(),
       push: PushSettings {
         ttl: Duration::from_secs(config.push.ttl_secs),
         allow_private_endpoints: config.push.allow_private_endpoints,
       },
     }),
+    rate_limits: Arc::new(RateLimits::new(&config.security.rate_limits)),
   };
   spawn_session_sweeper(state.clone());
   if state.settings.maybe_oidc_sync.is_some() {
@@ -150,9 +154,12 @@ async fn run() -> anyhow::Result<()> {
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
   info!(addr = %config.server.listen_addr, "teamcraft-server listening");
-  axum::serve(listener, router(state))
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+  axum::serve(
+    listener,
+    router(state).into_make_service_with_connect_info::<SocketAddr>(),
+  )
+  .with_graceful_shutdown(shutdown_signal())
+  .await?;
   info!("shut down");
   Ok(())
 }

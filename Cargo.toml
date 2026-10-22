@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "apps/desktop"]
 # Third-party code, patched into the dependency graph (see crates/vendor/*/VENDORED.md); not ours to lint.
-exclude = ["crates/vendor"]
+exclude = ["crates/vendor", "fuzz"]
 
 [workspace.package]
 version = "0.0.0"

@@ -8,9 +8,12 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection};
 
-use crate::Database;
+/// Re-exported so tests of other crates can seed and inspect the database directly.
+pub use sqlx::{self, PgPool};
+
+use crate::{Database, DatabaseOptions};
 
 static DATABASE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -45,8 +48,11 @@ impl TestDatabase {
       .unwrap();
 
     let (base, _) = admin_url.rsplit_once('/').unwrap();
-    let pool = PgPool::connect(&format!("{base}/{name}")).await.unwrap();
-    let db = Database::from_pool(pool.clone());
+    // The same connection settings as production (jit off).
+    let db = Database::connect(&format!("{base}/{name}"), &DatabaseOptions::default())
+      .await
+      .unwrap();
+    let pool = db.pool().clone();
     db.migrate().await.unwrap();
     Some(Self {
       db,

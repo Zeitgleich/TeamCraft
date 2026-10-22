@@ -1,0 +1,18 @@
+# Nightly toolchain with cargo-fuzz for fuzz/run.sh. The source is mounted, not copied:
+#
+#   podman build -f fuzz/Containerfile -t teamcraft-fuzz fuzz/
+#
+# The base image is pinned by digest, the nightly by date (sanitizer builds need a nightly; bump
+# both deliberately).
+
+ARG RUST_IMAGE=docker.io/library/rust:1-bookworm@sha256:8bf7188ae46ad73b801c8d405eedc13ce63a7852b562885743a56890723549a8
+FROM ${RUST_IMAGE}
+ARG NIGHTLY=nightly-2026-10-20
+RUN rustup toolchain install ${NIGHTLY} --profile minimal --component rust-src \
+ && rustup default ${NIGHTLY} \
+ && cargo install cargo-fuzz --locked
+ENV RUSTUP_TOOLCHAIN=${NIGHTLY} \
+    SQLX_OFFLINE=true \
+    CARGO_TARGET_DIR=/target \
+    CARGO_INCREMENTAL=0
+WORKDIR /src/fuzz

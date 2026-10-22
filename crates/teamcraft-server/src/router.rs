@@ -1,4 +1,6 @@
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
+use axum::middleware;
 use axum::routing::{delete, get, patch, post, put};
 use tower_http::trace::TraceLayer;
 
@@ -38,6 +40,7 @@ use crate::handlers::{
   update_space_member_handler, upload_key_packages_handler,
 };
 use crate::openapi::openapi_json_handler;
+use crate::security;
 use crate::state::AppState;
 use crate::web;
 
@@ -294,6 +297,10 @@ pub fn router(state: AppState) -> Router {
     .nest("/api/v1", api_v1)
     .nest("/api/internal/v1", internal)
     .fallback_service(web::router(&state.settings.web))
+    .layer(DefaultBodyLimit::max(
+      state.settings.security.max_request_body_bytes,
+    ))
+    .layer(middleware::from_fn_with_state(state.clone(), security::guard))
     .layer(TraceLayer::new_for_http())
     .with_state(state)
 }

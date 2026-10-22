@@ -209,6 +209,10 @@ impl TokenValidator {
       .map_err(|e| invalid(&e))?
       .claims;
 
+    // An empty subject would map every such token to one shared account.
+    if claims.sub.trim().is_empty() {
+      return Err(AuthError::InvalidToken("token has no subject".into()));
+    }
     if !claims.is_issued_to(&self.options.client_id) {
       return Err(AuthError::InvalidToken(
         "token was not issued for this application".into(),
@@ -400,6 +404,48 @@ mod tests {
       &EncodingKey::from_secret(TEST_PUBLIC_KEY_PEM.as_bytes()),
     )
     .unwrap();
+    assert!(validator().verify(&token, &public_key()).is_err());
+  }
+
+  #[test]
+  fn rejects_tokens_that_are_not_valid_yet() {
+    let token = sign(&claims(json!({"nbf": now() + 3600})));
+    assert!(validator().verify(&token, &public_key()).is_err());
+  }
+
+  #[test]
+  fn rejects_tokens_without_subject_or_expiry() {
+    for missing in ["sub", "exp", "iss"] {
+      let token = sign(&claims(json!({ missing: null })));
+      assert!(
+        validator().verify(&token, &public_key()).is_err(),
+        "without {missing}"
+      );
+    }
+    let token = sign(&claims(json!({"sub": ""})));
+    assert!(
+      validator().verify(&token, &public_key()).is_err(),
+      "empty subject"
+    );
+  }
+
+  #[test]
+  fn rejects_unsigned_tokens_with_alg_none() {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT","kid":"test-key"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(claims(json!({})).to_string());
+    for token in [format!("{header}.{payload}."), format!("{header}.{payload}.AAAA")] {
+      assert!(validator().verify(&token, &public_key()).is_err());
+    }
+  }
+
+  #[test]
+  fn rejects_a_token_signed_by_another_key_even_with_a_known_key_id() {
+    let other = EncodingKey::from_secret(b"another key");
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(TEST_KEY_ID.into());
+    let token = encode(&header, &claims(json!({})), &other).unwrap();
     assert!(validator().verify(&token, &public_key()).is_err());
   }
 

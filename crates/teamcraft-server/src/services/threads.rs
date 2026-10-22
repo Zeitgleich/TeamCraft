@@ -141,7 +141,7 @@ pub async fn list_threads(
 pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<UnreadResponse, ApiError> {
   let conversations = state
     .database
-    .conversation_unread_counts(caller.user.id)
+    .conversation_unread_counts(caller.user.id, state.settings.limits.max_unread_counted)
     .await?
     .into_iter()
     .map(|row| ConversationUnread {

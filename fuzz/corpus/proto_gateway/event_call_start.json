@@ -1,0 +1,1 @@
+{"type": "event", "seq": 1, "event": {"type": "call_start", "conversation_id": "1", "call_id": "2", "started_by": "3", "started_at": 4, "is_ringing": true, "participants": [{"user_id": "3", "device_id": "5"}]}}

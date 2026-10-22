@@ -11,7 +11,7 @@ mod validator;
 pub mod test_keys;
 
 pub use error::AuthError;
-pub use extractor::AuthenticatedUser;
+pub use extractor::{AdminUser, AuthenticatedUser, InboxCaller, SfuCaller};
 pub use jwks::{BoxFuture, HttpJwkSource, JwkSource, JwksCache, JwksCacheOptions};
 pub use revocations::Revocations;
 pub use roles::RoleMapping;

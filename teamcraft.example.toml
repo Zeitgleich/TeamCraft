@@ -88,6 +88,9 @@ max_text_length = 1000
 default_page_size = 50
 max_page_size = 200
 max_directory_results = 50
+# Unread counts look at this many of the newest unread messages per conversation; a count equal to it
+# means "that many or more" (clients show "1000+"). Keeps the cost independent of huge unread backlogs.
+max_unread_counted = 1000
 # Unused MLS key packages per device, their size and the count per upload.
 max_key_packages_per_device = 200
 max_key_package_bytes = 16384
@@ -164,6 +167,29 @@ urgent_scheduler_interval_secs = 15
 [integration]
 # Days; 0 sets no retention. A channel's own retention setting wins.
 default_retention_days = 30
+
+# Request limits and response hardening of the API.
+[security]
+# Largest request body; bigger ones get 413 (ciphertext and MLS payloads have smaller limits in [limits]).
+max_request_body_bytes = 4194304
+# Send Strict-Transport-Security; enable when a TLS-terminating proxy serves the API.
+hsts = false
+# Behind a reverse proxy that sets X-Forwarded-For: count clients by its last entry. Leave off when
+# clients connect directly, since anybody could forge the header.
+trust_forwarded_for = false
+
+# Per-minute token buckets (burst = the same number), in memory per instance. A first line against
+# abuse; the reverse proxy's limits come on top.
+[security.rate_limits]
+is_enabled = true
+# All requests of one client address (IPv6 clients count per /64).
+ip_requests_per_minute = 1200
+# Writes (POST/PUT/PATCH/DELETE) of one authenticated user.
+user_writes_per_minute = 600
+# Requests without credentials: guest join, back-channel logout, internal endpoints.
+public_requests_per_minute = 30
+# Failed authentications (401) per address; when used up, that address gets 429 until it refills.
+auth_failures_per_minute = 30
 
 # The web client: the `trunk build` output of crates/teamcraft-ui, served at `/` (unknown paths get
 # index.html, `/api/...` stays the API, `/f/<id>` is the share-link download page). Assets with a

@@ -1,0 +1,1 @@
+{"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": false, "dnd_schedule": {"utc_offset_minutes": 60, "windows": [{"weekdays": ["mon", "fri"], "start_minute": 1320, "end_minute": 420}], "allow_user_ids": ["9"]}}

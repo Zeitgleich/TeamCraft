@@ -42,6 +42,8 @@ pub struct Config {
   pub integration: IntegrationConfig,
   #[serde(default)]
   pub web: WebConfig,
+  #[serde(default)]
+  pub security: SecurityConfig,
   /// Blob storage for attachments; without it the attachment endpoints answer 503.
   #[serde(default)]
   pub storage: Option<StorageConfig>,
@@ -173,6 +175,9 @@ pub struct LimitsConfig {
   pub default_page_size: u32,
   pub max_page_size: u32,
   pub max_directory_results: u32,
+  /// Unread counts look at this many of the newest unread messages per conversation; a count equal
+  /// to it means "that many or more" (clients show "1000+").
+  pub max_unread_counted: u32,
   /// Unused key packages a device may have on the server.
   pub max_key_packages_per_device: usize,
   pub max_key_package_bytes: usize,
@@ -260,6 +265,62 @@ pub struct RetentionJobConfig {
   pub initial_delay_secs: u64,
   /// Months of message partitions kept ready ahead of time (the job tops them up).
   pub partitions_ahead_months: u32,
+}
+
+/// Request limits and response hardening of the HTTP API.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SecurityConfig {
+  /// Largest request body; bigger ones get 413. Ciphertext, key packages and MLS payloads have
+  /// their own, smaller limits (`[limits]`); this is the ceiling in front of them.
+  pub max_request_body_bytes: usize,
+  /// Send `Strict-Transport-Security`. Enable it when a TLS-terminating proxy serves the API.
+  pub hsts: bool,
+  /// The server runs behind a reverse proxy that sets `X-Forwarded-For`: use the last address in
+  /// it as the client address (the one the proxy saw). Leave off when clients connect directly,
+  /// since anybody could forge the header.
+  pub trust_forwarded_for: bool,
+  pub rate_limits: RateLimitConfig,
+}
+
+/// Per-minute limits; each is a token bucket with a burst of the same size. Counted in memory per
+/// server instance.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RateLimitConfig {
+  pub is_enabled: bool,
+  /// All requests of one client address.
+  pub ip_requests_per_minute: u32,
+  /// Writes (POST, PUT, PATCH, DELETE) of one authenticated user.
+  pub user_writes_per_minute: u32,
+  /// Requests without credentials: guest join, back-channel logout, internal endpoints.
+  pub public_requests_per_minute: u32,
+  /// Failed authentications (401) of one client address; once used up, that address gets 429 until
+  /// the bucket refills, which slows token guessing.
+  pub auth_failures_per_minute: u32,
+}
+
+impl Default for SecurityConfig {
+  fn default() -> Self {
+    Self {
+      max_request_body_bytes: 4 * 1024 * 1024,
+      hsts: false,
+      trust_forwarded_for: false,
+      rate_limits: RateLimitConfig::default(),
+    }
+  }
+}
+
+impl Default for RateLimitConfig {
+  fn default() -> Self {
+    Self {
+      is_enabled: true,
+      ip_requests_per_minute: 1200,
+      user_writes_per_minute: 600,
+      public_requests_per_minute: 30,
+      auth_failures_per_minute: 30,
+    }
+  }
 }
 
 /// Serving the web client (the `trunk build` output of `teamcraft-ui`).
@@ -560,6 +621,7 @@ impl Default for LimitsConfig {
       default_page_size: 50,
       max_page_size: 200,
       max_directory_results: 50,
+      max_unread_counted: 1000,
       max_key_packages_per_device: 200,
       max_key_package_bytes: 16 * 1024,
       max_key_packages_per_upload: 100,

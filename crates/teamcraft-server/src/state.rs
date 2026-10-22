@@ -8,13 +8,14 @@ use secrecy::SecretString;
 
 use crate::config::{
   GatewayConfig, IntegrationConfig, LimitsConfig, NotificationsConfig, PolicyConfig, RendezvousConfig,
-  RetentionJobConfig, RoleNames, WebConfig,
+  RetentionJobConfig, RoleNames, SecurityConfig, WebConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
 use crate::meetings::MeetingService;
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
+use crate::security::RateLimits;
 use crate::services::calls::CallService;
 use crate::storage::BlobStore;
 
@@ -37,6 +38,7 @@ pub struct AppState {
   pub maybe_meetings: Option<Arc<MeetingService>>,
   pub scheme: Arc<PermissionScheme>,
   pub settings: Arc<Settings>,
+  pub rate_limits: Arc<RateLimits>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -52,6 +54,7 @@ pub struct Settings {
   pub notifications: NotificationsConfig,
   pub integration: IntegrationConfig,
   pub web: WebConfig,
+  pub security: SecurityConfig,
   pub push: PushSettings,
 }
 
