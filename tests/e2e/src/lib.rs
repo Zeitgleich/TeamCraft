@@ -17,6 +17,7 @@ pub mod rest;
 pub mod scenario;
 pub mod stack;
 pub mod tokens;
+pub mod totp;
 
 pub use bridge::BridgeProcess;
 pub use mail::{Mailpit, ReceivedMail};

@@ -101,6 +101,8 @@ pub struct PushNotification {
   pub is_direct: bool,
   pub is_mention: bool,
   pub is_urgent: bool,
+  /// A ring, not a message: the app reports an incoming call instead of showing text.
+  pub is_call: bool,
   /// Show without sound or vibration (the sender sent it silently).
   pub is_silent: bool,
 }
@@ -109,6 +111,8 @@ pub struct PushNotification {
 pub enum PushService {
   Fcm,
   UnifiedPush,
+  /// Apple Push Notification service (the iOS app; the token is the hex device token).
+  Apns,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -176,6 +180,7 @@ impl From<PushPreview> for PushNotification {
       is_direct: preview.is_direct,
       is_mention: preview.wake_up.kind == PushKind::Mention,
       is_urgent: preview.wake_up.is_urgent,
+      is_call: preview.wake_up.kind == PushKind::Call,
       is_silent: preview.is_silent,
     }
   }
@@ -186,6 +191,7 @@ impl From<PushService> for PushProvider {
     match service {
       PushService::Fcm => Self::Fcm,
       PushService::UnifiedPush => Self::UnifiedPush,
+      PushService::Apns => Self::Apns,
     }
   }
 }
@@ -199,4 +205,11 @@ impl From<Presence> for PresenceStatus {
       Presence::Offline => Self::Offline,
     }
   }
+}
+
+/// A recovery request this device made: the server's ID and the code the user reads to an admin.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct OrgRecoveryStart {
+  pub request_id: String,
+  pub verification_code: String,
 }

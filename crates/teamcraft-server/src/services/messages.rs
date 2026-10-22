@@ -73,6 +73,11 @@ pub async fn send_message(
       "mentioned user {stranger} is not in the conversation"
     )));
   }
+  if request.maybe_thread_id.is_some() && !state.policy.get().threads.is_threaded_view_enabled {
+    return Err(ApiError::Forbidden(
+      "threads are turned off in this workspace".into(),
+    ));
+  }
   let maybe_thread_root = match request.maybe_thread_id {
     Some(thread) => {
       let root = state

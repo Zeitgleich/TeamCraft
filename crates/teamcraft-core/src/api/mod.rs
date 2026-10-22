@@ -35,6 +35,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+  CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
+  OrgBackgroundId,
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
@@ -282,10 +284,27 @@ pub trait ServerApi {
     background: BackgroundId,
   ) -> impl Future<Output = Result<BackgroundDownloadResponse, ApiError>>;
   fn delete_background(&self, background: BackgroundId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Admins: announces an organization background (stored unencrypted, hash in the policy).
+  fn create_org_background_upload(
+    &self,
+    request: &CreateOrgBackgroundUploadRequest,
+  ) -> impl Future<Output = Result<CreateOrgBackgroundUploadResponse, ApiError>>;
+  fn complete_org_background_upload(
+    &self,
+    background: OrgBackgroundId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  fn download_org_background(
+    &self,
+    background: OrgBackgroundId,
+  ) -> impl Future<Output = Result<OrgBackgroundDownloadResponse, ApiError>>;
+  fn delete_org_background(&self, background: OrgBackgroundId) -> impl Future<Output = Result<(), ApiError>>;
   /// Uploads an encrypted blob to a presigned URL (object storage, not the API).
   fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
   /// Downloads an encrypted blob from a presigned URL.
   fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
+  /// Like [`Self::get_blob`], but stops reading (and fails) once the blob grows past `max_bytes`,
+  /// so a hostile server or storage can't make the client buffer an unbounded download.
+  fn get_blob_capped(&self, url: &str, max_bytes: u64) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
   /// Makes an attachment downloadable without an account (`POST /shares`; the request names the attachment).
   fn create_share_link(
     &self,
@@ -349,6 +368,13 @@ pub enum ApiError {
   Token(String),
   #[error("not supported on this platform yet: {0}")]
   Unsupported(&'static str),
+  /// A downloaded blob was larger than it may be.
+  #[error("the download is larger than {max_bytes} bytes")]
+  BlobTooLarge { max_bytes: u64 },
+  /// The server URL is not `https://` (plain `http://` is only allowed to a loopback address, for
+  /// development): no request or token is sent.
+  #[error("the server address must use https: {0}")]
+  InsecureServerUrl(String),
 }
 
 impl ApiError {

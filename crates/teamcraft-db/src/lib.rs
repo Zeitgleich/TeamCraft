@@ -14,6 +14,7 @@ mod conversation;
 mod database;
 mod device;
 mod device_list;
+mod email_digest;
 mod error;
 mod identity;
 mod ids;
@@ -25,6 +26,7 @@ mod meeting;
 mod message;
 mod mls;
 mod notification;
+mod org_background;
 mod org_recovery;
 mod permission_override;
 mod profile;
@@ -60,6 +62,7 @@ pub use conversation::{
 pub use database::{Database, DatabaseOptions};
 pub use device::{Device, NewDevice};
 pub use device_list::{DeviceList, DeviceListOutcome};
+pub use email_digest::{DueDigest, StoredEmailDigest};
 pub use error::DbError;
 pub use identity::{IdentityKey, IdentityKeyOutcome, NewIdentityKey};
 pub use invite::{AppliedInvite, Invite, NewInvite};
@@ -73,6 +76,7 @@ pub use meeting::{
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 pub use notification::{ReceiptRow, StoredUserSettings};
+pub use org_background::OrgBackgroundObject;
 pub use org_recovery::{
   ApprovalOutcome, NewRecoveryRequest, ShareOutcome, StoredApproval, StoredRecoveryRequest, StoredShare,
 };
@@ -90,6 +94,6 @@ pub use status::StoredStatus;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};
 pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};
 pub use urgent::{Acknowledgement, DueReminder};
-pub use user::{OidcIdentity, OidcUserRow, PresencePreference, User, UserSearch};
+pub use user::{OidcIdentity, OidcUserRow, PresencePreference, SyncedUser, User, UserSearch};
 pub use user_group::{GroupCreateOutcome, NewUserGroup, UserGroup};
 pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};

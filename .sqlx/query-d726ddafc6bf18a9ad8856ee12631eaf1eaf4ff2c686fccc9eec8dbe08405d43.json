@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_email_digest SET\n           watermark_message_id = GREATEST(watermark_message_id, $2),\n           next_check_at = $3,\n           last_sent_at = COALESCE($4, last_sent_at)\n         WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d726ddafc6bf18a9ad8856ee12631eaf1eaf4ff2c686fccc9eec8dbe08405d43"
+}

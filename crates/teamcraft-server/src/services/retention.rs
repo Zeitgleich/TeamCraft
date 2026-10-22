@@ -138,7 +138,11 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
   let mut report = RetentionReport::default();
 
   for target in state.database.list_retention_targets().await? {
-    let effective = effective(target.own, target.space, retention.default);
+    // The limit also holds for settings made before it was lowered.
+    let effective = limited(
+      effective(target.own, target.space, retention.default),
+      retention.limit,
+    );
     if effective.maybe_max_age_days.is_none() && effective.maybe_max_messages.is_none() {
       continue;
     }
@@ -256,6 +260,31 @@ pub fn snowflake_floor(time: OffsetDateTime) -> Snowflake {
   Snowflake::new(millis.clamp(0, (1 << 41) - 1) << 22).unwrap_or(Snowflake::ZERO)
 }
 
+/// The setting cut down to the workspace limit: a value above it counts as the limit, an unlimited
+/// one as well. Settings stay as stored, so raising the limit again gives them back.
+pub fn limited(setting: StoredRetention, limit: RetentionSetting) -> StoredRetention {
+  StoredRetention {
+    maybe_max_age_days: at_most(
+      setting.maybe_max_age_days,
+      limit.maybe_max_age_days.and_then(|days| i32::try_from(days).ok()),
+    ),
+    maybe_max_messages: at_most(
+      setting.maybe_max_messages,
+      limit
+        .maybe_max_messages
+        .and_then(|count| i64::try_from(count).ok()),
+    ),
+  }
+}
+
+fn at_most<T: Ord>(maybe_value: Option<T>, maybe_limit: Option<T>) -> Option<T> {
+  match (maybe_value, maybe_limit) {
+    (Some(value), Some(limit)) => Some(value.min(limit)),
+    (None, Some(limit)) => Some(limit),
+    (maybe_value, None) => maybe_value,
+  }
+}
+
 /// Per field: the object's own value, else its space's, else the default.
 pub fn effective(own: StoredRetention, space: StoredRetention, default: RetentionSetting) -> StoredRetention {
   StoredRetention {
@@ -286,7 +315,10 @@ async fn status(
   space: StoredRetention,
 ) -> Result<RetentionStatusResponse, ApiError> {
   let (_, policy, _) = current_policy(state).await?;
-  let effective = effective(own, space, policy.retention.default);
+  let effective = limited(
+    effective(own, space, policy.retention.default),
+    policy.retention.limit,
+  );
   Ok(RetentionStatusResponse {
     own: to_setting(own),
     effective: to_setting(effective),
@@ -393,6 +425,24 @@ mod tests {
       RetentionSetting::default(),
     );
     assert_eq!(none, stored(None, None));
+  }
+
+  #[test]
+  fn settings_beyond_a_lowered_limit_count_as_the_limit() {
+    let limit = RetentionSetting {
+      maybe_max_age_days: Some(30),
+      maybe_max_messages: None,
+    };
+    assert_eq!(
+      limited(stored(Some(90), Some(5)), limit),
+      stored(Some(30), Some(5))
+    );
+    assert_eq!(limited(stored(None, None), limit), stored(Some(30), None));
+    assert_eq!(limited(stored(Some(7), None), limit), stored(Some(7), None));
+    assert_eq!(
+      limited(stored(Some(90), None), RetentionSetting::default()),
+      stored(Some(90), None)
+    );
   }
 
   #[test]

@@ -25,7 +25,7 @@ use time::{Duration, OffsetDateTime};
 
 use super::access::load_space;
 use super::audit::{self, Target as AuditTarget};
-use super::convert::{unix_millis, user_summary};
+use super::convert::{presented_name, unix_millis, user_summary};
 use super::invites::{check_channels, check_guest_domain, future_expiry, normalize_email};
 use super::spaces::require_member_management;
 use crate::auth::{AuthError, AuthenticatedUser, TokenIdentity};
@@ -188,7 +188,10 @@ pub async fn create_local_guest(
   let (subject, body) = brand.activation_texts(&state.settings.mail);
   let fill = |template: &str| {
     template
-      .replace("{inviter}", &caller.user.display_name)
+      .replace(
+        "{inviter}",
+        &presented_name(&state.policy.get().directory, &caller.user),
+      )
       .replace("{space}", &access.view.space.name)
       .replace("{url}", &url)
   };
@@ -267,10 +270,16 @@ pub async fn reissue_activation(
     to_address: account.login.clone(),
     maybe_to_name: None,
     subject: subject
-      .replace("{inviter}", &caller.user.display_name)
+      .replace(
+        "{inviter}",
+        &presented_name(&state.policy.get().directory, &caller.user),
+      )
       .replace("{space}", &brand.display_name),
     text: body
-      .replace("{inviter}", &caller.user.display_name)
+      .replace(
+        "{inviter}",
+        &presented_name(&state.policy.get().directory, &caller.user),
+      )
       .replace("{space}", &brand.display_name)
       .replace("{url}", &url),
     method: Method::Request,

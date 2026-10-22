@@ -1,0 +1,90 @@
+name: iOS
+
+# The iOS app needs a Mac: builds the Rust core as an XCFramework for device and simulator,
+# generates the Xcode project, builds the app and the notification extension and runs the unit
+# tests on a simulator. Unsigned (no Apple account in CI); signing is described in apps/ios/README.md.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/ios/**"
+      - "crates/teamcraft-ffi/**"
+      - "crates/teamcraft-core/**"
+      - "crates/teamcraft-client-api/**"
+      - "crates/teamcraft-crypto/**"
+      - "crates/teamcraft-media/**"
+      - "crates/teamcraft-proto/**"
+      - "crates/teamcraft-uniffi-bindgen/**"
+      - "Cargo.lock"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - "crates/teamcraft-ffi/**"
+      - "crates/teamcraft-core/**"
+      - "crates/teamcraft-client-api/**"
+      - "crates/teamcraft-crypto/**"
+      - "crates/teamcraft-media/**"
+      - "crates/teamcraft-proto/**"
+      - "crates/teamcraft-uniffi-bindgen/**"
+      - "Cargo.lock"
+      - ".github/workflows/ios.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: String catalogs are complete (en + de)
+        run: python3 apps/ios/scripts/check-strings.py
+      - name: Tools
+        run: brew install xcodegen cmake
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ios
+      - name: Rust core as XCFramework and Swift bindings
+        # Debug profile: much faster to build than release, and the tests never run the core.
+        run: apps/ios/scripts/build-xcframework.sh --debug
+      - name: Generate the Xcode project
+        working-directory: apps/ios
+        run: xcodegen generate
+      - name: Pick a simulator
+        id: simulator
+        run: |
+          id=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime in sorted(devices, reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for device in devices[runtime]:
+                  if device["name"].startswith("iPhone") and device["isAvailable"]:
+                      print(device["udid"]); sys.exit(0)
+          sys.exit(1)')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: Build and test (simulator, unsigned)
+        working-directory: apps/ios
+        run: >
+          set -o pipefail &&
+          xcodebuild test -project TeamCraft.xcodeproj -scheme TeamCraft
+          -destination "id=${{ steps.simulator.outputs.id }}"
+          -derivedDataPath build/DerivedData -resultBundlePath build/TeamCraft.xcresult
+          CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+          | tail -n 200
+      - name: Upload the result bundle on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-xcresult
+          path: apps/ios/build/TeamCraft.xcresult

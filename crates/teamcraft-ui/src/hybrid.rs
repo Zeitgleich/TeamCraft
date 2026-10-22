@@ -6,6 +6,8 @@
 //! comes from the account, so admins see the console (with demo data).
 
 use std::rc::Rc;
+use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::Role;
 
@@ -13,7 +15,7 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
-use teamcraft_proto::{CategoryId, HistoryPolicy};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy};
 
 use crate::admin::{
   AdminChannel, AdminUser, AuditEntry, DeviceInfo, PolicyBlocker, PolicyField, Retention, SecurityPolicy,
@@ -23,7 +25,8 @@ use crate::admin_live::{AdminLive, policy_from_security};
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
+  Participant,
 };
 use crate::clock::now_ms;
 use crate::live::{LiveScope, LiveServer, POLL_INTERVAL_MS, thread_summary};
@@ -309,6 +312,30 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 
   fn saved_items(&self) -> Vec<SavedItem> {
     self.chat.saved_items()
+  }
+
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    self.chat.background_images()
+  }
+
+  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
+    self.chat.add_background_image(name, picture);
+  }
+
+  fn delete_background_image(&self, id: BackgroundId) {
+    self.chat.delete_background_image(id);
+  }
+
+  fn add_org_background(&self, name: &str, picture: Vec<u8>) {
+    self.chat.add_org_background(name, picture);
+  }
+
+  fn delete_org_background(&self, id: OrgBackgroundId) {
+    self.chat.delete_org_background(id);
+  }
+
+  fn set_org_background_rule(&self, rule: OrgBackgroundRule) {
+    self.chat.set_org_background_rule(rule);
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {

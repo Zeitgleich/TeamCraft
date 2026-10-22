@@ -49,7 +49,7 @@
       ]
     },
     "nullable": [
-      false,
+      true,
       null,
       true,
       true

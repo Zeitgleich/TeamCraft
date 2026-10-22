@@ -199,6 +199,8 @@ wire_enum! {
     Message => "message",
     /// A message that mentions the user, or arrives in a DM.
     Mention => "mention",
+    /// Someone calls the user (a ring); the iOS extension hands it to CallKit (e2ee.md §7).
+    Call => "call",
   }
 }
 

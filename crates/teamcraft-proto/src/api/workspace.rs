@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{Base64Bytes, DeviceId, HistoryPolicy, UnixMillis};
+use crate::{Base64Bytes, DeviceId, HistoryPolicy, OrgBackgroundId, UnixMillis};
 
 wire_enum! {
   /// Which log an entry belongs to.
@@ -131,6 +131,54 @@ pub struct StatusPreset {
   pub maybe_duration_minutes: Option<u32>,
 }
 
+wire_enum! {
+  /// What people may put behind themselves in calls (admin.md §3.5). Enforced by member clients.
+  pub enum CallBackgroundMode {
+    /// Organization backgrounds are offered next to the presets and people's own pictures.
+    Free => "free",
+    /// Only organization backgrounds, blur or nothing.
+    OrgOnly => "org_only",
+    /// The camera always shows an organization background; people pick which.
+    Required => "required",
+  }
+}
+
+/// A background picture an admin uploaded for the organization. The owner-signed policy carries
+/// its hash, so clients detect a server that swaps the picture (e2ee.md §8.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OrgBackground {
+  pub id: OrgBackgroundId,
+  pub name: String,
+  /// SHA-256 of the stored picture (a JPEG).
+  pub sha256: Base64Bytes,
+  pub size_bytes: u64,
+}
+
+/// Organization call backgrounds and how they are enforced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CallBackgroundPolicy {
+  pub mode: CallBackgroundMode,
+  /// In the order pickers show them.
+  #[serde(default)]
+  pub images: Vec<OrgBackground>,
+  /// Preselected (and used when a required background isn't chosen yet); one of `images`.
+  #[serde(rename = "default_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_default: Option<OrgBackgroundId>,
+  /// Guests choose freely whatever the mode.
+  pub guests_exempt: bool,
+}
+
+impl Default for CallBackgroundPolicy {
+  fn default() -> Self {
+    Self {
+      mode: CallBackgroundMode::Free,
+      images: Vec::new(),
+      maybe_default: None,
+      guests_exempt: true,
+    }
+  }
+}
+
 /// Which presence features exist (PLAN.md §4, §11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PresencePolicy {
@@ -182,6 +230,35 @@ impl Default for DirectoryPolicy {
   }
 }
 
+/// Guest rules the server enforces (PLAN.md §12).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GuestPolicy {
+  /// If not empty, guests need an e-mail address of one of these domains (or a subdomain): they
+  /// can't be invited, added to meetings or sign in otherwise. Lower case, without `@`. The
+  /// server's own `[guests] allowed_email_domains` applies in addition.
+  #[serde(default)]
+  pub allowed_email_domains: Vec<String>,
+}
+
+/// Threads (PLAN.md §3): admin options for the threaded view and the auto-follow default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadPolicy {
+  /// Off: the workspace is flat, the server refuses messages that reply in a thread. Existing
+  /// threads stay readable.
+  pub is_threaded_view_enabled: bool,
+  /// Whether people who never chose follow the threads where they are mentioned.
+  pub auto_follows_mentioned_threads: bool,
+}
+
+impl Default for ThreadPolicy {
+  fn default() -> Self {
+    Self {
+      is_threaded_view_enabled: true,
+      auto_follows_mentioned_threads: true,
+    }
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -198,6 +275,12 @@ pub struct WorkspacePolicy {
   pub directory: DirectoryPolicy,
   #[serde(default)]
   pub presence: PresencePolicy,
+  #[serde(default)]
+  pub threads: ThreadPolicy,
+  #[serde(default)]
+  pub guests: GuestPolicy,
+  #[serde(default)]
+  pub call_backgrounds: CallBackgroundPolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -233,6 +316,9 @@ impl Default for WorkspacePolicy {
       session: SessionPolicy::default(),
       directory: DirectoryPolicy::default(),
       presence: PresencePolicy::default(),
+      threads: ThreadPolicy::default(),
+      guests: GuestPolicy::default(),
+      call_backgrounds: CallBackgroundPolicy::default(),
     }
   }
 }
@@ -296,6 +382,28 @@ mod tests {
     assert_eq!(policy.compliance_archive.mode, ComplianceArchiveMode::Off);
     assert!(json.contains(r#""admin_self_join":"visible""#));
     assert!(policy.org_recovery.is_enabled_for_members && !policy.org_recovery.is_enabled_for_guests);
+  }
+
+  #[test]
+  fn call_backgrounds_default_to_free_and_older_policies_still_parse() {
+    let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(
+      value["call_backgrounds"],
+      serde_json::json!({"mode": "free", "images": [], "guests_exempt": true})
+    );
+    value.as_object_mut().unwrap().remove("call_backgrounds");
+    let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
+    assert_eq!(older.call_backgrounds, CallBackgroundPolicy::default());
+
+    let required: CallBackgroundPolicy = serde_json::from_value(serde_json::json!({
+      "mode": "required",
+      "images": [{"id": "5", "name": "Lobby", "sha256": "AAAA", "size_bytes": 3}],
+      "default_id": "5",
+      "guests_exempt": false,
+    }))
+    .unwrap();
+    assert_eq!(required.mode, CallBackgroundMode::Required);
+    assert_eq!(required.maybe_default, Some("5".parse().unwrap()));
   }
 
   #[test]

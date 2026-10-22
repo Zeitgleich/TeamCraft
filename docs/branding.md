@@ -193,8 +193,8 @@ exists (a user clicks something) the request brand is used instead.
 | Guest meeting links            | Brand of the meeting (organizer's home brand) | Join page branding, link host                           |
 
 Every generated link uses the first host name of the chosen brand, never the received host. Implemented
-today: invitation and activation e-mail, meeting invitations (iMIP, join links, CalDAV events) and share
-links; push texts and digests follow when those exist.
+today: invitation and activation e-mail, the mention digest, meeting invitations (iMIP, join links,
+CalDAV events) and share links. Push texts follow when they carry brand names.
 
 ## 7. Spaces and brands
 
@@ -275,8 +275,8 @@ An optional label per user, taken from the identity provider.
 ## 13. What is not there yet
 
 - The space settings dialog has no brand picker; the tag is set through the API.
-- Notification texts (push) and e-mail digests do not exist yet; they will take the recipient's home brand
-  from `BrandRegistry::for_email` when they do.
+- Push notification texts do not name a brand yet; when they do they take the recipient's home brand from
+  `BrandRegistry::for_email`.
 - Android and iOS shells call `GET /api/v1/brand` and run `teamcraft-client-api::brand` once they get a
   server-URL screen; the server and the checks are ready.
 - One OIDC client for all brands (§10).

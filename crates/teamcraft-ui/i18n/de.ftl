@@ -238,7 +238,9 @@ effect-bookshelf = Bücherregal
 effect-sunrise = Sonnenaufgang
 effect-forest = Wald
 effect-upload = Bild hochladen
-effect-upload-soon = Eigene Hintergründe sind noch nicht verfügbar
+effect-upload-too-large = Dieses Bild ist größer als { $limit }.
+effect-upload-unreadable = Das Bild konnte nicht gelesen werden.
+effect-delete = Hintergrund { $name } löschen
 
 ## Eingehende Anrufe
 incoming-title = Eingehender Anruf
@@ -261,6 +263,7 @@ admin-nav-channels = Spaces und Kanäle
 admin-nav-users = Nutzer und Gäste
 admin-nav-security = Sicherheitsrichtlinie
 admin-nav-retention = Aufbewahrung
+admin-nav-backgrounds = Hintergründe
 admin-nav-audit = Audit-Protokoll
 admin-back = Zurück zum Chat
 admin-metadata-only = Nur Metadaten
@@ -380,6 +383,27 @@ policy-signing = Aktuelle Richtlinienversion { $version }. Änderungen werden mi
 policy-saved = Als Richtlinienversion { $version } gespeichert.
 policy-reset = Änderungen verwerfen
 policy-save = Richtlinie speichern
+
+admin-backgrounds-title = Anruf-Hintergründe
+admin-backgrounds-subtitle = Bilder für den Kamera-Hintergrund aller und ob sie verwendet werden müssen. Jede Änderung ist eine neue signierte Richtlinienversion.
+admin-backgrounds-pictures = Bilder der Organisation
+admin-backgrounds-default = Standard
+admin-backgrounds-up = Nach oben
+admin-backgrounds-down = Nach unten
+admin-backgrounds-delete = Löschen
+admin-backgrounds-name = Name (optional)
+admin-backgrounds-add = Bild hinzufügen
+admin-backgrounds-choose-file = Wähle zuerst ein JPEG- oder PNG-Bild.
+admin-backgrounds-unreadable = Das Bild konnte nicht gelesen werden.
+policy-backgrounds-mode = Regel für Kamera-Hintergründe
+policy-backgrounds-free = Freie Wahl
+policy-backgrounds-free-hint = Bilder der Organisation werden zuerst angeboten, neben Weichzeichnen, den eingebauten Bildern und eigenen Bildern.
+policy-backgrounds-org-only = Nur Bilder der Organisation
+policy-backgrounds-org-only-hint = Zur Wahl stehen die Bilder der Organisation, Weichzeichnen und kein Hintergrund.
+policy-backgrounds-required = Vorgeschrieben
+policy-backgrounds-required-hint = Hinter der Person ist immer eines der Bilder der Organisation zu sehen; welches, entscheidet jede Person selbst. Geräte, die den Hintergrund nicht ersetzen können, können die Kamera nicht einschalten.
+policy-backgrounds-guests-exempt = Gäste wählen frei
+policy-backgrounds-required-needs-picture = Füge zuerst mindestens ein Bild hinzu, bevor du eines vorschreibst.
 
 admin-retention-title = Aufbewahrung
 admin-retention-subtitle = Die letzten N Tage und/oder N Nachrichten behalten, je nachdem, was strenger ist. Kanaleigentümer können weniger wählen, bis zu { $days } Tagen.
@@ -930,6 +954,15 @@ notif-browser-granted = Benachrichtigungen sind in diesem Browser erlaubt.
 notif-browser-denied = Benachrichtigungen sind blockiert. Erlaube sie in den Website-Einstellungen des Browsers.
 notif-browser-allow = Benachrichtigungen erlauben
 notif-browser-background = Benachrichtigungen kommen auch an, wenn TeamCraft geschlossen ist.
+
+log-toolbar-label = Optionen der Protokollansicht
+log-mode-log = Protokoll
+log-mode-chat = Chat
+log-filter-level = Mindeststufe
+log-filter-text = Protokolltext filtern
+log-follow = Mitlaufen
+log-filter-none = Keine Protokolleinträge passen zum Filter.
+log-filter-truncated = Die neuesten { $count } passenden Einträge werden angezeigt.
 
 # Profiles, people and groups (v1 REST UI)
 profile-edit-title = Profil bearbeiten

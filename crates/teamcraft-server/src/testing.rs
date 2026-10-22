@@ -517,6 +517,28 @@ impl TestApp {
     &self.test_db.pool
   }
 
+  /// Changes the settings of the running app (e.g. policies that name IDs created by the test) by
+  /// serving the same state again under a new address; `base_url` and `ws_url` change with it.
+  pub fn reconfigure(&mut self, customize: impl FnOnce(&mut Settings)) {
+    let mut settings = (*self.state.settings).clone();
+    customize(&mut settings);
+    self.state.settings = Arc::new(settings);
+    self.server.abort();
+    let listener = bind_listener(([127, 0, 0, 1], 0).into()).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(self.state.clone());
+    self.server = tokio::spawn(async move {
+      axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+      )
+      .await
+      .unwrap();
+    });
+    self.base_url = format!("http://{addr}");
+    self.ws_url = format!("ws://{addr}/api/v1/gateway");
+  }
+
   pub async fn stop(self) {
     self.server.abort();
     self.test_db.drop_database().await;

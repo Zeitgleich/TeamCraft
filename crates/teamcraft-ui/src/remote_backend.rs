@@ -10,6 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
+use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_proto::OrgBackgroundId;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
@@ -19,6 +21,7 @@ use teamcraft_client_api::actions::{
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
+use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
   ThreadSummary, User, UserId,
@@ -28,7 +31,7 @@ use teamcraft_client_api::remote::{
   MessageWindow,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
-use teamcraft_proto::{CategoryId, HistoryPolicy, WebPushKeyResponse};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyResponse};
 
 use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen};
@@ -437,6 +440,39 @@ impl ChatBackend for RemoteChat {
       Some(ChatAnswer::SavedItems { items }) => items,
       _ => Vec::new(),
     }
+  }
+
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    match self.ask(ChatQuery::BackgroundImages) {
+      Some(ChatAnswer::BackgroundImages { images }) => images,
+      _ => Vec::new(),
+    }
+  }
+
+  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
+    self.act(ChatAction::AddBackgroundImage {
+      name: name.to_owned(),
+      picture: picture.into(),
+    });
+  }
+
+  fn add_org_background(&self, name: &str, picture: Vec<u8>) {
+    self.act(ChatAction::AddOrgBackground {
+      name: name.to_string(),
+      picture: picture.into(),
+    });
+  }
+
+  fn delete_background_image(&self, id: BackgroundId) {
+    self.act(ChatAction::DeleteBackgroundImage { id });
+  }
+
+  fn delete_org_background(&self, id: OrgBackgroundId) {
+    self.act(ChatAction::DeleteOrgBackground { id });
+  }
+
+  fn set_org_background_rule(&self, rule: OrgBackgroundRule) {
+    self.act(ChatAction::SetOrgBackgroundRule { rule });
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {

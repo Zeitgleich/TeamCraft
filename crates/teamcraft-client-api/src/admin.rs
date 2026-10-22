@@ -243,15 +243,17 @@ pub enum AdminSection {
   Users,
   Security,
   Retention,
+  Backgrounds,
   Audit,
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 5] = [
+  pub const ALL: [AdminSection; 6] = [
     Self::Channels,
     Self::Users,
     Self::Security,
     Self::Retention,
+    Self::Backgrounds,
     Self::Audit,
   ];
 
@@ -261,6 +263,7 @@ impl AdminSection {
       Self::Users => "users",
       Self::Security => "security",
       Self::Retention => "retention",
+      Self::Backgrounds => "backgrounds",
       Self::Audit => "audit",
     }
   }

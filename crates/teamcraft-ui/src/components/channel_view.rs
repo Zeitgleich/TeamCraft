@@ -6,7 +6,7 @@ use crate::components::bookmarks::BookmarksBar;
 use crate::components::composer::Composer;
 use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
-use crate::components::message_list::MessageList;
+use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind};
@@ -34,7 +34,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <KeyChangeBanner conversation=conversation />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
-        <MessageList conversation=conversation />
+        <ChannelFeed conversation=conversation />
         <SeenLine conversation=conversation />
         <Composer conversation=conversation can_post=can_post conversation_name=name />
       </section>
@@ -100,10 +100,20 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
   // Jump to date: the picked day is searched in the feed; unloaded parts load while we wait.
   let jump_target = RwSignal::new(None::<i64>);
   let is_picking_date = RwSignal::new(false);
+  let requested_history = RwSignal::new(None::<i64>);
   Effect::new(move |_| {
     let Some(at) = jump_target.get() else {
       return;
     };
+    // Channels too big to hold locally fetch the history around the date first (once per jump).
+    if !state.read(|backend| backend.is_history_loaded(conversation, at)) {
+      if requested_history.get_untracked() != Some(at) {
+        requested_history.set(Some(at));
+        state.write(|backend| backend.request_history_at(conversation, at));
+      }
+      return;
+    }
+    requested_history.set(None);
     let outcome = state.read(|backend| {
       let count = backend.message_count(conversation);
       first_index_at_or_after(

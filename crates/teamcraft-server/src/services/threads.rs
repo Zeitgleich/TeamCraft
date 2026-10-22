@@ -28,6 +28,7 @@ pub async fn record_reply(
       sender: reply.sender_user_id,
       root_sender: root.sender_user_id,
       mentioned: &reply.mentioned_user_ids,
+      follows_mentions_by_default: state.policy.get().threads.auto_follows_mentioned_threads,
     })
     .await?;
   announce(state, reply.conversation_id, thread, changed);
@@ -117,7 +118,8 @@ pub async fn list_threads(
   let has_more = rows.len() > limit as usize;
   rows.truncate(limit as usize);
 
-  let mut threads = Vec::with_capacity(rows.len());
+  // No capacity hint from the row count: `limit` above caps the page (max_page_size).
+  let mut threads = Vec::new();
   for row in rows {
     let maybe_last_reply = state
       .database

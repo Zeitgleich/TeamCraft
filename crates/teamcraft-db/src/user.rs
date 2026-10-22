@@ -44,6 +44,13 @@ pub struct PresencePreference {
   pub maybe_dnd_until: Option<OffsetDateTime>,
 }
 
+/// A user after sign-in, with whether the default memberships still have to be applied.
+#[derive(Debug, Clone)]
+pub struct SyncedUser {
+  pub user: User,
+  pub is_awaiting_default_memberships: bool,
+}
+
 /// Filter of a directory search.
 #[derive(Debug, Clone)]
 pub struct UserSearch<'a> {
@@ -60,6 +67,14 @@ impl Database {
   /// Creates the user on first login and refreshes username, email, display name and kind afterwards.
   /// `new_id` is only used when the user does not exist yet.
   pub async fn upsert_oidc_user(&self, identity: &OidcIdentity<'_>, new_id: UserId) -> Result<User, DbError> {
+    Ok(self.upsert_oidc_user_flagged(identity, new_id).await?.user)
+  }
+
+  async fn upsert_oidc_user_flagged(
+    &self,
+    identity: &OidcIdentity<'_>,
+    new_id: UserId,
+  ) -> Result<SyncedUser, DbError> {
     let row = sqlx::query!(
       r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role, organization)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $10)
@@ -70,8 +85,8 @@ impl Database {
                kind = EXCLUDED.kind,
                oidc_role = EXCLUDED.oidc_role,
                organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END
-         RETURNING id, username, display_name, kind, created_at, organization,
-                   deactivated_at IS NOT NULL AS "is_deactivated!""#,
+         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!",
+                   default_memberships_at IS NULL AS "is_awaiting_defaults!""#,
       to_db(new_id),
       identity.issuer,
       identity.subject,
@@ -85,22 +100,36 @@ impl Database {
     )
     .fetch_one(self.pool())
     .await?;
-    user_from_parts(
-      row.id,
-      row.username,
-      row.display_name,
-      row.kind,
-      row.created_at,
-      row.organization,
-      row.is_deactivated,
-    )
+    Ok(SyncedUser {
+      user: user_from_parts(
+        row.id,
+        row.username,
+        row.display_name,
+        row.kind,
+        row.created_at,
+        row.organization,
+        row.is_deactivated,
+      )?,
+      is_awaiting_default_memberships: row.is_awaiting_defaults,
+    })
   }
 
   /// Like [`Self::upsert_oidc_user`], but only writes when the user is new or the attested data
   /// changed. Meant for the per-request authentication path, which must not write every time.
   pub async fn sync_oidc_user(&self, identity: &OidcIdentity<'_>, new_id: UserId) -> Result<User, DbError> {
+    Ok(self.sync_oidc_user_flagged(identity, new_id).await?.user)
+  }
+
+  /// [`Self::sync_oidc_user`] that also says whether the account still waits for its default
+  /// memberships, from the same read, so the per-request path needs no extra query.
+  pub async fn sync_oidc_user_flagged(
+    &self,
+    identity: &OidcIdentity<'_>,
+    new_id: UserId,
+  ) -> Result<SyncedUser, DbError> {
     let existing = sqlx::query!(
-      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!"
+      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!",
+                default_memberships_at IS NULL AS "is_awaiting_defaults!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2"#,
       identity.issuer,
       identity.subject,
@@ -116,18 +145,21 @@ impl Database {
         && row.oidc_role.as_deref() == identity.maybe_oidc_role
         && (!identity.should_sync_organization || row.organization.as_deref() == identity.maybe_organization);
       if is_unchanged {
-        return user_from_parts(
-          row.id,
-          row.username,
-          row.display_name,
-          row.kind,
-          row.created_at,
-          row.organization,
-          row.is_deactivated,
-        );
+        return Ok(SyncedUser {
+          user: user_from_parts(
+            row.id,
+            row.username,
+            row.display_name,
+            row.kind,
+            row.created_at,
+            row.organization,
+            row.is_deactivated,
+          )?,
+          is_awaiting_default_memberships: row.is_awaiting_defaults,
+        });
       }
     }
-    self.upsert_oidc_user(identity, new_id).await
+    self.upsert_oidc_user_flagged(identity, new_id).await
   }
 
   /// The role the identity provider gave the user at their last sign-in (`None`: no such user;

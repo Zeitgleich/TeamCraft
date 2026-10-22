@@ -6,7 +6,7 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
-use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, Role};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, OrgBackgroundId, Role};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
@@ -17,6 +17,7 @@ use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
   Participant,
 };
+use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
   ThreadId, ThreadSummary, User, UserId,
@@ -142,6 +143,17 @@ pub trait ChatBackend {
   /// uploaded and synced to the user's devices.
   fn add_background_image(&self, _name: &str, _picture: Vec<u8>) {}
   fn delete_background_image(&self, _id: BackgroundId) {}
+  /// The organization's call backgrounds and their rule, from the verified workspace policy.
+  fn org_backgrounds(&self) -> OrgBackgrounds {
+    OrgBackgrounds::default()
+  }
+  /// Owners: uploads a picture (the host normalizes it to a JPEG first) and adds it to the signed
+  /// policy.
+  fn add_org_background(&self, _name: &str, _picture: Vec<u8>) {}
+  /// Owners: removes a picture from the signed policy and deletes it.
+  fn delete_org_background(&self, _id: OrgBackgroundId) {}
+  /// Owners: the rule, the default and the order of the organization's backgrounds.
+  fn set_org_background_rule(&self, _rule: OrgBackgroundRule) {}
   /// A link to the message that only members of the conversation can open.
   fn permalink(&self, _conversation: ConversationId, _message: MessageId) -> Option<String> {
     None
@@ -218,6 +230,14 @@ pub trait ChatBackend {
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
+  /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
+  /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
+  fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}
+  /// Whether the request for `at` was answered (also when it failed or found nothing). Backends
+  /// that hold the whole history always say yes.
+  fn is_history_loaded(&self, _conversation: ConversationId, _at: i64) -> bool {
+    true
+  }
   /// The conversation includes people from outside the organization (the "external" badge).
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false

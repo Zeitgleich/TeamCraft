@@ -33,12 +33,13 @@ use teamcraft_server::services::local_accounts::LocalAuth;
 use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
-use teamcraft_server::services::{guests, oidc, retention, urgent};
+use teamcraft_server::services::{backgrounds, email_digest, guests, oidc, retention, urgent};
 use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, Settings};
 use teamcraft_server::storage::BlobStore;
 use tracing::{info, warn};
 
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const BACKGROUND_SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -186,7 +187,9 @@ async fn run() -> anyhow::Result<()> {
     .await
     .context("loading the workspace policy")?;
   spawn_urgent_scheduler(state.clone());
+  spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
+  spawn_background_sweeper(state.clone());
   spawn_derived_presence(state.clone());
 
   let listener = bind_listener(config.server.listen_addr)
@@ -200,6 +203,22 @@ async fn run() -> anyhow::Result<()> {
   .await?;
   info!("shut down");
   Ok(())
+}
+
+/// Removes deleted and abandoned call backgrounds once their upload URLs have expired.
+fn spawn_background_sweeper(state: AppState) {
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(BACKGROUND_SWEEP_INTERVAL);
+    loop {
+      interval.tick().await;
+      let cutoff = backgrounds::sweep_cutoff(&state, time::OffsetDateTime::now_utc());
+      match backgrounds::sweep(&state, cutoff).await {
+        Ok(0) => {},
+        Ok(swept) => info!(swept, "swept deleted call backgrounds"),
+        Err(error) => warn!(%error, "sweeping call backgrounds failed"),
+      }
+    }
+  });
 }
 
 /// Drops gateway sessions nobody resumed within the window and updates presence for their users.
@@ -350,6 +369,30 @@ fn spawn_urgent_scheduler(state: AppState) {
       interval.tick().await;
       if let Err(error) = urgent::run_due(&state, time::OffsetDateTime::now_utc()).await {
         warn!(%error, "urgent reminders failed");
+      }
+    }
+  });
+}
+
+/// Mails the digests of missed mentions that are due (PLAN.md §5).
+fn spawn_email_digests(state: AppState) {
+  if !state.settings.notifications.email_digest.is_enabled {
+    return;
+  }
+  tokio::spawn(async move {
+    let period = Duration::from_secs(
+      state
+        .settings
+        .notifications
+        .email_digest
+        .scheduler_interval_secs
+        .max(1),
+    );
+    let mut interval = tokio::time::interval(period);
+    loop {
+      interval.tick().await;
+      if let Err(error) = email_digest::run_due(&state, time::OffsetDateTime::now_utc()).await {
+        warn!(%error, "mention digests failed");
       }
     }
   });

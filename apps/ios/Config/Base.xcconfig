@@ -1,0 +1,21 @@
+// Shared build settings (project.yml -> configFiles). Override per machine in Config/Local.xcconfig
+// (untracked), e.g. DEVELOPMENT_TEAM and the server of your deployment.
+#include? "Local.xcconfig"
+
+// Where the app talks to; Info.plist reads these (see TeamCraft/App/AppEnvironment.swift).
+TEAMCRAFT_SERVER_URL = http:/$()/127.0.0.1:8081
+TEAMCRAFT_OIDC_ISSUER = http:/$()/127.0.0.1:8080/realms/teamcraft-dev
+TEAMCRAFT_OIDC_CLIENT_ID = teamcraft
+// Redirect URI is <scheme>:/oauth/callback; the OIDC client must allow it.
+TEAMCRAFT_OIDC_REDIRECT_SCHEME = com.example.teamcraft
+
+// Shared between the app and the notification service extension (docs/e2ee.md §7).
+APP_GROUP_ID = group.de.zeitgleich.teamcraft
+KEYCHAIN_ACCESS_GROUP = $(AppIdentifierPrefix)de.zeitgleich.teamcraft
+
+// Entitlements of the extension. Swap for NotificationService.Filtering.entitlements once Apple granted
+// com.apple.developer.usernotifications.filtering (needed to suppress call pushes, README.md).
+NSE_ENTITLEMENTS = NotificationService/NotificationService.entitlements
+
+// APNs environment of the push entitlement (archives for TestFlight/App Store get production from the profile).
+APS_ENVIRONMENT = development

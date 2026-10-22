@@ -24,11 +24,12 @@ use crate::state::AppState;
 
 const MAX_CHANGES_PER_REQUEST: usize = 200;
 /// The roles of a scheme, in the order the API lists them.
-const ROLES: [SchemeRole; 6] = [
+const ROLES: [SchemeRole; 7] = [
   SchemeRole::Guest,
   SchemeRole::Member,
   SchemeRole::SpaceAdmin,
   SchemeRole::ChannelAdmin,
+  SchemeRole::ChannelModerator,
   SchemeRole::Admin,
   SchemeRole::Owner,
 ];
@@ -251,7 +252,8 @@ async fn apply(
   if request.changes.len() > MAX_CHANGES_PER_REQUEST {
     return Err(ApiError::InvalidRequest("too many changes".into()));
   }
-  let mut edits = Vec::with_capacity(request.changes.len());
+  // Grows with the checked changes; never sized from the request.
+  let mut edits = Vec::new();
   for change in &request.changes {
     if matches!(change.effect, OverrideEffect::Unknown(_)) {
       return Err(ApiError::InvalidRequest("unknown effect".into()));

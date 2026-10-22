@@ -3,7 +3,10 @@
 ## Where tests live
 
 - Unit tests in `#[cfg(test)] mod tests { ... }` at the bottom of each file.
-- Cross-crate and protocol tests in the crate's `tests/` directory.
+- Cross-crate and protocol tests in the crate's `tests/suite/` directory: one test binary per crate
+  (`tests/suite/main.rs` with a `mod` line per file), so adding a test file adds no link step. Shared
+  helpers live in `tests/common/` and are included from `main.rs`. Tests that need another target
+  (wasm) stay separate files in `tests/`.
 - Tests that need Postgres, Keycloak or S3 use the dev stack (`docker compose -f docker-compose.dev.yml`)
   and are behind the `integration` feature, so `cargo test --workspace` works without it.
 
@@ -39,6 +42,7 @@ Shared helpers go in the parent `mod tests` so sub-modules reach them via `use s
 
 ```sh
 cargo test --workspace --all-features                 # unit tests
+cargo nextest run --workspace --profile ci           # what CI runs (plus `cargo test --doc`)
 cargo test --workspace --features integration         # with the dev stack running
 ```
 

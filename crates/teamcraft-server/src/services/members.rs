@@ -91,7 +91,7 @@ pub async fn add_member(
   if matches!(role, ChannelRole::Unknown(_)) {
     return Err(ApiError::InvalidRequest("unknown channel role".into()));
   }
-  if role == ChannelRole::Admin {
+  if is_privileged(&role) {
     require(state, caller, Permission::ManageChannelRoles, &access.target())?;
   }
 
@@ -115,8 +115,10 @@ pub async fn add_member(
       "the user is not a member of the space".into(),
     ));
   };
-  if space_role == SpaceRole::Guest && role == ChannelRole::Admin {
-    return Err(ApiError::InvalidRequest("guests can't be channel admins".into()));
+  if space_role == SpaceRole::Guest && is_privileged(&role) {
+    return Err(ApiError::InvalidRequest(
+      "guests can't be channel admins or moderators".into(),
+    ));
   }
 
   state
@@ -162,6 +164,10 @@ pub async fn remove_member(
   let Some(target) = members.iter().find(|m| m.user.id == user_id) else {
     return Err(ApiError::user_not_found());
   };
+  // Moderators remove members; removing a moderator or an admin takes the right to manage roles.
+  if user_id != caller.user.id && is_privileged(&target.role) {
+    require(state, caller, Permission::ManageChannelRoles, &access.target())?;
+  }
   if target.role == ChannelRole::Admin
     && members.len() > 1
     && state.database.count_channel_admins(id).await? <= 1
@@ -230,8 +236,10 @@ pub async fn update_member(
     let Some(target) = members.iter().find(|m| m.user.id == user_id) else {
       return Err(ApiError::user_not_found());
     };
-    if *role == ChannelRole::Admin && target.user.kind == teamcraft_proto::UserKind::Guest {
-      return Err(ApiError::InvalidRequest("guests can't be channel admins".into()));
+    if is_privileged(role) && target.user.kind == teamcraft_proto::UserKind::Guest {
+      return Err(ApiError::InvalidRequest(
+        "guests can't be channel admins or moderators".into(),
+      ));
     }
     if target.role == ChannelRole::Admin
       && *role != ChannelRole::Admin
@@ -351,4 +359,10 @@ async fn announce_added_user(
     },
   );
   Ok(())
+}
+
+/// Roles that give powers over other members: only somebody who manages roles hands them out or
+/// removes their holders.
+fn is_privileged(role: &ChannelRole) -> bool {
+  matches!(role, ChannelRole::Admin | ChannelRole::Moderator)
 }

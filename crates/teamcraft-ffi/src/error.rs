@@ -26,9 +26,12 @@ pub enum TeamCraftError {
   /// A malformed ID or link code from the app.
   #[error("invalid input: {0}")]
   InvalidInput(String),
-  /// A link step was called out of order.
+  /// A link or recovery step was called out of order.
   #[error("no device link in progress")]
   NoLinkInProgress,
+  /// The admins haven't answered the recovery request yet; try again later.
+  #[error("the recovery request isn't answered yet")]
+  RecoveryPending,
   /// The engine thread is gone (the app closed the handle).
   #[error("the engine has stopped")]
   EngineStopped,

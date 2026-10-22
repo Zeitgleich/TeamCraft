@@ -16,6 +16,8 @@ pub struct ThreadActivity<'a> {
   /// Author of the thread's root message.
   pub root_sender: UserId,
   pub mentioned: &'a [UserId],
+  /// What mentioned members follow who never chose (the workspace's default).
+  pub follows_mentions_by_default: bool,
 }
 
 /// A thread the user follows, with counts relative to their read position.
@@ -60,7 +62,8 @@ impl Database {
   ///
   /// - the sender follows (also again after an unfollow: replying is explicit),
   /// - the root author follows when somebody else replies,
-  /// - mentioned members follow if they enabled `auto_follow_mentioned_threads`.
+  /// - mentioned members follow if they enabled `auto_follow_mentioned_threads` (or, when they never
+  ///   chose, if the workspace default says so).
   ///
   /// Users who unfollowed manually are not brought back by anyone else's reply.
   pub async fn record_thread_activity(&self, activity: &ThreadActivity<'_>) -> Result<Vec<UserId>, DbError> {
@@ -107,12 +110,13 @@ impl Database {
          SELECT ms.user_id, ms.conversation_id, $3, 'following', 'mentioned'
          FROM memberships ms JOIN users u ON u.id = ms.user_id
          WHERE ms.conversation_id = $1 AND ms.user_id = ANY($2) AND ms.user_id <> $4
-           AND u.auto_follow_mentioned_threads
+           AND COALESCE(u.auto_follow_mentioned_threads, $5)
          ON CONFLICT DO NOTHING RETURNING user_id"#,
       to_db(activity.conversation),
       &to_db_all(activity.mentioned),
       to_db(activity.thread),
       to_db(activity.sender),
+      activity.follows_mentions_by_default,
     )
     .fetch_all(&mut *tx)
     .await?;

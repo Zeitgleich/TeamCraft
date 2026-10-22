@@ -1,6 +1,7 @@
 //! Leptos components, one module per screen area.
 
 pub mod admin_audit;
+pub mod admin_backgrounds;
 pub mod admin_channels;
 pub mod admin_console;
 pub mod admin_retention;
@@ -8,6 +9,7 @@ pub mod admin_security;
 pub mod admin_users;
 pub mod app;
 pub mod avatar;
+pub mod background_picker;
 pub mod bookmarks;
 pub mod bundle_banner;
 pub mod call_prejoin;
@@ -22,6 +24,7 @@ pub mod guest_join;
 pub mod huddle_bar;
 pub mod icons;
 pub mod incoming_call;
+pub mod log_view;
 pub mod login;
 pub mod meeting_controls;
 pub mod meetings_view;
