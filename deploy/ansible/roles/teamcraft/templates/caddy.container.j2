@@ -1,0 +1,23 @@
+# Managed by Ansible (roles/teamcraft). Runs rootless as tc-proxy.
+[Unit]
+Description=TeamCraft reverse proxy (TLS, HTTP/3)
+
+[Container]
+Image={{ teamcraft_images.caddy }}
+ContainerName=teamcraft-caddy
+# Host network: binds 80/443 (allowed via net.ipv4.ip_unprivileged_port_start) and reaches the
+# server on 127.0.0.1.
+Network=host
+Volume=/home/tc-proxy/config/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+# Bind mount: container root maps to tc-proxy, so the export script can read the certificates.
+Volume=/home/tc-proxy/caddy-data:/data:Z
+NoNewPrivileges=true
+PodmanArgs=--memory={{ teamcraft_memory.caddy }}
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

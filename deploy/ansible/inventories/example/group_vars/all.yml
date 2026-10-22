@@ -1,0 +1,28 @@
+teamcraft_domain: chat.example.com
+teamcraft_sfu_domain: sfu.chat.example.com
+teamcraft_acme_email: admin@example.com
+
+# Pinned versions. TeamCraft images by digest, from images.txt of the release (docs/release.md in
+# the teamcraft repository).
+teamcraft_image_registry: ghcr.io/zeitgleich
+teamcraft_server_digest: "sha256:replace-with-release-digest"
+teamcraft_sfu_digest: "sha256:replace-with-release-digest"
+postgres_version: "18.6-alpine3.23"
+caddy_version: "2.11.7"
+
+# Identity provider: issuer URL of the realm (must equal the tokens' `iss`).
+teamcraft_oidc_issuer: https://id.example.com/realms/example
+
+# S3-compatible storage (external provider); keys are secrets.
+teamcraft_s3_endpoint: https://s3.example.com
+teamcraft_s3_region: us-east-1
+teamcraft_s3_bucket: teamcraft
+
+# Optional: the web client archive of the release (teamcraft-web-<version>.tar.gz), downloaded next
+# to this inventory.
+# teamcraft_web_archive: "{{ inventory_dir }}/teamcraft-web-1.0.0-beta.1.tar.gz"
+
+# Encrypted with sops next to this inventory (README.md, "Your own inventory"); decrypted on the
+# control machine (community.sops collection). Keys: secrets/README.md.
+teamcraft_secrets_source: sops
+teamcraft_secrets_file: "{{ inventory_dir }}/secrets.enc.yaml"
