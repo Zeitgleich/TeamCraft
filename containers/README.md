@@ -2,16 +2,18 @@
 
 OCI images of the server binaries and the integration bridge, built from the workspace root:
 
-| Image              | Containerfile                    | Listens on                             | Health check                   |
-|--------------------|----------------------------------|----------------------------------------|--------------------------------|
-| `teamcraft-server` | `teamcraft-server.Containerfile` | `8080/tcp` (HTTP, `[::]` dual stack)   | `teamcraft-server healthcheck` |
-| `teamcraft-sfu`    | `teamcraft-sfu.Containerfile`    | `4433/udp` (QUIC), `8081/tcp` (health) | `teamcraft-sfu healthcheck`    |
-| `teamcraft-bridge` | `teamcraft-bridge.Containerfile` | `8088/tcp` (webhooks, logs)            | `teamcraft-bridge healthcheck` |
+| Image                    | Containerfile                          | Listens on                                                 | Health check                         |
+|--------------------------|----------------------------------------|------------------------------------------------------------|--------------------------------------|
+| `teamcraft-server`       | `teamcraft-server.Containerfile`       | `8080/tcp` (HTTP, `[::]` dual stack)                       | `teamcraft-server healthcheck`       |
+| `teamcraft-sfu`          | `teamcraft-sfu.Containerfile`          | `4433/udp` (QUIC), `8081/tcp` (health)                     | `teamcraft-sfu healthcheck`          |
+| `teamcraft-bridge`       | `teamcraft-bridge.Containerfile`       | `8088/tcp` (webhooks, logs)                                | `teamcraft-bridge healthcheck`       |
+| `teamcraft-push-gateway` | `teamcraft-push-gateway.Containerfile` | `8090/tcp` (API), `8091/tcp` (health, metrics: not public) | `teamcraft-push-gateway healthcheck` |
 
 ```sh
 podman build --format docker -f containers/teamcraft-server.Containerfile -t teamcraft-server .
 podman build --format docker -f containers/teamcraft-sfu.Containerfile    -t teamcraft-sfu .
 podman build --format docker -f containers/teamcraft-bridge.Containerfile -t teamcraft-bridge .
+podman build --format docker -f containers/teamcraft-push-gateway.Containerfile -t teamcraft-push-gateway .
 ```
 
 `--format docker` keeps the `HEALTHCHECK` instruction; the OCI format has none. Orchestrators
@@ -48,9 +50,15 @@ loopback only) and keeps its database in the volume `/var/lib/teamcraft-bridge`.
 `TEAMCRAFT_SFU_HEALTH_BIND`). Without a certificate it generates a short-lived self-signed one in
 memory, which only suits tests.
 
+`teamcraft-push-gateway`: a TOML file (`--config`, `TEAMCRAFT_PUSH_GATEWAY_CONFIG`;
+`crates/teamcraft-push-gateway/teamcraft-push-gateway.example.toml`) plus `TEAMCRAFT_PUSH_GATEWAY__SECTION__KEY`
+variables. Only the publisher of store apps runs one (docs/push-gateway.md). State is a SQLite file in the
+volume `/var/lib/teamcraft-push-gateway` (writable for UID 65532); the health and metrics port 8091 is for
+the operator's network only.
+
 ## Smoke test
 
-`dev/smoke-images.sh [server|sfu]` builds the images and starts them with rootless podman against the
+`dev/smoke-images.sh [server|sfu|bridge|push-gateway]` builds the images and starts them with rootless podman against the
 dev stack (`docker compose -f docker-compose.dev.yml up -d`): read-only root filesystem, no
 capabilities, non-root, health endpoints on IPv4 and IPv6, the `healthcheck` subcommand, and a clean exit
 on SIGTERM.

@@ -511,7 +511,8 @@ Details:
 - App and NSE still share the local database (App Group container + keychain access group). Like
   Threema's `ProcessCoordinator`, a cross-process lock ensures only one process syncs with the server at
   a time; Darwin notifications tell the other process to reload.
-- Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else.
+- Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else. (Through a push
+  gateway, the gateway sees the same, plus an opaque ID of the sending server; §7.1.)
 - The server decides *whether* to push using metadata it has anyway: membership, mute settings,
   presence (don't push to the phone while the desktop is active), DND, and the mention list (§4.4).
 - Keyword notifications ("notify me on 'deploy'") are matched on the client after decryption.
@@ -528,6 +529,28 @@ Details:
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,
   the server pushes only what will definitely be shown (DMs, mentions, followed threads,
   "all messages" channels).
+
+### 7.1 Push gateway
+
+Apple and Google only deliver to the holder of an app's signing identity, so a self-hosted server can't
+push to the store apps of its publisher on its own. A **push gateway** ([push-gateway.md](push-gateway.md))
+holds the publisher's APNs and FCM credentials and forwards the sealed wake-ups of any server. Every
+server uses it the same way, including the publisher's own; servers with their own apps send to
+APNs and FCM directly. Web Push and UnifiedPush never go through it.
+
+The wake-up is sealed with the device's push key *before* it leaves the server, so a gateway handles
+exactly what Apple and Google handle: a device token and ciphertext. Threat model:
+
+- A **malicious gateway** can drop or delay pushes, refuse a server, replay a wake-up it has seen
+  (the device fetches the named message again: at worst a duplicate notification) and correlate device
+  tokens with servers and timing. It **cannot read** a wake-up (no push key), **cannot forge** one (a
+  ciphertext it makes up fails authentication and is discarded by the app), and does not learn user,
+  device or conversation IDs. Messages are never lost by a gateway failure: apps catch up when they
+  run or reconnect; only the prompt notification is.
+- A **malicious server** can only spend its own quota: gateway-side limits per server and per device
+  token, a fixed alert text and topic, and a block list bound what it can do to a device.
+- The server authenticates to the gateway with an Ed25519 key pair of its own (not related to any
+  user, device or MLS key); that key authenticates the *server* only and protects no content.
 
 ## 8. Calls
 

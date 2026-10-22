@@ -2,7 +2,7 @@
 # Builds the OCI images and smoke-tests them with rootless podman against the dev stack.
 #
 #   docker compose -f docker-compose.dev.yml up -d   # Postgres on 127.0.0.1:5432
-#   dev/smoke-images.sh [server|sfu|bridge]           # default: all
+#   dev/smoke-images.sh [server|sfu|bridge|push-gateway]   # default: all
 #
 # Checks per image: starts non-root with a read-only root filesystem and all capabilities dropped,
 # becomes healthy (`healthcheck` subcommand), serves its endpoint and shuts down on SIGTERM.
@@ -16,6 +16,8 @@ pg_admin=${SMOKE_PG_ADMIN_URL:-postgres://teamcraft:teamcraft-dev-only@127.0.0.1
 pg_smoke=${pg_admin%/*}/teamcraft_smoke
 server_port=18080
 sfu_health_port=18081
+gateway_port=18090
+gateway_health_port=18091
 
 log() { printf '== %s\n' "$*"; }
 fail() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
@@ -36,7 +38,7 @@ run_hardened() { # name, image, extra args...
 }
 
 cleanup() {
-  "$engine" rm -f teamcraft-smoke-server teamcraft-smoke-sfu >/dev/null 2>&1 || true
+  "$engine" rm -f teamcraft-smoke-server teamcraft-smoke-sfu teamcraft-smoke-push-gateway >/dev/null 2>&1 || true
   psql "$pg_admin" -qc 'DROP DATABASE IF EXISTS teamcraft_smoke' >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -142,10 +144,37 @@ TOML
   log "teamcraft-bridge OK (the full flow is covered by crates/teamcraft-bridge/tests/end_to_end.rs)"
 }
 
+smoke_push_gateway() {
+  log "building teamcraft-push-gateway"
+  "$engine" build --format docker -f containers/teamcraft-push-gateway.Containerfile \
+    -t localhost/teamcraft-push-gateway:dev .
+
+  log "starting teamcraft-push-gateway (read-only rootfs, no capabilities, state on a tmpfs)"
+  run_hardened teamcraft-smoke-push-gateway localhost/teamcraft-push-gateway:dev \
+    --tmpfs /var/lib/teamcraft-push-gateway:uid=65532,gid=65532 \
+    -e "TEAMCRAFT_PUSH_GATEWAY__SERVER__BIND=[::]:$gateway_port" \
+    -e "TEAMCRAFT_PUSH_GATEWAY__SERVER__HEALTH_BIND=[::]:$gateway_health_port"
+
+  wait_for "the gateway health endpoint" curl -fsS "http://127.0.0.1:$gateway_health_port/healthz"
+  curl -fsS "http://[::1]:$gateway_health_port/healthz" >/dev/null || fail "no IPv6 access"
+  curl -fsS "http://127.0.0.1:$gateway_port/api/v1/info" | grep -q '"is_registration_open":true' \
+    || fail "the info document is missing"
+  "$engine" exec teamcraft-smoke-push-gateway /usr/local/bin/teamcraft-push-gateway healthcheck 2>/dev/null \
+    || fail "healthcheck subcommand failed against a healthy gateway"
+  local uid
+  uid=$("$engine" inspect teamcraft-smoke-push-gateway --format '{{.Config.User}}')
+  [ "$uid" = "65532:65532" ] || fail "runs as $uid, expected 65532:65532"
+  "$engine" stop -t 10 teamcraft-smoke-push-gateway >/dev/null
+  [ "$("$engine" inspect teamcraft-smoke-push-gateway --format '{{.State.ExitCode}}')" = 0 ] \
+    || fail "did not exit cleanly on SIGTERM"
+  log "teamcraft-push-gateway OK"
+}
+
 case $which_images in
   server) smoke_server ;;
   sfu) smoke_sfu ;;
   bridge) smoke_bridge ;;
-  all) smoke_server; smoke_sfu; smoke_bridge ;;
-  *) fail "usage: $0 [server|sfu|bridge]" ;;
+  push-gateway) smoke_push_gateway ;;
+  all) smoke_server; smoke_sfu; smoke_bridge; smoke_push_gateway ;;
+  *) fail "usage: $0 [server|sfu|bridge|push-gateway]" ;;
 esac
