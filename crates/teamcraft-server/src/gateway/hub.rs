@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use teamcraft_proto::{DeviceActivity, DeviceId, GatewayEvent, GatewayServerMessage, PresenceState, UserId};
+use teamcraft_proto::{
+  CustomStatus, DeviceActivity, DeviceId, GatewayEvent, GatewayServerMessage, PresenceState, UserId,
+};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -15,6 +17,22 @@ const CHANNEL_CAPACITY: usize = 1024;
 /// so a client that reconnects with its last seen sequence number receives exactly what it missed.
 /// State is in memory and per server process; running several instances needs a shared bus
 /// (Postgres `LISTEN/NOTIFY`), which is not part of M1.
+/// What was last broadcast about a user's presence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceSnapshot {
+  pub state: PresenceState,
+  pub maybe_status: Option<CustomStatus>,
+}
+
+impl Default for PresenceSnapshot {
+  fn default() -> Self {
+    Self {
+      state: PresenceState::Offline,
+      maybe_status: None,
+    }
+  }
+}
+
 pub struct Hub {
   options: HubOptions,
   inner: Mutex<Inner>,
@@ -58,7 +76,7 @@ pub enum DeviceAggregate {
 struct Inner {
   sessions: HashMap<String, Session>,
   by_user: HashMap<UserId, HashSet<String>>,
-  last_presence: HashMap<UserId, PresenceState>,
+  last_presence: HashMap<UserId, PresenceSnapshot>,
 }
 
 struct Session {
@@ -294,18 +312,13 @@ impl Hub {
   }
 
   /// Remembers the broadcast presence of a user; `true` if it differs from the previous one.
-  pub fn record_presence(&self, user: UserId, state: PresenceState) -> bool {
-    self.lock().last_presence.insert(user, state.clone()) != Some(state)
+  pub fn record_presence(&self, user: UserId, snapshot: PresenceSnapshot) -> bool {
+    self.lock().last_presence.insert(user, snapshot.clone()) != Some(snapshot)
   }
 
-  /// The last presence broadcast for the user (`Offline` if none).
-  pub fn last_presence(&self, user: UserId) -> PresenceState {
-    self
-      .lock()
-      .last_presence
-      .get(&user)
-      .cloned()
-      .unwrap_or(PresenceState::Offline)
+  /// The last presence broadcast for the user (offline without status if none).
+  pub fn last_presence(&self, user: UserId) -> PresenceSnapshot {
+    self.lock().last_presence.get(&user).cloned().unwrap_or_default()
   }
 
   /// Drops sessions that stayed disconnected longer than the resume window; returns their users.
@@ -556,11 +569,30 @@ mod tests {
   #[test]
   fn presence_changes_are_reported_once() {
     let hub = Hub::new(OPTIONS);
-    assert!(hub.record_presence(user(1), PresenceState::Online));
-    assert!(!hub.record_presence(user(1), PresenceState::Online));
-    assert!(hub.record_presence(user(1), PresenceState::Away));
-    assert_eq!(hub.last_presence(user(1)), PresenceState::Away);
-    assert_eq!(hub.last_presence(user(9)), PresenceState::Offline);
+    let snapshot = |state, status: Option<&str>| PresenceSnapshot {
+      state,
+      maybe_status: status.map(|text| CustomStatus {
+        maybe_emoji: None,
+        maybe_text: Some(text.into()),
+        maybe_expires_at: None,
+      }),
+    };
+    assert!(hub.record_presence(user(1), snapshot(PresenceState::Online, None)));
+    assert!(!hub.record_presence(user(1), snapshot(PresenceState::Online, None)));
+    assert!(hub.record_presence(user(1), snapshot(PresenceState::Away, None)));
+    // A status change alone counts as a change.
+    assert!(hub.record_presence(user(1), snapshot(PresenceState::Away, Some("lunch"))));
+    assert!(!hub.record_presence(user(1), snapshot(PresenceState::Away, Some("lunch"))));
+    assert_eq!(
+      hub
+        .last_presence(user(1))
+        .maybe_status
+        .unwrap()
+        .maybe_text
+        .as_deref(),
+      Some("lunch")
+    );
+    assert_eq!(hub.last_presence(user(9)), PresenceSnapshot::default());
   }
 
   #[test]

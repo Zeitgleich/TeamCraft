@@ -23,10 +23,29 @@ pub struct KeyPackageStatusResponse {
 }
 
 /// `POST /api/v1/users/{id}/key-packages/claim`: takes one key package per device of the user, to
-/// add them to `conversation_id` (which both must be members of).
+/// add them to `conversation_id` (which both must be members of). The device filters keep devices
+/// that are already in the group from wasting packages. If the filters leave no device, the answer is
+/// an empty list; `key_package_exhausted` means devices matched but none had a package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ClaimKeyPackagesRequest {
   pub conversation_id: ConversationId,
+  /// Only these devices of the user (the ones not in the group yet). Absent: all devices.
+  #[serde(rename = "only_device_ids", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_only_device_ids: Option<Vec<DeviceId>>,
+  /// Never claim for these devices, e.g. the claimer's own or ones already in the group.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub exclude_device_ids: Vec<DeviceId>,
+}
+
+impl ClaimKeyPackagesRequest {
+  /// A claim for all devices of the user.
+  pub fn new(conversation_id: ConversationId) -> Self {
+    Self {
+      conversation_id,
+      maybe_only_device_ids: None,
+      exclude_device_ids: Vec::new(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

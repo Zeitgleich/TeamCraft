@@ -11,8 +11,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  ConversationId, DeviceActivity, DeviceId, ErrorBody, MessageResponse, MlsMessageResponse, PresenceState,
-  SpaceId, UserId, UserSummary, WorkspaceLogKind,
+  CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId, ErrorBody,
+  MessageResponse, MlsMessageResponse, PresenceState, SpaceId, UnixMillis, UserId, UserSummary,
+  WorkspaceLogKind,
 };
 
 /// Frames sent by the client.
@@ -102,6 +103,40 @@ pub enum GatewayEvent {
     kind: WorkspaceLogKind,
     version: u64,
   },
+  /// The first participant joined: a call is running in the conversation.
+  CallStart {
+    conversation_id: ConversationId,
+    call_id: CallId,
+    started_by: UserId,
+    started_at: UnixMillis,
+    is_ringing: bool,
+    participants: Vec<CallRosterEntry>,
+  },
+  /// Someone joined or left, or the ringing stopped.
+  CallUpdate {
+    conversation_id: ConversationId,
+    call_id: CallId,
+    is_ringing: bool,
+    participants: Vec<CallRosterEntry>,
+  },
+  /// The last participant left: the call is over.
+  CallEnd {
+    conversation_id: ConversationId,
+    call_id: CallId,
+  },
+  /// Sent to all devices of the other members of a DM or group DM when a call starts there. Stop
+  /// ringing when a `call_update` with `is_ringing: false` or `call_end` arrives.
+  CallRing {
+    conversation_id: ConversationId,
+    call_id: CallId,
+    from_user_id: UserId,
+  },
+  /// A user registered a new device. Members of shared conversations add it to their MLS groups
+  /// (fetch `GET /users/{id}/devices`); the user's other devices also learn about it.
+  DeviceAdd {
+    user_id: UserId,
+    device_id: DeviceId,
+  },
   /// A device of a user was removed (lost phone, deactivation); members commit its removal from their groups.
   DeviceRemove {
     user_id: UserId,
@@ -125,6 +160,9 @@ pub enum GatewayEvent {
   PresenceUpdate {
     user_id: UserId,
     state: PresenceState,
+    /// The user's custom status; absent if none (or just cleared).
+    #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
+    maybe_status: Option<CustomStatus>,
   },
   #[serde(other)]
   Unknown,
@@ -249,10 +287,41 @@ mod tests {
   }
 
   #[test]
+  fn presence_update_carries_the_custom_status_when_there_is_one() {
+    let event = GatewayEvent::PresenceUpdate {
+      user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      state: PresenceState::Online,
+      maybe_status: Some(CustomStatus {
+        maybe_emoji: Some("🌴".into()),
+        maybe_text: Some("Vacation".into()),
+        maybe_expires_at: Some(crate::UnixMillis(1000)),
+      }),
+    };
+    assert_eq!(
+      serde_json::to_string(&event).unwrap(),
+      r#"{"type":"presence_update","user_id":"2","state":"online","status":{"emoji":"🌴","text":"Vacation","expires_at":1000}}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<GatewayEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
+      event
+    );
+    let old: GatewayEvent =
+      serde_json::from_str(r#"{"type":"presence_update","user_id":"2","state":"away"}"#).unwrap();
+    assert!(matches!(
+      old,
+      GatewayEvent::PresenceUpdate {
+        maybe_status: None,
+        ..
+      }
+    ));
+  }
+
+  #[test]
   fn presence_update_wire_format() {
     let event = GatewayEvent::PresenceUpdate {
       user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
       state: PresenceState::DoNotDisturb,
+      maybe_status: None,
     };
     assert_eq!(
       serde_json::to_string(&event).unwrap(),

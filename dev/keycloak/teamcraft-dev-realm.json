@@ -144,7 +144,10 @@
         "teamcraft": [
           "owner"
         ]
-      }
+      },
+      "realmRoles": [
+        "default-roles-teamcraft-dev"
+      ]
     },
     {
       "username": "bob",
@@ -164,7 +167,10 @@
         "teamcraft": [
           "admin"
         ]
-      }
+      },
+      "realmRoles": [
+        "default-roles-teamcraft-dev"
+      ]
     },
     {
       "username": "carol",
@@ -182,6 +188,9 @@
       ],
       "groups": [
         "/project-a"
+      ],
+      "realmRoles": [
+        "default-roles-teamcraft-dev"
       ]
     },
     {
@@ -202,7 +211,10 @@
         "teamcraft": [
           "guest"
         ]
-      }
+      },
+      "realmRoles": [
+        "default-roles-teamcraft-dev"
+      ]
     },
     {
       "username": "erin",
@@ -223,7 +235,10 @@
           "guest",
           "member"
         ]
-      }
+      },
+      "realmRoles": [
+        "default-roles-teamcraft-dev"
+      ]
     },
     {
       "username": "frank",
@@ -238,6 +253,9 @@
           "value": "frank-dev-pass",
           "temporary": false
         }
+      ],
+      "realmRoles": [
+        "default-roles-teamcraft-dev"
       ]
     },
     {
@@ -255,5 +273,18 @@
         ]
       }
     }
-  ]
+  ],
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\": [{\"name\": \"username\", \"displayName\": \"${username}\", \"validations\": {\"length\": {\"min\": 3, \"max\": 255}, \"username-prohibited-characters\": {}, \"up-username-not-idn-homograph\": {}}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"email\", \"displayName\": \"${email}\", \"validations\": {\"email\": {}, \"length\": {\"max\": 255}}, \"required\": {\"roles\": [\"user\"]}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"firstName\", \"displayName\": \"${firstName}\", \"validations\": {\"length\": {\"max\": 255}, \"person-name-prohibited-characters\": {}}, \"required\": {\"roles\": [\"user\"]}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"lastName\", \"displayName\": \"${lastName}\", \"validations\": {\"length\": {\"max\": 255}, \"person-name-prohibited-characters\": {}}, \"required\": {\"roles\": [\"user\"]}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"tc_identity_key\", \"displayName\": \"TeamCraft identity key\", \"validations\": {\"length\": {\"max\": 512}}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"user\"]}, \"multivalued\": false}], \"groups\": [{\"name\": \"user-metadata\", \"displayHeader\": \"User metadata\", \"displayDescription\": \"Attributes, which refer to user metadata\"}]}"
+          ]
+        }
+      }
+    ]
+  }
 }

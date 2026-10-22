@@ -270,6 +270,14 @@ pub struct CallsConfig {
   /// A conversation's call gets a new id once no join token was issued for this long.
   #[serde(default = "default_call_idle_secs")]
   pub call_idle_secs: u64,
+  /// Shared secret of the SFU: it reports who joins and leaves calls with `Authorization: Bearer
+  /// <token>` to `/api/internal/v1/calls/participants/*`. Without it those endpoints answer 503 and
+  /// the call roster stays empty. Prefer `TEAMCRAFT_CALLS__SFU_REGISTRATION_TOKEN`.
+  #[serde(rename = "sfu_registration_token", default)]
+  pub maybe_sfu_registration_token: Option<SecretString>,
+  /// DMs and group DMs ring for this long unless somebody else joins.
+  #[serde(default = "default_ring_timeout_secs")]
+  pub ring_timeout_secs: u64,
 }
 
 /// Device-linking relay at /api/v1/rendezvous.
@@ -467,6 +475,10 @@ fn env_provider() -> Env {
 
 fn default_join_token_ttl_secs() -> u64 {
   60
+}
+
+fn default_ring_timeout_secs() -> u64 {
+  30
 }
 
 fn default_call_idle_secs() -> u64 {

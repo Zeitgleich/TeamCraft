@@ -177,3 +177,9 @@ allow_private_endpoints = false
 # join_token_ttl_secs = 60
 # A conversation's call gets a new id once no join token was issued for this long.
 # call_idle_secs = 43200
+# The SFU reports who joins and leaves calls to /api/internal/v1/calls/participants/{joined,left}
+# with this bearer token; the server turns that into the call roster and call_* gateway events.
+# Prefer the environment variable TEAMCRAFT_CALLS__SFU_REGISTRATION_TOKEN.
+# sfu_registration_token = "..."
+# DMs and group DMs ring until somebody else joins or this many seconds pass.
+# ring_timeout_secs = 30

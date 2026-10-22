@@ -21,6 +21,7 @@ mod push;
 mod retention;
 mod snowflake;
 mod space;
+mod status;
 #[cfg(feature = "integration")]
 pub mod testing;
 mod user;
@@ -51,5 +52,6 @@ pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};
 pub use space::{
   Category, NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing, SpaceMember, SpaceView,
 };
+pub use status::StoredStatus;
 pub use user::{OidcIdentity, OidcUserRow, PresencePreference, User, UserSearch};
 pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};

@@ -133,8 +133,15 @@ impl TestApp {
       signing_key_path: "unused.pem".into(),
       join_token_ttl_secs: 60,
       call_idle_secs: 3600,
+      maybe_sfu_registration_token: None,
+      ring_timeout_secs: 30,
     };
-    let calls = CallService::new(&config, signing_key_pem.as_bytes()).unwrap();
+    Self::start_with_calls_config(&config, signing_key_pem).await
+  }
+
+  /// Like [`Self::start_with_calls`] with a full calls configuration (SFU token, ring timeout).
+  pub async fn start_with_calls_config(config: &CallsConfig, signing_key_pem: &str) -> Option<Self> {
+    let calls = CallService::new(config, signing_key_pem.as_bytes()).unwrap();
     Self::start_inner(|_| {}, None, Some(calls)).await
   }
 

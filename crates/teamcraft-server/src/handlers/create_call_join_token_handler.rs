@@ -9,7 +9,7 @@ use crate::services::calls;
 use crate::state::AppState;
 
 /// Issues a short-lived token for joining the conversation's call on the SFU.
-#[utoipa::path(post, path = "/api/v1/conversations/{conversation_id}/call/join-token", tag = "calls", summary = "Issues a short-lived token for joining the conversation's call on the SFU.", params(("conversation_id" = ConversationId, Path)), request_body = CreateCallJoinTokenRequest, responses((status = 200, body = CallJoinTokenResponse), (status = 400, body = ErrorBody), (status = 401, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody), (status = 503, body = ErrorBody)), security(("bearer" = [])))]
+#[utoipa::path(post, path = "/api/v1/conversations/{conversation_id}/call/join-token", tag = "calls", summary = "Issues a short-lived token for joining the conversation's call on the SFU.", request_body = CreateCallJoinTokenRequest, params(("conversation_id" = ConversationId, Path)), responses((status = 200, body = CallJoinTokenResponse), (status = 400, body = ErrorBody), (status = 401, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)), security(("bearer" = [])))]
 pub async fn create_call_join_token_handler(
   State(state): State<AppState>,
   caller: AuthenticatedUser,

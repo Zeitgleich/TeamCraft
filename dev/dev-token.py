@@ -6,6 +6,7 @@ disables the password grant), then prints the access token.
 
   ./dev/dev-token.py alice
   curl -H "Authorization: Bearer $(./dev/dev-token.py alice)" http://127.0.0.1:8081/api/v1/me
+  ./dev/dev-token.py alice id      # the ID token instead (carries tc_identity_key once it is set)
 
 Dev only: passwords are "<user>-dev-pass" (see dev/keycloak/teamcraft-dev-realm.json).
 """
@@ -32,7 +33,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def main() -> None:
-  if len(sys.argv) != 2:
+  if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "id"):
     sys.exit(__doc__)
   user = sys.argv[1]
   verifier = secrets.token_urlsafe(48)
@@ -66,7 +67,8 @@ def main() -> None:
     "grant_type": "authorization_code", "client_id": CLIENT_ID, "code": code[0],
     "redirect_uri": REDIRECT_URI, "code_verifier": verifier,
   }).encode())
-  print(json.load(urllib.request.urlopen(token_request))["access_token"])
+  answer = json.load(urllib.request.urlopen(token_request))
+  print(answer["id_token"] if len(sys.argv) == 3 else answer["access_token"])
 
 
 if __name__ == "__main__":

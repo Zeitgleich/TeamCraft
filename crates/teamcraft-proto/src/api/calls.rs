@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{CallId, DeviceId, UnixMillis};
+use crate::{CallId, ConversationId, DeviceId, UnixMillis, UserId};
 
 /// Body of `POST /api/v1/conversations/{conversation_id}/call/join-token`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -31,4 +31,32 @@ impl std::fmt::Debug for CallJoinTokenResponse {
       .field("expires_at", &self.expires_at)
       .finish()
   }
+}
+
+/// One device in a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CallRosterEntry {
+  pub user_id: UserId,
+  pub device_id: DeviceId,
+}
+
+/// `GET /api/v1/conversations/{id}/call`: the call that is running in the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CallStateResponse {
+  pub call_id: CallId,
+  pub conversation_id: ConversationId,
+  pub started_by: UserId,
+  pub started_at: UnixMillis,
+  /// DMs and group DMs ring until someone else joins or the ring timeout passes.
+  pub is_ringing: bool,
+  pub participants: Vec<CallRosterEntry>,
+}
+
+/// Body of the SFU's reports `POST /api/internal/v1/calls/participants/{joined,left}`. Internal:
+/// authenticated with the SFU's registration token, not with a user token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuParticipantReport {
+  pub call_id: CallId,
+  pub user_id: UserId,
+  pub device_id: DeviceId,
 }

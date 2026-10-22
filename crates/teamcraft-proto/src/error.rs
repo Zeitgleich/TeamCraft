@@ -20,6 +20,7 @@ wire_enum! {
     IdentityKeyNotFound => "identity_key_not_found",
     KeyBagNotFound => "key_bag_not_found",
     AttachmentNotFound => "attachment_not_found",
+    CallNotFound => "call_not_found",
     Conflict => "conflict",
     EpochConflict => "epoch_conflict",
     VersionConflict => "version_conflict",
@@ -41,6 +42,13 @@ pub struct ErrorBody {
   pub error_code: ErrorCode,
   /// Human-readable English text for logs and developers; clients localize by `error_code`.
   pub message: String,
+  /// With `epoch_conflict`: the epoch the MLS group is in now, so the client can rebase without
+  /// parsing the message.
+  #[serde(rename = "current_epoch", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_current_epoch: Option<u64>,
+  /// With `version_conflict`: the stored version of the versioned object (key bag, roster, policy).
+  #[serde(rename = "current_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_current_version: Option<u64>,
 }
 
 impl ErrorBody {
@@ -48,7 +56,19 @@ impl ErrorBody {
     Self {
       error_code,
       message: message.into(),
+      maybe_current_epoch: None,
+      maybe_current_version: None,
     }
+  }
+
+  pub fn with_current_epoch(mut self, epoch: u64) -> Self {
+    self.maybe_current_epoch = Some(epoch);
+    self
+  }
+
+  pub fn with_current_version(mut self, version: u64) -> Self {
+    self.maybe_current_version = Some(version);
+    self
   }
 }
 
@@ -63,6 +83,23 @@ mod tests {
       serde_json::to_string(&body).unwrap(),
       r#"{"error_code":"channel_not_found","message":"no such channel"}"#
     );
+  }
+
+  #[test]
+  fn conflicts_carry_structured_fields_that_are_omitted_otherwise() {
+    let body = ErrorBody::new(ErrorCode::EpochConflict, "rebase").with_current_epoch(7);
+    assert_eq!(
+      serde_json::to_string(&body).unwrap(),
+      r#"{"error_code":"epoch_conflict","message":"rebase","current_epoch":7}"#
+    );
+    let version = ErrorBody::new(ErrorCode::VersionConflict, "stale").with_current_version(3);
+    assert!(
+      serde_json::to_string(&version)
+        .unwrap()
+        .ends_with(r#""current_version":3}"#)
+    );
+    let old: ErrorBody = serde_json::from_str(r#"{"error_code":"epoch_conflict","message":"x"}"#).unwrap();
+    assert_eq!((old.maybe_current_epoch, old.maybe_current_version), (None, None));
   }
 
   #[test]
@@ -88,6 +125,7 @@ mod tests {
       ErrorCode::IdentityKeyNotFound,
       ErrorCode::KeyBagNotFound,
       ErrorCode::AttachmentNotFound,
+      ErrorCode::CallNotFound,
       ErrorCode::Conflict,
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,

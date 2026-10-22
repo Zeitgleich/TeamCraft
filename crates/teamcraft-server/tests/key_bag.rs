@@ -61,6 +61,11 @@ async fn stale_versions_are_rejected_without_changing_the_bag() {
     (StatusCode::CONFLICT, "version_conflict")
   );
   assert!(stale.body["message"].as_str().unwrap().contains('2'));
+  assert_eq!(
+    stale.body["current_version"], 2,
+    "the version is a structured field"
+  );
+  assert!(stale.body.get("current_epoch").is_none());
   let again_create = app.put(&carol, "/me/key-bag", bag(0, "c3RhbGU=")).await;
   assert_eq!(again_create.error_code(), "version_conflict");
   let future = app.put(&carol, "/me/key-bag", bag(9, "c3RhbGU=")).await;

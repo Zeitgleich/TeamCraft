@@ -104,8 +104,26 @@ pub async fn claim_key_packages(
     ));
   }
 
+  let candidates: Vec<_> = state
+    .database
+    .list_devices(target.id)
+    .await?
+    .into_iter()
+    .filter(|device| {
+      request
+        .maybe_only_device_ids
+        .as_ref()
+        .is_none_or(|only| only.contains(&device.id))
+    })
+    .filter(|device| !request.exclude_device_ids.contains(&device.id))
+    .collect();
+  // The filters left nothing to claim: no device is missing from the group.
+  if candidates.is_empty() {
+    return Ok(ClaimKeyPackagesResponse { packages: Vec::new() });
+  }
+
   let mut packages = Vec::new();
-  for device in state.database.list_devices(target.id).await? {
+  for device in candidates {
     if let Some(claimed) = state.database.claim_key_package(device.id).await? {
       packages.push(ClaimedKeyPackage {
         device_id: device.id,

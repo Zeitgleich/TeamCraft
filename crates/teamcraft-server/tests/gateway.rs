@@ -127,7 +127,7 @@ impl Gateway {
   async fn next_presence(&mut self) -> (String, PresenceState) {
     self
       .event_where(|event| match event {
-        GatewayEvent::PresenceUpdate { user_id, state } => Some((user_id.to_string(), state.clone())),
+        GatewayEvent::PresenceUpdate { user_id, state, .. } => Some((user_id.to_string(), state.clone())),
         _ => None,
       })
       .await
@@ -137,7 +137,9 @@ impl Gateway {
     let user = user.to_owned();
     self
       .event_where(|event| match event {
-        GatewayEvent::PresenceUpdate { user_id, state } if user_id.to_string() == user => Some(state.clone()),
+        GatewayEvent::PresenceUpdate { user_id, state, .. } if user_id.to_string() == user => {
+          Some(state.clone())
+        },
         _ => None,
       })
       .await

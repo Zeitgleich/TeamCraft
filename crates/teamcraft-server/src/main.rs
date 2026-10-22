@@ -21,7 +21,7 @@ use teamcraft_server::push::{ApnsSender, FcmSender, PushDispatcher, UnifiedPushS
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
 use teamcraft_server::services::calls::CallService;
-use teamcraft_server::services::presence::refresh_presence;
+use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::{oidc, retention};
 use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, Settings};
 use teamcraft_server::storage::BlobStore;
@@ -117,6 +117,10 @@ fn spawn_session_sweeper(state: AppState) {
     let mut interval = tokio::time::interval(SESSION_SWEEP_INTERVAL);
     loop {
       interval.tick().await;
+      match presence::expire_statuses(&state, time::OffsetDateTime::now_utc()).await {
+        Ok(_) => {},
+        Err(error) => warn!(%error, "expiring custom statuses failed"),
+      }
       for user in state.hub.sweep_expired() {
         if let Err(error) = refresh_presence(&state, user).await {
           warn!(%error, "presence refresh failed");

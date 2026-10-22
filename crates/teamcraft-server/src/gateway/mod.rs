@@ -3,4 +3,4 @@
 pub mod connection;
 mod hub;
 
-pub use hub::{Attached, DeviceAggregate, Hub, HubOptions, ResumeError};
+pub use hub::{Attached, DeviceAggregate, Hub, HubOptions, PresenceSnapshot, ResumeError};

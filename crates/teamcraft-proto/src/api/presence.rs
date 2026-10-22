@@ -33,11 +33,29 @@ wire_enum! {
   }
 }
 
+/// A custom status (PLAN.md §4): "🌴 Vacation until Monday". Server-visible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CustomStatus {
+  #[serde(rename = "emoji", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_emoji: Option<String>,
+  #[serde(rename = "text", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_text: Option<String>,
+  /// After this time the status disappears by itself.
+  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<UnixMillis>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UserPresence {
   pub user_id: UserId,
   pub state: PresenceState,
+  #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_status: Option<CustomStatus>,
 }
+
+/// `PUT /api/v1/me/status`: sets the caller's custom status (needs an emoji or a text). Replaces the
+/// previous one; `DELETE /api/v1/me/status` clears it.
+pub type SetCustomStatusRequest = CustomStatus;
 
 /// `PUT /api/v1/me/presence`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

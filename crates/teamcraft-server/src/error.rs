@@ -90,6 +90,13 @@ impl ApiError {
     }
   }
 
+  pub fn call_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::CallNotFound,
+      what: "call",
+    }
+  }
+
   pub fn key_bag_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::KeyBagNotFound,
@@ -161,7 +168,12 @@ impl IntoResponse for ApiError {
     ) {
       error!(error = %self, "request failed");
     }
-    let body = ErrorBody::new(self.error_code(), self.public_message());
+    let mut body = ErrorBody::new(self.error_code(), self.public_message());
+    match &self {
+      Self::EpochConflict { current_epoch } => body = body.with_current_epoch(*current_epoch),
+      Self::VersionConflict { current_version } => body = body.with_current_version(*current_version),
+      _ => {},
+    }
     let mut response = (self.status(), Json(body)).into_response();
     if self.status() == StatusCode::UNAUTHORIZED {
       response
@@ -273,6 +285,32 @@ mod tests {
     for (error, status, code) in cases {
       assert_eq!((error.status(), error.error_code()), (status, code), "{error}");
     }
+  }
+
+  #[tokio::test]
+  async fn conflicts_expose_the_current_epoch_and_version_as_fields() {
+    async fn body_of(error: ApiError) -> ErrorBody {
+      let response = error.into_response();
+      let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+      serde_json::from_slice(&bytes).unwrap()
+    }
+    let epoch = body_of(ApiError::EpochConflict { current_epoch: 4 }).await;
+    assert_eq!(
+      (epoch.maybe_current_epoch, epoch.maybe_current_version),
+      (Some(4), None)
+    );
+    let version = body_of(ApiError::VersionConflict { current_version: 9 }).await;
+    assert_eq!(
+      (version.maybe_current_epoch, version.maybe_current_version),
+      (None, Some(9))
+    );
+    let other = body_of(ApiError::Conflict("x".into())).await;
+    assert_eq!(
+      (other.maybe_current_epoch, other.maybe_current_version),
+      (None, None)
+    );
   }
 
   #[test]

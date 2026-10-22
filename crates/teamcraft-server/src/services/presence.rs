@@ -2,10 +2,10 @@
 
 use std::collections::HashSet;
 
-use teamcraft_db::PresencePreference;
+use teamcraft_db::{PresencePreference, StoredStatus};
 use teamcraft_proto::{
-  GatewayEvent, ListPresenceResponse, ManualPresence, PresenceState, SetPresenceRequest, SetPresenceResponse,
-  UserId, UserPresence,
+  CustomStatus, GatewayEvent, ListPresenceResponse, ManualPresence, PresenceState, SetCustomStatusRequest,
+  SetPresenceRequest, SetPresenceResponse, UserId, UserPresence,
 };
 use time::OffsetDateTime;
 
@@ -13,7 +13,7 @@ use super::access::is_guest;
 use super::convert::{offset_date_time, unix_millis};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
-use crate::gateway::DeviceAggregate;
+use crate::gateway::{DeviceAggregate, PresenceSnapshot};
 use crate::state::AppState;
 
 const MAX_PRESENCE_QUERY_USERS: usize = 200;
@@ -45,12 +45,19 @@ pub fn derive_state(
 /// Recomputes the user's presence and tells everyone who shares a conversation if it changed.
 pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let preference = state.database.get_presence_preference(user).await?;
-  let presence = derive_state(
-    &preference,
-    state.hub.device_aggregate(user),
-    OffsetDateTime::now_utc(),
-  );
-  if state.hub.record_presence(user, presence.clone()) {
+  let now = OffsetDateTime::now_utc();
+  let presence = derive_state(&preference, state.hub.device_aggregate(user), now);
+  let maybe_status = state
+    .database
+    .get_custom_statuses(&[user], now)
+    .await?
+    .remove(&user)
+    .map(|status| status_response(&status));
+  let snapshot = PresenceSnapshot {
+    state: presence.clone(),
+    maybe_status: maybe_status.clone(),
+  };
+  if state.hub.record_presence(user, snapshot) {
     let mut audience: HashSet<UserId> = state.database.users_sharing_conversation(user).await?;
     audience.insert(user);
     state.hub.publish(
@@ -58,6 +65,7 @@ pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiE
       &GatewayEvent::PresenceUpdate {
         user_id: user,
         state: presence,
+        maybe_status,
       },
     );
   }
@@ -119,12 +127,18 @@ pub async fn list_presence(
   } else {
     requested
   };
+  // Statuses come from the database: users who are offline still show theirs.
+  let mut statuses = state
+    .database
+    .get_custom_statuses(&visible, OffsetDateTime::now_utc())
+    .await?;
   Ok(ListPresenceResponse {
     presences: visible
       .into_iter()
       .map(|user_id| UserPresence {
         user_id,
-        state: state.hub.last_presence(user_id),
+        state: state.hub.last_presence(user_id).state,
+        maybe_status: statuses.remove(&user_id).map(|status| status_response(&status)),
       })
       .collect(),
   })
@@ -147,6 +161,81 @@ fn parse_user_ids(text: &str) -> Result<Vec<UserId>, ApiError> {
     )));
   }
   Ok(ids)
+}
+
+const MAX_EMOJI_CHARS: usize = 32;
+
+/// Sets the caller's custom status (PLAN.md §4) and tells everybody who sees their presence.
+pub async fn set_custom_status(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  request: SetCustomStatusRequest,
+) -> Result<CustomStatus, ApiError> {
+  let emoji = request
+    .maybe_emoji
+    .as_deref()
+    .map(str::trim)
+    .filter(|e| !e.is_empty());
+  let text = request
+    .maybe_text
+    .as_deref()
+    .map(str::trim)
+    .filter(|t| !t.is_empty());
+  if emoji.is_none() && text.is_none() {
+    return Err(ApiError::InvalidRequest(
+      "a status needs an emoji or a text".into(),
+    ));
+  }
+  if emoji.is_some_and(|e| e.chars().count() > MAX_EMOJI_CHARS || e.chars().any(char::is_control)) {
+    return Err(ApiError::InvalidRequest("the emoji is invalid".into()));
+  }
+  if let Some(text) = text {
+    super::validate_name(text, "status text", state.settings.limits.max_name_length)?;
+  }
+  let maybe_expires_at = match request.maybe_expires_at {
+    Some(millis) => {
+      let at =
+        offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
+      if at <= OffsetDateTime::now_utc() {
+        return Err(ApiError::InvalidRequest(
+          "expires_at must be in the future".into(),
+        ));
+      }
+      Some(at)
+    },
+    None => None,
+  };
+
+  let stored = StoredStatus {
+    maybe_emoji: emoji.map(str::to_owned),
+    maybe_text: text.map(str::to_owned),
+    maybe_expires_at,
+  };
+  state.database.set_custom_status(caller.user.id, &stored).await?;
+  refresh_presence(state, caller.user.id).await?;
+  Ok(status_response(&stored))
+}
+
+pub async fn clear_custom_status(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
+  state.database.clear_custom_status(caller.user.id).await?;
+  refresh_presence(state, caller.user.id).await
+}
+
+/// Removes statuses that expired at `now` and tells the audience. The server runs this periodically.
+pub async fn expire_statuses(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
+  let users = state.database.delete_expired_statuses(now).await?;
+  for user in &users {
+    refresh_presence(state, *user).await?;
+  }
+  Ok(users.len())
+}
+
+fn status_response(status: &StoredStatus) -> CustomStatus {
+  CustomStatus {
+    maybe_emoji: status.maybe_emoji.clone(),
+    maybe_text: status.maybe_text.clone(),
+    maybe_expires_at: status.maybe_expires_at.map(unix_millis),
+  }
 }
 
 #[cfg(test)]

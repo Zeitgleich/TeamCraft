@@ -1,7 +1,7 @@
 use teamcraft_db::NewDevice;
 use teamcraft_proto::{
   DeviceId, DeviceResponse, GatewayEvent, ListDevicesResponse, PushProvider, RegisterDeviceRequest,
-  RegisterPushRequest, UserId,
+  RegisterPushRequest, SetDeviceCertificateRequest, UserId,
 };
 
 use super::audit::{self, Target as AuditTarget};
@@ -43,7 +43,46 @@ pub async fn register_device(
       cross_signature: request.cross_signature.as_slice(),
     })
     .await?;
+
+  // Everybody who shares a conversation with the user (and the user's other devices) learns about the
+  // device, so one of them can add it to the MLS groups.
+  let mut audience = state.database.users_sharing_conversation(caller.user.id).await?;
+  audience.insert(caller.user.id);
+  state.hub.publish(
+    audience,
+    &GatewayEvent::DeviceAdd {
+      user_id: caller.user.id,
+      device_id: device.id,
+    },
+  );
   Ok(device_response(&device))
+}
+
+/// Replaces the device's cross-signature with the final device certificate.
+pub async fn set_device_certificate(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  device: DeviceId,
+  request: SetDeviceCertificateRequest,
+) -> Result<DeviceResponse, ApiError> {
+  if request.cross_signature.is_empty() || request.cross_signature.len() > MAX_KEY_BYTES {
+    return Err(ApiError::InvalidRequest(
+      "cross_signature has an invalid size".into(),
+    ));
+  }
+  if !state
+    .database
+    .set_device_certificate(caller.user.id, device, request.cross_signature.as_slice())
+    .await?
+  {
+    return Err(ApiError::device_not_found());
+  }
+  let devices = state.database.list_devices(caller.user.id).await?;
+  devices
+    .iter()
+    .find(|d| d.id == device)
+    .map(device_response)
+    .ok_or_else(ApiError::device_not_found)
 }
 
 pub async fn list_devices(

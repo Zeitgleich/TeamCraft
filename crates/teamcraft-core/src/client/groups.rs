@@ -151,12 +151,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       let claimed = self
         .api
-        .claim_key_packages(
-          member.user.id,
-          &ClaimKeyPackagesRequest {
-            conversation_id: conversation,
-          },
-        )
+        .claim_key_packages(member.user.id, &ClaimKeyPackagesRequest::new(conversation))
         .await?;
       for package in claimed
         .packages
@@ -513,12 +508,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let in_group = self.group_device_ids(conversation)?;
     let claimed = match self
       .api
-      .claim_key_packages(
-        user,
-        &ClaimKeyPackagesRequest {
-          conversation_id: conversation,
-        },
-      )
+      .claim_key_packages(user, &ClaimKeyPackagesRequest::new(conversation))
       .await
     {
       Ok(claimed) => claimed,

@@ -165,15 +165,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.refresh_conversation(conversation_id).await
         }
       },
-      GatewayEvent::PresenceUpdate { user_id, state } => {
+      GatewayEvent::PresenceUpdate { user_id, state, .. } => {
         records::put_json(&self.store, Table::Presence, &user_id.to_string(), &state)
       },
       GatewayEvent::SpaceUpdate { .. }
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
-      // Not handled yet: verifying and applying roster/policy log entries, and committing the
-      // removal of a removed device from every shared group. Both are follow-ups for the core.
-      GatewayEvent::WorkspaceUpdate { .. } | GatewayEvent::DeviceRemove { .. } => Ok(()),
+      // Not handled yet: verifying and applying roster/policy log entries, committing the removal of
+      // a removed device and the addition of a new one (`add_missing_devices`) in shared groups.
+      GatewayEvent::WorkspaceUpdate { .. }
+      | GatewayEvent::DeviceRemove { .. }
+      | GatewayEvent::DeviceAdd { .. }
+      // Call roster and ringing: the UI shell does not show calls from the server roster yet.
+      | GatewayEvent::CallStart { .. }
+      | GatewayEvent::CallUpdate { .. }
+      | GatewayEvent::CallEnd { .. }
+      | GatewayEvent::CallRing { .. } => Ok(()),
       GatewayEvent::TypingStart { .. } | GatewayEvent::Unknown => Ok(()),
     }
   }

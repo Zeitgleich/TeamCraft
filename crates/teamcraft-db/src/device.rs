@@ -134,6 +134,24 @@ impl Database {
     Ok(result.rows_affected() > 0)
   }
 
+  /// Replaces the cross-signature of one of the user's active devices; `false` if it isn't theirs.
+  pub async fn set_device_certificate(
+    &self,
+    user: UserId,
+    device: DeviceId,
+    cross_signature: &[u8],
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE devices SET cross_signature = $3 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+      to_db(device),
+      to_db(user),
+      cross_signature,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
   pub async fn touch_device(&self, device: DeviceId) -> Result<(), DbError> {
     sqlx::query!(
       "UPDATE devices SET last_seen_at = now() WHERE id = $1",

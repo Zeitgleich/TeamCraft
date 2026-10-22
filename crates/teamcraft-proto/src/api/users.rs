@@ -70,6 +70,14 @@ pub struct RegisterPushRequest {
   pub push_key: Base64Bytes,
 }
 
+/// `PUT /api/v1/devices/{id}/certificate`: replaces the device's cross-signature once the final device
+/// certificate is known. The certificate signs the device ID, which the server assigns, so a client
+/// registers with a provisional certificate and uploads the final one right after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SetDeviceCertificateRequest {
+  pub cross_signature: Base64Bytes,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListDevicesResponse {
   pub devices: Vec<DeviceResponse>,

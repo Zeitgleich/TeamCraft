@@ -7392,6 +7392,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "subtle",
  "teamcraft-crypto",
  "teamcraft-db",
  "teamcraft-proto",

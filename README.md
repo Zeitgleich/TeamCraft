@@ -55,6 +55,20 @@ when the container is created (ARCHITECTURE.md §5.1.1):
 | `erin`  | `erin-dev-pass`  | guest and member roles: the highest wins (member)  |
 | `frank` | `frank-dev-pass` | no TeamCraft role: the server rejects his tokens   |
 
+**Changing the realm.** Keycloak imports the realm file only when the realm doesn't exist yet, so after
+editing `dev/keycloak/teamcraft-dev-realm.json` recreate the container (all Keycloak dev state is reset, the
+realm is imported again):
+
+```sh
+docker compose -f docker-compose.dev.yml up -d --force-recreate keycloak
+```
+
+Users who were created in TeamCraft before get new Keycloak IDs then; use a fresh database or let them be
+deactivated by the sync. `./dev/verify-realm.py` checks the identity key attestation setup: the app client's
+tokens work with the account API (audience `account`), a user can write the profile attribute `tc_identity_key`
+(visible to admins, not editable by the service account) and gets it back as an ID token claim
+(`./dev/dev-token.py alice id`).
+
 ### 2. Run the server
 
 ```sh

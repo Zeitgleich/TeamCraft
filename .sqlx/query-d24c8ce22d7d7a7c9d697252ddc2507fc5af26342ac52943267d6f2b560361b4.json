@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO custom_status (user_id, emoji, text, expires_at) VALUES ($1, $2, $3, $4)\n         ON CONFLICT (user_id) DO UPDATE SET emoji = EXCLUDED.emoji, text = EXCLUDED.text,\n                                             expires_at = EXCLUDED.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d24c8ce22d7d7a7c9d697252ddc2507fc5af26342ac52943267d6f2b560361b4"
+}

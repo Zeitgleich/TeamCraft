@@ -129,3 +129,49 @@ pub async fn channel_with(app: &TestApp, members: &[&TestUser]) -> String {
   }
   channel
 }
+
+pub mod ws {
+  //! Minimal gateway client for tests that only watch events.
+  #![allow(clippy::unwrap_used)]
+
+  use std::time::Duration;
+
+  use futures_util::{SinkExt, StreamExt};
+  use serde_json::json;
+  use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayEvent, GatewayServerMessage};
+  use teamcraft_server::testing::{TestApp, TestUser};
+  use tokio_tungstenite::tungstenite::Message;
+
+  pub type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+  /// Connects and identifies; returns once the session is ready.
+  pub async fn connect(app: &TestApp, user: &TestUser, device: &str) -> Socket {
+    let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
+    socket.next().await;
+    let identify = GatewayClientMessage::Identify {
+      token: app.token(user),
+      device_id: serde_json::from_value(json!(device)).unwrap(),
+      activity: DeviceActivity::Active,
+    };
+    socket
+      .send(Message::Text(serde_json::to_string(&identify).unwrap().into()))
+      .await
+      .unwrap();
+    socket.next().await;
+    socket
+  }
+
+  /// Every event that arrives within `wait`, or until the connection closes.
+  pub async fn events(socket: &mut Socket, wait: Duration) -> Vec<GatewayEvent> {
+    let mut seen = Vec::new();
+    while let Ok(Some(Ok(message))) = tokio::time::timeout(wait, socket.next()).await {
+      if let Message::Text(text) = message
+        && let Ok(GatewayServerMessage::Event { event, .. }) = serde_json::from_str(text.as_str())
+      {
+        seen.push(event);
+      }
+    }
+    seen
+  }
+}

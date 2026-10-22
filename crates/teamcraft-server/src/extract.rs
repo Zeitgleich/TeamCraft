@@ -48,3 +48,20 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for ApiQuery<T> {
       .map_err(|rejection: QueryRejection| ApiError::InvalidRequest(rejection.body_text()))
   }
 }
+
+/// The `Authorization: Bearer` value of an internal request, if there is one.
+pub struct BearerToken(pub Option<String>);
+
+impl<S: Send + Sync> FromRequestParts<S> for BearerToken {
+  type Rejection = ApiError;
+
+  async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    let maybe_token = parts
+      .headers
+      .get(axum::http::header::AUTHORIZATION)
+      .and_then(|value| value.to_str().ok())
+      .and_then(|value| value.strip_prefix("Bearer "))
+      .map(str::to_owned);
+    Ok(Self(maybe_token))
+  }
+}
