@@ -7,7 +7,7 @@ final class OidcTests: XCTestCase {
     serverURL: URL(string: "https://chat.example.com")!,
     oidcIssuer: URL(string: "https://id.example.com/realms/team")!,
     oidcClientId: "teamcraft", oidcRedirectScheme: "com.example.teamcraft",
-    appGroupId: "group.com.example.teamcraft", keychainAccessGroup: "")
+    appGroupId: "group.de.zeitgleich.teamcraft", keychainAccessGroup: "")
 
   func testPkceMatchesTheRfcTestVector() {
     // RFC 7636 appendix B.

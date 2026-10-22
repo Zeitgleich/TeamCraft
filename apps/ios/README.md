@@ -63,8 +63,8 @@ the extension (each links the static library; they are separate processes).
 | `APP_GROUP_ID`                   | App Group shared by app and extension (change it with your bundle IDs)                                        |
 | `NSE_ENTITLEMENTS`               | `NotificationService/NotificationService.Filtering.entitlements` once Apple granted the filtering entitlement |
 
-Bundle IDs are `com.example.teamcraft` (app), `com.example.teamcraft.NotificationService`,
-`com.example.teamcraft.Tests`. Change them for your Apple account in `project.yml` together with
+Bundle IDs are `de.zeitgleich.teamcraft` (app), `de.zeitgleich.teamcraft.notifications`,
+`de.zeitgleich.teamcraft.Tests`. Change them for your Apple account in `project.yml` together with
 `APP_GROUP_ID` and `KEYCHAIN_ACCESS_GROUP`.
 
 ## How it works
@@ -179,7 +179,7 @@ a **device** (push, CallKit and memory only work there), then the simulator.
 11. **German.** Switch the phone's language to German; screens, notification actions and the call
     screen are translated.
 
-Report anything that fails with the Xcode console log (subsystem `com.example.teamcraft` once added) and
+Report anything that fails with the Xcode console log (subsystem `de.zeitgleich.teamcraft` once added) and
 whether it was a device or the simulator.
 
 ## Known gaps

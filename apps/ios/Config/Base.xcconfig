@@ -10,8 +10,8 @@ TEAMCRAFT_OIDC_CLIENT_ID = teamcraft
 TEAMCRAFT_OIDC_REDIRECT_SCHEME = com.example.teamcraft
 
 // Shared between the app and the notification service extension (docs/e2ee.md §7).
-APP_GROUP_ID = group.com.example.teamcraft
-KEYCHAIN_ACCESS_GROUP = $(AppIdentifierPrefix)com.example.teamcraft.shared
+APP_GROUP_ID = group.de.zeitgleich.teamcraft
+KEYCHAIN_ACCESS_GROUP = $(AppIdentifierPrefix)de.zeitgleich.teamcraft
 
 // Entitlements of the extension. Swap for NotificationService.Filtering.entitlements once Apple granted
 // com.apple.developer.usernotifications.filtering (needed to suppress call pushes, README.md).

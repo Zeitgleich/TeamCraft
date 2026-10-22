@@ -15,7 +15,7 @@ struct KeychainStore {
   /// Empty: the process's default group (unsigned simulator builds have no shared one).
   let accessGroup: String
 
-  init(service: String = "com.example.teamcraft", accessGroup: String = AppEnvironment.current.keychainAccessGroup) {
+  init(service: String = "de.zeitgleich.teamcraft", accessGroup: String = AppEnvironment.current.keychainAccessGroup) {
     self.service = service
     self.accessGroup = accessGroup
   }

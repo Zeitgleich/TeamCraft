@@ -47,7 +47,7 @@ final class ProcessLock: @unchecked Sendable {
 /// Tells the other process that the shared store changed (Darwin notifications cross processes and
 /// carry no payload): the extension after it stored a message, the app to reload.
 final class StoreChangeNotifier {
-  static let name = "com.example.teamcraft.store-changed"
+  static let name = "de.zeitgleich.teamcraft.store-changed"
 
   private var handler: (() -> Void)?
 

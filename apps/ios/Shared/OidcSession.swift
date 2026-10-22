@@ -167,7 +167,7 @@ final class SessionVault {
 
   private let keychain: KeychainStore
   private let oidc: OidcClient
-  private let queue = DispatchQueue(label: "com.example.teamcraft.session")
+  private let queue = DispatchQueue(label: "de.zeitgleich.teamcraft.session")
 
   init(keychain: KeychainStore = KeychainStore(), oidc: OidcClient = OidcClient(environment: .current)) {
     self.keychain = keychain
