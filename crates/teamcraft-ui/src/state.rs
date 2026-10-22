@@ -83,6 +83,8 @@ pub enum Overlay {
   SpaceSettings(SpaceId),
   /// The images of a conversation, starting at the one in this message.
   Gallery(ConversationId, MessageId),
+  /// The versions of an edited message.
+  EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.
   Bookmarks(ConversationId),
   /// The signed-in user's profile form.

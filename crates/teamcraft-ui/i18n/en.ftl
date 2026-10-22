@@ -1024,3 +1024,7 @@ bookmarks-down = Move down
 bookmarks-remove = Remove bookmark
 bookmarks-invalid = Every bookmark needs a title, and links must start with https:// or http://.
 action-bookmark-file = Add file to bookmarks
+
+history-title = Edit history
+history-current = Current version
+history-replaced = Replaced { $time }

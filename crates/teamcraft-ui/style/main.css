@@ -4001,3 +4001,8 @@ select.input {
 .bookmark-edit-list { list-style: none; margin: 0 0 .5rem; padding: 0; }
 .bookmark-row { display: flex; gap: .35rem; align-items: center; margin-bottom: .35rem; }
 .bookmark-row .emoji-input { width: 3.5rem; text-align: center; }
+
+.history-versions { list-style: none; margin: 0; padding: 0 1rem 1rem; }
+.history-versions h3 { font-size: .85em; color: var(--text-muted, #666); margin: .75rem 0 .15rem; }
+.diff-added { background: rgba(46, 160, 67, .25); border-radius: 2px; }
+.diff-removed { background: rgba(248, 81, 73, .25); text-decoration: line-through; border-radius: 2px; }

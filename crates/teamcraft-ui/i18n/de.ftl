@@ -1024,3 +1024,7 @@ bookmarks-down = Nach unten
 bookmarks-remove = Lesezeichen entfernen
 bookmarks-invalid = Jedes Lesezeichen braucht einen Titel, und Links müssen mit https:// oder http:// beginnen.
 action-bookmark-file = Datei zu Lesezeichen hinzufügen
+
+history-title = Bearbeitungsverlauf
+history-current = Aktuelle Version
+history-replaced = Ersetzt { $time }

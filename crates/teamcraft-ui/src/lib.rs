@@ -13,6 +13,7 @@ pub mod bundle;
 pub mod calls;
 pub mod clock;
 pub mod components;
+pub mod diff;
 pub mod emoji;
 pub mod groups;
 pub mod highlight;
