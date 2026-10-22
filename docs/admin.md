@@ -175,7 +175,8 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
-timeout) are part of the signed workspace policy; the server enforces them. A permission scheme change
+timeout) and the thread options (threaded view on/off, auto-follow default) are part of the signed
+workspace policy; the server enforces them. A permission scheme change
 cannot touch the owner role or `sign_workspace`, cannot give guests permissions beyond channel content
 and direct messages, and cannot change instance-wide permissions inside a space.
 

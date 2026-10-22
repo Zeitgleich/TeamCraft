@@ -182,6 +182,25 @@ impl Default for DirectoryPolicy {
   }
 }
 
+/// Threads (PLAN.md §3): admin options for the threaded view and the auto-follow default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadPolicy {
+  /// Off: the workspace is flat, the server refuses messages that reply in a thread. Existing
+  /// threads stay readable.
+  pub is_threaded_view_enabled: bool,
+  /// Whether people who never chose follow the threads where they are mentioned.
+  pub auto_follows_mentioned_threads: bool,
+}
+
+impl Default for ThreadPolicy {
+  fn default() -> Self {
+    Self {
+      is_threaded_view_enabled: true,
+      auto_follows_mentioned_threads: true,
+    }
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -198,6 +217,8 @@ pub struct WorkspacePolicy {
   pub directory: DirectoryPolicy,
   #[serde(default)]
   pub presence: PresencePolicy,
+  #[serde(default)]
+  pub threads: ThreadPolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -233,6 +254,7 @@ impl Default for WorkspacePolicy {
       session: SessionPolicy::default(),
       directory: DirectoryPolicy::default(),
       presence: PresencePolicy::default(),
+      threads: ThreadPolicy::default(),
     }
   }
 }

@@ -8,11 +8,14 @@ content stays encrypted; keyword notifications and the activity feed are built o
 
 - A reply follows the thread for the sender (again after an unfollow, since replying is explicit),
   the author of the root message and mentioned members (unless they turned off
-  `auto_follow_mentioned_threads`). Somebody who unfollowed by hand is not brought back by other
+  `auto_follow_mentioned_threads`; somebody who never chose follows the workspace default, signed policy
+  `threads.auto_follows_mentioned_threads`). Somebody who unfollowed by hand is not brought back by other
   people's replies.
 - `PUT` / `DELETE /conversations/{id}/threads/{thread_id}/follow` follow and unfollow manually
   (following starts "from now": existing replies count as read).
 - `PUT /conversations/{id}/threads/{thread_id}/read` moves the thread read position forward.
+- The signed policy can switch threads off (`threads.is_threaded_view_enabled`): the server then refuses
+  messages with a `thread_id` (403); existing threads stay readable.
 - `GET /threads` is the threads inbox: followed threads, newest activity first, with reply, unread and
   mention counts and the newest reply (ciphertext) for the preview; `unread_only=true` filters.
 - `thread_update` (gateway) tells the user's other devices that a follow or read position changed.

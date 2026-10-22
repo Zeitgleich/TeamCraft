@@ -28,6 +28,7 @@ pub async fn record_reply(
       sender: reply.sender_user_id,
       root_sender: root.sender_user_id,
       mentioned: &reply.mentioned_user_ids,
+      follows_mentions_by_default: state.policy.get().threads.auto_follows_mentioned_threads,
     })
     .await?;
   announce(state, reply.conversation_id, thread, changed);
