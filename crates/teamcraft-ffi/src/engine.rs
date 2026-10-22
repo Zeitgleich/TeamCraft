@@ -3,9 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::model::Message as MessageView;
@@ -106,23 +107,11 @@ pub(crate) fn spawn(
       };
       LocalSet::new().block_on(&runtime, async move {
         // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
-        // goes nowhere on Android.
-        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-          Engine::open(config, ForeignTokens(tokens), listener)
-        }));
-        let mut engine = match opened {
-          Ok(Ok(engine)) => engine,
-          Ok(Err(error)) => {
+        // goes nowhere on Android, so the error carries the message and location instead.
+        let mut engine = match open_reporting_panics(config, ForeignTokens(tokens), listener) {
+          Ok(engine) => engine,
+          Err(error) => {
             let _ = ready.send(Err(error));
-            return;
-          },
-          Err(panic) => {
-            let message = panic
-              .downcast_ref::<String>()
-              .cloned()
-              .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_string()))
-              .unwrap_or_default();
-            let _ = ready.send(Err(TeamCraftError::Core(format!("opening the engine panicked: {message}"))));
             return;
           },
         };
@@ -136,6 +125,30 @@ pub(crate) fn spawn(
     .map_err(|error| TeamCraftError::Core(error.to_string()))?;
   opened.recv().map_err(|_| TeamCraftError::EngineStopped)??;
   Ok(jobs)
+}
+
+/// [`Engine::open`], with a panic turned into an error that says where it happened.
+fn open_reporting_panics(
+  config: AppConfig,
+  tokens: ForeignTokens,
+  listener: Arc<dyn EventListener>,
+) -> Result<Engine, TeamCraftError> {
+  let report = Arc::new(Mutex::new(String::new()));
+  let previous_hook = std::panic::take_hook();
+  let hook_report = report.clone();
+  std::panic::set_hook(Box::new(move |info| {
+    if let Ok(mut report) = hook_report.lock() {
+      *report = info.to_string();
+    }
+  }));
+  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| Engine::open(config, tokens, listener)));
+  std::panic::set_hook(previous_hook);
+  opened.unwrap_or_else(|_| {
+    let message = report.lock().map(|report| report.clone()).unwrap_or_default();
+    Err(TeamCraftError::Core(format!(
+      "opening the engine panicked: {message}"
+    )))
+  })
 }
 
 impl Engine {

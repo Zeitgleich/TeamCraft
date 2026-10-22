@@ -1,6 +1,10 @@
 //! TLS trust on Android. reqwest's default verifier there (rustls-platform-verifier) needs a JNI
 //! context and a Kotlin component; instead both HTTP and the WebSockets use rustls with the
 //! Mozilla root store (`webpki-roots`), which needs nothing from the app.
+//!
+//! The provider is named explicitly: the tree enables both rustls providers (aws-lc-rs through
+//! reqwest, ring through the WebTransport stack), so rustls can't pick a process default and
+//! `ClientConfig::builder()` would panic.
 
 use std::sync::{Arc, OnceLock};
 
@@ -13,8 +17,12 @@ pub(crate) fn client_config() -> Arc<ClientConfig> {
     .get_or_init(|| {
       let mut roots = RootCertStore::empty();
       roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+      let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
       Arc::new(
-        ClientConfig::builder()
+        ClientConfig::builder_with_provider(provider)
+          .with_safe_default_protocol_versions()
+          // Invariant: rustls' own provider supports its default protocol versions.
+          .expect("aws-lc-rs supports the default TLS versions")
           .with_root_certificates(roots)
           .with_no_client_auth(),
       )
@@ -37,3 +45,4 @@ pub(crate) fn http_client() -> reqwest::Client {
     },
   }
 }
+
