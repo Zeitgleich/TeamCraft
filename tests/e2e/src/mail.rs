@@ -13,6 +13,8 @@ pub struct Mailpit {
 /// One caught e-mail.
 #[derive(Debug)]
 pub struct ReceivedMail {
+  /// Mailpit's ID of the message.
+  pub id: String,
   pub subject: String,
   /// Plain text body.
   pub text: String,
@@ -42,6 +44,15 @@ impl Mailpit {
     }
   }
 
+  /// Every mail to `address`, newest first.
+  pub async fn all_to(&self, address: &str) -> Vec<ReceivedMail> {
+    let mut mails = Vec::new();
+    for id in self.search(address).await {
+      mails.extend(self.fetch(&id).await);
+    }
+    mails
+  }
+
   /// The number of mails to `address` right now.
   pub async fn count_to(&self, address: &str) -> usize {
     self.search(address).await.len()
@@ -49,6 +60,10 @@ impl Mailpit {
 
   async fn find(&self, address: &str) -> Option<ReceivedMail> {
     let id = self.search(address).await.into_iter().next()?;
+    self.fetch(&id).await
+  }
+
+  async fn fetch(&self, id: &str) -> Option<ReceivedMail> {
     let message: Value = self
       .http
       .get(format!("{MAILPIT_URL}/api/v1/message/{id}"))
@@ -68,6 +83,7 @@ impl Mailpit {
       .await
       .ok()?;
     Some(ReceivedMail {
+      id: id.to_owned(),
       subject: message["Subject"].as_str().unwrap_or_default().to_owned(),
       text: message["Text"].as_str().unwrap_or_default().to_owned(),
       raw,
@@ -78,7 +94,7 @@ impl Mailpit {
     let found: Value = self
       .http
       .get(format!("{MAILPIT_URL}/api/v1/search"))
-      .query(&[("query", format!("to:{address}"))])
+      .query(&[("query", format!("to:{address}")), ("limit", "500".to_owned())])
       .send()
       .await
       .expect("Mailpit answers")

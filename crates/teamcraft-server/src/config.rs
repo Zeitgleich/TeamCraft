@@ -713,6 +713,31 @@ pub struct NotificationsConfig {
   /// While a desktop device of the user is active, pushes to their phones wait this long and are
   /// sent only if the message is still unread. `0` pushes at once.
   pub mobile_push_delay_secs: u64,
+  /// E-mail digest of missed mentions.
+  pub email_digest: EmailDigestConfig,
+}
+
+/// E-mail digest of missed mentions: content-free mail ("3 new mentions") to people who turned it
+/// on, batched by an interval. Needs `[mail.smtp]` and `[mail] public_base_url`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EmailDigestConfig {
+  /// Off: the setting can't be turned on and no mail is sent.
+  pub is_enabled: bool,
+  /// Interval of people who didn't choose one.
+  pub default_interval_secs: u64,
+  /// The shortest interval a person may choose.
+  pub min_interval_secs: u64,
+  /// A mention counts as missed only when it is this old and still unread, so a message the person
+  /// is about to read doesn't cause a mail.
+  pub grace_secs: u64,
+  /// How often the scheduler looks for digests that are due.
+  pub scheduler_interval_secs: u64,
+  /// Placeholders: `{count}` and `{url}`. The texts never contain anything about the messages.
+  pub subject_one: String,
+  pub subject_many: String,
+  pub body_one: String,
+  pub body_many: String,
 }
 
 /// Share links for external download (e2ee.md §4.5.1).
@@ -999,6 +1024,24 @@ impl Default for NotificationsConfig {
       urgent_max_pushes: 5,
       urgent_scheduler_interval_secs: 15,
       mobile_push_delay_secs: 120,
+      email_digest: EmailDigestConfig::default(),
+    }
+  }
+}
+
+impl Default for EmailDigestConfig {
+  fn default() -> Self {
+    Self {
+      is_enabled: false,
+      default_interval_secs: 3600,
+      min_interval_secs: 900,
+      grace_secs: 300,
+      scheduler_interval_secs: 60,
+      subject_one: "1 new mention in TeamCraft".into(),
+      subject_many: "{count} new mentions in TeamCraft".into(),
+      body_one: "You were mentioned while you were away.\n\nOpen TeamCraft to read it: {url}\n".into(),
+      body_many:
+        "You were mentioned {count} times while you were away.\n\nOpen TeamCraft to read them: {url}\n".into(),
     }
   }
 }

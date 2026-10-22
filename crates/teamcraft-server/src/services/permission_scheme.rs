@@ -24,11 +24,12 @@ use crate::state::AppState;
 
 const MAX_CHANGES_PER_REQUEST: usize = 200;
 /// The roles of a scheme, in the order the API lists them.
-const ROLES: [SchemeRole; 6] = [
+const ROLES: [SchemeRole; 7] = [
   SchemeRole::Guest,
   SchemeRole::Member,
   SchemeRole::SpaceAdmin,
   SchemeRole::ChannelAdmin,
+  SchemeRole::ChannelModerator,
   SchemeRole::Admin,
   SchemeRole::Owner,
 ];

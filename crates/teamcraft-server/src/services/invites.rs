@@ -9,7 +9,7 @@ use tracing::warn;
 
 use super::access::load_space;
 use super::audit::{self, Target as AuditTarget};
-use super::convert::{invite_response, offset_date_time};
+use super::convert::{invite_response, offset_date_time, presented_name};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -121,7 +121,10 @@ async fn send_invite_mail(
   };
   let fill = |template: &str| {
     template
-      .replace("{inviter}", &caller.user.display_name)
+      .replace(
+        "{inviter}",
+        &presented_name(&state.policy.get().directory, &caller.user),
+      )
       .replace("{space}", space_name)
       .replace("{role}", invite.role.as_str())
       .replace("{url}", &state.settings.mail.public_base_url)
@@ -174,15 +177,13 @@ pub async fn delete_invite(
 
 /// Guests may only be invited from the configured domains, if there are any.
 pub fn check_guest_domain(state: &AppState, email: &str) -> Result<(), ApiError> {
-  let allowed = &state.settings.guests.allowed_email_domains;
-  if allowed.is_empty() {
-    return Ok(());
-  }
-  let domain = email.rsplit_once('@').map_or("", |(_, domain)| domain);
-  let is_allowed = allowed.iter().any(|candidate| {
-    let candidate = candidate.trim_start_matches('@').to_lowercase();
-    domain == candidate || domain.ends_with(&format!(".{candidate}"))
-  });
+  let policy = state.policy.get();
+  let is_allowed = [
+    &state.settings.guests.allowed_email_domains,
+    &policy.guests.allowed_email_domains,
+  ]
+  .into_iter()
+  .all(|allowed| is_domain_allowed(allowed, email));
   if is_allowed {
     Ok(())
   } else {
@@ -190,6 +191,21 @@ pub fn check_guest_domain(state: &AppState, email: &str) -> Result<(), ApiError>
       "guests from this e-mail domain are not allowed".into(),
     ))
   }
+}
+
+/// Whether `email` belongs to one of the domains (or their subdomains); an empty list allows all.
+pub fn is_domain_allowed(allowed: &[String], email: &str) -> bool {
+  if allowed.is_empty() {
+    return true;
+  }
+  let domain = email
+    .rsplit_once('@')
+    .map_or("", |(_, domain)| domain)
+    .to_lowercase();
+  allowed.iter().any(|candidate| {
+    let candidate = candidate.trim_start_matches('@').to_lowercase();
+    domain == candidate || domain.ends_with(&format!(".{candidate}"))
+  })
 }
 
 /// Lowercases and sanity-checks an email address; real verification is the identity provider's job.
@@ -233,5 +249,22 @@ mod tests {
     ] {
       assert!(normalize_email(bad).is_err(), "{bad:?}");
     }
+  }
+}
+
+#[cfg(test)]
+mod domain_tests {
+  use super::*;
+
+  #[test]
+  fn domains_match_exactly_or_as_subdomains_without_case() {
+    let allowed = vec!["Example.org".to_owned(), "@partner.test".to_owned()];
+    assert!(is_domain_allowed(&allowed, "a@example.org"));
+    assert!(is_domain_allowed(&allowed, "a@Team.Example.ORG"));
+    assert!(is_domain_allowed(&allowed, "a@partner.test"));
+    assert!(!is_domain_allowed(&allowed, "a@notexample.org"));
+    assert!(!is_domain_allowed(&allowed, "a@example.org.evil.test"));
+    assert!(!is_domain_allowed(&allowed, "no-at-sign"));
+    assert!(is_domain_allowed(&[], "anyone@anywhere.test"));
   }
 }

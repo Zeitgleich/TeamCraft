@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.user_id, d.watermark_message_id, d.interval_minutes\n         FROM user_email_digest d JOIN users u ON u.id = d.user_id\n         WHERE d.is_enabled AND d.next_check_at <= $1 AND u.deactivated_at IS NULL\n         ORDER BY d.next_check_at\n         LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_email_digest",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "watermark_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_email_digest",
+            "name": "watermark_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "interval_minutes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "user_email_digest",
+            "name": "interval_minutes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "34e85aa35e9b986e8babd03818cd9129f9061e56fe90d1dcfe6c78cdcd610dd7"
+}
