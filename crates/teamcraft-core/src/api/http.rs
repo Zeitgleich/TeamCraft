@@ -627,22 +627,11 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
-    let mut response = send(self.client.get(url)).await?;
+    let response = send(self.client.get(url)).await?;
     if response.content_length().is_some_and(|length| length > max_bytes) {
       return Err(ApiError::BlobTooLarge { max_bytes });
     }
-    let mut blob = Vec::new();
-    while let Some(chunk) = response
-      .chunk()
-      .await
-      .map_err(|error| ApiError::Network(error.to_string()))?
-    {
-      if blob.len() as u64 + chunk.len() as u64 > max_bytes {
-        return Err(ApiError::BlobTooLarge { max_bytes });
-      }
-      blob.extend_from_slice(&chunk);
-    }
-    Ok(blob)
+    read_capped(response, max_bytes).await
   }
 
   async fn create_share_link(
@@ -690,6 +679,37 @@ impl fmt::Debug for StaticToken {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str("StaticToken([redacted])")
   }
+}
+
+/// Reads a body chunk by chunk and stops as soon as it passes `max_bytes`.
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+  let mut blob = Vec::new();
+  while let Some(chunk) = response
+    .chunk()
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?
+  {
+    if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    blob.extend_from_slice(&chunk);
+  }
+  Ok(blob)
+}
+
+/// The browser's fetch has no chunked reads in reqwest, so the body is read whole; the
+/// Content-Length check before it already refuses announced oversized bodies.
+#[cfg(target_arch = "wasm32")]
+async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+  let blob = response
+    .bytes()
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?;
+  if blob.len() as u64 > max_bytes {
+    return Err(ApiError::BlobTooLarge { max_bytes });
+  }
+  Ok(blob.to_vec())
 }
 
 /// The gateway WebSocket on native targets.
