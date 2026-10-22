@@ -1,12 +1,12 @@
-# Desktop release build (draft): builds the Linux and macOS packages and keeps them as workflow
-# artifacts. It does not publish anything: no GitHub release, no Flathub, no notarization upload.
-# Run it by hand (Actions > Desktop release > Run workflow) or by pushing a tag like v0.1.0.
+# Desktop release build: builds the Linux and macOS packages and keeps them as workflow artifacts.
+# It publishes nothing itself (no Flathub, no notarization upload). release.yml calls it for a tag
+# `v*` and attaches the packages to the draft GitHub release; run it by hand (Actions > Desktop
+# release > Run workflow) to get the packages of a branch without a release.
 name: Desktop release
 
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
+  workflow_call:
 
 permissions:
   contents: read

@@ -1,5 +1,6 @@
 //! The system under test: a fresh database in the dev stack's Postgres and a `teamcraft-server`
-//! process (optionally with SFU and meeting mail) in front of it.
+//! process (optionally with SFU and meeting mail) in front of it, or an already deployed instance
+//! (`E2E_DEPLOYED_URL`, see [`Stack::deployed`]).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -27,13 +28,21 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
 -----END PUBLIC KEY-----
 ";
 const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// Base URL of a deployed instance for [`Stack::deployed`], e.g. `https://chat.example.com`.
+const DEPLOYED_URL_VAR: &str = "E2E_DEPLOYED_URL";
 
-/// A running server with its own database.
+/// A running server with its own database, or a deployed instance the tests only talk to.
 pub struct Stack {
   pub base_url: String,
   pub http: reqwest::Client,
   pub dir: PathBuf,
   pub maybe_sfu: Option<SfuHandle>,
+  /// `None` for a deployed instance: no process and no database belong to the test.
+  maybe_owned: Option<OwnedServer>,
+}
+
+/// The server process a test started and the database it created for it.
+struct OwnedServer {
   database_name: String,
   server: Service,
 }
@@ -125,27 +134,58 @@ impl Stack {
     Self::builder().start().await
   }
 
+  /// An instance deployed elsewhere (the deploy dry run, docs/operations.md), at `$E2E_DEPLOYED_URL`.
+  /// It must use the dev Keycloak realm, since the tokens come from there. `None` (the test skips)
+  /// when the variable is not set; `E2E_REQUIRED` does not apply, the suite never needs one.
+  /// Clients trust the system roots, so for a private CA point `SSL_CERT_FILE` at its certificate.
+  pub fn deployed() -> Option<Stack> {
+    let Ok(base_url) = std::env::var(DEPLOYED_URL_VAR) else {
+      eprintln!("skipping: {DEPLOYED_URL_VAR} is not set");
+      return None;
+    };
+    let dir = std::env::temp_dir().join(format!("teamcraft-e2e-deployed-{:016x}", rand_u64()));
+    std::fs::create_dir_all(&dir).expect("creating the test directory");
+    Some(Self {
+      base_url: base_url.trim_end_matches('/').to_owned(),
+      http: reqwest::Client::new(),
+      dir,
+      maybe_sfu: None,
+      maybe_owned: None,
+    })
+  }
+
   /// A bearer-token source for a dev user (`alice`, `bob`, `carol`, `dave`, ...).
   pub fn tokens(&self, user: &str) -> UserTokens {
     UserTokens::new(user)
   }
 
+  /// The log of the server process; empty for a deployed instance.
   pub fn server_log(&self) -> String {
-    self.server.plain_log()
+    self
+      .maybe_owned
+      .as_ref()
+      .map(|owned| owned.server.plain_log())
+      .unwrap_or_default()
   }
 
   /// Stops the processes and drops the database.
   pub async fn stop(self) {
     let Self {
-      server,
+      maybe_owned,
       maybe_sfu,
-      database_name,
       dir,
       ..
     } = self;
     drop(maybe_sfu);
-    drop(server);
     let _ = std::fs::remove_dir_all(&dir);
+    let Some(OwnedServer {
+      database_name,
+      server,
+    }) = maybe_owned
+    else {
+      return;
+    };
+    drop(server);
     // Best effort: the runner script also removes leftover e2e databases.
     if let Ok(mut connection) = sqlx::PgConnection::connect(POSTGRES_ADMIN_URL).await {
       let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -257,8 +297,10 @@ impl Stack {
       http: reqwest::Client::new(),
       dir,
       maybe_sfu,
-      database_name,
-      server,
+      maybe_owned: Some(OwnedServer {
+        database_name,
+        server,
+      }),
     })
   }
 }
