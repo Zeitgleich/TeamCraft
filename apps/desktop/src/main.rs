@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod autostart;
 mod calls;
 mod core;
 mod notifications;
@@ -95,6 +96,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_watch_video,
       calls::commands::call_unwatch_video,
       notifications::notify_user,
+      autostart::autostart_get,
+      autostart::autostart_set,
     ])
     .run(tauri::generate_context!())
     .context("failed to run the TeamCraft desktop shell")

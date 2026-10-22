@@ -5,8 +5,8 @@
 //! starts the app with the link as an argument. A second launch hands its arguments to the running
 //! instance (single-instance plugin, which forwards links to the deep-link plugin) and exits.
 //! Links are forwarded to the webview as the [`DEEP_LINK_EVENT`] event; the UI decides what to do
-//! with them. "Start at login" is the autostart plugin's registry entry, toggled from the UI through
-//! the plugin's JS commands (permissions in `capabilities/windows.json`).
+//! with them. "Start at login" is the autostart plugin's registry entry, toggled through the shell's own
+//! `autostart_get`/`autostart_set` commands (`autostart.rs`); the plugin's commands are not exposed.
 
 use tauri::{AppHandle, Emitter, Manager, Wry};
 use tauri_plugin_autostart::MacosLauncher;
