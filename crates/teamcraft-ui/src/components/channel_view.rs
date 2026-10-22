@@ -89,10 +89,20 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
   // Jump to date: the picked day is searched in the feed; unloaded parts load while we wait.
   let jump_target = RwSignal::new(None::<i64>);
   let is_picking_date = RwSignal::new(false);
+  let requested_history = RwSignal::new(None::<i64>);
   Effect::new(move |_| {
     let Some(at) = jump_target.get() else {
       return;
     };
+    // Channels too big to hold locally fetch the history around the date first (once per jump).
+    if !state.read(|backend| backend.is_history_loaded(conversation, at)) {
+      if requested_history.get_untracked() != Some(at) {
+        requested_history.set(Some(at));
+        state.write(|backend| backend.request_history_at(conversation, at));
+      }
+      return;
+    }
+    requested_history.set(None);
     let outcome = state.read(|backend| {
       let count = backend.message_count(conversation);
       first_index_at_or_after(
