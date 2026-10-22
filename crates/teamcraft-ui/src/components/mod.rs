@@ -22,6 +22,7 @@ pub mod huddle_bar;
 pub mod icons;
 pub mod incoming_call;
 pub mod login;
+pub mod meeting_controls;
 pub mod meetings_view;
 pub mod members_panel;
 pub mod message_actions;

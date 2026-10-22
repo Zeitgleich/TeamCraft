@@ -999,3 +999,16 @@ slash-reminder-set = Erinnerung gesetzt für { $time }.
 slash-meet-starting = Meeting wird gestartet …
 slash-meet-unavailable = Meetings brauchen eine angemeldete Sitzung.
 reminder-due = Erinnerung: { $text }
+
+# Meetings: responses and host controls
+meetings-responses = Antworten ({ $count })
+meetings-rsvp-awaiting = Noch keine Antwort
+meetings-rsvp-summary = { $accepted } zugesagt · { $tentative } vielleicht · { $declined } abgesagt · { $awaiting } ausstehend
+host-controls = Host-Steuerung
+host-mute-all = Alle stummschalten
+host-lock = Meeting sperren
+host-unlock = Meeting entsperren
+host-end = Für alle beenden
+host-end-confirm = Meeting jetzt beenden
+host-remove = Entfernen
+presence-in-meeting = In einem Meeting

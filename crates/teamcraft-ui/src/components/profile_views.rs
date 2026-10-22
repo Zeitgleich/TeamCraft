@@ -263,6 +263,21 @@ pub fn EditProfileDialog() -> impl IntoView {
   .into_any()
 }
 
+/// "In a meeting" next to a person who is in a call right now (from the server's call rosters).
+#[component]
+pub fn InMeetingBadge(user: UserId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <Show when=move || state.read(|backend| backend.is_in_call(user)) fallback=|| ()>
+      <span class="in-meeting-badge" title=move || i18n.t("presence-in-meeting")>
+        <Icon name=IconName::Phone />
+        <span class="visually-hidden">{move || i18n.t("presence-in-meeting")}</span>
+      </span>
+    </Show>
+  }
+}
+
 /// Another person's card: name, status, role in the company, local time and a way to message them.
 #[component]
 pub fn UserProfileDialog(user: UserId) -> impl IntoView {
@@ -287,6 +302,7 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
       <div class="modal-body profile-card">
         <Avatar user=person.clone() size=AvatarSize::Large show_presence=true />
         {person.maybe_custom_status.clone().map(|status| view! { <p>{status.emoji} " " {status.text}</p> })}
+        <p><InMeetingBadge user=user /></p>
         {move || {
           profile().map(|profile| {
             let zone = profile.maybe_time_zone.clone();

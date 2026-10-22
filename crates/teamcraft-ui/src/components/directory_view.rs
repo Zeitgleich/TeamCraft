@@ -122,6 +122,7 @@ fn PersonRow(user: User) -> impl IntoView {
           <span class="person-name" translate="no">{user.display_name.clone()}</span>
           <span class="person-facts" translate="no">{facts}</span>
         </span>
+        <crate::components::profile_views::InMeetingBadge user=id />
         {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
       </button>
       {(!is_me).then(|| view! { <button class="btn btn-small" on:click=move |_| state.open_direct(id)>{move || i18n.t("profile-message")}</button> })}

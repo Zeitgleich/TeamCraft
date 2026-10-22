@@ -3987,3 +3987,13 @@ select.input {
 
 .toasts { position: fixed; inset-inline-end: 1rem; bottom: 1rem; display: flex; flex-direction: column; gap: .5rem; z-index: 50; }
 .toast { display: flex; align-items: center; gap: .5rem; padding: .6rem .8rem; border-radius: 8px; background: var(--surface-raised, Canvas); border: 1px solid var(--border, rgba(128,128,128,.4)); box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+
+/* Meeting responses and host controls */
+.host-controls { margin-top: .5rem; padding: .5rem; border: 1px solid var(--border, rgba(128,128,128,.35)); border-radius: 6px; }
+.host-buttons { display: flex; gap: .35rem; flex-wrap: wrap; }
+.host-participants { list-style: none; margin: .5rem 0 0; padding: 0; }
+.host-participants li { display: flex; align-items: center; justify-content: space-between; padding: .15rem 0; }
+.rsvp-list h4 { margin: .5rem 0 .15rem; }
+.rsvp-list ul { margin: 0; padding-inline-start: 1.2rem; }
+.call-host { position: absolute; inset-inline-end: 1rem; top: 3.5rem; z-index: 5; }
+.in-meeting-badge { color: var(--accent, #3b7ddd); font-size: .85em; }

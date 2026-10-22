@@ -167,6 +167,14 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
             />
           </Show>
         </div>
+        {move || {
+          info.get().and_then(|conv| {
+            (conv.kind == crate::model::ConversationKind::Direct)
+              .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
+              .flatten()
+              .map(|other| view! { <crate::components::profile_views::InMeetingBadge user=other /> })
+          })
+        }}
         {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
         <Show when=has_external fallback=|| ()>
           <span class="badge badge-guest" title=move || i18n.t("external-badge-detail")>
