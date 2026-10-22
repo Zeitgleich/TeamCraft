@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use teamcraft_proto::{CategoryId, HistoryPolicy};
+use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
@@ -12,8 +12,8 @@ use crate::actions::{
 };
 use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, MediaDevices, PushToTalk,
-  RemoteVideoTrack, RunningCall,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallRequest, IncomingCall, MediaDevices,
+  PushToTalk, RemoteVideoTrack, RunningCall,
 };
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
@@ -316,6 +316,14 @@ pub enum ChatAction {
     message: MessageId,
     is_saved: bool,
   },
+  /// A picture file for the user's backgrounds (JPEG or PNG; the host normalizes it).
+  AddBackgroundImage {
+    name: String,
+    picture: Base64Bytes,
+  },
+  DeleteBackgroundImage {
+    id: BackgroundId,
+  },
   MarkUnread {
     conversation: ConversationId,
     from: MessageId,
@@ -420,6 +428,8 @@ impl ChatAction {
         message,
         is_saved,
       } => backend.set_saved(conversation, message, is_saved),
+      Self::AddBackgroundImage { name, picture } => backend.add_background_image(&name, picture.into_vec()),
+      Self::DeleteBackgroundImage { id } => backend.delete_background_image(id),
       Self::MarkUnread { conversation, from } => backend.mark_unread(conversation, from),
       Self::SetDraft {
         conversation,
@@ -481,6 +491,7 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   SavedItems,
+  BackgroundImages,
   Permalink {
     conversation: ConversationId,
     message: MessageId,
@@ -530,6 +541,7 @@ pub enum ChatAnswer {
   MessageExtras { extras: Vec<MessageExtras> },
   Messages { messages: Vec<Message> },
   SavedItems { items: Vec<SavedItem> },
+  BackgroundImages { images: Vec<BackgroundImageInfo> },
   Link { maybe_link: Option<String> },
   PermalinkTarget { maybe_target: Option<PermalinkTarget> },
   Message { maybe_message: Option<MessageId> },
@@ -561,6 +573,9 @@ impl ChatQuery {
       },
       Self::SavedItems => ChatAnswer::SavedItems {
         items: backend.saved_items(),
+      },
+      Self::BackgroundImages => ChatAnswer::BackgroundImages {
+        images: backend.background_images(),
       },
       Self::Permalink {
         conversation,

@@ -92,6 +92,13 @@ impl ApiError {
     }
   }
 
+  pub fn background_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::BackgroundNotFound,
+      what: "background",
+    }
+  }
+
   pub fn attachment_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::AttachmentNotFound,

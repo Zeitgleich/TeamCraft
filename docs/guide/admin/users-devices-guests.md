@@ -39,8 +39,32 @@ A guest is a user with the `guest` role (same realm, see [Keycloak setup](keyclo
    The inviter is recorded as sponsor.
 3. Review guests regularly (Users and guests > Guests: sponsor, expiry, where they are).
 
+### Guests with their own password
+
+For people who are not in the identity provider. Off by default: set `[local_accounts] is_enabled =
+true` with a `session_secret` (32+ random bytes, `TEAMCRAFT_LOCAL_ACCOUNTS__SESSION_SECRET`) and
+`[mail]` with `[mail.smtp]` and `public_base_url`.
+
+1. `POST /spaces/{id}/local-guests` with `email`, `display_name`, optional `channel_ids` and
+   `expires_at` creates the account, adds it to the space as a guest and e-mails the activation
+   link `<public_base_url>/activate#token=...`.
+2. The guest chooses a password (default minimum 12 characters, or the policy's value) and connects
+   an authenticator app through `POST /auth/local/activate`. **The web app has no activation page
+   yet** (see [Troubleshooting](troubleshooting.md#known-gaps-between-design-and-code)); until it
+   has, complete this step with the guest through the API.
+3. Sign-in is on the login screen (*Sign in with a guest account*): password plus TOTP code.
+   Defaults: TOTP required, 5 failed attempts lock the account for 15 minutes, sessions last 12
+   hours at most (the workspace session policy can only shorten it).
+4. An expired activation link is replaced with `POST /admin/local-accounts/{id}/activation`.
+
+Guests may also be limited to certain e-mail domains, in the server file (`[guests]
+allowed_email_domains`) and in the signed policy; the check applies to invitations, local guests,
+external meeting invitees and sign-in. Guests expire automatically (90 days by default); the sponsor
+is told when it happens.
+
 Rules for guests: see only what they were added to; find only people they share a conversation with;
-DMs only with shared contacts (`[policy] guests_dm_only_with_shared_conversations`); history always
+DMs only with shared contacts (`[policy] guests_dm_only_with_shared_conversations`), and a DM or
+group DM with a guest needs a shared conversation with every participant; history always
 from join; their organization recovery is off by default.
 
 **Meeting guests** (no account) are separate: see [Meetings](meetings.md).

@@ -7,6 +7,7 @@ mod admin;
 mod announcement;
 mod attachment;
 mod audit;
+mod background;
 mod bot;
 mod call_history;
 mod conversation;
@@ -50,6 +51,7 @@ pub use admin::{
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
 pub use attachment::{Attachment, NewAttachment};
 pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};
+pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};
 pub use call_history::{MissedCall, StoredCall};
 pub use conversation::{

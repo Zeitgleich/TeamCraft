@@ -68,11 +68,26 @@ grace time. `has_lobby: false` skips the lobby.
 
 Rotating `guest_token_secret` invalidates open links and guest sessions; do it between meetings.
 
+## Host controls
+
+Organizers and hosts can **mute everyone, lock the meeting, remove a person and end it for
+everyone**. The server forwards these to the SFU, which carries them out: it needs
+`[calls] sfu_control_url` (the SFU's health listener, for example `http://sfu.internal:8081`) and the
+registration token on both sides; without them the controls answer 503. A removed person gets no
+new join token; after *End for everyone* nobody can join.
+
+## "In a meeting" status
+
+With `[meetings.caldav] free_busy_url_template` (for example
+`https://cal.example.com/dav/calendars/{email}/personal/`, `{email}` is the person's address) the
+server asks the calendar for the busy periods of people who are online and shows them as "in a
+meeting"; `[presence]` sets the polling interval. Being in a call or a TeamCraft meeting sets the
+status by itself.
+
 ## Not done yet
 
-"In a meeting" presence from the calendar, recurring series exceptions, host controls (mute all,
-remove, lock, end for everyone), meetings created in other CalDAV clients, per-organizer calendars,
-and browser audio/video for guests.
+Recurring-series exceptions, meetings created in other CalDAV clients, per-organizer calendars, and
+browser audio/video for guests.
 
 ## Development
 
