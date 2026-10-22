@@ -118,7 +118,8 @@ pub async fn list_threads(
   let has_more = rows.len() > limit as usize;
   rows.truncate(limit as usize);
 
-  let mut threads = Vec::with_capacity(rows.len());
+  // No capacity hint from the row count: `limit` above caps the page (max_page_size).
+  let mut threads = Vec::new();
   for row in rows {
     let maybe_last_reply = state
       .database

@@ -221,7 +221,7 @@ cargo test -p teamcraft-core --all-features
 cargo clippy -p teamcraft-core --all-targets --all-features -- -D warnings
 cargo check -p teamcraft-core --target wasm32-unknown-unknown
 # with the dev stack and a server on 8081 (skipped without the variable):
-TEAMCRAFT_TEST_SERVER_URL=http://127.0.0.1:8081 cargo test -p teamcraft-core --features integration --test dev_stack
+TEAMCRAFT_TEST_SERVER_URL=http://127.0.0.1:8081 cargo test -p teamcraft-core --features integration --test suite dev_stack
 # the server needs the [storage] section (dev Garage) for the attachment test
 ```
 

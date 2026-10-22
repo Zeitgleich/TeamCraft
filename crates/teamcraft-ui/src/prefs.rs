@@ -371,6 +371,25 @@ impl Default for SidebarPrefs {
   }
 }
 
+/// Writing messages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComposerPrefs {
+  /// `:)` and `:tada:` become emoji when a message is sent.
+  pub convert_emoticons: bool,
+  /// The formatting toolbar and the preview under the input.
+  pub show_formatting: bool,
+}
+
+impl Default for ComposerPrefs {
+  fn default() -> Self {
+    Self {
+      convert_emoticons: true,
+      show_formatting: false,
+    }
+  }
+}
+
 /// Everything in one place, stored as a single JSON document.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -380,6 +399,7 @@ pub struct Preferences {
   pub calls: CallPrefs,
   pub display: DisplayPrefs,
   pub sidebar: SidebarPrefs,
+  pub composer: ComposerPrefs,
 }
 
 impl Preferences {

@@ -19,6 +19,7 @@ use teamcraft_client_api::actions::{
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
+use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
   ThreadSummary, User, UserId,
@@ -28,7 +29,7 @@ use teamcraft_client_api::remote::{
   MessageWindow,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
-use teamcraft_proto::{CategoryId, HistoryPolicy, WebPushKeyResponse};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyResponse};
 
 use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen};
@@ -439,6 +440,24 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    match self.ask(ChatQuery::BackgroundImages) {
+      Some(ChatAnswer::BackgroundImages { images }) => images,
+      _ => Vec::new(),
+    }
+  }
+
+  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
+    self.act(ChatAction::AddBackgroundImage {
+      name: name.to_owned(),
+      picture: picture.into(),
+    });
+  }
+
+  fn delete_background_image(&self, id: BackgroundId) {
+    self.act(ChatAction::DeleteBackgroundImage { id });
+  }
+
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
     match self.ask(ChatQuery::Permalink {
       conversation,
@@ -782,6 +801,26 @@ impl ChatBackend for RemoteChat {
       found.mention_count = 0;
     });
     self.act(ChatAction::MarkRead { conversation });
+  }
+
+  fn set_bookmarks(
+    &self,
+    conversation: ConversationId,
+    bookmarks: Vec<teamcraft_client_api::model::Bookmark>,
+  ) {
+    self.update_conversation(conversation, |found| found.bookmarks = bookmarks.clone());
+    self.act(ChatAction::SetBookmarks {
+      conversation,
+      bookmarks,
+    });
+  }
+
+  fn remove_member(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::RemoveMember { conversation, user });
+  }
+
+  fn open_dm(&self, user: UserId) {
+    self.act(ChatAction::OpenDm { user });
   }
 
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {

@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
+use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 
 use crate::clock::{format_time, format_time_seconds, local_day};
@@ -57,16 +58,65 @@ pub fn MessageRow(
 
 fn log_line(message: &Message, level: LogLevel, locale: &'static str) -> impl IntoView + use<> {
   let time = format_time_seconds(message.sent_at, locale);
-  let body = message.body.clone();
-  let i18n = use_i18n();
+  let entries = log_entries(&message.body, level);
+  let author = log_author(message.author);
+  if let [single] = entries.as_slice() {
+    let class = format!("msg msg-log level-{}", single.level.slug());
+    return log_entry_line(&time, &author, single, &class, message.sent_at).into_any();
+  }
+  // A bridge batch: one row per entry under the batch's time.
+  let lines: Vec<_> = entries
+    .iter()
+    .map(|entry| {
+      let class = format!("msg-log log-entry level-{}", entry.level.slug());
+      log_entry_line(&time, &author, entry, &class, message.sent_at)
+    })
+    .collect();
   view! {
-    <div class=format!("msg msg-log level-{}", level.slug()) tabindex="-1" data-nav="row">
-      <time class="log-time" datetime=message.sent_at.to_string()>
+    <div class="msg msg-log-batch" tabindex="-1" data-nav="row">
+      {lines}
+    </div>
+  }
+  .into_any()
+}
+
+/// Who wrote a log row: the bridge's bot or, for a pasted message, the person.
+pub fn log_author(author: crate::model::UserId) -> String {
+  let state = use_app_state();
+  state
+    .read(|backend| backend.user(author))
+    .map(|user| user.display_name)
+    .unwrap_or_default()
+}
+
+/// One entry of the log view: time, author, level and text in a monospace line.
+pub fn log_entry_line(
+  time: &str,
+  author: &str,
+  entry: &LogEntry,
+  class: &str,
+  sent_at: i64,
+) -> impl IntoView + use<> {
+  let i18n = use_i18n();
+  let level = entry.level;
+  let text = entry.text.clone();
+  let class = class.to_owned();
+  let time = time.to_owned();
+  let author = author.to_owned();
+  let title = author.clone();
+  let tab_index = if class.starts_with("msg ") { "-1" } else { "" };
+  let data_nav = if class.starts_with("msg ") { "row" } else { "" };
+  view! {
+    <div class=class tabindex=tab_index data-nav=data_nav>
+      <time class="log-time" datetime=sent_at.to_string()>
         {time}
       </time>
+      <span class="log-author" translate="no" title=title>
+        {author}
+      </span>
       <span class="log-level">{move || i18n.t(&format!("log-level-{}", level.slug()))}</span>
       <span class="log-text" translate="no">
-        {body}
+        {text}
       </span>
     </div>
   }
@@ -167,7 +217,6 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       .find(|extras| extras.message == message_id)
   });
   let is_editing = RwSignal::new(false);
-  let is_history_open = RwSignal::new(false);
 
   let gutter = match (is_grouped, author.clone()) {
     (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
@@ -200,33 +249,13 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     view! {
       <button
         class="edited link-btn"
-        aria-expanded=move || is_history_open.get().to_string()
-        on:click=move |_| is_history_open.update(|open| *open = !*open)
+        aria-haspopup="dialog"
+        on:click=move |_| state.overlay.set(crate::state::Overlay::EditHistory(conversation, message_id))
       >
         {move || i18n.t("message-edited")}
       </button>
     }
   });
-  let history = move || {
-    (is_history_open.get() && !extras.get().is_none_or(|extras| extras.edits.is_empty())).then(|| {
-      let edits = extras.get().map(|extras| extras.edits).unwrap_or_default();
-      view! {
-        <ol class="edit-history" aria-label=move || i18n.t("message-history")>
-          {edits
-            .into_iter()
-            .map(|edit| {
-              view! {
-                <li>
-                  <time>{crate::clock::format_date_time(edit.replaced_at, locale)}</time>
-                  <span translate="no">{edit.body}</span>
-                </li>
-              }
-            })
-            .collect_view()}
-        </ol>
-      }
-    })
-  };
   let quote = move || {
     extras.get().and_then(|extras| extras.maybe_reply).map(|reply| {
       let name = state
@@ -434,7 +463,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
           {rendered_body}
           {edited}
           {badges}
-        </div> {attachments} {history} {acknowledge} {reaction_chips} {replies}
+        </div> {attachments} {acknowledge} {reaction_chips} {replies}
       </div>
       {actions}
     </div>

@@ -35,9 +35,9 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
-    <release version="0.0.0" date="2026-10-22">
+    <release version="1.0.0-beta.1" date="2026-10-22" type="development">
       <description>
-        <p>Development build.</p>
+        <p>First public beta: encrypted chat, threads, calls and meetings.</p>
       </description>
     </release>
   </releases>

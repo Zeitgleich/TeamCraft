@@ -9,6 +9,7 @@ mod admin;
 mod bridge;
 mod calls;
 mod conversion;
+mod deployed;
 mod devices;
 mod display_names;
 mod email_digest;

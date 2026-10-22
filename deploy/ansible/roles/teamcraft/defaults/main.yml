@@ -1,0 +1,92 @@
+# Each service runs rootless under its own unprivileged user (own subuid range, own podman
+# secrets, own systemd --user instance via quadlet). Services talk over loopback ports.
+teamcraft_base_dir: /srv/teamcraft
+teamcraft_cert_dir: "{{ teamcraft_base_dir }}/certs" # group tc-certs, read by the SFU
+
+teamcraft_images:
+  server: "{{ teamcraft_image_registry }}/teamcraft-server@{{ teamcraft_server_digest }}"
+  sfu: "{{ teamcraft_image_registry }}/teamcraft-sfu@{{ teamcraft_sfu_digest }}"
+  postgres: "docker.io/library/postgres:{{ postgres_version }}"
+  caddy: "docker.io/library/caddy:{{ caddy_version }}"
+
+teamcraft_ports:
+  postgres: 5432    # 127.0.0.1 only
+  server: 8080      # 127.0.0.1 only (Caddy proxies)
+  sfu: 4433         # public, udp (QUIC), dual stack
+  sfu_control: 8081 # 127.0.0.1 only: SFU health and host controls, called by the server
+teamcraft_memory:
+  server: 1g
+  sfu: 1g
+  postgres: 2g
+  caddy: 256m
+
+# Where the secrets come from (keys: secrets/README.md):
+#   sops: teamcraft_secrets_file is sops-encrypted, decrypted on the control machine (production)
+#   file: teamcraft_secrets_file is a plain YAML file outside the repository (throwaway test targets)
+teamcraft_secrets_source: sops
+
+# TLS for the two host names, by Caddy:
+#   acme:     public certificates from Let's Encrypt (needs DNS and ports 80/443 from the internet)
+#   internal: Caddy's own local CA (test targets; clients must trust its root certificate)
+teamcraft_tls: acme
+# Caddy's storage directory of each issuer (caddy-data/caddy/certificates/<dir>/<host>/).
+teamcraft_caddy_issuer_dirs:
+  acme: acme-v02.api.letsencrypt.org-directory
+  internal: local
+teamcraft_caddy_cert_dir: >-
+  /home/tc-proxy/caddy-data/caddy/certificates/{{ teamcraft_caddy_issuer_dirs[teamcraft_tls] }}
+
+# Identity provider (teamcraft.example.toml, [oidc]).
+teamcraft_oidc_client_id: teamcraft
+teamcraft_oidc_server_client: teamcraft-server
+teamcraft_oidc_roles:
+  owner: owner
+  admin: admin
+  member: member
+  guest: guest
+# Deprovisioning sync; needs the secret `oidc_sync_client_secret`.
+teamcraft_oidc_sync_enabled: false
+
+# S3-compatible storage for encrypted attachments; clients reach the endpoint directly.
+teamcraft_s3_region: us-east-1
+teamcraft_s3_path_style: false
+
+# Sender of meeting and invitation e-mail. Mail is only sent when `teamcraft_smtp` is set:
+#   teamcraft_smtp: {host: smtp.example.com, port: 587, security: start_tls, username: teamcraft}
+# with the password in the secret `smtp_password`.
+teamcraft_mail_from: "teamcraft@{{ teamcraft_domain }}"
+
+# Optional: the web client (teamcraft-web-<version>.tar.gz of a release, on the control machine).
+# Empty: the server serves only the API; desktop and mobile apps still work.
+teamcraft_web_archive: ""
+
+# `tracing` filter of the server and the SFU.
+teamcraft_log_filter: info
+
+# name: unit stem; user: service account; secrets: podman secrets this user gets (least privilege);
+# configs: rendered into the user's config dir. Deployed and started in this order: Caddy before
+# the SFU because the SFU uses the certificate Caddy obtains.
+teamcraft_services:
+  - name: postgres
+    user: tc-db
+    secrets: [postgres_password]
+    configs: []
+  - name: caddy
+    user: tc-proxy
+    secrets: []
+    configs: [Caddyfile]
+  - name: teamcraft-server
+    user: tc-server
+    secrets: "{{ teamcraft_server_secrets }}"
+    configs: [teamcraft.toml]
+  - name: teamcraft-sfu
+    user: tc-sfu
+    secrets: [sfu_registration_token]
+    configs: [call-signing.pub.pem]
+
+teamcraft_server_secrets: >-
+  {{ ['database_url', 's3_access_key', 's3_secret_key', 'sfu_registration_token', 'call_signing_key',
+      'meetings_guest_token_secret']
+     + (['oidc_sync_client_secret'] if teamcraft_oidc_sync_enabled else [])
+     + (['vapid_private_key'] if 'vapid_private_key' in teamcraft_secrets else [])
+     + (['smtp_password'] if teamcraft_smtp is defined else []) }}
