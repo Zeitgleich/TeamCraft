@@ -125,8 +125,22 @@ jobs:
         run: brew install meson ninja pkg-config
       # The official universal GStreamer (both slices): development files to link against, and the
       # runtime that is bundled into the app for VideoToolbox hardware encoding.
+      # (The Homebrew casks are disabled, so the packages come from gstreamer.freedesktop.org, pinned by hash.)
       - name: GStreamer framework
-        run: brew install --cask gstreamer-runtime gstreamer-development
+        env:
+          GSTREAMER_VERSION: "1.28.8"
+        run: |
+          set -euo pipefail
+          base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
+          for package in gstreamer-1.0 gstreamer-1.0-devel; do
+            file="$package-$GSTREAMER_VERSION-universal.pkg"
+            curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" "$base/$file"
+          done
+          cd "$RUNNER_TEMP"
+          echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
+          echo "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7  gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
+          sudo installer -pkg "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" -target /
       - name: Trunk (builds the UI bundle)
         uses: taiki-e/install-action@v2
         with:
@@ -184,10 +198,13 @@ jobs:
           key: ${{ matrix.target }}
       # OpenSSL for SQLCipher is built from source and needs NASM; Perl comes with the image.
       - uses: ilammy/setup-nasm@v1
+      # Direct download: install-action's bash startup fails on the Windows image.
       - name: Trunk (builds the UI bundle)
-        uses: taiki-e/install-action@v2
-        with:
-          tool: trunk
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-pc-windows-msvc.zip -OutFile "$env:RUNNER_TEMP\trunk.zip"
+          Expand-Archive "$env:RUNNER_TEMP\trunk.zip" -DestinationPath "$env:RUNNER_TEMP\trunk"
+          "$env:RUNNER_TEMP\trunk" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       - name: Segmentation model (background effects; not in git)
