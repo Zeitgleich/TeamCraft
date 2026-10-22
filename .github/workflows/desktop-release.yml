@@ -105,7 +105,7 @@ jobs:
     # the x86_64 slice and `cargo tauri build --target universal-apple-darwin` joins them with lipo.
     # Each slice is compiled for its own architecture, so the OpenH264 download picks the matching
     # Cisco library at runtime (openh264_library.rs).
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
