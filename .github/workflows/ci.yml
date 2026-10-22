@@ -107,6 +107,8 @@ jobs:
     continue-on-error: true
     env:
       RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
+      CC: cl
+      CXX: cl
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -116,6 +118,8 @@ jobs:
         with:
           key: audio-processing
       - uses: ilammy/setup-nasm@v1
+      # Meson otherwise picks the image's MinGW compiler, whose headers clash with abseil.
+      - uses: ilammy/msvc-dev-cmd@v1
       - name: Meson and ninja
         run: pip install meson ninja
       - name: Test

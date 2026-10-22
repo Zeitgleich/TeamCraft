@@ -112,6 +112,8 @@ type Api = HttpServerApi<TokenCache>;
 type Gateway = <Api as ServerApi>::Gateway;
 type Store = Arc<SqlCipherStore>;
 
+// Short-lived messages on a channel: boxing the one large variant would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 enum Request {
   Status(oneshot::Sender<CoreStatus>),
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
