@@ -220,6 +220,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         tracing::debug!(%error, "backup key not wrapped to the new org key yet");
       }
     }
+    // Last seen of people who went offline since the last tick, in one request.
+    match self.client.refresh_stale_last_seen().await {
+      Ok(true) => self.changed(),
+      Ok(false) => {},
+      Err(error) => tracing::debug!(%error, "reading last seen failed"),
+    }
     // Staggered commits (a colleague's new device) come due without a gateway event.
     if let Err(error) = self.client.apply_pending_changes().await {
       tracing::debug!(%error, "pending membership changes not applied yet");

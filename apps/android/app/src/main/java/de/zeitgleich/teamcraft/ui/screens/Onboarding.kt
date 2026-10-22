@@ -1,7 +1,5 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.content.ClipboardManager
-import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,7 +23,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,10 +33,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
-import de.zeitgleich.teamcraft.ui.sensitiveClip
+import de.zeitgleich.teamcraft.ui.SecretClipboard
 
 private const val MIN_PASSPHRASE_LENGTH = 12
 
@@ -223,17 +218,7 @@ internal val PASSPHRASE_KEYBOARD = KeyboardOptions(keyboardType = KeyboardType.P
 @Composable
 private fun CopySecretButton(secret: String) {
   val context = LocalContext.current
-  val scope = rememberCoroutineScope()
-  TextButton(onClick = {
-    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return@TextButton
-    val clip = sensitiveClip(secret)
-    clipboard.setPrimaryClip(clip)
-    scope.launch {
-      delay(SECRET_CLIP_LIFETIME_MS)
-      val current = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
-      if (current == secret && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) clipboard.clearPrimaryClip()
-    }
-  }) { Text(stringResource(R.string.link_copy_code)) }
+  TextButton(onClick = { SecretClipboard.copy(context.applicationContext, secret) }) {
+    Text(stringResource(R.string.link_copy_code))
+  }
 }
-
-private const val SECRET_CLIP_LIFETIME_MS = 60_000L

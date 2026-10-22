@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, name, revoked_at IS NOT NULL AS \"is_revoked!\", push_provider, last_seen_at, created_at\n         FROM devices WHERE user_id = $1 ORDER BY id",
+  "query": "SELECT d.id, d.name, d.revoked_at IS NOT NULL AS \"is_revoked!\", d.push_provider, d.created_at,\n                CASE WHEN u.last_seen_visibility = 'everyone' AND u.presence_pref <> 'invisible'\n                     THEN d.last_seen_at\n                     ELSE date_trunc('day', d.last_seen_at, 'UTC') END AS last_seen_at\n         FROM devices d JOIN users u ON u.id = d.user_id\n         WHERE d.user_id = $1 ORDER BY d.id",
   "describe": {
     "columns": [
       {
@@ -44,17 +44,6 @@
       },
       {
         "ordinal": 4,
-        "name": "last_seen_at",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "devices",
-            "name": "last_seen_at"
-          }
-        }
-      },
-      {
-        "ordinal": 5,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -63,6 +52,12 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -75,9 +70,9 @@
       false,
       null,
       true,
-      true,
-      false
+      false,
+      null
     ]
   },
-  "hash": "808ab31066dabaad993328c65839b8961dc263e43b29e9b91fa4e7ecac970f19"
+  "hash": "bf52968f17f8d3263e659f2b1a06eadf4b43c3abcfa90aaf559b88db0115d78f"
 }

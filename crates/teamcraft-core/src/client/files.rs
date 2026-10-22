@@ -441,6 +441,36 @@ fn is_finished(upload: &PendingUpload) -> bool {
     .all(|file| file.maybe_done.is_some() || file.maybe_failure.is_some())
 }
 
+/// Deletes the staged plaintext copies in `staging` that no pending upload refers to: files taken
+/// out of the composer before sending, or left by an app that was stopped first. Returns how many
+/// were deleted. Call it before the app stages new files (when the client opens).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sweep_staged_copies(store: &impl LocalStore, staging: &std::path::Path) -> Result<usize, CoreError> {
+  let uploads: Vec<PendingUpload> = records::list_json(store, Table::PendingUploads)?;
+  let referenced: std::collections::HashSet<std::path::PathBuf> = uploads
+    .iter()
+    .flat_map(|upload| upload.files.iter())
+    .filter_map(|file| match &file.source {
+      UploadSource::Path { path } => Some(std::path::PathBuf::from(path)),
+      UploadSource::Bytes { .. } => None,
+    })
+    .collect();
+  let Ok(entries) = std::fs::read_dir(staging) else {
+    return Ok(0);
+  };
+  let mut removed = 0;
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if entry.file_type().is_ok_and(|kind| kind.is_file()) && !referenced.contains(&path) {
+      match std::fs::remove_file(&path) {
+        Ok(()) => removed += 1,
+        Err(error) => tracing::debug!(%error, "a stray staged upload copy could not be deleted"),
+      }
+    }
+  }
+  Ok(removed)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn remove_staged(staging: &std::path::Path, source: &UploadSource) {
   let UploadSource::Path { path } = source else {
@@ -560,5 +590,40 @@ mod tests {
     assert!(!staged.exists());
     assert!(original.exists());
     std::fs::remove_dir_all(&root).unwrap();
+  }
+
+  #[test]
+  fn the_sweep_keeps_copies_of_pending_uploads_only() {
+    let staging = std::env::temp_dir().join(format!(
+      "teamcraft-sweep-{}",
+      rand_core::RngCore::next_u64(&mut OsRng)
+    ));
+    std::fs::create_dir_all(&staging).unwrap();
+    let pending = staging.join("pending.pdf");
+    let stray = staging.join("taken-out.pdf");
+    std::fs::write(&pending, b"x").unwrap();
+    std::fs::write(&stray, b"x").unwrap();
+    let store = crate::store::MemoryStore::new();
+    let upload = PendingUpload {
+      conversation_id: teamcraft_proto::Id::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap()),
+      client_message_id: ClientMessageId::from_bytes([1; 16]),
+      files: vec![PendingFile {
+        file_name: "pending.pdf".into(),
+        media_type: "application/pdf".into(),
+        source: UploadSource::Path {
+          path: pending.display().to_string(),
+        },
+        size_bytes: 1,
+        maybe_done: None,
+        maybe_failure: None,
+      }],
+    };
+    save_pending_upload(&store, &upload).unwrap();
+
+    assert_eq!(sweep_staged_copies(&store, &staging).unwrap(), 1);
+    assert!(pending.exists(), "still to be uploaded");
+    assert!(!stray.exists());
+    assert_eq!(sweep_staged_copies(&store, &staging.join("missing")).unwrap(), 0);
+    std::fs::remove_dir_all(&staging).unwrap();
   }
 }

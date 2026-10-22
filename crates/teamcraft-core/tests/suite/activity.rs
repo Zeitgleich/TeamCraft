@@ -12,7 +12,7 @@ use teamcraft_client_api::calls::CallDirection;
 use teamcraft_client_api::model::thread_id_of;
 use teamcraft_client_api::privacy::LastSeenVisibility;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_proto::{CallHistoryEntry, UnixMillis};
+use teamcraft_proto::{CallHistoryEntry, GatewayEvent, GatewayServerMessage, PresenceState, UnixMillis};
 
 #[tokio::test]
 async fn mentions_reactions_and_thread_replies_form_one_feed_with_an_unread_state() {
@@ -90,6 +90,41 @@ async fn last_seen_comes_from_the_server_and_follows_the_privacy_choice() {
   run_commands(&mut alice, &alice_ui).await;
   assert_eq!(alice_ui.privacy().last_seen, LastSeenVisibility::Nobody);
   assert!(alice_ui.privacy().is_last_seen_available);
+}
+
+#[tokio::test]
+async fn people_going_offline_are_read_back_in_one_batch() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob = Peer::enroll(&server, "Bob").await;
+  let carol = Peer::enroll(&server, "Carol").await;
+  let alice_ui = backend_of(&alice);
+  let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+  server.set_last_seen(bob_id, 1_799_999_000_000);
+  server.set_last_seen(carol_id, 1_799_999_500_000);
+
+  for (seq, user) in [(1, bob_id), (2, carol_id), (3, bob_id)] {
+    alice
+      .client
+      .handle_frame(GatewayServerMessage::Event {
+        seq,
+        event: GatewayEvent::PresenceUpdate {
+          user_id: user,
+          state: PresenceState::Offline,
+          maybe_status: None,
+        },
+      })
+      .await
+      .unwrap();
+  }
+  // Nothing asked yet: the events only mark them; the runner's tick reads them together.
+  assert!(alice.client.refresh_stale_last_seen().await.unwrap());
+  assert!(
+    !alice.client.refresh_stale_last_seen().await.unwrap(),
+    "nothing left"
+  );
+  assert_eq!(alice_ui.last_seen(bob_id), Some(1_799_999_000_000));
+  assert_eq!(alice_ui.last_seen(carol_id), Some(1_799_999_500_000));
 }
 
 #[tokio::test]

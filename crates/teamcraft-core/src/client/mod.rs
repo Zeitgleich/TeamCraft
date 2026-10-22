@@ -113,6 +113,9 @@ pub struct Client<A, S> {
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
   typing: notifications::TypingState,
+  /// People who went offline whose last seen is still to be read (batched, see
+  /// [`Client::refresh_stale_last_seen`]).
+  stale_last_seen: std::collections::BTreeSet<UserId>,
   maybe_call_sink: Option<CallEventSink>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
@@ -166,6 +169,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       groups: HashMap::new(),
       sync,
       typing: Default::default(),
+      stale_last_seen: Default::default(),
       maybe_call_sink: None,
       maybe_preview_fetcher,
       maybe_jwks_source,

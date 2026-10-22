@@ -20,6 +20,8 @@ pub const PRIVACY_KEY: &str = "privacy";
 pub const CALL_HISTORY_KEY: &str = "call_history";
 /// Calls fetched for the history list.
 const CALL_HISTORY_PAGE: u32 = 100;
+/// Most people `GET /presence` answers for in one request.
+const MAX_PRESENCE_BATCH: usize = 200;
 
 /// When the person was last active, as the server last told this device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )?;
     }
     Ok(())
+  }
+
+  /// Reads the last seen of the people who went offline since the last call, in one request (the
+  /// runner calls it every tick). Returns whether anything was read.
+  pub async fn refresh_stale_last_seen(&mut self) -> Result<bool, CoreError> {
+    if self.stale_last_seen.is_empty() {
+      return Ok(false);
+    }
+    let users: Vec<UserId> = self
+      .stale_last_seen
+      .iter()
+      .take(MAX_PRESENCE_BATCH)
+      .copied()
+      .collect();
+    self.refresh_presence(&users).await?;
+    for user in &users {
+      self.stale_last_seen.remove(user);
+    }
+    Ok(true)
   }
 
   /// Reads the user's privacy choices from the server.

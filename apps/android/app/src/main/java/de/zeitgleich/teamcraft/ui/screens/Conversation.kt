@@ -876,7 +876,13 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
     if (files.isNotEmpty()) {
       FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         for (file in files) {
-          AssistChip(onClick = { files = files - file }, label = { Text("📎 ${file.fileName} ✕") })
+          AssistChip(
+            onClick = {
+              files = files - file
+              viewModel.discardFile(file)
+            },
+            label = { Text("📎 ${file.fileName} ✕") },
+          )
         }
       }
     }

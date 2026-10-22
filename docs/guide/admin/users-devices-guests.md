@@ -9,7 +9,9 @@ create a user, create them in Keycloak and assign a role.
 ## User list
 
 Administration > **Users and guests** shows accounts with role, devices, spaces and last activity
-(`GET /admin/users`, devices at `GET /admin/users/{id}/devices`).
+(`GET /admin/users`, devices at `GET /admin/users/{id}/devices`). For people who hide their last
+seen or appear offline, last activity is shown to the day only: enough to spot unused devices,
+not when someone was active.
 
 ## Deactivate and reactivate
 

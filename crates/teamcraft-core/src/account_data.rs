@@ -16,6 +16,8 @@ use teamcraft_proto::{
 
 /// Tombstones older than this are dropped when merging (every device has synced by then).
 pub const TOMBSTONE_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+/// How far the activity read mark may lie ahead of this device's clock.
+const MAX_ACTIVITY_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountData {
@@ -129,7 +131,11 @@ impl AccountData {
       .into_iter()
       .flatten()
       .max_by_key(|entry| (entry.value, entry.updated_at_ms));
-    self.maybe_activity_read = newer_read;
+    // A mark from the future (another device, or older versions) is capped like a new one.
+    self.maybe_activity_read = newer_read.map(|mut entry| {
+      entry.value = entry.value.min(now_ms.saturating_add(MAX_ACTIVITY_CLOCK_SKEW_MS));
+      entry
+    });
     // The root never changes; the first one a device of the user verified stays.
     if self.maybe_workspace_root.is_none() {
       self.maybe_workspace_root = other.maybe_workspace_root.clone();
@@ -163,8 +169,11 @@ impl AccountData {
     self.maybe_activity_read.as_ref().map_or(0, |entry| entry.value)
   }
 
-  /// Records that the feed was read up to `read_at_ms`; returns whether that moved the mark.
+  /// Records that the feed was read up to `read_at_ms`; returns whether that moved the mark. The
+  /// times come from server-assigned message IDs, so the mark never goes past now (plus some clock
+  /// skew): one message with a far-future ID must not mark everything after it read.
   pub fn mark_activity_read(&mut self, read_at_ms: i64, now_ms: i64) -> bool {
+    let read_at_ms = read_at_ms.min(now_ms.saturating_add(MAX_ACTIVITY_CLOCK_SKEW_MS));
     if read_at_ms <= self.activity_read_at_ms() {
       return false;
     }
@@ -467,6 +476,26 @@ mod tests {
     assert_eq!(merged_on_phone, merged_on_laptop);
     assert_eq!(merged_on_phone.activity_read_at_ms(), 900);
     assert_eq!(AccountData::default().activity_read_at_ms(), 0);
+  }
+
+  #[test]
+  fn the_activity_read_mark_never_runs_ahead_of_the_clock() {
+    let now = 1_000_000;
+    let mut data = AccountData::default();
+    // A message with a far-future (server-assigned) time must not mark everything read.
+    assert!(data.mark_activity_read(i64::MAX, now));
+    assert_eq!(data.activity_read_at_ms(), now + MAX_ACTIVITY_CLOCK_SKEW_MS);
+    let from_elsewhere = AccountData {
+      maybe_activity_read: Some(Stamped {
+        value: i64::MAX,
+        updated_at_ms: now,
+        is_removed: false,
+      }),
+      ..AccountData::default()
+    };
+    let mut merged = AccountData::default();
+    merged.merge(&from_elsewhere, now);
+    assert_eq!(merged.activity_read_at_ms(), now + MAX_ACTIVITY_CLOCK_SKEW_MS);
   }
 
   #[test]

@@ -126,12 +126,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * decrypted downloads and staged uploads, and the push registration. The sealed store stays.
    */
   fun signOut() = launchBusy {
+    // Wake-ups that arrive from now on show nothing; notifications are cleared last, when no
+    // core can be opened any more to post new ones.
+    graph.push.beginSignOut()
     graph.calls.hangUp()
     graph.push.unregister()
     runCatching { graph.core.core().deletePlaintextFiles() }
-    graph.notifier.clearAll()
     graph.core.close()
     graph.auth.signOut()
+    graph.notifier.clearAll()
     state.value = AppState.SignedOut()
   }
 
@@ -181,6 +184,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     } catch (failure: kotlinx.serialization.SerializationException) {
       null
     }
+
+  /**
+   * Deletes the staged copy of a file taken out of the composer before sending. Only files in the
+   * account's staging folder; anything else is not the app's to delete.
+   */
+  fun discardFile(file: PickedFile) = viewModelScope.launch(Dispatchers.IO) {
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()).canonicalFile }.getOrNull()
+      ?: return@launch
+    val staged = File(file.path).canonicalFile
+    if (staged.parentFile == directory) staged.delete()
+  }
 
   /** Copies a picked document into the account's staging folder so the core can read and encrypt it. */
   suspend fun importFile(uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
