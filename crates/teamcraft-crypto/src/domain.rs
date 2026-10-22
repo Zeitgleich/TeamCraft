@@ -20,6 +20,8 @@ pub(crate) const ACCOUNT_SECRET_KEY: &str = "TeamCraft-v1 account secret key";
 pub(crate) const RECOVERY_REQUEST_FINGERPRINT: &str = "TeamCraft-v1 recovery request fingerprint";
 pub(crate) const MEMBERSHIP_CHANGE: &str = "TeamCraft-v1 membership change";
 pub(crate) const PUSH_WAKEUP_AAD: &str = "TeamCraft-v1 push wake-up";
+pub(crate) const PUSH_GATEWAY_REQUEST: &str = "TeamCraft-v1 push gateway request";
+pub(crate) const PUSH_GATEWAY_SERVER_ID: &str = "TeamCraft-v1 push gateway server id";
 pub(crate) const WORKSPACE_LOG: &str = "TeamCraft-v1 workspace log";
 pub(crate) const ORG_RECOVERY_WRAP: &str = "TeamCraft-v1 org recovery wrap";
 pub(crate) const ORG_RECOVERY_SEAL: &str = "TeamCraft-v1 org recovery seal";
@@ -54,7 +56,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 27] = [
+  const ALL_LABELS: [&str; 29] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -65,6 +67,8 @@ mod tests {
     PASSKEY_PRF_KDF,
     MEMBERSHIP_CHANGE,
     PUSH_WAKEUP_AAD,
+    PUSH_GATEWAY_REQUEST,
+    PUSH_GATEWAY_SERVER_ID,
     WORKSPACE_LOG,
     ORG_RECOVERY_WRAP,
     ORG_RECOVERY_SEAL,

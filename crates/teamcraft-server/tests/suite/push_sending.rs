@@ -1279,3 +1279,125 @@ mod providers {
     app.stop().await;
   }
 }
+
+/// The whole server with APNs and FCM behind a (fake) push gateway: message in, sealed wake-up out,
+/// and what the gateway says about a token decides what the server keeps.
+mod via_gateway {
+  use super::*;
+  use crate::push_gateway::Stack;
+
+  async fn start() -> Option<(TestApp, Stack)> {
+    let mut stack = Stack::start().await;
+    // The app takes the dispatcher; the rest of the stack stays for the assertions.
+    let dispatcher = std::mem::replace(&mut stack.dispatcher, PushDispatcher::new(1));
+    let app = TestApp::start_with_push(
+      |settings| settings.notifications.mobile_push_delay_secs = 0,
+      dispatcher,
+    )
+    .await?;
+    Some((app, stack))
+  }
+
+  async fn register(app: &TestApp, user: &TestUser, provider: &str, token: &str) -> String {
+    let device = register_device(app, user).await;
+    let reply = app
+      .put(
+        user,
+        &format!("/devices/{device}/push"),
+        json!({"provider": provider, "token": token, "push_key": push_key()}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    device
+  }
+
+  fn has_push(devices: &serde_json::Value, device: &str) -> bool {
+    devices["devices"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|entry| entry["id"] == device && entry["push_provider"].is_string())
+  }
+
+  const APNS_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+  #[tokio::test]
+  async fn a_message_wakes_ios_and_android_through_the_gateway() {
+    let Some((app, stack)) = start().await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let channel = channel_with(&app, &[&carol]).await;
+    let alice_device = register_device(&app, &alice).await;
+    set_level(&app, &carol, &channel, "all").await;
+    register(&app, &carol, "apns", APNS_TOKEN).await;
+    register(&app, &carol, "fcm", "fcm-registration-token").await;
+
+    let message = send(&app, &alice, &channel, &alice_device, 1).await;
+
+    let pushes = stack.fake.wait_for(2).await;
+    assert_eq!(pushes.len(), 2);
+    let providers: Vec<_> = pushes
+      .iter()
+      .map(|push| push.provider.as_str().to_owned())
+      .collect();
+    assert!(providers.contains(&"apns".to_owned()) && providers.contains(&"fcm".to_owned()));
+    for push in &pushes {
+      let wake_up = open_wakeup(&PUSH_KEY_BYTES, push.sealed.as_slice()).unwrap();
+      assert_eq!(wake_up.kind, PushKind::Message);
+      assert_eq!(wake_up.conversation_id.to_string(), channel);
+      assert_eq!(wake_up.maybe_message_id.unwrap().to_string(), message);
+    }
+    // The admin console sees APNs and FCM as active, like with direct credentials.
+    let status = app.get(&admin(), "/admin/instance").await;
+    for name in ["apns", "fcm"] {
+      let entry = status.body["push"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["provider"] == name)
+        .unwrap()
+        .clone();
+      assert_eq!(entry["state"], "active", "{name}");
+      assert_eq!(entry["success_count"], 1, "{name}");
+    }
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_a_token_the_gateway_reports_dead_is_forgotten() {
+    let Some((app, stack)) = start().await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let channel = channel_with(&app, &[&carol]).await;
+    let alice_device = register_device(&app, &alice).await;
+    set_level(&app, &carol, &channel, "all").await;
+    let phone = register(&app, &carol, "apns", APNS_TOKEN).await;
+
+    // The gateway blocks this server: the push fails, the registration stays.
+    stack.fake.set_reply(Some((
+      403,
+      json!({"error_code": "server_blocked", "message": "blocked"}),
+    )));
+    send(&app, &alice, &channel, &alice_device, 1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(stack.fake.pushes().is_empty());
+    assert!(has_push(&app.get(&carol, "/devices").await.body, &phone));
+
+    // The push service says the token is dead: the server drops the registration.
+    stack.fake.set_reply(Some((
+      410,
+      json!({"error_code": "token_gone", "message": "dead"}),
+    )));
+    send(&app, &alice, &channel, &alice_device, 2).await;
+    for _ in 0..50 {
+      if !has_push(&app.get(&carol, "/devices").await.body, &phone) {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!has_push(&app.get(&carol, "/devices").await.body, &phone));
+    app.stop().await;
+  }
+}

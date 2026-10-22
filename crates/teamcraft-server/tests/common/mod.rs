@@ -1,6 +1,7 @@
 //! Shared helpers of the integration tests.
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
+pub mod fake_gateway;
 pub mod fake_keycloak;
 pub mod push_fakes;
 

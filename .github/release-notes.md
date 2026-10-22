@@ -51,8 +51,10 @@ previous release keep working.
 - **Android**: release APKs are only signed when the project's upload key is configured for the build;
   otherwise use the `-debug-signed` APKs for testing or sign the release APKs yourself.
 - **iOS** needs your own build and signing; there is no App Store or TestFlight build.
-- **Mobile push**: the server sends Web Push only; APNs, FCM and UnifiedPush senders are not
-  implemented yet, so the mobile apps get messages while they run, not as notifications when closed.
+- **Mobile push for the store apps** goes through the publisher's push gateway: set
+  `[push.gateway] url` on your server to the gateway of the app's publisher (docs/push-gateway.md). The
+  gateway sees device tokens and ciphertext only. Direct `[push.apns]` / `[push.fcm]` credentials are for
+  apps you build and sign yourself. Without either, phones only get messages while the app runs.
 - Calls in the browser need WebTransport (Chromium-based browsers, Firefox).
 
 ## Verify the downloads

@@ -1,0 +1,11 @@
+{
+  "comment": "Known answer for the request signature (docs/api.md \u00a72). Identical in teamcraft and teamcraft-push-gateway.",
+  "seed_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "public_key_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "server_id": "5c59355db4339fb3e2358017d6cfab0e",
+  "method": "POST",
+  "path": "/v1/push",
+  "timestamp_ms": 1700000000000,
+  "body": "{\"request_id\":\"AQEBAQEBAQEBAQEBAQEBAQ==\",\"provider\":\"apns\",\"kind\":\"message\",\"urgency\":\"high\",\"ttl_secs\":3600,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"sealed\":\"AWhlbGxv\"}",
+  "signature_hex": "b6530378135aed007dfce047cec26d65b178097c371031301043574dc63b5835cc06c6235b9e14a8ad92e323c85b1ae4c0c75a57445b878cb5a692d3f78a8008"
+}

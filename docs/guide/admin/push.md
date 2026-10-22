@@ -6,14 +6,20 @@ do-not-disturb and active devices ([docs/notifications.md](../../notifications.m
 
 ## Status
 
-| Provider                   | Server                                                  | Client                                                                                           |
-|----------------------------|---------------------------------------------------------|--------------------------------------------------------------------------------------------------|
-| Web Push (VAPID, RFC 8291) | Implemented                                             | Service worker of the web client; shows a generic notification until it can open sealed payloads |
-| FCM (Android)              | Implemented (HTTP v1, service account)                  | App receiver exists (flavor `full`)                                                              |
-| UnifiedPush                | Implemented (Web Push encryption to the distributor)    | App receiver exists                                                                              |
-| APNs (iOS)                 | Implemented (HTTP/2, `.p8` key; VoIP topic for calls)   | iOS app with notification service extension                                                      |
+| Provider                   | Server                                                                        | Client                                                                                           |
+|----------------------------|-------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
+| Web Push (VAPID, RFC 8291) | Implemented                                                                   | Service worker of the web client; shows a generic notification until it can open sealed payloads |
+| FCM (Android)              | Implemented (HTTP v1, service account, or via the push gateway)               | App receiver exists (flavor `full`)                                                              |
+| UnifiedPush                | Implemented (Web Push encryption to the distributor)                          | App receiver exists                                                                              |
+| APNs (iOS)                 | Implemented (HTTP/2, `.p8` key or via the push gateway; VoIP topic for calls) | iOS app with notification service extension                                                      |
 
-Each provider is on once its credentials are set; the admin console (Instance → Push providers) shows
+**Store apps** (App Store, Play Store) are signed by their publisher, so their pushes can only be sent with the
+publisher's credentials. Set `[push.gateway] url` to the publisher's push gateway and your server
+sends APNs and FCM wake-ups through it; the gateway only sees device tokens and ciphertext
+([Push gateway](../../push-gateway.md)). Builds you sign yourself use `[push.apns]` / `[push.fcm]`
+directly instead.
+
+Each provider is on once its credentials are set (or a gateway is configured); the admin console (Instance → Push providers) shows
 which are configured, the last delivery and the last error. Credentials for APNs, FCM and UnifiedPush are
 described in [Operations](../../operations.md#push-notifications).
 

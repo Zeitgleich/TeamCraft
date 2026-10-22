@@ -1,0 +1,1 @@
+{"version":"1.0.0","providers":["apns","fcm"],"is_registration_open":true,"limits":{"pushes_per_second":50,"burst":200,"pushes_per_day":200000,"pushes_per_token_per_minute":30}}

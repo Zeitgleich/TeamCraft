@@ -7,6 +7,7 @@
 mod apns;
 pub mod crypto;
 mod fcm;
+mod gateway;
 pub mod routing;
 mod sender;
 mod status;
@@ -15,6 +16,9 @@ mod web_push;
 
 pub use apns::{APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings};
 pub use fcm::{FCM_BASE_URL, FcmSender, FcmSettings, ServiceAccount};
+pub use gateway::{
+  GatewayClient, GatewaySender, GatewaySettings, load_or_create_gateway_key, parse_gateway_key,
+};
 pub use sender::{PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency};
 pub use status::ProviderHealth;
 pub use unified_push::UnifiedPushSender;

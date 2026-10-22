@@ -76,6 +76,11 @@ device cross-signing by the user's identity key, identity-key change warnings an
 verification codes (see [docs/e2ee.md](docs/e2ee.md) §3).
 Key transparency is a later option.
 
+Push goes through APNs/FCM, optionally via a **push gateway** operated by the publisher of the store
+apps. Wake-ups are sealed to the device's push key before they leave the server, so neither Apple,
+Google nor a gateway can read or forge them; a malicious gateway can only drop, delay or replay
+(e2ee.md §7.1).
+
 ## 3. System overview
 
 ```
@@ -103,6 +108,7 @@ Binaries:
 - **`teamcraft-bridge`** – optional, runs next to log/webhook sources: encrypts their output into integration channels.
 - **`teamcraft-pbx`** – optional telephony module: AI hotline on any SIP trunk (`rsipstack`), pluggable voice agent providers (first: ElevenLabs), queues, handover to agents in the app. No Asterisk.
 - **`teamcraft-sfu`** – selective forwarding unit for calls. Separate so it can run on a box with good network and be restarted without dropping chat. Registers with the server using a registration token.
+- **`teamcraft-push-gateway`** – its own repository ([Zeitgleich/teamcraft-push-gateway](https://github.com/Zeitgleich/teamcraft-push-gateway)): holds the APNs and FCM credentials of the published store apps and forwards the sealed wake-ups of any server to them, so self-hosted servers work with the store apps. Run by the app's publisher on a separate host; sees device tokens and ciphertext only ([docs/push-gateway.md](docs/push-gateway.md)).
 - **`teamcraft-vault`** – optional, runs on company hardware (e.g. a NAS or on-prem server): compliance archive, file text extraction.
 
 ## 4. Chat

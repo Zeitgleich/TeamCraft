@@ -85,7 +85,7 @@ Rendered by `scripts/render-release-notes.py` from the template `.github/release
 | Highlights                  | the version's `CHANGELOG.md` section (for a candidate: the base version's) |
 | Install                     | the template, with the image references of `images.txt`                    |
 | Upgrading, breaking changes | the template; `### Breaking` of the changelog section, else "None."        |
-| Known limitations           | the template: unsigned builds, iOS self-build, mobile push                 |
+| Known limitations           | the template: unsigned builds, iOS self-build, mobile push via the push gateway                 |
 | Verify the downloads        | the template: checksums, attestations, cosign                              |
 | What's changed              | GitHub's generated notes, grouped by `.github/release.yml`                 |
 

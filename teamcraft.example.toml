@@ -413,6 +413,17 @@ allow_private_endpoints = false
 # [push.fcm]
 # service_account_path = "/run/secrets/fcm_service_account.json"
 
+# Push gateway for the published store apps (docs/push-gateway.md). The iOS and Android store apps
+# register with APNs and FCM credentials that belong to their publisher, not to you; a gateway holds
+# them and forwards your sealed wake-ups. It sees device tokens and ciphertext, nothing else. Set
+# the URL of the gateway of your app's publisher. A provider with credentials of its own ([push.apns],
+# [push.fcm], for self-built and self-signed apps) is sent to directly. Web Push and UnifiedPush never
+# use a gateway.
+# [push.gateway]
+# url = "https://push-gw.zeitgleich.de"                 # the publisher's gateway for the official store apps
+# key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start; this is your identity there
+# key = "..."                                        # alternative: 32 bytes base64url, prefer TEAMCRAFT_PUSH__GATEWAY__KEY
+
 # Android without Google services (UnifiedPush distributors such as ntfy). On by default; it needs no
 # credentials because the app hands the server the distributor's endpoint.
 [push.unified_push]

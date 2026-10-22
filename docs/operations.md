@@ -162,12 +162,28 @@ provider is on as soon as its credentials are set; `GET /api/v1/admin/instance` 
 (Instance → Push providers) show per provider whether it is configured, when it last delivered, how
 many pushes failed since the server started and the last error.
 
-| Provider    | For                       | Needs                                                            | Configuration                                    |
-|-------------|---------------------------|------------------------------------------------------------------|--------------------------------------------------|
-| Web Push    | browsers (PWA)            | a VAPID key pair                                                 | `[push] vapid_private_key`, `vapid_subject`      |
-| APNs        | iOS, including call rings | an Apple `.p8` key, key ID, team ID, bundle ID                   | `[push.apns]`                                    |
-| FCM         | Android with Google       | a Firebase service account JSON key                              | `[push.fcm]`                                     |
-| UnifiedPush | Android without Google    | nothing (the app hands over the distributor's endpoint and keys) | `[push.unified_push] is_enabled` (on by default) |
+| Provider    | For                       | Needs                                                                              | Configuration                                    |
+|-------------|---------------------------|------------------------------------------------------------------------------------|--------------------------------------------------|
+| Web Push    | browsers (PWA)            | a VAPID key pair                                                                   | `[push] vapid_private_key`, `vapid_subject`      |
+| APNs        | iOS, including call rings | store app: a push gateway; own app: an Apple `.p8` key, key ID, team ID, bundle ID | `[push.gateway]` or `[push.apns]`                |
+| FCM         | Android with Google       | store app: a push gateway; own app: a Firebase service account JSON key            | `[push.gateway]` or `[push.fcm]`                 |
+| UnifiedPush | Android without Google    | nothing (the app hands over the distributor's endpoint and keys)                   | `[push.unified_push] is_enabled` (on by default) |
+
+**Store apps and the push gateway.** The iOS and Android store apps are signed by their publisher, and
+Apple and Google only deliver to the holder of that signing identity, so your server can't send to
+them with credentials of its own. Point it at the publisher's push gateway instead
+([push-gateway.md](push-gateway.md)): it forwards your sealed wake-ups and sees only device tokens and
+ciphertext. Every server does this, the publisher's own included.
+
+```toml
+[push.gateway]
+url      = "https://push-gw.zeitgleich.de"   # the publisher's gateway for the official store apps
+key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start; your identity at the gateway
+```
+
+The APNs and FCM rows above are for **self-built, self-signed apps**: with `[push.apns]` or `[push.fcm]`
+set, the server sends to that provider directly and never to the gateway. Web Push and UnifiedPush
+never use the gateway. Running a gateway is only for whoever publishes apps (its own repository, see [push-gateway.md](push-gateway.md)).
 
 Common settings in `[push]`: `ttl_secs` (how long a push service holds a wake-up for an offline
 device), `request_timeout_secs`, `max_concurrent_sends` (per pool: APNs/FCM, and Web Push/UnifiedPush),
@@ -234,16 +250,18 @@ those endpoints, so they never mark the provider as failing.
 
 The Ansible deployment passes these on (secrets as podman secrets, the rest as variables):
 
-| Deployment name              | Kind     | Becomes                                           |
-|------------------------------|----------|---------------------------------------------------|
-| `vapid_private_key`          | secret   | `TEAMCRAFT_PUSH__VAPID_PRIVATE_KEY`               |
-| `apns_key`                   | secret   | `TEAMCRAFT_PUSH__APNS__KEY` (the `.p8` text)      |
-| `fcm_service_account`        | secret   | `TEAMCRAFT_PUSH__FCM__SERVICE_ACCOUNT`            |
-| `teamcraft_apns_key_id`      | variable | `[push.apns] key_id`                              |
-| `teamcraft_apns_team_id`     | variable | `[push.apns] team_id`                             |
-| `teamcraft_apns_bundle_id`   | variable | `[push.apns] bundle_id`                           |
-| `teamcraft_apns_use_sandbox` | variable | `[push.apns] use_sandbox` (default `false`)       |
-| `teamcraft_unified_push`     | variable | `[push.unified_push] is_enabled` (default `true`) |
+| Deployment name              | Kind     | Becomes                                                                          |
+|------------------------------|----------|----------------------------------------------------------------------------------|
+| `vapid_private_key`          | secret   | `TEAMCRAFT_PUSH__VAPID_PRIVATE_KEY`                                              |
+| `apns_key`                   | secret   | `TEAMCRAFT_PUSH__APNS__KEY` (the `.p8` text)                                     |
+| `fcm_service_account`        | secret   | `TEAMCRAFT_PUSH__FCM__SERVICE_ACCOUNT`                                           |
+| `teamcraft_apns_key_id`      | variable | `[push.apns] key_id`                                                             |
+| `teamcraft_apns_team_id`     | variable | `[push.apns] team_id`                                                            |
+| `teamcraft_apns_bundle_id`   | variable | `[push.apns] bundle_id`                                                          |
+| `teamcraft_apns_use_sandbox` | variable | `[push.apns] use_sandbox` (default `false`)                                      |
+| `teamcraft_push_gateway_url` | variable | `[push.gateway] url` (the publisher's push gateway, for the store apps)          |
+| `push_gateway_key`           | secret   | `TEAMCRAFT_PUSH__GATEWAY__KEY` (generated: the server's identity at the gateway) |
+| `teamcraft_unified_push`     | variable | `[push.unified_push] is_enabled` (default `true`)                                |
 
 The `[push.apns]` block is only rendered when `apns_key` is a secret.
 

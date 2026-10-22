@@ -20,6 +20,7 @@ pub mod message;
 pub mod mls;
 pub mod org_recovery;
 pub mod push;
+pub mod push_gateway;
 pub mod rendezvous;
 pub mod secret;
 pub mod share_link;
