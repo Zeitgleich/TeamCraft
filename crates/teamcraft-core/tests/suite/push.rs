@@ -28,6 +28,7 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
   assert_eq!(preview.maybe_conversation_name.as_deref(), Some("planning"));
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
   assert!(!preview.is_direct);
+  assert!(preview.is_conversation_verified);
   // A preview only reads: the store didn't change.
   assert_eq!(
     bob.store.messages(channel, MessageFilter::All).unwrap().len(),
@@ -47,12 +48,33 @@ async fn without_a_session_only_names_are_shown_unless_the_store_has_the_message
     .unwrap();
   assert_eq!(preview.content, PreviewContent::Unavailable);
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
+  assert!(!preview.is_conversation_verified);
 
   settle(&mut [&mut alice, &mut bob]).await;
   let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
     .await
     .unwrap();
   assert_eq!(preview.content, PreviewContent::Text("see you".into()));
+  assert!(preview.is_conversation_verified);
+}
+
+#[tokio::test]
+async fn a_wake_up_naming_another_conversation_is_not_verified() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let message = alice_says(&mut alice, channel, "for the planning channel").await;
+  let other = alice
+    .client
+    .create_channel(alice.space().await, "other")
+    .await
+    .unwrap();
+  // The server claims the planning message belongs to another conversation.
+  let sealed = wake_up_for(&server, &bob, &alice, other, message);
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  assert!(!preview.is_conversation_verified);
+  settle(&mut [&mut alice, &mut bob]).await;
 }
 
 #[tokio::test]

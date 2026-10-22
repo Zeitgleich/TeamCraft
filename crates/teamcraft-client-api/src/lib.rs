@@ -11,6 +11,7 @@ pub mod admin;
 pub mod backend;
 pub mod brand;
 pub mod calls;
+pub mod links;
 pub mod log;
 pub mod model;
 pub mod notify;

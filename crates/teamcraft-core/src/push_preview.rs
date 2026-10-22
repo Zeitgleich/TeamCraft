@@ -37,6 +37,10 @@ pub struct PushPreview {
   pub is_direct: bool,
   /// The sender sent it silently: show it without sound or vibration.
   pub is_silent: bool,
+  /// The message was found in, or decrypted and signature-checked as part of, the wake-up's
+  /// conversation. Only then may the notification offer to reply there: the wake-up's
+  /// conversation ID alone is the server's word (e2ee.md §7). Survives the policy limits.
+  pub is_conversation_verified: bool,
 }
 
 /// What of the message itself can be shown.
@@ -91,9 +95,9 @@ pub async fn push_preview<A: ServerApi>(
       .or_else(|| participant_name(maybe_conversation.as_ref(), sender)),
     None => None,
   };
-  let (content, is_silent) = match wake_up.maybe_message_id {
+  let (content, is_silent, is_conversation_verified) = match wake_up.maybe_message_id {
     Some(message_id) => preview_content(store, maybe_api, &wake_up, message_id).await,
-    None => (PreviewContent::Unavailable, false),
+    None => (PreviewContent::Unavailable, false, false),
   };
   let preview = PushPreview {
     wake_up,
@@ -102,6 +106,7 @@ pub async fn push_preview<A: ServerApi>(
     content,
     is_direct,
     is_silent,
+    is_conversation_verified,
   };
   Ok(preview.limited_to(&push_content_mode(store)))
 }
@@ -161,13 +166,14 @@ impl std::fmt::Debug for PushSession {
 }
 
 /// From the store if the app already has the message, else fetched and decrypted; failures only
-/// cost the preview. Also whether the sender sent it silently.
+/// cost the preview. Also whether the sender sent it silently, and whether the message is known to
+/// belong to the wake-up's conversation.
 async fn preview_content<A: ServerApi>(
   store: &impl LocalStore,
   maybe_api: Option<&A>,
   wake_up: &PushWakeUp,
   message_id: MessageId,
-) -> (PreviewContent, bool) {
+) -> (PreviewContent, bool, bool) {
   let conversation = wake_up.conversation_id;
   let local = store
     .messages(conversation, MessageFilter::All)
@@ -178,16 +184,20 @@ async fn preview_content<A: ServerApi>(
         .find(|message| message.maybe_server_id == Some(message_id))
     });
   if let Some(message) = local {
-    return (content_preview(&message.content), is_silent(&message.content));
+    return (
+      content_preview(&message.content),
+      is_silent(&message.content),
+      true,
+    );
   }
   let Some(api) = maybe_api else {
-    return (PreviewContent::Unavailable, false);
+    return (PreviewContent::Unavailable, false, false);
   };
   match fetch_and_decrypt(store, api, wake_up, message_id).await {
-    Ok(content) => (content_preview(&content), is_silent(&content)),
+    Ok(content) => (content_preview(&content), is_silent(&content), true),
     Err(error) => {
       tracing::debug!(%error, conversation_id = %conversation, "no preview for push");
-      (PreviewContent::Unavailable, false)
+      (PreviewContent::Unavailable, false, false)
     },
   }
 }
@@ -216,6 +226,13 @@ async fn fetch_and_decrypt<A: ServerApi>(
     .into_iter()
     .find(|message| message.id == message_id)
     .ok_or_else(|| CoreError::Corrupt("pushed message not found".into()))?;
+  // The key ring follows the message's own conversation: a message of another conversation
+  // would decrypt fine and be shown (and answered) as if it belonged to this one.
+  if message.conversation_id != wake_up.conversation_id {
+    return Err(CoreError::Corrupt(
+      "pushed message is from another conversation".into(),
+    ));
+  }
   let account = records::load_account(store)?.ok_or(CoreError::NotEnrolled)?;
   let maybe_sender_key =
     records::device_signing_key(store, message.sender_user_id, message.sender_device_id)?;
@@ -311,6 +328,7 @@ mod tests {
       content: PreviewContent::Text("lunch?".into()),
       is_direct: false,
       is_silent: false,
+      is_conversation_verified: true,
     };
     assert_eq!(full.clone().limited_to(&PushContentMode::Full), full);
     let sender = full.clone().limited_to(&PushContentMode::Sender);
@@ -320,6 +338,7 @@ mod tests {
       let generic = full.clone().limited_to(&mode);
       assert!(generic.maybe_sender_name.is_none() && generic.maybe_conversation_name.is_none());
       assert_eq!(generic.content, PreviewContent::Unavailable);
+      assert!(generic.is_conversation_verified);
     }
   }
 

@@ -177,7 +177,8 @@ impl Engine {
       .into();
     let mut engine = Self {
       server_url: config.server_url,
-      download_dir: directory.join("downloads"),
+      // Per account, so another account signed in on this device never sees these files.
+      download_dir: directory.join("downloads").join(&config.account),
       tokens,
       listener,
       store,
@@ -275,7 +276,15 @@ impl Engine {
     let client = self.take_client().await?;
     let result = client.start_link_approval(&code).await;
     self.client = ClientSlot::Idle(client);
-    let approval = result?;
+    let approval = match result {
+      Ok(approval) => approval,
+      Err(error) => {
+        if was_running {
+          self.start().await?;
+        }
+        return Err(error.into());
+      },
+    };
     let short_code = approval.short_code();
     self.maybe_approval = Some(PendingApproval {
       approval,
@@ -296,6 +305,17 @@ impl Engine {
       self.start().await?;
     }
     Ok(result?)
+  }
+
+  /// Drops an approval the user abandoned (the codes were never confirmed) and resumes syncing.
+  pub(crate) async fn cancel_device_link_approval(&mut self) -> Result<(), TeamCraftError> {
+    let Some(pending) = self.maybe_approval.take() else {
+      return Ok(());
+    };
+    if pending.was_running {
+      self.start().await?;
+    }
+    Ok(())
   }
 
   pub(crate) async fn start(&mut self) -> Result<(), TeamCraftError> {
