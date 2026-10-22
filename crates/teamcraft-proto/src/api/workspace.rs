@@ -182,6 +182,79 @@ impl Default for DirectoryPolicy {
   }
 }
 
+wire_enum! {
+  /// What a push notification shows on the lock screen. Applied by the receiving device when it opens
+  /// the sealed wake-up payload, so the push service never sees more than "something arrived".
+  pub enum PushContentMode {
+    /// "New message" only.
+    Generic => "generic",
+    /// The sender and the conversation, not the text.
+    Sender => "sender",
+    /// Sender, conversation and the beginning of the text.
+    Full => "full",
+  }
+}
+
+wire_enum! {
+  /// How replies are shown by default.
+  pub enum ReplyView {
+    /// In a side panel next to the channel.
+    Panel => "panel",
+    /// Inline in the channel, with the thread collapsed under its root.
+    Inline => "inline",
+  }
+}
+
+/// Rules for guests that the server applies. A value set here wins over the server file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GuestPolicy {
+  /// Guests can only be invited with these e-mail domains (and their subdomains). Empty: the server
+  /// file decides.
+  #[serde(default)]
+  pub allowed_email_domains: Vec<String>,
+  /// Guests without an explicit expiry expire after this many days; `0` never.
+  #[serde(
+    rename = "default_expiry_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_default_expiry_days: Option<u32>,
+  /// Guests open direct messages only with people they share a conversation with.
+  #[serde(
+    rename = "dm_only_with_shared_conversations",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_dm_only_with_shared_conversations: Option<bool>,
+}
+
+/// Rules for accounts that live in TeamCraft instead of the identity provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PasswordPolicy {
+  /// Shortest password; absent: the server file decides.
+  #[serde(rename = "min_chars", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_min_chars: Option<u32>,
+}
+
+/// Defaults for notifications and threads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct NotificationDefaults {
+  pub push_content: PushContentMode,
+  /// New accounts follow threads they are mentioned in.
+  pub auto_follow_mentioned_threads: bool,
+  pub reply_view: ReplyView,
+}
+
+impl Default for NotificationDefaults {
+  fn default() -> Self {
+    Self {
+      push_content: PushContentMode::Sender,
+      auto_follow_mentioned_threads: true,
+      reply_view: ReplyView::Panel,
+    }
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -198,6 +271,12 @@ pub struct WorkspacePolicy {
   pub directory: DirectoryPolicy,
   #[serde(default)]
   pub presence: PresencePolicy,
+  #[serde(default)]
+  pub guests: GuestPolicy,
+  #[serde(default)]
+  pub passwords: PasswordPolicy,
+  #[serde(default)]
+  pub notifications: NotificationDefaults,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -233,6 +312,9 @@ impl Default for WorkspacePolicy {
       session: SessionPolicy::default(),
       directory: DirectoryPolicy::default(),
       presence: PresencePolicy::default(),
+      guests: GuestPolicy::default(),
+      passwords: PasswordPolicy::default(),
+      notifications: NotificationDefaults::default(),
     }
   }
 }

@@ -214,3 +214,61 @@ pub struct ListAuditResponse {
   pub entries: Vec<AuditEntryResponse>,
   pub has_more: bool,
 }
+
+wire_enum! {
+  /// How far a push provider is usable.
+  pub enum PushProviderState {
+    /// The server sends pushes through it.
+    Active => "active",
+    /// The server has no credentials for it.
+    NotConfigured => "not_configured",
+    /// The sender is a stub; nothing is delivered yet.
+    NotImplemented => "not_implemented",
+  }
+}
+
+/// One push provider and what the server can do with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PushProviderStatus {
+  pub provider: PushProvider,
+  pub state: PushProviderState,
+  /// Live devices registered with this provider.
+  pub device_count: u32,
+}
+
+/// The media server (SFU) as the server sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuStatus {
+  /// `[calls]` is configured: clients can get join tokens.
+  pub is_configured: bool,
+  #[serde(rename = "url", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_url: Option<String>,
+  /// A registration token is set, so the SFU can report participants.
+  pub is_reporting_enabled: bool,
+  /// The server can forward host controls (mute, remove, end) to the SFU.
+  pub has_host_controls: bool,
+  /// When the SFU last contacted the server.
+  #[serde(rename = "last_contact_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_last_contact_at: Option<UnixMillis>,
+  pub active_calls: u32,
+}
+
+/// Storage the server knows about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StorageStatus {
+  /// `[storage]` is configured.
+  pub is_configured: bool,
+  pub attachment_count: u64,
+  pub attachment_bytes: u64,
+  pub index_segment_bytes: u64,
+}
+
+/// `GET /api/v1/admin/instance`: what the instance runs on. No secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AdminInstanceResponse {
+  pub sfu: SfuStatus,
+  pub push: Vec<PushProviderStatus>,
+  pub storage: StorageStatus,
+  /// Telephony (SIP, hotline) is not part of this server yet.
+  pub is_telephony_available: bool,
+}

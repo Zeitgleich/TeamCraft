@@ -8,12 +8,12 @@ use crate::handlers::{
   acknowledge_message_handler, add_conversation_member_handler, add_space_member_handler,
   add_user_group_member_handler, admin_assign_channel_owner_handler, admin_clear_announcement_handler,
   admin_create_bot_handler, admin_deactivate_user_handler, admin_get_channel_moderation_handler,
-  admin_get_permission_scheme_handler, admin_get_space_permission_scheme_handler, admin_list_audit_handler,
-  admin_list_bots_handler, admin_list_conversation_members_handler, admin_list_conversations_handler,
-  admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
-  admin_list_users_handler, admin_reactivate_user_handler, admin_reissue_local_activation_handler,
-  admin_revoke_bot_handler, admin_revoke_device_handler, admin_rotate_bot_token_handler,
-  admin_set_announcement_handler, admin_set_channel_moderation_handler,
+  admin_get_permission_scheme_handler, admin_get_space_permission_scheme_handler, admin_instance_handler,
+  admin_list_audit_handler, admin_list_bots_handler, admin_list_conversation_members_handler,
+  admin_list_conversations_handler, admin_list_space_members_handler, admin_list_spaces_handler,
+  admin_list_user_devices_handler, admin_list_users_handler, admin_reactivate_user_handler,
+  admin_reissue_local_activation_handler, admin_revoke_bot_handler, admin_revoke_device_handler,
+  admin_rotate_bot_token_handler, admin_set_announcement_handler, admin_set_channel_moderation_handler,
   admin_update_permission_scheme_handler, admin_update_space_permission_scheme_handler, admit_guest_handler,
   append_policy_handler, append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
   cancel_meeting_handler, cancel_recovery_request_handler, change_local_password_handler,
@@ -325,6 +325,7 @@ pub fn router(state: AppState) -> Router {
       delete(admin_revoke_device_handler),
     )
     .route("/admin/audit", get(admin_list_audit_handler))
+    .route("/admin/instance", get(admin_instance_handler))
     .route("/me/security-log", get(get_security_log_handler))
     .route(
       "/spaces/{space_id}/retention",

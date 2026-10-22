@@ -337,7 +337,7 @@ async fn open_participants_conversation(
   kind: ConversationKind,
   others: Vec<UserId>,
 ) -> Result<Created<ConversationResponse>, ApiError> {
-  let sharing = if state.settings.policy.guests_dm_only_with_shared_conversations {
+  let sharing = if super::workspace::effective_guest_dm_restriction(state) {
     Some(state.database.users_sharing_conversation(caller.user.id).await?)
   } else {
     None

@@ -174,7 +174,7 @@ pub async fn delete_invite(
 
 /// Guests may only be invited from the configured domains, if there are any.
 pub fn check_guest_domain(state: &AppState, email: &str) -> Result<(), ApiError> {
-  let allowed = &state.settings.guests.allowed_email_domains;
+  let allowed = &super::workspace::effective_guest_domains(state);
   if allowed.is_empty() {
     return Ok(());
   }
