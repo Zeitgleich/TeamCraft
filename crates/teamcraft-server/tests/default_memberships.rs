@@ -101,7 +101,11 @@ async fn workspace(app: &mut TestApp) -> Workspace {
     space,
   };
   let id = |text: &str| text.parse::<i64>().unwrap();
-  let (space, general, secret) = (id(&workspace.space), id(&workspace.general), id(&workspace.secret));
+  let (space, general, secret) = (
+    id(&workspace.space),
+    id(&workspace.general),
+    id(&workspace.secret),
+  );
   app.reconfigure(|settings| {
     settings.policy.default_spaces = vec![space_id(space), space_id(99)];
     settings.policy.default_channels = vec![channel_id(general), channel_id(secret)];

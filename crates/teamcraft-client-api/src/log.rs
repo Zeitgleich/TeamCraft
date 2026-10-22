@@ -50,15 +50,27 @@ impl LogFilter {
   }
 }
 
-/// The lines of a bridge batch: the text between the opening and closing code fence (a mention line
-/// before the fence is dropped). `None` if the body is not a fenced block.
+/// The lines of a bridge batch: an optional line of `@mentions`, then the code block with one line
+/// per entry. Anything else, e.g. text after the closing fence or a prefix that is not a mention,
+/// makes the message a normal one, so no text is ever hidden. `None` if the body is no batch.
 pub fn batch_lines(body: &str) -> Option<Vec<String>> {
   let mut lines = body.lines();
-  lines.by_ref().find(|line| line.starts_with("```"))?;
   let mut found = Vec::new();
-  for line in lines {
+  loop {
+    let line = lines.next()?;
+    if line.starts_with("```") {
+      break;
+    }
+    let is_mention_line =
+      !line.trim().is_empty() && line.split_whitespace().all(|word| word.starts_with('@'));
+    if !is_mention_line {
+      return None;
+    }
+    found.push(line.trim().to_owned());
+  }
+  for line in lines.by_ref() {
     if line.trim_end() == "```" {
-      return Some(found);
+      return lines.all(|rest| rest.trim().is_empty()).then_some(found);
     }
     found.push(line.to_owned());
   }
@@ -118,6 +130,10 @@ mod tests {
       vec![
         LogEntry {
           level: LogLevel::Info,
+          text: "@ops".into()
+        },
+        LogEntry {
+          level: LogLevel::Info,
           text: "started".into()
         },
         LogEntry {
@@ -138,6 +154,20 @@ mod tests {
     assert_eq!(row.kind, MessageKind::Log(LogLevel::Warn));
     assert_eq!(row.body, "slow query");
     assert_eq!(log_entries(&row.body, LogLevel::Warn).len(), 1);
+  }
+
+  #[test]
+  fn text_around_the_fence_is_never_hidden() {
+    // Not written by the bridge: the whole message stays visible, line by line.
+    let row = as_log_line(message("deploy notes\n```\n[ERROR] x\n```\nsee above"));
+    assert_eq!(row.body, "deploy notes\n```\n[ERROR] x\n```\nsee above");
+    let texts: Vec<String> = log_entries(&row.body, LogLevel::Info)
+      .into_iter()
+      .map(|entry| entry.text)
+      .collect();
+    assert_eq!(texts, vec!["deploy notes", "```", "x", "```", "see above"]);
+    assert_eq!(batch_lines("```\na\n```\nafter"), None);
+    assert_eq!(batch_lines("not a mention\n```\na\n```"), None);
   }
 
   #[test]

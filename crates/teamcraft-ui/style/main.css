@@ -1162,6 +1162,14 @@ select.input {
   font-variant-numeric: tabular-nums;
 }
 
+.log-author {
+  flex: none;
+  max-width: 110px;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+}
+
 .log-level {
   flex: none;
   width: 42px;

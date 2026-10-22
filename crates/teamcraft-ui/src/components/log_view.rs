@@ -13,9 +13,9 @@ use teamcraft_client_api::log::{LogEntry, LogFilter, log_entries};
 use crate::backend::Backend;
 use crate::clock::format_time_seconds;
 use crate::components::message_list::MessageList;
-use crate::components::message_row::log_entry_line;
+use crate::components::message_row::{log_author, log_entry_line};
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, ConversationKind, LogLevel, MessageKind, TimestampMs};
+use crate::model::{ConversationId, ConversationKind, LogLevel, MessageKind, TimestampMs, UserId};
 use crate::state::use_app_state;
 
 /// Messages read per backend call while scanning for matches.
@@ -52,8 +52,16 @@ impl FeedMode {
 /// The matching entries of a channel, oldest first, and whether more matched than were kept.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Scan {
-  pub entries: Vec<(TimestampMs, LogEntry)>,
+  pub entries: Vec<ScanEntry>,
   pub is_truncated: bool,
+}
+
+/// A matching entry with its time and the user who sent the batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanEntry {
+  pub sent_at: TimestampMs,
+  pub author: UserId,
+  pub entry: LogEntry,
 }
 
 /// The message feed of a conversation: plain for most channels; integration channels get the log
@@ -198,9 +206,16 @@ fn FilteredLog(
       scan
         .entries
         .iter()
-        .map(|(sent_at, entry)| {
-          let class = format!("msg-log log-entry level-{}", entry.level.slug());
-          log_entry_line(&format_time_seconds(*sent_at, locale), entry, &class, *sent_at)
+        .map(|found| {
+          let class = format!("msg-log log-entry level-{}", found.entry.level.slug());
+          let time = format_time_seconds(found.sent_at, locale);
+          log_entry_line(
+            &time,
+            &log_author(found.author),
+            &found.entry,
+            &class,
+            found.sent_at,
+          )
         })
         .collect::<Vec<_>>()
     })
@@ -225,7 +240,7 @@ fn FilteredLog(
 /// Collects the entries matching `filter` from the newest messages backwards, so that a huge channel
 /// costs at most [`SCAN_LIMIT`] messages. The result is oldest first.
 pub fn scan_entries(backend: &dyn Backend, conversation: ConversationId, filter: &LogFilter) -> Scan {
-  let mut found: Vec<(TimestampMs, LogEntry)> = Vec::new();
+  let mut found: Vec<ScanEntry> = Vec::new();
   let mut end = backend.message_count(conversation);
   let mut scanned = 0;
   let mut is_truncated = end > SCAN_LIMIT;
@@ -241,7 +256,11 @@ pub fn scan_entries(backend: &dyn Backend, conversation: ConversationId, filter:
             is_truncated = true;
             break 'chunks;
           }
-          found.push((message.sent_at, entry));
+          found.push(ScanEntry {
+            sent_at: message.sent_at,
+            author: message.author,
+            entry,
+          });
         }
       }
     }
@@ -314,8 +333,13 @@ mod tests {
       errors
         .entries
         .iter()
-        .all(|(_, entry)| entry.level == LogLevel::Error)
+        .all(|found| found.entry.level == LogLevel::Error)
     );
-    assert!(errors.entries.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    assert!(
+      errors
+        .entries
+        .windows(2)
+        .all(|pair| pair[0].sent_at <= pair[1].sent_at)
+    );
   }
 }
