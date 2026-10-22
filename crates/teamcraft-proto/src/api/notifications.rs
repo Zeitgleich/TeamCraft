@@ -116,6 +116,48 @@ pub struct ConversationNotificationSettings {
   /// Muted until this time; past values mean not muted.
   #[serde(rename = "muted_until", default, skip_serializing_if = "Option::is_none")]
   pub maybe_muted_until: Option<UnixMillis>,
+  /// Reads: the conversation follows its space's setting. Writes: `true` drops the conversation's
+  /// own setting (level and mute time are ignored) so it follows the space again.
+  #[serde(default)]
+  pub is_inherited: bool,
+}
+
+/// `GET`/`PUT /api/v1/spaces/{id}/notification-settings`: the caller's setting for a whole space.
+/// Its channels follow it unless the member set a channel's own level or mute time. `PUT` replaces
+/// both fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpaceNotificationSettings {
+  /// `None`: no space-level choice; every channel keeps its own level.
+  #[serde(rename = "level", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_level: Option<NotificationLevel>,
+  /// Muted until this time; past values mean not muted.
+  #[serde(rename = "muted_until", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_muted_until: Option<UnixMillis>,
+}
+
+/// What a member's conversation settings come to once the space level is taken into account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveNotifications {
+  pub level: NotificationLevel,
+  pub maybe_muted_until: Option<UnixMillis>,
+}
+
+/// Per field: a conversation the member configured themselves keeps its own settings; any other
+/// follows the space level and mute time, if the member set them.
+pub fn effective_notifications(
+  own: &ConversationNotificationSettings,
+  maybe_space: Option<&SpaceNotificationSettings>,
+) -> EffectiveNotifications {
+  let Some(space) = maybe_space.filter(|_| own.is_inherited) else {
+    return EffectiveNotifications {
+      level: own.level.clone(),
+      maybe_muted_until: own.maybe_muted_until,
+    };
+  };
+  EffectiveNotifications {
+    level: space.maybe_level.clone().unwrap_or_else(|| own.level.clone()),
+    maybe_muted_until: own.maybe_muted_until.max(space.maybe_muted_until),
+  }
 }
 
 /// One member's read position in a DM or group DM.

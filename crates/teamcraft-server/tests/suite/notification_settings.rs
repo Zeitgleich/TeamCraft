@@ -150,7 +150,7 @@ mod conversation_settings {
     let path = format!("/conversations/{channel}/notification-settings");
 
     let before = app.get(&carol, &path).await;
-    assert_eq!(before.body, json!({"level": "mentions"}));
+    assert_eq!(before.body, json!({"level": "mentions", "is_inherited": true}));
 
     let put = app
       .put(
@@ -162,7 +162,7 @@ mod conversation_settings {
     assert_eq!(put.status, StatusCode::OK, "{}", put.body);
     assert_eq!(
       app.get(&carol, &path).await.body,
-      json!({"level": "all", "muted_until": 4_102_444_800_000_i64})
+      json!({"level": "all", "muted_until": 4_102_444_800_000_i64, "is_inherited": false})
     );
     let conversation = app.get(&carol, &format!("/conversations/{channel}")).await;
     assert_eq!(
@@ -172,7 +172,10 @@ mod conversation_settings {
     assert_eq!(conversation.body["my_membership"]["notification_level"], "all");
 
     app.put(&carol, &path, json!({"level": "mentions"})).await;
-    assert_eq!(app.get(&carol, &path).await.body, json!({"level": "mentions"}));
+    assert_eq!(
+      app.get(&carol, &path).await.body,
+      json!({"level": "mentions", "is_inherited": false})
+    );
     app.stop().await;
   }
 

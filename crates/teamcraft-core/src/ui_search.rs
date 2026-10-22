@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use teamcraft_client_api::backend::SearchBackend;
 use teamcraft_client_api::model::{ConversationId, Message};
 use teamcraft_client_api::search::{
-  Filter, ParsedQuery, SavedSearch, SearchHit, SearchResults, find_ci, has_file, has_link, make_snippet,
+  Filter, ParsedQuery, SavedSearch, SearchHit, SearchResults, find_ci, has_file, has_link, is_in_space,
+  make_snippet,
 };
 
 use crate::client::stored_account_data;
@@ -189,9 +190,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let (username, display_name) = author
       .map(|user| (user.username, user.display_name))
       .unwrap_or_default();
+    let maybe_space_name = conversation.maybe_space.and_then(|space| {
+      teamcraft_client_api::backend::ChatBackend::spaces(self)
+        .into_iter()
+        .find(|candidate| candidate.id == space)
+        .map(|found| found.name)
+    });
     let passes = query.filters().iter().all(|filter| match filter {
       Filter::From(name) => username.eq_ignore_ascii_case(name) || find_ci(&display_name, name).is_some(),
       Filter::In(name) => find_ci(&conversation.name, name).is_some(),
+      Filter::InSpace(name) => is_in_space(maybe_space_name.as_deref().unwrap_or_default(), name),
       Filter::HasFile => matches!(stored.content, MessageContent::File { .. }) || has_file(&message.body),
       Filter::HasLink => has_link(&message.body),
       Filter::Before(limit) => message.sent_at < *limit,
@@ -201,12 +209,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
     if !passes {
       return None;
     }
-    let maybe_space_name = conversation.maybe_space.and_then(|space| {
-      teamcraft_client_api::backend::ChatBackend::spaces(self)
-        .into_iter()
-        .find(|candidate| candidate.id == space)
-        .map(|found| found.name)
-    });
     Some(SearchHit {
       snippet: make_snippet(&message.body, &query.terms()),
       message,
@@ -253,7 +255,7 @@ mod tests {
   use teamcraft_client_api::search::parse_query;
   use teamcraft_proto::{
     ChannelModeration, ClientMessageId, ConversationKind, ConversationResponse, ConversationVisibility,
-    HistoryPolicy, Id, MessageId, Snowflake, UserKind, UserSummary,
+    HistoryPolicy, Id, MessageId, Snowflake, SpaceResponse, UserKind, UserSummary,
   };
 
   use super::*;
@@ -273,6 +275,21 @@ mod tests {
     assert_eq!(from_bob.hits[0].message.body, "Budget review moved");
     assert_eq!(backend.search(&parse_query("budget in:nowhere")).total, 0);
     assert_eq!(backend.search(&parse_query("")).total, 0);
+  }
+
+  #[test]
+  fn search_is_scoped_to_a_space() {
+    let backend = backend();
+    assert_eq!(
+      backend.search(&parse_query(r#"budget space:"Project A""#)).total,
+      3
+    );
+    let scoped = backend.search(&parse_query("budget space:project"));
+    assert_eq!(scoped.hits[0].maybe_space_name.as_deref(), Some("Project A"));
+    assert_eq!(
+      backend.search(&parse_query(r#"budget space:"Project B""#)).total,
+      0
+    );
   }
 
   #[test]
@@ -309,9 +326,23 @@ mod tests {
       };
       records::put_json(&store, Table::Users, &user.to_string(), &summary).unwrap();
     }
+    let space = id::<teamcraft_proto::SpaceId>(5);
+    let project = SpaceResponse {
+      id: space,
+      name: "Project A".into(),
+      maybe_icon: None,
+      maybe_color: None,
+      maybe_description: None,
+      join_policy: teamcraft_proto::JoinPolicy::Open,
+      is_archived: false,
+      maybe_brand_id: None,
+      maybe_my_role: Some(teamcraft_proto::SpaceRole::Member),
+      maybe_my_notifications: None,
+    };
+    records::put_json(&store, Table::Spaces, &space.to_string(), &project).unwrap();
     let conversation = ConversationResponse {
       id: channel,
-      maybe_space_id: None,
+      maybe_space_id: Some(space),
       kind: ConversationKind::Channel,
       maybe_name: Some("finance".into()),
       maybe_topic: None,

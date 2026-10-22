@@ -32,6 +32,9 @@ pub struct SpaceResponse {
   /// The caller's role; absent if the caller is not a member (open spaces they could join).
   #[serde(rename = "my_role", default, skip_serializing_if = "Option::is_none")]
   pub maybe_my_role: Option<SpaceRole>,
+  /// The caller's notification setting for the whole space; absent for non-members.
+  #[serde(rename = "my_notifications", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_my_notifications: Option<crate::SpaceNotificationSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

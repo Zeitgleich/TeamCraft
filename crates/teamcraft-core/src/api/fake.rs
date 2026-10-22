@@ -19,11 +19,11 @@ use teamcraft_proto::{
   HistoryPolicy, Id, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
   ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpacesResponse, MessageId,
-  MessageResponse, MlsMessageKind, MlsMessageResponse, MyMembership, NotificationLevel, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, Role,
-  SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake, SpaceId, SpaceResponse,
-  SpaceRole, UnixMillis, UpdateConversationMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
-  UserId, UserKind, UserSummary,
+  MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, Role, SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake,
+  SpaceId, SpaceResponse, SpaceRole, UnixMillis, UpdateConversationMemberRequest, UploadIdentityKeyRequest,
+  UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -1198,6 +1198,27 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn move_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &MoveChannelRequest,
+  ) -> Result<ConversationResponse, ApiError> {
+    self.with(|state, me| {
+      let entry = state.member_conversation_mut(conversation, me)?;
+      entry.response.maybe_space_id = Some(request.space_id);
+      entry.response.maybe_category_id = request.maybe_category_id;
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      let view = entry.view(me);
+      state.publish(
+        members,
+        &GatewayEvent::ConversationUpdate {
+          conversation_id: conversation,
+        },
+      );
+      Ok(view)
+    })
+  }
+
   async fn list_joinable(&self, space: SpaceId) -> Result<ListConversationsResponse, ApiError> {
     self.with(|state, me| {
       let conversations = state
@@ -1228,6 +1249,7 @@ impl ServerApi for FakeServerApi {
         is_archived: false,
         maybe_brand_id: None,
         maybe_my_role: Some(SpaceRole::SpaceAdmin),
+        maybe_my_notifications: None,
       };
       state.spaces.insert(id, space.clone());
       Ok(space)
@@ -2076,6 +2098,7 @@ impl State {
       is_archived: false,
       maybe_brand_id: None,
       maybe_my_role: Some(SpaceRole::Member),
+      maybe_my_notifications: None,
     });
   }
 
@@ -2275,6 +2298,7 @@ impl Conversation {
       is_favorite: self.favorites.get(&me).copied().unwrap_or(false),
       maybe_last_read_message_id: self.read_positions.get(&me).copied(),
       maybe_muted_until: None,
+      is_notification_inherited: false,
     });
     response
   }

@@ -25,6 +25,8 @@ wire_enum! {
     RetentionChanged => "retention_changed",
     /// The channel became public or private.
     PrivacyChanged => "privacy_changed",
+    /// The channel moved to another space.
+    Moved => "moved",
   }
 }
 

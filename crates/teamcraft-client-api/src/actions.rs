@@ -338,6 +338,10 @@ pub struct ChannelChanges {
   pub maybe_is_archived: Option<bool>,
   #[serde(default)]
   pub maybe_category: Option<CategoryChoice>,
+  /// Moves the channel to another space (owner or space admin); the channel leaves its category,
+  /// unless `maybe_category` names one of the new space.
+  #[serde(default)]
+  pub maybe_space: Option<SpaceId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +408,11 @@ pub enum WorkspaceEvent {
   },
   MadePublic {
     by: UserId,
+  },
+  /// The channel moved to the space with this name (empty if the mover's client did not know it).
+  Moved {
+    by: UserId,
+    space: String,
   },
   Pinned {
     message: MessageId,

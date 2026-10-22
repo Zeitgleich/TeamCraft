@@ -13,9 +13,10 @@ use teamcraft_proto::{
   DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
   KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
   ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest,
-  SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  ListMlsMessagesResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
+  UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -431,6 +432,20 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   ) -> Result<ConversationResponse, ApiError> {
     self
       .send_json(Method::PATCH, &format!("/conversations/{conversation}"), request)
+      .await
+  }
+
+  async fn move_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &MoveChannelRequest,
+  ) -> Result<ConversationResponse, ApiError> {
+    self
+      .send_json(
+        Method::PUT,
+        &format!("/conversations/{conversation}/space"),
+        request,
+      )
       .await
   }
 
