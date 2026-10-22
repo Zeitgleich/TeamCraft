@@ -1,4 +1,4 @@
-# Desktop release build (draft): builds the Linux and macOS packages and keeps them as workflow
+# Desktop release build (draft): builds the Linux, macOS and Windows packages and keeps them as workflow
 # artifacts. It does not publish anything: no GitHub release, no Flathub, no notarization upload.
 # Run it by hand (Actions > Desktop release > Run workflow) or by pushing a tag like v0.1.0.
 name: Desktop release
@@ -85,24 +85,20 @@ jobs:
           cache-key: flatpak-builder-${{ github.sha }}
 
   macos:
-    name: macOS (${{ matrix.target }}, dmg)
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-          - runner: macos-13
-            target: x86_64-apple-darwin
+    name: macOS (universal dmg)
+    # One dmg with both slices (arm64 + x86_64), built on an Apple silicon runner; Rust cross-compiles
+    # the x86_64 slice and `cargo tauri build --target universal-apple-darwin` joins them with lipo.
+    # Each slice is compiled for its own architecture, so the OpenH264 download picks the matching
+    # Cisco library at runtime (openh264_library.rs).
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown,${{ matrix.target }}
+          targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: universal-apple-darwin
       - name: Meson and ninja (build WebRTC audio processing)
         run: brew install meson ninja
       - name: Trunk (builds the UI bundle)
@@ -115,13 +111,61 @@ jobs:
         run: crates/teamcraft-media/models/fetch.sh
       - name: Build dmg
         working-directory: apps/desktop
-        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles dmg
+        run: cargo tauri build --config tauri.models.conf.json --target universal-apple-darwin --bundles dmg
         # Signing and notarization are left out on purpose (the dmg is unsigned). To enable them,
         # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
         #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
         #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          name: macos-universal
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows (${{ matrix.target }}, msi, nsis)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          # Cross-built on the x64 runner: hosted arm64 runners are not free for private repositories.
+          # Required, like x64 (the build fails the workflow); the OpenSSL, Opus and OpenH264 C code
+          # builds for ARM64 with the MSVC cross tools that windows-latest ships.
+          - target: aarch64-pc-windows-msvc
+    # Overrides the workflow-wide flags: WebRTC echo cancellation is not part of the Windows build
+    # yet (the experimental CI job tries it), so calls run without it.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # OpenSSL for SQLCipher is built from source and needs NASM; Perl comes with the image.
+      - uses: ilammy/setup-nasm@v1
+      - name: Trunk (builds the UI bundle)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Segmentation model (background effects; not in git)
+        shell: bash
+        run: crates/teamcraft-media/models/fetch.sh
+      - name: Build installers
+        working-directory: apps/desktop
+        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles nsis,msi
+        # Signing is left out on purpose (the installers are unsigned). To enable it, see
+        # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            target/${{ matrix.target }}/release/bundle/msi/*.msi
           if-no-files-found: error

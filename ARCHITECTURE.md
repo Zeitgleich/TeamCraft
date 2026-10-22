@@ -58,7 +58,6 @@ Consequences:
 - Federation
 - Server-side recording (E2EE; recording is client-side only)
 - General file sharing (use a dedicated file service; TeamCraft only offers per-file share links)
-- Windows desktop client
 - Plugin system / marketplace
 - Public communities
 
@@ -325,12 +324,12 @@ The meeting title, time and invitee list are **not** E2EE (they live in CalDAV a
 
 ## 7. Clients
 
-| Platform     | Shell                                           | Notes                                                                                                                        |
-|--------------|-------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
-| macOS, Linux | Tauri 2 + Leptos                                | Media engine and crypto in the Rust core, not the webview (WebKitGTK media on Linux is unreliable). No Windows build planned |
-| Web          | Leptos → WASM, served by `teamcraft-server`     | Members and guests; WebTransport + WebCodecs                                                                                 |
-| Android      | Kotlin (Jetpack Compose) + Rust core via UniFFI | FCM or UnifiedPush; Jetpack Telecom for calls → Android Auto calling + messaging                                             |
-| iOS          | Swift (SwiftUI) + Rust core via UniFFI          | Notification Service Extension, CallKit (→ CarPlay), shared App Group keychain                                               |
+| Platform              | Shell                                           | Notes                                                                                                                                                                                                                                                         |
+|-----------------------|-------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Windows, macOS, Linux | Tauri 2 + Leptos                                | Media engine and crypto in the Rust core, not the webview (WebKitGTK media on Linux is unreliable). Windows runs on WebView2 with Credential Manager, Media Foundation / Windows Graphics Capture and WASAPI (docs: apps/desktop/packaging/windows/README.md) |
+| Web                   | Leptos → WASM, served by `teamcraft-server`     | Members and guests; WebTransport + WebCodecs                                                                                                                                                                                                                  |
+| Android               | Kotlin (Jetpack Compose) + Rust core via UniFFI | FCM or UnifiedPush; Jetpack Telecom for calls → Android Auto calling + messaging                                                                                                                                                                              |
+| iOS                   | Swift (SwiftUI) + Rust core via UniFFI          | Notification Service Extension, CallKit (→ CarPlay), shared App Group keychain                                                                                                                                                                                |
 
 All logic (sync, crypto, storage, search, media) lives in the shared Rust core. Mobile uses native shells
 instead of Tauri mobile because the Notification Service Extension, CallKit and Android's Telecom /

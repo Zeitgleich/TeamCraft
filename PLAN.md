@@ -370,12 +370,12 @@ channel scope. Role and scheme assignments are signed like admin actions ([docs/
 
 ## 15. Clients
 
-| Client                 | Prio | Tech                                                                                                     |
-|------------------------|------|----------------------------------------------------------------------------------------------------------|
-| Desktop macOS + Linux  | v1   | Tauri 2 + Leptos; Rust core for crypto, media, storage. Windows not planned (nobody on the team uses it) |
-| Web (members + guests) | v1   | Same Leptos app, WASM; WebTransport + WebCodecs                                                          |
-| Android                | v1   | Native shell (Kotlin) + Rust core via UniFFI; FCM + UnifiedPush, Jetpack Telecom, Android Auto           |
-| iOS                    | v1   | Native shell (Swift) + Rust core via UniFFI; Notification Service Extension, CallKit                     |
+| Client                          | Prio | Tech                                                                                                                                                                                                                                          |
+|---------------------------------|------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Desktop Windows + macOS + Linux | v1   | Tauri 2 + Leptos; Rust core for crypto, media, storage. Windows (10/11, x64 and arm64): WebView2, Credential Manager, WASAPI, Media Foundation cameras, Windows Graphics Capture, MSI + NSIS installers (unsigned until a certificate exists) |
+| Web (members + guests)          | v1   | Same Leptos app, WASM; WebTransport + WebCodecs                                                                                                                                                                                               |
+| Android                         | v1   | Native shell (Kotlin) + Rust core via UniFFI; FCM + UnifiedPush, Jetpack Telecom, Android Auto                                                                                                                                                |
+| iOS                             | v1   | Native shell (Swift) + Rust core via UniFFI; Notification Service Extension, CallKit                                                                                                                                                          |
 
 Mobile is native-shell rather than Tauri mobile because the Notification Service Extension, CallKit
 and Android Auto need native targets. All logic lives in the shared Rust core.

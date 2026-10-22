@@ -1,0 +1,17 @@
+PackageIdentifier: TeamCraft.TeamCraft
+PackageVersion: 0.0.0
+PackageLocale: en-US
+Publisher: TeamCraft contributors
+PackageName: TeamCraft
+PackageUrl: https://github.com/Zeitgleich/TeamCraft
+License: AGPL-3.0-or-later
+LicenseUrl: https://github.com/Zeitgleich/TeamCraft/blob/main/LICENSE
+ShortDescription: End-to-end encrypted team chat
+Description: Self-hosted business team chat with calls and meetings. Messages are end-to-end encrypted; the server only stores ciphertext.
+Tags:
+  - chat
+  - team
+  - encryption
+  - self-hosted
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

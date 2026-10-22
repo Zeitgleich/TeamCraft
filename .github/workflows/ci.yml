@@ -68,6 +68,59 @@ jobs:
       - name: Test
         run: cargo test -p teamcraft-media --features native
 
+  # The Windows desktop client: the Tauri shell and the call media with Media Foundation cameras and
+  # Windows Graphics Capture. Not --all-features: the `gstreamer` feature needs GStreamer's MSVC
+  # runtime and `pipewire`/`v4l2` are Linux-only. WebRTC audio processing is opt-in and not built
+  # here (see the experimental job below).
+  windows:
+    runs-on: windows-latest
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      # OpenH264 (tests) and OpenSSL for SQLCipher (built from source) need NASM; Perl comes with the image.
+      - uses: ilammy/setup-nasm@v1
+      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
+        shell: bash
+        run: mkdir -p crates/teamcraft-ui/dist
+      # The desktop crate enables the Windows capture features of teamcraft-media itself.
+      - name: Clippy (desktop shell and core)
+        run: cargo clippy -p teamcraft-desktop -p teamcraft-core --all-targets -- -D warnings
+      - name: Clippy (call media)
+        run: cargo clippy -p teamcraft-media --all-targets --features native,mediafoundation,graphics-capture,effects,segmentation,openh264-source -- -D warnings
+      - name: Test (desktop shell and core)
+        run: cargo test -p teamcraft-desktop -p teamcraft-core
+      - name: Test (call media)
+        run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,effects,segmentation,openh264-source
+      - name: Check (ARM64, cross-compiled)
+        run: cargo check --target aarch64-pc-windows-msvc -p teamcraft-desktop
+
+  # Echo cancellation on Windows (WebRTC audio processing built with meson and MSVC). Experimental:
+  # failures don't block merging until a real Windows run proves the build.
+  windows-audio-processing:
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audio-processing
+      - uses: ilammy/setup-nasm@v1
+      - name: Meson and ninja
+        run: pip install meson ninja
+      - name: Test
+        run: cargo test -p teamcraft-media --features native
+
   deny:
     runs-on: ubuntu-latest
     steps:

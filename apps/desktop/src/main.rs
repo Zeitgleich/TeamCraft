@@ -9,6 +9,8 @@ mod auth;
 mod calls;
 mod core;
 mod notifications;
+#[cfg(windows)]
+mod windows_shell;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +39,11 @@ fn main() -> anyhow::Result<()> {
   let tokens = TokenCache::default();
   keep_tokens_fresh(service.clone(), tokens.clone());
 
-  tauri::Builder::default()
+  let builder = tauri::Builder::default();
+  // Registered first: the single-instance plugin must see a second launch before anything else.
+  #[cfg(windows)]
+  let builder = windows_shell::plugins(builder);
+  builder
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
@@ -56,6 +62,8 @@ fn main() -> anyhow::Result<()> {
       };
       app.manage(Arc::new(CallHost::new(notify, files)));
       create_main_window(app)?;
+      #[cfg(windows)]
+      windows_shell::forward_deep_links(app.handle());
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![

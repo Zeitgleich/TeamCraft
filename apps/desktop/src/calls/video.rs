@@ -3,7 +3,8 @@
 //!
 //! Linux: the desktop portal first (asks the user, works on Wayland and in Flatpak), V4L2 for
 //! cameras when the portal isn't there. macOS: AVFoundation for cameras (untested); its screen
-//! share (ScreenCaptureKit) isn't there yet.
+//! share (ScreenCaptureKit) isn't there yet. Windows: Media Foundation for cameras and Windows
+//! Graphics Capture for screens and windows (both compile-checked only).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,12 +54,12 @@ pub(super) fn list_cameras() -> Vec<CameraInfo> {
   teamcraft_media::capture_v4l2::list_cameras()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) fn list_cameras() -> Vec<CameraInfo> {
-  teamcraft_media::capture_avfoundation::list_cameras()
+  teamcraft_media::capture_nokhwa::list_cameras()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn list_cameras() -> Vec<CameraInfo> {
   Vec::new()
 }
@@ -81,14 +82,14 @@ pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture
     .map_err(|error| error.to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
-  teamcraft_media::capture_avfoundation::NokhwaCamera::open(maybe_id, CAMERA_FORMAT)
+  teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, CAMERA_FORMAT)
     .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
     .map_err(|error| error.to_string())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
   Err("cameras are not supported on this platform yet".into())
 }
@@ -104,7 +105,21 @@ pub(super) fn open_screen(
     .map_err(|error| error.to_string())
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The primary display, or the source a stored token names (`monitor:N`, `window:Title`).
+#[cfg(target_os = "windows")]
+pub(super) fn open_screen(
+  maybe_restore_token: Option<&str>,
+) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
+  use teamcraft_media::capture_windows::{ScreenSource, WindowsScreenCapture};
+
+  let source = ScreenSource::from_token(maybe_restore_token);
+  let maybe_token = source.to_token();
+  WindowsScreenCapture::open(source, SCREEN_FORMAT)
+    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {

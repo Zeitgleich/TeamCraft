@@ -7,8 +7,7 @@ What the build produces and how to build it. Nothing here publishes anything.
 | Linux    | `.deb`, `.rpm`, AppImage           | `bundle.linux` in `tauri.conf.json`                                 |
 | Linux    | Flatpak (draft)                    | `linux/org.teamcraft.desktop.yml`, `.desktop` file, AppStream data  |
 | macOS    | `.dmg` (arm64 and x86_64)          | `bundle.macOS`, `Info.plist`, `macos/Entitlements.plist`            |
-
-Windows is not planned (see PLAN.md, platform table).
+| Windows  | NSIS `.exe` and `.msi` (x64, arm64) | `tauri.windows.conf.json`, [`windows/README.md`](windows/README.md) |
 
 ## Build locally
 
@@ -20,6 +19,7 @@ packages (see the README of `teamcraft-ui`). The `beforeBuildCommand` builds the
 cd apps/desktop
 cargo tauri build --bundles deb,rpm,appimage      # Linux; results in target/release/bundle/
 cargo tauri build --bundles dmg                   # macOS only
+cargo tauri build --bundles nsis,msi              # Windows only (see windows/README.md)
 cargo tauri build --no-bundle                     # just target/release/teamcraft-desktop
 ```
 
@@ -62,6 +62,6 @@ The runtime is GNOME 48, which ships WebKitGTK 4.1. Submitting to Flathub needs 
 ## Release workflow
 
 `.github/workflows/desktop-release.yml` runs on manual dispatch or when a tag like `v0.1.0` is pushed. It
-builds the Linux packages, a Flatpak bundle (inside the Flatpak builder container) and the macOS dmg for
-both architectures, and keeps them as workflow artifacts. It does not create a GitHub release and does not
+builds the Linux packages, a Flatpak bundle (inside the Flatpak builder container), the macOS dmg for
+both architectures and the Windows installers (x64, arm64), and keeps them as workflow artifacts. It does not create a GitHub release and does not
 publish to any store.
