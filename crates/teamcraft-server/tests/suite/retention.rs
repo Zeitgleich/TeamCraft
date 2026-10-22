@@ -132,6 +132,63 @@ mod settings {
   }
 
   #[tokio::test]
+  async fn a_channel_owner_without_admin_rights_sets_retention_within_the_limit() {
+    let app = app!();
+    let (alice, carol, dave) = (owner(), member("carol"), member("dave"));
+    let device = register_device(&app, &alice).await;
+    let space = create_space(&app, &alice, "Team", "invite_only").await;
+    for user in [&carol, &dave] {
+      let id = user_id(&app, user).await;
+      add_space_member(&app, &alice, &space, &id, "member").await;
+    }
+    // Carol created the channel, so she is its owner; Dave is a plain member.
+    let channel = create_channel(&app, &carol, &space, "projects", "private").await;
+    add_channel_member(&app, &carol, &channel, &user_id(&app, &dave).await).await;
+    sign_policy(&app, &alice, &device, 0, |p| {
+      p["retention"]["default"] = json!({"max_age_days": 30, "max_messages": 1000});
+      p["retention"]["limit"] = json!({"max_age_days": 90, "max_messages": 10000});
+    })
+    .await;
+
+    let ok = set_retention(
+      &app,
+      &carol,
+      &channel,
+      json!({"max_age_days": 14, "max_messages": 200}),
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+    assert_eq!(
+      ok.body["effective"],
+      json!({"max_age_days": 14, "max_messages": 200})
+    );
+    let too_long = set_retention(
+      &app,
+      &carol,
+      &channel,
+      json!({"max_age_days": 365, "max_messages": 5}),
+    )
+    .await;
+    assert_eq!(too_long.status, StatusCode::BAD_REQUEST, "{}", too_long.body);
+    let too_many = set_retention(&app, &carol, &channel, json!({"max_messages": 20000})).await;
+    assert_eq!(too_many.status, StatusCode::BAD_REQUEST, "{}", too_many.body);
+    let plain_member = set_retention(
+      &app,
+      &dave,
+      &channel,
+      json!({"max_age_days": 7, "max_messages": 5}),
+    )
+    .await;
+    assert_eq!(
+      plain_member.status,
+      StatusCode::FORBIDDEN,
+      "{}",
+      plain_member.body
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn space_settings_are_inherited_by_channels_without_their_own() {
     let app = app!();
     let alice = owner();

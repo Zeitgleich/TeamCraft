@@ -64,6 +64,10 @@ impl MockBackend {
           author_username: &author.username,
           author_name: &author.display_name,
           conversation_name: &info.name,
+          space_name: info
+            .maybe_space
+            .and_then(|space| state.spaces.iter().find(|candidate| candidate.id == space))
+            .map_or("", |space| space.name.as_str()),
         };
         if matches(query, message, &context) {
           hits.push((message.clone(), 0));

@@ -30,7 +30,8 @@ async fn every_provider_can_be_registered_and_is_shown_without_secrets() {
   let carol = member("carol");
   let device = register_device(&app, &carol).await;
   for provider in ["apns", "fcm", "unifiedpush", "webpush"] {
-    let token = if provider == "webpush" {
+    // UnifiedPush registrations use the Web Push subscription format.
+    let token = if matches!(provider, "webpush" | "unifiedpush") {
       SUBSCRIPTION
     } else {
       "device-token"
@@ -126,6 +127,30 @@ async fn web_push_subscriptions_are_checked_when_registered() {
         &carol,
         &path,
         json!({"provider": "webpush", "token": token, "push_key": PUSH_KEY}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{token}");
+  }
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn unified_push_registrations_are_checked_like_web_push() {
+  let app = app!();
+  let carol = member("carol");
+  let device = register_device(&app, &carol).await;
+  let path = format!("/devices/{device}/push");
+  for token in [
+    // A bare URL has no keys to encrypt with.
+    "https://push.example.com/up/abc",
+    r#"{"endpoint":"https://169.254.169.254/x","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#,
+    r#"{"endpoint":"https://push.example.com/up/abc"}"#,
+  ] {
+    let reply = app
+      .put(
+        &carol,
+        &path,
+        json!({"provider": "unifiedpush", "token": token, "push_key": PUSH_KEY}),
       )
       .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{token}");

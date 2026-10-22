@@ -10,7 +10,7 @@ do-not-disturb and active devices ([docs/notifications.md](../../notifications.m
 |----------------------------|---------------------------------------------------------|--------------------------------------------------------------------------------------------------|
 | Web Push (VAPID, RFC 8291) | Implemented                                             | Service worker of the web client; shows a generic notification until it can open sealed payloads |
 | FCM (Android)              | Implemented (HTTP v1, service account)                  | App receiver exists (flavor `full`)                                                              |
-| UnifiedPush                | Implemented (POST to the distributor endpoint)          | App receiver exists                                                                              |
+| UnifiedPush                | Implemented (Web Push encryption to the distributor)    | App receiver exists                                                                              |
 | APNs (iOS)                 | Implemented (HTTP/2, `.p8` key; VoIP topic for calls)   | iOS app with notification service extension                                                      |
 
 Each provider is on once its credentials are set; the admin console (Instance → Push providers) shows
@@ -31,7 +31,8 @@ described in [Operations](../../operations.md#push-notifications).
    that browsers subscribe with.
 4. Serve the web client over HTTPS (service workers and push require it).
 
-Other keys: `ttl_secs` (3600), `request_timeout_secs`, `max_concurrent_sends` (32).
+Other keys: `ttl_secs` (3600), `request_timeout_secs`, `max_concurrent_sends` (32 per pool),
+`max_concurrent_sends_per_user` (4).
 `allow_private_endpoints = true` is for development only.
 
 Rotating the VAPID key makes every browser subscribe again: expect a short gap.

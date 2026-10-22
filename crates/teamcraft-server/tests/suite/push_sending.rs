@@ -25,7 +25,7 @@ use teamcraft_proto::{DeviceActivity, GatewayClientMessage, PushKind, PushProvid
 use teamcraft_server::auth::BoxFuture;
 use teamcraft_server::push::crypto::{VapidKey, decrypt_web_push, open_wakeup};
 use teamcraft_server::push::{
-  PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency, WebPushSender,
+  PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency, Vapid, WebPushSender,
 };
 use teamcraft_server::testing::{TestApp, TestUser};
 use tokio_tungstenite::tungstenite::Message;
@@ -99,11 +99,21 @@ async fn register_push_device(app: &TestApp, user: &TestUser, provider: &str) ->
     .put(
       user,
       &format!("/devices/{device}/push"),
-      json!({"provider": provider, "token": "t", "push_key": push_key()}),
+      json!({"provider": provider, "token": registration_token(provider), "push_key": push_key()}),
     )
     .await;
   assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
   device
+}
+
+/// A registration the server accepts: Web Push and UnifiedPush need a subscription with keys.
+fn registration_token(provider: &str) -> &'static str {
+  match provider {
+    "webpush" | "unifiedpush" => {
+      r#"{"endpoint":"https://push.example.com/up/abc","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#
+    },
+    _ => "t",
+  }
 }
 
 async fn set_level(app: &TestApp, user: &TestUser, channel: &str, level: &str) {
@@ -444,6 +454,48 @@ mod preferences {
       .await;
     mention(&app, &s, 2).await;
     assert_eq!(recorder.wait_for(1).await.len(), 1, "the mute passed");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_muted_space_silences_its_channels_unless_they_have_their_own_setting() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let spaces = app.get(&s.carol, "/spaces").await;
+    let space = spaces.body["spaces"][0]["id"].as_str().unwrap().to_owned();
+    let channel_path = format!("/conversations/{}/notification-settings", s.channel);
+
+    let muted = app
+      .put(
+        &s.carol,
+        &format!("/spaces/{space}/notification-settings"),
+        json!({"level": "none"}),
+      )
+      .await;
+    assert_eq!(muted.status, StatusCode::OK, "{}", muted.body);
+    mention(&app, &s, 1).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "the space is muted");
+
+    // A level chosen for the channel itself overrides the space.
+    app.put(&s.carol, &channel_path, json!({"level": "all"})).await;
+    mention(&app, &s, 2).await;
+    assert_eq!(
+      recorder.wait_for(1).await.len(),
+      1,
+      "the channel has its own level"
+    );
+
+    // Dropping the channel's own setting hands it back to the space.
+    app
+      .put(
+        &s.carol,
+        &channel_path,
+        json!({"level": "all", "is_inherited": true}),
+      )
+      .await;
+    mention(&app, &s, 3).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1, "the space is muted again");
     app.stop().await;
   }
 
@@ -846,8 +898,7 @@ mod web_push {
   async fn start_web_push() -> Option<TestApp> {
     let vapid = VapidKey::from_base64url(VAPID_PRIVATE).unwrap();
     let sender = WebPushSender::new(
-      vapid,
-      "mailto:ops@example.com".into(),
+      Vapid::new(vapid, "mailto:ops@example.com".into()),
       Duration::from_secs(5),
       true,
     )
@@ -1055,7 +1106,7 @@ mod providers {
       .with_sender(&PushProvider::Fcm, Arc::new(fcm_sender))
       .with_sender(
         &PushProvider::UnifiedPush,
-        Arc::new(UnifiedPushSender::new(timeout, true).unwrap()),
+        Arc::new(UnifiedPushSender::new(None, timeout, true).unwrap()),
       );
     let app = TestApp::start_with_push(
       |settings| {
@@ -1106,7 +1157,18 @@ mod providers {
     set_level(&app, &carol, &channel, "all").await;
     register(&app, &carol, "apns", APNS_TOKEN).await;
     register(&app, &carol, "fcm", "fcm-registration-token").await;
-    register(&app, &carol, "unifiedpush", &services.unified_endpoint).await;
+    // The Android app registers the distributor's endpoint with its Web Push keys.
+    let unified_ua = SecretKey::random(&mut rand_core::OsRng);
+    let unified_auth = [6u8; 16];
+    let unified_subscription = json!({
+      "endpoint": services.unified_endpoint,
+      "keys": {
+        "p256dh": URL_SAFE_NO_PAD.encode(unified_ua.public_key().to_encoded_point(false).as_bytes()),
+        "auth": URL_SAFE_NO_PAD.encode(unified_auth),
+      }
+    })
+    .to_string();
+    register(&app, &carol, "unifiedpush", &unified_subscription).await;
 
     let message = send(&app, &alice, &channel, &alice_device, 1).await;
 
@@ -1127,7 +1189,10 @@ mod providers {
     )));
 
     let unified = services.unified.wait_for(1).await;
-    expect(opened(&unified[0].body));
+    assert_eq!(unified[0].header("content-encoding"), "aes128gcm");
+    expect(opened(
+      &decrypt_web_push(&unified_ua, &unified_auth, &unified[0].body).unwrap(),
+    ));
 
     // The admin console reports what happened, from the real counters.
     let status = app.get(&admin(), "/admin/instance").await;

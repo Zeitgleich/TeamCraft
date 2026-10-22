@@ -613,6 +613,12 @@ pub fn SidebarTab() -> impl IntoView {
         }
       })
     />
+    <CheckField
+      label="settings-sidebar-grouped"
+      hint="settings-sidebar-grouped-hint"
+      value=Signal::derive(move || prefs.get().sidebar.is_grouped_by_space)
+      on_change=Callback::new(move |value: bool| prefs.update(|all| all.sidebar.is_grouped_by_space = value))
+    />
     <SelectField
       id="setting-dm-limit"
       label="settings-dm-limit"

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE memberships SET\n           role = COALESCE($3, role),\n           notification_level = COALESCE($4, notification_level),\n           notification_overridden = notification_overridden OR $4::text IS NOT NULL,\n           is_favorite = COALESCE($5, is_favorite)\n         WHERE conversation_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0e86547b175672f8bbff25015b11ddbc610ddef2576f92b33fb6f581d1c4713a"
+}

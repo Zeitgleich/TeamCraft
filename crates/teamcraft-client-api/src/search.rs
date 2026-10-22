@@ -2,7 +2,7 @@
 //! over decrypted data in `teamcraft-core` (encrypted index segments, e2ee.md §10) and over the mock.
 //!
 //! Syntax: plain words (all must match), `"exact phrase"`, and the filters `from:name`, `in:channel`,
-//! `has:file`, `has:link`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD` and `in-thread`.
+//! `space:name`, `has:file`, `has:link`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD` and `in-thread`.
 
 use crate::model::{Message, TimestampMs};
 
@@ -16,6 +16,8 @@ const FILE_EXTENSIONS: [&str; 8] = [".pdf", ".png", ".jpg", ".xlsx", ".docx", ".
 pub enum Filter {
   From(String),
   In(String),
+  /// Only messages of channels in the space with this name.
+  InSpace(String),
   HasFile,
   HasLink,
   /// Messages sent before this day (UTC midnight).
@@ -78,6 +80,33 @@ impl ParsedQuery {
   /// Nothing to search for yet.
   pub fn is_empty(&self) -> bool {
     self.terms().is_empty() && self.filters().is_empty()
+  }
+
+  /// The space the query is limited to (`space:name`), if it names one.
+  pub fn space_scope(&self) -> Option<&str> {
+    self.filters().into_iter().find_map(|filter| match filter {
+      Filter::InSpace(name) => Some(name.as_str()),
+      _ => None,
+    })
+  }
+
+  /// The query limited to `maybe_space` (`None`: all spaces). Replaces an existing `space:` filter
+  /// and keeps every other token.
+  pub fn with_space_scope(&self, maybe_space: Option<&str>) -> String {
+    let mut parts: Vec<String> = self
+      .tokens
+      .iter()
+      .filter(|token| !matches!(token.kind, TokenKind::Filter(Filter::InSpace(_))))
+      .map(|token| token.raw.clone())
+      .collect();
+    if let Some(name) = maybe_space {
+      parts.push(if name.contains(char::is_whitespace) {
+        format!("space:\"{name}\"")
+      } else {
+        format!("space:{name}")
+      });
+    }
+    parts.join(" ")
   }
 
   /// The query without the token at `index`, for removing a chip.
@@ -144,7 +173,7 @@ fn classify(raw: &str) -> Token {
 }
 
 fn is_filter_key(key: &str) -> bool {
-  ["from", "in", "has", "before", "after"]
+  ["from", "in", "space", "has", "before", "after"]
     .iter()
     .any(|known| key.eq_ignore_ascii_case(known))
 }
@@ -156,6 +185,7 @@ fn classify_filter(key: &str, value: &str) -> TokenKind {
     (_, "") => TokenKind::Invalid,
     ("from", value) => TokenKind::Filter(Filter::From(named(value))),
     ("in", value) => TokenKind::Filter(Filter::In(named(value))),
+    ("space", value) => TokenKind::Filter(Filter::InSpace(value.to_owned())),
     ("has", value) if value.eq_ignore_ascii_case("file") => TokenKind::Filter(Filter::HasFile),
     ("has", value) if value.eq_ignore_ascii_case("link") => TokenKind::Filter(Filter::HasLink),
     ("before", value) => {
@@ -201,6 +231,8 @@ pub struct MatchContext<'a> {
   pub author_username: &'a str,
   pub author_name: &'a str,
   pub conversation_name: &'a str,
+  /// Empty for conversations outside spaces (they never match `space:`).
+  pub space_name: &'a str,
 }
 
 /// Whether `message` satisfies every term and filter of `query`.
@@ -214,12 +246,19 @@ pub fn matches(query: &ParsedQuery, message: &Message, context: &MatchContext<'_
         context.author_username.eq_ignore_ascii_case(name) || find_ci(context.author_name, name).is_some()
       },
       Filter::In(name) => find_ci(context.conversation_name, name).is_some(),
+      Filter::InSpace(name) => is_in_space(context.space_name, name),
       Filter::HasFile => has_file(&message.body),
       Filter::HasLink => has_link(&message.body),
       Filter::Before(limit) => message.sent_at < *limit,
       Filter::After(limit) => message.sent_at >= *limit,
       Filter::InThread => message.maybe_thread.is_some(),
     })
+}
+
+/// Whether a space name matches the `space:` value: the same name ignoring case, or, for a partial
+/// value, a name that contains it.
+pub fn is_in_space(space_name: &str, wanted: &str) -> bool {
+  !space_name.is_empty() && find_ci(space_name, wanted).is_some()
 }
 
 pub fn has_link(body: &str) -> bool {
@@ -396,6 +435,35 @@ mod tests {
   }
 
   #[test]
+  fn the_space_filter_takes_quoted_names() {
+    let query = parse_query(r#"budget space:"Project A""#);
+    assert_eq!(query.terms(), ["budget"]);
+    assert_eq!(query.filters(), [&Filter::InSpace("Project A".into())]);
+    assert!(is_in_space("Project A", "project a"));
+    assert!(!is_in_space("Project B", "Project A"));
+    assert!(
+      !is_in_space("", "Project A"),
+      "conversations outside spaces never match"
+    );
+  }
+
+  #[test]
+  fn the_space_scope_is_replaced_added_and_removed() {
+    let query = parse_query(r#"budget space:"Project A" has:file"#);
+    assert_eq!(query.space_scope(), Some("Project A"));
+    assert_eq!(
+      query.with_space_scope(Some("Internal")),
+      "budget has:file space:Internal"
+    );
+    assert_eq!(
+      query.with_space_scope(Some("Project B")),
+      r#"budget has:file space:"Project B""#
+    );
+    assert_eq!(query.with_space_scope(None), "budget has:file");
+    assert_eq!(parse_query("budget").space_scope(), None);
+  }
+
+  #[test]
   fn unreadable_filters_are_flagged_not_dropped() {
     let query = parse_query("before:yesterday has:video from:");
     assert!(query.tokens.iter().all(|token| token.kind == TokenKind::Invalid));
@@ -432,6 +500,7 @@ mod tests {
       author_username: "sam",
       author_name: "Sam Rivera",
       conversation_name: "engineering",
+      space_name: "Project A",
     };
     let check = |text: &str| matches(&parse_query(text), &message, &context);
     assert!(check("deploy has:link has:file from:sam in:eng"));
@@ -451,6 +520,7 @@ mod tests {
       author_username: "a",
       author_name: "A",
       conversation_name: "c",
+      space_name: "",
     };
     assert!(matches(&parse_query("in-thread"), &reply, &context));
   }

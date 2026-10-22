@@ -5,8 +5,8 @@ use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
   CategoryId, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility,
   CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest, CreateSpaceRequest, HistoryPolicy,
-  ListCategoriesResponse, ListConversationsResponse, SpaceId, SpaceResponse, SpaceRole, UnixMillis,
-  UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
+  ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole,
+  UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
 };
 
 use super::Client;
@@ -87,6 +87,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.announce(conversation, event).await?;
     }
     Ok(())
+  }
+
+  /// Moves a channel to another space and announces it. The encryption group stays as it is.
+  pub async fn move_channel(
+    &mut self,
+    conversation: ConversationId,
+    request: &MoveChannelRequest,
+  ) -> Result<(), CoreError> {
+    let after = self.api.move_conversation(conversation, request).await?;
+    records::put_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+      &after,
+    )?;
+    let maybe_space: Option<SpaceResponse> =
+      records::get_json(&self.store, Table::Spaces, &request.space_id.to_string())?;
+    self
+      .announce(
+        conversation,
+        ConversationEvent::Moved {
+          space: maybe_space.map(|space| space.name).unwrap_or_default(),
+        },
+      )
+      .await
   }
 
   /// Public channels of a space the user hasn't joined, kept for the channel browser.

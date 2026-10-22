@@ -162,10 +162,14 @@ pub async fn register_push(
       "push_key must be {PUSH_KEY_BYTES} bytes"
     )));
   }
-  if request.provider == PushProvider::WebPush {
-    // The server will POST to this URL; check it now rather than at the first message.
+  if matches!(
+    request.provider,
+    PushProvider::WebPush | PushProvider::UnifiedPush
+  ) {
+    // The server will POST to the endpoint (UnifiedPush registrations use the Web Push subscription
+    // format); check it now rather than at the first message.
     crate::push::WebPushSubscription::parse(&request.token, state.settings.push.allow_private_endpoints)
-      .map_err(|error| ApiError::InvalidRequest(format!("invalid Web Push subscription: {error}")))?;
+      .map_err(|error| ApiError::InvalidRequest(format!("invalid push subscription: {error}")))?;
   }
   let stored = state
     .database

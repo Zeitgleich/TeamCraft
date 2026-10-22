@@ -147,7 +147,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <div class="app-body">
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
-          <SpaceRail />
+          <Show when=move || !state.settings.prefs.with(|prefs| prefs.sidebar.is_grouped_by_space) fallback=|| ()>
+            <SpaceRail />
+          </Show>
           <Sidebar />
         </Show>
         <main id="main-content" class="main" tabindex="-1">

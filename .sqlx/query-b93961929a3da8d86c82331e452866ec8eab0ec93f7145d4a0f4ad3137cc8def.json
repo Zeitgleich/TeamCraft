@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,\n                s.archived_at IS NOT NULL AS \"is_archived!\", m.role AS \"role?\"\n         FROM spaces s\n         LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1\n              AND (m.expires_at IS NULL OR m.expires_at > now())\n         WHERE ($2::bigint IS NULL OR s.id = $2)\n           AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL\n                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))\n         ORDER BY s.name, s.id",
+  "query": "SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,\n                s.archived_at IS NOT NULL AS \"is_archived!\", m.role AS \"role?\",\n                m.notification_level AS \"notification_level?\", m.muted_until AS \"muted_until?\"\n         FROM spaces s\n         LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1\n              AND (m.expires_at IS NULL OR m.expires_at > now())\n         WHERE ($2::bigint IS NULL OR s.id = $2)\n           AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL\n                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL)\n                -- A channel moved into a space keeps its members, who may not be members of it.\n                OR EXISTS (SELECT 1 FROM conversations c\n                           JOIN memberships cm ON cm.conversation_id = c.id AND cm.user_id = $1\n                           WHERE c.space_id = s.id))\n         ORDER BY s.name, s.id",
   "describe": {
     "columns": [
       {
@@ -96,6 +96,28 @@
             "name": "role"
           }
         }
+      },
+      {
+        "ordinal": 9,
+        "name": "notification_level?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "notification_level"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "muted_until?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "muted_until"
+          }
+        }
       }
     ],
     "parameters": {
@@ -115,8 +137,10 @@
       false,
       true,
       null,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "2af15ee9b151431463cd14cdd6f8a23e291c059dd4dd6ef46bb553d0e1b33f21"
+  "hash": "b93961929a3da8d86c82331e452866ec8eab0ec93f7145d4a0f4ad3137cc8def"
 }

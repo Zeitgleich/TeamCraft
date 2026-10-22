@@ -179,6 +179,9 @@ pub struct NotificationPrefs {
   pub dnd: DndSchedule,
   /// Per conversation, keyed by the conversation ID as text.
   pub conversations: BTreeMap<String, ConversationNotify>,
+  /// Per space, keyed by the space ID as text. Its channels follow it unless they have an entry of
+  /// their own; "mute space" is an entry with the level `Nothing` or a mute time.
+  pub spaces: BTreeMap<String, ConversationNotify>,
 }
 
 impl Default for NotificationPrefs {
@@ -198,6 +201,7 @@ impl Default for NotificationPrefs {
       auto_follow_on_channel_mention: true,
       dnd: DndSchedule::default(),
       conversations: BTreeMap::new(),
+      spaces: BTreeMap::new(),
     }
   }
 }
@@ -222,6 +226,46 @@ impl NotificationPrefs {
     } else {
       self.conversations.insert(id.to_owned(), value);
     }
+  }
+
+  pub fn space(&self, id: &str) -> ConversationNotify {
+    self.spaces.get(id).copied().unwrap_or_default()
+  }
+
+  /// Stores a space's setting; a default-valued one is removed.
+  pub fn set_space(&mut self, id: &str, value: ConversationNotify) {
+    if value == ConversationNotify::default() {
+      self.spaces.remove(id);
+    } else {
+      self.spaces.insert(id.to_owned(), value);
+    }
+  }
+
+  /// What applies to a conversation: its own setting if it has one, else its space's. A
+  /// conversation with its own setting ignores the space entirely.
+  pub fn resolved(&self, id: &str, maybe_space: Option<&str>) -> ConversationNotify {
+    let own = self.conversation(id);
+    if own != ConversationNotify::default() {
+      return own;
+    }
+    maybe_space.map(|space| self.space(space)).unwrap_or_default()
+  }
+
+  /// [`Self::effective_level`] with the space's setting taken into account.
+  pub fn effective_level_in(&self, id: &str, maybe_space: Option<&str>) -> NotifyLevel {
+    self.resolved(id, maybe_space).maybe_level.unwrap_or(self.desktop)
+  }
+
+  /// [`Self::is_muted`] with the space's setting taken into account.
+  pub fn is_muted_in(&self, id: &str, maybe_space: Option<&str>) -> bool {
+    let entry = self.resolved(id, maybe_space);
+    entry.mute != MuteFor::Off || entry.maybe_level == Some(NotifyLevel::Nothing)
+  }
+
+  /// Whether the whole space is muted.
+  pub fn is_space_muted(&self, id: &str) -> bool {
+    let entry = self.space(id);
+    entry.mute != MuteFor::Off || entry.maybe_level == Some(NotifyLevel::Nothing)
   }
 
   /// The level that applies to a conversation: its override, else the desktop level.
@@ -358,6 +402,9 @@ pub struct SidebarPrefs {
   pub sort: SidebarSort,
   /// Direct messages shown before "show more"; 0 shows all.
   pub dm_limit: u32,
+  /// One sidebar with the channels of every space grouped by space (Slack style), instead of the
+  /// space switcher with one space's channels at a time.
+  pub is_grouped_by_space: bool,
 }
 
 impl Default for SidebarPrefs {
@@ -365,6 +412,7 @@ impl Default for SidebarPrefs {
     Self {
       sort: SidebarSort::Default,
       dm_limit: 0,
+      is_grouped_by_space: false,
     }
   }
 }

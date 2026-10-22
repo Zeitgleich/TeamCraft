@@ -39,6 +39,16 @@ messages from before the user joined are not counted. The read position is
 | Auto-follow mentioned threads     | same                                                    |
 | Send read receipts                | same (default: `[notifications] read_receipts_default`) |
 
+### Muting a whole space
+
+`GET`/`PUT /spaces/{id}/notification-settings` hold the member's level (optional) and mute time for a
+space. A channel follows them (`my_membership.is_notification_inherited`) until the member sets a level
+or mute time for the channel itself; `PUT .../notification-settings` with `"is_inherited": true` drops
+that choice again. A channel with its own setting ignores the space entirely. The server resolves this
+in the push routing and the e-mail digest, clients with `effective_notifications` in `teamcraft-proto`.
+The desktop and web notifier keep the same two layers in their preferences (`spaces` next to
+`conversations`) and send changes to these endpoints.
+
 The DND schedule is typed (weekdays, start/end minute, a fixed UTC offset the client keeps current,
 an allow list of senders) and stored as JSON text the database does not interpret. The server
 evaluates it in the push routing, so it needs no timezone database.

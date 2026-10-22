@@ -8,7 +8,7 @@
 use crate::common;
 
 use common::{Peer, backend_of, run_commands, settle};
-use teamcraft_client_api::actions::{ChannelChanges, NewChannel, SpaceInvite, WorkspaceEvent};
+use teamcraft_client_api::actions::{ChannelChanges, NewChannel, NewSpace, SpaceInvite, WorkspaceEvent};
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, MessageKind, SystemEvent};
 use teamcraft_core::api::fake::FakeServer;
@@ -104,6 +104,57 @@ async fn channel_changes_are_announced() {
     by: alice.client.user_id(),
     history: HistoryPolicy::Full,
   }));
+}
+
+#[tokio::test]
+async fn a_moved_channel_keeps_its_group_and_is_announced() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let source = alice.space().await;
+  let channel = create_public_channel(&mut alice, source, "Ops").await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.add_member_with_history(channel, bob.client.user_id(), HistoryPolicy::Full);
+  run_commands(&mut alice, &alice_ui).await;
+  settle_and_flush(&mut [&mut alice, &mut bob]).await;
+
+  alice_ui.create_space(NewSpace {
+    name: "Project B".into(),
+    maybe_description: None,
+    is_open: true,
+  });
+  run_commands(&mut alice, &alice_ui).await;
+  let target = alice_ui
+    .spaces()
+    .into_iter()
+    .find(|space| space.name == "Project B")
+    .unwrap()
+    .id;
+
+  alice_ui.update_channel(
+    channel,
+    ChannelChanges {
+      maybe_space: Some(target),
+      ..ChannelChanges::default()
+    },
+  );
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  assert!(alice_ui.space_conversations(source).is_empty());
+  assert_eq!(alice_ui.space_conversations(target)[0].id, channel);
+  // The encryption group did not change: messages still flow after the move.
+  alice_ui.post_message(channel, None, "after the move");
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(bob.texts(channel).contains(&"after the move".to_string()));
+  let bob_ui = backend_of(&bob);
+  assert!(
+    workspace_events(&bob_ui, channel).contains(&WorkspaceEvent::Moved {
+      by: alice.client.user_id(),
+      space: "Project B".into(),
+    })
+  );
 }
 
 #[tokio::test]

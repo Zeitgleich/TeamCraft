@@ -35,6 +35,8 @@ pub struct Membership {
   pub is_favorite: bool,
   pub maybe_last_read_message_id: Option<MessageId>,
   pub maybe_muted_until: Option<OffsetDateTime>,
+  /// The member never chose level or mute time here, so the space's setting applies.
+  pub is_notification_inherited: bool,
   /// Smallest message ID created after the member joined; history cut-off for `from_join`.
   pub joined_floor: MessageId,
 }
@@ -168,6 +170,7 @@ impl Database {
                 c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.is_integration, c.member_denied, c.guest_denied,
                 m.role AS "role?", m.notification_level AS "notification_level?",
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
+                NOT m.notification_overridden AS "is_inherited?",
                 tc_snowflake_floor(m.joined_at) AS "joined_floor?"
          FROM conversations c
          LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1
@@ -196,6 +199,7 @@ impl Database {
           row.joined_floor,
         ) {
           (Some(role), Some(level), Some(is_favorite), Some(floor)) => Some(Membership {
+            is_notification_inherited: row.is_inherited.unwrap_or(false),
             role: ChannelRole::from(role),
             notification_level: NotificationLevel::from(level),
             is_favorite,
@@ -364,6 +368,7 @@ impl Database {
       r#"UPDATE memberships SET
            role = COALESCE($3, role),
            notification_level = COALESCE($4, notification_level),
+           notification_overridden = notification_overridden OR $4::text IS NOT NULL,
            is_favorite = COALESCE($5, is_favorite)
          WHERE conversation_id = $1 AND user_id = $2"#,
       to_db(conversation),
@@ -374,6 +379,24 @@ impl Database {
         .as_ref()
         .map(NotificationLevel::as_str),
       changes.maybe_is_favorite,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Moves a channel to another space and files it under `maybe_category` (of that space) or none.
+  pub async fn move_conversation_to_space(
+    &self,
+    conversation: ConversationId,
+    space: SpaceId,
+    maybe_category: Option<CategoryId>,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE conversations SET space_id = $2, category_id = $3 WHERE id = $1 AND kind = 'channel'",
+      to_db(conversation),
+      to_db(space),
+      maybe_category.map(to_db),
     )
     .execute(self.pool())
     .await?;

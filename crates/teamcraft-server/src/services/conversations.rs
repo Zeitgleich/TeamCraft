@@ -8,8 +8,8 @@ use teamcraft_db::{
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy,
-  ListConversationsQuery, ListConversationsResponse, Permission, SpaceId, SystemEventKind, Target,
-  UpdateConversationRequest, UserId,
+  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId,
+  SystemEventKind, Target, UpdateConversationRequest, UserId,
 };
 
 use super::access::{
@@ -265,6 +265,73 @@ pub async fn update_conversation(
   for kind in kinds {
     system_events::emit(state, id, kind, Some(caller.user.id), None).await;
   }
+  let members = state.database.conversation_member_ids(id).await?;
+  state
+    .hub
+    .publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
+  get_conversation(state, caller, id).await
+}
+
+/// Moves a channel to another space. The MLS group, memberships and history are untouched: the
+/// space only decides who may browse the channel and which scheme and retention defaults apply.
+/// Needs `manage_space_properties` in the space the channel leaves and in the one it enters.
+pub async fn move_channel(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+  request: MoveChannelRequest,
+) -> Result<ConversationResponse, ApiError> {
+  let access = load_conversation(state, caller, id).await?;
+  let conversation = &access.view.conversation;
+  let Some(from) = conversation.maybe_space_id else {
+    return Err(ApiError::InvalidRequest("only channels can be moved".into()));
+  };
+  if conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::InvalidRequest("only channels can be moved".into()));
+  }
+  if from == request.space_id {
+    return Err(ApiError::InvalidRequest(
+      "the channel is already in this space".into(),
+    ));
+  }
+  if conversation.is_archived {
+    return Err(ApiError::Conflict("unarchive the channel first".into()));
+  }
+  require(
+    state,
+    caller,
+    Permission::ManageSpaceProperties,
+    &space_target(Some(from), access.maybe_space_role.clone()),
+  )?;
+  let destination = load_space(state, caller, request.space_id).await?;
+  require(
+    state,
+    caller,
+    Permission::ManageSpaceProperties,
+    &destination.target(),
+  )?;
+  if destination.view.space.is_archived {
+    return Err(ApiError::Conflict("the space is archived".into()));
+  }
+  if let Some(category) = request.maybe_category_id {
+    let found = state.database.get_category(category).await?;
+    if found.is_none_or(|found| found.space_id != request.space_id) {
+      return Err(ApiError::category_not_found());
+    }
+  }
+  state
+    .database
+    .move_conversation_to_space(id, request.space_id, request.maybe_category_id)
+    .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "channel_moved",
+    Some(AuditTarget::new("conversation", id)),
+    &json!({"from_space_id": from.to_string(), "to_space_id": request.space_id.to_string()}),
+  )
+  .await?;
+  system_events::emit(state, id, SystemEventKind::Moved, Some(caller.user.id), None).await;
   let members = state.database.conversation_member_ids(id).await?;
   state
     .hub

@@ -26,7 +26,7 @@ use teamcraft_server::meetings::{MeetingBackends, MeetingService};
 use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{
   APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FcmSender, FcmSettings,
-  PushDispatcher, ServiceAccount, UnifiedPushSender, WebPushSender,
+  PushDispatcher, ServiceAccount, UnifiedPushSender, Vapid, WebPushSender,
 };
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
@@ -451,14 +451,14 @@ fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration)
 fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
   let push = &config.push;
   let timeout = Duration::from_secs(push.request_timeout_secs);
-  let mut dispatcher = PushDispatcher::new(push.max_concurrent_sends);
+  let mut dispatcher = PushDispatcher::new(push.max_concurrent_sends)
+    .with_max_concurrent_sends_per_user(push.max_concurrent_sends_per_user);
   if let Some(private_key) = &push.maybe_vapid_private_key {
     let vapid = VapidKey::from_base64url(private_key.expose_secret()).context("push.vapid_private_key")?;
     let public_key = vapid.public_key_base64url();
     info!(%public_key, "Web Push enabled (applicationServerKey)");
     let sender = WebPushSender::new(
-      vapid,
-      push.vapid_subject.clone(),
+      Vapid::new(vapid, push.vapid_subject.clone()),
       timeout,
       push.allow_private_endpoints,
     )
@@ -477,13 +477,21 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
     push.fcm.maybe_service_account_path.as_deref(),
     "push.fcm.service_account",
   )? {
+    let account = ServiceAccount::from_json(json.expose_secret()).context("push.fcm.service_account")?;
+    let base_url = push
+      .fcm
+      .maybe_base_url
+      .clone()
+      .unwrap_or_else(|| FCM_BASE_URL.into());
+    require_tls(&base_url, "push.fcm.base_url", push.allow_private_endpoints)?;
+    require_tls(
+      &account.token_uri,
+      "token_uri of push.fcm.service_account",
+      push.allow_private_endpoints,
+    )?;
     let sender = FcmSender::new(FcmSettings {
-      account: ServiceAccount::from_json(json.expose_secret()).context("push.fcm.service_account")?,
-      base_url: push
-        .fcm
-        .maybe_base_url
-        .clone()
-        .unwrap_or_else(|| FCM_BASE_URL.into()),
+      account,
+      base_url,
       timeout,
     })
     .context("push.fcm.service_account")?;
@@ -491,7 +499,15 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
     dispatcher = dispatcher.with_sender(&PushProvider::Fcm, Arc::new(sender));
   }
   if push.unified_push.is_enabled {
-    let sender = UnifiedPushSender::new(timeout, push.allow_private_endpoints)
+    // Distributors may check a VAPID token; the same key as Web Push signs it when there is one.
+    let maybe_vapid = match &push.maybe_vapid_private_key {
+      Some(private_key) => Some(Vapid::new(
+        VapidKey::from_base64url(private_key.expose_secret()).context("push.vapid_private_key")?,
+        push.vapid_subject.clone(),
+      )),
+      None => None,
+    };
+    let sender = UnifiedPushSender::new(maybe_vapid, timeout, push.allow_private_endpoints)
       .context("building the UnifiedPush client")?;
     dispatcher = dispatcher.with_sender(&PushProvider::UnifiedPush, Arc::new(sender));
   }
@@ -529,6 +545,7 @@ fn apns_settings(config: &Config) -> anyhow::Result<Option<ApnsSettings>> {
     }
     .into()
   });
+  require_tls(&base_url, "push.apns.base_url", push.allow_private_endpoints)?;
   Ok(Some(ApnsSettings {
     key_pem,
     key_id: required(&apns.maybe_key_id, "key_id")?,
@@ -538,6 +555,23 @@ fn apns_settings(config: &Config) -> anyhow::Result<Option<ApnsSettings>> {
     alert_text: apns.alert_text.clone(),
     timeout: Duration::from_secs(push.request_timeout_secs),
   }))
+}
+
+/// Push credentials (the APNs provider token, the FCM assertion and access token) only travel over
+/// TLS. Plain `http://` is for local fakes and needs `push.allow_private_endpoints`.
+fn require_tls(url: &str, name: &str, allow_plain_http: bool) -> anyhow::Result<()> {
+  if url.starts_with("https://") {
+    return Ok(());
+  }
+  anyhow::ensure!(
+    allow_plain_http && url.starts_with("http://"),
+    "{name} must be an https URL (plain http only with push.allow_private_endpoints, for development)"
+  );
+  warn!(
+    setting = name,
+    "push credentials are sent over plain http (development only)"
+  );
+  Ok(())
 }
 
 /// A secret given inline or as a file (for container secrets mounted as files). Inline wins.
@@ -600,4 +634,17 @@ fn config_path() -> Option<PathBuf> {
     }
   }
   std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn push_credentials_need_tls_unless_development_allows_plain_http() {
+    assert!(require_tls("https://api.push.apple.com", "x", false).is_ok());
+    assert!(require_tls("http://127.0.0.1:9000", "x", false).is_err());
+    assert!(require_tls("http://127.0.0.1:9000", "x", true).is_ok());
+    assert!(require_tls("ftp://push.example.com", "x", true).is_err());
+  }
 }

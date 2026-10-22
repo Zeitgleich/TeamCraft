@@ -8,9 +8,10 @@ use crate::search::{SearchHit, TokenKind, parse_query};
 use crate::state::use_app_state;
 
 /// Filters offered as buttons; each inserts its token and leaves the cursor in the search box.
-const FILTER_BUTTONS: [(&str, &str); 7] = [
+const FILTER_BUTTONS: [(&str, &str); 8] = [
   ("search-filter-from", "from:"),
   ("search-filter-in", "in:"),
+  ("search-filter-space", "space:"),
   ("search-filter-file", "has:file"),
   ("search-filter-link", "has:link"),
   ("search-filter-before", "before:"),
@@ -38,6 +39,8 @@ pub fn SearchView() -> impl IntoView {
   let results = Memo::new(move |_| state.read(|backend| backend.search(&parsed.get())));
   let mentions = Memo::new(move |_| state.read(|backend| backend.recent_mentions()));
   let saved = Memo::new(move |_| state.read(|backend| backend.saved_searches()));
+  let spaces = Memo::new(move |_| state.read(|backend| backend.spaces()));
+  let scope = move || parsed.get().space_scope().unwrap_or_default().to_owned();
   let has_invalid = move || {
     parsed
       .get()
@@ -170,6 +173,27 @@ pub fn SearchView() -> impl IntoView {
             >
               {move || i18n.t("search-save")}
             </button>
+          </div>
+          <div class="search-scope">
+            <label for="search-scope">{move || i18n.t("search-scope-label")}</label>
+            <select
+              id="search-scope"
+              class="input"
+              prop:value=scope
+              on:change=move |ev| {
+                pane.set(Pane::Results);
+                let chosen = event_target_value(&ev);
+                let maybe_space = (!chosen.is_empty()).then_some(chosen);
+                query.set(parsed.get_untracked().with_space_scope(maybe_space.as_deref()));
+              }
+            >
+              <option value="">{move || i18n.t("search-scope-all")}</option>
+              <For each=move || spaces.get() key=|space| space.id let:space>
+                <option value=space.name.clone() selected=move || scope() == space.name translate="no">
+                  {space.name.clone()}
+                </option>
+              </For>
+            </select>
           </div>
           <div class="filter-buttons" role="group" aria-label=move || i18n.t("search-filters-label")>
             {FILTER_BUTTONS

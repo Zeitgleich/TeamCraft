@@ -4,12 +4,14 @@
 //! dialogs only collect the choices.
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
   SpaceInvite,
 };
 use teamcraft_proto::{CategoryId, HistoryPolicy};
 
+use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
@@ -318,6 +320,7 @@ pub fn ChannelSettingsDialog(conversation: ConversationId) -> impl IntoView {
             </select>
           }
         })}
+      <MoveChannel conversation=conversation current_space=space />
       <h3>{move || i18n.t("channel-privacy")}</h3>
       <p class="hint">{move || if is_private { i18n.t("channel-privacy-hint-private") } else { i18n.t("channel-privacy-hint-public") }}</p>
       <Show
@@ -328,12 +331,215 @@ pub fn ChannelSettingsDialog(conversation: ConversationId) -> impl IntoView {
         <button class="btn btn-primary" on:click=move |_| change(ChannelChanges { maybe_is_private: Some(!is_private), ..ChannelChanges::default() })>{move || i18n.t("confirm")}</button>
         <button class="btn" on:click=move |_| is_confirming_privacy.set(false)>{move || i18n.t("cancel")}</button>
       </Show>
+      <ChannelRetention conversation=conversation />
       <h3>{move || i18n.t("channel-archive")}</h3>
       <button class="btn" on:click=move |_| change(ChannelChanges { maybe_is_archived: Some(true), ..ChannelChanges::default() })>{move || i18n.t("channel-archive-action")}</button>
       <AddPeople conversation=conversation />
     </Dialog>
   }
   .into_any()
+}
+
+/// Moves the channel to another space. Members, history and encryption stay as they are.
+#[component]
+fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let targets = Memo::new(move |_| {
+    state
+      .read(|backend| backend.spaces())
+      .into_iter()
+      .filter(|space| Some(space.id) != current_space)
+      .collect::<Vec<_>>()
+  });
+  let chosen = RwSignal::new(String::new());
+  let is_confirming = RwSignal::new(false);
+  let move_now = move |_| {
+    if let Ok(space) = chosen.get_untracked().parse::<SpaceId>() {
+      state.write(|backend| {
+        backend.update_channel(
+          conversation,
+          ChannelChanges {
+            maybe_space: Some(space),
+            ..ChannelChanges::default()
+          },
+        )
+      });
+      state.close_overlay();
+    }
+  };
+
+  view! {
+    <Show when=move || current_space.is_some() && !targets.get().is_empty() fallback=|| ()>
+      <h3>{move || i18n.t("channel-move-space")}</h3>
+      <p class="hint">{move || i18n.t("channel-move-space-hint")}</p>
+      <select
+        class="input"
+        aria-label=move || i18n.t("channel-move-space")
+        on:change=move |ev| {
+          chosen.set(event_target_value(&ev));
+          is_confirming.set(false);
+        }
+      >
+        <option value="">{move || i18n.t("channel-move-space-choose")}</option>
+        <For each=move || targets.get() key=|space| space.id let:space>
+          <option value=space.id.to_string() translate="no">{space.name.clone()}</option>
+        </For>
+      </select>
+      <Show
+        when=move || is_confirming.get()
+        fallback=move || view! {
+          <button class="btn" prop:disabled=move || chosen.get().is_empty() on:click=move |_| is_confirming.set(true)>
+            {move || i18n.t("channel-move-space-action")}
+          </button>
+        }
+      >
+        <p role="alert">{move || i18n.t("channel-move-space-confirm")}</p>
+        <button class="btn btn-primary" on:click=move_now>{move || i18n.t("confirm")}</button>
+        <button class="btn" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
+      </Show>
+    </Show>
+  }
+}
+
+/// How long the channel keeps its messages, within the limit the administrators set. The server
+/// decides who may change it and refuses values above the limit.
+#[component]
+fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
+  let i18n = use_i18n();
+  let Some(hub) = use_context::<ChannelPolicyHub>() else {
+    return ().into_any();
+  };
+  let status = RwSignal::new(None::<teamcraft_proto::RetentionStatusResponse>);
+  let days = RwSignal::new(String::new());
+  let messages = RwSignal::new(String::new());
+  let maybe_error = RwSignal::new(None::<&'static str>);
+  let is_saved = RwSignal::new(false);
+  spawn_local(async move {
+    if let Ok(loaded) = hub.retention(conversation).await {
+      days.set(
+        loaded
+          .own
+          .maybe_max_age_days
+          .map(|value| value.to_string())
+          .unwrap_or_default(),
+      );
+      messages.set(
+        loaded
+          .own
+          .maybe_max_messages
+          .map(|value| value.to_string())
+          .unwrap_or_default(),
+      );
+      status.set(Some(loaded));
+    }
+  });
+  let save = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    is_saved.set(false);
+    let setting = match parse_retention(&days.get_untracked(), &messages.get_untracked()) {
+      Ok(setting) => setting,
+      Err(error) => {
+        maybe_error.set(Some(error.message_key()));
+        return;
+      },
+    };
+    maybe_error.set(None);
+    spawn_local(async move {
+      match hub.set_retention(conversation, setting).await {
+        Ok(saved) => {
+          status.set(Some(saved));
+          is_saved.set(true);
+        },
+        Err(error) => {
+          tracing::warn!(%error, "could not save the channel retention");
+          maybe_error.set(Some("retention-error-refused"));
+        },
+      }
+    });
+  };
+  let describe = move |setting: teamcraft_proto::RetentionSetting| match (
+    setting.maybe_max_age_days,
+    setting.maybe_max_messages,
+  ) {
+    (None, None) => i18n.t("retention-unlimited"),
+    (Some(age), None) => i18n.t_with("retention-summary-days", &[("days", &age.to_string())]),
+    (None, Some(count)) => i18n.t_with("retention-summary-messages", &[("count", &count.to_string())]),
+    (Some(age), Some(count)) => i18n.t_with(
+      "retention-summary-both",
+      &[("days", &age.to_string()), ("count", &count.to_string())],
+    ),
+  };
+
+  view! {
+    <Show when=move || status.get().is_some() fallback=|| ()>
+      <h3>{move || i18n.t("retention-channel-title")}</h3>
+      <p class="hint">{move || i18n.t("retention-channel-hint")}</p>
+      <form on:submit=save>
+        <label for="cs-retention-days">{move || i18n.t("retention-days")}</label>
+        <input id="cs-retention-days" class="input" inputmode="numeric" prop:value=move || days.get()
+          on:input=move |ev| days.set(event_target_value(&ev)) />
+        <label for="cs-retention-messages">{move || i18n.t("retention-messages")}</label>
+        <input id="cs-retention-messages" class="input" inputmode="numeric" prop:value=move || messages.get()
+          on:input=move |ev| messages.set(event_target_value(&ev)) />
+        <p class="muted-text small">
+          {move || status.get().map(|current| {
+            i18n.t_with("retention-channel-effective", &[("value", &describe(current.effective))])
+          })}
+          " "
+          {move || status.get().map(|current| {
+            let limit = current.limit;
+            (limit != teamcraft_proto::RetentionSetting::default()).then(|| {
+              i18n.t_with("retention-channel-limit", &[("value", &describe(limit))])
+            })
+          })}
+        </p>
+        <p role="alert" class="warn-text">{move || maybe_error.get().map(|key| i18n.t(key))}</p>
+        <p role="status">{move || is_saved.get().then(|| i18n.t("retention-channel-saved"))}</p>
+        <div class="modal-foot">
+          <span class="grow"></span>
+          <button type="submit" class="btn">{move || i18n.t("save")}</button>
+        </div>
+      </form>
+    </Show>
+  }
+  .into_any()
+}
+
+/// Mutes the whole space: its channels stop notifying unless they have a setting of their own.
+#[component]
+fn SpaceMute(space: SpaceId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let id = space.to_string();
+  let is_muted = {
+    let id = id.clone();
+    move || {
+      state
+        .settings
+        .prefs
+        .with(|prefs| prefs.notifications.is_space_muted(&id))
+    }
+  };
+  view! {
+    <h3>{move || i18n.t("space-notifications")}</h3>
+    <label class="checkbox settings-check">
+      <input
+        type="checkbox"
+        prop:checked=is_muted.clone()
+        on:change=move |ev| {
+          let muted = event_target_checked(&ev);
+          state.settings.prefs.update(|prefs| {
+            prefs.notifications.set_space(&id, crate::components::sidebar::space_mute_entry(muted))
+          });
+        }
+      />
+      <span>
+        {move || i18n.t("space-mute-label")}
+        <small class="muted-text">{move || i18n.t("space-mute-hint")}</small>
+      </span>
+    </label>
+  }
 }
 
 /// Adds a person to the channel. The "share history" toggle decides what they can read (e2ee.md).
@@ -444,6 +650,7 @@ pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
         <button type="submit" class="btn" prop:disabled=move || new_category.get().trim().is_empty()>{move || i18n.t("create")}</button>
       </form>
       <InvitePeople space=space />
+      <SpaceMute space=space />
       <h3>{move || i18n.t("channel-archive")}</h3>
       <button
         class="btn"

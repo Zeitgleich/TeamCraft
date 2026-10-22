@@ -31,6 +31,9 @@ pub struct MyMembership {
   /// The conversation is muted until this time.
   #[serde(rename = "muted_until", default, skip_serializing_if = "Option::is_none")]
   pub maybe_muted_until: Option<UnixMillis>,
+  /// Level and mute time follow the space's setting (the member never chose their own).
+  #[serde(default)]
+  pub is_notification_inherited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -123,6 +126,16 @@ pub struct ConvertChannelRequest {
   /// converting to public is the moment to decide it, because everybody in the space may join.
   #[serde(rename = "history_policy", default, skip_serializing_if = "Option::is_none")]
   pub maybe_history_policy: Option<HistoryPolicy>,
+}
+
+/// `PUT /api/v1/conversations/{id}/space`: moves a channel to another space. The MLS group, the
+/// members and the history stay as they are; the channel leaves its category.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MoveChannelRequest {
+  pub space_id: SpaceId,
+  /// A category of the target space to file the channel under.
+  #[serde(rename = "category_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_category_id: Option<CategoryId>,
 }
 
 /// `POST /api/v1/dms`: opens (or returns the existing) DM with one person.

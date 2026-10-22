@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use teamcraft_proto::{DeviceId, PushKind, PushProvider, PushWakeUp, UnixMillis, UserId};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 
 use super::crypto::{PushCryptoError, seal_wakeup};
@@ -89,10 +89,21 @@ pub trait PushSender: Send + Sync {
   ) -> BoxFuture<'a, Result<(), PushError>>;
 }
 
-/// Routes pushes to the sender of the target's provider, with a cap on parallel requests.
+/// Pushes one user may have in flight to endpoints they chose, unless configured otherwise.
+pub const DEFAULT_MAX_CONCURRENT_SENDS_PER_USER: usize = 4;
+
+/// Routes pushes to the sender of the target's provider, with caps on parallel requests.
+///
+/// Web Push and UnifiedPush endpoints are chosen by users, so one user could point devices at
+/// endpoints that never answer. Those sends get their own pool and a per-user cap: a slow endpoint
+/// holds at most its owner's few permits, and APNs/FCM (including call rings) never wait for it.
 pub struct PushDispatcher {
   senders: HashMap<&'static str, Arc<dyn PushSender>>,
-  permits: Arc<Semaphore>,
+  /// APNs and FCM: the operator's push services.
+  service_permits: Arc<Semaphore>,
+  /// Web Push and UnifiedPush: endpoints chosen by users.
+  endpoint_permits: Arc<Semaphore>,
+  per_user: PerUserLimit,
   health: ProviderHealthTracker,
   /// The VAPID public key browsers subscribe with (`applicationServerKey`), if Web Push is on.
   maybe_web_public_key: Option<String>,
@@ -102,10 +113,18 @@ impl PushDispatcher {
   pub fn new(max_concurrent_sends: usize) -> Self {
     Self {
       senders: HashMap::new(),
-      permits: Arc::new(Semaphore::new(max_concurrent_sends.max(1))),
+      service_permits: Arc::new(Semaphore::new(max_concurrent_sends.max(1))),
+      endpoint_permits: Arc::new(Semaphore::new(max_concurrent_sends.max(1))),
+      per_user: PerUserLimit::new(DEFAULT_MAX_CONCURRENT_SENDS_PER_USER),
       health: ProviderHealthTracker::default(),
       maybe_web_public_key: None,
     }
+  }
+
+  /// Caps how many pushes to user-chosen endpoints one user may have in flight.
+  pub fn with_max_concurrent_sends_per_user(mut self, max: usize) -> Self {
+    self.per_user = PerUserLimit::new(max);
+    self
   }
 
   /// Publishes the VAPID public key to browsers (`GET /api/v1/push/web-key`).
@@ -154,17 +173,95 @@ impl PushDispatcher {
       urgency,
       ttl,
     };
-    // The semaphore is never closed, so acquiring only fails if the dispatcher is gone.
-    let _permit = self
-      .permits
+    let is_user_endpoint = is_user_endpoint(&target.provider);
+    // The user's own cap first: while it waits, it holds nothing that others need.
+    let _user_permit = if is_user_endpoint {
+      Some(self.per_user.acquire(target.user).await?)
+    } else {
+      None
+    };
+    let pool = if is_user_endpoint {
+      &self.endpoint_permits
+    } else {
+      &self.service_permits
+    };
+    // The semaphores are never closed, so acquiring only fails if the dispatcher is gone.
+    let _permit = pool
       .acquire()
       .await
       .map_err(|_| PushError::Unavailable("shutting down".into()))?;
     debug!(provider = %target.provider, device_id = %target.device, "sending push");
     let result = sender.send(target, &message).await;
-    self.health.record(name, &result, now_millis());
+    self.health.record(name, is_user_endpoint, &result, now_millis());
     result
   }
+}
+
+/// Web Push and UnifiedPush post to an endpoint the user registered, not to a service the operator
+/// configured.
+fn is_user_endpoint(provider: &PushProvider) -> bool {
+  matches!(provider, PushProvider::WebPush | PushProvider::UnifiedPush)
+}
+
+/// A semaphore per user with sends in flight; entries go away when the user has none.
+struct PerUserLimit {
+  max: usize,
+  users: Arc<Mutex<HashMap<UserId, Arc<Semaphore>>>>,
+}
+
+/// One send of a user in flight; frees the user's entry when it was the last one.
+struct UserPermit {
+  user: UserId,
+  maybe_permit: Option<OwnedSemaphorePermit>,
+  users: Arc<Mutex<HashMap<UserId, Arc<Semaphore>>>>,
+}
+
+impl PerUserLimit {
+  fn new(max: usize) -> Self {
+    Self {
+      max: max.max(1),
+      users: Arc::default(),
+    }
+  }
+
+  async fn acquire(&self, user: UserId) -> Result<UserPermit, PushError> {
+    let semaphore = lock(&self.users)
+      .entry(user)
+      .or_insert_with(|| Arc::new(Semaphore::new(self.max)))
+      .clone();
+    let permit = semaphore
+      .acquire_owned()
+      .await
+      .map_err(|_| PushError::Unavailable("shutting down".into()))?;
+    Ok(UserPermit {
+      user,
+      maybe_permit: Some(permit),
+      users: self.users.clone(),
+    })
+  }
+
+  #[cfg(test)]
+  fn tracked_users(&self) -> usize {
+    lock(&self.users).len()
+  }
+}
+
+impl Drop for UserPermit {
+  fn drop(&mut self) {
+    let mut users = lock(&self.users);
+    drop(self.maybe_permit.take());
+    // Only the map holds the semaphore and nobody waits or sends: the user is idle.
+    if let Some(semaphore) = users.get(&self.user)
+      && Arc::strong_count(semaphore) == 1
+    {
+      users.remove(&self.user);
+    }
+  }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  // A poisoned lock only means another task panicked while holding it; the map stays usable.
+  mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn known_name(provider: &PushProvider) -> Option<&'static str> {
@@ -302,5 +399,81 @@ mod tests {
       .deliver(&bad, &wake_up(), Urgency::Normal, Duration::from_secs(60))
       .await;
     assert!(matches!(result, Err(PushError::Crypto(_))));
+  }
+
+  mod fairness {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_user_with_endpoints_that_never_answer_holds_up_only_themselves() {
+      let dispatcher = Arc::new(
+        PushDispatcher::new(2)
+          .with_max_concurrent_sends_per_user(1)
+          .with_sender(&PushProvider::WebPush, Arc::new(Tarpit))
+          .with_sender(&PushProvider::Apns, Arc::new(Fixed(Ok(()))))
+          .with_sender(&PushProvider::UnifiedPush, Arc::new(Fixed(Ok(())))),
+      );
+      // Mallory's devices point at an endpoint that never answers; more sends than the pool has.
+      let mallory = target_of(PushProvider::WebPush, 7);
+      let mut stuck = Vec::new();
+      for _ in 0..5 {
+        let dispatcher = dispatcher.clone();
+        let mallory = mallory.clone();
+        stuck.push(tokio::spawn(async move {
+          dispatcher
+            .deliver(&mallory, &wake_up(), Urgency::Normal, Duration::from_secs(60))
+            .await
+        }));
+      }
+      tokio::task::yield_now().await;
+
+      // Others still get through: another user's endpoint, and the operator's push services.
+      for target in [
+        target_of(PushProvider::UnifiedPush, 8),
+        target_of(PushProvider::Apns, 7),
+      ] {
+        let delivered = tokio::time::timeout(
+          Duration::from_secs(5),
+          dispatcher.deliver(&target, &wake_up(), Urgency::Normal, Duration::from_secs(60)),
+        )
+        .await;
+        assert!(matches!(delivered, Ok(Ok(()))), "{:?}", target.provider);
+      }
+      for task in stuck {
+        task.abort();
+      }
+    }
+
+    #[tokio::test]
+    async fn idle_users_are_forgotten() {
+      let dispatcher = PushDispatcher::new(4).with_sender(&PushProvider::WebPush, Arc::new(Fixed(Ok(()))));
+      for user in 10..20 {
+        dispatcher
+          .deliver(
+            &target_of(PushProvider::WebPush, user),
+            &wake_up(),
+            Urgency::Normal,
+            Duration::from_secs(60),
+          )
+          .await
+          .unwrap();
+      }
+      assert_eq!(dispatcher.per_user.tracked_users(), 0);
+    }
+
+    /// An endpoint that accepts the connection and never answers.
+    struct Tarpit;
+
+    impl PushSender for Tarpit {
+      fn send<'a>(&'a self, _: &'a PushTarget, _: &'a PushMessage) -> BoxFuture<'a, Result<(), PushError>> {
+        Box::pin(std::future::pending())
+      }
+    }
+
+    fn target_of(provider: PushProvider, user: i64) -> PushTarget {
+      let mut target = target(provider);
+      target.user = UserId::from_snowflake(Snowflake::new(user).unwrap());
+      target
+    }
   }
 }

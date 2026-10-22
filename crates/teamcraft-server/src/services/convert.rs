@@ -2,11 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use teamcraft_db::{Category, ConversationView, Device, Invite, Membership, SpaceView, StoredMessage, User};
+use teamcraft_db::{
+  Category, ConversationView, Device, Invite, Membership, SpaceView, StoredMessage, StoredSpaceNotifications,
+  User,
+};
 use teamcraft_proto::{
   Base64Bytes, CategoryResponse, ConversationId, ConversationResponse, DeviceResponse, DirectoryPolicy,
-  DisplayNameFormat, InviteResponse, MessageResponse, MyMembership, PushProvider, SpaceResponse, UnixMillis,
-  UserSummary,
+  DisplayNameFormat, InviteResponse, MessageResponse, MyMembership, PushProvider, SpaceNotificationSettings,
+  SpaceResponse, UnixMillis, UserSummary,
 };
 use time::OffsetDateTime;
 
@@ -89,6 +92,17 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
     is_archived: space.is_archived,
     maybe_brand_id: space.maybe_brand_id.clone(),
     maybe_my_role: view.maybe_role.clone(),
+    maybe_my_notifications: view
+      .maybe_role
+      .as_ref()
+      .map(|_| space_notification_settings(&view.notifications)),
+  }
+}
+
+pub fn space_notification_settings(stored: &StoredSpaceNotifications) -> SpaceNotificationSettings {
+  SpaceNotificationSettings {
+    maybe_level: stored.maybe_level.clone(),
+    maybe_muted_until: stored.maybe_muted_until.map(unix_millis),
   }
 }
 
@@ -120,6 +134,7 @@ pub fn my_membership(membership: &Membership) -> MyMembership {
     is_favorite: membership.is_favorite,
     maybe_last_read_message_id: membership.maybe_last_read_message_id,
     maybe_muted_until: membership.maybe_muted_until.map(unix_millis),
+    is_notification_inherited: membership.is_notification_inherited,
   }
 }
 

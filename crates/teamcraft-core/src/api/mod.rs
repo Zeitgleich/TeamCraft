@@ -21,7 +21,7 @@ use teamcraft_proto::{
   GetMeResponse, IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
   ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpacesResponse, MessageResponse,
-  MlsMessageResponse, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
   PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest, SpaceId,
   UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
@@ -129,6 +129,12 @@ pub trait ServerApi {
     &self,
     conversation: ConversationId,
     request: &UpdateConversationRequest,
+  ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
+  /// Moves a channel to another space (`PUT /conversations/{id}/space`).
+  fn move_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &MoveChannelRequest,
   ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
   /// Public channels of a space the caller hasn't joined (the channel browser).
   fn list_joinable(

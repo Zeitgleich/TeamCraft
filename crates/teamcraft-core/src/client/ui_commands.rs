@@ -159,6 +159,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         request,
       } => self.update_channel(conversation, &request).await,
+      CoreCommand::MoveChannel {
+        conversation,
+        request,
+      } => self.move_channel(conversation, &request).await,
       CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
       CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
       CoreCommand::LeaveChannel { conversation } => self.leave_channel(conversation).await,

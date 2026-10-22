@@ -7,7 +7,8 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::model::{ConversationId, SpaceId};
 use teamcraft_proto::{
   ConversationKind, ConversationResponse, ConversationVisibility, CreateSpaceRequest, JoinPolicy,
-  ListCategoriesResponse, ListConversationsResponse, UpdateConversationRequest, UpdateSpaceRequest,
+  ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, UpdateConversationRequest,
+  UpdateSpaceRequest,
 };
 
 use crate::client::workspace_admin::ChannelOptions;
@@ -57,6 +58,20 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   pub(crate) fn ui_update_channel(&self, conversation: ConversationId, changes: ChannelChanges) {
+    if let Some(space) = changes.maybe_space {
+      let maybe_category_id = match changes.maybe_category {
+        Some(CategoryChoice::Category { category }) => Some(category),
+        Some(CategoryChoice::Uncategorized) | None => None,
+      };
+      self.command(CoreCommand::MoveChannel {
+        conversation,
+        request: MoveChannelRequest {
+          space_id: space,
+          maybe_category_id,
+        },
+      });
+      return;
+    }
     let (maybe_category_id, clear_category) = match changes.maybe_category {
       Some(CategoryChoice::Category { category }) => (Some(category), false),
       Some(CategoryChoice::Uncategorized) => (None, true),

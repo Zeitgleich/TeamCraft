@@ -162,16 +162,19 @@ provider is on as soon as its credentials are set; `GET /api/v1/admin/instance` 
 (Instance → Push providers) show per provider whether it is configured, when it last delivered, how
 many pushes failed since the server started and the last error.
 
-| Provider    | For                       | Needs                                              | Configuration                                    |
-|-------------|---------------------------|----------------------------------------------------|--------------------------------------------------|
-| Web Push    | browsers (PWA)            | a VAPID key pair                                   | `[push] vapid_private_key`, `vapid_subject`      |
-| APNs        | iOS, including call rings | an Apple `.p8` key, key ID, team ID, bundle ID     | `[push.apns]`                                    |
-| FCM         | Android with Google       | a Firebase service account JSON key                | `[push.fcm]`                                     |
-| UnifiedPush | Android without Google    | nothing (the app hands over the distributor's URL) | `[push.unified_push] is_enabled` (on by default) |
+| Provider    | For                       | Needs                                                            | Configuration                                    |
+|-------------|---------------------------|------------------------------------------------------------------|--------------------------------------------------|
+| Web Push    | browsers (PWA)            | a VAPID key pair                                                 | `[push] vapid_private_key`, `vapid_subject`      |
+| APNs        | iOS, including call rings | an Apple `.p8` key, key ID, team ID, bundle ID                   | `[push.apns]`                                    |
+| FCM         | Android with Google       | a Firebase service account JSON key                              | `[push.fcm]`                                     |
+| UnifiedPush | Android without Google    | nothing (the app hands over the distributor's endpoint and keys) | `[push.unified_push] is_enabled` (on by default) |
 
 Common settings in `[push]`: `ttl_secs` (how long a push service holds a wake-up for an offline
-device), `request_timeout_secs`, `max_concurrent_sends`. `allow_private_endpoints` is for development
-only: it lets Web Push and UnifiedPush endpoints point at private addresses and plain http.
+device), `request_timeout_secs`, `max_concurrent_sends` (per pool: APNs/FCM, and Web Push/UnifiedPush),
+`max_concurrent_sends_per_user` (Web Push/UnifiedPush sends one user may have in flight, so endpoints
+that never answer only hold up their owner). `allow_private_endpoints` is for development only: it lets
+Web Push and UnifiedPush endpoints point at private addresses and plain http, and allows plain http
+APNs/FCM base URLs for local fakes; otherwise the server refuses to start with them.
 
 ### Web Push (VAPID)
 
@@ -219,8 +222,13 @@ high-priority messages that carry only the sealed wake-up.
 ### UnifiedPush (Android without Google services)
 
 Nothing to configure on the server: the app registers the endpoint of the user's distributor (for
-example a self-hosted ntfy) and the server POSTs the sealed wake-up there. Endpoints must be public
-https URLs. Set `[push.unified_push] is_enabled = false` to refuse it.
+example a self-hosted ntfy) with its Web Push keys, in the Web Push subscription format. The server
+sends exactly as for Web Push: the sealed wake-up encrypted with RFC 8291 and posted to the endpoint,
+with a VAPID token when `vapid_private_key` is set (distributors may ignore it). Endpoints must be
+public https URLs. Set `[push.unified_push] is_enabled = false` to refuse it.
+
+In the admin console, failures at Web Push and UnifiedPush endpoints are counted apart: users choose
+those endpoints, so they never mark the provider as failing.
 
 ### Variables in the deployment repository
 

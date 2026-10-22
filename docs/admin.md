@@ -200,6 +200,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Channels without an admin                | `GET /admin/conversations?orphaned=true`, `POST /admin/conversations/{id}/owner`   |
 | System messages from the audit log      | `GET /conversations/{id}/system-events` (members), live as `system_event` gateway events |
 | Permission scheme                        | `GET/PUT /admin/permission-scheme`, `GET/PUT /admin/spaces/{id}/permission-scheme` (grant, revoke, inherit) |
+| Move a channel to another space         | `PUT /conversations/{id}/space` (`manage_space_properties` in both spaces; audit `channel_moved`, system event `moved`) |
 | Channel moderation for members / guests  | `GET/PUT /admin/conversations/{id}/moderation` (channel admins use `PATCH /conversations/{id}`) |
 | Local guest accounts                     | `POST /spaces/{id}/local-guests`, `POST /admin/local-accounts/{user}/activation`   |
 | User groups                              | `/user-groups` (create, edit and manage members need `create_user_group` / `manage_user_group_members`) |

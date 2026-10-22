@@ -18,4 +18,4 @@ pub use fcm::{FCM_BASE_URL, FcmSender, FcmSettings, ServiceAccount};
 pub use sender::{PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency};
 pub use status::ProviderHealth;
 pub use unified_push::UnifiedPushSender;
-pub use web_push::{WebPushSender, WebPushSubscription};
+pub use web_push::{Vapid, WebPushSender, WebPushSubscription};

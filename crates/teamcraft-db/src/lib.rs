@@ -77,7 +77,7 @@ pub use meeting::{
 };
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
-pub use notification::{ReceiptRow, StoredUserSettings};
+pub use notification::{ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
 pub use org_background::OrgBackgroundObject;
 pub use org_recovery::{
   ApprovalOutcome, NewRecoveryRequest, ShareOutcome, StoredApproval, StoredRecoveryRequest, StoredShare,
