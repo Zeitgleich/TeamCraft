@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "teamcraft-desktop"
 description = "Tauri 2 shell for the TeamCraft desktop client (macOS and Linux)"
 version.workspace = true

@@ -6,7 +6,26 @@ all-features = true
 
 [advisories]
 # Every ignored advisory needs a reason and a link.
-ignore = []
+ignore = [
+  # Unmaintained, no known vulnerability. Proc macro used by Leptos (either_of, reactive_graph) for
+  # the UI. Remove once Leptos drops it. https://rustsec.org/advisories/RUSTSEC-2024-0436
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro via Leptos, no vulnerability" },
+  # Unmaintained proc-macro error helpers, compile time only: glib-macros (GTK stack of the Tauri
+  # desktop shell) and hax-lib-macros (libcrux via openmls). No runtime code.
+  { id = "RUSTSEC-2024-0370", reason = "unmaintained compile-time proc macro via glib/hax-lib" },
+  { id = "RUSTSEC-2026-0173", reason = "unmaintained compile-time proc macro via hax-lib (openmls)" },
+  # unic-* (unmaintained) via urlpattern in tauri-utils: matches the desktop shell's own capability
+  # URL patterns, no untrusted input.
+  { id = "RUSTSEC-2025-0075", reason = "unmaintained, via tauri-utils urlpattern, trusted input" },
+  { id = "RUSTSEC-2025-0080", reason = "unmaintained, via tauri-utils urlpattern, trusted input" },
+  { id = "RUSTSEC-2025-0081", reason = "unmaintained, via tauri-utils urlpattern, trusted input" },
+  { id = "RUSTSEC-2025-0098", reason = "unmaintained, via tauri-utils urlpattern, trusted input" },
+  { id = "RUSTSEC-2025-0100", reason = "unmaintained, via tauri-utils urlpattern, trusted input" },
+  # quick-xml 0.38 via plist via tauri-utils: only parses the app's own Info.plist / Tauri config at
+  # build time, never data from the network. No newer plist release yet; revisit on Tauri updates.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml via tauri plist, build-time trusted input only" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml via tauri plist, build-time trusted input only" },
+]
 
 [licenses]
 confidence-threshold = 0.93
