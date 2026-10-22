@@ -1,6 +1,6 @@
 -- A user's own call background pictures. The server only stores where each encrypted picture
 -- lives and how large it is; the keys and names are in the user's encrypted key bag.
--- (0022 is taken by the channel moderator role on another branch.)
+-- (0022-0024 come with the server branch merged before this one.)
 CREATE TABLE user_backgrounds (
   id           bigint PRIMARY KEY,
   user_id      bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE,
