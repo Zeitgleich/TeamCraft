@@ -17,4 +17,8 @@ object UnifiedPushBackend : PushBackend {
     }
     UnifiedPush.register(context)
   }
+
+  override fun unregister(context: Context) {
+    if (UnifiedPush.getAckDistributor(context) != null) UnifiedPush.unregister(context)
+  }
 }

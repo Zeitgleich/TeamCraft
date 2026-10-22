@@ -12,9 +12,10 @@ use crate::state::{Overlay, use_app_state};
 
 const DEFAULT_EMOJI: &str = "🔖";
 
-/// Only web links open from a bookmark; anything else (`javascript:`, `data:`) is refused.
+/// Only web links open from a bookmark; anything else (`javascript:`, `data:`) is refused (the
+/// rule the mobile apps share, teamcraft-client-api `links`).
 pub fn is_openable(url: &str) -> bool {
-  url.starts_with("https://") || url.starts_with("http://")
+  teamcraft_client_api::links::is_openable_link(url)
 }
 
 /// Moves entry `index` by `delta` places, keeping it inside the list.

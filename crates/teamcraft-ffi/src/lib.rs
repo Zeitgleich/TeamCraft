@@ -113,6 +113,30 @@ impl TeamCraft {
     self.call(|engine| Box::pin(engine.confirm_device_link())).await
   }
 
+  /// Existing device: the user left the comparison without confirming; nothing is sent and
+  /// syncing resumes.
+  pub async fn cancel_device_link_approval(&self) -> Result<(), TeamCraftError> {
+    self
+      .call(|engine| Box::pin(engine.cancel_device_link_approval()))
+      .await
+  }
+
+  /// Where the app copies a picked file before sending it; the core deletes the copy once the
+  /// upload finished (or failed for good).
+  pub async fn upload_staging_dir(&self) -> Result<String, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.upload_staging_dir() }))
+      .await
+  }
+
+  /// Deletes this account's plaintext files on the device (decrypted downloads, staged uploads);
+  /// for sign-out. The sealed store stays.
+  pub async fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.delete_plaintext_files() }))
+      .await
+  }
+
   /// Starts syncing (gateway, outbox, membership changes). Call when the app is in the foreground.
   pub async fn start(&self) -> Result<(), TeamCraftError> {
     self.call(|engine| Box::pin(engine.start())).await
@@ -194,6 +218,11 @@ impl TeamCraft {
     self
       .call(move |engine| Box::pin(engine.register_push(service, token)))
       .await
+  }
+
+  /// Removes this device's push registration and its push key (sign-out).
+  pub async fn unregister_push(&self) -> Result<(), TeamCraftError> {
+    self.call(|engine| Box::pin(engine.unregister_push())).await
   }
 
   /// What to show for a push payload (an FCM data message or a UnifiedPush message): opened with
@@ -349,6 +378,12 @@ impl TeamCraft {
       .await?;
     calls::join(preparation, hub).await
   }
+}
+
+/// Whether a link from content other members control (a bookmark) may be opened: web links only.
+#[uniffi::export]
+pub fn is_openable_link(url: String) -> bool {
+  teamcraft_client_api::links::is_openable_link(&url)
 }
 
 /// Whether sending `body` to a conversation with `member_count` members should be confirmed first

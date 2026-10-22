@@ -107,6 +107,10 @@ pub struct PushNotification {
   pub is_call: bool,
   /// Show without sound or vibration (the sender sent it silently).
   pub is_silent: bool,
+  /// The message is known to belong to `conversation_id` (found locally, or decrypted and
+  /// signature-checked there). Offer reply and mark-read only then: the conversation of a
+  /// wake-up alone is the server's word.
+  pub is_conversation_verified: bool,
 }
 
 /// Device-local mention preferences (as on desktop): the server routes push by explicit mentions,
@@ -204,6 +208,7 @@ impl From<PushPreview> for PushNotification {
       is_urgent: preview.wake_up.is_urgent,
       is_call: preview.wake_up.kind == PushKind::Call,
       is_silent: preview.is_silent,
+      is_conversation_verified: preview.is_conversation_verified,
     }
   }
 }

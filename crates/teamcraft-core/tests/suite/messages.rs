@@ -165,6 +165,11 @@ async fn push_payloads_open_with_the_registered_key() {
   )
   .unwrap();
   assert!(alice.client.open_push(&foreign).is_err());
+
+  // Signed out: the registration and the key are gone, so a late wake-up can't be opened.
+  alice.client.unregister_push().await.unwrap();
+  assert!(server.push_registration(alice.client.device_id()).is_none());
+  assert!(alice.client.open_push(&sealed).is_err());
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

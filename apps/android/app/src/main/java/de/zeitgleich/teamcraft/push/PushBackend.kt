@@ -12,4 +12,7 @@ interface PushBackend {
 
   /** Starts registration; the token arrives later through [PushManager.onToken]. */
   fun register(context: Context)
+
+  /** Drops this device's registration with the push service (sign-out). */
+  fun unregister(context: Context)
 }

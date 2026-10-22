@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft
 
 import android.app.Application
 import android.content.Context
+import java.io.File
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -38,6 +39,8 @@ class TeamCraftApplication : Application() {
     super.onCreate()
     graph = AppGraph(this)
     graph.segmentPrefetch.schedule()
+    // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.
+    graph.scope.launch(Dispatchers.IO) { File(cacheDir, "outgoing").deleteRecursively() }
     ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(graph))
   }
 

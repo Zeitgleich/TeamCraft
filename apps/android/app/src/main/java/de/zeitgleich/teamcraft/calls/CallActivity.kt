@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -51,6 +52,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallPhase
@@ -72,6 +74,7 @@ class CallActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
+    if (prefs(this).isSecureScreen) window.setFlags(FLAG_SECURE, FLAG_SECURE)
     setShowWhenLocked(true)
     setTurnScreenOn(true)
     val microphone = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)

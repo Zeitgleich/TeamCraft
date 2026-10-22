@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import android.content.ClipboardManager
+import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,7 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -18,18 +20,26 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.sensitiveClip
 
 private const val MIN_PASSPHRASE_LENGTH = 12
 
@@ -70,8 +80,8 @@ fun EnrollScreen(
   onLink: () -> Unit,
   onOrgRecovery: () -> Unit,
 ) {
-  var passphrase by rememberSaveable { mutableStateOf("") }
-  var repeated by rememberSaveable { mutableStateOf("") }
+  var passphrase by remember { mutableStateOf("") }
+  var repeated by remember { mutableStateOf("") }
   val maybeProblem = when {
     passphrase.length < MIN_PASSPHRASE_LENGTH -> R.string.passphrase_too_short
     !hasExistingIdentity && passphrase != repeated -> R.string.passphrases_differ
@@ -88,6 +98,7 @@ fun EnrollScreen(
       onValueChange = { passphrase = it },
       label = { Text(stringResource(R.string.passphrase)) },
       visualTransformation = PasswordVisualTransformation(),
+      keyboardOptions = PASSPHRASE_KEYBOARD,
       singleLine = true,
       modifier = Modifier.fillMaxWidth(),
     )
@@ -97,6 +108,7 @@ fun EnrollScreen(
         onValueChange = { repeated = it },
         label = { Text(stringResource(R.string.passphrase_repeat)) },
         visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = PASSPHRASE_KEYBOARD,
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
       )
@@ -130,9 +142,9 @@ fun LinkThisDeviceScreen(code: String, maybeShortCode: String?, onCancel: () -> 
     // The code holds the handshake key: shown on this screen only, never sent anywhere else.
     QrCode(code, Modifier.fillMaxWidth(QR_CODE_WIDTH_FRACTION))
     Text(stringResource(R.string.link_qr_hint), style = MaterialTheme.typography.bodySmall)
-    SelectionContainer {
-      Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-    }
+    // Not selectable: a copy goes through the button, marked sensitive and cleared again.
+    Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+    CopySecretButton(code)
     if (maybeShortCode == null) {
       Text(stringResource(R.string.link_waiting))
       CircularProgressIndicator()
@@ -154,21 +166,21 @@ fun OrgRecoveryScreen(
   onFinish: (String) -> Unit,
   onCancel: () -> Unit,
 ) {
-  var passphrase by rememberSaveable { mutableStateOf("") }
-  var repeated by rememberSaveable { mutableStateOf("") }
+  var passphrase by remember { mutableStateOf("") }
+  var repeated by remember { mutableStateOf("") }
   val isValid = passphrase.length >= MIN_PASSPHRASE_LENGTH && passphrase == repeated
   Centered {
     Text(stringResource(R.string.org_recovery_title), style = MaterialTheme.typography.headlineSmall)
     Text(stringResource(R.string.org_recovery_hint), style = MaterialTheme.typography.bodyMedium)
-    SelectionContainer {
-      Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.titleMedium)
-    }
+    // Read aloud to an admin; not selectable, so it stays out of clipboard histories.
+    Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.titleMedium)
     Text(stringResource(R.string.org_recovery_new_passphrase), style = MaterialTheme.typography.bodyMedium)
     OutlinedTextField(
       value = passphrase,
       onValueChange = { passphrase = it },
       label = { Text(stringResource(R.string.passphrase)) },
       visualTransformation = PasswordVisualTransformation(),
+      keyboardOptions = PASSPHRASE_KEYBOARD,
       singleLine = true,
       modifier = Modifier.fillMaxWidth(),
     )
@@ -177,6 +189,7 @@ fun OrgRecoveryScreen(
       onValueChange = { repeated = it },
       label = { Text(stringResource(R.string.passphrase_repeat)) },
       visualTransformation = PasswordVisualTransformation(),
+      keyboardOptions = PASSPHRASE_KEYBOARD,
       singleLine = true,
       modifier = Modifier.fillMaxWidth(),
     )
@@ -202,3 +215,25 @@ private fun Centered(content: @Composable () -> Unit) {
     ) { content() }
   }
 }
+
+/** Passphrases: keyboards must not learn, suggest or sync them. */
+internal val PASSPHRASE_KEYBOARD = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)
+
+/** Copies a secret code, marked sensitive, and clears the clipboard again after a minute. */
+@Composable
+private fun CopySecretButton(secret: String) {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  TextButton(onClick = {
+    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return@TextButton
+    val clip = sensitiveClip(secret)
+    clipboard.setPrimaryClip(clip)
+    scope.launch {
+      delay(SECRET_CLIP_LIFETIME_MS)
+      val current = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+      if (current == secret && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) clipboard.clearPrimaryClip()
+    }
+  }) { Text(stringResource(R.string.link_copy_code)) }
+}
+
+private const val SECRET_CLIP_LIFETIME_MS = 60_000L

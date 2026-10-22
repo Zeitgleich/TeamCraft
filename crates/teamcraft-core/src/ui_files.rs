@@ -79,7 +79,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
             done_bytes: 0,
             total_bytes,
           },
-          Some(TransferState::Local { path }) => FileTransfer::Local { path },
+          // A download whose file is gone (wiped at sign-out, cleared by the system) is remote
+          // again.
+          Some(TransferState::Local { path }) if std::path::Path::new(&path).is_file() => {
+            FileTransfer::Local { path }
+          },
+          Some(TransferState::Local { .. }) => FileTransfer::Remote,
           Some(TransferState::Failed { reason }) => FileTransfer::Failed {
             reason: failure_view(reason),
           },

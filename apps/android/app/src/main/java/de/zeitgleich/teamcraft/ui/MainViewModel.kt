@@ -121,7 +121,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     state.value = AppState.NeedsEnrollment(hasExistingIdentity = true)
   }
 
+  /**
+   * Signs out and removes what the account left in the clear on this device: notifications,
+   * decrypted downloads and staged uploads, and the push registration. The sealed store stays.
+   */
   fun signOut() = launchBusy {
+    graph.calls.hangUp()
+    graph.push.unregister()
+    runCatching { graph.core.core().deletePlaintextFiles() }
+    graph.notifier.clearAll()
     graph.core.close()
     graph.auth.signOut()
     state.value = AppState.SignedOut()
@@ -174,14 +182,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       null
     }
 
-  /** Copies a picked document into the app's cache so the core can read and encrypt it. */
+  /** Copies a picked document into the account's staging folder so the core can read and encrypt it. */
   suspend fun importFile(uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
     val resolver = getApplication<Application>().contentResolver
     val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
       if (cursor.moveToFirst()) cursor.getString(0) else null
     } ?: "file"
     val type = resolver.getType(uri) ?: "application/octet-stream"
-    val directory = File(getApplication<Application>().cacheDir, "outgoing").apply { mkdirs() }
+    // The core deletes the copy once it is uploaded (or failed for good).
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
     runCatching {
       resolver.openInputStream(uri)?.use { input -> target.outputStream().use { input.copyTo(it) } }
@@ -210,6 +219,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     runCatching { graph.core.core().approveDeviceLink(code.trim()) }
 
   suspend fun confirmLink(): Result<Unit> = runCatching { graph.core.core().confirmDeviceLink() }
+
+  /** The user left the code comparison: nothing is sent, syncing resumes. */
+  fun cancelLinkApproval() {
+    graph.scope.launch { runCatching { graph.core.core().cancelDeviceLinkApproval() } }
+  }
 
   private suspend fun loadAccountState(): AppState =
     try {
