@@ -35,7 +35,9 @@ pub fn use_policy_draft() -> PolicyDraft {
     let current = stored.get();
     if let Some(previous) = previous {
       let untouched = draft.get_untracked() == previous.1;
-      let our_save_arrived = pending_after.get_untracked().is_some_and(|before| current.0 > before);
+      let our_save_arrived = pending_after
+        .get_untracked()
+        .is_some_and(|before| current.0 > before);
       if untouched || our_save_arrived {
         draft.set(current.1.clone());
       }

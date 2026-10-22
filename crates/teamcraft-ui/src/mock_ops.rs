@@ -4,17 +4,17 @@
 use std::collections::HashMap;
 
 use teamcraft_proto::{
-  ALL_PERMISSIONS, SchemeRoleResponse, AdminInstanceResponse, AdminSelfJoin as AdminSelfJoinWire,
-  AnnouncementResponse, ChannelModeration, HistoryPolicy, OverrideEffect, Permission, PermissionScheme,
+  ALL_PERMISSIONS, AdminInstanceResponse, AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse,
+  ChannelModeration, GuestPolicy, HistoryPolicy, OverrideEffect, Permission, PermissionScheme,
   PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role, SchemeChange,
-  SchemeOverride, SchemeRole, SetAnnouncementRequest, SfuStatus, StorageStatus, UnixMillis,
-  WorkspacePolicy,
+  SchemeOverride, SchemeRole, SchemeRoleResponse, SessionPolicy, SetAnnouncementRequest, SfuStatus,
+  StorageStatus, UnixMillis, WorkspacePolicy,
 };
 
 use super::{MockBackend, dm_first, id_from_raw};
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, GuestInfo, Retention,
-  SelfJoinOutcome,
+  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, GuestInfo,
+  Retention, SelfJoinOutcome,
 };
 use crate::backend::{AdminBackend, CallBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevice, MediaDevices, Participant};
@@ -158,7 +158,13 @@ impl AdminBackend for MockBackend {
   }
 
   fn admin_spaces(&self) -> Vec<AdminSpace> {
-    let mut names: Vec<String> = self.ops.borrow().channels.iter().map(|c| c.space_name.clone()).collect();
+    let mut names: Vec<String> = self
+      .ops
+      .borrow()
+      .channels
+      .iter()
+      .map(|c| c.space_name.clone())
+      .collect();
     names.sort();
     names.dedup();
     names
@@ -232,18 +238,37 @@ impl AdminBackend for MockBackend {
         list.push(change);
       }
     }
-    let target = if maybe_space.is_some() { "space scheme" } else { "instance scheme" };
-    ops.record(self.now, AuditAction::PermissionsChanged, target, "permissions changed");
+    let target = if maybe_space.is_some() {
+      "space scheme"
+    } else {
+      "instance scheme"
+    };
+    ops.record(
+      self.now,
+      AuditAction::PermissionsChanged,
+      target,
+      "permissions changed",
+    );
   }
 
   fn channel_moderation(&self, channel: ConversationId) -> ChannelModeration {
-    self.ops.borrow().moderation.get(&channel).cloned().unwrap_or_default()
+    self
+      .ops
+      .borrow()
+      .moderation
+      .get(&channel)
+      .cloned()
+      .unwrap_or_default()
   }
 
   fn set_channel_moderation(&self, channel: ConversationId, moderation: ChannelModeration) {
     let mut ops = self.ops.borrow_mut();
     ops.moderation.insert(channel, moderation);
-    let name = ops.channels.iter().find(|c| c.id == channel).map(|c| format!("#{}", c.name));
+    let name = ops
+      .channels
+      .iter()
+      .find(|c| c.id == channel)
+      .map(|c| format!("#{}", c.name));
     ops.record(
       self.now,
       AuditAction::ModerationChanged,
@@ -254,7 +279,15 @@ impl AdminBackend for MockBackend {
 
   fn channel_member_candidates(&self, channel: ConversationId) -> Vec<UserId> {
     let _ = channel;
-    self.ops.borrow().users.iter().filter(|u| u.is_active).take(4).map(|u| u.user.id).collect()
+    self
+      .ops
+      .borrow()
+      .users
+      .iter()
+      .filter(|u| u.is_active)
+      .take(4)
+      .map(|u| u.user.id)
+      .collect()
   }
 
   fn assign_channel_owner(&self, channel: ConversationId, user: UserId) {
@@ -288,7 +321,12 @@ impl AdminBackend for MockBackend {
   fn clear_announcement(&self) {
     let mut ops = self.ops.borrow_mut();
     ops.announcement = None;
-    ops.record(self.now, AuditAction::AnnouncementChanged, "announcement", "cleared");
+    ops.record(
+      self.now,
+      AuditAction::AnnouncementChanged,
+      "announcement",
+      "cleared",
+    );
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
@@ -472,13 +510,20 @@ impl SecurityBackend for MockBackend {
 }
 
 fn default_policy() -> WorkspacePolicy {
-  let mut policy = WorkspacePolicy::default();
-  policy.history_default = HistoryPolicy::FromJoin;
-  policy.session.requires_mfa = true;
-  policy.session.maybe_max_age_hours = Some(30 * 24);
-  policy.session.maybe_idle_timeout_minutes = Some(120);
-  policy.guests.allowed_email_domains = vec!["example.com".to_owned(), "partner.example".to_owned()];
-  policy
+  let defaults = WorkspacePolicy::default();
+  WorkspacePolicy {
+    history_default: HistoryPolicy::FromJoin,
+    session: SessionPolicy {
+      requires_mfa: true,
+      maybe_max_age_hours: Some(30 * 24),
+      maybe_idle_timeout_minutes: Some(120),
+    },
+    guests: GuestPolicy {
+      allowed_email_domains: vec!["example.com".to_owned(), "partner.example".to_owned()],
+      ..GuestPolicy::default()
+    },
+    ..defaults
+  }
 }
 
 fn push_status(provider: PushProvider, state: PushProviderState, device_count: u32) -> PushProviderStatus {

@@ -17,20 +17,22 @@ Account menu > **Administration** > Channels (read live from the admin API). Eve
 also available through the REST API (OpenAPI document at `/api/v1/openapi.json`, authenticate with
 a bearer token).
 
-| Task                                         | Console                  | API                                                           |
-|----------------------------------------------|--------------------------|---------------------------------------------------------------|
-| List all spaces, channels, members           | yes                      | `GET /admin/spaces`, `/admin/conversations`, `.../members`    |
-| Set retention per channel                    | yes                      | `PUT /conversations/{id}/retention`, `/spaces/{id}/retention` |
-| Join a private channel as admin              | yes (visible to members) | core action `AdminJoinChannel`                                |
-| Create space                                 | not yet                  | `POST /spaces` (admin or owner)                               |
-| Create channel, rename, topic, categories    | not yet                  | `POST /spaces/{id}/channels`, `PATCH /conversations/{id}`     |
-| Archive, unarchive, change visibility        | not yet                  | `PATCH /conversations/{id}` (`is_archived`, `visibility`)     |
-| Flag as integration channel                  | not yet                  | `PATCH /conversations/{id}` (`is_integration`)                |
-| Add or remove members, change roles          | not yet                  | `/spaces/{id}/members`, `/conversations/{id}/members`         |
-| Invite by e-mail (member or guest)           | not yet                  | `POST /spaces/{id}/invites`                                   |
-| Per-channel moderation (deny post, react...) | not yet                  | `PATCH /conversations/{id}` (`moderation`)                    |
+| Task                                         | Console                  | API                                                                    |
+|----------------------------------------------|--------------------------|------------------------------------------------------------------------|
+| List all spaces, channels, members           | yes                      | `GET /admin/spaces`, `/admin/conversations`, `.../members`             |
+| Set retention per channel                    | yes                      | `PUT /conversations/{id}/retention`, `/spaces/{id}/retention`          |
+| Join a private channel as admin              | yes (visible to members) | core action `AdminJoinChannel`                                         |
+| Create space                                 | not yet                  | `POST /spaces` (admin or owner)                                        |
+| Create channel, rename, topic, categories    | not yet                  | `POST /spaces/{id}/channels`, `PATCH /conversations/{id}`              |
+| Archive, unarchive, change visibility        | not yet                  | `PATCH /conversations/{id}` (`is_archived`, `visibility`)              |
+| Flag as integration channel                  | not yet                  | `PATCH /conversations/{id}` (`is_integration`)                         |
+| Add or remove members, change roles          | not yet                  | `/spaces/{id}/members`, `/conversations/{id}/members`                  |
+| Invite by e-mail (member or guest)           | not yet                  | `POST /spaces/{id}/invites`                                            |
+| Per-channel moderation (deny post, react...) | yes                      | `PUT /admin/conversations/{id}/moderation`                             |
+| Assign an owner to an orphaned channel       | yes                      | `POST /admin/conversations/{id}/owner`                                 |
+| Permission scheme per instance and space     | yes (Permissions)        | `PUT /admin/permission-scheme`, `/admin/spaces/{id}/permission-scheme` |
 
-Console items marked *not yet* are placeholders in the current UI: assigning owners, archiving,
+Console items marked *not yet* are placeholders in the current UI: archiving,
 creating users, inviting guests, organization recovery and CSV audit export.
 
 ## How changes work without membership
@@ -64,4 +66,4 @@ See [Security policy](security-policy.md#retention).
 ## Orphaned channels
 
 When the last owner of a private channel leaves, assign a new owner from the remaining members; you
-do not need to be a member. The console button is a placeholder, use the members API.
+do not need to be a member. In the console, select the channel and choose a member under *Assign owner*.

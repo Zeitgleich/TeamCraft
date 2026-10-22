@@ -219,7 +219,14 @@ mod tests {
       keys.push(format!("permission-{}", permission.as_str()));
       keys.push(format!("permission-{}-hint", permission.as_str()));
     }
-    for role in ["guest", "member", "space_admin", "channel_admin", "admin", "owner"] {
+    for role in [
+      "guest",
+      "member",
+      "space_admin",
+      "channel_admin",
+      "admin",
+      "owner",
+    ] {
       keys.push(format!("permissions-role-{role}"));
     }
     for group in ["content", "channel", "space", "instance"] {

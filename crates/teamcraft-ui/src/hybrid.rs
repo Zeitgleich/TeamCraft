@@ -8,8 +8,8 @@
 use std::rc::Rc;
 
 use teamcraft_proto::{
-  AdminInstanceResponse, AnnouncementResponse, ChannelModeration, PermissionSchemeResponse, Role, SchemeChange,
-  SetAnnouncementRequest, WorkspacePolicy,
+  AdminInstanceResponse, AnnouncementResponse, ChannelModeration, PermissionSchemeResponse, Role,
+  SchemeChange, SetAnnouncementRequest, WorkspacePolicy,
 };
 
 use teamcraft_client_api::actions::{

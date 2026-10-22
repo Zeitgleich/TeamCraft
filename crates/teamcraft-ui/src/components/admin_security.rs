@@ -71,16 +71,23 @@ pub fn SecuritySection() -> impl IntoView {
       .collect()
   });
   let dm_options = Signal::derive(move || {
-    [("default", "policy-server-default"), ("shared", "policy-dm-shared_spaces"), ("anyone", "policy-dm-anyone")]
-      .into_iter()
-      .map(|(value, key)| (value.to_owned(), i18n.t(key)))
-      .collect()
+    [
+      ("default", "policy-server-default"),
+      ("shared", "policy-dm-shared_spaces"),
+      ("anyone", "policy-dm-anyone"),
+    ]
+    .into_iter()
+    .map(|(value, key)| (value.to_owned(), i18n.t(key)))
+    .collect()
   });
   let history_options = Signal::derive(move || {
-    [("from_join", "admin-history-from_join"), ("full", "admin-history-full")]
-      .into_iter()
-      .map(|(value, key)| (value.to_owned(), i18n.t(key)))
-      .collect()
+    [
+      ("from_join", "admin-history-from_join"),
+      ("full", "admin-history-full"),
+    ]
+    .into_iter()
+    .map(|(value, key)| (value.to_owned(), i18n.t(key)))
+    .collect()
   });
   let approval_options = Signal::derive(move || {
     APPROVALS

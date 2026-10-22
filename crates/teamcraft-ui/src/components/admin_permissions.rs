@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::{
-  ALL_PERMISSIONS, OverrideEffect, Permission, PermissionScope, SchemeChange, SchemeRole,
-  SchemeRoleResponse, check_scheme_change,
+  ALL_PERMISSIONS, OverrideEffect, Permission, PermissionScope, SchemeChange, SchemeRole, SchemeRoleResponse,
+  check_scheme_change,
 };
 
 use crate::admin::AdminSpace;
@@ -250,9 +250,18 @@ mod tests {
 
   #[test]
   fn clicking_toggles_or_drops_the_change() {
-    let granted = CellState { is_granted: true, override_effect: None };
-    let denied = CellState { is_granted: false, override_effect: None };
-    let changed = CellState { is_granted: true, override_effect: Some(OverrideEffect::Grant) };
+    let granted = CellState {
+      is_granted: true,
+      override_effect: None,
+    };
+    let denied = CellState {
+      is_granted: false,
+      override_effect: None,
+    };
+    let changed = CellState {
+      is_granted: true,
+      override_effect: Some(OverrideEffect::Grant),
+    };
     assert_eq!(next_effect(&granted), OverrideEffect::Revoke);
     assert_eq!(next_effect(&denied), OverrideEffect::Grant);
     assert_eq!(next_effect(&changed), OverrideEffect::Inherit);

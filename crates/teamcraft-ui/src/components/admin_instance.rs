@@ -79,7 +79,6 @@ fn InstanceCards(instance: AdminInstanceResponse) -> impl IntoView {
             {instance
               .push
               .iter()
-              .cloned()
               .map(|entry| {
                 let provider_key = format!("instance-provider-{}", entry.provider.as_str());
                 let state_slug = push_state_slug(&entry.state);
@@ -185,14 +184,25 @@ mod tests {
   fn the_sfu_is_judged_by_its_last_contact() {
     assert_eq!(sfu_health(&sfu(false, None), 1_000_000), SfuHealth::NotConfigured);
     assert_eq!(sfu_health(&sfu(true, None), 1_000_000), SfuHealth::Unknown);
-    assert_eq!(sfu_health(&sfu(true, Some(990_000)), 1_000_000), SfuHealth::Healthy);
-    assert_eq!(sfu_health(&sfu(true, Some(100_000)), 1_000_000), SfuHealth::Silent);
+    assert_eq!(
+      sfu_health(&sfu(true, Some(990_000)), 1_000_000),
+      SfuHealth::Healthy
+    );
+    assert_eq!(
+      sfu_health(&sfu(true, Some(100_000)), 1_000_000),
+      SfuHealth::Silent
+    );
   }
 
   #[test]
   fn every_provider_has_a_wire_name() {
     use teamcraft_proto::PushProvider;
-    for provider in [PushProvider::WebPush, PushProvider::Fcm, PushProvider::UnifiedPush, PushProvider::Apns] {
+    for provider in [
+      PushProvider::WebPush,
+      PushProvider::Fcm,
+      PushProvider::UnifiedPush,
+      PushProvider::Apns,
+    ] {
       assert!(!provider.as_str().is_empty());
     }
   }

@@ -248,7 +248,8 @@ pub struct NotificationDefaults {
 impl Default for NotificationDefaults {
   fn default() -> Self {
     Self {
-      push_content: PushContentMode::Sender,
+      // Today's behaviour; admins who want less on lock screens lower it.
+      push_content: PushContentMode::Full,
       auto_follow_mentioned_threads: true,
       reply_view: ReplyView::Panel,
     }

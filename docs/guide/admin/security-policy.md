@@ -19,8 +19,22 @@ identity provider's roles. Policy versions are append-only; each save is a new v
 | Link previews         | `off` (default), `allow_list`, `block_list` + domains                     | Applied by sending and receiving clients                                     |
 | Compliance archive    | only `off`                                                                | Reserved                                                                     |
 
-Sign-in rules, guest domains and DM scope appear in the console but are shown disabled: they come
-from the identity provider and `[policy]`, not from the signed policy.
+The policy also holds the rules below. Where a value is set here it wins over the server file;
+where it is absent the server file (`[guests]`, `[policy]`, `[local_accounts]`) decides.
+
+| Console section         | Setting                                                    | Enforced by                           |
+|-------------------------|------------------------------------------------------------|---------------------------------------|
+| Security                | Require a second factor, session length, idle timeout      | Server, at every request              |
+| Security                | Shortest password of local accounts (8 to 128)             | Server                                |
+| Security                | Guest e-mail domains, guest DM scope, default guest expiry | Server                                |
+| People and notification | Display name format, full name, e-mail visibility          | Server, in user responses             |
+| People and notification | Statuses on or off, custom statuses, away timeout, presets | Server                                |
+| People and notification | Push content: generic, sender or full (default full)       | The receiving device                  |
+| People and notification | Follow threads people are mentioned in, reply view         | Clients, as the default for new users |
+
+The console also edits things outside the signed policy, through the admin API: the permission
+scheme (Permissions), per-channel moderation and owners (Spaces and channels), the announcement
+banner (Announcement) and, read-only, the media server, push providers and storage (Instance).
 
 ### admin_self_join
 

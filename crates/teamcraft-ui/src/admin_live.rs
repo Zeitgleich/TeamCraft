@@ -12,16 +12,19 @@ use std::time::Duration;
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
-  AdminConversationSummary, AdminDeviceResponse, AdminInstanceResponse, AdminSpaceSummary, AdminUserSummary, AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse,
-  ChannelModeration, ConversationVisibility, GetAnnouncementResponse, HistoryPolicy,
-  ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
-  ListAuditResponse, ListConversationMembersResponse, ListSpaceMembersResponse, RetentionSetting,
-  PermissionSchemeResponse, RetentionStatusResponse, Role, SchemeChange, SetAnnouncementRequest,
-  SetChannelModerationRequest, SetRetentionRequest, SpaceId, UpdatePermissionSchemeRequest, UserKind,
-  WorkspacePolicy, WorkspacePolicyResponse,
+  AdminConversationSummary, AdminDeviceResponse, AdminInstanceResponse, AdminSpaceSummary, AdminUserSummary,
+  AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, ChannelModeration,
+  ConversationVisibility, GetAnnouncementResponse, HistoryPolicy, ListAdminConversationsResponse,
+  ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse, ListAuditResponse,
+  ListConversationMembersResponse, ListSpaceMembersResponse, PermissionSchemeResponse, RetentionSetting,
+  RetentionStatusResponse, Role, SchemeChange, SetAnnouncementRequest, SetChannelModerationRequest,
+  SetRetentionRequest, SpaceId, UpdatePermissionSchemeRequest, UserKind, WorkspacePolicy,
+  WorkspacePolicyResponse,
 };
 
-use crate::admin::{AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, Retention};
+use crate::admin::{
+  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, Retention,
+};
 use crate::auth::{ApiMethod, Authenticator};
 use crate::model::{
   ConversationId, ConversationKind, CustomStatus, PresenceStatus, User, UserId, id_from_raw, raw_id,
@@ -187,9 +190,10 @@ impl AdminLive {
       format!("members:{channel}"),
       format!("/api/v1/admin/conversations/{channel}/members"),
       move |data, list: ListConversationMembersResponse| {
-        data
-          .members
-          .insert(channel, list.members.into_iter().map(|member| member.user.id).collect());
+        data.members.insert(
+          channel,
+          list.members.into_iter().map(|member| member.user.id).collect(),
+        );
       },
     );
     Vec::new()
@@ -207,7 +211,11 @@ impl AdminLive {
 
   pub fn set_announcement(&self, announcement: SetAnnouncementRequest) {
     if let Ok(body) = serde_json::to_string(&announcement) {
-      self.send(ApiMethod::Put, "/api/v1/admin/announcement".to_owned(), Some(body));
+      self.send(
+        ApiMethod::Put,
+        "/api/v1/admin/announcement".to_owned(),
+        Some(body),
+      );
     }
   }
 
@@ -470,7 +478,10 @@ impl AdminLive {
   async fn reload_cached(&self, errors: &mut Vec<String>) {
     let (scopes, channels): (Vec<Option<SpaceId>>, Vec<ConversationId>) = {
       let data = self.data.borrow();
-      (data.schemes.keys().copied().collect(), data.moderation.keys().copied().collect())
+      (
+        data.schemes.keys().copied().collect(),
+        data.moderation.keys().copied().collect(),
+      )
     };
     for scope in scopes {
       let path = match scope {
@@ -759,7 +770,10 @@ mod tests {
 
   #[test]
   fn the_audit_request_carries_the_filter() {
-    assert_eq!(audit_path(AuditFilter::default()), "/api/v1/admin/audit?limit=200");
+    assert_eq!(
+      audit_path(AuditFilter::default()),
+      "/api/v1/admin/audit?limit=200"
+    );
     let filter = AuditFilter {
       maybe_actor: Some(id_from_raw(7)),
       maybe_since: Some(1000),

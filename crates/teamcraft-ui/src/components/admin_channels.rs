@@ -316,7 +316,12 @@ fn OwnerAssign(channel: ConversationId) -> impl IntoView {
   }
 }
 
-fn assign_owner(state: crate::state::AppState, channel: ConversationId, maybe_user: Option<UserId>, done: RwSignal<bool>) {
+fn assign_owner(
+  state: crate::state::AppState,
+  channel: ConversationId,
+  maybe_user: Option<UserId>,
+  done: RwSignal<bool>,
+) {
   if let Some(user) = maybe_user {
     state.write(|backend| backend.assign_channel_owner(channel, user));
     done.set(true);
@@ -411,7 +416,12 @@ fn set_allowed(
   state.write(|backend| backend.set_channel_moderation(channel, next));
 }
 
-fn with_allowed(mut moderation: ChannelModeration, who: Who, permission: Permission, is_allowed: bool) -> ChannelModeration {
+fn with_allowed(
+  mut moderation: ChannelModeration,
+  who: Who,
+  permission: Permission,
+  is_allowed: bool,
+) -> ChannelModeration {
   let denied = match who {
     Who::Members => &mut moderation.member_denied,
     Who::Guests => &mut moderation.guest_denied,
@@ -430,7 +440,12 @@ mod tests {
 
   #[test]
   fn toggles_add_and_remove_denials_per_audience() {
-    let denied = with_allowed(ChannelModeration::default(), Who::Guests, Permission::CreatePost, false);
+    let denied = with_allowed(
+      ChannelModeration::default(),
+      Who::Guests,
+      Permission::CreatePost,
+      false,
+    );
     assert!(denied.guest_denied.contains(&Permission::CreatePost));
     assert!(denied.member_denied.is_empty());
     let allowed = with_allowed(denied, Who::Guests, Permission::CreatePost, true);

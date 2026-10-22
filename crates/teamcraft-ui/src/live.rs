@@ -15,8 +15,8 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
   AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
-  ListPresenceResponse, ListThreadsResponse, PresenceState,
-  ReadReceiptsResponse, ThreadSummary as ThreadWire, UnreadResponse, UserPresence,
+  ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
+  ThreadSummary as ThreadWire, UnreadResponse, UserPresence,
 };
 
 use crate::auth::{ApiMethod, Authenticator};
@@ -145,7 +145,12 @@ impl LiveServer {
 
   /// The instance announcement, unless this user dismissed it.
   pub fn announcement(&self) -> Option<AnnouncementResponse> {
-    self.state.borrow().announcement.clone().filter(|banner| !banner.is_dismissed)
+    self
+      .state
+      .borrow()
+      .announcement
+      .clone()
+      .filter(|banner| !banner.is_dismissed)
   }
 
   pub fn dismiss_announcement(&self, id: AnnouncementId) {
@@ -153,7 +158,11 @@ impl LiveServer {
       banner.is_dismissed = true;
     }
     self.changed();
-    self.send(ApiMethod::Post, format!("/api/v1/announcement/{id}/dismiss"), Some("{}".to_owned()));
+    self.send(
+      ApiMethod::Post,
+      format!("/api/v1/announcement/{id}/dismiss"),
+      Some("{}".to_owned()),
+    );
   }
 
   /// Unread and mention counts of the conversation, once the server has answered.

@@ -3,7 +3,7 @@ use teamcraft_proto::{DisplayNameFormat, PushContentMode, ReplyView, StatusPrese
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_policy::{
-  CheckRow, PolicyBlockerNote, PolicyFooter, PolicyDraft, SelectRow, use_policy_draft,
+  CheckRow, PolicyBlockerNote, PolicyDraft, PolicyFooter, SelectRow, use_policy_draft,
 };
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
