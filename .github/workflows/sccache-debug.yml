@@ -23,6 +23,8 @@ jobs:
           env | grep -i "ACTIONS_\|SCCACHE" | sed 's/TOKEN=.*/TOKEN=***/'
           which -a sccache; sccache --version; echo "$SCCACHE_PATH"
           cargo new --lib /tmp/hello -q
-          cd /tmp/hello && cargo build 2>&1 | tail -2
-          sccache --show-stats | head -12
+          cd /tmp/hello && cargo add serde_json -q && cargo build 2>&1 | tail -1
+          sccache --show-stats | grep -E "hits|misses|write|read"
+          cargo clean && cargo build 2>&1 | tail -1
+          sccache --show-stats | grep -E "hits|misses|write|read"
           cat /tmp/sccache-error.log | head -40
