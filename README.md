@@ -113,6 +113,12 @@ Push: messages wake devices with an encrypted payload sealed with the device's p
 (VAPID, RFC 8291) is implemented and needs `[push] vapid_private_key`; APNs, FCM and UnifiedPush are stubs behind
 the same trait. Routing honours mute, mentions, do-not-disturb and active devices.
 
+### Tests against the whole stack
+
+`scripts/e2e.sh` starts the dev stack, builds the server, SFU and bridge and runs the end-to-end suite
+(real clients, calls, meetings with mail, the web client in headless Chromium): see
+[tests/e2e/README.md](tests/e2e/README.md).
+
 ### 3. Checks before committing
 
 ```sh

@@ -1,0 +1,13 @@
+# Builds the web client (crates/teamcraft-ui) with trunk, for the browser e2e tests (tests/e2e/README.md).
+# Same Rust as dev/wasm-test/Dockerfile; trunk downloads the wasm-bindgen version of Cargo.lock itself.
+FROM docker.io/library/rust:1.99.1-trixie
+
+# The image's Rust is what rust-toolchain.toml's "stable" means today; use it instead of downloading.
+ENV RUSTUP_TOOLCHAIN=1.99.1
+RUN rustup target add wasm32-unknown-unknown
+
+ARG TRUNK_VERSION=0.22.0
+RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+  | tar -xz -C /usr/local/bin trunk
+
+WORKDIR /src/crates/teamcraft-ui

@@ -1,0 +1,45 @@
+name: E2E
+
+# The end-to-end suite starts the dev stack (Keycloak, Postgres, Garage, Mailpit), the real server,
+# SFU and bridge, and drives them with headless clients and Chromium (tests/e2e/README.md). It takes
+# a few minutes and needs containers, so it doesn't run on every push.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages (ALSA for the native call client, libclang and cmake for the codecs)
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libclang-dev cmake pkg-config libssl-dev
+      - name: Run the suite
+        # Starts the dev stack, builds server, SFU, bridge and the web client, runs the tests.
+        # The runner's Google Chrome drives the browser tests.
+        run: scripts/e2e.sh
+      - name: Failure screenshots and process logs
+        # The logs of the server, SFU and bridge of failed tests stay in the temp directory.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            target/e2e-artifacts
+            /tmp/teamcraft-e2e-*
+          if-no-files-found: ignore
+      - name: Dev stack logs
+        if: failure()
+        run: docker compose -f docker-compose.dev.yml logs --no-color --tail 200
