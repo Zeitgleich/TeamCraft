@@ -436,6 +436,16 @@ select.input {
   color: var(--text-muted);
 }
 
+.badge-org {
+  margin-inline-start: .35rem;
+  background: var(--accent-soft);
+  color: var(--text);
+  white-space: nowrap;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .badge-guest {
   background: var(--mention-bg);
   color: var(--mention-text);
@@ -3282,6 +3292,56 @@ select.input {
   border-radius: 10px;
   background: var(--accent);
   color: var(--on-accent);
+}
+
+.auth-logo-img {
+  display: block;
+  max-width: 180px;
+  max-height: 40px;
+  object-fit: contain;
+}
+
+/* A brand's dark logo replaces the light one in the dark theme. */
+.brand-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand-dark {
+    display: block;
+  }
+
+  :root:not([data-theme="light"]) .brand-light:has(+ .brand-dark) {
+    display: none;
+  }
+}
+
+:root[data-theme="dark"] .brand-dark {
+  display: block;
+}
+
+:root[data-theme="dark"] .brand-light:has(+ .brand-dark) {
+  display: none;
+}
+
+.auth-brand-title {
+  font-size: 18px;
+  margin: 0 0 4px;
+}
+
+.auth-brand-text {
+  margin: 0 0 12px;
+}
+
+.auth-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 8px;
+}
+
+.auth-links:empty {
+  display: none;
 }
 
 .auth-card h1 {

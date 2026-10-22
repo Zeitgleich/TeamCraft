@@ -10,6 +10,7 @@ use teamcraft_proto::GetMeResponse;
 use crate::auth::tauri;
 use crate::auth::{self, AppConfig};
 use crate::backend::Backend;
+use crate::brand::Brand;
 use crate::clock::now_ms;
 use crate::components::app::Shell;
 use crate::components::bundle_banner::BundleBanner;
@@ -52,16 +53,57 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
 #[component]
 pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
   let i18n = use_i18n();
+  let brand = Brand::use_current().0;
+  let language = move || i18n.locale().tag();
+  let name = move || brand.with(|view| view.display_name.clone());
+  let links = move || {
+    brand.with(|view| {
+      [
+        ("login-brand-support", view.links.maybe_support.clone()),
+        ("login-brand-privacy", view.links.maybe_privacy.clone()),
+        ("login-brand-terms", view.links.maybe_terms.clone()),
+        ("login-brand-imprint", view.links.maybe_imprint.clone()),
+      ]
+      .into_iter()
+      .filter_map(|(key, link)| link.map(|link| (key, link)))
+      .collect::<Vec<_>>()
+    })
+  };
   view! {
     <main class="auth-page">
       <BundleBanner />
       <section class="auth-card">
         <div class="auth-brand" translate="no">
-          <span class="auth-logo" aria-hidden="true">"T"</span>
-          <span>"TeamCraft"</span>
+          {move || match brand.with(|view| view.asset("logo", false).map(str::to_owned)) {
+            Some(light) => {
+              let dark = brand.with(|view| view.asset("logo", true).map(str::to_owned)).filter(|dark| *dark != light);
+              view! {
+                <img class="auth-logo-img brand-light" src=light alt=name() />
+                {dark.map(|dark| view! { <img class="auth-logo-img brand-dark" src=dark alt=name() /> })}
+              }
+                .into_any()
+            },
+            None => view! { <span class="auth-logo" aria-hidden="true">{move || name().chars().next().map(String::from).unwrap_or_default()}</span> }.into_any(),
+          }}
+          <span>{name}</span>
         </div>
+        {move || {
+          brand
+            .with(|view| view.login_title(language()).map(str::to_owned))
+            .map(|title| view! { <h2 class="auth-brand-title">{title}</h2> })
+        }}
+        {move || {
+          brand
+            .with(|view| view.login_text(language()).map(str::to_owned))
+            .map(|text| view! { <p class="auth-brand-text muted-text">{text}</p> })
+        }}
         {children()}
         <p class="auth-foot muted-text small">{move || i18n.t("login-footer")}</p>
+        <nav class="auth-links small" aria-label=move || i18n.t("login-brand-links")>
+          <For each=links key=|(key, link)| (*key, link.clone()) let:item>
+            <a href=item.1.clone() target="_blank" rel="noopener noreferrer">{move || i18n.t(item.0)}</a>
+          </For>
+        </nav>
       </section>
     </main>
   }

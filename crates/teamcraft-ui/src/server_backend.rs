@@ -158,6 +158,7 @@ pub fn build_snapshot(
     avatar_hue: hue_from_seed(&summary.id.to_string()),
     is_guest: summary.kind == UserKind::Guest,
     is_bot: false,
+    maybe_organization: summary.maybe_organization.clone(),
   };
 
   let me_user = User {
@@ -170,6 +171,7 @@ pub fn build_snapshot(
     avatar_hue: hue_from_seed(&me.id.to_string()),
     is_guest: me.role == Role::Guest,
     is_bot: false,
+    maybe_organization: None,
   };
 
   let mut users: Vec<User> = vec![me_user.clone()];

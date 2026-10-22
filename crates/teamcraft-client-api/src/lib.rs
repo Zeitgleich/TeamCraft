@@ -9,6 +9,7 @@
 pub mod actions;
 pub mod admin;
 pub mod backend;
+pub mod brand;
 pub mod calls;
 pub mod model;
 pub mod remote;

@@ -9,6 +9,7 @@ pub use teamcraft_client_api::{admin, backend, model, search, security};
 
 pub mod admin_live;
 pub mod auth;
+pub mod brand;
 pub mod bundle;
 pub mod calls;
 pub mod clock;

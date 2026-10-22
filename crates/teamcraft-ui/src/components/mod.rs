@@ -30,6 +30,7 @@ pub mod message_actions;
 pub mod message_list;
 pub mod message_row;
 pub mod modal;
+pub mod org_badge;
 pub mod profile_views;
 pub mod quick_switcher;
 pub mod rail;

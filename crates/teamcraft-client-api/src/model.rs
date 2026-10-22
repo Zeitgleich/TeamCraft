@@ -110,6 +110,9 @@ pub struct User {
   pub avatar_hue: u16,
   pub is_guest: bool,
   pub is_bot: bool,
+  /// The organization from the identity provider, shown as a badge (no permission depends on it).
+  #[serde(default)]
+  pub maybe_organization: Option<String>,
 }
 
 impl User {

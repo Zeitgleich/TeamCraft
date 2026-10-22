@@ -57,6 +57,12 @@ pub async fn api_get(path: String, service: State<'_, Arc<Service>>) -> Result<A
   Ok(service.api_get(&path).await?)
 }
 
+/// A request without credentials (the brand of the server, shown before sign-in).
+#[tauri::command]
+pub async fn public_get(path: String, service: State<'_, Arc<Service>>) -> Result<ApiResponse, CommandError> {
+  Ok(service.public_get(&path).await?)
+}
+
 #[tauri::command]
 pub async fn api_request(
   method: ApiMethod,

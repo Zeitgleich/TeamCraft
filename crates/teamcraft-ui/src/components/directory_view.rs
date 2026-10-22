@@ -56,10 +56,27 @@ fn PeopleList() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let filter = RwSignal::new(String::new());
+  // Empty: everybody; otherwise only people of this organization.
+  let organization = RwSignal::new(String::new());
+  let organizations = Memo::new(move |_| {
+    let mut names: Vec<String> = state
+      .read(|backend| backend.users())
+      .into_iter()
+      .filter(|user| !user.is_bot)
+      .filter_map(|user| user.maybe_organization)
+      .collect();
+    names.sort();
+    names.dedup();
+    names
+  });
   let people = Memo::new(move |_| {
     let needle = filter.get().trim().to_lowercase();
+    let selected = organization.get();
     let mut all: Vec<User> = state.read(|backend| backend.users());
     all.retain(|user| !user.is_bot);
+    if !selected.is_empty() {
+      all.retain(|user| user.maybe_organization.as_deref() == Some(selected.as_str()));
+    }
     all.sort_by_key(|user| user.display_name.to_lowercase());
     let hub = use_profiles();
     all
@@ -88,6 +105,15 @@ fn PeopleList() -> impl IntoView {
   view! {
     <label class="visually-hidden" for="directory-filter">{move || i18n.t("directory-filter")}</label>
     <input id="directory-filter" class="input" placeholder=move || i18n.t("directory-filter") prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
+    <Show when=move || !organizations.get().is_empty() fallback=|| ()>
+      <label class="visually-hidden" for="directory-organization">{move || i18n.t("directory-organization")}</label>
+      <select id="directory-organization" class="input" prop:value=move || organization.get() on:change=move |ev| organization.set(event_target_value(&ev))>
+        <option value="">{move || i18n.t("directory-all-organizations")}</option>
+        <For each=move || organizations.get() key=|name| name.clone() let:name>
+          <option value=name.clone() translate="no">{name.clone()}</option>
+        </For>
+      </select>
+    </Show>
     <ul class="person-list">
       <For each=move || people.get() key=|user| (user.id, user.presence) let:user>
         <PersonRow user=user />
@@ -124,6 +150,7 @@ fn PersonRow(user: User) -> impl IntoView {
         </span>
         <crate::components::profile_views::InMeetingBadge user=id />
         {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+        <crate::components::org_badge::OrgBadge organization=user.maybe_organization.clone() />
       </button>
       {(!is_me).then(|| view! { <button class="btn btn-small" on:click=move |_| state.open_direct(id)>{move || i18n.t("profile-message")}</button> })}
     </li>

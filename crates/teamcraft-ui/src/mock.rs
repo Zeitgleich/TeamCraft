@@ -678,6 +678,12 @@ fn demo_users() -> Vec<User> {
       avatar_hue,
       is_guest: id == 9,
       is_bot: false,
+      // Two affiliated companies share the demo workspace; the guest belongs to neither.
+      maybe_organization: match id {
+        1..=4 => Some("Brand A".to_owned()),
+        5..=8 => Some("Brand B".to_owned()),
+        _ => None,
+      },
     })
     .collect();
   users[3].maybe_custom_status = Some(CustomStatus {
@@ -699,6 +705,7 @@ fn demo_users() -> Vec<User> {
     avatar_hue: 260,
     is_guest: false,
     is_bot: true,
+    maybe_organization: None,
   });
   users
 }
