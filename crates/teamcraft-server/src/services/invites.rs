@@ -9,7 +9,7 @@ use tracing::warn;
 
 use super::access::load_space;
 use super::audit::{self, Target as AuditTarget};
-use super::convert::{invite_response, offset_date_time};
+use super::convert::{invite_response, offset_date_time, presented_name};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -121,7 +121,10 @@ async fn send_invite_mail(
   };
   let fill = |template: &str| {
     template
-      .replace("{inviter}", &caller.user.display_name)
+      .replace(
+        "{inviter}",
+        &presented_name(&state.policy.get().directory, &caller.user),
+      )
       .replace("{space}", space_name)
       .replace("{role}", invite.role.as_str())
       .replace("{url}", &state.settings.mail.public_base_url)

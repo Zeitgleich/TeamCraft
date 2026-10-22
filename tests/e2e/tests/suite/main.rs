@@ -10,6 +10,7 @@ mod bridge;
 mod calls;
 mod conversion;
 mod devices;
+mod display_names;
 mod guest_domains;
 mod guests;
 mod meetings;

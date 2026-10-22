@@ -177,7 +177,10 @@ Session length, idle timeout, required second factor, display name format and th
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
 timeout) the thread options (threaded view on/off, auto-follow default) and the allowed guest e-mail domains
 (`guests.allowed_email_domains`: invitations, meeting invitees and guest sign-in; added to the server's
-`[guests] allowed_email_domains`) are part of the signed workspace policy; the server enforces them. A permission scheme change
+`[guests] allowed_email_domains`) are part of the signed workspace policy; the server enforces them. The display name format and the full name/e-mail privacy apply
+to every response that names a person (directory, member lists, `/me`, meeting attendees, gateway events)
+and to the names in e-mail the server sends (iCalendar organizer and attendees, `{inviter}`); only the
+admin console's user list shows the identity provider's name, because admins must recognise accounts. A permission scheme change
 cannot touch the owner role or `sign_workspace`, cannot give guests permissions beyond channel content
 and direct messages, and cannot change instance-wide permissions inside a space.
 
