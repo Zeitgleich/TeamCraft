@@ -741,6 +741,8 @@ async fn resolve_invitees(
       },
       MeetingInvitee::External { email, maybe_name } => {
         let email = validated_email(email)?;
+        // External invitees get a guest session: the guest rules apply to them as well.
+        super::invites::check_guest_domain(state, &email)?;
         let maybe_name = maybe_name
           .as_deref()
           .map(|name| validate_name(name, "invitee name", MAX_TITLE_CHARS))

@@ -224,6 +224,12 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
       "link_previews.domains must be host names".into(),
     ));
   }
+  let domains = &policy.guests.allowed_email_domains;
+  if domains.len() > MAX_LINK_PREVIEW_DOMAINS || domains.iter().any(|domain| !is_plausible_domain(domain)) {
+    return Err(ApiError::InvalidRequest(
+      "guests.allowed_email_domains must be domain names".into(),
+    ));
+  }
   check_retention(&policy.retention)?;
   Ok(document)
 }

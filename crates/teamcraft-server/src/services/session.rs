@@ -4,9 +4,10 @@
 use std::sync::{Arc, RwLock};
 
 use teamcraft_db::{LOCAL_ISSUER, SessionLimits, SessionState};
-use teamcraft_proto::WorkspacePolicy;
+use teamcraft_proto::{Role, WorkspacePolicy};
 use time::{Duration, OffsetDateTime};
 
+use super::invites::is_domain_allowed;
 use super::workspace::current_policy;
 use crate::auth::{AuthError, TokenIdentity};
 use crate::error::ApiError;
@@ -97,7 +98,11 @@ pub fn limits_for(state: &AppState) -> SessionLimits {
 /// limits and, if the policy requires it, signed in with a second factor. Local accounts check
 /// their sessions when the token is validated; bots and meeting guests are exempt.
 pub async fn enforce(state: &AppState, identity: &TokenIdentity) -> Result<(), ApiError> {
-  if identity.is_exempt_from_session_policy || identity.issuer == LOCAL_ISSUER {
+  if identity.is_exempt_from_session_policy {
+    return Ok(());
+  }
+  check_guest_sign_in(state, identity)?;
+  if identity.issuer == LOCAL_ISSUER {
     return Ok(());
   }
   let policy = state.policy.get();
@@ -127,6 +132,34 @@ pub async fn enforce(state: &AppState, identity: &TokenIdentity) -> Result<(), A
     SessionState::Expired | SessionState::Unknown => {
       Err(AuthError::InvalidToken("the session timed out; sign in again".into()).into())
     },
+  }
+}
+
+/// Guests may only sign in with an e-mail address of an allowed domain, also when the list changed
+/// after they were invited. Without an address there is nothing to check, so no sign-in while a
+/// restriction is in force.
+fn check_guest_sign_in(state: &AppState, identity: &TokenIdentity) -> Result<(), ApiError> {
+  if identity.role != Role::Guest {
+    return Ok(());
+  }
+  let policy = state.policy.get();
+  let lists = [
+    &state.settings.guests.allowed_email_domains,
+    &policy.guests.allowed_email_domains,
+  ];
+  let is_allowed = lists.into_iter().all(|allowed| {
+    allowed.is_empty()
+      || identity
+        .maybe_email
+        .as_deref()
+        .is_some_and(|email| is_domain_allowed(allowed, email))
+  });
+  if is_allowed {
+    Ok(())
+  } else {
+    Err(ApiError::Forbidden(
+      "guests from this e-mail domain are not allowed".into(),
+    ))
   }
 }
 
