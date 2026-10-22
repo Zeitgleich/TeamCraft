@@ -4417,7 +4417,7 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "zune-core 0.5.3",
- "zune-jpeg 0.5.15",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -10166,7 +10166,7 @@ dependencies = [
  "wgpu",
  "windows-capture",
  "wtransport",
- "zune-jpeg 0.4.21",
+ "zune-jpeg",
  "zune-png",
 ]
 
@@ -13232,15 +13232,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73ab332fe2f6680068f3582b16a24f90ad7096d5d39b974d1c0aff0125116f02"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "zune-jpeg"
-version = "0.4.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
-dependencies = [
- "zune-core 0.4.12",
 ]
 
 [[package]]
