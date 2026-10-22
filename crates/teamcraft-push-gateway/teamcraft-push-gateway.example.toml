@@ -1,0 +1,54 @@
+# Configuration of teamcraft-push-gateway (docs/push-gateway.md). Pass the file with `--config <file>`
+# or TEAMCRAFT_PUSH_GATEWAY_CONFIG; every option can be overridden by TEAMCRAFT_PUSH_GATEWAY__SECTION__KEY
+# (e.g. TEAMCRAFT_PUSH_GATEWAY__APNS__KEY for the contents of the .p8 key). Values shown are the defaults.
+
+[server]
+# The public API. Dual stack: [::] accepts IPv4 and IPv6.
+bind = "[::]:8090"
+# /healthz and /metrics. Keep this off the internet (loopback by default; the container image binds
+# all addresses and publishes no port for it).
+health_bind = "[::1]:8091"
+# Behind a reverse proxy: the header that carries the client address, set by the proxy you trust
+# (the last entry counts). Only the limits on registrations use it.
+# client_ip_header = "x-forwarded-for"
+provider_timeout_secs = 10
+
+[database]
+# SQLite file (servers, block list, daily counters). Its directory must be writable and backed up if
+# you want the block list and quotas to survive a lost disk.
+path = "teamcraft-push-gateway.db"
+# A block takes effect within this many seconds.
+server_cache_secs = 10
+flush_interval_secs = 10
+
+[registration]
+# "open": any server can register its key. "closed": only keys added with
+# `teamcraft-push-gateway servers allow <public-key>`.
+mode = "open"
+per_address_per_hour = 10
+global_per_hour = 600
+max_servers = 100000
+
+# Defaults for every server; `servers limits <id> ...` overrides them per server.
+[limits]
+pushes_per_second = 50
+burst = 200
+pushes_per_day = 200000
+pushes_per_token_per_minute = 30
+max_body_bytes = 16384
+max_sealed_bytes = 2048
+max_ttl_secs = 604800
+timestamp_window_secs = 300
+
+# The credentials of the published iOS app.
+# [apns]
+# key_path = "/run/secrets/apns_key.p8"
+# key_id = "ABC123DEFG"
+# team_id = "DEF456GHIJ"
+# bundle_id = "com.example.teamcraft"   # calls go to "<bundle_id>.voip"
+# use_sandbox = false
+# alert_text = "New message"            # generic; the app's notification extension replaces it
+
+# The credentials of the published Android app (Firebase project).
+# [fcm]
+# service_account_path = "/run/secrets/fcm_service_account.json"

@@ -24,6 +24,7 @@ teamcraft-crypto.workspace = true
 teamcraft-proto.workspace = true
 teamcraft-db.workspace = true
 teamcraft-ops.workspace = true
+teamcraft-push-providers.workspace = true
 anyhow.workspace = true
 aws-lc-rs.workspace = true
 time.workspace = true
@@ -70,3 +71,5 @@ teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
 teamcraft-crypto.workspace = true
 rand_core.workspace = true
 wtransport = "0.7.2"
+# End-to-end test of the gateway client against the real gateway (tests/suite/push_gateway.rs).
+teamcraft-push-gateway = { path = "../teamcraft-push-gateway" }

@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::PushKind;
 use tracing::warn;
 
-use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
-use crate::auth::BoxFuture;
+use crate::{BoxFuture, ProviderError, PushMessage, TokenSender, Urgency};
 
 pub const APNS_PRODUCTION_URL: &str = "https://api.push.apple.com";
 pub const APNS_SANDBOX_URL: &str = "https://api.sandbox.push.apple.com";
@@ -95,9 +94,9 @@ struct ApnsError {
 }
 
 impl ApnsSender {
-  pub fn new(settings: ApnsSettings) -> Result<Self, PushError> {
+  pub fn new(settings: ApnsSettings) -> Result<Self, ProviderError> {
     let key = EncodingKey::from_ec_pem(settings.key_pem.expose_secret().as_bytes())
-      .map_err(|_| PushError::Invalid("the APNs key is not a PKCS#8 EC private key (.p8)".into()))?;
+      .map_err(|_| ProviderError::Invalid("the APNs key is not a PKCS#8 EC private key (.p8)".into()))?;
     let mut builder = reqwest::Client::builder()
       .timeout(settings.timeout)
       .redirect(reqwest::redirect::Policy::none());
@@ -106,7 +105,7 @@ impl ApnsSender {
     }
     let http = builder
       .build()
-      .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+      .map_err(|e| ProviderError::Unavailable(e.without_url().to_string()))?;
     Ok(Self {
       key,
       key_id: settings.key_id,
@@ -120,7 +119,7 @@ impl ApnsSender {
   }
 
   /// The provider token, signed again when the cached one is old.
-  fn provider_token(&self, now: u64) -> Result<SecretString, PushError> {
+  fn provider_token(&self, now: u64) -> Result<SecretString, ProviderError> {
     let mut cached = self.cached_token.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(token) = cached.as_ref()
       && now.saturating_sub(token.issued_at) < TOKEN_LIFETIME_SECS
@@ -134,7 +133,7 @@ impl ApnsSender {
       iat: now,
     };
     let jwt: SecretString = jsonwebtoken::encode(&header, &claims, &self.key)
-      .map_err(|_| PushError::Invalid("signing the APNs provider token failed".into()))?
+      .map_err(|_| ProviderError::Invalid("signing the APNs provider token failed".into()))?
       .into();
     *cached = Some(CachedToken {
       jwt: jwt.clone(),
@@ -149,22 +148,22 @@ impl ApnsSender {
 }
 
 /// `bearer <token>`, marked sensitive so it never shows in debug output.
-fn authorization_header(token: &SecretString) -> Result<reqwest::header::HeaderValue, PushError> {
+fn authorization_header(token: &SecretString) -> Result<reqwest::header::HeaderValue, ProviderError> {
   let mut value = reqwest::header::HeaderValue::try_from(format!("bearer {}", token.expose_secret()))
-    .map_err(|_| PushError::Invalid("the APNs provider token is not a header value".into()))?;
+    .map_err(|_| ProviderError::Invalid("the APNs provider token is not a header value".into()))?;
   value.set_sensitive(true);
   Ok(value)
 }
 
-impl PushSender for ApnsSender {
+impl TokenSender for ApnsSender {
   fn send<'a>(
     &'a self,
-    target: &'a PushTarget,
+    token: &'a str,
     message: &'a PushMessage,
-  ) -> BoxFuture<'a, Result<(), PushError>> {
+  ) -> BoxFuture<'a, Result<(), ProviderError>> {
     Box::pin(async move {
-      if !is_device_token(&target.token) {
-        return Err(PushError::Invalid("not an APNs device token".into()));
+      if !is_device_token(token) {
+        return Err(ProviderError::Invalid("not an APNs device token".into()));
       }
       let now = jsonwebtoken::get_current_timestamp();
       let is_call = message.kind == PushKind::Call;
@@ -198,11 +197,11 @@ impl PushSender for ApnsSender {
           }),
         )
       };
-      let body = body.map_err(|_| PushError::Invalid("encoding the APNs payload failed".into()))?;
+      let body = body.map_err(|_| ProviderError::Invalid("encoding the APNs payload failed".into()))?;
 
       let response = self
         .http
-        .post(format!("{}/3/device/{}", self.base_url, target.token))
+        .post(format!("{}/3/device/{}", self.base_url, token))
         .header("authorization", authorization_header(&self.provider_token(now)?)?)
         .header("apns-topic", topic)
         .header("apns-push-type", push_type)
@@ -212,7 +211,7 @@ impl PushSender for ApnsSender {
         .body(body)
         .send()
         .await
-        .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+        .map_err(|e| ProviderError::Unavailable(e.without_url().to_string()))?;
       let status = response.status();
       if status.is_success() {
         return Ok(());
@@ -229,19 +228,23 @@ impl PushSender for ApnsSender {
 }
 
 /// Maps an APNs error response (<https://developer.apple.com/documentation/usernotifications>).
-fn classify(status: StatusCode, reason: &str, on_bad_credentials: impl FnOnce()) -> Result<(), PushError> {
+fn classify(
+  status: StatusCode,
+  reason: &str,
+  on_bad_credentials: impl FnOnce(),
+) -> Result<(), ProviderError> {
   match (status.as_u16(), reason) {
     // The token is dead: unregistered, or made for another app or environment.
-    (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => Err(PushError::Gone),
+    (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => Err(ProviderError::Gone),
     (403, "ExpiredProviderToken" | "InvalidProviderToken") => {
       on_bad_credentials();
       warn!(%reason, "APNs rejected the provider token");
-      Err(PushError::Rejected(403))
+      Err(ProviderError::Rejected(403))
     },
-    (429, _) | (500..=599, _) => Err(PushError::Unavailable(format!("status {status}"))),
+    (429, _) | (500..=599, _) => Err(ProviderError::Unavailable(format!("status {status}"))),
     (code, _) => {
       warn!(status = code, %reason, "APNs rejected the push");
-      Err(PushError::Rejected(code))
+      Err(ProviderError::Rejected(code))
     },
   }
 }
@@ -267,17 +270,20 @@ mod tests {
   fn error_responses_are_classified() {
     let class =
       |status: u16, reason: &str| classify(StatusCode::from_u16(status).unwrap(), reason, || {}).unwrap_err();
-    assert!(matches!(class(410, "Unregistered"), PushError::Gone));
-    assert!(matches!(class(400, "BadDeviceToken"), PushError::Gone));
-    assert!(matches!(class(400, "BadTopic"), PushError::Rejected(400)));
+    assert!(matches!(class(410, "Unregistered"), ProviderError::Gone));
+    assert!(matches!(class(400, "BadDeviceToken"), ProviderError::Gone));
+    assert!(matches!(class(400, "BadTopic"), ProviderError::Rejected(400)));
     assert!(matches!(
       class(403, "InvalidProviderToken"),
-      PushError::Rejected(403)
+      ProviderError::Rejected(403)
     ));
-    assert!(matches!(class(429, "TooManyRequests"), PushError::Unavailable(_)));
+    assert!(matches!(
+      class(429, "TooManyRequests"),
+      ProviderError::Unavailable(_)
+    ));
     assert!(matches!(
       class(503, "ServiceUnavailable"),
-      PushError::Unavailable(_)
+      ProviderError::Unavailable(_)
     ));
   }
 }

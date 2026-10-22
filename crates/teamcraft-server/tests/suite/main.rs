@@ -47,6 +47,7 @@ mod perf_history;
 mod presence_derived;
 mod profiles;
 mod push;
+mod push_gateway;
 mod push_providers;
 mod push_sending;
 mod read_receipts;

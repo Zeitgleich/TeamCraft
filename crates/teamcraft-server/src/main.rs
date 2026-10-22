@@ -26,7 +26,8 @@ use teamcraft_server::meetings::{MeetingBackends, MeetingService};
 use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{
   APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FcmSender, FcmSettings,
-  PushDispatcher, ServiceAccount, UnifiedPushSender, Vapid, WebPushSender,
+  GatewayClient, GatewaySettings, PushDispatcher, ServiceAccount, UnifiedPushSender, Vapid, WebPushSender,
+  load_or_create_gateway_key, parse_gateway_key,
 };
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
@@ -467,10 +468,13 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
       .with_sender(&PushProvider::WebPush, Arc::new(sender))
       .with_web_public_key(public_key);
   }
+  let maybe_gateway = build_gateway(config)?;
   if let Some(settings) = apns_settings(config)? {
     let sender = ApnsSender::new(settings).context("push.apns")?;
-    info!("APNs enabled");
-    dispatcher = dispatcher.with_sender(&PushProvider::Apns, Arc::new(sender));
+    info!("APNs enabled (direct)");
+    dispatcher = dispatcher.with_token_sender(&PushProvider::Apns, sender);
+  } else if let Some(gateway) = &maybe_gateway {
+    dispatcher = dispatcher.with_token_sender(&PushProvider::Apns, gateway.sender(PushProvider::Apns));
   }
   if let Some(json) = secret_from_config(
     push.fcm.maybe_service_account.as_ref(),
@@ -495,8 +499,10 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
       timeout,
     })
     .context("push.fcm.service_account")?;
-    info!("FCM enabled");
-    dispatcher = dispatcher.with_sender(&PushProvider::Fcm, Arc::new(sender));
+    info!("FCM enabled (direct)");
+    dispatcher = dispatcher.with_token_sender(&PushProvider::Fcm, sender);
+  } else if let Some(gateway) = &maybe_gateway {
+    dispatcher = dispatcher.with_token_sender(&PushProvider::Fcm, gateway.sender(PushProvider::Fcm));
   }
   if push.unified_push.is_enabled {
     // Distributors may check a VAPID token; the same key as Web Push signs it when there is one.
@@ -512,6 +518,42 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
     dispatcher = dispatcher.with_sender(&PushProvider::UnifiedPush, Arc::new(sender));
   }
   Ok(dispatcher)
+}
+
+/// The push gateway client, if `push.gateway.url` is set. The first push registers the server key
+/// anyway; registering at startup surfaces a wrong URL or a refusing gateway in the log early.
+fn build_gateway(config: &Config) -> anyhow::Result<Option<Arc<GatewayClient>>> {
+  let push = &config.push;
+  let gateway = &push.gateway;
+  let Some(url) = gateway.maybe_url.clone().filter(|url| !url.is_empty()) else {
+    anyhow::ensure!(
+      gateway.maybe_key.is_none() && gateway.maybe_key_path.is_none(),
+      "push.gateway: a key is set but no url"
+    );
+    return Ok(None);
+  };
+  require_tls(&url, "push.gateway.url", push.allow_private_endpoints)?;
+  let key = match (&gateway.maybe_key, &gateway.maybe_key_path) {
+    (Some(key), _) => parse_gateway_key(key.expose_secret()).context("push.gateway.key")?,
+    (None, Some(path)) => {
+      load_or_create_gateway_key(path).with_context(|| format!("push.gateway.key_path {}", path.display()))?
+    },
+    (None, None) => anyhow::bail!("push.gateway.key or key_path is required with push.gateway.url"),
+  };
+  let client = GatewayClient::new(GatewaySettings {
+    url,
+    key,
+    timeout: Duration::from_secs(push.request_timeout_secs),
+  })
+  .context("push.gateway")?;
+  info!(server_id = %client.server_id(), "push gateway enabled");
+  let registering = client.clone();
+  tokio::spawn(async move {
+    if let Err(error) = registering.register().await {
+      warn!(%error, "registering at the push gateway failed; the first push tries again");
+    }
+  });
+  Ok(Some(client))
 }
 
 /// APNs is on when the key and its three identifiers are set; a partial setup is an error, not a

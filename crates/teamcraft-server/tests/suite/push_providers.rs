@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use teamcraft_proto::{ConversationId, DeviceId, Id, PushKind, PushProvider, PushWakeUp, Snowflake, UserId};
 use teamcraft_server::push::crypto::open_wakeup;
 use teamcraft_server::push::{
-  ApnsSender, ApnsSettings, FcmSender, FcmSettings, PushDispatcher, PushError, PushTarget, ServiceAccount,
-  UnifiedPushSender, Urgency,
+  ApnsSender, ApnsSettings, FcmSender, FcmSettings, ProviderError, PushDispatcher, PushError, PushTarget,
+  ServiceAccount, UnifiedPushSender, Urgency,
 };
 
 const PUSH_KEY: [u8; 32] = [7; 32];
@@ -192,7 +192,7 @@ mod apns {
       alert_text: "x".into(),
       timeout: Duration::from_secs(1),
     });
-    assert!(matches!(result, Err(PushError::Invalid(_))));
+    assert!(matches!(result, Err(ProviderError::Invalid(_))));
   }
 
   async fn apns_dispatcher() -> (Fake, PushDispatcher) {
@@ -209,7 +209,7 @@ mod apns {
     .unwrap();
     (
       fake,
-      PushDispatcher::new(4).with_sender(&PushProvider::Apns, Arc::new(sender)),
+      PushDispatcher::new(4).with_token_sender(&PushProvider::Apns, sender),
     )
   }
 }
@@ -360,7 +360,7 @@ mod fcm {
       base_url: "http://127.0.0.1:1".into(),
       timeout: Duration::from_secs(1),
     });
-    assert!(matches!(result, Err(PushError::Invalid(_))));
+    assert!(matches!(result, Err(ProviderError::Invalid(_))));
   }
 
   /// `http://host:port` of the fake, taken from the recorded request.
@@ -378,7 +378,7 @@ mod fcm {
     .unwrap();
     (
       fake,
-      PushDispatcher::new(4).with_sender(&PushProvider::Fcm, Arc::new(sender)),
+      PushDispatcher::new(4).with_token_sender(&PushProvider::Fcm, sender),
     )
   }
 }

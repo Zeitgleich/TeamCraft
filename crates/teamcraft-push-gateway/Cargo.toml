@@ -1,0 +1,37 @@
+[package]
+name = "teamcraft-push-gateway"
+description = "Forwards sealed push wake-ups of TeamCraft servers to APNs and FCM with the publisher's credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teamcraft-crypto.workspace = true
+teamcraft-ops.workspace = true
+teamcraft-proto.workspace = true
+teamcraft-push-providers.workspace = true
+anyhow.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+base64.workspace = true
+figment.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# The state store: a few small tables on the gateway's own disk (docs/push-gateway.md §6).
+rusqlite = { version = "0.39", features = ["bundled"] }
+rand_core.workspace = true
+
+[dev-dependencies]
+axum = { workspace = true, features = ["http2"] }
+reqwest.workspace = true
+figment = { workspace = true, features = ["test"] }

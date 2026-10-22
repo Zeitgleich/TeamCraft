@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use teamcraft_proto::{DeviceId, PushKind, PushProvider, PushWakeUp, UnixMillis, UserId};
+use teamcraft_proto::{DeviceId, PushProvider, PushWakeUp, UnixMillis, UserId};
+pub use teamcraft_push_providers::{ProviderError, PushMessage, TokenSender, Urgency};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 
@@ -43,25 +44,6 @@ impl Drop for PushTarget {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Urgency {
-  Normal,
-  /// Urgent messages: deliver immediately, even to a dozing device.
-  High,
-}
-
-/// An encrypted wake-up ready to be sent.
-#[derive(Debug, Clone)]
-pub struct PushMessage {
-  /// `seal_wakeup` output: opaque to push services.
-  pub sealed: Vec<u8>,
-  /// What the wake-up is for. Push services only need it to pick a channel (APNs: VoIP for calls).
-  pub kind: PushKind,
-  pub urgency: Urgency,
-  /// How long the push service may hold it if the device is offline.
-  pub ttl: Duration,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum PushError {
   /// The registration is dead (unsubscribed, expired); the server forgets it.
@@ -77,6 +59,30 @@ pub enum PushError {
   Invalid(String),
   #[error(transparent)]
   Crypto(#[from] PushCryptoError),
+}
+
+impl From<ProviderError> for PushError {
+  fn from(error: ProviderError) -> Self {
+    match error {
+      ProviderError::Gone => Self::Gone,
+      ProviderError::Rejected(status) => Self::Rejected(status),
+      ProviderError::Unavailable(reason) => Self::Unavailable(reason),
+      ProviderError::Invalid(reason) => Self::Invalid(reason),
+    }
+  }
+}
+
+/// Adapts a sender of the providers crate (token in, nothing else) to the server's [`PushSender`].
+struct TokenPushSender<S>(pub S);
+
+impl<S: TokenSender> PushSender for TokenPushSender<S> {
+  fn send<'a>(
+    &'a self,
+    target: &'a PushTarget,
+    message: &'a PushMessage,
+  ) -> BoxFuture<'a, Result<(), PushError>> {
+    Box::pin(async move { Ok(self.0.send(&target.token, message).await?) })
+  }
 }
 
 /// Sends one push through one provider. Implementations get the sealed wake-up and wrap it the way
@@ -155,6 +161,11 @@ impl PushDispatcher {
       self.senders.insert(name, sender);
     }
     self
+  }
+
+  /// Registers a sender that only needs the device token (APNs, FCM, the gateway).
+  pub fn with_token_sender(self, provider: &PushProvider, sender: impl TokenSender + 'static) -> Self {
+    self.with_sender(provider, Arc::new(TokenPushSender(sender)))
   }
 
   /// Seals the wake-up with the device's push key and sends it.

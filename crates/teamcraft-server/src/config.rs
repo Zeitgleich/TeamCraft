@@ -323,7 +323,26 @@ pub struct PushConfig {
   pub allow_private_endpoints: bool,
   pub apns: ApnsConfig,
   pub fcm: FcmConfig,
+  pub gateway: PushGatewayConfig,
   pub unified_push: UnifiedPushConfig,
+}
+
+/// A push gateway that sends the wake-ups for the store apps' APNs and FCM registrations
+/// (docs/push-gateway.md). On when `url` is set; a provider with credentials of its own under
+/// `[push.apns]` / `[push.fcm]` is sent to directly instead. Web Push and UnifiedPush never use it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PushGatewayConfig {
+  /// Base URL of the gateway, `https://...`.
+  #[serde(rename = "url")]
+  pub maybe_url: Option<String>,
+  /// The server's Ed25519 key for the gateway: 32 bytes, base64url.
+  #[serde(rename = "key")]
+  pub maybe_key: Option<SecretString>,
+  /// File with that key; created with a fresh key (mode 0600) when it does not exist. Used when
+  /// `key` is not set.
+  #[serde(rename = "key_path")]
+  pub maybe_key_path: Option<PathBuf>,
 }
 
 /// APNs with token authentication. On when the key, key ID, team ID and bundle ID are all set.
@@ -1192,6 +1211,7 @@ impl Default for PushConfig {
       allow_private_endpoints: false,
       apns: ApnsConfig::default(),
       fcm: FcmConfig::default(),
+      gateway: PushGatewayConfig::default(),
       unified_push: UnifiedPushConfig::default(),
     }
   }

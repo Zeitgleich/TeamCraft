@@ -1102,8 +1102,8 @@ mod providers {
     })
     .unwrap();
     let dispatcher = PushDispatcher::new(8)
-      .with_sender(&PushProvider::Apns, Arc::new(apns_sender))
-      .with_sender(&PushProvider::Fcm, Arc::new(fcm_sender))
+      .with_token_sender(&PushProvider::Apns, apns_sender)
+      .with_token_sender(&PushProvider::Fcm, fcm_sender)
       .with_sender(
         &PushProvider::UnifiedPush,
         Arc::new(UnifiedPushSender::new(None, timeout, true).unwrap()),
@@ -1276,6 +1276,135 @@ mod providers {
         .iter()
         .any(|device| device["push_provider"] == "fcm")
     );
+    app.stop().await;
+  }
+}
+
+/// The whole server with APNs and FCM behind the real push gateway: message in, sealed wake-up out,
+/// and what the gateway says about a token decides what the server keeps.
+mod via_gateway {
+  use super::*;
+  use crate::push_gateway::Stack;
+
+  async fn start() -> Option<(TestApp, Stack)> {
+    let mut stack = Stack::start(|_| {}).await;
+    // The app takes the dispatcher; the rest of the stack stays for the assertions.
+    let dispatcher = std::mem::replace(&mut stack.dispatcher, PushDispatcher::new(1));
+    let app = TestApp::start_with_push(
+      |settings| settings.notifications.mobile_push_delay_secs = 0,
+      dispatcher,
+    )
+    .await?;
+    Some((app, stack))
+  }
+
+  async fn register(app: &TestApp, user: &TestUser, provider: &str, token: &str) -> String {
+    let device = register_device(app, user).await;
+    let reply = app
+      .put(
+        user,
+        &format!("/devices/{device}/push"),
+        json!({"provider": provider, "token": token, "push_key": push_key()}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    device
+  }
+
+  fn has_push(devices: &serde_json::Value, device: &str) -> bool {
+    devices["devices"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|entry| entry["id"] == device && entry["push_provider"].is_string())
+  }
+
+  const APNS_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+  #[tokio::test]
+  async fn a_message_wakes_ios_and_android_through_the_gateway() {
+    let Some((app, stack)) = start().await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let channel = channel_with(&app, &[&carol]).await;
+    let alice_device = register_device(&app, &alice).await;
+    set_level(&app, &carol, &channel, "all").await;
+    register(&app, &carol, "apns", APNS_TOKEN).await;
+    register(&app, &carol, "fcm", "fcm-registration-token").await;
+
+    let message = send(&app, &alice, &channel, &alice_device, 1).await;
+
+    for sealed in [
+      push_fakes::sealed_from(stack.apns.wait_for(1).await[0].json()["w"].as_str().unwrap()),
+      push_fakes::sealed_from(
+        stack.fcm.wait_for(1).await[0].json()["message"]["data"]["w"]
+          .as_str()
+          .unwrap(),
+      ),
+    ] {
+      let wake_up = open_wakeup(&PUSH_KEY_BYTES, &sealed).unwrap();
+      assert_eq!(wake_up.kind, PushKind::Message);
+      assert_eq!(wake_up.conversation_id.to_string(), channel);
+      assert_eq!(wake_up.maybe_message_id.unwrap().to_string(), message);
+    }
+    // The admin console sees APNs and FCM as active, like with direct credentials.
+    let status = app.get(&admin(), "/admin/instance").await;
+    for name in ["apns", "fcm"] {
+      let entry = status.body["push"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["provider"] == name)
+        .unwrap()
+        .clone();
+      assert_eq!(entry["state"], "active", "{name}");
+      assert_eq!(entry["success_count"], 1, "{name}");
+    }
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_token_the_gateway_reports_dead_is_forgotten_but_a_block_is_not_held_against_it() {
+    let Some((app, stack)) = start().await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let channel = channel_with(&app, &[&carol]).await;
+    let alice_device = register_device(&app, &alice).await;
+    set_level(&app, &carol, &channel, "all").await;
+    let phone = register(&app, &carol, "apns", APNS_TOKEN).await;
+
+    // The gateway is blocking this server: the push fails, the registration stays.
+    send(&app, &alice, &channel, &alice_device, 1).await;
+    assert_eq!(stack.apns.wait_for(1).await.len(), 1);
+    stack
+      .gateway
+      .store
+      .set_blocked(stack.client.server_id(), Some("test"), 1)
+      .await
+      .unwrap();
+    send(&app, &alice, &channel, &alice_device, 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(stack.apns.requests().len(), 1, "blocked: nothing reaches Apple");
+    assert!(has_push(&app.get(&carol, "/devices").await.body, &phone));
+
+    // Apple says the token is dead: the gateway tells the server, which drops the registration.
+    stack
+      .gateway
+      .store
+      .set_blocked(stack.client.server_id(), None, 2)
+      .await
+      .unwrap();
+    stack.apns.set_reply(410, json!({"reason": "Unregistered"}));
+    send(&app, &alice, &channel, &alice_device, 3).await;
+    for _ in 0..50 {
+      if !has_push(&app.get(&carol, "/devices").await.body, &phone) {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!has_push(&app.get(&carol, "/devices").await.body, &phone));
     app.stop().await;
   }
 }

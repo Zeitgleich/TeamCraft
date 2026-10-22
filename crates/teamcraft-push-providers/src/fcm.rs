@@ -15,8 +15,7 @@ use teamcraft_proto::PushKind;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
-use crate::auth::BoxFuture;
+use crate::{BoxFuture, ProviderError, PushMessage, TokenSender, Urgency, json_error};
 
 pub const FCM_BASE_URL: &str = "https://fcm.googleapis.com";
 const SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
@@ -35,13 +34,9 @@ pub struct ServiceAccount {
 }
 
 impl ServiceAccount {
-  pub fn from_json(json: &str) -> Result<Self, PushError> {
-    serde_json::from_str(json).map_err(|e| {
-      PushError::Invalid(format!(
-        "not a Google service account key: {}",
-        super::web_push::json_error(&e)
-      ))
-    })
+  pub fn from_json(json: &str) -> Result<Self, ProviderError> {
+    serde_json::from_str(json)
+      .map_err(|e| ProviderError::Invalid(format!("not a Google service account key: {}", json_error(&e))))
   }
 }
 
@@ -92,15 +87,15 @@ struct FcmError {
 }
 
 impl FcmSender {
-  pub fn new(settings: FcmSettings) -> Result<Self, PushError> {
+  pub fn new(settings: FcmSettings) -> Result<Self, ProviderError> {
     let account = settings.account;
     let key = EncodingKey::from_rsa_pem(account.private_key.expose_secret().as_bytes())
-      .map_err(|_| PushError::Invalid("the service account private key is not an RSA PEM key".into()))?;
+      .map_err(|_| ProviderError::Invalid("the service account private key is not an RSA PEM key".into()))?;
     let http = reqwest::Client::builder()
       .timeout(settings.timeout)
       .redirect(reqwest::redirect::Policy::none())
       .build()
-      .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+      .map_err(|e| ProviderError::Unavailable(e.without_url().to_string()))?;
     Ok(Self {
       client_email: account.client_email,
       key,
@@ -117,7 +112,7 @@ impl FcmSender {
 
   /// The cached OAuth token, or a fresh one. Holding the lock across the request makes concurrent
   /// sends share one token request.
-  async fn bearer(&self) -> Result<SecretString, PushError> {
+  async fn bearer(&self) -> Result<SecretString, ProviderError> {
     let mut cached = self.access_token.lock().await;
     if let Some(token) = cached.as_ref()
       && Instant::now() < token.renew_at
@@ -133,7 +128,7 @@ impl FcmSender {
       exp: now + ASSERTION_LIFETIME_SECS,
     };
     let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &self.key)
-      .map_err(|_| PushError::Invalid("signing the service account assertion failed".into()))?;
+      .map_err(|_| ProviderError::Invalid("signing the service account assertion failed".into()))?;
     let response = self
       .http
       .post(&self.token_uri)
@@ -143,23 +138,23 @@ impl FcmSender {
       ])
       .send()
       .await
-      .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+      .map_err(|e| ProviderError::Unavailable(e.without_url().to_string()))?;
     let status = response.status();
     if !status.is_success() {
       warn!(%status, "the Google token endpoint refused the service account");
       // Bad credentials are the operator's to fix; a server error is Google's.
       return Err(
         if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-          PushError::Unavailable(format!("token endpoint status {status}"))
+          ProviderError::Unavailable(format!("token endpoint status {status}"))
         } else {
-          PushError::Rejected(status.as_u16())
+          ProviderError::Rejected(status.as_u16())
         },
       );
     }
     let token: TokenResponse = response
       .json()
       .await
-      .map_err(|_| PushError::Unavailable("unreadable token response".into()))?;
+      .map_err(|_| ProviderError::Unavailable("unreadable token response".into()))?;
     let lifetime = Duration::from_secs(token.expires_in).saturating_sub(TOKEN_MARGIN);
     let value = token.access_token.clone();
     *cached = Some(AccessToken {
@@ -174,15 +169,15 @@ impl FcmSender {
   }
 }
 
-impl PushSender for FcmSender {
+impl TokenSender for FcmSender {
   fn send<'a>(
     &'a self,
-    target: &'a PushTarget,
+    token: &'a str,
     message: &'a PushMessage,
-  ) -> BoxFuture<'a, Result<(), PushError>> {
+  ) -> BoxFuture<'a, Result<(), ProviderError>> {
     Box::pin(async move {
-      if target.token.is_empty() || target.token.len() > MAX_TOKEN_CHARS {
-        return Err(PushError::Invalid("not an FCM registration token".into()));
+      if token.is_empty() || token.len() > MAX_TOKEN_CHARS {
+        return Err(ProviderError::Invalid("not an FCM registration token".into()));
       }
       // Calls and urgent messages must wake a dozing phone; the rest may wait for the next window.
       let priority = if message.urgency == Urgency::High || message.kind == PushKind::Call {
@@ -192,7 +187,7 @@ impl PushSender for FcmSender {
       };
       let body = json!({
         "message": {
-          "token": target.token,
+          "token": token,
           "data": { "w": URL_SAFE_NO_PAD.encode(&message.sealed) },
           "android": {
             "priority": priority,
@@ -208,7 +203,7 @@ impl PushSender for FcmSender {
         .json(&body)
         .send()
         .await
-        .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+        .map_err(|e| ProviderError::Unavailable(e.without_url().to_string()))?;
       let status = response.status();
       if status.is_success() {
         return Ok(());
@@ -229,14 +224,14 @@ impl PushSender for FcmSender {
 }
 
 /// Maps an FCM v1 error (<https://firebase.google.com/docs/reference/fcm/rest/v1/ErrorCode>).
-fn classify(status: StatusCode, error_status: &str) -> Result<(), PushError> {
+fn classify(status: StatusCode, error_status: &str) -> Result<(), ProviderError> {
   match (status.as_u16(), error_status) {
     // The registration token is unknown or expired.
-    (404, _) | (_, "UNREGISTERED") => Err(PushError::Gone),
-    (429, _) | (500..=599, _) => Err(PushError::Unavailable(format!("status {status}"))),
+    (404, _) | (_, "UNREGISTERED") => Err(ProviderError::Gone),
+    (429, _) | (500..=599, _) => Err(ProviderError::Unavailable(format!("status {status}"))),
     (code, reason) => {
       warn!(status = code, %reason, "FCM rejected the push");
-      Err(PushError::Rejected(code))
+      Err(ProviderError::Rejected(code))
     },
   }
 }
@@ -259,15 +254,21 @@ mod tests {
   fn error_responses_are_classified() {
     let class =
       |status: u16, reason: &str| classify(StatusCode::from_u16(status).unwrap(), reason).unwrap_err();
-    assert!(matches!(class(404, "NOT_FOUND"), PushError::Gone));
-    assert!(matches!(class(400, "UNREGISTERED"), PushError::Gone));
-    assert!(matches!(class(400, "INVALID_ARGUMENT"), PushError::Rejected(400)));
+    assert!(matches!(class(404, "NOT_FOUND"), ProviderError::Gone));
+    assert!(matches!(class(400, "UNREGISTERED"), ProviderError::Gone));
+    assert!(matches!(
+      class(400, "INVALID_ARGUMENT"),
+      ProviderError::Rejected(400)
+    ));
     assert!(matches!(
       class(403, "SENDER_ID_MISMATCH"),
-      PushError::Rejected(403)
+      ProviderError::Rejected(403)
     ));
-    assert!(matches!(class(429, "QUOTA_EXCEEDED"), PushError::Unavailable(_)));
-    assert!(matches!(class(503, "UNAVAILABLE"), PushError::Unavailable(_)));
+    assert!(matches!(
+      class(429, "QUOTA_EXCEEDED"),
+      ProviderError::Unavailable(_)
+    ));
+    assert!(matches!(class(503, "UNAVAILABLE"), ProviderError::Unavailable(_)));
   }
 
   #[test]
