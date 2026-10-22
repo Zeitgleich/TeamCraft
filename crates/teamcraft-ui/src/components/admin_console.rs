@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use crate::admin::AdminSection;
 use crate::components::admin_audit::AuditSection;
+use crate::components::admin_backgrounds::BackgroundsSection;
 use crate::components::admin_channels::ChannelsSection;
 use crate::components::admin_retention::RetentionSection;
 use crate::components::admin_security::SecuritySection;
@@ -49,6 +50,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Users, IconName::Users)}
           {nav_item(AdminSection::Security, IconName::Key)}
           {nav_item(AdminSection::Retention, IconName::Clock)}
+          {nav_item(AdminSection::Backgrounds, IconName::Image)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
         <button class="admin-back" on:click=move |_| state.exit_admin()>
@@ -67,6 +69,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Users => view! { <UsersSection /> }.into_any(),
           AdminSection::Security => view! { <SecuritySection /> }.into_any(),
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
+          AdminSection::Backgrounds => view! { <BackgroundsSection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),
         }}
       </div>
