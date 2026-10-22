@@ -247,7 +247,8 @@ fn classify(status: StatusCode, reason: &str, on_bad_credentials: impl FnOnce())
 }
 
 /// APNs device tokens are hex; anything else never goes into the request path.
-fn is_device_token(token: &str) -> bool {
+/// An APNs device token: hex, as the apps hand it over (also checked for gateway registrations).
+pub(crate) fn is_device_token(token: &str) -> bool {
   (32..=200).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

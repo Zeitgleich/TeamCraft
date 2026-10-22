@@ -64,13 +64,19 @@ failing when it refuses or is unreachable.
 
 ## 4. How answers map onto the server's push errors
 
-| Gateway answer                                                                                   | Server                                                           |
-|--------------------------------------------------------------------------------------------------|------------------------------------------------------------------|
-| `200`                                                                                            | delivered                                                        |
-| `410 token_gone`                                                                                 | **forget the device's push registration**                        |
-| `401 unknown_server`                                                                             | register the key, retry once                                     |
-| `429` (`rate_limited`, `quota_exceeded`, `token_rate_limited`), `5xx`                            | failed, retryable, shows in the provider health; nothing deleted |
-| `403 server_blocked`, `401 unauthorized`, `502 provider_rejected`, `501 provider_not_configured` | failed (rejected), shows as failing; nothing deleted             |
+| Gateway answer                                                                                   | Server                                                            |
+|--------------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
+| `200`                                                                                            | delivered                                                         |
+| `410 token_gone`                                                                                 | **forget the device's push registration**                         |
+| `401 unknown_server`                                                                             | register the key (once for all waiting pushes), retry once        |
+| `429 rate_limited`, `429 quota_exceeded`                                                         | dropped; no push is sent until `Retry-After` has passed           |
+| `429 token_rate_limited`, `400 invalid_request`                                                  | dropped; a problem of that token, not counted against the gateway |
+| `5xx`, `502 provider_unavailable`                                                                | dropped, shows in the provider health; nothing deleted            |
+| `403 server_blocked`, `401 unauthorized`, `502 provider_rejected`, `501 provider_not_configured` | dropped (rejected), shows as failing; nothing deleted             |
+
+A dropped push is not retried: wake-ups are hints, the app catches up when it runs. A bare `410`
+without `token_gone` (a proxy, a wrong URL) deletes nothing. After the gateway refuses to register
+the server, pushes fail at once for five minutes instead of trying again each time.
 
 Only `token_gone` deletes a registration: a gateway that blocks, rate-limits or breaks must never
 cost a server its devices.

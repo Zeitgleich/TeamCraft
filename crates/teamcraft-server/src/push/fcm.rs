@@ -25,6 +25,11 @@ const ASSERTION_LIFETIME_SECS: u64 = 3600;
 const TOKEN_MARGIN: Duration = Duration::from_secs(120);
 const MAX_TOKEN_CHARS: usize = 4096;
 
+/// An FCM registration token as far as it can be checked here: present and not absurdly long.
+pub(crate) fn is_registration_token(token: &str) -> bool {
+  !token.is_empty() && token.len() <= MAX_TOKEN_CHARS
+}
+
 /// The fields of a Google service account key file that sending needs.
 #[derive(Deserialize)]
 pub struct ServiceAccount {
@@ -181,7 +186,7 @@ impl PushSender for FcmSender {
     message: &'a PushMessage,
   ) -> BoxFuture<'a, Result<(), PushError>> {
     Box::pin(async move {
-      if target.token.is_empty() || target.token.len() > MAX_TOKEN_CHARS {
+      if !is_registration_token(&target.token) {
         return Err(PushError::Invalid("not an FCM registration token".into()));
       }
       // Calls and urgent messages must wake a dozing phone; the rest may wait for the next window.

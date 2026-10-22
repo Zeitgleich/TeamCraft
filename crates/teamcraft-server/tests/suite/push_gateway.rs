@@ -197,11 +197,63 @@ mod what_comes_back {
   }
 
   #[tokio::test]
+  async fn a_bare_410_deletes_nothing() {
+    assert!(!matches!(
+      answer(410, "unknown_future_code").await,
+      Err(PushError::Gone)
+    ));
+  }
+
+  #[tokio::test]
+  async fn a_problem_of_one_token_is_not_the_gateways() {
+    for (status, code) in [(429, "token_rate_limited"), (400, "invalid_request")] {
+      let result = answer(status, code).await;
+      assert!(matches!(result, Err(PushError::Invalid(_))), "{code}: {result:?}");
+    }
+  }
+
+  #[tokio::test]
+  async fn a_server_over_its_limit_waits_as_told_before_the_next_push() {
+    let stack = Stack::start().await;
+    stack.client.register().await.unwrap();
+    stack.fake.set_reply(Some((
+      429,
+      json!({"error_code": "quota_exceeded", "message": "quota", "retry_after_secs": 3600}),
+    )));
+    let push = || {
+      deliver(
+        &stack,
+        PushProvider::Apns,
+        APNS_TOKEN,
+        PushKind::Message,
+        Urgency::Normal,
+      )
+    };
+    assert!(matches!(push().await, Err(PushError::Unavailable(_))));
+    stack.fake.set_reply(None);
+    assert!(matches!(push().await, Err(PushError::Unavailable(_))));
+    assert_eq!(
+      stack.fake.push_attempts(),
+      1,
+      "the second push waited instead of going out"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_junk_token_never_reaches_the_gateway() {
+    let stack = Stack::start().await;
+    for (provider, token) in [(PushProvider::Apns, "not a hex token"), (PushProvider::Fcm, "")] {
+      let result = deliver(&stack, provider, token, PushKind::Message, Urgency::Normal).await;
+      assert!(matches!(result, Err(PushError::Invalid(_))), "{result:?}");
+    }
+    assert_eq!(stack.fake.push_attempts(), 0);
+  }
+
+  #[tokio::test]
   async fn limits_and_outages_are_retryable_and_never_delete_devices() {
     for (status, code) in [
       (429, "rate_limited"),
       (429, "quota_exceeded"),
-      (429, "token_rate_limited"),
       (502, "provider_unavailable"),
       (503, "unknown_future_code"),
     ] {

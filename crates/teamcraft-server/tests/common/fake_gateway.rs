@@ -30,6 +30,8 @@ struct Inner {
   known: HashMap<String, GatewayPublicKey>,
   registrations: usize,
   pushes: Vec<GatewayPushRequest>,
+  /// Signed push requests that arrived, accepted or not.
+  push_attempts: usize,
   reply: Option<(u16, Value)>,
 }
 
@@ -50,6 +52,11 @@ impl FakeGateway {
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (fake, url)
+  }
+
+  /// Signed push requests that arrived, accepted or answered with an error.
+  pub fn push_attempts(&self) -> usize {
+    self.inner.lock().unwrap().push_attempts
   }
 
   /// The pushes accepted so far, in order.
@@ -121,6 +128,7 @@ async fn push(State(fake): State<FakeGateway>, headers: HeaderMap, body: axum::b
     return error(400, "invalid_request");
   };
   let mut inner = fake.inner.lock().unwrap();
+  inner.push_attempts += 1;
   if let Some((status, body)) = inner.reply.clone() {
     return (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response();
   }

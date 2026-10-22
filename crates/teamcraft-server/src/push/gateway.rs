@@ -5,8 +5,8 @@
 
 use std::io::Write as _;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -24,6 +24,15 @@ use zeroize::Zeroizing;
 use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
 use crate::auth::BoxFuture;
 
+/// How long to hold back after the gateway said "too many" without saying how long.
+const DEFAULT_BACKOFF: Duration = Duration::from_secs(60);
+/// The longest pause a gateway's answer can impose (its daily quota resets within a day).
+const MAX_BACKOFF: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long to wait before registering again after the gateway refused to register us.
+const REGISTER_RETRY: Duration = Duration::from_secs(5 * 60);
+/// Most of an error response that is read.
+const MAX_ERROR_BODY_BYTES: usize = 4096;
+
 /// What the client needs to reach a gateway.
 pub struct GatewaySettings {
   /// Base URL, e.g. `https://gateway.example.com`. Plain `http://` only in tests.
@@ -38,6 +47,10 @@ pub struct GatewayClient {
   key: GatewayServerKey,
   server_id: String,
   http: reqwest::Client,
+  /// The gateway asked this server to wait (rate limit, daily quota): no pushes are sent before.
+  paused_until: Mutex<Option<Instant>>,
+  /// One registration at a time; after a refusal, none before the time stored.
+  registration: tokio::sync::Mutex<Option<Instant>>,
 }
 
 /// The sender of one provider (APNs or FCM) behind a [`GatewayClient`].
@@ -50,6 +63,7 @@ impl GatewayClient {
   pub fn new(settings: GatewaySettings) -> Result<Arc<Self>, PushError> {
     let http = reqwest::Client::builder()
       .timeout(settings.timeout)
+      .connect_timeout(settings.timeout.min(Duration::from_secs(5)))
       .redirect(reqwest::redirect::Policy::none())
       .build()
       .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
@@ -58,6 +72,8 @@ impl GatewayClient {
       server_id: settings.key.public_key().server_id(),
       key: settings.key,
       http,
+      paused_until: Mutex::new(None),
+      registration: tokio::sync::Mutex::new(None),
     }))
   }
 
@@ -86,15 +102,54 @@ impl GatewayClient {
   }
 
   async fn push(&self, request: &GatewayPushRequest) -> Result<(), PushError> {
+    if let Some(until) = *lock(&self.paused_until)
+      && Instant::now() < until
+    {
+      // Not even sent: the gateway asked us to wait, and ignoring that gets a server blocked.
+      return Err(PushError::Unavailable("the push gateway asked to wait".into()));
+    }
     let body = serde_json::to_vec(request)
       .map_err(|_| PushError::Invalid("encoding the gateway request failed".into()))?;
-    match self.post(GATEWAY_PUSH_PATH, body.clone()).await {
+    let first = self.post(GATEWAY_PUSH_PATH, body.clone()).await;
+    let result = match first {
       // The gateway lost us (new database) or this is the first push: register and try once more.
-      Err(GatewayFailure::UnknownServer) => {
-        self.register().await?;
-        self.post(GATEWAY_PUSH_PATH, body).await.map_err(Into::into)
+      Err(GatewayFailure::UnknownServer) => match self.register_once().await {
+        Ok(()) => self.post(GATEWAY_PUSH_PATH, body).await,
+        Err(error) => Err(GatewayFailure::Provider(error)),
       },
-      other => other.map_err(Into::into),
+      other => other,
+    };
+    if let Err(GatewayFailure::Throttled { retry_after, .. }) = &result {
+      let until = Instant::now() + (*retry_after).min(MAX_BACKOFF);
+      warn!(
+        seconds = retry_after.as_secs(),
+        "the push gateway asked this server to wait"
+      );
+      *lock(&self.paused_until) = Some(until);
+    }
+    result.map_err(Into::into)
+  }
+
+  /// Registers once for all pushes that found the gateway didn't know us: the others wait for
+  /// that registration instead of each sending their own. After a refusal, pushes fail fast for a
+  /// while instead of costing two requests each.
+  async fn register_once(&self) -> Result<(), PushError> {
+    let started = Instant::now();
+    let mut retry_at = self.registration.lock().await;
+    if let Some(at) = *retry_at {
+      if at > started {
+        return Err(PushError::Rejected(401));
+      }
+    }
+    match self.register().await {
+      Ok(()) => {
+        *retry_at = None;
+        Ok(())
+      },
+      Err(error) => {
+        *retry_at = Some(Instant::now() + REGISTER_RETRY);
+        Err(error)
+      },
     }
   }
 
@@ -122,12 +177,23 @@ impl GatewayClient {
     if status.is_success() {
       return Ok(());
     }
-    let maybe_code = response
-      .json::<GatewayErrorBody>()
-      .await
-      .ok()
-      .map(|body| body.error_code);
-    Err(classify(status.as_u16(), maybe_code))
+    let maybe_header_wait = response
+      .headers()
+      .get(reqwest::header::RETRY_AFTER)
+      .and_then(|value| value.to_str().ok())
+      .and_then(|value| value.trim().parse::<u64>().ok())
+      .map(Duration::from_secs);
+    let maybe_body = read_error_body(response).await;
+    let maybe_body_wait = maybe_body
+      .as_ref()
+      .and_then(|body| body.maybe_retry_after_secs)
+      .map(|secs| Duration::from_secs(u64::from(secs)));
+    let retry_after = maybe_header_wait.or(maybe_body_wait).unwrap_or(DEFAULT_BACKOFF);
+    Err(classify(
+      status.as_u16(),
+      maybe_body.map(|body| body.error_code),
+      retry_after,
+    ))
   }
 }
 
@@ -138,6 +204,15 @@ impl PushSender for GatewaySender {
     message: &'a PushMessage,
   ) -> BoxFuture<'a, Result<(), PushError>> {
     Box::pin(async move {
+      // Checked like the direct senders do: a junk registration never reaches the gateway.
+      let is_token = match self.provider {
+        PushProvider::Apns => super::apns::is_device_token(&target.token),
+        PushProvider::Fcm => super::fcm::is_registration_token(&target.token),
+        _ => false,
+      };
+      if !is_token {
+        return Err(PushError::Invalid("not a push token of this provider".into()));
+      }
       let mut request_id = [0u8; GATEWAY_REQUEST_ID_LEN];
       OsRng.fill_bytes(&mut request_id);
       self
@@ -195,6 +270,11 @@ pub fn load_or_create_gateway_key(path: &Path) -> std::io::Result<GatewayServerK
 enum GatewayFailure {
   /// The gateway does not know our key (yet).
   UnknownServer,
+  /// This server is over its rate or daily quota: wait this long before the next push.
+  Throttled {
+    retry_after: Duration,
+    status: u16,
+  },
   Provider(PushError),
 }
 
@@ -203,17 +283,30 @@ impl From<GatewayFailure> for PushError {
     match failure {
       // Registering did not help: the gateway keeps refusing us.
       GatewayFailure::UnknownServer => PushError::Rejected(401),
+      GatewayFailure::Throttled { status, .. } => PushError::Unavailable(format!("gateway status {status}")),
       GatewayFailure::Provider(error) => error,
     }
   }
 }
 
-/// Maps a gateway error response. Only `token_gone` makes the server forget a registration; a
-/// refusal of the server itself (blocked, bad signature, over quota) must never delete devices.
-fn classify(status: u16, maybe_code: Option<GatewayErrorCode>) -> GatewayFailure {
+/// Maps a gateway error response. Only `token_gone` makes the server forget a registration (a
+/// bare 410 may come from a proxy in front of the gateway); a refusal of the server itself
+/// (blocked, bad signature, over quota) must never delete devices. Problems of one token
+/// (`invalid_request`, `token_rate_limited`) say nothing about the gateway and don't count
+/// against its health.
+fn classify(status: u16, maybe_code: Option<GatewayErrorCode>, retry_after: Duration) -> GatewayFailure {
   let failure = match (status, &maybe_code) {
     (_, Some(GatewayErrorCode::UnknownServer)) => return GatewayFailure::UnknownServer,
-    (410, _) | (_, Some(GatewayErrorCode::TokenGone)) => PushError::Gone,
+    (_, Some(GatewayErrorCode::TokenGone)) => PushError::Gone,
+    (_, Some(GatewayErrorCode::RateLimited | GatewayErrorCode::QuotaExceeded)) => {
+      return GatewayFailure::Throttled { retry_after, status };
+    },
+    (_, Some(GatewayErrorCode::InvalidRequest)) => {
+      PushError::Invalid("the push gateway refused the request".into())
+    },
+    (_, Some(GatewayErrorCode::TokenRateLimited)) => {
+      PushError::Invalid("too many pushes to this device".into())
+    },
     // The gateway's own credentials or setup: the operator's to fix; shows as failing, deletes nothing.
     (_, Some(GatewayErrorCode::ProviderRejected | GatewayErrorCode::ProviderNotConfigured)) => {
       warn!(
@@ -222,22 +315,32 @@ fn classify(status: u16, maybe_code: Option<GatewayErrorCode>) -> GatewayFailure
       );
       PushError::Rejected(status)
     },
-    (
-      _,
-      Some(
-        GatewayErrorCode::RateLimited
-        | GatewayErrorCode::QuotaExceeded
-        | GatewayErrorCode::TokenRateLimited
-        | GatewayErrorCode::ProviderUnavailable,
-      ),
-    )
-    | (429 | 500..=599, _) => PushError::Unavailable(format!("gateway status {status}")),
+    (_, Some(GatewayErrorCode::ProviderUnavailable)) | (429 | 500..=599, _) => {
+      PushError::Unavailable(format!("gateway status {status}"))
+    },
     _ => {
       warn!(status, code = ?maybe_code.as_ref().map(GatewayErrorCode::as_str), "the push gateway refused the push");
       PushError::Rejected(status)
     },
   };
   GatewayFailure::Provider(failure)
+}
+
+/// The error body, read up to [`MAX_ERROR_BODY_BYTES`]; `None` if absent or unreadable.
+async fn read_error_body(mut response: reqwest::Response) -> Option<GatewayErrorBody> {
+  let mut bytes = Vec::new();
+  while let Ok(Some(chunk)) = response.chunk().await {
+    bytes.extend_from_slice(&chunk);
+    if bytes.len() > MAX_ERROR_BODY_BYTES {
+      return None;
+    }
+  }
+  serde_json::from_slice(&bytes).ok()
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  // A poisoned lock only means another task panicked while holding it; the value stays usable.
+  mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn now_millis() -> u64 {
@@ -251,8 +354,9 @@ mod tests {
   use super::*;
 
   fn class(status: u16, code: Option<GatewayErrorCode>) -> PushError {
-    match classify(status, code) {
+    match classify(status, code, DEFAULT_BACKOFF) {
       GatewayFailure::Provider(error) => error,
+      failure @ GatewayFailure::Throttled { .. } => failure.into(),
       GatewayFailure::UnknownServer => PushError::Rejected(0),
     }
   }
@@ -263,24 +367,39 @@ mod tests {
       class(410, Some(GatewayErrorCode::TokenGone)),
       PushError::Gone
     ));
+    // A bare 410 (a proxy, a wrong URL) deletes nothing.
+    assert!(!matches!(class(410, None), PushError::Gone));
     for refusal in [
       GatewayErrorCode::ServerBlocked,
       GatewayErrorCode::Unauthorized,
       GatewayErrorCode::ProviderRejected,
-      GatewayErrorCode::InvalidRequest,
     ] {
       assert!(matches!(class(403, Some(refusal)), PushError::Rejected(403)));
     }
   }
 
   #[test]
-  fn limits_and_outages_are_retryable() {
+  fn problems_of_one_token_do_not_count_against_the_gateway() {
+    for code in [
+      GatewayErrorCode::InvalidRequest,
+      GatewayErrorCode::TokenRateLimited,
+    ] {
+      assert!(matches!(class(429, Some(code)), PushError::Invalid(_)));
+    }
+  }
+
+  #[test]
+  fn limits_of_the_server_make_it_wait_and_outages_are_retryable() {
+    for code in [GatewayErrorCode::RateLimited, GatewayErrorCode::QuotaExceeded] {
+      assert!(matches!(
+        classify(429, Some(code), Duration::from_secs(30)),
+        GatewayFailure::Throttled { retry_after, .. } if retry_after == Duration::from_secs(30)
+      ));
+    }
     for (status, code) in [
-      (429, Some(GatewayErrorCode::RateLimited)),
-      (429, Some(GatewayErrorCode::QuotaExceeded)),
-      (429, Some(GatewayErrorCode::TokenRateLimited)),
       (502, Some(GatewayErrorCode::ProviderUnavailable)),
       (503, None),
+      (429, None),
     ] {
       assert!(matches!(class(status, code), PushError::Unavailable(_)));
     }
@@ -315,7 +434,7 @@ mod tests {
   #[test]
   fn an_unknown_server_triggers_registration() {
     assert!(matches!(
-      classify(401, Some(GatewayErrorCode::UnknownServer)),
+      classify(401, Some(GatewayErrorCode::UnknownServer), DEFAULT_BACKOFF),
       GatewayFailure::UnknownServer
     ));
   }

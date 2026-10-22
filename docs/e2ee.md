@@ -547,8 +547,12 @@ exactly what Apple and Google handle: a device token and ciphertext. Threat mode
   ciphertext it makes up fails authentication and is discarded by the app), and does not learn user,
   device or conversation IDs. Messages are never lost by a gateway failure: apps catch up when they
   run or reconnect; only the prompt notification is.
-- A **malicious server** can only spend its own quota: gateway-side limits per server and per device
-  token, a fixed alert text and topic, and a block list bound what it can do to a device.
+- A **malicious server** is bounded by gateway-side limits per server and per device token, a fixed
+  alert text and topic, and a block list. It is not limited to its own quota, though: an app
+  install has one token and gives it to every server it signs in to, so a hostile server (also one
+  the user left, while the token stays valid) can push generic "New message" alerts or call rings
+  to that device and use up the device's per-token budget it shares with honest servers. It still
+  learns nothing and can't make the app show content.
 - The server authenticates to the gateway with an Ed25519 key pair of its own (not related to any
   user, device or MLS key); that key authenticates the *server* only and protects no content.
 
