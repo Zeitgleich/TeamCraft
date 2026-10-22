@@ -46,11 +46,14 @@ token.
 | Reading                  | Jump to the first unread message, mark unread, link previews, thumbnails, drafts         |
 | Threads                  | Thread view, follow / unfollow, inbox of followed threads with unread replies            |
 | Files                    | Per-conversation gallery; downloads decrypted to app storage, opened via FileProvider    |
-| Channels and people      | Browse and join public channels, create channels, direct messages, presence              |
+| Channels and people      | Browse, join, create, archive and leave channels, bookmarks, direct messages, presence   |
 | Saved and mentions       | Saved items and recent mentions                                                          |
 | Status and notifications | Presence, custom status, push mode, read receipts, per-conversation level and mute       |
+| Mentions                 | Keywords, first name and `@channel` on the device (shared rules, client-api `notify`)    |
+| Search                   | Filters (from, in, date, has file/link, in thread); segment prefetch on Wi-Fi + charging |
+| Calls                    | Pre-join (camera, muted), mute, deafen, speaker, camera video both ways, privacy code    |
 | Meetings                 | Upcoming meetings, join the meeting's call                                               |
-| Devices and recovery     | Link a device (both sides), passphrase recovery and change, recovery by the organization |
+| Devices and recovery     | Link a device by QR code (show and scan), passphrase and organization recovery           |
 | Security                 | Own security code, changed contact keys to compare and accept                            |
 
 Workspace administration stays on desktop and web.
@@ -83,7 +86,13 @@ flavors and runs the unit tests; other Gradle tasks can be passed:
 apps/android/scripts/docker-build.sh assembleFullRelease
 ```
 
-APKs end up in `app/build/outputs/apk/<flavor>/<type>/`.
+APKs end up in `app/build/outputs/apk/<flavor>/<type>/`. For a quicker build, `TEAMCRAFT_RUST_PROFILE=dev`
+builds the core without optimizations and `TEAMCRAFT_ANDROID_ABIS=x86_64` for the emulator only
+(the Kotlin bindings come from the x86_64 library, so it always stays in the list).
+
+CI (`.github/workflows/android.yml`) runs `docker-build.sh` with the dev profile for both ABIs:
+`assembleFullDebug` and the unit tests of both flavors, whenever `apps/android` or a crate the app
+links changes.
 
 ### Flavors
 
@@ -223,9 +232,12 @@ key (a lost upload key can be reset; a lost app signing key can't).
 
 ## Not done yet
 
-- QR code display and scanning for device linking (the code is shown as text and typed in).
-- A call button in the conversation screen (calls start from Android Auto or are answered when
-  they ring), video in calls, files and reactions in the UI, editing messages.
 - iOS (needs macOS; the Swift side uses the same `teamcraft-ffi`).
 - While a device link waits for the other device, other calls into the core wait too (one engine
   thread runs one job at a time).
+- Screen sharing from the phone and background effects (desktop only).
+- Keywords and the first name can only mark messages that reach the phone: with the push level
+  "mentions" the server pushes explicit mentions only (it can't read the text).
+- Received video is decoded with Cisco's OpenH264, which the phone downloads on the first call
+  (licensing, see teamcraft-media `openh264_library`); without it calls stay audio-only for that
+  phone. Sending uses the phone's hardware encoder. Video is untested on real devices so far.

@@ -73,6 +73,9 @@ fn InstanceCards(instance: AdminInstanceResponse) -> impl IntoView {
               <th scope="col">{move || i18n.t("instance-push-provider")}</th>
               <th scope="col">{move || i18n.t("instance-push-state")}</th>
               <th scope="col" class="num">{move || i18n.t("instance-push-devices")}</th>
+              <th scope="col">{move || i18n.t("instance-push-last-success")}</th>
+              <th scope="col" class="num">{move || i18n.t("instance-push-failures")}</th>
+              <th scope="col">{move || i18n.t("instance-push-last-error")}</th>
             </tr>
           </thead>
           <tbody>
@@ -82,11 +85,25 @@ fn InstanceCards(instance: AdminInstanceResponse) -> impl IntoView {
               .map(|entry| {
                 let provider_key = format!("instance-provider-{}", entry.provider.as_str());
                 let state_slug = push_state_slug(&entry.state);
+                let entry = entry.clone();
                 view! {
                   <tr>
                     <th scope="row">{move || i18n.t(&provider_key)}</th>
                     <td><span class=format!("badge badge-{state_slug}")>{move || i18n.t(&format!("instance-push-{state_slug}"))}</span></td>
                     <td class="num">{entry.device_count}</td>
+                    <td>
+                      {move || match entry.maybe_last_success_at {
+                        Some(at) => format_relative(at.0, now, i18n.locale().tag()),
+                        None => i18n.t("instance-never"),
+                      }}
+                    </td>
+                    <td class="num">{entry.failure_count}</td>
+                    <td class="small">
+                      {entry.maybe_last_error.clone().map(|error| {
+                        let when = entry.maybe_last_failure_at.map(|at| format_relative(at.0, now, i18n.locale().tag()));
+                        view! { <span translate="no">{error}</span> " " {when} }
+                      })}
+                    </td>
                   </tr>
                 }
               })
@@ -159,7 +176,7 @@ fn push_state_slug(state: &PushProviderState) -> &'static str {
   match state {
     PushProviderState::Active => "active",
     PushProviderState::NotConfigured => "not-configured",
-    PushProviderState::NotImplemented => "not-implemented",
+    PushProviderState::Failing => "failing",
     PushProviderState::Unknown(_) => "unknown",
   }
 }

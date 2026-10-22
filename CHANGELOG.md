@@ -8,51 +8,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
-### Added
+## [1.0.0] - 2026-10-23
 
-- **Brands**: one server under several host names, each with its own name, logo, colors, login text,
-  links and e-mail sender (`[branding]`, `[[brands]]`, `GET /api/v1/brand`). The brand is chosen by the
-  request's host name only; unknown host names get the default brand or `421`. Invitation, activation and
-  digest e-mail and meeting invitations go out as the recipient's brand, share links work only on the
-  host names of the brand that made them, and the web client gets a content security policy per brand.
-  See [docs/branding.md](docs/branding.md).
-- **Organizations**: an optional label per user from a configurable token claim
-  (`[oidc] organization_claim`), shown as a badge and used as a directory filter.
-- Spaces can carry a brand tag (`brand_id`), a theming hint.
-
-## [1.0.0-beta.1] - 2026-10-22
-
-First public beta. Everything below is new; the protocol, wire types and database schema may still
-change before 1.0.0, with migrations.
+First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the
+server only ever sees ciphertext. From here on the wire format, the API and the database stay
+compatible within 1.x; database migrations run by themselves and are forward-only.
 
 ### Added
 
-- **Server** (`teamcraft-server`): REST API and WebSocket gateway with resumable sessions, spaces,
-  public and private channels, categories, DMs and group DMs, threads, reactions, mentions, user groups,
-  presence (including "in a meeting" / "in a call"), unread counts, read receipts and urgent DMs.
+- **Chat**: spaces, public and private channels with categories, DMs and group DMs, threads,
+  reactions, mentions, user groups, read receipts, urgent DMs, presence
+  (including "in a meeting" / "in a call"), unread counts, jump to date, fuzzy search, default
+  memberships, channel conversion (public/private) and moderators.
 - **End-to-end encryption**: MLS (openmls) for every conversation, device certificates and signed
   device lists, encrypted key bag with backup key and passphrase, device linking through the rendezvous
   relay, organization recovery with admin approvals, client-side search index segments.
-- **Login** through any OIDC provider (Keycloak is the reference setup); TeamCraft roles from client
-  roles, deprovisioning sync and back-channel logout.
-- **Administration without content access**: signed instance policy, admin API, audit log, retention
-  per channel and space, guests with sponsor and expiry, rate limits.
-- **Attachments** in S3-compatible storage (encrypted on the client) and share links for external
-  download whose key never reaches the server.
 - **Calls** through `teamcraft-sfu` (WebTransport): 1:1 and group calls with DAVE end-to-end media
   encryption, Opus audio with echo cancellation, H.264 video with simulcast, screen share, background
-  effects, push-to-talk, host controls.
+  effects with personal and organization backgrounds, push-to-talk, host controls.
 - **Meetings**: scheduled and instant meetings with their own chat, iMIP invitations, CalDAV calendar,
   external guests with a lobby.
+- **Login** through any OIDC provider (Keycloak is the reference setup): TeamCraft roles from client
+  roles, deprovisioning sync, back-channel logout, MFA and guest rules.
+- **Administration without content access**: signed instance policy edited in the admin console,
+  admin API, audit log, retention per channel and space, guests with sponsor and expiry, rate limits,
+  e-mail digests.
+- **Brands**: one server under several host names, each with its own name, logo, colors, login text,
+  links and e-mail sender (`[branding]`, `[[brands]]`, `GET /api/v1/brand`); see
+  [docs/branding.md](docs/branding.md). **Organizations**: an optional label per user from a token
+  claim (`[oidc] organization_claim`), shown as a badge and used as a directory filter.
+- **Attachments** in S3-compatible storage (encrypted on the client) and share links for external
+  download whose key never reaches the server.
 - **Integration channels** and `teamcraft-bridge`: Slack/Mattermost-compatible webhooks and log
   shipping into encrypted channels, with a compact log view.
-- **Push notifications**: encrypted Web Push wake-ups.
-- **Clients**: Leptos UI shared by the desktop app (Tauri: Linux deb/rpm/AppImage/Flatpak for x86_64
-  and aarch64, macOS dmg), the web client (served by the server) and an Android app on the shared Rust
-  core (UniFFI), with `full` (FCM) and `libre` (no Google services) flavors.
-- **Operations**: distroless OCI images for server, SFU and bridge; health checks; dual-stack
-  networking; operations guide and a release pipeline that publishes images, packages, SBOMs and
-  checksums for every tag.
+- **Push notifications**: encrypted wake-ups through Web Push. The server's APNs, FCM and UnifiedPush
+  senders are not implemented yet (see the release notes' known limitations).
+- **Clients**: one Leptos UI for the desktop app (Tauri: Linux deb/rpm/AppImage/Flatpak for x86_64 and
+  aarch64, macOS universal dmg, Windows x64 and arm64 msi/exe) and the web client (served by the
+  server); Android (`full` with FCM, `libre` without Google services) and iOS (SwiftUI, CallKit,
+  notification service extension) on the shared Rust core.
+- **Operations**: distroless OCI images for server, SFU and bridge (amd64 and arm64); health checks;
+  dual-stack networking; the deployment playbook
+  [Zeitgleich/teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy); an end-to-end and
+  v1 acceptance suite.
 
-[Unreleased]: https://github.com/Zeitgleich/TeamCraft/compare/v1.0.0-beta.1...HEAD
-[1.0.0-beta.1]: https://github.com/Zeitgleich/TeamCraft/releases/tag/v1.0.0-beta.1
+### Security
+
+- The server is untrusted by design ([ARCHITECTURE.md](ARCHITECTURE.md) §2): it stores ciphertext,
+  signed policy and signed membership only. An external review's findings are fixed
+  ([docs/security-review.md](docs/security-review.md)).
+- The API client only talks HTTPS outside development; the service worker checks its origin.
+- Releases ship SBOMs (SPDX and CycloneDX), SHA-256 checksums and build provenance attestations; the
+  container images are signed with Sigstore (keyless). CI actions are pinned to commit SHAs.
+
+[Unreleased]: https://github.com/Zeitgleich/TeamCraft/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Zeitgleich/TeamCraft/releases/tag/v1.0.0

@@ -37,9 +37,6 @@ pub struct PushPreview {
   pub is_direct: bool,
   /// The sender sent it silently: show it without sound or vibration.
   pub is_silent: bool,
-  /// The text matches the user's mention rules (`@channel`, first name, keywords; see
-  /// [`crate::notify_rules`]). Only set while the text may be shown.
-  pub is_rule_match: bool,
 }
 
 /// What of the message itself can be shown.
@@ -98,7 +95,6 @@ pub async fn push_preview<A: ServerApi>(
     Some(message_id) => preview_content(store, maybe_api, &wake_up, message_id).await,
     None => (PreviewContent::Unavailable, false),
   };
-  let is_rule_match = matches_mention_rules(store, &content);
   let preview = PushPreview {
     wake_up,
     maybe_conversation_name,
@@ -106,7 +102,6 @@ pub async fn push_preview<A: ServerApi>(
     content,
     is_direct,
     is_silent,
-    is_rule_match,
   };
   Ok(preview.limited_to(&push_content_mode(store)))
 }
@@ -132,39 +127,15 @@ impl PushPreview {
   pub fn limited_to(mut self, mode: &PushContentMode) -> Self {
     match mode {
       PushContentMode::Full => {},
-      PushContentMode::Sender => {
-        self.content = PreviewContent::Unavailable;
-        self.is_rule_match = false;
-      },
+      PushContentMode::Sender => self.content = PreviewContent::Unavailable,
       PushContentMode::Generic | PushContentMode::Unknown(_) => {
         self.content = PreviewContent::Unavailable;
-        self.is_rule_match = false;
         self.maybe_conversation_name = None;
         self.maybe_sender_name = None;
       },
     }
     self
   }
-}
-
-/// Whether the shown text matches the user's mention rules. Failures only cost the flag.
-fn matches_mention_rules(store: &impl LocalStore, content: &PreviewContent) -> bool {
-  let PreviewContent::Text(text) = content else {
-    return false;
-  };
-  let Ok(Some(account)) = records::load_account(store) else {
-    return false;
-  };
-  let Ok(rules) = crate::notify_rules::load_mention_rules(store) else {
-    return false;
-  };
-  let maybe_me: Option<UserSummary> = records::get_json(store, Table::Users, &account.user_id.to_string())
-    .ok()
-    .flatten();
-  let Some(me) = maybe_me else {
-    return false;
-  };
-  rules.is_mentioned(text, me.maybe_username.as_deref(), &me.display_name)
 }
 
 /// Stores the session a notification process may use (see [`PushSession`]).
@@ -340,12 +311,10 @@ mod tests {
       content: PreviewContent::Text("lunch?".into()),
       is_direct: false,
       is_silent: false,
-      is_rule_match: true,
     };
     assert_eq!(full.clone().limited_to(&PushContentMode::Full), full);
     let sender = full.clone().limited_to(&PushContentMode::Sender);
     assert_eq!(sender.content, PreviewContent::Unavailable);
-    assert!(!sender.is_rule_match);
     assert_eq!(sender.maybe_sender_name.as_deref(), Some("Alice"));
     for mode in [PushContentMode::Generic, PushContentMode::Unknown("x".into())] {
       let generic = full.clone().limited_to(&mode);

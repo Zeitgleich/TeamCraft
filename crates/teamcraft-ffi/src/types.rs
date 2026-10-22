@@ -2,7 +2,7 @@
 //! 64-bit unsigned type that matches, and the app only passes them back.
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
-use teamcraft_core::notify_rules::MentionRules;
+use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_preview::{PreviewContent, PushPreview};
 use teamcraft_proto::{PushKind, PushProvider};
@@ -109,6 +109,26 @@ pub struct PushNotification {
   pub is_silent: bool,
 }
 
+/// Device-local mention preferences (as on desktop): the server routes push by explicit mentions,
+/// these are applied to the decrypted text on the device.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MentionSettings {
+  pub is_first_name_mention: bool,
+  pub do_channel_mentions_notify: bool,
+  /// Words that count as a mention (case-insensitive, matched anywhere in the text).
+  pub keywords: Vec<String>,
+}
+
+/// What a search segment prefetch did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SegmentPrefetchResult {
+  pub fetched: u32,
+  /// Left out because they would exceed the size cap.
+  pub skipped: u32,
+  /// Bytes of the segments kept on this device.
+  pub stored_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PushService {
   Fcm,
@@ -180,7 +200,7 @@ impl From<PushPreview> for PushNotification {
       maybe_text,
       maybe_file_name,
       is_direct: preview.is_direct,
-      is_mention: preview.wake_up.kind == PushKind::Mention || preview.is_rule_match,
+      is_mention: preview.wake_up.kind == PushKind::Mention,
       is_urgent: preview.wake_up.is_urgent,
       is_call: preview.wake_up.kind == PushKind::Call,
       is_silent: preview.is_silent,
@@ -216,35 +236,28 @@ pub struct OrgRecoveryStart {
   pub verification_code: String,
 }
 
-/// The user's rules for what counts as a mention besides `@username` (docs/notifications.md).
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct MentionRulesItem {
-  pub first_name_is_mention: bool,
-  pub channel_mentions_notify: bool,
-  pub keywords: Vec<String>,
-}
-
-impl From<MentionRules> for MentionRulesItem {
-  fn from(rules: MentionRules) -> Self {
+/// Desktop's defaults: the first name and `@channel` notify, no keywords.
+impl Default for MentionSettings {
+  fn default() -> Self {
     Self {
-      first_name_is_mention: rules.first_name_is_mention,
-      channel_mentions_notify: rules.channel_mentions_notify,
-      keywords: rules.keywords,
+      is_first_name_mention: true,
+      do_channel_mentions_notify: true,
+      keywords: Vec::new(),
     }
   }
 }
 
-impl From<MentionRulesItem> for MentionRules {
-  fn from(item: MentionRulesItem) -> Self {
+impl From<teamcraft_core::client::SegmentPrefetch> for SegmentPrefetchResult {
+  fn from(prefetch: teamcraft_core::client::SegmentPrefetch) -> Self {
     Self {
-      first_name_is_mention: item.first_name_is_mention,
-      channel_mentions_notify: item.channel_mentions_notify,
-      keywords: item.keywords,
+      fetched: u32::try_from(prefetch.fetched).unwrap_or(u32::MAX),
+      skipped: u32::try_from(prefetch.skipped).unwrap_or(u32::MAX),
+      stored_bytes: prefetch.stored_bytes,
     }
   }
 }
 
-/// When the app downloads shared search index segments ahead of time.
+/// When the app downloads shared search index segments ahead of time (the core keeps the choice).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SegmentPrefetchMode {
   Off,
@@ -269,6 +282,26 @@ impl From<SegmentPrefetchMode> for SegmentPrefetch {
       SegmentPrefetchMode::Off => Self::Off,
       SegmentPrefetchMode::UnmeteredOnly => Self::UnmeteredOnly,
       SegmentPrefetchMode::Always => Self::Always,
+    }
+  }
+}
+
+impl From<MentionPreferences> for MentionSettings {
+  fn from(preferences: MentionPreferences) -> Self {
+    Self {
+      is_first_name_mention: preferences.first_name_is_mention,
+      do_channel_mentions_notify: preferences.channel_mentions_notify,
+      keywords: preferences.keywords,
+    }
+  }
+}
+
+impl From<MentionSettings> for MentionPreferences {
+  fn from(settings: MentionSettings) -> Self {
+    Self {
+      first_name_is_mention: settings.is_first_name_mention,
+      channel_mentions_notify: settings.do_channel_mentions_notify,
+      keywords: settings.keywords,
     }
   }
 }

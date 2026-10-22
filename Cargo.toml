@@ -5,7 +5,7 @@ members = ["crates/*", "apps/desktop", "tests/e2e"]
 exclude = ["crates/vendor", "fuzz"]
 
 [workspace.package]
-version = "1.0.0-beta.1"
+version = "1.0.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Zeitgleich/TeamCraft"
@@ -65,7 +65,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["trace", "request-id", "fs"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2"] }
 
 # Database
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "time"] }

@@ -1,5 +1,0 @@
-# Copy next to your own inventory: which age keys can decrypt secrets.enc.yaml. One entry per operator.
-creation_rules:
-  - path_regex: secrets\.enc\.ya?ml$
-    age: >-
-      age1replace_with_operator_public_key

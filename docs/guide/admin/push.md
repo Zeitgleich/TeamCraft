@@ -6,15 +6,16 @@ do-not-disturb and active devices ([docs/notifications.md](../../notifications.m
 
 ## Status
 
-| Provider                   | Server                                                     | Client                                                                                           |
-|----------------------------|------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
-| Web Push (VAPID, RFC 8291) | Implemented                                                | Service worker of the web client; shows a generic notification until it can open sealed payloads |
-| FCM (Android)              | **Stub**: logs "push provider is a stub, nothing was sent" | App receiver exists (flavor `full`)                                                              |
-| UnifiedPush                | **Stub**                                                   | App receiver exists                                                                              |
-| APNs (iOS)                 | **Stub**                                                   | iOS app: coming soon                                                                             |
+| Provider                   | Server                                                  | Client                                                                                           |
+|----------------------------|---------------------------------------------------------|--------------------------------------------------------------------------------------------------|
+| Web Push (VAPID, RFC 8291) | Implemented                                             | Service worker of the web client; shows a generic notification until it can open sealed payloads |
+| FCM (Android)              | Implemented (HTTP v1, service account)                  | App receiver exists (flavor `full`)                                                              |
+| UnifiedPush                | Implemented (POST to the distributor endpoint)          | App receiver exists                                                                              |
+| APNs (iOS)                 | Implemented (HTTP/2, `.p8` key; VoIP topic for calls)   | iOS app with notification service extension                                                      |
 
-So today only Web Push is delivered by the server. Android devices get messages while the app is
-connected; background wake-ups need the server's FCM/UnifiedPush senders (coming soon).
+Each provider is on once its credentials are set; the admin console (Instance → Push providers) shows
+which are configured, the last delivery and the last error. Credentials for APNs, FCM and UnifiedPush are
+described in [Operations](../../operations.md#push-notifications).
 
 ## Set up Web Push
 

@@ -318,13 +318,14 @@ final class AppModel {
 
   // MARK: Notification rules and prefetch
 
-  func mentionRules() async -> MentionRulesItem {
-    (try? await core().mentionRules())
-      ?? MentionRulesItem(firstNameIsMention: true, channelMentionsNotify: true, keywords: [])
+  func mentionSettings() async -> MentionSettings {
+    (try? await core().mentionSettings())
+      ?? MentionSettings(isFirstNameMention: true, doChannelMentionsNotify: true, keywords: [])
   }
 
-  func setMentionRules(_ rules: MentionRulesItem) async {
-    try? await core().setMentionRules(rules: rules)
+  /// The core keeps them in the store, so the notification extension applies them too.
+  func setMentionSettings(_ settings: MentionSettings) async {
+    try? await core().setMentionSettings(settings: settings)
   }
 
   func segmentPrefetch() async -> SegmentPrefetchMode {
@@ -354,7 +355,8 @@ final class AppModel {
       guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }
     }
     defer { if !isSyncing { processLock.release() } }
-    return (try? await core.prefetchSegments(isNetworkMetered: isMetered)) != nil
+    return (try? await core.prefetchSegments(isNetworkMetered: isMetered, maxTotalBytes: Self.segmentPrefetchCapBytes))
+      != nil
   }
 
   // MARK: Scene and sync
@@ -374,6 +376,8 @@ final class AppModel {
   // MARK: Push
 
   private static let pushTokenKey = "apnsToken"
+  /// Search index segments kept on the phone by the background prefetch (newest months first).
+  private static let segmentPrefetchCapBytes: UInt64 = 512 * 1024 * 1024
 
   /// Asks for the permission and registers with APNs; the token arrives in `didRegisterForRemoteNotifications`.
   func enablePush() async {

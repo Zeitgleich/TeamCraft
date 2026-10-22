@@ -4227,9 +4227,9 @@ select.input {
 .health-silent { background: var(--dnd); }
 .health-unknown { background: var(--away); }
 .badge-active { background: var(--accent-soft); color: var(--accent-strong); }
-.badge-not-implemented, .badge-unknown { background: #fde7d9; color: #8a3b0a; }
+.badge-failing, .badge-unknown { background: #fde7d9; color: #8a3b0a; }
 .badge-not-configured { background: var(--surface-3); color: var(--text-muted); }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .badge-not-implemented,
+  :root:not([data-theme="light"]) .badge-failing,
   :root:not([data-theme="light"]) .badge-unknown { background: #4a2a12; color: #f3b98f; }
 }

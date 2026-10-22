@@ -67,12 +67,13 @@ mentions") and links to the app, never where, from whom or what. Off by default.
 
 What counts as a mention beyond `@username` is decided on the device, on the decrypted text, because the
 server cannot read it: `@channel` / `@here` / `@all`, the user's first name and their own keywords
-(`teamcraft_core::notify_rules`, desktop: Settings → Notifications). The mobile apps keep the rules in the
-sealed local store (`mention_rules`), so the app and the push extension apply the same ones. The push
-preview carries the result (`PushPreview::is_rule_match`, `PushNotification::is_mention`); it is set only
-while the signed push-content policy lets the text show on the lock screen. The rules rank and mark
-notifications (iOS: relevance score of the notification); they do not stop the server from pushing, and an
-extension without the filtering entitlement cannot suppress a notification.
+(`teamcraft_client_api::notify`, shared by desktop and mobile; desktop: Settings → Notifications). The
+mobile core keeps the preferences in the sealed local store (`teamcraft_core::notify_rules`, set with
+`TeamCraft.set_mention_settings`), so the app and the iOS push extension, which opens the same store,
+apply the same ones: `notification_for_push` sets `is_mention` when the decrypted text matches. The text
+is only available while the signed push-content policy lets it show on the lock screen. The rules rank
+and mark notifications (iOS: relevance score); they do not stop the server from pushing, and an extension
+without the filtering entitlement cannot suppress a notification.
 
 ## Push routing
 

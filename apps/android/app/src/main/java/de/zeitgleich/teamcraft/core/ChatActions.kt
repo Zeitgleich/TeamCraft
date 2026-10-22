@@ -154,6 +154,12 @@ object ChatActions {
 
   fun leaveChannel(conversation: String) = action("leave_channel") { put("conversation", conversation) }
 
+  /** `update_channel` with only `maybe_is_archived` set; the other changes stay absent. */
+  fun archiveChannel(conversation: String, isArchived: Boolean = true) = action("update_channel") {
+    put("conversation", conversation)
+    put("changes", buildJsonObject { put("maybe_is_archived", isArchived) })
+  }
+
   fun createChannel(space: String, name: String) = action("create_channel") {
     put("space", space)
     put("name", name)

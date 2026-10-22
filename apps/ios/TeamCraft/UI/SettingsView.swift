@@ -211,15 +211,15 @@ struct ApproveLinkView: View {
 struct NotificationRulesView: View {
   @Environment(AppModel.self) private var model
 
-  @State private var rules = MentionRulesItem(firstNameIsMention: true, channelMentionsNotify: true, keywords: [])
+  @State private var rules = MentionSettings(isFirstNameMention: true, doChannelMentionsNotify: true, keywords: [])
   @State private var isLoaded = false
   @State private var newKeyword = ""
 
   var body: some View {
     Form {
       Section {
-        Toggle("rules_first_name", isOn: $rules.firstNameIsMention)
-        Toggle("rules_channel", isOn: $rules.channelMentionsNotify)
+        Toggle("rules_first_name", isOn: $rules.isFirstNameMention)
+        Toggle("rules_channel", isOn: $rules.doChannelMentionsNotify)
       } footer: {
         Text("rules_hint")
       }
@@ -239,11 +239,11 @@ struct NotificationRulesView: View {
     .navigationTitle("rules_title")
     .navigationBarTitleDisplayMode(.inline)
     .task {
-      rules = await model.mentionRules()
+      rules = await model.mentionSettings()
       isLoaded = true
     }
     .onChange(of: rules) { _, updated in
-      if isLoaded { Task { await model.setMentionRules(updated) } }
+      if isLoaded { Task { await model.setMentionSettings(updated) } }
     }
   }
 

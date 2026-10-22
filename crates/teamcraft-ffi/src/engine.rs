@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex};
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::model::Message as MessageView;
+use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::LinkApproval;
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::clock::SystemClock;
-use teamcraft_core::notify_rules::{load_mention_rules, save_mention_rules};
+use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_preview::push_preview;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
@@ -33,8 +34,8 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MentionRulesItem, MessageItem, Presence,
-  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
+  AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem, Presence,
+  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -66,6 +67,8 @@ pub(crate) struct Engine {
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
   calls: CallHub,
+  /// Applied to decrypted push texts (keywords, first name).
+  mentions: MentionSettings,
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
@@ -168,6 +171,10 @@ impl Engine {
     std::fs::create_dir_all(&directory).map_err(|error| TeamCraftError::Storage(error.to_string()))?;
     let path = directory.join(format!("{}.teamcraft.db", config.account));
     let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
+    // A broken record only costs the preferences, not the store.
+    let mentions: MentionSettings = load_mention_preferences(store.as_ref())
+      .unwrap_or_default()
+      .into();
     let mut engine = Self {
       server_url: config.server_url,
       download_dir: directory.join("downloads"),
@@ -182,6 +189,7 @@ impl Engine {
       maybe_new_link: None,
       maybe_approval: None,
       calls: CallHub::default(),
+      mentions,
     };
     if let Some(client) = Client::open(
       engine.api(),
@@ -454,44 +462,6 @@ impl Engine {
     result
   }
 
-  pub(crate) fn mention_rules(&self) -> Result<MentionRulesItem, TeamCraftError> {
-    Ok(load_mention_rules(self.store.as_ref())?.into())
-  }
-
-  pub(crate) fn set_mention_rules(&self, rules: MentionRulesItem) -> Result<(), TeamCraftError> {
-    Ok(save_mention_rules(self.store.as_ref(), &rules.into())?)
-  }
-
-  pub(crate) fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
-    Ok(load_segment_prefetch(self.store.as_ref())?.into())
-  }
-
-  pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
-    Ok(save_segment_prefetch(self.store.as_ref(), mode.into())?)
-  }
-
-  /// Fetches the missing index segments if the setting allows it on this network.
-  pub(crate) async fn prefetch_segments(&mut self, is_network_metered: bool) -> Result<u32, TeamCraftError> {
-    if !load_segment_prefetch(self.store.as_ref())?.allows(is_network_metered) {
-      return Ok(0);
-    }
-    let fetched = Arc::new(Mutex::new(0usize));
-    let result = fetched.clone();
-    self
-      .with_client(move |client| {
-        Box::pin(async move {
-          let count = client.fetch_index_segments().await?;
-          if let Ok(mut total) = result.lock() {
-            *total = count;
-          }
-          Ok(())
-        })
-      })
-      .await?;
-    let count = fetched.lock().map(|total| *total).unwrap_or(0);
-    Ok(u32::try_from(count).unwrap_or(u32::MAX))
-  }
-
   pub(crate) fn calls(&self) -> &CallHub {
     &self.calls
   }
@@ -504,7 +474,76 @@ impl Engine {
     // Without a token the preview still names conversation and sender.
     let maybe_api = self.tokens.0.access_token().map(|_| &api);
     let preview = push_preview(self.store.as_ref(), maybe_api, &payload).await?;
-    Ok(preview.into())
+    let mut notification: PushNotification = preview.into();
+    if !notification.is_mention
+      && let (Some(text), Ok(backend)) = (&notification.maybe_text, self.backend())
+    {
+      let me = backend.me();
+      notification.is_mention = is_mentioned(
+        text,
+        &MentionRules {
+          username: &me.username,
+          display_name: &me.display_name,
+          first_name_is_mention: self.mentions.is_first_name_mention,
+          channel_mentions_notify: self.mentions.do_channel_mentions_notify,
+          keywords: &self.mentions.keywords,
+        },
+      );
+    }
+    Ok(notification)
+  }
+
+  /// Remembers the preferences in the store, so a process that opens the store later (the iOS
+  /// notification extension) applies them too.
+  pub(crate) fn set_mention_settings(&mut self, settings: MentionSettings) -> Result<(), TeamCraftError> {
+    save_mention_preferences(self.store.as_ref(), &settings.clone().into())?;
+    self.mentions = settings;
+    Ok(())
+  }
+
+  pub(crate) fn mention_settings(&self) -> MentionSettings {
+    self.mentions.clone()
+  }
+
+  pub(crate) fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
+    Ok(load_segment_prefetch(self.store.as_ref())?.into())
+  }
+
+  pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
+    Ok(save_segment_prefetch(self.store.as_ref(), mode.into())?)
+  }
+
+  /// Prefetches the search segments if the saved mode allows it on this network; nothing is
+  /// fetched otherwise.
+  pub(crate) async fn prefetch_segments(
+    &mut self,
+    is_network_metered: bool,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    if !load_segment_prefetch(self.store.as_ref())?.allows(is_network_metered) {
+      return Ok(SegmentPrefetchResult {
+        fetched: 0,
+        skipped: 0,
+        stored_bytes: 0,
+      });
+    }
+    self.prefetch_search_segments(max_total_bytes).await
+  }
+
+  /// Downloads missing search segments, newest first, within `max_total_bytes`; pauses syncing
+  /// meanwhile.
+  pub(crate) async fn prefetch_search_segments(
+    &mut self,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = client.prefetch_index_segments(max_total_bytes).await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    Ok(result?.into())
   }
 
   pub(crate) async fn complete_enrollment(

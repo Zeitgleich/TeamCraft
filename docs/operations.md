@@ -6,98 +6,52 @@ backups, upgrades and secret rotation. Configuration reference: `teamcraft.examp
 
 ## Quickstart: a fresh server in 15 minutes
 
-The reference deployment is the Ansible playbook in [`deploy/`](../deploy/README.md), which installs
-TeamCraft on one Debian VPS with **rootless Podman and Quadlet**, each service under its own
-unprivileged user:
+The reference deployment is the Ansible playbook in
+[Zeitgleich/teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy). It installs TeamCraft
+on one Debian 13 server with **rootless Podman and Quadlet**, each component under its own
+unprivileged user, IPv4 and IPv6, with the identity provider (Keycloak) and the attachment storage
+(Garage) bundled or external, secrets generated on the server, Let's Encrypt certificates, a firewall
+and nightly database backups.
 
-| Service             | User        | Listens on                                                |
-|---------------------|-------------|-----------------------------------------------------------|
-| Caddy (TLS, HTTP/3) | `tc-proxy`  | `80/tcp`, `443/tcp+udp`, IPv4 and IPv6                    |
-| `teamcraft-server`  | `tc-server` | `127.0.0.1:8080` (behind Caddy)                           |
-| `teamcraft-sfu`     | `tc-sfu`    | `4433/udp` (QUIC) IPv4 and IPv6; `127.0.0.1:8081` control |
-| PostgreSQL          | `tc-db`     | `127.0.0.1:5432`                                          |
+```sh
+git clone https://github.com/Zeitgleich/teamcraft-deploy.git && cd teamcraft-deploy
+mkdir -p inventory/host_vars/chat.example.com
+cp examples/hosts inventory/hosts                                   # the server's address
+cp examples/vars.yml inventory/host_vars/chat.example.com/vars.yml  # domain and admin e-mail
+just install-all
+just ensure-admin alice 'a long password'                           # first user, role owner
+just self-check
+```
 
-Not on the VPS: the OIDC provider (e.g. Keycloak) and the S3 storage.
+What you need first: a Debian 13 VPS (2 vCPU, 4 GB RAM) with public IPv4 and IPv6, A and AAAA records
+for `chat.example.com`, `sfu.chat.example.com` and, when bundled, `id.` and `s3.` below it, and UDP
+port 4433 open for calls. The playbook's documentation covers DNS, configuration, secrets (generated
+or sops + age), updating, backups and every component.
 
-### What you need
+Several brands on one server (`docs/branding.md`) are `teamcraft_brands` in the playbook: it adds
+the host names to Caddy and the Keycloak client.
 
-- A VPS with **Debian 13 (trixie)**, 2 vCPU, 4 GB RAM, 20 GB disk, a public IPv4 **and** IPv6 address,
-  SSH access as a user with `sudo`.
-- Two DNS names with A and AAAA records pointing at it: `chat.example.com` (API, web client) and
-  `sfu.chat.example.com` (calls).
-- Firewall open for `80/tcp`, `443/tcp`, `443/udp`, `4433/udp`, both address families. Nothing else.
-- An **OIDC provider** with a realm for TeamCraft: a public client `teamcraft` (code flow with PKCE;
-  redirect URIs of the apps), client roles `owner`, `admin`, `member`, `guest` and users who have
-  one of them. The Keycloak realm in `dev/keycloak/teamcraft-dev-realm.json` is a complete example.
-- An **S3 bucket** with an access key; clients upload to it directly, so it must be reachable from
-  them and allow CORS from `https://chat.example.com` for the web client.
-- On your machine: Ansible ≥ 2.16, `sops` and `age`, and the collections of
-  `ansible/requirements.yml`.
+Then point the desktop app at `https://chat.example.com` and sign in. The first device of every user
+creates their keys; set up the recovery passphrase when asked.
 
-### Steps
+### Running the images yourself
 
-1. **Inventory.** Copy `deploy/ansible/inventories/example` to a directory of your own, outside this
-   checkout (ideally a private repository, `deploy/README.md`, "Your own inventory"), and set the host
-   (`hosts.yml`) and `group_vars/all.yml`: the two names, an ACME e-mail, the OIDC issuer, the S3
-   endpoint, region and bucket, and the image digests from `images.txt` of the release.
-2. **Secrets.** Generate them (commands in `deploy/secrets/README.md`), put your age key into the
-   inventory's `.sops.yaml` and write them into the encrypted file next to the inventory:
-
-   ```sh
-   cd ~/my-teamcraft-instance && sops secrets.enc.yaml
-   ```
-
-   Needed: `postgres_password`, `s3_access_key`, `s3_secret_key`, `sfu_registration_token`,
-   `call_signing_key` + `call_signing_public_key`, `meetings_guest_token_secret`.
-3. **Deploy.**
-
-   ```sh
-   ansible-galaxy collection install -r deploy/ansible/requirements.yml
-   ansible-playbook -i ~/my-teamcraft-instance deploy/ansible/site.yml
-   ```
-
-   The first run installs Podman, creates the four service users, pulls the images, gets the
-   certificates from Let's Encrypt and starts everything (about 5 minutes in the dry run, most of it
-   package installs and image pulls). A second run must report `changed=0`. The SFU certificate is
-   copied from Caddy hourly; the SFU restarts by itself when it changes (renewals).
-4. **Check.**
-
-   ```sh
-   curl -fsS https://chat.example.com/readyz                    # server and database
-   curl -fsS --http3-only https://chat.example.com/healthz      # HTTP/3 through Caddy
-   curl -sS -o /dev/null -w '%{http_version}\n' --http3-only https://sfu.chat.example.com:4433/  # 3: SFU reachable
-   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://chat.example.com/api/internal/v1/calls/participants/joined  # 404
-   ```
-
-   Repeat with `-4` and `-6`. On the server, `sudo -u tc-server XDG_RUNTIME_DIR=/run/user/$(id -u
-   tc-server) systemctl --user status teamcraft-server` and `journalctl --user` work per service user.
-5. **Sign in.** Point the desktop app at `https://chat.example.com` and sign in with an `owner`
-   user. The first device of every user creates their keys; set up the recovery passphrase when
-   asked. With the web client archive deployed (`teamcraft_web_archive`), the same works in the
-   browser at `https://chat.example.com`.
-
-Then read "Backup and restore" below and set up the database backup before inviting people.
-
-### Trying it locally first
-
-`deploy/test/dry-run.sh all` runs the whole playbook against a throwaway
-Debian trixie container (systemd, rootless Podman inside, its own dual-stack Docker network), with
-images built from this repository, generated secrets, Caddy's internal CA and the dev Keycloak and
-Garage of `docker-compose.dev.yml`. It then checks the health endpoints over IPv4 and IPv6, that
-`/api/internal/` is refused, the SFU's QUIC handshake over both families, and sends encrypted messages
-between two dev users through the deployment with the end-to-end harness
-(`tests/e2e/tests/suite/deployed.rs`, `E2E_DEPLOYED_URL`; `SSL_CERT_FILE` points the clients at Caddy's
-local root). `deploy/test/dry-run.sh down` removes it again.
-
-Pitfalls the dry run found, worth knowing for any other way of running the images:
+The rest of this guide applies to any way of running the images. Pitfalls the deployment's dry run
+found:
 
 - The server image sets `TEAMCRAFT_SERVER__LISTEN_ADDR=[::]:8080`, and environment variables win over
   the TOML file. With host networking, set the variable yourself (e.g. `127.0.0.1:8080`), or the server
   is reachable on every address of the host, bypassing the proxy.
 - The images are distroless: health checks must use the exec form
-  (`HealthCmd=["/usr/local/bin/teamcraft-server", "healthcheck", "--ready"]`), there is no shell.
+  (`["/usr/local/bin/teamcraft-server", "healthcheck", "--ready"]`), there is no shell.
 - Rootless containers run as a subordinate uid: bind-mounted configuration files must be readable by
-  others (they hold no secrets; secrets go in as podman secrets).
+  others (they hold no secrets; pass secrets as podman secrets or environment variables).
+- When the identity provider runs on the same host, point `[oidc] jwks_uri` at its loopback address:
+  the server then fetches keys without a round trip through the proxy (and without trusting its CA).
+
+The playbook's dry run (`test/dry-run.sh` there) deploys to a throwaway container and uses this
+repository's end-to-end harness against it (`tests/e2e/tests/suite/deployed.rs`, `E2E_DEPLOYED_URL`,
+`DEV_TOKEN_ISSUER` for `dev/dev-token.py`).
 
 ## Pieces and what holds state
 
@@ -199,6 +153,92 @@ harmless; rows without an object show up as failed downloads.
 - Check `docs/` and the release notes for configuration changes before upgrading. The server rejects
   unknown configuration keys at startup, so a stale key fails fast instead of being ignored.
 
+## Push notifications
+
+Push wakes sleeping phones and browsers. The payload is sealed with a per-device key (e2ee.md §7), so
+Apple, Google and push relays only see ciphertext; the app then fetches and decrypts the message.
+Without a provider configured, devices of that kind only get messages while the app is open. Every
+provider is on as soon as its credentials are set; `GET /api/v1/admin/instance` and the admin console
+(Instance → Push providers) show per provider whether it is configured, when it last delivered, how
+many pushes failed since the server started and the last error.
+
+| Provider    | For                       | Needs                                              | Configuration                                    |
+|-------------|---------------------------|----------------------------------------------------|--------------------------------------------------|
+| Web Push    | browsers (PWA)            | a VAPID key pair                                   | `[push] vapid_private_key`, `vapid_subject`      |
+| APNs        | iOS, including call rings | an Apple `.p8` key, key ID, team ID, bundle ID     | `[push.apns]`                                    |
+| FCM         | Android with Google       | a Firebase service account JSON key                | `[push.fcm]`                                     |
+| UnifiedPush | Android without Google    | nothing (the app hands over the distributor's URL) | `[push.unified_push] is_enabled` (on by default) |
+
+Common settings in `[push]`: `ttl_secs` (how long a push service holds a wake-up for an offline
+device), `request_timeout_secs`, `max_concurrent_sends`. `allow_private_endpoints` is for development
+only: it lets Web Push and UnifiedPush endpoints point at private addresses and plain http.
+
+### Web Push (VAPID)
+
+```sh
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '='      # the private key, 32 random bytes
+```
+
+Set it as `TEAMCRAFT_PUSH__VAPID_PRIVATE_KEY` and `vapid_subject` to a `mailto:` or `https:` contact for
+push services to reach you. At startup the server logs the matching public key; browsers get it from
+`GET /api/v1/push/web-key`. Changing the key means browsers must subscribe again.
+
+### APNs (iOS)
+
+1. In the Apple Developer account: Keys → create a key with "Apple Push Notifications service (APNs)"
+   enabled and download the `.p8` file once. Note the **Key ID**; the **Team ID** is shown under
+   Membership; the **bundle ID** is the iOS app's.
+2. Configure the server. The key is the file's contents, as `TEAMCRAFT_PUSH__APNS__KEY` or, for a
+   mounted secret file, `key_path`:
+
+   ```toml
+   [push.apns]
+   key_path = "/run/secrets/apns_key.p8"
+   key_id = "ABC123DEFG"
+   team_id = "DEF456GHIJ"
+   bundle_id = "com.example.teamcraft"
+   use_sandbox = false
+   ```
+
+Messages go to the app's topic as alerts with `mutable-content` (the notification service extension
+rewrites the generic `alert_text`); calls go to `<bundle_id>.voip` as VoIP pushes that are not stored.
+One key serves production and sandbox; `use_sandbox = true` points the server at Apple's sandbox for
+development builds (a token only works in the environment its build was signed for). A partial setup
+(for example a key without a team ID) stops the server at startup.
+
+### FCM (Android with Google services)
+
+1. In the Firebase console: Project settings → Service accounts → "Generate new private key" (the
+   account needs the "Firebase Cloud Messaging API Admin" role or `firebase.messaging`).
+2. Give the JSON file to the server as `TEAMCRAFT_PUSH__FCM__SERVICE_ACCOUNT` (the contents) or
+   `[push.fcm] service_account_path`.
+
+The server trades the account's key for short-lived OAuth tokens itself and sends data-only
+high-priority messages that carry only the sealed wake-up.
+
+### UnifiedPush (Android without Google services)
+
+Nothing to configure on the server: the app registers the endpoint of the user's distributor (for
+example a self-hosted ntfy) and the server POSTs the sealed wake-up there. Endpoints must be public
+https URLs. Set `[push.unified_push] is_enabled = false` to refuse it.
+
+### Variables in the deployment repository
+
+The Ansible deployment passes these on (secrets as podman secrets, the rest as variables):
+
+| Deployment name              | Kind     | Becomes                                           |
+|------------------------------|----------|---------------------------------------------------|
+| `vapid_private_key`          | secret   | `TEAMCRAFT_PUSH__VAPID_PRIVATE_KEY`               |
+| `apns_key`                   | secret   | `TEAMCRAFT_PUSH__APNS__KEY` (the `.p8` text)      |
+| `fcm_service_account`        | secret   | `TEAMCRAFT_PUSH__FCM__SERVICE_ACCOUNT`            |
+| `teamcraft_apns_key_id`      | variable | `[push.apns] key_id`                              |
+| `teamcraft_apns_team_id`     | variable | `[push.apns] team_id`                             |
+| `teamcraft_apns_bundle_id`   | variable | `[push.apns] bundle_id`                           |
+| `teamcraft_apns_use_sandbox` | variable | `[push.apns] use_sandbox` (default `false`)       |
+| `teamcraft_unified_push`     | variable | `[push.unified_push] is_enabled` (default `true`) |
+
+The `[push.apns]` block is only rendered when `apns_key` is a secret.
+
 ## Secrets and key rotation
 
 | Secret                                      | Where                                      | Rotating it                                                                |
@@ -209,6 +249,8 @@ harmless; rows without an object show up as failed downloads.
 | Guest token secret                          | `[meetings] guest_token_secret`            | invalidates open invite links and guest sessions; use between meetings     |
 | Mail inbox token                            | `[meetings] inbox_token`                   | change on the server and the inbox handler together                        |
 | VAPID key (Web Push)                        | `[push] vapid_private_key`                 | browsers must subscribe again; plan for a short push gap                   |
+| APNs key (`.p8`)                            | `[push.apns] key`                          | create a new key at Apple, switch, then revoke the old one; no gap         |
+| FCM service account key                     | `[push.fcm] service_account`               | create a new key in Firebase, switch, then delete the old one; no gap      |
 | OIDC server client secret                   | `[oidc.sync] client_secret`                | rotate in the identity provider, then restart the server                   |
 | Database password, S3 keys, SMTP and CalDAV | `[database]`, `[storage]`, `[meetings.*]`  | change at the provider, then in the configuration, then restart            |
 

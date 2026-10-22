@@ -46,7 +46,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     maybeCall = nil
     maybeEncoder = nil
     lock.unlock()
-    call?.stopCamera()
+    call?.stopEncodedCamera()
     sessionQueue.async { [self] in
       if captureSession.isRunning { captureSession.stopRunning() }
     }
@@ -106,10 +106,10 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
       let encoder = H264Encoder(
         width: width, height: height, bitrate: Self.bitrate, frameRate: Self.frameRate,
         output: { data, timestamp, isKeyframe in
-          call.sendCameraFrame(data: data, timestamp: timestamp, isKeyframe: isKeyframe)
+          call.sendEncodedCameraFrame(data: data, timestamp: timestamp, isKeyframe: isKeyframe)
         })
     else { return nil }
-    call.publishCamera(
+    call.publishEncodedCamera(
       width: UInt16(clamping: width), height: UInt16(clamping: height), maxFramerate: UInt8(Self.frameRate),
       maxBitrateBps: UInt32(Self.bitrate))
     return encoder

@@ -191,7 +191,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       do {
         let session = try await AppModel.shared.joinCall(conversationId: call.conversationId)
         maybeSession = session
-        session.setVideoListener(listener: self)
+        session.setEncodedVideoListener(listener: self)
         if var current = activeCall {
           current.phase = .connected
           activeCall = current
@@ -397,7 +397,7 @@ extension CallManager: CallListener {
 // MARK: - Video from the core
 
 /// Remote tracks and keyframe requests of the core's call session (called on the call thread).
-extension CallManager: VideoListener {
+extension CallManager: EncodedVideoListener {
   func onRemoteVideoTrack(track: RemoteVideoTrack) {
     let renderer = renderers.renderer(for: track.streamId, creating: true)
     DispatchQueue.main.async {
@@ -406,7 +406,7 @@ extension CallManager: VideoListener {
         self.remoteVideo.append(
           RemoteVideoStream(id: track.streamId, isScreen: track.isScreen, renderer: renderer))
       }
-      self.maybeSession?.watchVideo(streamId: track.streamId)
+      self.maybeSession?.watchEncodedVideo(streamId: track.streamId)
     }
   }
 

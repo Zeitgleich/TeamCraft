@@ -222,8 +222,8 @@ wire_enum! {
     Active => "active",
     /// The server has no credentials for it.
     NotConfigured => "not_configured",
-    /// The sender is a stub; nothing is delivered yet.
-    NotImplemented => "not_implemented",
+    /// Configured, but the last attempt to reach the push service failed.
+    Failing => "failing",
   }
 }
 
@@ -234,6 +234,20 @@ pub struct PushProviderStatus {
   pub state: PushProviderState,
   /// Live devices registered with this provider.
   pub device_count: u32,
+  /// Pushes the push service accepted since the server started.
+  #[serde(default)]
+  pub success_count: u64,
+  /// Pushes the push service refused or could not be reached for since the server started. Dead
+  /// registrations (device gone) are not counted: the push service itself worked.
+  #[serde(default)]
+  pub failure_count: u64,
+  #[serde(rename = "last_success_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_last_success_at: Option<UnixMillis>,
+  #[serde(rename = "last_failure_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_last_failure_at: Option<UnixMillis>,
+  /// Short description of the last failure (status code or transport error). No tokens, no content.
+  #[serde(rename = "last_error", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_last_error: Option<String>,
 }
 
 /// The media server (SFU) as the server sees it.

@@ -5,6 +5,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import uniffi.teamcraft_ffi.PushService
 
@@ -16,6 +17,7 @@ class PushManager(
   private val context: Context,
   private val core: CoreRepository,
   private val notifier: MessageNotifier,
+  private val mentionPrefs: MentionPrefs,
   private val scope: CoroutineScope,
 ) {
   private val backends: List<PushBackend> = PushBackends.all()
@@ -36,7 +38,12 @@ class PushManager(
 
   /** Opens a wake-up and shows its notification. Never logs the payload or the text. */
   suspend fun onWakeUp(payload: ByteArray) {
-    runCatching { core.core().notificationForPush(payload) }
+    runCatching {
+      val core = core.core()
+      // Keywords and the first name are matched on the device (the server can't read the text).
+      core.setMentionSettings(mentionPrefs.settings.value)
+      core.notificationForPush(payload)
+    }
       .onSuccess { notifier.show(it) }
       .onFailure { Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}") }
   }

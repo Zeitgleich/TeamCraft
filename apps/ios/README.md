@@ -147,7 +147,7 @@ by start. **Join** starts the meeting chat's call; the menu answers the invitati
 ### Notification rules
 
 *Settings → Mentions and keywords*: first name, `@channel` / `@here` / `@all` and own keywords
-(`teamcraft_core::notify_rules`, kept in the sealed store). The extension reads them with the store, so a
+(`teamcraft_core::notify_rules` keeps them in the sealed store, the matching is `teamcraft_client_api::notify`). The extension reads them with the store, so a
 pushed message that matches counts as a mention (`PushNotification.isMention`): it ranks higher in the
 notification summary. The rules cannot stop the server from pushing, and an extension without the
 filtering entitlement cannot suppress a notification (see Push).
@@ -267,6 +267,6 @@ whether it was a device or the simulator.
   CI's compiler and unit tests (Annex B handling), never on a device.
 - The keyword rules mark and rank notifications; they cannot suppress one without the filtering
   entitlement, and the server still decides what is pushed.
-- Search prefetch has no size cap, and iOS decides when a processing task runs.
+- Search prefetch keeps at most 512 MB of segments (newest months first), and iOS decides when a processing task runs.
 - Push and ring-in-the-background need the server's APNs sender and the `call` wake-up.
 - Swift 5 language mode (CI probes Swift 6 in a non-gating step; see the PR).

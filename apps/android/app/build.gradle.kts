@@ -21,8 +21,8 @@ android {
     targetSdk = 35
     // docs/release.md: versionCode = MAJOR*1000000 + MINOR*10000 + PATCH*100 + stage, where stage is
     // beta.N -> N, rc.N -> 50+N and the final release -> 99, so every release sorts above the last.
-    versionCode = 1000001
-    versionName = "1.0.0-beta.1"
+    versionCode = 1000099
+    versionName = "1.0.0"
     // The ABIs scripts/build.sh builds the Rust library for (phones and the x86_64 emulator).
     ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -112,6 +112,14 @@ dependencies {
   // Calls: Telecom integration and Android Auto calling.
   implementation(libs.androidx.core.telecom)
   implementation(libs.androidx.car.app)
+  // Camera for video calls and the device-link QR scanner (CameraX, Apache-2.0).
+  implementation(libs.androidx.camera.camera2)
+  implementation(libs.androidx.camera.lifecycle)
+  implementation(libs.androidx.camera.view)
+  // QR codes for device linking, shown and scanned (pure Java, Apache-2.0; no Play services).
+  implementation(libs.zxing.core)
+  // Search segment prefetch on unmetered networks while charging.
+  implementation(libs.androidx.work.runtime)
   // UniFFI's Kotlin bindings call the Rust library through JNA.
   implementation("${libs.jna.get()}@aar")
   "fullImplementation"(libs.firebase.messaging)

@@ -35,9 +35,9 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
-    <release version="1.0.0-beta.1" date="2026-10-22" type="development">
+    <release version="1.0.0" date="2026-10-23" type="stable">
       <description>
-        <p>First public beta: encrypted chat, threads, calls and meetings.</p>
+        <p>First release: end-to-end encrypted chat, threads, calls and meetings.</p>
       </description>
     </release>
   </releases>

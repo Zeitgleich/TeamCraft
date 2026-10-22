@@ -6,8 +6,8 @@ written in Rust. License: AGPL-3.0-or-later.
 - Architecture, threat model and data model: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Feature catalog and roadmap: [PLAN.md](PLAN.md)
 - User and administrator guide: [docs/guide/index.md](docs/guide/index.md)
-- Run your own server: [docs/operations.md](docs/operations.md) (quickstart) and [deploy/](deploy/README.md)
-  (Ansible playbook, rootless Podman)
+- Run your own server: [Zeitgleich/teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)
+  (Ansible playbook, rootless Podman) and [docs/operations.md](docs/operations.md)
 - Releases and changes: [CHANGELOG.md](CHANGELOG.md), [docs/release.md](docs/release.md)
 - Rules for contributors and coding agents: [AGENTS.md](AGENTS.md)
 
@@ -113,8 +113,8 @@ and `[oidc.sync]` polls the admin API with the service account (disabled users, 
 `TEAMCRAFT_OIDC__SYNC__IS_ENABLED=true TEAMCRAFT_OIDC__SYNC__CLIENT_SECRET=teamcraft-server-dev-secret`.
 
 Push: messages wake devices with an encrypted payload sealed with the device's push key (e2ee.md §7). Web Push
-(VAPID, RFC 8291) is implemented and needs `[push] vapid_private_key`; APNs, FCM and UnifiedPush are stubs behind
-the same trait. Routing honours mute, mentions, do-not-disturb and active devices.
+(VAPID, RFC 8291) needs `[push] vapid_private_key`; APNs (`[push.apns]`), FCM (`[push.fcm]`) and UnifiedPush are implemented
+behind the same trait and on once configured (docs/operations.md). Routing honours mute, mentions, do-not-disturb and active devices.
 
 ### Tests against the whole stack
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use teamcraft_db::{Database, DatabaseOptions, SnowflakeGenerator};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_proto::PushProvider;
@@ -24,7 +24,10 @@ use teamcraft_server::meetings::caldav::{CalDavStore, CalendarStore};
 use teamcraft_server::meetings::mailer::{Mailer, SmtpMailer};
 use teamcraft_server::meetings::{MeetingBackends, MeetingService};
 use teamcraft_server::push::crypto::VapidKey;
-use teamcraft_server::push::{ApnsSender, FcmSender, PushDispatcher, UnifiedPushSender, WebPushSender};
+use teamcraft_server::push::{
+  APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FcmSender, FcmSettings,
+  PushDispatcher, ServiceAccount, UnifiedPushSender, WebPushSender,
+};
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
 use teamcraft_server::security::RateLimits;
@@ -444,13 +447,11 @@ fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration)
   });
 }
 
-/// The push senders: Web Push if a VAPID key is configured, stubs for the other providers.
+/// The push senders: each provider whose credentials are configured, UnifiedPush unless disabled.
 fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
   let push = &config.push;
-  let mut dispatcher = PushDispatcher::new(push.max_concurrent_sends)
-    .with_sender(&PushProvider::Apns, Arc::new(ApnsSender))
-    .with_sender(&PushProvider::Fcm, Arc::new(FcmSender))
-    .with_sender(&PushProvider::UnifiedPush, Arc::new(UnifiedPushSender));
+  let timeout = Duration::from_secs(push.request_timeout_secs);
+  let mut dispatcher = PushDispatcher::new(push.max_concurrent_sends);
   if let Some(private_key) = &push.maybe_vapid_private_key {
     let vapid = VapidKey::from_base64url(private_key.expose_secret()).context("push.vapid_private_key")?;
     let public_key = vapid.public_key_base64url();
@@ -458,7 +459,7 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
     let sender = WebPushSender::new(
       vapid,
       push.vapid_subject.clone(),
-      Duration::from_secs(push.request_timeout_secs),
+      timeout,
       push.allow_private_endpoints,
     )
     .context("building the Web Push client")?;
@@ -466,7 +467,94 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
       .with_sender(&PushProvider::WebPush, Arc::new(sender))
       .with_web_public_key(public_key);
   }
+  if let Some(settings) = apns_settings(config)? {
+    let sender = ApnsSender::new(settings).context("push.apns")?;
+    info!("APNs enabled");
+    dispatcher = dispatcher.with_sender(&PushProvider::Apns, Arc::new(sender));
+  }
+  if let Some(json) = secret_from_config(
+    push.fcm.maybe_service_account.as_ref(),
+    push.fcm.maybe_service_account_path.as_deref(),
+    "push.fcm.service_account",
+  )? {
+    let sender = FcmSender::new(FcmSettings {
+      account: ServiceAccount::from_json(json.expose_secret()).context("push.fcm.service_account")?,
+      base_url: push
+        .fcm
+        .maybe_base_url
+        .clone()
+        .unwrap_or_else(|| FCM_BASE_URL.into()),
+      timeout,
+    })
+    .context("push.fcm.service_account")?;
+    info!("FCM enabled");
+    dispatcher = dispatcher.with_sender(&PushProvider::Fcm, Arc::new(sender));
+  }
+  if push.unified_push.is_enabled {
+    let sender = UnifiedPushSender::new(timeout, push.allow_private_endpoints)
+      .context("building the UnifiedPush client")?;
+    dispatcher = dispatcher.with_sender(&PushProvider::UnifiedPush, Arc::new(sender));
+  }
   Ok(dispatcher)
+}
+
+/// APNs is on when the key and its three identifiers are set; a partial setup is an error, not a
+/// silently disabled provider.
+fn apns_settings(config: &Config) -> anyhow::Result<Option<ApnsSettings>> {
+  let push = &config.push;
+  let apns = &push.apns;
+  let maybe_key = secret_from_config(
+    apns.maybe_key.as_ref(),
+    apns.maybe_key_path.as_deref(),
+    "push.apns.key",
+  )?;
+  let Some(key_pem) = maybe_key else {
+    anyhow::ensure!(
+      apns.maybe_key_id.is_none() && apns.maybe_team_id.is_none() && apns.maybe_bundle_id.is_none(),
+      "push.apns: key_id, team_id or bundle_id is set but no key (push.apns.key or key_path)"
+    );
+    return Ok(None);
+  };
+  let required = |value: &Option<String>, name: &str| {
+    value
+      .clone()
+      .filter(|value| !value.is_empty())
+      .with_context(|| format!("push.apns.{name} is required with an APNs key"))
+  };
+  let base_url = apns.maybe_base_url.clone().unwrap_or_else(|| {
+    if apns.use_sandbox {
+      APNS_SANDBOX_URL
+    } else {
+      APNS_PRODUCTION_URL
+    }
+    .into()
+  });
+  Ok(Some(ApnsSettings {
+    key_pem,
+    key_id: required(&apns.maybe_key_id, "key_id")?,
+    team_id: required(&apns.maybe_team_id, "team_id")?,
+    bundle_id: required(&apns.maybe_bundle_id, "bundle_id")?,
+    base_url,
+    alert_text: apns.alert_text.clone(),
+    timeout: Duration::from_secs(push.request_timeout_secs),
+  }))
+}
+
+/// A secret given inline or as a file (for container secrets mounted as files). Inline wins.
+fn secret_from_config(
+  maybe_inline: Option<&SecretString>,
+  maybe_path: Option<&std::path::Path>,
+  name: &str,
+) -> anyhow::Result<Option<SecretString>> {
+  if let Some(inline) = maybe_inline {
+    return Ok(Some(SecretString::from(inline.expose_secret().to_owned())));
+  }
+  let Some(path) = maybe_path else {
+    return Ok(None);
+  };
+  let text =
+    std::fs::read_to_string(path).with_context(|| format!("reading {name} from {}", path.display()))?;
+  Ok(Some(SecretString::from(text)))
 }
 
 fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {

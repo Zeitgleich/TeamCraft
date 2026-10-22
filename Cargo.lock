@@ -3773,6 +3773,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17e2ac29387b1aa07a1e448f7bb4f35b500787971e965b02842b900afa5c8f6f"
 
 [[package]]
+name = "h2"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap 2.14.2",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4137,7 +4156,9 @@ checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
 dependencies = [
  "atomic-waker",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -7745,6 +7766,7 @@ dependencies = [
  "cookie_store",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -9826,7 +9848,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-bridge"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -9851,7 +9873,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-client-api"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -9860,7 +9882,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-core"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "futures-channel",
@@ -9897,7 +9919,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-crypto"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -9930,7 +9952,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-db"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "sqlx",
  "teamcraft-proto",
@@ -9942,7 +9964,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-desktop"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -9976,7 +9998,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-e2e"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -9995,7 +10017,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-ffi"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "rand_core 0.6.4",
  "reqwest",
@@ -10014,7 +10036,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-media"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -10067,7 +10089,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-ops"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "socket2",
  "thiserror 2.0.21",
@@ -10076,7 +10098,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-proto"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -10087,7 +10109,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-server"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -10126,7 +10148,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-sfu"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -10149,7 +10171,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-ui"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "console_error_panic_hook",
  "fluent-bundle",
@@ -10179,14 +10201,14 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-uniffi-bindgen"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "teamcraft-web-sw"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "teamcraft-core",
 ]
@@ -10454,6 +10476,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]

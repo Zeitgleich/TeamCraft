@@ -11,20 +11,25 @@ mod calls;
 mod engine;
 mod error;
 mod types;
+mod video;
 
+use std::path::Path;
 use std::sync::Arc;
 
 pub use calls::{
-  CallEndReason, CallListener, CallPhase, CallSession, CallStateInfo, IncomingCallInfo, RemoteVideoFrame,
-  RemoteVideoTrack, VideoListener,
+  CallEndReason, CallListener, CallPhase, CallSession, CallStateInfo, EncodedVideoListener, IncomingCallInfo,
+  RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
+use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MentionRulesItem, MessageItem,
+  AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem,
   OrgRecoveryStart, Presence, PushNotification, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode,
+  SegmentPrefetchMode, SegmentPrefetchResult,
 };
+
+pub use video::{CameraFrame, VideoFrameRgba};
 
 use crate::engine::{Engine, Job};
 
@@ -199,6 +204,58 @@ impl TeamCraft {
       .await
   }
 
+  /// Keywords, first name and `@channel` preferences for marking pushed messages as mentions.
+  pub async fn set_mention_settings(&self, settings: MentionSettings) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.set_mention_settings(settings) }))
+      .await
+  }
+
+  /// The saved mention preferences (kept in the store, so the push extension applies them too).
+  pub async fn mention_settings(&self) -> Result<MentionSettings, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { Ok(engine.mention_settings()) }))
+      .await
+  }
+
+  /// When search index segments are prefetched; the platform schedules the work (see
+  /// `prefetch_segments`).
+  pub async fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.segment_prefetch() }))
+      .await
+  }
+
+  pub async fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.set_segment_prefetch(mode) }))
+      .await
+  }
+
+  /// Prefetches the search segments like `prefetch_search_segments` if the saved mode allows it
+  /// on the current network (`is_network_metered`); fetches nothing otherwise. For background tasks.
+  pub async fn prefetch_segments(
+    &self,
+    is_network_metered: bool,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.prefetch_segments(is_network_metered, max_total_bytes)))
+      .await
+  }
+
+  /// Downloads the conversations' published search segments (e2ee.md §10.1), newest first, while
+  /// the segments kept on the device stay within `max_total_bytes`. The app calls it on unmetered
+  /// networks while charging.
+  pub async fn prefetch_search_segments(
+    &self,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.prefetch_search_segments(max_total_bytes)))
+      .await
+  }
+
   /// Everything the conversation list and headers show, as JSON (`ChatSnapshot` of
   /// teamcraft-client-api: users, spaces, conversations with unread counts, message counts, keys).
   pub async fn snapshot(&self) -> Result<String, TeamCraftError> {
@@ -268,42 +325,6 @@ impl TeamCraft {
       .await
   }
 
-  /// The user's mention rules (`@channel`, first name, keywords) that the notification extension
-  /// applies to pushed text as well.
-  pub async fn mention_rules(&self) -> Result<MentionRulesItem, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.mention_rules() }))
-      .await
-  }
-
-  pub async fn set_mention_rules(&self, rules: MentionRulesItem) -> Result<(), TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(async move { engine.set_mention_rules(rules) }))
-      .await
-  }
-
-  /// When search index segments are prefetched (the platform schedules the work, see
-  /// `prefetch_segments`).
-  pub async fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.segment_prefetch() }))
-      .await
-  }
-
-  pub async fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(async move { engine.set_segment_prefetch(mode) }))
-      .await
-  }
-
-  /// Downloads the search index segments this device doesn't have yet if the setting allows it on
-  /// the current network; answers how many were fetched. Meant for background tasks.
-  pub async fn prefetch_segments(&self, is_network_metered: bool) -> Result<u32, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.prefetch_segments(is_network_metered)))
-      .await
-  }
-
   /// Rings and the state of this device's call go to `listener` from now on.
   pub async fn set_call_listener(&self, listener: Arc<dyn CallListener>) -> Result<(), TeamCraftError> {
     self
@@ -328,6 +349,43 @@ impl TeamCraft {
       .await?;
     calls::join(preparation, hub).await
   }
+}
+
+/// Whether sending `body` to a conversation with `member_count` members should be confirmed first
+/// (`@channel`/`@here`/`@all` and more members than `confirm_over`; `0` never asks).
+#[uniffi::export]
+pub fn needs_channel_confirmation(body: String, member_count: u32, confirm_over: u32) -> bool {
+  teamcraft_client_api::notify::needs_channel_confirmation(
+    &body,
+    usize::try_from(member_count).unwrap_or(usize::MAX),
+    confirm_over,
+  )
+}
+
+/// Where Cisco's OpenH264 for this phone is downloaded from (receiving video needs it; it can't be
+/// shipped with the app, see teamcraft-media `openh264_library`). `None`: no binary for this CPU.
+#[uniffi::export]
+pub fn video_codec_download_url() -> Option<String> {
+  OpenH264Binary::for_this_platform()
+    .ok()
+    .map(|binary| binary.download_url())
+}
+
+/// Uses an earlier download from `directory`; `false` if there is none (or it doesn't check out).
+#[uniffi::export]
+pub fn use_installed_video_codec(directory: String) -> bool {
+  openh264_library::is_available()
+    || OpenH264Binary::for_this_platform().is_ok_and(|binary| binary.use_installed(Path::new(&directory)))
+}
+
+/// Unpacks the download from [`video_codec_download_url`] into `directory`, checks it against
+/// Cisco's published hashes and uses it for calls joined from now on.
+#[uniffi::export]
+pub fn install_video_codec(directory: String, compressed: Vec<u8>) -> Result<(), TeamCraftError> {
+  OpenH264Binary::for_this_platform()
+    .and_then(|binary| binary.install(Path::new(&directory), &compressed))
+    .map(drop)
+    .map_err(|error| TeamCraftError::Call(error.to_string()))
 }
 
 impl TeamCraft {
