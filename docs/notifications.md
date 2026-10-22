@@ -43,6 +43,26 @@ The DND schedule is typed (weekdays, start/end minute, a fixed UTC offset the cl
 an allow list of senders) and stored as JSON text the database does not interpret. The server
 evaluates it in the push routing, so it needs no timezone database.
 
+## E-mail digest of missed mentions
+
+The only e-mail notification, **content-free** like everything the server can do here: it knows who is
+mentioned in which message and who has read what, so the mail says how many mentions wait ("3 new
+mentions") and links to the app, never where, from whom or what. Off by default.
+
+- Server: `[notifications.email_digest]` (`is_enabled`, default and minimum interval, grace period,
+  scheduler interval, texts) and `[mail.smtp]` with `[mail] public_base_url` (the mail goes through
+  lettre like the activation and invitation mail).
+- User: `GET`/`PUT /me/email-digest` (`is_enabled`, optional `interval_minutes` ≥ the instance minimum;
+  without it the instance default). Turning it on starts "from now"; it needs an e-mail address on the
+  account.
+- The scheduler looks at each user once per interval and counts mentions since the last look that are
+  at least `grace_secs` old and still unread (thread replies against the thread's read position),
+  in conversations that aren't muted, and not written by the user. A mention that was read in time is
+  never mailed; several mentions are one mail. A mail that can't be sent is tried again after five
+  minutes without losing the count.
+- Only the digest's count and the link leave the server; pushes for urgent messages and mentions are
+  separate (below).
+
 ## Push routing
 
 For each recipient without a live connection: muted (level `none` or mute-until) never pushes; DND

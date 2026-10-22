@@ -11,6 +11,7 @@ mod calls;
 mod conversion;
 mod devices;
 mod display_names;
+mod email_digest;
 mod guest_domains;
 mod guests;
 mod meetings;

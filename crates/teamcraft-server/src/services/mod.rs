@@ -14,6 +14,7 @@ pub mod convert;
 pub mod device_lists;
 pub mod devices;
 pub mod directory;
+pub mod email_digest;
 pub mod guests;
 pub mod identity;
 pub mod invites;
