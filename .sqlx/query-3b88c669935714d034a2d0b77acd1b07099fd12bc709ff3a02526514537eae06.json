@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO space_members (space_id, user_id, role)\n         SELECT s.id, $2, 'member' FROM spaces s\n         WHERE lower(s.name) = ANY($1) AND s.archived_at IS NULL\n         ON CONFLICT (space_id, user_id) DO NOTHING RETURNING space_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "space_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "space_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3b88c669935714d034a2d0b77acd1b07099fd12bc709ff3a02526514537eae06"
+}

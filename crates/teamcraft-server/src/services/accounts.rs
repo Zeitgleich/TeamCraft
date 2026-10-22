@@ -1,4 +1,4 @@
-use teamcraft_db::{BOT_ISSUER, OidcIdentity};
+use teamcraft_db::{AppliedInvite, BOT_ISSUER, OidcIdentity};
 use teamcraft_proto::{GatewayEvent, Role, UserKind};
 use tracing::info;
 
@@ -110,6 +110,9 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   if let Some(email) = identity.maybe_email.as_deref().filter(|_| may_use_email) {
     apply_pending_invites(state, &user, email).await?;
   }
+  if user.kind == UserKind::Member {
+    apply_default_memberships(state, &user).await?;
+  }
   Ok(AuthenticatedUser {
     user,
     role: identity.role,
@@ -123,6 +126,19 @@ fn guest_default_expiry_secs(state: &AppState) -> Option<f64> {
   (days > 0).then(|| f64::from(days) * 86_400.0)
 }
 
+/// Adds a new member to the configured default spaces and channels (once per account).
+async fn apply_default_memberships(state: &AppState, user: &teamcraft_db::User) -> Result<(), ApiError> {
+  let policy = &state.settings.policy;
+  if policy.default_spaces.is_empty() {
+    return Ok(());
+  }
+  let applied = state
+    .database
+    .apply_default_memberships(user.id, &policy.default_spaces, &policy.default_channels)
+    .await?;
+  announce_applied(state, user, applied).await
+}
+
 async fn apply_pending_invites(
   state: &AppState,
   user: &teamcraft_db::User,
@@ -132,8 +148,16 @@ async fn apply_pending_invites(
     .database
     .accept_pending_invites(user.id, email, guest_default_expiry_secs(state))
     .await?;
+  announce_applied(state, user, applied).await
+}
+
+async fn announce_applied(
+  state: &AppState,
+  user: &teamcraft_db::User,
+  applied: Vec<AppliedInvite>,
+) -> Result<(), ApiError> {
   for invite in applied {
-    info!(space_id = %invite.space_id, user_id = %user.id, "invite accepted");
+    info!(space_id = %invite.space_id, user_id = %user.id, "membership applied");
     let summary = super::convert::user_summary(state, user);
     let members = state.database.list_space_members(invite.space_id).await?;
     state.hub.publish(

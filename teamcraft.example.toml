@@ -80,6 +80,10 @@ format = "pretty"
 guests_dm_only_with_shared_conversations = true
 # Pending invites only apply to accounts whose provider verified the email address.
 invites_require_verified_email = true
+# Spaces (by name, case-insensitive) every new member joins on their first sign-in, and the public
+# channels of those spaces they join with them. Applied once per account; guests and bots get none.
+default_spaces = []
+default_channels = []
 
 [limits]
 max_ciphertext_bytes = 1048576
