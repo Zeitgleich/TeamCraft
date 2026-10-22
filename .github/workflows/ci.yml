@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to the same branch or PR cancels the run still going for the previous one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -26,8 +31,18 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    container: rust:1.99.1-trixie
+    container:
+      image: rust:1.99.1-trixie
+      # The hosted runner ships ~30 GB of tools we never use; mounted here so the first step can
+      # delete them, otherwise the workspace's test binaries fill the runner's disk.
+      volumes:
+        - /usr/share/dotnet:/host/dotnet
+        - /usr/local/lib/android:/host/android
+        - /opt/ghc:/host/ghc
+        - /opt/hostedtoolcache:/host/toolcache
     steps:
+      - name: Free disk space on the runner
+        run: find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete || true
       - uses: actions/checkout@v5
       - name: Rust components
         run: rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown
@@ -51,15 +66,55 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
         env:
           SQLX_OFFLINE: "true"
-      - name: Test
-        run: cargo test --workspace
-        env:
-          SQLX_OFFLINE: "true"
       - name: Wasm build (browser crates)
         if: matrix.arch == 'x86_64'
         run: >
           cargo check --target wasm32-unknown-unknown
           -p teamcraft-proto -p teamcraft-crypto -p teamcraft-media -p teamcraft-core -p teamcraft-ui
+
+  # Tests in their own job: a fresh disk, and test binaries without debug info (every integration
+  # test binary links the whole dependency tree).
+  test:
+    name: test (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: rust:1.99.1-trixie
+      # The hosted runner ships ~30 GB of tools we never use; mounted here so the first step can
+      # delete them, otherwise the workspace's test binaries fill the runner's disk.
+      volumes:
+        - /usr/share/dotnet:/host/dotnet
+        - /usr/local/lib/android:/host/android
+        - /opt/ghc:/host/ghc
+        - /opt/hostedtoolcache:/host/toolcache
+    env:
+      SQLX_OFFLINE: "true"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: "debuginfo"
+    steps:
+      - name: Free disk space on the runner
+        run: find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete || true
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.arch }}
+      - name: System packages for the Tauri desktop shell, native call media and capture
+        run: >
+          apt-get update && apt-get install -y --no-install-recommends cmake
+          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev
+          libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev mesa-vulkan-drivers
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-bad
+      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
+        run: mkdir -p crates/teamcraft-ui/dist
+      - name: Test
+        run: cargo test --workspace
 
   # WebRTC audio processing (echo cancellation) is opt-in at build time, see
   # crates/teamcraft-media/README.md. Built from source here (version 2 isn't packaged).
@@ -77,7 +132,7 @@ jobs:
           key: audio-processing
       - name: System packages (ALSA, meson/ninja and libclang for the bundled build)
         run: >
-          apt-get update && apt-get install -y --no-install-recommends
+          apt-get update && apt-get install -y --no-install-recommends cmake
           libasound2-dev meson ninja-build libclang-dev
       - name: Clippy
         run: cargo clippy -p teamcraft-media --all-targets --features native -- -D warnings
