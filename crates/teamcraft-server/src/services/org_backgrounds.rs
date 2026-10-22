@@ -1,4 +1,4 @@
-//! Call background pictures for the organization (admin.md §3.6). Admins upload them; they are
+//! Call background pictures for the organization (admin.md §3.5). Admins upload them; they are
 //! stored unencrypted and readable by everybody in the workspace, because every call participant
 //! sees them anyway. Owners list them, with each picture's SHA-256, in the signed workspace
 //! policy; clients check the hash before using a picture, so the server can't swap one.

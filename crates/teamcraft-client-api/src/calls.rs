@@ -49,7 +49,7 @@ pub enum BackgroundEffect {
   Org(OrgBackgroundId),
 }
 
-/// The organization's call backgrounds and the rule for them (admin.md §3.6), from the
+/// The organization's call backgrounds and the rule for them (admin.md §3.5), from the
 /// owner-signed policy the client verified.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrgBackgrounds {

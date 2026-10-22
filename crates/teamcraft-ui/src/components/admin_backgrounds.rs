@@ -16,7 +16,7 @@ const MODES: [CallBackgroundMode; 3] = [
   CallBackgroundMode::Required,
 ];
 
-/// Organization call backgrounds (admin.md §3.6): owners upload pictures, order them, pick the
+/// Organization call backgrounds (admin.md §3.5): owners upload pictures, order them, pick the
 /// default and decide whether people must use them. Every change is a new signed policy version
 /// that member clients verify and enforce.
 #[component]

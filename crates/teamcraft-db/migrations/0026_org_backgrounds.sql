@@ -1,4 +1,4 @@
--- Call background pictures admins uploaded for the organization (admin.md §3.6). Stored
+-- Call background pictures admins uploaded for the organization (admin.md §3.5). Stored
 -- unencrypted; the owner-signed workspace policy lists them with their SHA-256.
 CREATE TABLE org_backgrounds (
   id           bigint PRIMARY KEY,

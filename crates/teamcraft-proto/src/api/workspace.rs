@@ -132,7 +132,7 @@ pub struct StatusPreset {
 }
 
 wire_enum! {
-  /// What people may put behind themselves in calls (admin.md §3.6). Enforced by member clients.
+  /// What people may put behind themselves in calls (admin.md §3.5). Enforced by member clients.
   pub enum CallBackgroundMode {
     /// Organization backgrounds are offered next to the presets and people's own pictures.
     Free => "free",
@@ -144,7 +144,7 @@ wire_enum! {
 }
 
 /// A background picture an admin uploaded for the organization. The owner-signed policy carries
-/// its hash, so clients detect a server that swaps the picture (e2ee.md §11.2).
+/// its hash, so clients detect a server that swaps the picture (e2ee.md §8.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct OrgBackground {
   pub id: OrgBackgroundId,

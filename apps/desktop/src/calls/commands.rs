@@ -58,7 +58,7 @@ pub async fn call_unwatch_video(
   Ok(())
 }
 
-/// Applies `requested` as far as the organization's rule allows (admin.md §3.6) and loads the
+/// Applies `requested` as far as the organization's rule allows (admin.md §3.5) and loads the
 /// picture it needs: the user's own (decrypted) or the organization's (hash-checked).
 async fn apply_background(
   core: &CoreHost,

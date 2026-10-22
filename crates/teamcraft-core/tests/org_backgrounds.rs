@@ -1,5 +1,5 @@
 //! Organization call backgrounds: owners list them, with their hashes, in the signed workspace
-//! policy; other people's devices only use a picture whose hash matches (e2ee.md §11.2).
+//! policy; other people's devices only use a picture whose hash matches (e2ee.md §8.1).
 #![cfg(feature = "ui")]
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]

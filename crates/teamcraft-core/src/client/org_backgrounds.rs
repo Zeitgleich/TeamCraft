@@ -1,4 +1,4 @@
-//! Organization call backgrounds (admin.md §3.6, e2ee.md §11.2): pictures admins upload, stored
+//! Organization call backgrounds (admin.md §3.5, e2ee.md §8.1): pictures admins upload, stored
 //! unencrypted on the server and listed, with their SHA-256, in the owner-signed workspace policy.
 //! A picture is only used after its hash matches the verified policy, so the server can't swap
 //! one; owners change the list and the rule by signing a new policy version.

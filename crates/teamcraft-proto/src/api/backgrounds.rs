@@ -31,7 +31,7 @@ pub struct BackgroundDownloadResponse {
 
 /// `POST /api/v1/admin/backgrounds`: an admin announces an organization background. These are
 /// stored unencrypted (every call participant sees them anyway); the owner-signed policy names
-/// each one with its SHA-256, which clients check (e2ee.md §11.2).
+/// each one with its SHA-256, which clients check (e2ee.md §8.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CreateOrgBackgroundUploadRequest {
   /// Size of the picture (a JPEG); the upload URL only accepts exactly this size. (Defaulted so

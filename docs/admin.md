@@ -148,6 +148,34 @@ Admins can't read reported content unless a member shows it to them:
 | Push setup (APNs, FCM, UnifiedPush)                                                                               | v1   |
 | Backups status                                                                                                    | v1.x |
 
+### 3.5 Call backgrounds
+
+Admins upload pictures for the organization's call backgrounds; owners decide how they are used. The
+rule is part of the signed workspace policy (`call_backgrounds`, §2.3), so member clients enforce it
+themselves and the server can't relax it.
+
+| Mode       | What people may use behind themselves                                                                      |
+|------------|------------------------------------------------------------------------------------------------------------|
+| `free`     | Anything; the organization's pictures are offered first, next to blur, built-in and own pictures (default) |
+| `org_only` | The organization's pictures, blur or nothing                                                               |
+| `required` | Always one of the organization's pictures while the camera is on; people pick which                        |
+
+- **Default picture:** optional; preselected, and used when a choice isn't allowed (or none was made
+  under `required`).
+- **Guests:** exempt by default (`guests_exempt`), so external participants aren't forced into the
+  organization's look; owners can include them.
+- **Enforcement:** the client applies the rule when a background is chosen and when the camera turns
+  on. Under `required`, a device that can't replace the background (no GPU or segmentation model) can't
+  turn the camera on, so the room behind the person is never sent. The browser and the mobile apps don't
+  send camera video yet; they get the same check when they do.
+- **Storage:** the pictures are stored unencrypted (every call participant sees them anyway); the policy
+  lists each one with its SHA-256, and clients refuse a picture whose hash doesn't match (e2ee.md §8.1).
+- **Admin UI:** Administration → Backgrounds: upload (JPEG or PNG; re-encoded as a Full HD JPEG without
+  metadata), delete, order, default, mode and guest exemption. Admins upload; publishing the list is a
+  policy change, which needs an owner (`sign_workspace`). A picture the current policy lists can't be
+  deleted on the server; removing it from the list first is one step in the UI.
+- **Limits:** 50 organization pictures, each up to `max_background_bytes` (8 MiB).
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.
@@ -172,6 +200,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | User groups                              | `/user-groups` (create, edit and manage members need `create_user_group` / `manage_user_group_members`) |
 | Organization recovery                    | `/org-recovery/...`, see e2ee.md §6.3.1                                            |
 | Share links                              | `/shares` (members), public `/shares/{id}`; `[shares]` configuration               |
+| Call backgrounds                         | `POST /admin/backgrounds`, `POST /admin/backgrounds/{id}/complete`, `DELETE /admin/backgrounds/{id}`; everybody: `GET /org-backgrounds/{id}/download` |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
