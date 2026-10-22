@@ -96,6 +96,13 @@ pub fn PeopleSection() -> impl IntoView {
           disabled=Signal::derive(move || !draft.get().presence.statuses_enabled)
           on_change=move |value| policy.edit(|p| p.presence.custom_status_enabled = value)
         />
+        <CheckRow
+          name="is_last_seen_enabled"
+          label=Signal::derive(move || i18n.t("policy-last-seen"))
+          hint=Signal::derive(move || i18n.t("policy-last-seen-hint"))
+          checked=Signal::derive(move || draft.get().presence.is_last_seen_enabled)
+          on_change=move |value| policy.edit(|p| p.presence.is_last_seen_enabled = value)
+        />
         <SelectRow
           id="policy-away"
           label=Signal::derive(move || i18n.t("policy-away"))

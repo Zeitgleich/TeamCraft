@@ -34,6 +34,10 @@ pub enum MainView {
   Search,
   /// Messages the user saved for later.
   Saved,
+  /// Mentions, reactions to the user's messages and replies in their threads.
+  Activity,
+  /// The user's calls: missed, incoming and outgoing.
+  Calls,
   /// Scheduled and instant meetings (signed-in builds).
   Meetings,
   /// People and user groups.
@@ -220,6 +224,8 @@ impl AppState {
       | MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Activity
+      | MainView::Calls
       | MainView::Directory => None,
     }
   }
@@ -287,6 +293,43 @@ impl AppState {
     self.view.set(MainView::Saved);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
+  }
+
+  pub fn open_activity(&self) {
+    self.view.set(MainView::Activity);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  pub fn open_calls(&self) {
+    self.view.set(MainView::Calls);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+    self.write(|backend| backend.refresh_call_history());
+  }
+
+  /// Shows a message: in its thread if it is a reply, else in the conversation, scrolled to it.
+  pub fn open_message(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    maybe_thread: Option<ThreadId>,
+  ) {
+    self.open_conversation(conversation);
+    if let Some(thread) = maybe_thread {
+      self.open_thread(conversation, thread);
+      return;
+    }
+    let index = self.read(|backend| {
+      let count = backend.message_count(conversation);
+      backend
+        .messages(conversation, 0, count)
+        .iter()
+        .position(|candidate| candidate.id == message)
+    });
+    if let Some(index) = index {
+      self.jump_to_index.set(Some((conversation, index)));
+    }
   }
 
   pub fn open_meetings(&self) {

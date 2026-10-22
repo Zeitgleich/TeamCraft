@@ -648,6 +648,46 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn activity(&self) -> teamcraft_client_api::activity::ActivityFeed {
+    match self.ask(ChatQuery::Activity) {
+      Some(ChatAnswer::Activity { feed }) => feed,
+      _ => Default::default(),
+    }
+  }
+
+  fn mark_activity_read(&self) {
+    self.act(ChatAction::MarkActivityRead);
+  }
+
+  fn last_seen(&self, user: UserId) -> Option<teamcraft_client_api::model::TimestampMs> {
+    match self.ask(ChatQuery::LastSeen { user }) {
+      Some(ChatAnswer::LastSeen { maybe_at }) => maybe_at,
+      _ => None,
+    }
+  }
+
+  fn privacy(&self) -> teamcraft_client_api::privacy::PrivacySettings {
+    match self.ask(ChatQuery::Privacy) {
+      Some(ChatAnswer::Privacy { settings }) => settings,
+      _ => Default::default(),
+    }
+  }
+
+  fn set_last_seen_visibility(&self, visibility: teamcraft_client_api::privacy::LastSeenVisibility) {
+    self.act(ChatAction::SetLastSeenVisibility { visibility });
+  }
+
+  fn call_history(&self) -> Vec<teamcraft_client_api::calls::CallHistoryItem> {
+    match self.ask(ChatQuery::CallHistory) {
+      Some(ChatAnswer::CallHistory { calls }) => calls,
+      _ => Vec::new(),
+    }
+  }
+
+  fn refresh_call_history(&self) {
+    self.act(ChatAction::RefreshCallHistory);
+  }
+
   fn security_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {
     self.mirror.borrow().snapshot.security.clone()
   }

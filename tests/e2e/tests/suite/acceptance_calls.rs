@@ -64,6 +64,27 @@ async fn a_dm_call_rings_starts_updates_and_ends_through_the_gateway() {
   );
   assert!(seen.iter().any(|name| name == "end"), "the end: {seen:?}");
 
+  // The call history lists the finished call to both participants (PLAN.md §8): Alice started
+  // it, Carol joined; it was not missed, and an outsider sees nothing.
+  for viewer in [&alice, &carol] {
+    let history = stack
+      .get(&viewer.tokens, "/calls/history")
+      .await
+      .expect(StatusCode::OK);
+    let calls = history.body["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 1, "{}", history.body);
+    assert_eq!(calls[0]["conversation_id"], dm.to_string());
+    assert_eq!(calls[0]["is_missed"], false, "{}", history.body);
+    assert_eq!(calls[0]["participants"].as_array().unwrap().len(), 2);
+    assert_eq!(calls[0]["started_by"], alice.user_id().to_string());
+    assert!(calls[0].get("ended_at").is_some(), "{}", history.body);
+  }
+  let outsider_history = stack
+    .get(&erin.tokens, "/calls/history")
+    .await
+    .expect(StatusCode::OK);
+  assert_eq!(outsider_history.body["calls"], serde_json::json!([]));
+
   // Only the conversation's members see or join a call.
   let outsider = stack
     .get(&erin.tokens, &format!("/conversations/{dm}/call"))

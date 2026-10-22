@@ -61,6 +61,8 @@ pub fn Sidebar() -> impl IntoView {
     })
   });
 
+  let activity_unread = Memo::new(move |_| state.read(|backend| backend.activity().unread_count));
+
   view! {
     <nav class="sidebar" aria-label=move || i18n.t("sidebar-label")>
       <div class="sidebar-head">
@@ -95,6 +97,29 @@ pub fn Sidebar() -> impl IntoView {
           let unread = thread_unread.get();
           (unread > 0).then(|| view! { <span class="badge-count">{unread}</span> })
         }}
+      </button>
+      <button
+        class="sb-item sb-activity"
+        class:current=move || state.view.get() == MainView::Activity
+        class:unread={move || activity_unread.get() > 0}
+        aria-current=move || (state.view.get() == MainView::Activity).then_some("page")
+        on:click=move |_| state.open_activity()
+      >
+        <Icon name=IconName::Bell />
+        <span class="sb-name">{move || i18n.t("sidebar-activity")}</span>
+        {move || {
+          let unread = activity_unread.get();
+          (unread > 0).then(|| view! { <span class="badge-count">{unread}</span> })
+        }}
+      </button>
+      <button
+        class="sb-item sb-calls"
+        class:current=move || state.view.get() == MainView::Calls
+        aria-current=move || (state.view.get() == MainView::Calls).then_some("page")
+        on:click=move |_| state.open_calls()
+      >
+        <Icon name=IconName::Phone />
+        <span class="sb-name">{move || i18n.t("sidebar-calls")}</span>
       </button>
       {use_context::<MeetingsHub>().map(|_| {
         view! {

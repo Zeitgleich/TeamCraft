@@ -14,6 +14,7 @@ workspace = true
 [features]
 # Without it the crate is empty, so `cargo test --workspace` neither builds nor runs anything here.
 e2e = [
+  "dep:teamcraft-client-api",
   "dep:teamcraft-core",
   "dep:teamcraft-crypto",
   "dep:teamcraft-media",
@@ -30,7 +31,8 @@ e2e = [
 browser = ["e2e", "dep:chromiumoxide", "dep:futures-util"]
 
 [dependencies]
-teamcraft-core = { path = "../../crates/teamcraft-core", optional = true }
+teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
+teamcraft-core = { path = "../../crates/teamcraft-core", optional = true, features = ["ui"] }
 teamcraft-crypto = { workspace = true, optional = true }
 teamcraft-media = { path = "../../crates/teamcraft-media", optional = true, features = ["native"] }
 teamcraft-proto = { workspace = true, optional = true }

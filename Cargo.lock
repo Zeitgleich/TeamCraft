@@ -10036,6 +10036,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sqlx",
+ "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
  "teamcraft-media",

@@ -10,12 +10,14 @@ use crate::backend::Backend;
 use crate::calls::CallEvent;
 use crate::calls::CallPhase;
 use crate::clock::now_ms;
+use crate::components::activity_view::ActivityView;
 use crate::components::admin_console::AdminConsole;
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bookmarks::BookmarksDialog;
 use crate::components::bundle_banner::BundleBanner;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
+use crate::components::calls_view::CallsView;
 use crate::components::channel_view::ChannelView;
 use crate::components::directory_view::DirectoryView;
 use crate::components::file_views::{FilesPanel, Gallery};
@@ -156,6 +158,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Search => view! { <SearchView /> }.into_any(),
             MainView::Meetings => view! { <MeetingsView /> }.into_any(),
             MainView::Saved => view! { <SavedView /> }.into_any(),
+            MainView::Activity => view! { <ActivityView /> }.into_any(),
+            MainView::Calls => view! { <CallsView /> }.into_any(),
             MainView::Directory => view! { <DirectoryView /> }.into_any(),
           }}
         </main>
