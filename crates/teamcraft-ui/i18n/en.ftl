@@ -1028,3 +1028,14 @@ action-bookmark-file = Add file to bookmarks
 history-title = Edit history
 history-current = Current version
 history-replaced = Replaced { $time }
+
+# Local (guest) sign-in
+login-local-open = Sign in with a guest account
+login-local-title = Guest account
+login-local-email = E-mail address
+login-local-password = Password
+login-local-code = Code from your authenticator app
+login-local-code-hint = This account uses two-factor authentication.
+login-local-refused = E-mail, password or code is wrong.
+login-local-failed = Sign-in did not work
+login-local-submit = Sign in

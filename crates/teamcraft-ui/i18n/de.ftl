@@ -1028,3 +1028,14 @@ action-bookmark-file = Datei zu Lesezeichen hinzufügen
 history-title = Bearbeitungsverlauf
 history-current = Aktuelle Version
 history-replaced = Ersetzt { $time }
+
+# Local (guest) sign-in
+login-local-open = Mit einem Gastkonto anmelden
+login-local-title = Gastkonto
+login-local-email = E-Mail-Adresse
+login-local-password = Passwort
+login-local-code = Code deiner Authenticator-App
+login-local-code-hint = Dieses Konto nutzt Zwei-Faktor-Authentifizierung.
+login-local-refused = E-Mail, Passwort oder Code ist falsch.
+login-local-failed = Die Anmeldung hat nicht funktioniert
+login-local-submit = Anmelden

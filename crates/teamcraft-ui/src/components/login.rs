@@ -23,7 +23,7 @@ use crate::reactive::use_interval;
 use crate::remote_backend::{self, RemoteChat};
 use crate::remote_calls::RemoteCalls;
 use crate::server_backend::{LoadError, RestChat};
-use crate::session::{LoginProblem, SessionControl, SessionState};
+use crate::session::{LocalSignInProblem, LoginProblem, SessionControl, SessionState};
 use crate::settings::{BackendMode, Settings};
 use teamcraft_client_api::remote::{CoreStatus, LinkStatus};
 
@@ -151,6 +151,9 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
           .into_any()
         }}
       </div>
+      <Show when=|| !tauri::is_available() fallback=|| ()>
+        <LocalSignIn control=control />
+      </Show>
       <button
         class="link-btn"
         on:click=move |_| {
@@ -520,5 +523,54 @@ fn default_device_name() -> String {
     "Desktop".to_owned()
   } else {
     format!("Desktop ({platform})")
+  }
+}
+
+/// Sign-in for local accounts: guests who have no account at the identity provider.
+#[component]
+fn LocalSignIn(control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_open = RwSignal::new(false);
+  let login = RwSignal::new(String::new());
+  let password = RwSignal::new(String::new());
+  let code = RwSignal::new(String::new());
+  let submit = move |ev: web_sys::SubmitEvent| {
+    ev.prevent_default();
+    let totp = code.get_untracked();
+    control.sign_in_local(
+      login.get_untracked().trim().to_owned(),
+      password.get_untracked(),
+      (!totp.trim().is_empty()).then(|| totp.trim().to_owned()),
+    );
+  };
+  view! {
+    <Show
+      when=move || is_open.get()
+      fallback=move || view! { <button class="link-btn" on:click=move |_| is_open.set(true)>{move || i18n.t("login-local-open")}</button> }
+    >
+      <form class="auth-local" on:submit=submit>
+        <h2>{move || i18n.t("login-local-title")}</h2>
+        <label for="local-login">{move || i18n.t("login-local-email")}</label>
+        <input id="local-login" class="input" type="email" autocomplete="username" required data-autofocus prop:value=move || login.get() on:input=move |ev| login.set(event_target_value(&ev)) />
+        <label for="local-password">{move || i18n.t("login-local-password")}</label>
+        <input id="local-password" class="input" type="password" autocomplete="current-password" required prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) />
+        <Show when=move || control.local_error.get() == Some(LocalSignInProblem::CodeRequired) fallback=|| ()>
+          <label for="local-code">{move || i18n.t("login-local-code")}</label>
+          <input id="local-code" class="input" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required prop:value=move || code.get() on:input=move |ev| code.set(event_target_value(&ev)) />
+          <p class="muted-text small">{move || i18n.t("login-local-code-hint")}</p>
+        </Show>
+        {move || {
+          match control.local_error.get() {
+            Some(LocalSignInProblem::Refused) => Some(i18n.t("login-local-refused")),
+            Some(LocalSignInProblem::Failed(detail)) => Some(format!("{} ({detail})", i18n.t("login-local-failed"))),
+            _ => None,
+          }
+          .map(|message| view! { <p class="field-error" role="alert">{message}</p> })
+        }}
+        <button type="submit" class="btn btn-primary" prop:disabled=move || control.is_local_signing_in.get()>
+          {move || i18n.t("login-local-submit")}
+        </button>
+      </form>
+    </Show>
   }
 }
