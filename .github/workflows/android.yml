@@ -46,14 +46,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      # The mounted cache of docker-build.sh (SDK, NDK, Gradle, Cargo, target directory).
-      TEAMCRAFT_ANDROID_CACHE: ${{ runner.temp }}/android
       TEAMCRAFT_ANDROID_IMAGE: teamcraft-android-build:ci
       # Debug core for both ABIs (phones and emulator): it compiles the bindings and the app like a
       # release build, much faster. The CI image (containers/ci.Containerfile) has no JDK, SDK or
       # Android targets, so the job uses the app's own build image instead.
       TEAMCRAFT_RUST_PROFILE: dev
     steps:
+      # The mounted cache of docker-build.sh (SDK, NDK, Gradle, Cargo, target directory). Set here
+      # because the runner context isn't available in a job's env.
+      - name: Cache directory
+        run: echo "TEAMCRAFT_ANDROID_CACHE=${RUNNER_TEMP}/android" >> "$GITHUB_ENV"
       - name: Free disk space on the runner
         # The runner's own Android SDK and other unused tools; the build uses the image's SDK.
         run: nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache > /dev/null 2>&1 &
