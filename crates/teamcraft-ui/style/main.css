@@ -3964,3 +3964,13 @@ select.input {
 .group-members li { display: flex; align-items: center; gap: .5rem; padding: .15rem 0; }
 .tabs { display: flex; gap: .25rem; }
 .tabs [role=tab][aria-selected=true] { font-weight: 600; text-decoration: underline; }
+
+/* Syntax highlighting (code blocks) */
+.md-code .tok-keyword { color: var(--tok-keyword, #8250df); font-weight: 600; }
+.md-code .tok-string { color: var(--tok-string, #0a7d3a); }
+.md-code .tok-comment { color: var(--tok-comment, #6e7781); font-style: italic; }
+.md-code .tok-number { color: var(--tok-number, #b35900); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .md-code { --tok-keyword: #d2a8ff; --tok-string: #7ee787; --tok-comment: #8b949e; --tok-number: #ffa657; }
+}
+:root[data-theme="dark"] .md-code { --tok-keyword: #d2a8ff; --tok-string: #7ee787; --tok-comment: #8b949e; --tok-number: #ffa657; }

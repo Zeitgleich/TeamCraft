@@ -13,6 +13,8 @@ pub mod bundle;
 pub mod calls;
 pub mod clock;
 pub mod components;
+pub mod emoji;
+pub mod highlight;
 pub mod hybrid;
 pub mod i18n;
 pub mod live;
