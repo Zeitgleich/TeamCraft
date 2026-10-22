@@ -159,6 +159,7 @@ pushes.
 | Keyword notifications                                                 | v1    | Matched client-side after decryption       |
 | Thread notifications (followed threads)                               | v1    |                                            |
 | Don't push to mobile while desktop is active (with delay, e.g. 2 min) | v1    |                                            |
+| Push gateway so store apps work with any self-hosted server           | v1.x  | Sees only sealed wake-ups; e2ee.md §7      |
 | DND schedule, DND override for specific people (e.g. manager)         | v1.x  |                                            |
 | Notification sound per conversation                                   | v1.x  |                                            |
 | Email digest of missed mentions                                       | later | Can only say "3 new mentions", not content |
