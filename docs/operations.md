@@ -177,7 +177,7 @@ ciphertext. Every server does this, the publisher's own included.
 
 ```toml
 [push.gateway]
-url      = "https://gateway.example.com"
+url      = "https://push-gw.zeitgleich.de"   # the publisher's gateway for the official store apps
 key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start; your identity at the gateway
 ```
 

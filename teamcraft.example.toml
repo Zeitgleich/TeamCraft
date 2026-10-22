@@ -420,7 +420,7 @@ allow_private_endpoints = false
 # [push.fcm], for self-built and self-signed apps) is sent to directly. Web Push and UnifiedPush never
 # use a gateway.
 # [push.gateway]
-# url = "https://gateway.example.com"
+# url = "https://push-gw.zeitgleich.de"                 # the publisher's gateway for the official store apps
 # key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start; this is your identity there
 # key = "..."                                        # alternative: 32 bytes base64url, prefer TEAMCRAFT_PUSH__GATEWAY__KEY
 

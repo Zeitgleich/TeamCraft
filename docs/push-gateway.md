@@ -45,7 +45,7 @@ refused.
 
 ```toml
 [push.gateway]
-url      = "https://gateway.example.com"
+url      = "https://push-gw.zeitgleich.de"   # the publisher's gateway for the official store apps
 key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start, mode 0600
 ```
 
@@ -56,8 +56,9 @@ losing it only means registering a new identity. On start the server registers t
 the first push if the gateway doesn't know it; a gateway that lost its database is learned again the same
 way). Requests are signed in `teamcraft-crypto` (`push_gateway.rs`).
 
-The release builds are meant to ship the publisher's gateway as the default URL, so a server works with
-the store apps without extra configuration; until the publisher's gateway is public the URL must be set.
+The publisher of the official store apps runs its gateway at `https://push-gw.zeitgleich.de`; point
+`url` there to make the official apps work with your server. The server code has no built-in host: the
+URL is always configuration (the deployment playbook sets it by default).
 The admin console's push provider status shows APNs and FCM as active when the gateway answers and as
 failing when it refuses or is unreachable.
 
