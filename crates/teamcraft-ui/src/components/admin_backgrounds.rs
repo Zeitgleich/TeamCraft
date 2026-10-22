@@ -119,7 +119,7 @@ pub fn BackgroundsSection() -> impl IntoView {
           }}
         </p>
         <button
-          class="btn primary"
+          class="btn btn-primary"
           type="submit"
           prop:disabled=move || mode.get() == CallBackgroundMode::Required && current.get().images.is_empty()
         >
@@ -171,7 +171,7 @@ pub fn BackgroundsSection() -> impl IntoView {
                     <Icon name=IconName::ChevronRight class="rotate-down" />
                   </button>
                   <button
-                    class="btn danger small"
+                    class="btn btn-danger btn-small"
                     prop:disabled=is_locked
                     on:click=move |_| state.write(|backend| backend.delete_org_background(id))
                   >
@@ -229,6 +229,7 @@ fn UploadForm(is_locked: Signal<bool>) -> impl IntoView {
     <form class="admin-upload" on:submit=upload>
       <fieldset prop:disabled=move || is_locked.get()>
         <input
+          class="input"
           type="text"
           maxlength="100"
           placeholder=move || i18n.t("admin-backgrounds-name")

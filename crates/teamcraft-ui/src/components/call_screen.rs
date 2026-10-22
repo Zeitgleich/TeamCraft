@@ -3,7 +3,7 @@ use std::cell::Cell;
 use leptos::prelude::*;
 
 use crate::auth::tauri;
-use crate::calls::{CallKind, CallLayout, CallRequest, Participant};
+use crate::calls::{CallKind, CallLayout, CallRequest, Participant, ScreenShareSound};
 use crate::components::call_video::{BackgroundPicker, VideoTile};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -92,6 +92,22 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let clock = move || format!("{:02}:{:02}", elapsed.get() / 60, elapsed.get() % 60);
 
   let effects_open = RwSignal::new(false);
+  let share_open = RwSignal::new(false);
+  let screen_sound = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .active_call()
+        .map(|active| active.screen_sound)
+        .unwrap_or_default()
+    })
+  });
+  let set_share_sound = move |has_sound: bool| {
+    call.share_sound.set(has_sound);
+    state
+      .settings
+      .prefs
+      .update(|prefs| prefs.calls.share_sound = has_sound);
+  };
 
   let title = move || {
     let name = conversation.get().map(|conv| conv.name).unwrap_or_default();
@@ -172,6 +188,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             <div class="share-banner" role="status">
               <Icon name=IconName::Monitor />
               <span>{banner}</span>
+              {move || {
+                let key = match screen_sound.get() {
+                  ScreenShareSound::Shared => "share-sound-on",
+                  ScreenShareSound::Unavailable => "share-sound-unavailable",
+                  ScreenShareSound::Off | ScreenShareSound::Unknown => return None,
+                };
+                call.is_sharing_screen.get().then(|| view! { <span class="share-sound muted-text small">{i18n.t(key)}</span> })
+              }}
               <Show when=move || call.is_sharing_screen.get() fallback=|| ()>
                 <button class="btn btn-small" on:click=move |_| call.set_screen_share(false)>
                   {move || i18n.t("share-stop")}
@@ -292,6 +316,31 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         })
       }}
       <div class="call-stage-wrap">{stage}</div>
+      <Show when=move || share_open.get() fallback=|| ()>
+        <div class="effects-popover share-popover" role="dialog" aria-label=move || i18n.t("share-options")>
+          <h2>{move || i18n.t("share-options")}</h2>
+          <label class="checkbox">
+            <input
+              type="checkbox"
+              prop:checked=move || call.share_sound.get()
+              on:change=move |ev| set_share_sound(event_target_checked(&ev))
+            />
+            <span>
+              {move || i18n.t("share-sound")}
+              <small class="muted-text">{move || i18n.t("share-sound-hint")}</small>
+            </span>
+          </label>
+          <button
+            class="btn btn-primary"
+            on:click=move |_| {
+              share_open.set(false);
+              call.set_screen_share(true);
+            }
+          >
+            {move || i18n.t("share-choose")}
+          </button>
+        </div>
+      </Show>
       <Show when=move || effects_open.get() fallback=|| ()>
         <div class="effects-popover" role="dialog" aria-label=move || i18n.t("call-effects")>
           <h2>{move || i18n.t("call-effects")}</h2>
@@ -320,10 +369,18 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           on_press=move || call.set_camera(!call.is_camera_on.get_untracked())
         />
         <ControlButton
-          is_active=Signal::derive(move || call.is_sharing_screen.get())
+          is_active=Signal::derive(move || call.is_sharing_screen.get() || share_open.get())
           icon=IconName::Monitor
           label=Signal::derive(move || if call.is_sharing_screen.get() { i18n.t("share-stop") } else { i18n.t("share-start") })
-          on_press=move || call.set_screen_share(!call.is_sharing_screen.get_untracked())
+          on_press=move || {
+            if call.is_sharing_screen.get_untracked() {
+              call.set_screen_share(false);
+            } else {
+              // What to share comes from the system picker; the options come first.
+              effects_open.set(false);
+              share_open.update(|open| *open = !*open);
+            }
+          }
         />
         // Raising a hand has no wire message yet; it stays a demo-only control.
         <Show when=move || !is_real fallback=|| ()>
@@ -338,7 +395,10 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           is_active=Signal::derive(move || effects_open.get())
           icon=IconName::Image
           label=Signal::derive(move || i18n.t("call-effects"))
-          on_press=move || effects_open.update(|open| *open = !*open)
+          on_press=move || {
+            share_open.set(false);
+            effects_open.update(|open| *open = !*open);
+          }
         />
         <ControlButton
           icon=Signal::derive(move || if call.layout.get() == CallLayout::Gallery { IconName::Spotlight } else { IconName::Grid })

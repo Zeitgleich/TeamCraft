@@ -2,6 +2,8 @@
 //!
 //! - **Audio:** accepted only on the sender's assigned stream; its audio level (RFC 6464, unencrypted)
 //!   feeds the speaker selection, and only selected speakers reach the others.
+//! - **Screen audio:** a participant's shared screen sound on its own stream, forwarded to everyone
+//!   else regardless of the speaker selection (it is not speech and must not crowd out speakers).
 //! - **Video:** published tracks with simulcast layers; each receiver gets one layer per subscribed
 //!   track. The layer comes from the receiver's downlink estimate ([`LayerAllocator`]) and a switch
 //!   happens on a keyframe of the target layer (the SFU asks the publisher for one).
@@ -21,8 +23,8 @@ use teamcraft_media::{
   rtp::{AudioLevel, RtpError, RtpHeader},
 };
 use teamcraft_proto::{
-  DeviceId, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, TransportFeedback, VideoCodec,
-  VideoLayerInfo, VideoTrack, VideoTrackKind,
+  DeviceId, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback,
+  VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 
@@ -79,9 +81,19 @@ pub enum Effect {
   },
 }
 
+/// What a leaving participant took with it.
+#[derive(Debug, Default)]
+pub struct Removal {
+  pub effects: Vec<Effect>,
+  /// Its video tracks, now unpublished.
+  pub video_tracks: Vec<StreamId>,
+  pub maybe_screen_audio: Option<StreamId>,
+}
+
 #[derive(Debug)]
 struct ParticipantRoute {
   audio_stream: StreamId,
+  maybe_screen_audio: Option<StreamId>,
   capabilities: MediaCapabilities,
   downlink: SendSideEstimator,
   uplink: FeedbackRecorder,
@@ -148,6 +160,7 @@ impl Forwarder {
   ) {
     let route = ParticipantRoute {
       audio_stream,
+      maybe_screen_audio: None,
       capabilities,
       downlink: SendSideEstimator::new(self.config.bwe),
       uplink: FeedbackRecorder::new(now),
@@ -157,10 +170,12 @@ impl Forwarder {
     self.participants.insert(device_id, route);
   }
 
-  /// Removes a participant with its tracks and subscriptions. Returns the effects and the
-  /// unpublished tracks.
-  pub fn remove_participant(&mut self, device_id: DeviceId, now: Instant) -> (Vec<Effect>, Vec<StreamId>) {
-    self.participants.remove(&device_id);
+  /// Removes a participant with its tracks and subscriptions.
+  pub fn remove_participant(&mut self, device_id: DeviceId, now: Instant) -> Removal {
+    let maybe_screen_audio = self
+      .participants
+      .remove(&device_id)
+      .and_then(|route| route.maybe_screen_audio);
     let mut effects = Vec::new();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
@@ -182,7 +197,37 @@ impl Forwarder {
     for stream_id in subscribed {
       effects.extend(self.update_layers_needed(stream_id));
     }
-    (effects, owned)
+    Removal {
+      effects,
+      video_tracks: owned,
+      maybe_screen_audio,
+    }
+  }
+
+  /// Starts forwarding `owner`'s screen sound on `stream_id`; one per participant.
+  pub fn publish_screen_audio(
+    &mut self,
+    owner: DeviceId,
+    stream_id: StreamId,
+  ) -> Result<ScreenAudioTrack, ForwardError> {
+    let participant = self.participants.get_mut(&owner).ok_or(ForwardError::NotJoined)?;
+    if participant.maybe_screen_audio.is_some() {
+      return Err(ForwardError::InvalidPublication("screen audio already published"));
+    }
+    participant.maybe_screen_audio = Some(stream_id);
+    Ok(ScreenAudioTrack {
+      device_id: owner,
+      stream_id: MediaStreamId(stream_id.0),
+    })
+  }
+
+  pub fn unpublish_screen_audio(&mut self, owner: DeviceId, stream_id: StreamId) -> Result<(), ForwardError> {
+    let participant = self.participants.get_mut(&owner).ok_or(ForwardError::NotJoined)?;
+    if participant.maybe_screen_audio != Some(stream_id) {
+      return Err(ForwardError::ForeignStream(stream_id));
+    }
+    participant.maybe_screen_audio = None;
+    Ok(())
   }
 
   pub fn publish_video(
@@ -297,7 +342,9 @@ impl Forwarder {
       .get_mut(&sender)
       .ok_or(ForwardError::NotJoined)?;
     let is_audio = header.stream_id == participant.audio_stream;
+    let is_screen_audio = participant.maybe_screen_audio == Some(header.stream_id);
     if !is_audio
+      && !is_screen_audio
       && self
         .video_tracks
         .get(&header.stream_id)
@@ -311,18 +358,15 @@ impl Forwarder {
     }
 
     let mut route = Route::default();
-    let receivers = if is_audio {
+    let receivers = if is_screen_audio {
+      self.others(sender)
+    } else if is_audio {
       let level = rtp_header.audio_level().unwrap_or(AudioLevel::SILENCE);
       if let Some(speakers) = self.speakers.record(sender, level, now) {
         route.effects.push(Effect::ActiveSpeakers(speakers));
       }
       if self.speakers.is_selected(sender) {
-        self
-          .participants
-          .keys()
-          .copied()
-          .filter(|id| *id != sender)
-          .collect()
+        self.others(sender)
       } else {
         Vec::new()
       }
@@ -382,6 +426,20 @@ impl Forwarder {
     self.speakers.selected()
   }
 
+  /// Published screen audio, for participants who join later.
+  pub fn screen_audio_tracks(&self) -> Vec<ScreenAudioTrack> {
+    self
+      .participants
+      .iter()
+      .filter_map(|(&device_id, route)| {
+        route.maybe_screen_audio.map(|stream_id| ScreenAudioTrack {
+          device_id,
+          stream_id: MediaStreamId(stream_id.0),
+        })
+      })
+      .collect()
+  }
+
   /// Published video tracks.
   pub fn video_tracks(&self) -> Vec<VideoTrack> {
     self
@@ -397,6 +455,15 @@ impl Forwarder {
       .participants
       .get(&receiver)
       .map(|participant| participant.downlink.estimate_bps())
+  }
+
+  fn others(&self, sender: DeviceId) -> Vec<DeviceId> {
+    self
+      .participants
+      .keys()
+      .copied()
+      .filter(|id| *id != sender)
+      .collect()
   }
 
   /// Receivers of one video packet; switches subscriptions to their target layer on a keyframe.
@@ -567,8 +634,8 @@ mod tests {
         .route(device(1), &audio(1, 20), now + Duration::from_millis(200))
         .unwrap();
       assert!(again.effects.is_empty());
-      let (effects, _) = forwarder.remove_participant(device(1), now + Duration::from_millis(300));
-      assert_eq!(effects, vec![Effect::ActiveSpeakers(Vec::new())]);
+      let removal = forwarder.remove_participant(device(1), now + Duration::from_millis(300));
+      assert_eq!(removal.effects, vec![Effect::ActiveSpeakers(Vec::new())]);
     }
 
     #[test]
@@ -581,6 +648,68 @@ mod tests {
           assert_eq!(header.maybe_transport_seq, Some(TransportSeq(expected)));
         }
       }
+    }
+  }
+
+  mod screen_audio {
+    use super::*;
+
+    const SCREEN_AUDIO: StreamId = StreamId(50);
+
+    #[test]
+    fn reaches_everyone_without_being_a_speaker() {
+      let (mut forwarder, now) = room(5);
+      forwarder.publish_screen_audio(device(1), SCREEN_AUDIO).unwrap();
+      // Silent, and four louder speakers exist: still forwarded to all others.
+      for n in 2..=5u64 {
+        forwarder.route(device(n), &audio(n, 10), now).unwrap();
+      }
+      let route = forwarder
+        .route(device(1), &rtp_datagram(SCREEN_AUDIO.0, 0, header()), now)
+        .unwrap();
+      let mut receivers: Vec<DeviceId> = route.deliveries.iter().map(|(id, _)| *id).collect();
+      receivers.sort();
+      let mut expected = devices(&[2, 3, 4, 5]);
+      expected.sort();
+      assert_eq!(receivers, expected);
+      assert!(!forwarder.active_speakers().contains(&device(1)));
+    }
+
+    #[test]
+    fn one_per_participant_and_only_its_own() {
+      let (mut forwarder, now) = room(2);
+      forwarder.publish_screen_audio(device(1), SCREEN_AUDIO).unwrap();
+      assert!(matches!(
+        forwarder.publish_screen_audio(device(1), StreamId(51)),
+        Err(ForwardError::InvalidPublication(_))
+      ));
+      assert_eq!(
+        forwarder
+          .route(device(2), &rtp_datagram(SCREEN_AUDIO.0, 0, header()), now)
+          .unwrap_err(),
+        ForwardError::ForeignStream(SCREEN_AUDIO)
+      );
+      assert_eq!(
+        forwarder.unpublish_screen_audio(device(2), SCREEN_AUDIO),
+        Err(ForwardError::ForeignStream(SCREEN_AUDIO))
+      );
+      forwarder.unpublish_screen_audio(device(1), SCREEN_AUDIO).unwrap();
+      assert!(forwarder.screen_audio_tracks().is_empty());
+      assert!(
+        forwarder
+          .route(device(1), &rtp_datagram(SCREEN_AUDIO.0, 0, header()), now)
+          .is_err()
+      );
+    }
+
+    #[test]
+    fn leaves_with_its_publisher() {
+      let (mut forwarder, now) = room(2);
+      forwarder.publish_screen_audio(device(1), SCREEN_AUDIO).unwrap();
+      assert_eq!(forwarder.screen_audio_tracks().len(), 1);
+      let removal = forwarder.remove_participant(device(1), now);
+      assert_eq!(removal.maybe_screen_audio, Some(SCREEN_AUDIO));
+      assert!(forwarder.screen_audio_tracks().is_empty());
     }
   }
 
@@ -628,8 +757,8 @@ mod tests {
     #[test]
     fn publisher_leaving_removes_the_track() {
       let (mut forwarder, now) = video_room();
-      let (_, removed) = forwarder.remove_participant(device(1), now);
-      assert_eq!(removed, vec![VIDEO]);
+      let removal = forwarder.remove_participant(device(1), now);
+      assert_eq!(removal.video_tracks, vec![VIDEO]);
       assert!(forwarder.video_tracks().is_empty());
     }
   }

@@ -180,6 +180,7 @@ mod tests {
         is_sharing_screen: false,
         background: BackgroundEffect::default(),
         maybe_muted_by_host: None,
+        screen_sound: Default::default(),
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {

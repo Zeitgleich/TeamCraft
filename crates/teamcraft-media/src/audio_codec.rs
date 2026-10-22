@@ -22,8 +22,12 @@ pub struct OpusDecoder {
   channels: AudioChannels,
 }
 
+/// Bitrate of a shared screen's sound: music and video sound need more than speech.
+const SCREEN_AUDIO_BITRATE_BPS: i32 = 64_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpusEncoderConfig {
+  pub content: AudioContent,
   pub channels: AudioChannels,
   pub bitrate_bps: i32,
   /// In-band forward error correction: the next packet carries a low-bitrate copy of this one.
@@ -32,6 +36,15 @@ pub struct OpusEncoderConfig {
   pub has_dtx: bool,
   /// Loss the encoder plans FEC for, in percent.
   pub expected_loss_percent: u8,
+}
+
+/// What the encoder is tuned for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioContent {
+  /// A microphone: speech intelligibility first.
+  Voice,
+  /// A shared screen's sound: music and video as they are.
+  Music,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +64,7 @@ pub enum OpusError {
 impl Default for OpusEncoderConfig {
   fn default() -> Self {
     Self {
+      content: AudioContent::Voice,
       channels: AudioChannels::Mono,
       bitrate_bps: 32_000,
       has_inband_fec: true,
@@ -60,9 +74,25 @@ impl Default for OpusEncoderConfig {
   }
 }
 
+impl OpusEncoderConfig {
+  /// A shared screen's sound: tuned for music, no silence suppression of quiet passages.
+  pub fn screen_audio() -> Self {
+    Self {
+      content: AudioContent::Music,
+      bitrate_bps: SCREEN_AUDIO_BITRATE_BPS,
+      has_dtx: false,
+      ..Self::default()
+    }
+  }
+}
+
 impl OpusEncoder {
   pub fn new(config: OpusEncoderConfig) -> Result<Self, OpusError> {
-    let mut encoder = Encoder::new(SAMPLE_RATE_HZ, config.channels.into(), Application::Voip)?;
+    let application = match config.content {
+      AudioContent::Voice => Application::Voip,
+      AudioContent::Music => Application::Audio,
+    };
+    let mut encoder = Encoder::new(SAMPLE_RATE_HZ, config.channels.into(), application)?;
     encoder.set_bitrate(Bitrate::Bits(config.bitrate_bps))?;
     encoder.set_inband_fec(config.has_inband_fec)?;
     encoder.set_dtx(config.has_dtx)?;

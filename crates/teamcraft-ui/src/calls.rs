@@ -21,7 +21,8 @@ pub enum CallEvent {
   Camera(bool),
   CameraDevice(String),
   Effect(BackgroundEffect),
-  ScreenShare(bool),
+  StartScreenShare { has_sound: bool },
+  StopScreenShare,
 }
 
 type CallHandler = Rc<dyn Fn(CallEvent)>;
@@ -44,6 +45,8 @@ pub struct CallState {
   /// The call keeps running while the user browses channels; a bar in the channel stays visible.
   pub is_minimized: RwSignal<bool>,
   pub is_sharing_screen: RwSignal<bool>,
+  /// Screen shares include the computer's sound (the user's choice, remembered in the settings).
+  pub share_sound: RwSignal<bool>,
   pub has_hand_raised: RwSignal<bool>,
   pub is_deafened: RwSignal<bool>,
   /// Carries the user's actions to the call backend; set once by the shell.
@@ -67,6 +70,7 @@ impl CallState {
       layout: RwSignal::new(CallLayout::Gallery),
       is_minimized: RwSignal::new(false),
       is_sharing_screen: RwSignal::new(false),
+      share_sound: RwSignal::new(false),
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
       handler: StoredValue::new_local(None),
@@ -100,9 +104,16 @@ impl CallState {
     self.emit(CallEvent::Camera(is_on));
   }
 
+  /// Starts sharing (with the sound if the user chose so) or stops.
   pub fn set_screen_share(&self, is_sharing: bool) {
     self.is_sharing_screen.set(is_sharing);
-    self.emit(CallEvent::ScreenShare(is_sharing));
+    if is_sharing {
+      self.emit(CallEvent::StartScreenShare {
+        has_sound: self.share_sound.get_untracked(),
+      });
+    } else {
+      self.emit(CallEvent::StopScreenShare);
+    }
   }
 
   /// Stops ringing for an incoming call on this device.

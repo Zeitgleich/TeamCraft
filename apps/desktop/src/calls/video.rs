@@ -2,9 +2,12 @@
 //! the background effects in front of the encoder.
 //!
 //! Linux: the desktop portal first (asks the user, works on Wayland and in Flatpak), V4L2 for
-//! cameras when the portal isn't there. macOS: AVFoundation for cameras (untested); its screen
-//! share (ScreenCaptureKit) isn't there yet. Windows: Media Foundation for cameras and Windows
-//! Graphics Capture for screens and windows (both compile-checked only).
+//! cameras when the portal isn't there. macOS: AVFoundation for cameras and ScreenCaptureKit for
+//! screens (both untested on a Mac). Windows: Media Foundation for cameras and Windows Graphics
+//! Capture for screens and windows (both compile-checked only).
+//!
+//! A screen share's sound (the computer's playback without the call): PipeWire on Linux, WASAPI
+//! process loopback on Windows, ScreenCaptureKit on macOS.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +21,7 @@ use teamcraft_media::effects::{
   BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsPipeline,
   PRESET_HEIGHT, PRESET_WIDTH, PresetBackground, SegmentationModel, TractSegmenter,
 };
+use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video::{VideoResolution, simulcast_layers};
 use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
@@ -121,11 +125,46 @@ pub(super) fn open_screen(
     .map_err(|error| error.to_string())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+/// The main display, or the one a stored token names (`display:N`). The first share asks for the
+/// Screen Recording permission.
+#[cfg(target_os = "macos")]
+pub(super) fn open_screen(
+  maybe_restore_token: Option<&str>,
+) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
+  use teamcraft_media::capture_screencapturekit::{DisplaySource, ScreenCaptureKitScreen};
+
+  let source = DisplaySource::from_token(maybe_restore_token);
+  ScreenCaptureKitScreen::open(source, SCREEN_FORMAT)
+    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, source.to_token()))
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
   Err("screen sharing is not supported on this platform yet".into())
+}
+
+/// The computer's sound for a screen share, without this app's own playback.
+#[cfg(target_os = "linux")]
+pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+  Box::new(teamcraft_media::system_audio_pipewire::PipeWireSystemAudio::new())
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+  Box::new(teamcraft_media::system_audio_wasapi::WasapiSystemAudio::new())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+  Box::new(teamcraft_media::capture_screencapturekit::ScreenCaptureKitAudio::new())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+  Box::new(teamcraft_media::system_audio::UnsupportedSystemAudio)
 }
 
 /// Three simulcast layers for a camera.

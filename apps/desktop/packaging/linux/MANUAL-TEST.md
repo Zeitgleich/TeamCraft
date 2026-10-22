@@ -1,8 +1,8 @@
 # Manual test: calls on Wayland (GNOME and KDE)
 
 Screen sharing, the camera and push-to-talk depend on the desktop's portals, which only a real
-session exercises fully. `portal-test/run.sh` covers the screen-share path headlessly (sway and
-xdg-desktop-portal-wlr); this checklist covers GNOME (Mutter) and KDE Plasma (KWin) with real
+session exercises fully. `portal-test/run.sh` covers the screen-share path and the shared sound
+headlessly (sway, xdg-desktop-portal-wlr and PipeWire); this checklist covers GNOME (Mutter) and KDE Plasma (KWin) with real
 dialogs. Run it with the Flatpak, and once with the `.deb`/`.rpm` (outside the sandbox, the same
 portals are used).
 
@@ -36,6 +36,10 @@ Mark each line with pass/fail and a note. "Dialog" is what the desktop should sh
 | S8 | Cancel the dialog                                                             | No error dialog; the share button returns to its idle state                                                                                                                            |
 | S9 | Stop sharing from the desktop (GNOME: top-bar indicator; KDE: tray indicator) | Sharing stops in the app as well                                                                                                                                                       |
 | S10| Share with camera on                                                          | Both streams reach the other participant; screen text stays readable                                                                                                                   |
+| S11| Share with "Share sound" on while a video plays in a browser                   | The other participant hears the video; your microphone stays muted if it was                                                                                                           |
+| S12| During S11, the other participant talks                                       | You hear them, but they don't hear themselves back through your shared sound                                                                                                           |
+| S13| During S11, start another program's sound (e.g. a music player)               | It is shared as well, without restarting the share                                                                                                                                     |
+| S14| Stop sharing                                                                  | The shared sound stops for the other participant together with the picture                                                                                                             |
 
 ### Camera
 

@@ -322,7 +322,10 @@ pub trait CallBackend {
   fn set_call_camera(&self, _is_on: bool) {}
   fn select_camera(&self, _maybe_device: Option<String>) {}
   fn set_background_effect(&self, _effect: BackgroundEffect) {}
-  fn start_screen_share(&self) {}
+  /// Opens the system's video effects panel (macOS); nothing elsewhere.
+  fn open_system_video_effects(&self) {}
+  /// `has_sound`: share the computer's sound too (without the call's own).
+  fn start_screen_share(&self, _has_sound: bool) {}
   fn set_push_to_talk(&self, _is_enabled: bool, _maybe_shortcut: Option<String>) {}
   /// The push-to-talk key inside the window went down (`true`) or up.
   fn set_talking(&self, _is_talking: bool) {}

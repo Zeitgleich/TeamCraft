@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
-  DeviceId, ErrorBody, MediaCapabilities, MediaStreamId, UserId, VideoCodec, VideoLayerInfo, VideoTrack,
-  VideoTrackKind,
+  DeviceId, ErrorBody, MediaCapabilities, MediaStreamId, ScreenAudioTrack, UserId, VideoCodec,
+  VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -44,7 +44,10 @@ pub struct CallEngine {
   config: CallEngineConfig,
   phase: Phase,
   participants: BTreeMap<DeviceId, CallParticipant>,
-  audio_streams: HashMap<StreamId, DeviceId>,
+  /// Other devices' audio streams: microphones and shared screen sound.
+  audio_streams: HashMap<StreamId, (DeviceId, AudioOrigin)>,
+  /// This device's shared screen sound.
+  screen_audio: ScreenAudioState,
   /// Tracks this device publishes, by the stream id the SFU assigned.
   own_video: HashMap<StreamId, OutgoingVideo>,
   /// Tracks other devices publish.
@@ -61,8 +64,8 @@ pub struct CallEngine {
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
-  audio_sequence: SequenceNumber,
-  audio_timestamp: RtpTimestamp,
+  microphone_rtp: AudioRtpState,
+  screen_rtp: AudioRtpState,
   last_event_seq: u64,
   is_muted: bool,
   is_deafened: bool,
@@ -104,9 +107,10 @@ pub enum CallEngineEvent {
     epoch: u64,
     privacy_code: String,
   },
-  /// A decrypted audio frame for the jitter buffer.
+  /// A decrypted audio frame for the jitter buffer (one per sender and origin).
   AudioFrame {
     sender: DeviceId,
+    origin: AudioOrigin,
     sequence_number: SequenceNumber,
     opus: Vec<u8>,
   },
@@ -114,6 +118,11 @@ pub enum CallEngineEvent {
   /// on. Subscribe to other devices' tracks with [`CallEngine::subscribe_video`].
   VideoPublished(VideoTrack),
   VideoUnpublished(MediaStreamId),
+  /// A device (this one included) started or stopped sending its shared screen's sound.
+  ScreenAudioChanged {
+    device_id: DeviceId,
+    is_shared: bool,
+  },
   /// A decrypted, complete video frame for the decoder.
   VideoFrame(ReceivedVideoFrame),
   /// Encode a keyframe on this layer of an own track soon (a receiver switched to it).
@@ -169,6 +178,29 @@ enum Phase {
   Joined { call_id: CallId, audio_stream: StreamId },
 }
 
+/// Which of a device's audio streams a frame belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AudioOrigin {
+  Microphone,
+  /// The sound of a shared screen or window (system audio).
+  Screen,
+}
+
+/// This device's screen sound: requested from the SFU, then sent on the stream it assigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenAudioState {
+  Off,
+  Requested,
+  Publishing(StreamId),
+}
+
+/// RTP numbering of one outgoing audio stream.
+#[derive(Debug, Clone, Copy)]
+struct AudioRtpState {
+  sequence: SequenceNumber,
+  timestamp: RtpTimestamp,
+}
+
 #[derive(Debug, Error)]
 pub enum CallEngineError {
   #[error("event sequence jumped from {last} to {received}")]
@@ -191,6 +223,7 @@ impl CallEngine {
       phase: Phase::Idle,
       participants: BTreeMap::new(),
       audio_streams: HashMap::new(),
+      screen_audio: ScreenAudioState::Off,
       own_video: HashMap::new(),
       remote_video: HashMap::new(),
       maybe_dave: None,
@@ -202,8 +235,8 @@ impl CallEngine {
       uplink,
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
-      audio_sequence: SequenceNumber(0),
-      audio_timestamp: RtpTimestamp(0),
+      microphone_rtp: AudioRtpState::new(),
+      screen_rtp: AudioRtpState::new(),
       last_event_seq: 0,
       is_muted: false,
       is_deafened: false,
@@ -318,36 +351,36 @@ impl CallEngine {
     let Phase::Joined { audio_stream, .. } = self.phase else {
       return;
     };
-    if self.is_muted || self.is_compromised {
+    if self.is_muted {
       return;
     }
-    let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
-      return;
-    };
-    let encrypted = match dave.encrypt_frame(MediaKind::Audio, FrameCodec::Opus, &frame.opus) {
-      Ok(encrypted) => encrypted.into_owned(),
-      Err(error) => {
-        warn!(%error, "audio frame not encrypted, dropped");
-        return;
-      },
-    };
-    let mut header = RtpHeader::new(
-      PayloadType::OPUS,
-      self.audio_sequence,
-      self.audio_timestamp,
-      Ssrc(audio_stream.0),
-    );
-    header.set_audio_level(frame.level);
-    self.audio_sequence = self.audio_sequence.next();
-    self.audio_timestamp = RtpTimestamp(self.audio_timestamp.0.wrapping_add(OPUS_FRAME_TICKS));
-    let Ok(rtp) = (RtpPacket {
-      header,
-      payload: &encrypted,
-    })
-    .to_bytes() else {
-      return;
-    };
-    self.send_media(audio_stream, SimulcastLayer::BASE, &rtp, now);
+    self.send_audio_frame(audio_stream, AudioOrigin::Microphone, frame, now);
+  }
+
+  /// Asks the SFU for a stream for the shared screen's sound; frames flow after
+  /// [`CallEngineEvent::ScreenAudioChanged`] for this device. Not affected by muting the microphone.
+  pub fn publish_screen_audio(&mut self) {
+    if self.screen_audio == ScreenAudioState::Off {
+      self.screen_audio = ScreenAudioState::Requested;
+      self.signal(CallClientMessage::PublishScreenAudio);
+    }
+  }
+
+  pub fn unpublish_screen_audio(&mut self) {
+    if let ScreenAudioState::Publishing(stream) = self.screen_audio {
+      self.signal(CallClientMessage::UnpublishScreenAudio {
+        stream_id: MediaStreamId(stream.0),
+      });
+    }
+    // A request still in flight is unpublished when its answer arrives.
+    self.screen_audio = ScreenAudioState::Off;
+  }
+
+  /// Encrypts and sends one 20 ms frame of the shared screen's sound.
+  pub fn send_screen_audio(&mut self, frame: &EncodedAudioFrame, now: Instant) {
+    if let ScreenAudioState::Publishing(stream) = self.screen_audio {
+      self.send_audio_frame(stream, AudioOrigin::Screen, frame, now);
+    }
   }
 
   /// Starts publishing a video track; [`CallEngineEvent::VideoPublished`] brings its stream id.
@@ -427,10 +460,14 @@ impl CallEngine {
         participant,
         participants,
         video_tracks,
+        screen_audio_tracks,
       } => {
         self.on_joined(call_id, participant, participants)?;
         for track in video_tracks {
           self.add_video_track(track);
+        }
+        for track in screen_audio_tracks {
+          self.on_screen_audio_published(track);
         }
         Ok(())
       },
@@ -441,7 +478,7 @@ impl CallEngine {
       },
       CallEvent::ParticipantLeft { device_id } => {
         self.participants.remove(&device_id);
-        self.audio_streams.retain(|_, owner| *owner != device_id);
+        self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
         self.remote_video.retain(|_, track| track.sender != device_id);
         self.event(CallEngineEvent::ParticipantLeft(device_id));
         Ok(())
@@ -491,6 +528,14 @@ impl CallEngine {
         self.remote_video.remove(&StreamId(stream_id.0));
         self.own_video.remove(&StreamId(stream_id.0));
         self.event(CallEngineEvent::VideoUnpublished(stream_id));
+        Ok(())
+      },
+      CallEvent::ScreenAudioPublished { track } => {
+        self.on_screen_audio_published(track);
+        Ok(())
+      },
+      CallEvent::ScreenAudioUnpublished { stream_id } => {
+        self.on_screen_audio_unpublished(stream_id);
         Ok(())
       },
       CallEvent::KeyframeRequested { stream_id, layer } => {
@@ -679,7 +724,7 @@ impl CallEngine {
     if self.remote_video.contains_key(&datagram.header.stream_id) {
       return self.receive_video(datagram.header.stream_id, datagram.header.layer, datagram.rtp);
     }
-    let Some(&sender) = self.audio_streams.get(&datagram.header.stream_id) else {
+    let Some(&(sender, origin)) = self.audio_streams.get(&datagram.header.stream_id) else {
       return Ok(());
     };
     if self.is_deafened {
@@ -693,6 +738,7 @@ impl CallEngine {
     )?;
     self.event(CallEngineEvent::AudioFrame {
       sender,
+      origin,
       sequence_number: packet.header.sequence_number,
       opus,
     });
@@ -746,6 +792,93 @@ impl CallEngine {
     self.event(CallEngineEvent::VideoPublished(track));
   }
 
+  /// Encrypts one audio frame and sends it on `stream`. Dropped before DAVE is ready (there is no
+  /// unencrypted fallback, ARCHITECTURE.md §6.2). Both of a device's audio streams share its DAVE
+  /// audio encryptor, so their nonces never repeat.
+  fn send_audio_frame(
+    &mut self,
+    stream: StreamId,
+    origin: AudioOrigin,
+    frame: &EncodedAudioFrame,
+    now: Instant,
+  ) {
+    if self.is_compromised {
+      return;
+    }
+    let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
+      return;
+    };
+    let encrypted = match dave.encrypt_frame(MediaKind::Audio, FrameCodec::Opus, &frame.opus) {
+      Ok(encrypted) => encrypted.into_owned(),
+      Err(error) => {
+        warn!(%error, "audio frame not encrypted, dropped");
+        return;
+      },
+    };
+    let rtp_state = match origin {
+      AudioOrigin::Microphone => &mut self.microphone_rtp,
+      AudioOrigin::Screen => &mut self.screen_rtp,
+    };
+    let mut header = RtpHeader::new(
+      PayloadType::OPUS,
+      rtp_state.sequence,
+      rtp_state.timestamp,
+      Ssrc(stream.0),
+    );
+    header.set_audio_level(frame.level);
+    rtp_state.advance();
+    let Ok(rtp) = (RtpPacket {
+      header,
+      payload: &encrypted,
+    })
+    .to_bytes() else {
+      return;
+    };
+    self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
+  }
+
+  /// The SFU announced screen sound; ours starts sending (or is withdrawn if no longer wanted).
+  fn on_screen_audio_published(&mut self, track: ScreenAudioTrack) {
+    let stream = StreamId(track.stream_id.0);
+    if track.device_id == self.config.device_id {
+      if self.screen_audio == ScreenAudioState::Requested {
+        self.screen_audio = ScreenAudioState::Publishing(stream);
+        self.event(CallEngineEvent::ScreenAudioChanged {
+          device_id: track.device_id,
+          is_shared: true,
+        });
+      } else {
+        self.signal(CallClientMessage::UnpublishScreenAudio {
+          stream_id: track.stream_id,
+        });
+      }
+      return;
+    }
+    self
+      .audio_streams
+      .insert(stream, (track.device_id, AudioOrigin::Screen));
+    self.event(CallEngineEvent::ScreenAudioChanged {
+      device_id: track.device_id,
+      is_shared: true,
+    });
+  }
+
+  fn on_screen_audio_unpublished(&mut self, stream_id: MediaStreamId) {
+    let stream = StreamId(stream_id.0);
+    let maybe_device = if self.screen_audio == ScreenAudioState::Publishing(stream) {
+      self.screen_audio = ScreenAudioState::Off;
+      Some(self.config.device_id)
+    } else {
+      self.audio_streams.remove(&stream).map(|(device_id, _)| device_id)
+    };
+    if let Some(device_id) = maybe_device {
+      self.event(CallEngineEvent::ScreenAudioChanged {
+        device_id,
+        is_shared: false,
+      });
+    }
+  }
+
   /// Wraps one RTP packet in a datagram with a transport sequence number for uplink estimation.
   fn send_media(&mut self, stream: StreamId, layer: SimulcastLayer, rtp: &[u8], now: Instant) {
     let datagram_len = rtp.len() + crate::datagram::DATAGRAM_HEADER_BYTES + 2;
@@ -765,9 +898,10 @@ impl CallEngine {
   }
 
   fn add_participant(&mut self, participant: CallParticipant) {
-    self
-      .audio_streams
-      .insert(StreamId(participant.audio_stream_id.0), participant.device_id);
+    self.audio_streams.insert(
+      StreamId(participant.audio_stream_id.0),
+      (participant.device_id, AudioOrigin::Microphone),
+    );
     self.participants.insert(participant.device_id, participant);
   }
 
@@ -801,6 +935,21 @@ impl CallEngine {
 }
 
 /// DAVE's codec for a video codec (it leaves codec headers such as AV1 OBU headers readable).
+impl AudioRtpState {
+  fn new() -> Self {
+    Self {
+      sequence: SequenceNumber(0),
+      timestamp: RtpTimestamp(0),
+    }
+  }
+
+  /// Moves on by one 20 ms frame.
+  fn advance(&mut self) {
+    self.sequence = self.sequence.next();
+    self.timestamp = RtpTimestamp(self.timestamp.0.wrapping_add(OPUS_FRAME_TICKS));
+  }
+}
+
 fn frame_codec(codec: &VideoCodec) -> FrameCodec {
   match codec {
     VideoCodec::Av1 => FrameCodec::Av1,
@@ -894,6 +1043,98 @@ mod tests {
         alice.verification_code(device(2)),
         bob.verification_code(device(1))
       );
+    }
+
+    #[test]
+    fn screen_audio_has_its_own_stream_and_ignores_the_microphone_mute() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      alice.publish_screen_audio();
+      alice.send_screen_audio(&frame(), now);
+      let requested = drain(&mut alice);
+      assert!(requested.contains(&EngineOutput::Signal(CallClientMessage::PublishScreenAudio)));
+      assert!(
+        !requested
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Datagram(_))),
+        "nothing is sent before the SFU assigned a stream"
+      );
+
+      let track = ScreenAudioTrack {
+        device_id: device(1),
+        stream_id: MediaStreamId(40),
+      };
+      alice
+        .handle_signal(event(6, CallEvent::ScreenAudioPublished { track }), now)
+        .unwrap();
+      bob
+        .handle_signal(event(4, CallEvent::ScreenAudioPublished { track }), now)
+        .unwrap();
+      let shared = CallEngineEvent::ScreenAudioChanged {
+        device_id: device(1),
+        is_shared: true,
+      };
+      assert!(drain(&mut alice).contains(&EngineOutput::Event(shared.clone())));
+      assert!(drain(&mut bob).contains(&EngineOutput::Event(shared)));
+
+      alice.set_muted(true);
+      alice.send_screen_audio(&frame(), now);
+      bob.handle_datagram(&take_datagram(&mut alice), now);
+      let origin = drain(&mut bob).into_iter().find_map(|output| match output {
+        EngineOutput::Event(CallEngineEvent::AudioFrame { sender, origin, .. }) => Some((sender, origin)),
+        _ => None,
+      });
+      assert_eq!(origin, Some((device(1), AudioOrigin::Screen)));
+
+      alice.unpublish_screen_audio();
+      assert!(
+        drain(&mut alice).contains(&EngineOutput::Signal(CallClientMessage::UnpublishScreenAudio {
+          stream_id: MediaStreamId(40)
+        }))
+      );
+      alice.send_screen_audio(&frame(), now);
+      assert!(drain(&mut alice).is_empty(), "nothing is sent after unpublishing");
+      bob
+        .handle_signal(
+          event(
+            5,
+            CallEvent::ScreenAudioUnpublished {
+              stream_id: MediaStreamId(40),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      assert!(
+        drain(&mut bob).contains(&EngineOutput::Event(CallEngineEvent::ScreenAudioChanged {
+          device_id: device(1),
+          is_shared: false,
+        }))
+      );
+    }
+
+    #[test]
+    fn screen_audio_stopped_before_the_answer_is_withdrawn() {
+      let now = Instant::now();
+      let (mut alice, _) = secured_pair(now);
+      alice.publish_screen_audio();
+      alice.unpublish_screen_audio();
+      drain(&mut alice);
+      let track = ScreenAudioTrack {
+        device_id: device(1),
+        stream_id: MediaStreamId(40),
+      };
+      alice
+        .handle_signal(event(6, CallEvent::ScreenAudioPublished { track }), now)
+        .unwrap();
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Signal(CallClientMessage::UnpublishScreenAudio {
+          stream_id: MediaStreamId(40)
+        })]
+      );
+      alice.send_screen_audio(&frame(), now);
+      assert!(drain(&mut alice).is_empty());
     }
 
     #[test]
@@ -1316,6 +1557,7 @@ mod tests {
       participant: participant(id),
       participants: others.iter().map(|other| participant(*other)).collect(),
       video_tracks: Vec::new(),
+      screen_audio_tracks: Vec::new(),
     }
   }
 

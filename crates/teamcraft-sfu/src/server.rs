@@ -353,6 +353,14 @@ impl ParticipantSession {
         let result = self.room.unpublish_video(participant_id, stream_id);
         self.report(result);
       },
+      CallClientMessage::PublishScreenAudio => {
+        let result = self.room.publish_screen_audio(participant_id);
+        self.report(result);
+      },
+      CallClientMessage::UnpublishScreenAudio { stream_id } => {
+        let result = self.room.unpublish_screen_audio(participant_id, stream_id);
+        self.report(result);
+      },
       CallClientMessage::Subscribe {
         stream_id,
         maybe_max_layer,

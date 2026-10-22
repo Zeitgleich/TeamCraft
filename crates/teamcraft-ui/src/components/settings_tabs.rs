@@ -969,6 +969,7 @@ pub fn apply_call_prefs(call: crate::calls::CallState, calls: &CallPrefs) {
   call.camera_id.set(calls.camera_id.clone());
   call.microphone_id.set(calls.microphone_id.clone());
   call.speaker_id.set(calls.speaker_id.clone());
+  call.share_sound.set(calls.share_sound);
 }
 
 /// Replaces the recovery passphrase: the key backup is wrapped with the new one (e2ee.md §6.2).

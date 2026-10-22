@@ -71,6 +71,12 @@ pub enum CallClientMessage {
   UnpublishVideo {
     stream_id: MediaStreamId,
   },
+  /// Starts sending the shared screen's sound (system audio) as a second Opus stream; the SFU
+  /// answers with [`CallEvent::ScreenAudioPublished`]. One per device.
+  PublishScreenAudio,
+  UnpublishScreenAudio {
+    stream_id: MediaStreamId,
+  },
   /// Arrival times of the datagrams the SFU sent to this client (downlink estimation).
   TransportFeedback {
     feedback: TransportFeedback,
@@ -111,6 +117,8 @@ pub enum CallEvent {
     participants: Vec<CallParticipant>,
     #[serde(default)]
     video_tracks: Vec<VideoTrack>,
+    #[serde(default)]
+    screen_audio_tracks: Vec<ScreenAudioTrack>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -152,6 +160,14 @@ pub enum CallEvent {
     track: VideoTrack,
   },
   VideoUnpublished {
+    stream_id: MediaStreamId,
+  },
+  /// A device started sending its shared screen's sound (also sent to the publisher, which learns
+  /// the stream id). Forwarded to everyone, independent of the speaker selection.
+  ScreenAudioPublished {
+    track: ScreenAudioTrack,
+  },
+  ScreenAudioUnpublished {
     stream_id: MediaStreamId,
   },
   /// To the publisher: send a keyframe on this layer soon (a receiver switches to it).
@@ -200,6 +216,13 @@ pub struct CallParticipant {
   pub audio_stream_id: MediaStreamId,
 }
 
+/// A device's screen-share sound: Opus like its microphone, on its own stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenAudioTrack {
+  pub device_id: DeviceId,
+  pub stream_id: MediaStreamId,
+}
+
 /// SFU-assigned id of one media stream, as in the datagram header (`teamcraft-media::datagram`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -244,6 +267,11 @@ impl fmt::Debug for CallClientMessage {
         .finish(),
       Self::UnpublishVideo { stream_id } => f
         .debug_struct("UnpublishVideo")
+        .field("stream_id", stream_id)
+        .finish(),
+      Self::PublishScreenAudio => f.write_str("PublishScreenAudio"),
+      Self::UnpublishScreenAudio { stream_id } => f
+        .debug_struct("UnpublishScreenAudio")
         .field("stream_id", stream_id)
         .finish(),
       Self::Subscribe {
@@ -329,6 +357,34 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&feedback).unwrap(),
       r#"{"type":"transport_feedback","feedback":{"base_seq":65535,"arrivals_us":[10,null]}}"#
+    );
+  }
+
+  #[test]
+  fn screen_audio_wire_format() {
+    assert_eq!(
+      serde_json::to_string(&CallClientMessage::PublishScreenAudio).unwrap(),
+      r#"{"type":"publish_screen_audio"}"#
+    );
+    let event = CallEvent::ScreenAudioPublished {
+      track: ScreenAudioTrack {
+        device_id: DeviceId::from_snowflake(Snowflake::new(5).unwrap()),
+        stream_id: MediaStreamId(11),
+      },
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"screen_audio_published","track":{"device_id":"5","stream_id":11}}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+    // Older SFUs send no screen audio tracks with `joined`.
+    let joined: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[]}"#,
+    )
+    .unwrap();
+    assert!(
+      matches!(joined, CallEvent::Joined { screen_audio_tracks, .. } if screen_audio_tracks.is_empty())
     );
   }
 

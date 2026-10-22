@@ -29,9 +29,10 @@ use crate::audio_io::{AudioSink, AudioSource, sine_tone};
 use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer};
 use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_engine::{
-  CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
+  AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
 use crate::jitter::JitterBufferConfig;
+use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
 use crate::video::EncodedVideoFrame;
 use crate::video_capture::CaptureError;
 use crate::video_pipeline::{FrameSink, VideoReceiver, VideoSendConfig, VideoSender};
@@ -87,6 +88,8 @@ pub enum NativeCallError {
   Device(#[from] AudioDeviceError),
   #[error(transparent)]
   Capture(#[from] CaptureError),
+  #[error(transparent)]
+  SystemAudio(#[from] SystemAudioError),
   #[error("the call task ended unexpectedly")]
   TaskEnded,
 }
@@ -100,7 +103,20 @@ enum Command {
     done: oneshot::Sender<Result<(), AudioDeviceError>>,
   },
   Video(VideoCommand),
+  /// Starts sending a shared screen's sound from `capture`, replacing a running one.
+  StartScreenAudio(
+    Box<dyn SystemAudioCapture>,
+    oneshot::Sender<Result<(), SystemAudioError>>,
+  ),
+  StopScreenAudio,
   Leave,
+}
+
+/// The shared screen's sound being captured and encoded.
+struct ScreenAudio {
+  capture: Box<dyn SystemAudioCapture>,
+  samples: SystemAudioReceiver,
+  pipeline: CapturePipeline,
 }
 
 /// Video requests the app makes; frames come from the app's encoder (capture and codecs are
@@ -264,6 +280,25 @@ impl NativeCall {
     self.video(VideoCommand::Send { stream_id, frame });
   }
 
+  /// Sends the shared screen's sound from `capture` as a second audio stream (not affected by
+  /// muting the microphone); replaces a running one.
+  pub async fn start_screen_audio(
+    &self,
+    capture: Box<dyn SystemAudioCapture>,
+  ) -> Result<(), NativeCallError> {
+    let (done, done_rx) = oneshot::channel();
+    self
+      .commands
+      .send(Command::StartScreenAudio(capture, done))
+      .map_err(|_| NativeCallError::TaskEnded)?;
+    Ok(done_rx.await.map_err(|_| NativeCallError::TaskEnded)??)
+  }
+
+  pub fn stop_screen_audio(&self) {
+    // A closed channel means the call already ended.
+    let _ = self.commands.send(Command::StopScreenAudio);
+  }
+
   /// Switches microphone and speakers (or test signals) mid-call. On error the previous devices
   /// keep running.
   pub async fn set_audio(&self, source: AudioSource, sink: AudioSink) -> Result<(), NativeCallError> {
@@ -372,6 +407,7 @@ async fn run_call(
   let mut timer_tick = tokio::time::interval(TIMER_INTERVAL);
   engine.join(config.token.clone());
   let mut video = VideoState::default();
+  let mut maybe_screen_audio: Option<ScreenAudio> = None;
   let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
   let mut io = DriverIo {
     connection: &connection,
@@ -424,6 +460,18 @@ async fn run_call(
           buffer.push(&mix);
         }
       },
+      maybe_samples = recv_screen_audio(&mut maybe_screen_audio) => {
+        match (maybe_samples, maybe_screen_audio.as_mut()) {
+          (Some(samples), Some(screen_audio)) => {
+            io.mixer.push_echo_reference(&samples);
+            for frame in screen_audio.pipeline.push(&samples)? {
+              engine.send_screen_audio(&frame, Instant::now());
+            }
+          },
+          // The capture ended on its own (the shared window closed).
+          _ => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
+        }
+      },
       _ = timer_tick.tick() => engine.on_timer(Instant::now()),
       Some((kind, frame)) = encoded_rx.recv() => {
         if let Some(stream_id) = io.video.stream_of(&kind) {
@@ -453,6 +501,19 @@ async fn run_call(
             let _ = done.send(result);
           },
           Some(Command::Video(command)) => handle_video(&mut engine, io.video, &encoded_tx, command),
+          Some(Command::StartScreenAudio(capture, done)) => {
+            stop_screen_audio(&mut engine, &mut maybe_screen_audio);
+            let result = start_screen_audio(capture).map(|screen_audio| {
+              maybe_screen_audio = Some(screen_audio);
+              engine.publish_screen_audio();
+            });
+            if let Err(error) = &result {
+              warn!(%error, "sharing the computer's sound failed");
+            }
+            // The caller may have given up waiting.
+            let _ = done.send(result);
+          },
+          Some(Command::StopScreenAudio) => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
           Some(Command::Leave) | None => break Ok(()),
         }
       },
@@ -462,6 +523,9 @@ async fn run_call(
     }
   };
 
+  if let Some(mut screen_audio) = maybe_screen_audio {
+    screen_audio.capture.stop();
+  }
   devices.close();
   reader.abort();
   writer.abort();
@@ -469,6 +533,25 @@ async fn run_call(
   stats.maybe_privacy_code = engine.privacy_code();
   info!(?stats, "call ended");
   result.map(|()| stats)
+}
+
+fn start_screen_audio(mut capture: Box<dyn SystemAudioCapture>) -> Result<ScreenAudio, SystemAudioError> {
+  let pipeline = CapturePipeline::new(OpusEncoderConfig::screen_audio())
+    .map_err(|error| SystemAudioError::Device(error.to_string()))?;
+  let (sender, samples) = system_audio_queue();
+  capture.start(sender)?;
+  Ok(ScreenAudio {
+    capture,
+    samples,
+    pipeline,
+  })
+}
+
+fn stop_screen_audio(engine: &mut CallEngine, maybe_screen_audio: &mut Option<ScreenAudio>) {
+  if let Some(mut screen_audio) = maybe_screen_audio.take() {
+    screen_audio.capture.stop();
+    engine.unpublish_screen_audio();
+  }
 }
 
 fn handle_video(
@@ -542,11 +625,12 @@ impl DriverIo<'_> {
         },
         EngineOutput::Event(CallEngineEvent::AudioFrame {
           sender,
+          origin,
           sequence_number,
           opus,
         }) => {
           self.stats.frames_received += 1;
-          self.mixer.push(sender, sequence_number, opus)?;
+          self.mixer.push(sender, origin, sequence_number, opus)?;
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
           // Watched tracks are decoded for the app's sink; tracks the app subscribed to itself
@@ -561,6 +645,10 @@ impl DriverIo<'_> {
         EngineOutput::Event(event) => {
           match &event {
             CallEngineEvent::ParticipantLeft(device_id) => self.mixer.remove(*device_id),
+            CallEngineEvent::ScreenAudioChanged {
+              device_id,
+              is_shared: false,
+            } => self.mixer.remove_stream(*device_id, AudioOrigin::Screen),
             CallEngineEvent::VideoPublished(track) if track.device_id == engine.device_id() => {
               self.video.on_published(&track.kind, track.stream_id);
             },
@@ -697,6 +785,13 @@ impl AudioDevices {
 async fn recv_capture(maybe_capture: &mut Option<mpsc::UnboundedReceiver<Vec<f32>>>) -> Option<Vec<f32>> {
   match maybe_capture {
     Some(receiver) => receiver.recv().await,
+    None => std::future::pending().await,
+  }
+}
+
+async fn recv_screen_audio(maybe_screen_audio: &mut Option<ScreenAudio>) -> Option<Vec<f32>> {
+  match maybe_screen_audio {
+    Some(screen_audio) => screen_audio.samples.recv().await,
     None => std::future::pending().await,
   }
 }

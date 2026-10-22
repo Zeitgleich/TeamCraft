@@ -96,9 +96,15 @@ pub enum CallAction {
   SetTalking {
     is_talking: bool,
   },
-  /// Asks the system for a screen or window and shares it as its own stream.
-  StartScreenShare,
+  /// Asks the system for a screen or window and shares it as its own stream, with the computer's
+  /// sound when `has_sound` (older UIs send no flag: picture only).
+  StartScreenShare {
+    #[serde(default)]
+    has_sound: bool,
+  },
   StopScreenShare,
+  /// Opens the system's video effects panel (macOS: Portrait, background, Studio Light).
+  OpenSystemVideoEffects,
   #[serde(other)]
   Unknown,
 }
@@ -879,7 +885,8 @@ mod tests {
       CallAction::SetBackgroundEffect {
         effect: BackgroundEffect::Preset(BackgroundPreset::Office),
       },
-      CallAction::StartScreenShare,
+      CallAction::StartScreenShare { has_sound: true },
+      CallAction::OpenSystemVideoEffects,
     ] {
       let json = serde_json::to_string(&action).expect("serialize");
       assert_eq!(serde_json::from_str::<CallAction>(&json).expect("parse"), action);
@@ -891,6 +898,12 @@ mod tests {
       .expect("serialize"),
       r#"{"action":"set_background_effect","effect":"blur_light"}"#
     );
+  }
+
+  #[test]
+  fn screen_share_without_a_sound_flag_shares_the_picture_only() {
+    let older: CallAction = serde_json::from_str(r#"{"action":"start_screen_share"}"#).expect("parse");
+    assert_eq!(older, CallAction::StartScreenShare { has_sound: false });
   }
 
   #[test]

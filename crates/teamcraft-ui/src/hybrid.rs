@@ -687,15 +687,21 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
-  fn start_screen_share(&self) {
+  fn start_screen_share(&self, has_sound: bool) {
     if let Some(calls) = &self.maybe_calls {
-      calls.act(CallAction::StartScreenShare);
+      calls.act(CallAction::StartScreenShare { has_sound });
     }
   }
 
   fn stop_screen_share(&self) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::StopScreenShare);
+    }
+  }
+
+  fn open_system_video_effects(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::OpenSystemVideoEffects);
     }
   }
 }

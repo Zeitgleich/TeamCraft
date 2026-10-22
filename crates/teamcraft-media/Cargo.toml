@@ -50,6 +50,11 @@ avfoundation = ["native", "dep:nokhwa"]
 mediafoundation = ["native", "dep:nokhwa"]
 # Screen and window capture on Windows through Windows Graphics Capture (safe wrapper crate).
 graphics-capture = ["native", "dep:windows-capture"]
+# Screen sharing and its sound on macOS through ScreenCaptureKit (macOS 13+).
+screencapturekit = ["native", "dep:screencapturekit"]
+# A screen share's sound on Windows: WASAPI process loopback without our own process (safe
+# wrapper crate).
+wasapi-loopback = ["native", "dep:wasapi"]
 # Cameras through V4L2 directly (Linux fallback when the camera portal is unavailable).
 v4l2 = ["native", "dep:v4l"]
 
@@ -148,12 +153,19 @@ pipewire = { version = "0.10.1", optional = true }
 # (C code) is off; capture_convert decodes MJPEG.
 [target.'cfg(target_os = "macos")'.dependencies]
 nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-avfoundation"] }
+# Screen sharing with its sound: ScreenCaptureKit behind a safe API (MIT/Apache-2.0).
+# Screen sharing with its sound: ScreenCaptureKit behind a safe API (MIT/Apache-2.0). Its
+# `macos_14_0` feature only compiles the CGImage pixel helpers in; the bridge itself guards newer
+# APIs at runtime and needs macOS 13.
+screencapturekit = { version = "11.0.0", optional = true, features = ["macos_14_0"] }
 
 # Camera capture on Windows: Media Foundation behind nokhwa's safe API (Apache-2.0).
 [target.'cfg(target_os = "windows")'.dependencies]
 nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-msmf"] }
 # Screen and window capture: Windows Graphics Capture (MIT), D3D11 readback inside the crate.
 windows-capture = { version = "2.0.1", optional = true }
+# System audio for screen shares: WASAPI process loopback behind a safe API (MIT).
+wasapi = { version = "0.26.0", optional = true }
 
 # WebRTC's audio processing module (AEC3, noise suppression, AGC2; the only WebRTC component used,
 # ARCHITECTURE.md §6.1) is a C++ library, so it is opt-in at build time instead of a feature (which
@@ -184,6 +196,11 @@ required-features = ["openh264-source", "segmentation"]
 # Captures through the screencast/camera portal and counts the frames (packaging/linux/portal-test).
 [[example]]
 name = "portal_capture"
+required-features = ["pipewire"]
+
+# Captures the computer's sound through PipeWire and checks that our own playback is left out.
+[[example]]
+name = "system_audio_capture"
 required-features = ["pipewire"]
 
 # The browser driver as a JS module for the SFU's development page (see the example's docs).

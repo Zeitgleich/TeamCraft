@@ -310,6 +310,13 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Audio:** forward the 3–5 loudest speakers based on the audio-level header extension; in large calls nobody receives dozens of audio streams.
 - **Video:** simulcast (3 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
+- **Screen share sound** (opt-in): the computer's playback without the call itself, as a second
+  Opus stream per device (music mode, 64 kbit/s). The SFU forwards it to everyone regardless of
+  the speaker selection. It is encrypted with the device's DAVE audio key, like the microphone.
+  Capture: PipeWire on Linux (other applications' playback streams linked into our capture,
+  ours left out), WASAPI process loopback excluding our process tree on Windows, and
+  ScreenCaptureKit with `excludesCurrentProcessAudio` on macOS. The sender's echo canceller also
+  gets the shared sound as far-end signal, so the microphone doesn't send it a second time.
 - **Video effects** (background blur, background images, light correction) run on the sending device
   before encoding – the SFU only ever sees encrypted frames. Pipeline per platform: [PLAN.md](PLAN.md) §8.
 - Bandwidth estimation: transport-wide feedback over the signaling stream + QUIC congestion signals.

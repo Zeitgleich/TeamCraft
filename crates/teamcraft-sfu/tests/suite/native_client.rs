@@ -7,7 +7,7 @@
 use std::{
   collections::HashMap,
   net::{Ipv6Addr, SocketAddr},
-  sync::Arc,
+  sync::{Arc, Mutex},
   time::Duration,
 };
 
@@ -18,13 +18,14 @@ use teamcraft_crypto::{
 };
 use teamcraft_media::{
   audio_device::AudioDeviceError,
-  audio_io::{AudioDeviceChoice, AudioDeviceId, AudioSink, AudioSource},
+  audio_io::{AudioDeviceChoice, AudioDeviceId, AudioSink, AudioSource, sine_tone},
   bwe::BweConfig,
   call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator},
   call_engine::{CallEngineConfig, CallEngineEvent},
   call_native::{NativeCall, NativeCallConfig, NativeCallError},
   datagram::SimulcastLayer,
   rtp::RtpTimestamp,
+  system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioSender},
   video::{EncodedVideoFrame, VideoResolution, simulcast_layers},
 };
 use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, MediaStreamId, VideoCodec, VideoTrackKind};
@@ -236,6 +237,109 @@ async fn screen_share_reaches_a_subscriber_through_the_sfu() {
   assert!(received.len() >= 10, "{} frames arrived", received.len());
   assert!(received[0].is_keyframe, "the SFU starts a receiver at a keyframe");
   assert!(received.iter().all(|frame| frame.is_intact));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_screen_sound_reaches_the_others_while_the_microphone_is_muted() {
+  let (port, certificate_hash) = start_sfu().await;
+  let mut authenticators = authenticators();
+  let [presenter_device, listener_device] = [1u64, 2];
+  let mut calls = Vec::new();
+  for (device, other) in [
+    (presenter_device, listener_device),
+    (listener_device, presenter_device),
+  ] {
+    let engine = CallEngineConfig {
+      user_id: id_of(device),
+      device_id: id_of(device),
+      capabilities: MediaCapabilities::default(),
+      bwe: BweConfig::default(),
+    };
+    let sfu_url = format!("https://[::1]:{port}{CALL_PATH}");
+    let mut config = NativeCallConfig::new(sfu_url, format!("dev:14:{device}:{device}"), engine);
+    config.maybe_certificate_hash = Some(certificate_hash);
+    config.maybe_trusted_roster = Some(vec![id_of(other)]);
+    config.maybe_authenticator = authenticators.remove(&device);
+    calls.push(NativeCall::join(config).await.unwrap());
+  }
+  let [mut presenter, mut listener]: [NativeCall; 2] = calls.try_into().ok().unwrap();
+  presenter.set_muted(true);
+  let capture = SharedCapture::default();
+
+  // Both sides learn that the presenter shares sound once the SFU assigned the stream.
+  wait_for(&mut presenter, |event| {
+    matches!(event, CallEngineEvent::Secured { .. })
+  })
+  .await;
+  presenter
+    .start_screen_audio(Box::new(capture.clone()))
+    .await
+    .unwrap();
+  let shared = CallEngineEvent::ScreenAudioChanged {
+    device_id: id_of(presenter_device),
+    is_shared: true,
+  };
+  wait_for(&mut presenter, |event| *event == shared).await;
+  wait_for(&mut listener, |event| *event == shared).await;
+
+  // Two seconds of a tone at the pace of a real device: sent although the microphone is muted.
+  let sender = capture.sender().expect("the capture was started");
+  let mut pace = tokio::time::interval(Duration::from_millis(20));
+  for frame in 0..100u64 {
+    pace.tick().await;
+    assert!(sender.send(sine_tone(440.0, 0.3, frame * 960, 960)));
+  }
+  presenter.stop_screen_audio();
+  wait_for(&mut listener, |event| {
+    *event
+      == CallEngineEvent::ScreenAudioChanged {
+        device_id: id_of(presenter_device),
+        is_shared: false,
+      }
+  })
+  .await;
+  assert!(capture.sender().is_none(), "stopping the share stops the capture");
+
+  presenter.leave().await.unwrap();
+  let stats = listener.leave().await.unwrap();
+  // The muted microphone sent nothing, so every received frame is screen sound.
+  assert!(stats.frames_received > 80, "{stats:?}");
+  assert!(stats.audible_frames_played > 50, "{stats:?}");
+}
+
+/// A system audio capture the test feeds by hand.
+#[derive(Clone, Default)]
+struct SharedCapture(Arc<Mutex<Option<SystemAudioSender>>>);
+
+impl SharedCapture {
+  fn sender(&self) -> Option<SystemAudioSender> {
+    self.0.lock().unwrap().clone()
+  }
+}
+
+impl SystemAudioCapture for SharedCapture {
+  fn start(&mut self, samples: SystemAudioSender) -> Result<(), SystemAudioError> {
+    *self.0.lock().unwrap() = Some(samples);
+    Ok(())
+  }
+
+  fn stop(&mut self) {
+    *self.0.lock().unwrap() = None;
+  }
+}
+
+/// The next event matching `predicate` within five seconds.
+async fn wait_for(call: &mut NativeCall, predicate: impl Fn(&CallEngineEvent) -> bool) -> CallEngineEvent {
+  tokio::time::timeout(Duration::from_secs(5), async {
+    loop {
+      let event = call.next_event().await.expect("call ended before the event");
+      if predicate(&event) {
+        return event;
+      }
+    }
+  })
+  .await
+  .expect("event did not arrive")
 }
 
 /// What the viewer saw of one frame.

@@ -24,7 +24,7 @@ pub use call_media::{
 };
 pub use calls::{
   CALL_JOIN_TOKEN_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims, CallParticipant, CallServerMessage,
-  DaveKeyBinding, MediaStreamId,
+  DaveKeyBinding, MediaStreamId, ScreenAudioTrack,
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallRequest, IncomingCall, MediaDevice,
-  MediaDevices, Participant, PushToTalk, RemoteVideoTrack, RunningCall,
+  MediaDevices, Participant, PushToTalk, RemoteVideoTrack, RunningCall, ScreenShareSound,
 };
 use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_core::CallKeySigner;
@@ -32,6 +32,7 @@ use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
+use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId,
@@ -109,6 +110,9 @@ enum Control {
   },
   StartVideo(VideoSendConfig, oneshot::Sender<Result<(), String>>),
   StopVideo(VideoTrackKind),
+  /// Sends a screen share's sound from this capture; the answer says whether it started.
+  StartScreenAudio(Box<dyn SystemAudioCapture>, oneshot::Sender<Result<(), String>>),
+  StopScreenAudio,
   Subscribe {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
@@ -236,6 +240,7 @@ impl CallHost {
         is_sharing_screen: false,
         background: state.background,
         maybe_muted_by_host: None,
+        screen_sound: ScreenShareSound::Off,
       });
       state.maybe_end_reason = None;
     }
@@ -474,8 +479,10 @@ impl CallHost {
     }
   }
 
-  /// Shows the system's screen/window picker and shares the choice as its own stream.
-  pub async fn start_screen_share(&self) -> Result<(), String> {
+  /// Shows the system's screen/window picker and shares the choice as its own stream, with the
+  /// computer's sound when `has_sound`. Sound that can't be captured here doesn't stop the share;
+  /// the call state says so.
+  pub async fn start_screen_share(&self, has_sound: bool) -> Result<(), String> {
     self.ensure_video_codec().await?;
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
     let (capture, maybe_new_token) =
@@ -494,12 +501,49 @@ impl CallHost {
       lock(&self.state).maybe_screen_token = maybe_new_token;
     }
     self.update_active(|active| active.is_sharing_screen = true);
+    let screen_sound = if has_sound {
+      self.start_screen_audio().await
+    } else {
+      ScreenShareSound::Off
+    };
+    self.update_active(|active| active.screen_sound = screen_sound);
     Ok(())
   }
 
   pub async fn stop_screen_share(&self) {
+    self.control(Control::StopScreenAudio).await;
     self.control(Control::StopVideo(VideoTrackKind::Screen)).await;
-    self.update_active(|active| active.is_sharing_screen = false);
+    self.update_active(|active| {
+      active.is_sharing_screen = false;
+      active.screen_sound = ScreenShareSound::Off;
+    });
+  }
+
+  /// Starts sending the computer's sound with the share.
+  async fn start_screen_audio(&self) -> ScreenShareSound {
+    let (done, done_rx) = oneshot::channel();
+    {
+      let media = self.media.lock().await;
+      let Some(call) = media.as_ref() else {
+        return ScreenShareSound::Off;
+      };
+      if call
+        .controls
+        .send(Control::StartScreenAudio(video::open_system_audio(), done))
+        .is_err()
+      {
+        return ScreenShareSound::Off;
+      }
+    }
+    match done_rx.await {
+      Ok(Ok(())) => ScreenShareSound::Shared,
+      Ok(Err(error)) => {
+        tracing::warn!(%error, "the computer's sound can't be shared");
+        ScreenShareSound::Unavailable
+      },
+      // The call ended meanwhile.
+      Err(_) => ScreenShareSound::Off,
+    }
   }
 
   async fn start_video(&self, config: VideoSendConfig) -> Result<(), String> {
@@ -657,6 +701,11 @@ async fn run_media(
           let _ = done.send(result);
         },
         Some(Control::StopVideo(kind)) => call.stop_video(kind),
+        Some(Control::StartScreenAudio(capture, done)) => {
+          let result = call.start_screen_audio(capture).await.map_err(|error| error.to_string());
+          let _ = done.send(result);
+        },
+        Some(Control::StopScreenAudio) => call.stop_screen_audio(),
         Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
         Some(Control::Leave) | None => break,
       },
@@ -1138,6 +1187,7 @@ mod tests {
       is_sharing_screen: false,
       background: UiBackgroundEffect::None,
       maybe_muted_by_host: None,
+      screen_sound: ScreenShareSound::Off,
     }
   }
 

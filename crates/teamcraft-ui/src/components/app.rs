@@ -462,8 +462,8 @@ fn connect_calls(state: AppState) {
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
       CallEvent::Effect(effect) => backend.set_background_effect(effect),
-      CallEvent::ScreenShare(true) => backend.start_screen_share(),
-      CallEvent::ScreenShare(false) => backend.stop_screen_share(),
+      CallEvent::StartScreenShare { has_sound } => backend.start_screen_share(has_sound),
+      CallEvent::StopScreenShare => backend.stop_screen_share(),
     });
   });
   // The effect picker writes the signal; the media layer applies it to the camera image.

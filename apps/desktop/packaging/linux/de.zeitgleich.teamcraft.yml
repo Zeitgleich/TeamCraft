@@ -29,6 +29,10 @@ finish-args:
   - --device=dri
   # Microphone and speakers (PulseAudio protocol, served by PipeWire on current desktops).
   - --socket=pulseaudio
+  # Screen shares with sound: other applications' playback is linked into our capture stream
+  # through PipeWire itself (the ScreenCast portal has no audio). Without it the "share sound"
+  # option is unavailable; nothing else uses the PipeWire socket.
+  - --filesystem=xdg-run/pipewire-0
   # Refresh token in the desktop's keyring (GNOME Keyring, KWallet/ksecretd).
   - --talk-name=org.freedesktop.secrets
   # Mention and direct-message notifications.
