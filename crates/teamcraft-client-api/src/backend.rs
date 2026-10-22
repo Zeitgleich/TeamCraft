@@ -153,6 +153,8 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Starts (or finds) the direct conversation with a person; it shows up in the lists when ready.
+  fn open_dm(&self, _user: UserId) {}
   /// Confirms having read a message that asked for acknowledgement.
   fn acknowledge(&self, _conversation: ConversationId, _message: MessageId) {}
 

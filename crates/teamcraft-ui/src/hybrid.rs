@@ -236,6 +236,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.mark_read(conversation);
   }
 
+  fn open_dm(&self, user: UserId) {
+    self.chat.open_dm(user);
+  }
+
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
     self.chat.set_favorite(conversation, is_favorite);
   }

@@ -36,6 +36,8 @@ pub enum MainView {
   Saved,
   /// Scheduled and instant meetings (signed-in builds).
   Meetings,
+  /// People and user groups.
+  Directory,
 }
 
 /// What the right-hand panel shows.
@@ -81,6 +83,10 @@ pub enum Overlay {
   SpaceSettings(SpaceId),
   /// The images of a conversation, starting at the one in this message.
   Gallery(ConversationId, MessageId),
+  /// The signed-in user's profile form.
+  EditProfile,
+  /// Another person's profile card.
+  UserProfile(UserId),
 }
 
 #[derive(Clone, Copy)]
@@ -100,6 +106,8 @@ pub struct AppState {
   /// Bumped when the composer sent a message, so the feed scrolls to it.
   /// The message the composer quotes in its next message.
   pub reply_target: RwSignal<Option<ReplyTarget>>,
+  /// The person whose direct conversation was asked for and is not there yet.
+  pub pending_dm: RwSignal<Option<UserId>>,
   pub jump_to_latest: RwSignal<u64>,
   /// A request to scroll a conversation's feed to a message index (jump to date).
   pub jump_to_index: RwSignal<Option<(ConversationId, usize)>>,
@@ -124,6 +132,7 @@ impl AppState {
       call: CallState::new(),
       device_prompt: RwSignal::new(None),
       reply_target: RwSignal::new(None),
+      pending_dm: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
       settings,
@@ -134,6 +143,40 @@ impl AppState {
   /// the desktop shell), so views re-read.
   pub fn backend_changed(&self) {
     self.revision.update(|revision| *revision += 1);
+    if let Some(user) = self.pending_dm.get_untracked()
+      && let Some(conversation) = self.direct_with(user)
+    {
+      self.pending_dm.set(None);
+      self.open_conversation(conversation);
+    }
+  }
+
+  /// Opens the direct conversation with a person, creating it first if there is none yet.
+  pub fn open_direct(&self, user: UserId) {
+    if let Some(conversation) = self.direct_with(user) {
+      self.open_conversation(conversation);
+    } else {
+      self.pending_dm.set(Some(user));
+      self.write(|backend| backend.open_dm(user));
+    }
+  }
+
+  fn direct_with(&self, user: UserId) -> Option<ConversationId> {
+    let me = self.me().id;
+    self.read(|backend| {
+      backend
+        .direct_conversations()
+        .into_iter()
+        .find(|conversation| {
+          conversation.kind == crate::model::ConversationKind::Direct
+            && conversation.member_ids.contains(&user)
+            && conversation
+              .member_ids
+              .iter()
+              .all(|member| *member == user || *member == me)
+        })
+        .map(|conversation| conversation.id)
+    })
   }
 
   /// Reads from the backend and re-runs the calling reactive scope after any mutation.
@@ -156,9 +199,12 @@ impl AppState {
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),
-      MainView::Threads | MainView::Admin(_) | MainView::Search | MainView::Meetings | MainView::Saved => {
-        None
-      },
+      MainView::Threads
+      | MainView::Admin(_)
+      | MainView::Search
+      | MainView::Meetings
+      | MainView::Saved
+      | MainView::Directory => None,
     }
   }
 
@@ -211,6 +257,12 @@ impl AppState {
       self.search_query.set(query.to_owned());
     }
     self.view.set(MainView::Search);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  pub fn open_directory(&self) {
+    self.view.set(MainView::Directory);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
   }

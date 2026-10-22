@@ -75,6 +75,16 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
     })
   };
 
+  // A direct conversation shows the other person's local time (from their profile).
+  let locale = i18n.locale().tag();
+  let local_time = move || {
+    let conv = info.get()?;
+    if conv.kind != crate::model::ConversationKind::Direct {
+      return None;
+    }
+    let other = conv.member_ids.iter().copied().find(|id| *id != state.me().id)?;
+    crate::components::profile_views::local_time_label(other, locale)
+  };
   let topic = move || {
     info
       .get()
@@ -157,6 +167,7 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
             />
           </Show>
         </div>
+        {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
         <Show when=has_external fallback=|| ()>
           <span class="badge badge-guest" title=move || i18n.t("external-badge-detail")>
             {move || i18n.t("external-badge")}

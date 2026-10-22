@@ -924,3 +924,47 @@ notif-browser-granted = Benachrichtigungen sind in diesem Browser erlaubt.
 notif-browser-denied = Benachrichtigungen sind blockiert. Erlaube sie in den Website-Einstellungen des Browsers.
 notif-browser-allow = Benachrichtigungen erlauben
 notif-browser-background = Benachrichtigungen kommen auch an, wenn TeamCraft geschlossen ist.
+
+# Profiles, people and groups (v1 REST UI)
+profile-edit-title = Profil bearbeiten
+profile-unavailable = Profile sind hier nicht verfügbar.
+profile-title = Position
+profile-department = Abteilung
+profile-phone = Telefon
+profile-time-zone = Zeitzone
+profile-local-time = Ortszeit
+profile-hours = Arbeitszeiten
+profile-hours-days = Arbeitstage
+profile-hours-from = Von
+profile-hours-to = Bis
+profile-hours-invalid = Arbeitszeiten brauchen mindestens einen Tag und ein Ende nach dem Beginn.
+profile-avatar-change = Bild ändern
+profile-avatar-remove = Bild entfernen
+profile-avatar-type = Bilder müssen PNG, JPEG oder WebP sein.
+profile-avatar-size = Das Bild ist zu groß (höchstens 2 MB).
+profile-avatar-unreadable = Das Bild konnte nicht gelesen werden.
+profile-message = Nachricht
+weekday-mon = Mo
+weekday-tue = Di
+weekday-wed = Mi
+weekday-thu = Do
+weekday-fri = Fr
+weekday-sat = Sa
+weekday-sun = So
+sidebar-people = Personen
+directory-title = Personen
+directory-people = Personen
+directory-groups = Gruppen
+directory-filter = Person suchen
+directory-empty = Niemand gefunden.
+groups-unavailable = Benutzergruppen brauchen eine angemeldete Sitzung.
+groups-members = { $count ->
+    [one] 1 Mitglied
+   *[other] { $count } Mitglieder
+}
+groups-synced = Vom Identitätsanbieter
+groups-empty = Noch keine Benutzergruppen.
+groups-handle = Kürzel (was auf @ folgt)
+groups-name = Name
+groups-add = Hinzufügen
+groups-remove = Entfernen

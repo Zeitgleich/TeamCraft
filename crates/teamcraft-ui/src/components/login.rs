@@ -258,6 +258,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
       Some(Ok(loaded)) => {
         provide_context(StoredValue::new_local(NotificationSync::new(control.authenticator())));
         provide_context(MeetingsHub::new(MeetingsClient::new(control.authenticator())));
+        provide_context(crate::profiles::ProfileHub::new(crate::rest::RestClient::new(control.authenticator())));
         view! { <Shell backend=loaded settings=settings /> }.into_any()
       },
       Some(Err(error)) => {

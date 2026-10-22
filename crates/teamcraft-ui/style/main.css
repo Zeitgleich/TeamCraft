@@ -3944,3 +3944,23 @@ select.input {
 .inline-form { display: flex; gap: .5rem; }
 .sidebar-head { display: flex; align-items: center; gap: .25rem; }
 .sidebar-head .space-name { flex: 1; }
+
+/* Profiles and directory */
+.avatar-img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+.profile-avatar-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; }
+.profile-facts { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: .75rem 0; }
+.profile-facts dt { color: var(--text-muted, #666); }
+.profile-facts dd { margin: 0; }
+.weekday-picker { display: flex; flex-wrap: wrap; gap: .25rem .75rem; border: 0; padding: 0; margin: 0; }
+.hours-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.header-local-time { color: var(--text-muted, #666); font-size: .85em; }
+.directory-body { padding: .75rem 1rem; }
+.person-list, .group-list { list-style: none; margin: .5rem 0; padding: 0; }
+.person-row, .group-row { display: flex; align-items: center; gap: .5rem; padding: .35rem 0; border-bottom: 1px solid var(--border, rgba(128,128,128,.25)); flex-wrap: wrap; }
+.person-main { display: flex; align-items: center; gap: .6rem; flex: 1; text-align: start; background: none; border: 0; color: inherit; cursor: pointer; padding: .2rem; min-width: 0; }
+.person-text { display: flex; flex-direction: column; min-width: 0; }
+.person-facts { color: var(--text-muted, #666); font-size: .85em; }
+.group-members { width: 100%; list-style: none; padding: 0 0 0 2rem; margin: 0; }
+.group-members li { display: flex; align-items: center; gap: .5rem; padding: .15rem 0; }
+.tabs { display: flex; gap: .25rem; }
+.tabs [role=tab][aria-selected=true] { font-weight: 600; text-decoration: underline; }

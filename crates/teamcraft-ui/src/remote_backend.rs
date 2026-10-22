@@ -784,6 +784,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::MarkRead { conversation });
   }
 
+  fn open_dm(&self, user: UserId) {
+    self.act(ChatAction::OpenDm { user });
+  }
+
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
     self.update_conversation(conversation, |found| found.is_favorite = is_favorite);
     self.act(ChatAction::SetFavorite {

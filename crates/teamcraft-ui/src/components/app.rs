@@ -15,6 +15,7 @@ use crate::components::bundle_banner::BundleBanner;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::channel_view::ChannelView;
+use crate::components::directory_view::DirectoryView;
 use crate::components::file_views::{FilesPanel, Gallery};
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::incoming_call::IncomingCallDialog;
@@ -22,6 +23,7 @@ use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{ForwardDialog, PinsPanel, SavedView};
+use crate::components::profile_views::{EditProfileDialog, UserProfileDialog};
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
 use crate::components::search_view::SearchView;
@@ -133,6 +135,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Search => view! { <SearchView /> }.into_any(),
             MainView::Meetings => view! { <MeetingsView /> }.into_any(),
             MainView::Saved => view! { <SavedView /> }.into_any(),
+            MainView::Directory => view! { <DirectoryView /> }.into_any(),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
@@ -183,6 +186,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::BrowseChannels(space) => view! { <BrowseChannelsDialog space=space /> }.into_any(),
         Overlay::ChannelSettings(id) => view! { <ChannelSettingsDialog conversation=id /> }.into_any(),
         Overlay::SpaceSettings(space) => view! { <SpaceSettingsDialog space=space /> }.into_any(),
+        Overlay::EditProfile => view! { <EditProfileDialog /> }.into_any(),
+        Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
     </div>
