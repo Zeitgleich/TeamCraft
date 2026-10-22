@@ -4,25 +4,19 @@
 //! `CallId`. Snowflakes are non-negative 63-bit values, so they fit into `u64` both ways.
 
 use teamcraft_media::dave::{DaveCallId, DaveParticipantId};
-use teamcraft_proto::{CallId, DeviceId, Id, IdError, Snowflake};
+use teamcraft_proto::{CallId, DeviceId, IdError};
 
 pub fn dave_participant_id(device_id: DeviceId) -> DaveParticipantId {
-  DaveParticipantId(snowflake_to_u64(device_id.snowflake()))
+  DaveParticipantId::from_device(device_id)
 }
 
 pub fn dave_call_id(call_id: CallId) -> DaveCallId {
-  DaveCallId(snowflake_to_u64(call_id.snowflake()))
+  DaveCallId::from_call(call_id)
 }
 
 /// Reverse of [`dave_participant_id`]; fails for ids above the 63-bit snowflake range.
 pub fn device_id_from_dave(participant_id: DaveParticipantId) -> Result<DeviceId, IdError> {
-  let raw = i64::try_from(participant_id.0).map_err(|_| IdError::Malformed(participant_id.0.to_string()))?;
-  Ok(DeviceId::from_snowflake(Snowflake::new(raw)?))
-}
-
-fn snowflake_to_u64(snowflake: Snowflake) -> u64 {
-  // Invariant: snowflakes are non-negative, so the conversion never fails.
-  u64::try_from(snowflake.get()).unwrap_or_default()
+  participant_id.to_device()
 }
 
 #[cfg(test)]

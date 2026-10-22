@@ -10,10 +10,10 @@
 //!
 //! Pure state machine: every input returns the messages to send, so it is tested without network.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use teamcraft_media::dave::{DaveEpoch, DaveError, DaveExternalSender, DaveLeafIndex, DaveParticipantId};
-use teamcraft_proto::{Base64Bytes, CallEvent, CallId, DeviceId, IdError};
+use teamcraft_proto::{Base64Bytes, CallEvent, CallId, DaveKeyBinding, DeviceId, IdError};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -30,6 +30,8 @@ pub struct DaveCoordinator {
   leaves: Vec<Option<DeviceId>>,
   /// Key packages not yet proposed, in arrival order.
   waiting: Vec<(DeviceId, Vec<u8>)>,
+  /// Signed call key bindings as sent with the key packages (e2ee.md §8); relayed, never trusted.
+  key_bindings: HashMap<DeviceId, Vec<u8>>,
   pending_removals: Vec<DaveLeafIndex>,
   maybe_transition: Option<Transition>,
 }
@@ -71,6 +73,7 @@ impl DaveCoordinator {
       maybe_epoch: None,
       leaves: Vec::new(),
       waiting: Vec::new(),
+      key_bindings: HashMap::new(),
       pending_removals: Vec::new(),
       maybe_transition: None,
     })
@@ -86,6 +89,7 @@ impl DaveCoordinator {
     &mut self,
     participant_id: DeviceId,
     key_package: Vec<u8>,
+    maybe_key_binding: Option<Vec<u8>>,
   ) -> Result<Vec<Outbound>, DaveCoordinatorError> {
     let actual = device_id_from_dave(self.external_sender.key_package_participant(&key_package)?)?;
     if actual != participant_id {
@@ -96,6 +100,9 @@ impl DaveCoordinator {
     }
     if self.is_known(participant_id) {
       return Err(DaveCoordinatorError::AlreadyKnown(participant_id));
+    }
+    if let Some(binding) = maybe_key_binding {
+      self.key_bindings.insert(participant_id, binding);
     }
     self.waiting.push((participant_id, key_package));
     Ok(self.start_transition())
@@ -131,6 +138,7 @@ impl DaveCoordinator {
   /// A participant left the call (or its connection dropped).
   pub fn on_leave(&mut self, participant_id: DeviceId) -> Vec<Outbound> {
     self.waiting.retain(|(id, _)| *id != participant_id);
+    self.key_bindings.remove(&participant_id);
     if let Some(leaf_index) = self.leaf_of(participant_id) {
       self.leaves[leaf_index] = None;
       let leaf = DaveLeafIndex(u32::try_from(leaf_index).unwrap_or(u32::MAX));
@@ -223,6 +231,7 @@ impl DaveCoordinator {
           epoch: epoch.0,
           proposals: Base64Bytes::new(proposals.clone()),
           expected_participants: expected_participants.clone(),
+          key_bindings: self.bindings_of(joiners.iter().map(|(id, _)| *id)),
         },
       })
       .collect();
@@ -253,6 +262,7 @@ impl DaveCoordinator {
         },
       })
       .collect();
+    let mut welcomed = Vec::new();
     for (joiner, _) in &transition.joiners {
       let leaf_index = self.place(*joiner);
       if transition.departed_joiners.contains(joiner) {
@@ -260,11 +270,19 @@ impl DaveCoordinator {
         self
           .pending_removals
           .push(DaveLeafIndex(u32::try_from(leaf_index).unwrap_or(u32::MAX)));
-      } else if let Some(welcome) = &maybe_welcome {
+      } else {
+        welcomed.push(*joiner);
+      }
+    }
+    if let Some(welcome) = &maybe_welcome {
+      for joiner in welcomed {
+        // The joiner verifies everyone already in the group (including other joiners).
+        let others: Vec<DeviceId> = self.members().filter(|member| *member != joiner).collect();
         outbound.push(Outbound {
-          recipient: *joiner,
+          recipient: joiner,
           event: CallEvent::DaveWelcome {
             welcome: Base64Bytes::new(welcome.clone()),
+            key_bindings: self.bindings_of(others),
           },
         });
       }
@@ -301,6 +319,19 @@ impl DaveCoordinator {
       requeued.append(&mut self.waiting);
       self.waiting = requeued;
     }
+  }
+
+  fn bindings_of(&self, devices: impl IntoIterator<Item = DeviceId>) -> Vec<DaveKeyBinding> {
+    devices
+      .into_iter()
+      .filter_map(|device_id| {
+        let binding = self.key_bindings.get(&device_id)?;
+        Some(DaveKeyBinding {
+          device_id,
+          binding: Base64Bytes::new(binding.clone()),
+        })
+      })
+      .collect()
   }
 
   fn members(&self) -> impl Iterator<Item = DeviceId> + '_ {
@@ -406,6 +437,51 @@ mod tests {
     }
   }
 
+  mod bindings {
+    use super::*;
+
+    #[test]
+    fn bindings_are_relayed_with_proposals_and_welcomes() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.join_without_delivery(3);
+      let proposals = harness
+        .queue
+        .iter()
+        .find_map(|outbound| match &outbound.event {
+          CallEvent::DaveProposals { key_bindings, .. } => Some(key_bindings.clone()),
+          _ => None,
+        })
+        .unwrap();
+      assert_eq!(proposals, vec![binding(3)]);
+      // Deliver until device 3's welcome is queued.
+      let mut welcome_bindings = None;
+      while let Some(outbound) = harness.queue.pop_front() {
+        if let CallEvent::DaveWelcome { key_bindings, .. } = &outbound.event
+          && outbound.recipient == device(3)
+        {
+          welcome_bindings = Some(key_bindings.clone());
+        }
+        harness.queue.push_front(outbound);
+        harness.deliver_one();
+        if welcome_bindings.is_some() {
+          break;
+        }
+      }
+      let mut welcome_bindings = welcome_bindings.unwrap();
+      welcome_bindings.sort_by_key(|binding| binding.device_id);
+      assert_eq!(welcome_bindings, vec![binding(1), binding(2)]);
+    }
+
+    fn binding(id: u64) -> DaveKeyBinding {
+      DaveKeyBinding {
+        device_id: device(id),
+        binding: Base64Bytes::new(vec![u8::try_from(id).unwrap()]),
+      }
+    }
+  }
+
   mod rejection {
     use super::*;
 
@@ -414,7 +490,7 @@ mod tests {
       let mut harness = Harness::new();
       let mut client = harness.new_client(5);
       let key_package = client.create_key_package().unwrap();
-      let result = harness.coordinator.on_key_package(device(6), key_package);
+      let result = harness.coordinator.on_key_package(device(6), key_package, None);
       assert!(matches!(
         result,
         Err(DaveCoordinatorError::ParticipantMismatch { .. })
@@ -431,7 +507,7 @@ mod tests {
         .unwrap()
         .create_key_package()
         .unwrap();
-      let result = harness.coordinator.on_key_package(device(1), key_package);
+      let result = harness.coordinator.on_key_package(device(1), key_package, None);
       assert!(matches!(result, Err(DaveCoordinatorError::AlreadyKnown(_))));
     }
 
@@ -494,7 +570,10 @@ mod tests {
       let mut client = self.new_client(id);
       let key_package = client.create_key_package().unwrap();
       self.clients.insert(device(id), client);
-      let outbound = self.coordinator.on_key_package(device(id), key_package).unwrap();
+      let outbound = self
+        .coordinator
+        .on_key_package(device(id), key_package, Some(vec![u8::try_from(id).unwrap()]))
+        .unwrap();
       self.queue.extend(outbound);
     }
 
@@ -507,15 +586,23 @@ mod tests {
 
     /// Delivers queued messages the way the SFU would, feeding commits back into the coordinator.
     fn deliver_all(&mut self) {
-      while let Some(Outbound { recipient, event }) = self.queue.pop_front() {
+      while !self.queue.is_empty() {
+        self.deliver_one();
+      }
+    }
+
+    /// Delivers the first queued message.
+    fn deliver_one(&mut self) {
+      if let Some(Outbound { recipient, event }) = self.queue.pop_front() {
         let Some(client) = self.clients.get_mut(&recipient) else {
-          continue;
+          return;
         };
         match event {
           CallEvent::DaveProposals {
             epoch,
             proposals,
             expected_participants,
+            ..
           } => {
             let expected: Vec<_> = expected_participants
               .iter()
@@ -530,7 +617,7 @@ mod tests {
             }
           },
           CallEvent::DaveAnnounceCommit { commit, .. } => client.process_commit(commit.as_slice()).unwrap(),
-          CallEvent::DaveWelcome { welcome } => client.process_welcome(welcome.as_slice()).unwrap(),
+          CallEvent::DaveWelcome { welcome, .. } => client.process_welcome(welcome.as_slice()).unwrap(),
           other => panic!("unexpected event {other:?}"),
         }
       }

@@ -149,6 +149,34 @@ Done on `feat/m6-calls`:
   `forwarding.rs`, unit tested without network.
 - Test page sends real Opus via WebCodecs and plays what it receives.
 
+Done on `feat/m6-client`:
+
+- **Call engine** (`teamcraft-media::call_engine`): platform-neutral, sans I/O (also wasm32). Joins
+  with a join token and media capabilities, runs the DAVE member side, sends encrypted Opus with
+  the audio level, decrypts received audio, sends transport feedback, mute/deafen, active
+  speakers. Proposals are checked against a roster the app trusts (`set_trusted_roster`).
+- **Native driver and client** (`call_native`, feature `native`): tokio + wtransport, cpal devices
+  on an audio thread, Opus, jitter buffer and mixing; `teamcraft-call` joins headlessly with a test
+  tone or the microphone. An SFU test runs three native clients end to end.
+- **Audio processing**: WebRTC AEC3, noise suppression, AGC2 via `webrtc-audio-processing` 2.1,
+  switched on at build time (`--cfg teamcraft_audio_processing`, see `crates/teamcraft-media/README.md`);
+  without it audio passes through.
+- **DAVE keys bound to devices** (e2ee.md §8): a fresh P-256 key per call, signed by the device key
+  (`teamcraft-crypto::call_binding`); members verify bindings against device certificates and every
+  member's leaf key before committing and after each epoch.
+- **Bandwidth estimation** (`bwe`): transport sequence numbers in the datagram header, feedback over
+  signaling both ways, a simplified GCC (delay trendline over 5 ms packet groups, loss, demand-based
+  probing) tested over a simulated bottleneck.
+- **Simulcast layers in the SFU**: publish/subscribe video tracks, per-receiver layer allocation
+  with hysteresis and resume probes, keyframe-gated switches, keyframe and needed-layer requests to
+  publishers; simulated receivers at 0.4/0.9/3 Mbit/s settle on layers 0/1/2.
+- **Video skeleton**: I420 and encoded frame types, simulcast layer plans, codec choice, generic
+  frame fragmentation with an unencrypted fragment extension, capability negotiation in `join`.
+
+Open: video capture/encoding and the browser binding of the call engine are not wired; apps still
+have to feed the server's call roster and verified device certificates into the engine
+(`set_trusted_roster`, `DeviceCallKeyAuthenticator`), e.g. from `teamcraft-core`.
+
 ## Recommended next steps for M6
 
 1. Build `teamcraft-media` with `wasm-bindgen` for the page/web client and add DAVE to the browser
@@ -164,8 +192,8 @@ Done on `feat/m6-calls`:
    requests over signaling, bandwidth estimation (transport-wide feedback + QUIC congestion state).
 6. Audio quality: adaptive (time-based) jitter buffer, Opus FEC/PLC on `Playout::Missing`, native
    pipeline with `cpal` + `opus` + `webrtc-audio-processing`.
-7. SFU performance: forwarding without the per-room mutex, load test (rooms × participants, CPU per
-   forwarded packet).
+7. SFU performance: forwarding without the per-room mutex and without a copy per receiver for audio,
+   load test (rooms × participants, CPU per forwarded packet).
 8. Fallback decision for UDP-blocked networks.
 
 ## M6 design notes

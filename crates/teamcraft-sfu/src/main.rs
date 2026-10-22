@@ -77,7 +77,11 @@ async fn run() -> anyhow::Result<()> {
   let sfu = Sfu::bind(config, identity, verifier).context("binding the SFU")?;
   let local_addr = sfu.local_addr()?;
   let certificate_hash = sfu.certificate_hash();
-  info!(%local_addr, "SFU listening");
+  info!(
+    %local_addr,
+    certificate_hash = %certificate_hash.fmt(wtransport::tls::Sha256DigestFmt::DottedHex),
+    "SFU listening"
+  );
 
   let dev_page = async {
     match maybe_dev_http_addr {

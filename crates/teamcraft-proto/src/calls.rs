@@ -13,7 +13,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Base64Bytes, CallId, DeviceId, ErrorBody, UserId};
+use crate::{
+  Base64Bytes, CallId, DeviceId, ErrorBody, MediaCapabilities, TransportFeedback, UserId, VideoCodec,
+  VideoLayerInfo, VideoTrack, VideoTrackKind,
+};
 
 /// `aud` of call join tokens.
 pub const CALL_JOIN_TOKEN_AUDIENCE: &str = "teamcraft-sfu";
@@ -40,14 +43,42 @@ pub struct CallJoinClaims {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CallClientMessage {
   /// First message of every connection. `token` is a call join token from `teamcraft-server`.
-  Join { token: String },
+  Join {
+    token: String,
+    /// Older clients omit it and are treated as audio-only.
+    #[serde(default)]
+    capabilities: MediaCapabilities,
+  },
   /// The client's DAVE key package, sent after [`CallEvent::DaveExternalSender`].
-  DaveKeyPackage { key_package: Base64Bytes },
+  DaveKeyPackage {
+    key_package: Base64Bytes,
+    /// The device's signed call key binding for this key package's DAVE key (e2ee.md §8).
+    #[serde(default)]
+    maybe_key_binding: Option<Base64Bytes>,
+  },
   /// The client's commit for the proposals of `epoch`; `maybe_welcome` when members were added.
   DaveCommit {
     epoch: u64,
     commit: Base64Bytes,
     maybe_welcome: Option<Base64Bytes>,
+  },
+  /// Starts sending a video track; the SFU answers with [`CallEvent::VideoPublished`].
+  PublishVideo {
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  },
+  UnpublishVideo {
+    stream_id: MediaStreamId,
+  },
+  /// Arrival times of the datagrams the SFU sent to this client (downlink estimation).
+  TransportFeedback {
+    feedback: TransportFeedback,
+  },
+  /// Receive a video track up to `max_layer`; `None` stops receiving it.
+  Subscribe {
+    stream_id: MediaStreamId,
+    maybe_max_layer: Option<u8>,
   },
   #[serde(other)]
   Unknown,
@@ -78,6 +109,8 @@ pub enum CallEvent {
     call_id: CallId,
     participant: CallParticipant,
     participants: Vec<CallParticipant>,
+    #[serde(default)]
+    video_tracks: Vec<VideoTrack>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -99,6 +132,9 @@ pub enum CallEvent {
     epoch: u64,
     proposals: Base64Bytes,
     expected_participants: Vec<DeviceId>,
+    /// Call key bindings of the devices these proposals add.
+    #[serde(default)]
+    key_bindings: Vec<DaveKeyBinding>,
   },
   /// The selected commit for `epoch`; members move to `epoch + 1`.
   DaveAnnounceCommit {
@@ -107,9 +143,40 @@ pub enum CallEvent {
   },
   DaveWelcome {
     welcome: Base64Bytes,
+    /// Call key bindings of the group's other members.
+    #[serde(default)]
+    key_bindings: Vec<DaveKeyBinding>,
+  },
+  /// A video track was published (also sent to its publisher, which learns the stream id).
+  VideoPublished {
+    track: VideoTrack,
+  },
+  VideoUnpublished {
+    stream_id: MediaStreamId,
+  },
+  /// To the publisher: send a keyframe on this layer soon (a receiver switches to it).
+  KeyframeRequested {
+    stream_id: MediaStreamId,
+    layer: u8,
+  },
+  /// To the publisher: the layers someone receives; others may be paused to save uplink.
+  LayersNeeded {
+    stream_id: MediaStreamId,
+    layers: Vec<u8>,
+  },
+  /// Arrival times of the datagrams this client sent (uplink estimation, done by the client).
+  TransportFeedback {
+    feedback: TransportFeedback,
   },
   #[serde(other)]
   Unknown,
+}
+
+/// A device's signed call key binding (`teamcraft-crypto::call_binding`), relayed by the SFU.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaveKeyBinding {
+  pub device_id: DeviceId,
+  pub binding: Base64Bytes,
 }
 
 /// One device in a call.
@@ -130,10 +197,18 @@ pub struct MediaStreamId(pub u32);
 impl fmt::Debug for CallClientMessage {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Join { .. } => f.write_str("Join { token: [redacted] }"),
-      Self::DaveKeyPackage { key_package } => f
+      Self::Join { capabilities, .. } => f
+        .debug_struct("Join")
+        .field("token", &"[redacted]")
+        .field("capabilities", capabilities)
+        .finish(),
+      Self::DaveKeyPackage {
+        key_package,
+        maybe_key_binding,
+      } => f
         .debug_struct("DaveKeyPackage")
         .field("key_package", key_package)
+        .field("maybe_key_binding", maybe_key_binding)
         .finish(),
       Self::DaveCommit {
         epoch,
@@ -144,6 +219,28 @@ impl fmt::Debug for CallClientMessage {
         .field("epoch", epoch)
         .field("commit", commit)
         .field("maybe_welcome", maybe_welcome)
+        .finish(),
+      Self::PublishVideo { kind, codec, layers } => f
+        .debug_struct("PublishVideo")
+        .field("kind", kind)
+        .field("codec", codec)
+        .field("layers", layers)
+        .finish(),
+      Self::TransportFeedback { feedback } => f
+        .debug_struct("TransportFeedback")
+        .field("feedback", feedback)
+        .finish(),
+      Self::UnpublishVideo { stream_id } => f
+        .debug_struct("UnpublishVideo")
+        .field("stream_id", stream_id)
+        .finish(),
+      Self::Subscribe {
+        stream_id,
+        maybe_max_layer,
+      } => f
+        .debug_struct("Subscribe")
+        .field("stream_id", stream_id)
+        .field("maybe_max_layer", maybe_max_layer)
         .finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
@@ -157,10 +254,22 @@ mod tests {
 
   #[test]
   fn client_messages_wire_format() {
-    let join = CallClientMessage::Join { token: "t".into() };
+    // Older clients send no capabilities: audio only.
+    let join: CallClientMessage = serde_json::from_str(r#"{"type":"join","token":"t"}"#).unwrap();
     assert_eq!(
-      serde_json::to_string(&join).unwrap(),
-      r#"{"type":"join","token":"t"}"#
+      join,
+      CallClientMessage::Join {
+        token: "t".into(),
+        capabilities: MediaCapabilities::default(),
+      }
+    );
+    let subscribe = CallClientMessage::Subscribe {
+      stream_id: MediaStreamId(4),
+      maybe_max_layer: Some(1),
+    };
+    assert_eq!(
+      serde_json::to_string(&subscribe).unwrap(),
+      r#"{"type":"subscribe","stream_id":4,"maybe_max_layer":1}"#
     );
     let commit = CallClientMessage::DaveCommit {
       epoch: 3,
@@ -187,6 +296,28 @@ mod tests {
       r#"{"type":"event","seq":1,"event":{"type":"participant_joined","participant":{"user_id":"4","device_id":"5","audio_stream_id":9}}}"#
     );
     assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), message);
+  }
+
+  #[test]
+  fn video_events_wire_format() {
+    let event = CallEvent::KeyframeRequested {
+      stream_id: MediaStreamId(7),
+      layer: 2,
+    };
+    assert_eq!(
+      serde_json::to_string(&event).unwrap(),
+      r#"{"type":"keyframe_requested","stream_id":7,"layer":2}"#
+    );
+    let feedback = CallEvent::TransportFeedback {
+      feedback: TransportFeedback {
+        base_seq: 65535,
+        arrivals_us: vec![Some(10), None],
+      },
+    };
+    assert_eq!(
+      serde_json::to_string(&feedback).unwrap(),
+      r#"{"type":"transport_feedback","feedback":{"base_seq":65535,"arrivals_us":[10,null]}}"#
+    );
   }
 
   #[test]
@@ -238,6 +369,7 @@ mod tests {
   fn join_token_is_redacted_in_debug_output() {
     let join = CallClientMessage::Join {
       token: "secret-token".into(),
+      capabilities: MediaCapabilities::default(),
     };
     assert!(!format!("{join:?}").contains("secret-token"));
   }

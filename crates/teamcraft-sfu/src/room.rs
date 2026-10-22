@@ -1,8 +1,8 @@
 //! Rooms (one per call): participants, datagram forwarding and DAVE coordination.
 //!
 //! State sits behind a `std::sync::Mutex` that is never held across an `.await`; the per-datagram
-//! critical section only parses headers and copies connection handles. A lock-free forwarding table
-//! is a later optimization (SPIKE.md).
+//! critical section parses headers and restamps the datagram per receiver. A lock-free forwarding
+//! table is a later optimization (SPIKE.md).
 
 use std::{
   collections::HashMap,
@@ -11,7 +11,10 @@ use std::{
 };
 
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
-use teamcraft_proto::{Base64Bytes, CallEvent, CallId, CallParticipant, DeviceId, MediaStreamId, UserId};
+use teamcraft_proto::{
+  Base64Bytes, CallEvent, CallId, CallParticipant, DeviceId, MediaCapabilities, MediaStreamId,
+  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+};
 use thiserror::Error;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, trace, warn};
@@ -21,7 +24,7 @@ use crate::{
   auth::JoinGrant,
   config::SfuConfig,
   dave_coordinator::{DaveCoordinator, DaveCoordinatorError, Outbound},
-  forwarding::{ForwardError, Forwarder},
+  forwarding::{Effect, ForwardError, Forwarder},
   signaling::Outgoing,
 };
 
@@ -76,7 +79,12 @@ impl Rooms {
   }
 
   /// Adds a participant to a call, creating the room on first join.
-  pub fn join(&self, grant: JoinGrant, handle: ParticipantHandle) -> Result<Arc<Room>, RoomError> {
+  pub fn join(
+    &self,
+    grant: JoinGrant,
+    capabilities: MediaCapabilities,
+    handle: ParticipantHandle,
+  ) -> Result<Arc<Room>, RoomError> {
     let call_id = grant.call_id;
     // The rooms lock is held across the join so `leave` can't drop the room in between.
     // Lock order everywhere: rooms, then room state.
@@ -90,7 +98,7 @@ impl Rooms {
         room
       },
     };
-    let result = room.join(grant.user_id, grant.device_id, handle);
+    let result = room.join(grant.user_id, grant.device_id, capabilities, handle);
     if result.is_err() && room.is_empty() {
       rooms.remove(&call_id);
     }
@@ -116,7 +124,7 @@ impl Room {
   fn new(call_id: CallId, config: &SfuConfig) -> Result<Self, RoomError> {
     let state = RoomState {
       participants: HashMap::new(),
-      forwarder: Forwarder::new(config.speakers),
+      forwarder: Forwarder::new(config.forwarding),
       dave: DaveCoordinator::new(call_id)?,
       next_stream_id: 1,
     };
@@ -130,42 +138,103 @@ impl Room {
     self.call_id
   }
 
-  /// Forwards one media datagram from `sender` to the other participants if the sender is among
-  /// the loudest speakers. The payload stays encrypted; only headers are read.
+  /// Forwards one media datagram from `sender`: audio to everyone if the sender is among the
+  /// loudest speakers, video to the subscribers receiving that layer. Only headers are read.
   pub fn forward_datagram(
     &self,
     sender: DeviceId,
     datagram: &[u8],
     now: Instant,
   ) -> Result<usize, RoomError> {
-    let receivers: Vec<Connection> = {
+    let deliveries: Vec<(Connection, Vec<u8>)> = {
       let mut state = lock(&self.state);
       let route = state.forwarder.route(sender, datagram, now)?;
-      if let Some(speakers) = route.maybe_active_speakers {
-        state.broadcast(CallEvent::ActiveSpeakers { device_ids: speakers });
-      }
-      if !route.should_forward {
-        return Ok(0);
-      }
-      state
-        .participants
-        .iter()
-        .filter(|(id, _)| **id != sender)
-        .map(|(_, participant)| participant.handle.connection.clone())
+      state.apply(route.effects);
+      route
+        .deliveries
+        .into_iter()
+        .filter_map(|(receiver, bytes)| {
+          let participant = state.participants.get(&receiver)?;
+          Some((participant.handle.connection.clone(), bytes))
+        })
         .collect()
     };
-    for connection in &receivers {
+    for (connection, bytes) in &deliveries {
       // Datagrams are unreliable by design; a full send buffer or closed peer just drops this one.
-      if let Err(error) = connection.send_datagram(datagram) {
+      if let Err(error) = connection.send_datagram(bytes) {
         trace!(%error, "datagram dropped");
       }
     }
-    Ok(receivers.len())
+    Ok(deliveries.len())
   }
 
-  pub fn on_key_package(&self, participant_id: DeviceId, key_package: Vec<u8>) -> Result<(), RoomError> {
+  /// Publishes a video track of `owner` and announces it to everyone.
+  pub fn publish_video(
+    &self,
+    owner: DeviceId,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  ) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
-    let outbound = state.dave.on_key_package(participant_id, key_package)?;
+    let stream_id = state.allocate_stream_id();
+    let track = state
+      .forwarder
+      .publish_video(owner, stream_id, kind, codec, layers)?;
+    state.broadcast(CallEvent::VideoPublished { track });
+    Ok(())
+  }
+
+  pub fn unpublish_video(&self, owner: DeviceId, stream_id: MediaStreamId) -> Result<(), RoomError> {
+    let mut state = lock(&self.state);
+    state.forwarder.unpublish_video(owner, StreamId(stream_id.0))?;
+    state.broadcast(CallEvent::VideoUnpublished { stream_id });
+    Ok(())
+  }
+
+  pub fn subscribe(
+    &self,
+    receiver: DeviceId,
+    stream_id: MediaStreamId,
+    maybe_max_layer: Option<u8>,
+    now: Instant,
+  ) -> Result<(), RoomError> {
+    let mut state = lock(&self.state);
+    let effects = state
+      .forwarder
+      .subscribe(receiver, StreamId(stream_id.0), maybe_max_layer, now)?;
+    state.apply(effects);
+    Ok(())
+  }
+
+  pub fn on_transport_feedback(&self, receiver: DeviceId, feedback: &TransportFeedback, now: Instant) {
+    let mut state = lock(&self.state);
+    let effects = state.forwarder.on_transport_feedback(receiver, feedback, now);
+    state.apply(effects);
+  }
+
+  /// Periodic work for one participant (every ~100 ms): re-runs its layer allocation.
+  pub fn on_timer(&self, device_id: DeviceId, now: Instant) {
+    let mut state = lock(&self.state);
+    let effects = state.forwarder.on_timer(device_id, now);
+    state.apply(effects);
+  }
+
+  /// Feedback on the datagrams `sender` sent since the last call, for its uplink estimation.
+  pub fn take_uplink_feedback(&self, sender: DeviceId) -> Option<TransportFeedback> {
+    lock(&self.state).forwarder.take_uplink_feedback(sender)
+  }
+
+  pub fn on_key_package(
+    &self,
+    participant_id: DeviceId,
+    key_package: Vec<u8>,
+    maybe_key_binding: Option<Vec<u8>>,
+  ) -> Result<(), RoomError> {
+    let mut state = lock(&self.state);
+    let outbound = state
+      .dave
+      .on_key_package(participant_id, key_package, maybe_key_binding)?;
     state.dispatch(outbound);
     Ok(())
   }
@@ -188,14 +257,14 @@ impl Room {
     &self,
     user_id: UserId,
     participant_id: DeviceId,
+    capabilities: MediaCapabilities,
     handle: ParticipantHandle,
   ) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
     if state.participants.contains_key(&participant_id) {
       return Err(RoomError::AlreadyJoined(participant_id));
     }
-    let audio_stream_id = StreamId(state.next_stream_id);
-    state.next_stream_id = state.next_stream_id.wrapping_add(1);
+    let audio_stream_id = state.allocate_stream_id();
     let others: Vec<CallParticipant> = state
       .participants
       .iter()
@@ -214,6 +283,7 @@ impl Room {
         call_id: self.call_id,
         participant: info,
         participants: others,
+        video_tracks: state.forwarder.video_tracks(),
       },
     );
     send(
@@ -232,7 +302,9 @@ impl Room {
       );
     }
     state.broadcast(CallEvent::ParticipantJoined { participant: info });
-    state.forwarder.add(participant_id, audio_stream_id);
+    state
+      .forwarder
+      .add_participant(participant_id, audio_stream_id, capabilities, Instant::now());
     state.participants.insert(participant_id, participant);
     info!(call_id = %self.call_id, participant_id = %participant_id, "participant joined");
     Ok(())
@@ -247,9 +319,13 @@ impl Room {
     state.broadcast(CallEvent::ParticipantLeft {
       device_id: participant_id,
     });
-    if let Some(speakers) = state.forwarder.remove(participant_id, Instant::now()) {
-      state.broadcast(CallEvent::ActiveSpeakers { device_ids: speakers });
+    let (effects, unpublished) = state.forwarder.remove_participant(participant_id, Instant::now());
+    for stream_id in unpublished {
+      state.broadcast(CallEvent::VideoUnpublished {
+        stream_id: MediaStreamId(stream_id.0),
+      });
     }
+    state.apply(effects);
     let outbound = state.dave.on_leave(participant_id);
     state.dispatch(outbound);
     info!(
@@ -266,6 +342,49 @@ impl Room {
 }
 
 impl RoomState {
+  fn allocate_stream_id(&mut self) -> StreamId {
+    let stream_id = StreamId(self.next_stream_id);
+    self.next_stream_id = self.next_stream_id.wrapping_add(1);
+    stream_id
+  }
+
+  /// Sends the signaling a forwarding decision caused.
+  fn apply(&self, effects: Vec<Effect>) {
+    for effect in effects {
+      match effect {
+        Effect::ActiveSpeakers(device_ids) => self.broadcast(CallEvent::ActiveSpeakers { device_ids }),
+        Effect::KeyframeRequest {
+          publisher,
+          stream_id,
+          layer,
+        } => self.send_to(
+          publisher,
+          CallEvent::KeyframeRequested {
+            stream_id: MediaStreamId(stream_id.0),
+            layer,
+          },
+        ),
+        Effect::LayersNeeded {
+          publisher,
+          stream_id,
+          layers,
+        } => self.send_to(
+          publisher,
+          CallEvent::LayersNeeded {
+            stream_id: MediaStreamId(stream_id.0),
+            layers,
+          },
+        ),
+      }
+    }
+  }
+
+  fn send_to(&self, device_id: DeviceId, event: CallEvent) {
+    if let Some(participant) = self.participants.get(&device_id) {
+      send(&participant.handle, event);
+    }
+  }
+
   fn broadcast(&self, event: CallEvent) {
     for participant in self.participants.values() {
       send(&participant.handle, event.clone());

@@ -18,10 +18,11 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: System packages for the Tauri desktop shell
+      - name: System packages for the Tauri desktop shell and native call audio
         run: >
           sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev
+          libasound2-dev
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Format
@@ -38,6 +39,29 @@ jobs:
         run: >
           cargo check --target wasm32-unknown-unknown
           -p teamcraft-proto -p teamcraft-crypto -p teamcraft-media -p teamcraft-core -p teamcraft-ui
+
+  # WebRTC audio processing (echo cancellation) is opt-in at build time, see
+  # crates/teamcraft-media/README.md. Built from source here, as Ubuntu doesn't package version 2.
+  audio-processing:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audio-processing
+      - name: System packages (ALSA, meson/ninja and libclang for the bundled build)
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev ninja-build libclang-dev && pipx install meson
+      - name: Clippy
+        run: cargo clippy -p teamcraft-media --all-targets --features native -- -D warnings
+      - name: Test
+        run: cargo test -p teamcraft-media --features native
 
   deny:
     runs-on: ubuntu-latest

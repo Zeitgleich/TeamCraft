@@ -10,6 +10,7 @@ pub mod dev_page;
 pub mod forwarding;
 pub mod health;
 pub mod ids;
+pub mod layers;
 pub mod net;
 pub mod room;
 pub mod server;

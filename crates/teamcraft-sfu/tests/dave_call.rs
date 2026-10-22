@@ -20,6 +20,7 @@ use teamcraft_media::{
 };
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorCode,
+  MediaCapabilities,
 };
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
@@ -72,6 +73,7 @@ async fn invalid_join_token_is_rejected() {
     &mut send,
     &CallClientMessage::Join {
       token: "forged".into(),
+      capabilities: MediaCapabilities::default(),
     },
   )
   .await
@@ -222,9 +224,15 @@ async fn run_client(
   let connection = connect(addr, certificate_hash).await;
   let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
   let token = format!("dev:{CALL_ID}:{USER_ID}:{participant_id}");
-  write_message(&mut send, &CallClientMessage::Join { token })
-    .await
-    .unwrap();
+  write_message(
+    &mut send,
+    &CallClientMessage::Join {
+      token,
+      capabilities: MediaCapabilities::default(),
+    },
+  )
+  .await
+  .unwrap();
 
   let CallServerMessage::Event {
     seq: 1,
@@ -354,6 +362,7 @@ fn handle_event(
       outgoing
         .send(CallClientMessage::DaveKeyPackage {
           key_package: Base64Bytes::new(key_package),
+          maybe_key_binding: None,
         })
         .unwrap();
     },
@@ -361,6 +370,7 @@ fn handle_event(
       epoch,
       proposals,
       expected_participants,
+      ..
     } => {
       let expected: Vec<_> = expected_participants
         .iter()
@@ -384,7 +394,7 @@ fn handle_event(
       assert_eq!(state.dave.maybe_epoch(), Some(DaveEpoch(epoch)));
       state.dave.process_commit(commit.as_slice()).unwrap();
     },
-    CallEvent::DaveWelcome { welcome } => state.dave.process_welcome(welcome.as_slice()).unwrap(),
+    CallEvent::DaveWelcome { welcome, .. } => state.dave.process_welcome(welcome.as_slice()).unwrap(),
     CallEvent::ParticipantJoined { participant } => {
       state
         .senders_by_stream
@@ -442,6 +452,7 @@ async fn send_frames(
       header: DatagramHeader {
         stream_id,
         layer: SimulcastLayer::BASE,
+        maybe_transport_seq: None,
       },
       rtp: &rtp,
     }

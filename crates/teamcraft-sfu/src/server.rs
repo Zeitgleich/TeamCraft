@@ -3,9 +3,13 @@
 //! Session flow: the client connects to `/call`, opens one bidirectional stream for signaling and
 //! sends [`CallClientMessage::Join`] with its token. Afterwards media flows as QUIC datagrams.
 
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+  net::SocketAddr,
+  sync::Arc,
+  time::{Duration, Instant},
+};
 
-use teamcraft_proto::{Base64Bytes, CallClientMessage, CallServerMessage, ErrorBody, ErrorCode};
+use teamcraft_proto::{Base64Bytes, CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -22,6 +26,10 @@ use crate::{
   room::{ParticipantHandle, Room, RoomError, Rooms},
   signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
 };
+
+/// How often senders get feedback on their datagrams (uplink bandwidth estimation) and layer
+/// allocations are re-run.
+const PERIODIC_INTERVAL: Duration = Duration::from_millis(100);
 
 /// HTTP path of the WebTransport session.
 pub const CALL_PATH: &str = "/call";
@@ -152,7 +160,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   )
   .await
   .map_err(|_| SessionError::JoinTimeout)??;
-  let CallClientMessage::Join { token } = first else {
+  let CallClientMessage::Join { token, capabilities } = first else {
     reject(&mut send, ErrorCode::ProtocolViolation, "expected join").await;
     return Err(SessionError::ExpectedJoin);
   };
@@ -169,7 +177,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     connection: connection.clone(),
     signal_tx: signal_tx.clone(),
   };
-  let room = match shared.rooms.join(grant, handle) {
+  let room = match shared.rooms.join(grant, capabilities, handle) {
     Ok(room) => room,
     Err(error) => {
       reject(&mut send, ErrorCode::AlreadyJoined, &error.to_string()).await;
@@ -216,9 +224,23 @@ impl ParticipantSession {
         }
       }
     };
+    let periodic = async {
+      let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
+      loop {
+        interval.tick().await;
+        self.room.on_timer(self.grant.device_id, Instant::now());
+        if let Some(feedback) = self.room.take_uplink_feedback(self.grant.device_id) {
+          // Fails only when the writer task ended, i.e. the session is closing anyway.
+          let _ = self
+            .signal_tx
+            .send(Outgoing::Event(CallEvent::TransportFeedback { feedback }));
+        }
+      }
+    };
     let result: Result<(), SessionError> = tokio::select! {
       result = signaling => result,
       result = media => result,
+      () = periodic => Ok(()),
     };
     writer.abort();
     info!(
@@ -232,8 +254,16 @@ impl ParticipantSession {
   fn handle_client_message(&self, message: CallClientMessage) {
     let participant_id = self.grant.device_id;
     match message {
-      CallClientMessage::DaveKeyPackage { key_package } => {
-        if let Err(error) = self.room.on_key_package(participant_id, key_package.into_vec()) {
+      CallClientMessage::DaveKeyPackage {
+        key_package,
+        maybe_key_binding,
+      } => {
+        let result = self.room.on_key_package(
+          participant_id,
+          key_package.into_vec(),
+          maybe_key_binding.map(Base64Bytes::into_vec),
+        );
+        if let Err(error) = result {
           warn!(participant_id = %participant_id, %error, "rejected key package");
           self.send_error(ErrorCode::InvalidKeyPackage, error.to_string());
         }
@@ -253,7 +283,37 @@ impl ParticipantSession {
       CallClientMessage::Join { .. } => {
         self.send_error(ErrorCode::ProtocolViolation, "already joined".to_owned())
       },
+      CallClientMessage::TransportFeedback { feedback } => {
+        self
+          .room
+          .on_transport_feedback(participant_id, &feedback, Instant::now());
+      },
+      CallClientMessage::PublishVideo { kind, codec, layers } => {
+        let result = self.room.publish_video(participant_id, kind, codec, layers);
+        self.report(result);
+      },
+      CallClientMessage::UnpublishVideo { stream_id } => {
+        let result = self.room.unpublish_video(participant_id, stream_id);
+        self.report(result);
+      },
+      CallClientMessage::Subscribe {
+        stream_id,
+        maybe_max_layer,
+      } => {
+        let result = self
+          .room
+          .subscribe(participant_id, stream_id, maybe_max_layer, Instant::now());
+        self.report(result);
+      },
       CallClientMessage::Unknown => debug!(participant_id = %participant_id, "ignoring unknown message"),
+    }
+  }
+
+  /// Turns a rejected request into a `protocol_violation` error for the client.
+  fn report(&self, result: Result<(), RoomError>) {
+    if let Err(error) = result {
+      debug!(participant_id = %self.grant.device_id, %error, "request rejected");
+      self.send_error(ErrorCode::ProtocolViolation, error.to_string());
     }
   }
 

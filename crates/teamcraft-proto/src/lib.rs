@@ -5,6 +5,7 @@
 
 mod api;
 mod bytes;
+mod call_media;
 mod calls;
 mod conversation;
 mod error;
@@ -17,9 +18,13 @@ mod wire_enum;
 
 pub use api::*;
 pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, UnixMillis};
+pub use call_media::{
+  AudioCodec, MAX_SIMULCAST_LAYERS, MediaCapabilities, TransportFeedback, VideoCodec, VideoLayerInfo,
+  VideoTrack, VideoTrackKind,
+};
 pub use calls::{
   CALL_JOIN_TOKEN_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims, CallParticipant, CallServerMessage,
-  MediaStreamId,
+  DaveKeyBinding, MediaStreamId,
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};

@@ -13,11 +13,21 @@ workspace = true
 [features]
 default = ["dave"]
 # DAVE frame encryption (MLS via openmls). Builds for wasm32 as well.
-dave = ["dep:davey", "dep:openmls", "dep:openmls_basic_credential", "dep:openmls_rust_crypto", "dep:tls_codec"]
-# Opus encoding/decoding via libopus (C, built with cmake). Native clients only; browsers use WebCodecs.
-native = ["dep:opus"]
+dave = [
+  "dep:davey",
+  "dep:openmls",
+  "dep:openmls_basic_credential",
+  "dep:openmls_rust_crypto",
+  "dep:tls_codec",
+  "dep:teamcraft-crypto",
+  "dep:web-time",
+]
+# Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
+# needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
+native = ["dave", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
 
 [dependencies]
+teamcraft-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 davey = { version = "0.1.5", optional = true }
@@ -25,8 +35,40 @@ openmls = { version = "0.9.1", optional = true }
 openmls_basic_credential = { version = "0.6.0", optional = true }
 openmls_rust_crypto = { version = "0.6.0", optional = true }
 tls_codec = { version = "0.5.0", optional = true }
+# Call key bindings: DAVE keys signed by device keys (e2ee.md §8).
+teamcraft-crypto = { workspace = true, optional = true }
+# Wall clock that works in browsers (binding expiry checks).
+web-time = { version = "1.1.0", optional = true }
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
 opus = { version = "0.4.0", optional = true }
+# Cross-platform audio device I/O (ALSA/PipeWire, CoreAudio, WASAPI, AAudio).
+cpal = { version = "0.18.2", optional = true }
+# Native call driver: async runtime, WebTransport client and the JSON signaling encoding.
+tokio = { workspace = true, optional = true }
+wtransport = { version = "0.7.2", optional = true }
+serde_json = { workspace = true, optional = true }
+# Log output and error reporting of the headless teamcraft-call client.
+tracing-subscriber = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+
+# WebRTC's audio processing module (AEC3, noise suppression, AGC2; the only WebRTC component used,
+# ARCHITECTURE.md §6.1) is a C++ library, so it is opt-in at build time instead of a feature (which
+# `--all-features` would pull in everywhere): RUSTFLAGS="--cfg teamcraft_audio_processing" links the
+# system library, adding "--cfg teamcraft_audio_processing_bundled" builds it from source. Without
+# it calls work without echo cancellation. See README.md.
+[target.'cfg(all(teamcraft_audio_processing, not(teamcraft_audio_processing_bundled), not(target_arch = "wasm32")))'.dependencies]
+webrtc-audio-processing = "2.1.0"
+
+[target.'cfg(all(teamcraft_audio_processing, teamcraft_audio_processing_bundled, not(target_arch = "wasm32")))'.dependencies]
+webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
+
+[dev-dependencies]
+# Device identities for call key binding tests.
+rand_core.workspace = true
+
+[[bin]]
+name = "teamcraft-call"
+required-features = ["native"]
 
 # davey pulls in rand 0.8 (getrandom 0.2), which needs its JS backend in the browser.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

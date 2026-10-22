@@ -5,7 +5,7 @@ use std::{
   time::Duration,
 };
 
-use crate::speakers::SpeakerSelectionConfig;
+use crate::forwarding::ForwardingConfig;
 
 #[derive(Debug, Clone)]
 pub struct SfuConfig {
@@ -16,8 +16,8 @@ pub struct SfuConfig {
   /// Serves the browser test page over plain HTTP when set. Development only: it also enables the
   /// [`crate::auth::DevTokenVerifier`] in `main`.
   pub maybe_dev_http_addr: Option<SocketAddr>,
-  /// Which speakers' audio is forwarded (top-N by audio level).
-  pub speakers: SpeakerSelectionConfig,
+  /// Speaker selection, layer allocation and bandwidth estimation.
+  pub forwarding: ForwardingConfig,
   /// Time a new session has to send its `join` message.
   pub join_timeout: Duration,
   /// Upper bound for one signaling message.
@@ -33,7 +33,7 @@ impl Default for SfuConfig {
     Self {
       bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 4433)),
       maybe_dev_http_addr: None,
-      speakers: SpeakerSelectionConfig::default(),
+      forwarding: ForwardingConfig::default(),
       join_timeout: Duration::from_secs(10),
       max_signaling_message_bytes: 256 * 1024,
       join_token_leeway: Duration::from_secs(5),

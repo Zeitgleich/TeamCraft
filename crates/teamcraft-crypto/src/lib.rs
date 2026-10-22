@@ -6,6 +6,7 @@
 
 pub mod attachment;
 pub mod backup;
+pub mod call_binding;
 pub mod content_key;
 pub mod identity;
 pub mod ids;

@@ -324,9 +324,33 @@ Details:
 
 ## 8. Calls
 
-Calls use DAVE (see ARCHITECTURE.md §6). The DAVE MLS group for a call is derived from the call
-participants' existing device keys, so calls are verified automatically with no extra prompts.
-Meeting guests without an account get an ephemeral key and are shown as "Guest (unverified)".
+Calls use DAVE (see ARCHITECTURE.md §6): an MLS group per call (members are devices) and per-frame
+encryption of media; the SFU only forwards encrypted frames. The SFU is DAVE's *external sender*: it
+proposes adding and removing members, but members create the commits and the SFU never holds media
+keys.
+
+**Binding DAVE keys to devices.** DAVE v1 signs MLS with P-256 keys, while device keys are Ed25519
+(§2), so a device can't use its device key as DAVE credential key. Instead:
+
+1. For every call a device generates a **fresh P-256 key pair** (never reused across calls) for its
+   DAVE MLS leaf.
+2. It signs a **call key binding** with its device key: `{ call_id, user_id, device_id, DAVE public
+   key, not_after }`, domain-separated with the label `TeamCraft-v1 call key binding` (validity at
+   most one hour; it is only needed while the device joins). The binding travels to the SFU with the
+   DAVE key package; the SFU hands it to the members together with the proposal to add the device,
+   and to a joining device together with the welcome (the bindings of the existing members).
+3. Members verify a binding against the device's certificate (§3, the same `VerifiedDevice` as in
+   chat) and reject it if it is for another call, another device, expired, or valid for too long.
+   Before committing proposals, and after every epoch change, each member checks that every other
+   member's MLS leaf signature key equals the key in that member's verified binding. A mismatch or a
+   member without a verified binding stops media for the call (no unencrypted fallback).
+4. Members only accept proposed devices that are on the call roster they trust (from the server,
+   verified like chat membership); the SFU's own list of expected members is not trusted.
+
+This way the SFU can neither add a device of its own choosing nor swap a member's DAVE key: the
+calls are verified with no extra prompts, and the DAVE privacy code and per-member verification codes
+remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
+key and are shown as "Guest (unverified)".
 
 ## 9. Local storage
 

@@ -13,7 +13,7 @@
 use std::{borrow::Cow, num::NonZeroU16};
 
 use davey::{
-  CommitWelcome, DAVE_PROTOCOL_VERSION, DaveSession, ProposalsOperationType,
+  CommitWelcome, DAVE_PROTOCOL_VERSION, DaveSession, ProposalsOperationType, SigningKeyPair,
   errors::{
     CreateKeyPackageError, DecryptError, EncryptError, GetVerificationCodeError, InitError,
     ProcessCommitError, ProcessProposalsError, ProcessWelcomeError, SetExternalSenderError,
@@ -25,6 +25,7 @@ use openmls::prelude::{
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use teamcraft_proto::{CallId, DeviceId, Id, IdError, Snowflake};
 use thiserror::Error;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize, VLBytes};
 
@@ -34,6 +35,9 @@ const EXTERNAL_SENDER_IDENTITY: &[u8] = b"teamcraft-sfu";
 /// One participant's DAVE session for one call.
 pub struct DaveParticipant {
   session: DaveSession,
+  /// Public half of this session's fresh P-256 signature key (SEC1), bound to the device by a
+  /// call key binding (e2ee.md §8).
+  signature_public_key: Vec<u8>,
 }
 
 /// Signs MLS external Add/Remove proposals for a call.
@@ -125,8 +129,13 @@ impl DaveParticipant {
   pub fn new(participant_id: DaveParticipantId, call_id: DaveCallId) -> Result<Self, DaveError> {
     let version = NonZeroU16::new(DAVE_PROTOCOL_VERSION)
       .ok_or(DaveError::UnsupportedProtocolVersion(DAVE_PROTOCOL_VERSION))?;
-    let session = DaveSession::new(version, participant_id.0, call_id.0, None)?;
-    Ok(Self { session })
+    // A fresh key for every call; never reused (e2ee.md §8).
+    let key_pair = SigningKeyPair::generate();
+    let session = DaveSession::new(version, participant_id.0, call_id.0, Some(&key_pair))?;
+    Ok(Self {
+      session,
+      signature_public_key: key_pair.public.clone(),
+    })
   }
 
   /// Installs the external sender announced for this call and creates a pending (single member)
@@ -208,6 +217,43 @@ impl DaveParticipant {
   /// Code both sides compare out of band to verify each other (DAVE "displayable codes").
   pub fn verification_code(&self, other: DaveParticipantId) -> Result<String, DaveError> {
     Ok(self.session.get_verification_code(other.0)?)
+  }
+
+  /// This session's MLS signature public key (SEC1 P-256), to be bound to the device.
+  pub fn signature_public_key(&self) -> &[u8] {
+    &self.signature_public_key
+  }
+
+  /// Members the pending commit (from [`Self::process_proposals`]) would add, with their leaf
+  /// signature keys; check them before sending the commit.
+  pub fn pending_additions(&self) -> Vec<(DaveParticipantId, Vec<u8>)> {
+    let Some(commit) = self.session.group().and_then(|group| group.pending_commit()) else {
+      return Vec::new();
+    };
+    commit
+      .add_proposals()
+      .filter_map(|queued| {
+        let leaf = queued.add_proposal().key_package().leaf_node();
+        let id = participant_from_credential(leaf.credential()).ok()?;
+        Some((id, leaf.signature_key().as_slice().to_vec()))
+      })
+      .collect()
+  }
+
+  /// Current group members with their leaf signature keys.
+  pub fn member_signature_keys(&self) -> Vec<(DaveParticipantId, Vec<u8>)> {
+    let Some(group) = self.session.group() else {
+      return Vec::new();
+    };
+    group
+      .members()
+      .filter_map(|member| {
+        Some((
+          participant_from_credential(&member.credential).ok()?,
+          member.signature_key,
+        ))
+      })
+      .collect()
   }
 
   /// Participants in the current group, including ourselves; empty before joining.
@@ -301,6 +347,26 @@ impl DaveExternalSender {
   }
 }
 
+impl DaveParticipantId {
+  /// DAVE members are devices; the 8-byte member id is the device's snowflake.
+  pub fn from_device(device_id: DeviceId) -> Self {
+    Self(snowflake_to_u64(device_id.snowflake()))
+  }
+
+  /// Fails for ids above the 63-bit snowflake range (never produced by [`Self::from_device`]).
+  pub fn to_device(self) -> Result<DeviceId, IdError> {
+    let raw = i64::try_from(self.0).map_err(|_| IdError::Malformed(self.0.to_string()))?;
+    Ok(DeviceId::from_snowflake(Snowflake::new(raw)?))
+  }
+}
+
+impl DaveCallId {
+  /// The DAVE group id of a call is the call's snowflake.
+  pub fn from_call(call_id: CallId) -> Self {
+    Self(snowflake_to_u64(call_id.snowflake()))
+  }
+}
+
 impl From<MediaKind> for davey::MediaType {
   fn from(kind: MediaKind) -> Self {
     match kind {
@@ -321,6 +387,11 @@ impl From<FrameCodec> for davey::Codec {
       FrameCodec::Av1 => Self::AV1,
     }
   }
+}
+
+fn snowflake_to_u64(snowflake: Snowflake) -> u64 {
+  // Invariant: snowflakes are non-negative, so the conversion never fails.
+  u64::try_from(snowflake.get()).unwrap_or_default()
 }
 
 fn group_id(call_id: DaveCallId) -> GroupId {
@@ -371,6 +442,40 @@ mod tests {
         bob.verification_code(ALICE).unwrap()
       );
       assert_eq!(alice.maybe_privacy_code(), bob.maybe_privacy_code());
+    }
+
+    #[test]
+    fn member_keys_are_the_fresh_session_keys() {
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_participant(&gateway, ALICE);
+      let mut bob = joined_participant(&gateway, BOB);
+      let key_package = bob.create_key_package().unwrap();
+      let epoch = alice.maybe_epoch().unwrap();
+      let proposals = gateway.propose(CALL, epoch, &[(BOB, &key_package)], &[]).unwrap();
+      let commit = alice
+        .process_proposals(&proposals, &[ALICE, BOB])
+        .unwrap()
+        .unwrap();
+      assert_eq!(
+        alice.pending_additions(),
+        vec![(BOB, bob.signature_public_key().to_vec())]
+      );
+      alice.process_commit(&commit.commit).unwrap();
+      bob.process_welcome(&commit.maybe_welcome.unwrap()).unwrap();
+      let mut keys = bob.member_signature_keys();
+      keys.sort();
+      let mut expected = vec![
+        (ALICE, alice.signature_public_key().to_vec()),
+        (BOB, bob.signature_public_key().to_vec()),
+      ];
+      expected.sort();
+      assert_eq!(keys, expected);
+      // P-256 SEC1 uncompressed, and different per call.
+      assert_eq!(alice.signature_public_key().len(), 65);
+      assert_ne!(
+        alice.signature_public_key(),
+        joined_participant(&gateway, ALICE).signature_public_key()
+      );
     }
 
     #[test]

@@ -104,6 +104,8 @@ davey = { path = "crates/vendor/davey" }
 # for backtraces; dependencies carry no debug info.
 [profile.dev]
 debug = "line-tables-only"
+# Incremental caches are the largest part of target/; disk matters more than rebuild speed here.
+incremental = false
 
 [profile.dev.package."*"]
 debug = false

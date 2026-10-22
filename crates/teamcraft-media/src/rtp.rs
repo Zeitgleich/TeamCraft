@@ -20,6 +20,8 @@ const MAX_CSRC_COUNT: usize = 15;
 
 /// Extension ID used for the audio level. Fixed by TeamCraft instead of being negotiated via SDP.
 pub const AUDIO_LEVEL_EXTENSION_ID: u8 = 1;
+/// Extension ID of the video frame fragmentation info ([`crate::fragment`]).
+pub const FRAME_FRAGMENT_EXTENSION_ID: u8 = 3;
 
 /// A parsed RTP packet borrowing its payload from the input buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,13 +223,26 @@ impl RtpHeader {
     Ok(())
   }
 
-  /// The audio level from the [`AUDIO_LEVEL_EXTENSION_ID`] extension, if present and well formed.
-  pub fn audio_level(&self) -> Option<AudioLevel> {
+  /// Data of the one-byte extension `id`, if present.
+  pub fn extension(&self, id: u8) -> Option<&[u8]> {
     self
       .extensions
       .iter()
-      .find(|extension| extension.id == AUDIO_LEVEL_EXTENSION_ID)
-      .and_then(|extension| extension.data.first())
+      .find(|extension| extension.id == id)
+      .map(|extension| extension.data.as_slice())
+  }
+
+  /// Sets or replaces the one-byte extension `id` (validated when the header is written).
+  pub fn set_extension(&mut self, id: u8, data: Vec<u8>) {
+    self.extensions.retain(|extension| extension.id != id);
+    self.extensions.push(HeaderExtension { id, data });
+  }
+
+  /// The audio level from the [`AUDIO_LEVEL_EXTENSION_ID`] extension, if present and well formed.
+  pub fn audio_level(&self) -> Option<AudioLevel> {
+    self
+      .extension(AUDIO_LEVEL_EXTENSION_ID)
+      .and_then(<[u8]>::first)
       .map(|&byte| AudioLevel {
         has_voice_activity: byte & 0x80 != 0,
         level: byte & 0x7F,
@@ -236,18 +251,15 @@ impl RtpHeader {
 
   /// Sets or replaces the audio level extension.
   pub fn set_audio_level(&mut self, audio_level: AudioLevel) {
-    self
-      .extensions
-      .retain(|extension| extension.id != AUDIO_LEVEL_EXTENSION_ID);
     let byte = (u8::from(audio_level.has_voice_activity) << 7) | audio_level.level;
-    self.extensions.push(HeaderExtension {
-      id: AUDIO_LEVEL_EXTENSION_ID,
-      data: vec![byte],
-    });
+    self.set_extension(AUDIO_LEVEL_EXTENSION_ID, vec![byte]);
   }
 }
 
 impl PayloadType {
+  /// Opus (dynamic range; fixed by TeamCraft instead of negotiated).
+  pub const OPUS: Self = Self(111);
+
   pub fn new(value: u8) -> Result<Self, RtpError> {
     if value > 0x7F {
       return Err(RtpError::InvalidPayloadType(value));
