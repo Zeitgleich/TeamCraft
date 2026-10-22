@@ -45,7 +45,7 @@ use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSi
 use crate::audio_level::{DEFAULT_VOICE_THRESHOLD_DBOV, measure_audio_level};
 use crate::call_auth::CallKeyAuthenticator;
 use crate::call_engine::{
-  CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
+  AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
@@ -124,7 +124,7 @@ enum Input {
   Captured(Vec<f32>),
   Encoded(Vec<u8>),
   Decoded {
-    sender: DeviceId,
+    stream: RemoteStream,
     samples: Vec<f32>,
   },
   CodecFailed(String),
@@ -199,7 +199,10 @@ struct OpusEncoder {
   _error: Closure<dyn FnMut(JsValue)>,
 }
 
-/// One remote sender: jitter buffer, WebCodecs decoder and decoded samples waiting for the mix.
+/// A remote device's microphone or shared screen sound.
+type RemoteStream = (DeviceId, AudioOrigin);
+
+/// One remote audio stream: jitter buffer, WebCodecs decoder and decoded samples waiting for the mix.
 struct RemoteAudio {
   jitter: JitterBuffer<Vec<u8>>,
   decoder: AudioDecoder,
@@ -466,7 +469,7 @@ struct CallState<'a> {
   events: &'a mpsc::UnboundedSender<CallEngineEvent>,
   jitter: JitterBufferConfig,
   encoder: OpusEncoder,
-  remotes: BTreeMap<DeviceId, RemoteAudio>,
+  remotes: BTreeMap<RemoteStream, RemoteAudio>,
   source: AudioSource,
   tone_position: u64,
   is_muted: bool,
@@ -499,8 +502,8 @@ impl CallState<'_> {
         engine.send_audio(&EncodedAudioFrame { opus, level }, Instant::now());
         self.stats.frames_sent += 1;
       },
-      Input::Decoded { sender, samples } => {
-        if let Some(remote) = self.remotes.get_mut(&sender) {
+      Input::Decoded { stream, samples } => {
+        if let Some(remote) = self.remotes.get_mut(&stream) {
           remote.decoded.extend(samples);
           let excess = remote.decoded.len().saturating_sub(MAX_DECODED_SAMPLES);
           remote.decoded.drain(..excess);
@@ -534,14 +537,15 @@ impl CallState<'_> {
         EngineOutput::Datagram(bytes) => self.transport.send_datagram(&bytes),
         EngineOutput::Event(CallEngineEvent::AudioFrame {
           sender,
+          origin,
           sequence_number,
           opus,
         }) => {
           self.stats.frames_received += 1;
-          let remote = match self.remotes.entry(sender) {
+          let remote = match self.remotes.entry((sender, origin)) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
-              entry.insert(RemoteAudio::new(sender, self.jitter, self.inputs)?)
+              entry.insert(RemoteAudio::new((sender, origin), self.jitter, self.inputs)?)
             },
           };
           remote.jitter.push(sequence_number, opus);
@@ -554,7 +558,13 @@ impl CallState<'_> {
         EngineOutput::Event(event) => {
           match &event {
             CallEngineEvent::ParticipantLeft(device_id) => {
-              self.remotes.remove(device_id);
+              self.remotes.retain(|(sender, _), _| sender != device_id);
+            },
+            CallEngineEvent::ScreenAudioChanged {
+              device_id,
+              is_shared: false,
+            } => {
+              self.remotes.remove(&(*device_id, AudioOrigin::Screen));
             },
             CallEngineEvent::VideoPublished(track) if track.device_id == self.own_device => {
               if let Some(sender) = self
@@ -1034,7 +1044,7 @@ impl Drop for OpusEncoder {
 
 impl RemoteAudio {
   fn new(
-    sender: DeviceId,
+    stream: RemoteStream,
     jitter: JitterBufferConfig,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
@@ -1049,7 +1059,7 @@ impl RemoteAudio {
       data.close();
       let input = match copied {
         Ok(()) => Input::Decoded {
-          sender,
+          stream,
           samples: samples.to_vec(),
         },
         Err(error) => Input::CodecFailed(js_message(&error)),
@@ -1070,7 +1080,7 @@ impl RemoteAudio {
     ])
     .map_err(browser("AudioDecoder"))?;
     decoder.configure(&config).map_err(browser("AudioDecoder"))?;
-    debug!(sender = %sender, "decoding a new sender");
+    debug!(sender = %stream.0, origin = ?stream.1, "decoding a new audio stream");
     Ok(Self {
       jitter: JitterBuffer::new(jitter),
       decoder,

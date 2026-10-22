@@ -256,6 +256,24 @@ impl Room {
     Ok(())
   }
 
+  /// Starts forwarding `owner`'s screen sound and announces it to everyone.
+  pub fn publish_screen_audio(&self, owner: DeviceId) -> Result<(), RoomError> {
+    let mut state = lock(&self.state);
+    let stream_id = state.allocate_stream_id();
+    let track = state.forwarder.publish_screen_audio(owner, stream_id)?;
+    state.broadcast(CallEvent::ScreenAudioPublished { track });
+    Ok(())
+  }
+
+  pub fn unpublish_screen_audio(&self, owner: DeviceId, stream_id: MediaStreamId) -> Result<(), RoomError> {
+    let mut state = lock(&self.state);
+    state
+      .forwarder
+      .unpublish_screen_audio(owner, StreamId(stream_id.0))?;
+    state.broadcast(CallEvent::ScreenAudioUnpublished { stream_id });
+    Ok(())
+  }
+
   pub fn unpublish_video(&self, owner: DeviceId, stream_id: MediaStreamId) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
     state.forwarder.unpublish_video(owner, StreamId(stream_id.0))?;
@@ -355,6 +373,7 @@ impl Room {
         participant: info,
         participants: others,
         video_tracks: state.forwarder.video_tracks(),
+        screen_audio_tracks: state.forwarder.screen_audio_tracks(),
       },
     );
     send(
@@ -390,13 +409,18 @@ impl Room {
     state.broadcast(CallEvent::ParticipantLeft {
       device_id: participant_id,
     });
-    let (effects, unpublished) = state.forwarder.remove_participant(participant_id, Instant::now());
-    for stream_id in unpublished {
+    let removal = state.forwarder.remove_participant(participant_id, Instant::now());
+    for stream_id in removal.video_tracks {
       state.broadcast(CallEvent::VideoUnpublished {
         stream_id: MediaStreamId(stream_id.0),
       });
     }
-    state.apply(effects);
+    if let Some(stream_id) = removal.maybe_screen_audio {
+      state.broadcast(CallEvent::ScreenAudioUnpublished {
+        stream_id: MediaStreamId(stream_id.0),
+      });
+    }
+    state.apply(removal.effects);
     let outbound = state.dave.on_leave(participant_id);
     state.dispatch(outbound);
     info!(

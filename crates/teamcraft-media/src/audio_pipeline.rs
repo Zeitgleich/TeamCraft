@@ -4,7 +4,7 @@
 //!
 //! Device-independent so tests and the headless client feed samples directly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use teamcraft_proto::DeviceId;
 
@@ -14,6 +14,7 @@ use crate::audio_codec::{
 pub use crate::audio_frame::EncodedAudioFrame;
 use crate::audio_level::{DEFAULT_VOICE_THRESHOLD_DBOV, measure_audio_level};
 use crate::audio_processing::{AudioProcessingError, AudioProcessor, PROCESSING_FRAME_SAMPLES};
+use crate::call_engine::AudioOrigin;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::SequenceNumber;
 
@@ -25,12 +26,19 @@ pub struct CapturePipeline {
   maybe_processor: Option<std::sync::Arc<AudioProcessor>>,
 }
 
-/// Speaker side: one jitter buffer and decoder per remote participant, mixed every 20 ms.
+/// At most this much of the own shared screen's sound waits to be added to the echo reference.
+const MAX_ECHO_REFERENCE_SAMPLES: usize = 48_000 / 5;
+
+/// Speaker side: one jitter buffer and decoder per remote stream (microphone or shared screen
+/// sound of each participant), mixed every 20 ms.
 pub struct PlaybackMixer {
   jitter_config: JitterBufferConfig,
-  streams: BTreeMap<DeviceId, RemoteAudio>,
+  streams: BTreeMap<(DeviceId, AudioOrigin), RemoteAudio>,
   is_deafened: bool,
   maybe_processor: Option<std::sync::Arc<AudioProcessor>>,
+  /// The sound of our own shared screen: the speakers play it too, so the echo canceller has to
+  /// know it, or the microphone sends it a second time.
+  echo_reference: VecDeque<f32>,
 }
 
 struct RemoteAudio {
@@ -115,6 +123,7 @@ impl PlaybackMixer {
       streams: BTreeMap::new(),
       is_deafened: false,
       maybe_processor: None,
+      echo_reference: VecDeque::new(),
     }
   }
 
@@ -133,14 +142,15 @@ impl PlaybackMixer {
     self.is_deafened
   }
 
-  /// Queues one decrypted Opus packet from `sender`.
+  /// Queues one decrypted Opus packet from `sender`'s microphone or shared screen.
   pub fn push(
     &mut self,
     sender: DeviceId,
+    origin: AudioOrigin,
     sequence_number: SequenceNumber,
     opus: Vec<u8>,
   ) -> Result<(), AudioPipelineError> {
-    let stream = match self.streams.entry(sender) {
+    let stream = match self.streams.entry((sender, origin)) {
       std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
       std::collections::btree_map::Entry::Vacant(entry) => entry.insert(RemoteAudio {
         jitter: JitterBuffer::new(self.jitter_config),
@@ -151,9 +161,28 @@ impl PlaybackMixer {
     Ok(())
   }
 
-  /// A participant left: forget its stream.
+  /// A participant left: forget its streams.
   pub fn remove(&mut self, sender: DeviceId) {
-    self.streams.remove(&sender);
+    self.streams.retain(|(device_id, _), _| *device_id != sender);
+  }
+
+  /// One of a participant's streams ended (a screen share's sound stopped).
+  pub fn remove_stream(&mut self, sender: DeviceId, origin: AudioOrigin) {
+    self.streams.remove(&(sender, origin));
+  }
+
+  /// Our own shared screen's sound as it is captured (mono 48 kHz), for the echo canceller only;
+  /// it is not played back here.
+  pub fn push_echo_reference(&mut self, samples: &[f32]) {
+    if self.maybe_processor.is_none() {
+      return;
+    }
+    self.echo_reference.extend(samples);
+    let excess = self
+      .echo_reference
+      .len()
+      .saturating_sub(MAX_ECHO_REFERENCE_SAMPLES);
+    self.echo_reference.drain(..excess);
   }
 
   /// The next 20 ms of mixed audio (call every 20 ms). Lost packets are concealed.
@@ -178,11 +207,22 @@ impl PlaybackMixer {
     Ok(mix)
   }
 
-  fn analyze(&self, mix: &[f32]) -> Result<(), AudioPipelineError> {
-    if let Some(processor) = &self.maybe_processor {
-      for chunk in mix.chunks(PROCESSING_FRAME_SAMPLES) {
-        processor.analyze_render(chunk)?;
-      }
+  /// The far-end signal for the echo canceller: what the speakers play, plus our own shared
+  /// screen's sound, which the system plays through the same speakers.
+  fn analyze(&mut self, mix: &[f32]) -> Result<(), AudioPipelineError> {
+    let Some(processor) = &self.maybe_processor else {
+      return Ok(());
+    };
+    let mut render = mix.to_vec();
+    for (slot, sample) in render.iter_mut().zip(
+      self
+        .echo_reference
+        .drain(..mix.len().min(self.echo_reference.len())),
+    ) {
+      *slot = (*slot + sample).clamp(-1.0, 1.0);
+    }
+    for chunk in render.chunks(PROCESSING_FRAME_SAMPLES) {
+      processor.analyze_render(chunk)?;
     }
     Ok(())
   }
@@ -243,10 +283,14 @@ mod tests {
       for index in 0..10u16 {
         let start = u64::from(index) * 960;
         for frame in first.push(&sine_tone(300.0, 0.3, start, 960)).unwrap() {
-          mixer.push(a, SequenceNumber(index), frame.opus).unwrap();
+          mixer
+            .push(a, AudioOrigin::Microphone, SequenceNumber(index), frame.opus)
+            .unwrap();
         }
         for frame in second.push(&sine_tone(500.0, 0.3, start, 960)).unwrap() {
-          mixer.push(b, SequenceNumber(index), frame.opus).unwrap();
+          mixer
+            .push(b, AudioOrigin::Microphone, SequenceNumber(index), frame.opus)
+            .unwrap();
         }
       }
       let mut last = Vec::new();
@@ -258,6 +302,40 @@ mod tests {
     }
 
     #[test]
+    fn a_speaker_and_their_screen_sound_are_separate_streams() {
+      let mut mixer = PlaybackMixer::new(JitterBufferConfig {
+        target_depth_packets: 1,
+        max_depth_packets: 10,
+      });
+      let mut voice = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
+      let mut screen = CapturePipeline::new(OpusEncoderConfig::screen_audio()).unwrap();
+      // Both streams start at sequence 0: one shared jitter buffer would drop half of it.
+      for index in 0..10u16 {
+        let start = u64::from(index) * 960;
+        for frame in voice.push(&sine_tone(300.0, 0.3, start, 960)).unwrap() {
+          mixer
+            .push(
+              device(1),
+              AudioOrigin::Microphone,
+              SequenceNumber(index),
+              frame.opus,
+            )
+            .unwrap();
+        }
+        for frame in screen.push(&sine_tone(500.0, 0.3, start, 960)).unwrap() {
+          mixer
+            .push(device(1), AudioOrigin::Screen, SequenceNumber(index), frame.opus)
+            .unwrap();
+        }
+      }
+      assert_eq!(mixer.streams.len(), 2);
+      mixer.remove_stream(device(1), AudioOrigin::Screen);
+      assert_eq!(mixer.streams.len(), 1);
+      mixer.remove(device(1));
+      assert!(mixer.streams.is_empty());
+    }
+
+    #[test]
     fn deafened_mixer_plays_silence_and_gaps_are_concealed() {
       let mut mixer = PlaybackMixer::new(JitterBufferConfig {
         target_depth_packets: 1,
@@ -266,10 +344,20 @@ mod tests {
       let mut capture = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
       let frames = capture.push(&sine_tone(300.0, 0.5, 0, 960 * 3)).unwrap();
       mixer
-        .push(device(1), SequenceNumber(0), frames[0].opus.clone())
+        .push(
+          device(1),
+          AudioOrigin::Microphone,
+          SequenceNumber(0),
+          frames[0].opus.clone(),
+        )
         .unwrap();
       mixer
-        .push(device(1), SequenceNumber(2), frames[2].opus.clone())
+        .push(
+          device(1),
+          AudioOrigin::Microphone,
+          SequenceNumber(2),
+          frames[2].opus.clone(),
+        )
         .unwrap();
       mixer.set_deafened(true);
       assert!(mixer.next_frame().unwrap().iter().all(|sample| *sample == 0.0));

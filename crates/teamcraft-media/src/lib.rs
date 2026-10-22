@@ -67,5 +67,7 @@ pub mod capture_windows;
 pub mod dave;
 #[cfg(feature = "effects")]
 pub mod effects;
+#[cfg(feature = "native")]
+pub mod system_audio;
 #[cfg(feature = "web")]
 pub mod web_api;
