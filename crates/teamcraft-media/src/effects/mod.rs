@@ -8,12 +8,16 @@
 //! there.
 
 mod compositor;
+mod image_file;
 mod presets;
 mod segmentation;
 
 use std::sync::Arc;
 
 pub use compositor::Compositor;
+pub use image_file::{
+  BACKGROUND_MAX_HEIGHT, BACKGROUND_MAX_WIDTH, MAX_DECODED_DIMENSION, normalize_background_file,
+};
 pub use presets::{PRESET_HEIGHT, PRESET_WIDTH, PresetBackground};
 pub use segmentation::{EllipseSegmenter, PersonSegmenter, SegmentationMask};
 #[cfg(feature = "segmentation")]
@@ -76,6 +80,9 @@ pub enum EffectsError {
   InvalidImage { width: u32, height: u32, bytes: usize },
   #[error("segmentation: {0}")]
   Segmentation(String),
+  /// A picture file that isn't a JPEG or PNG, is broken or too large.
+  #[error("unsupported picture: {0}")]
+  UnsupportedImage(String),
   #[error(transparent)]
   Frame(#[from] VideoError),
 }
