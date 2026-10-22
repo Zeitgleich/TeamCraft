@@ -703,6 +703,12 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn unregister_push(&self, device: DeviceId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/devices/{device}/push"), None)
+      .await
+  }
+
   async fn connect_gateway(&self) -> Result<HttpGateway, ApiError> {
     self.require_secure_transport()?;
     HttpGateway::connect(&self.gateway_url()).await

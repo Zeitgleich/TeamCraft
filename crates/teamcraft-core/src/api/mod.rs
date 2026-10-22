@@ -322,6 +322,8 @@ pub trait ServerApi {
     device: DeviceId,
     request: &RegisterPushRequest,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Removes the device's push registration (`DELETE /devices/{id}/push`).
+  fn unregister_push(&self, device: DeviceId) -> impl Future<Output = Result<(), ApiError>>;
 
   /// Opens the gateway WebSocket. The caller runs the hello/identify handshake.
   fn connect_gateway(&self) -> impl Future<Output = Result<Self::Gateway, ApiError>>;

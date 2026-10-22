@@ -220,6 +220,11 @@ impl TeamCraft {
       .await
   }
 
+  /// Removes this device's push registration and its push key (sign-out).
+  pub async fn unregister_push(&self) -> Result<(), TeamCraftError> {
+    self.call(|engine| Box::pin(engine.unregister_push())).await
+  }
+
   /// What to show for a push payload (an FCM data message or a UnifiedPush message): opened with
   /// the push key, names from the store, the text fetched and decrypted if possible.
   pub async fn notification_for_push(&self, payload: Vec<u8>) -> Result<PushNotification, TeamCraftError> {

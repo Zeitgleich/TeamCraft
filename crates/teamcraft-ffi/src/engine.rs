@@ -475,6 +475,12 @@ impl Engine {
     Ok(result?)
   }
 
+  pub(crate) async fn unregister_push(&mut self) -> Result<(), TeamCraftError> {
+    self
+      .with_client(|client| Box::pin(async move { client.unregister_push().await }))
+      .await
+  }
+
   /// What joining the conversation's call needs from the client; pauses syncing meanwhile.
   pub(crate) async fn prepare_call(
     &mut self,

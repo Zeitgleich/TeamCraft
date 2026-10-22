@@ -1847,6 +1847,14 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn unregister_push(&self, device: DeviceId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, device)?;
+      state.push_registrations.remove(&device);
+      Ok(())
+    })
+  }
+
   async fn connect_gateway(&self) -> Result<FakeGateway, ApiError> {
     let (sender, receiver) = unbounded();
     let connection = self.with(|state, _| {

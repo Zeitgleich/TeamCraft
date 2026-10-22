@@ -43,6 +43,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// Removes this device's push registration and forgets the push key, so wake-ups that still
+  /// arrive can't be opened (sign-out).
+  pub async fn unregister_push(&mut self) -> Result<(), CoreError> {
+    self.api.unregister_push(self.account.device_id).await?;
+    self.store.delete(Table::Account, PUSH_KEY_RECORD)?;
+    Ok(())
+  }
+
   /// Opens a sealed push payload (the app or its notification extension), naming the conversation
   /// and message to fetch and decrypt.
   pub fn open_push(&self, sealed: &[u8]) -> Result<PushWakeUp, CoreError> {
