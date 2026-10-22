@@ -4,8 +4,8 @@ What the build produces and how to build it. Nothing here publishes anything.
 
 | Platform | Formats                            | Where it is configured                                              |
 |----------|------------------------------------|---------------------------------------------------------------------|
+| Linux    | Flatpak (primary)                  | `linux/org.teamcraft.desktop.yml`, `.desktop` file, AppStream data  |
 | Linux    | `.deb`, `.rpm`, AppImage           | `bundle.linux` in `tauri.conf.json`                                 |
-| Linux    | Flatpak (draft)                    | `linux/org.teamcraft.desktop.yml`, `.desktop` file, AppStream data  |
 | macOS    | `.dmg` (arm64 and x86_64)          | `bundle.macOS`, `Info.plist`, `macos/Entitlements.plist`            |
 
 Windows is not planned (see PLAN.md, platform table).
@@ -36,20 +36,9 @@ smaller sizes and the `.icns` (for example with `cargo tauri icon icons/icon-102
 
 ## Flatpak
 
-The manifest consumes the release binary instead of building from source, so it needs neither a Rust
-toolchain nor network access while building:
-
-```sh
-cd apps/desktop && cargo tauri build --no-bundle && cd ../..
-flatpak-builder --user --install --force-clean build-dir apps/desktop/packaging/linux/org.teamcraft.desktop.yml
-flatpak run org.teamcraft.desktop
-```
-
-Permissions (see `finish-args`): network (server and the loopback listener of the OIDC login), Wayland and
-X11, GPU, camera (`--device=all` until the camera portal is used), PulseAudio, the Secret Service (refresh
-token) and notifications. Opening the login page in the system browser goes through the OpenURI portal.
-The runtime is GNOME 48, which ships WebKitGTK 4.1. Submitting to Flathub needs a source-based manifest
-(vendored crates) and screenshots in the AppStream file; both are still to do.
+Flatpak is the primary Linux channel. Building, permissions, video in the sandbox, which package
+suits which distribution and the Flathub checklist are in [linux/README.md](linux/README.md); the
+Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
 
 ## macOS
 
@@ -62,6 +51,7 @@ The runtime is GNOME 48, which ships WebKitGTK 4.1. Submitting to Flathub needs 
 ## Release workflow
 
 `.github/workflows/desktop-release.yml` runs on manual dispatch or when a tag like `v0.1.0` is pushed. It
-builds the Linux packages, a Flatpak bundle (inside the Flatpak builder container) and the macOS dmg for
+builds the Linux packages, a Flatpak bundle (from source inside the Flatpak builder container, with the
+web UI from the Linux job) and the macOS dmg for
 both architectures, and keeps them as workflow artifacts. It does not create a GitHub release and does not
 publish to any store.

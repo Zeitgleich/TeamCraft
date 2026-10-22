@@ -13,13 +13,27 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.arch }})
+    # Both Linux architectures the desktop ships for, each on a native runner; they run in
+    # parallel, so arm64 adds no wall-clock time. Format and the wasm build are
+    # architecture-independent and run once.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     container: rust:1.99.1-trixie
     steps:
       - uses: actions/checkout@v5
       - name: Rust components
         run: rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
       - name: System packages for the Tauri desktop shell, native call media and capture
         # libpipewire/libspa + libclang: portal capture (bindgen); mesa-vulkan-drivers: lavapipe, a
         # software GPU, so the effects' golden-image tests run instead of skipping.
@@ -31,6 +45,7 @@ jobs:
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Format
+        if: matrix.arch == 'x86_64'
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -41,6 +56,7 @@ jobs:
         env:
           SQLX_OFFLINE: "true"
       - name: Wasm build (browser crates)
+        if: matrix.arch == 'x86_64'
         run: >
           cargo check --target wasm32-unknown-unknown
           -p teamcraft-proto -p teamcraft-crypto -p teamcraft-media -p teamcraft-core -p teamcraft-ui

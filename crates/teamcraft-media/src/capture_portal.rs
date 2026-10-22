@@ -17,7 +17,7 @@ use pw::properties::properties;
 use pw::spa;
 use pw::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pw::spa::pod::Pod;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::capture_convert::{PixelFormat, RawPicture};
 use crate::video::VideoResolution;
@@ -260,21 +260,27 @@ fn run_stream(
     })
     .process(move |stream, state| {
       let Some(mut buffer) = stream.dequeue_buffer() else {
+        trace!("process without a buffer");
         return;
       };
       let datas = buffer.datas_mut();
       let Some(data) = datas.first_mut() else {
+        trace!("buffer without data");
         return;
       };
       let chunk = data.chunk();
       let (offset, size, stride) = (chunk.offset() as usize, chunk.size() as usize, chunk.stride());
+      trace!(offset, size, stride, "buffer");
       let Some(pixel_format) = pixel_format_of(state.format.format()) else {
+        trace!(format = ?state.format.format(), "buffer in an unconverted format");
         return;
       };
       let Some(bytes) = data.data() else {
+        trace!("buffer not mapped");
         return;
       };
       let Some(bytes) = bytes.get(offset..offset + size) else {
+        trace!(offset, size, mapped = bytes.len(), "buffer chunk out of range");
         return;
       };
       let picture = RawPicture {

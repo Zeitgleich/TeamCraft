@@ -169,6 +169,11 @@ required-features = ["native"]
 name = "video_bench"
 required-features = ["openh264-source", "segmentation"]
 
+# Captures through the screencast/camera portal and counts the frames (packaging/linux/portal-test).
+[[example]]
+name = "portal_capture"
+required-features = ["pipewire"]
+
 # The browser driver as a JS module for the SFU's development page (see the example's docs).
 [[example]]
 name = "web_call"

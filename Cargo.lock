@@ -9716,6 +9716,8 @@ name = "teamcraft-desktop"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "ashpd",
+ "futures-util",
  "keyring",
  "oauth2",
  "pollster",

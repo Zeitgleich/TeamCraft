@@ -1,0 +1,14 @@
+# A headless Wayland desktop with the screencast and camera portals, for checking the capture
+# paths without a monitor or a user (see run.sh).
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf -y install --setopt=install_weak_deps=False \
+      sway xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk libcap pipewire wireplumber pipewire-gstreamer pipewire-utils \
+      gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free dbus-daemon dbus-tools procps-ng glib2 coreutils \
+      mesa-dri-drivers \
+  && dnf clean all \
+  # sway carries file capabilities (CAP_SYS_NICE), which a container can't grant on exec.
+  && setcap -r /usr/bin/sway
+RUN useradd --uid 1000 --create-home tester
+COPY session.sh sway.conf xdpw.conf portals.conf /opt/portal-test/
+USER tester
+ENTRYPOINT ["/opt/portal-test/session.sh"]

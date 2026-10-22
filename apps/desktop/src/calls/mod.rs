@@ -9,7 +9,7 @@
 
 mod codec_library;
 pub mod commands;
-mod push_to_talk;
+pub(crate) mod push_to_talk;
 mod video;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
     .manage(service)
+    .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(CoreHost::new(config, tokens))
     .setup(|app| {
       let emitter = app.handle().clone();
