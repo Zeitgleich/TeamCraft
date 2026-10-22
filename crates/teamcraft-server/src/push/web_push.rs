@@ -38,7 +38,7 @@ impl WebPushSubscription {
   }
 }
 
-fn check_endpoint(endpoint: &str, allow_private_endpoints: bool) -> Result<(), PushError> {
+pub(super) fn check_endpoint(endpoint: &str, allow_private_endpoints: bool) -> Result<(), PushError> {
   let url: Url = endpoint
     .parse()
     .map_err(|_| PushError::Invalid("endpoint is not a URL".into()))?;
@@ -155,7 +155,10 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
 /// The HTTP client of the push sender: no redirects (a push service could send us to an internal
 /// address) and, unless private endpoints are allowed for development, name resolution that refuses
 /// private addresses.
-fn build_client(timeout: Duration, allow_private_endpoints: bool) -> Result<reqwest::Client, reqwest::Error> {
+pub(super) fn build_client(
+  timeout: Duration,
+  allow_private_endpoints: bool,
+) -> Result<reqwest::Client, reqwest::Error> {
   let builder = reqwest::Client::builder()
     .timeout(timeout)
     .redirect(reqwest::redirect::Policy::none());

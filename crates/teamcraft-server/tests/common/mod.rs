@@ -2,6 +2,7 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 pub mod fake_keycloak;
+pub mod push_fakes;
 
 use reqwest::StatusCode;
 use serde_json::{Value, json};

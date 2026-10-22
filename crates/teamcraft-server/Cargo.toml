@@ -53,6 +53,8 @@ tracing-subscriber.workspace = true
 integration = ["teamcraft-db/integration"]
 
 [dev-dependencies]
+# The fake APNs speaks HTTP/2 without TLS.
+axum = { workspace = true, features = ["http2"] }
 time = { workspace = true, features = ["macros"] }
 p256.workspace = true
 reqwest.workspace = true

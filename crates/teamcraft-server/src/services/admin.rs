@@ -536,10 +536,13 @@ pub async fn instance_status(
   ]
   .into_iter()
   .map(|provider| {
-    let state_of = match state.push.sender_state(&provider) {
-      Some(true) => PushProviderState::Active,
-      Some(false) => PushProviderState::NotImplemented,
-      None => PushProviderState::NotConfigured,
+    let health = state.push.health(&provider);
+    let state_of = if !state.push.is_configured(&provider) {
+      PushProviderState::NotConfigured
+    } else if health.is_failing() {
+      PushProviderState::Failing
+    } else {
+      PushProviderState::Active
     };
     let wire_name = provider.as_str();
     PushProviderStatus {
@@ -549,6 +552,11 @@ pub async fn instance_status(
         .map_or(0, |count| u32::try_from(count.device_count).unwrap_or(u32::MAX)),
       provider,
       state: state_of,
+      success_count: health.success_count,
+      failure_count: health.failure_count,
+      maybe_last_success_at: health.maybe_last_success_at,
+      maybe_last_failure_at: health.maybe_last_failure_at,
+      maybe_last_error: health.maybe_last_error,
     }
   })
   .collect();

@@ -262,7 +262,7 @@ mod tests {
     for provider in ["webpush", "fcm", "unifiedpush", "apns"] {
       keys.push(format!("instance-provider-{provider}"));
     }
-    for state in ["active", "not-configured", "not-implemented", "unknown"] {
+    for state in ["active", "not-configured", "failing", "unknown"] {
       keys.push(format!("instance-push-{state}"));
     }
     for health in ["off", "unknown", "ok", "silent"] {
