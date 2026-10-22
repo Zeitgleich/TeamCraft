@@ -83,6 +83,28 @@ async fn apply_background(
   }
 }
 
+/// Opens the system's video effects panel (macOS 14+: Portrait, background replacement, Studio
+/// Light), where the user turns them off; AppKit wants it on the main thread.
+#[cfg(target_os = "macos")]
+fn open_system_video_effects(app: &AppHandle) -> Result<(), String> {
+  use avcapture::{CaptureDevice, CaptureSystemUserInterface};
+
+  app
+    .run_on_main_thread(|| {
+      if let Err(error) = CaptureDevice::show_system_user_interface(CaptureSystemUserInterface::VideoEffects)
+      {
+        tracing::warn!(%error, "the video effects panel did not open");
+      }
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Other systems have no video effects of their own.
+#[cfg(not(target_os = "macos"))]
+fn open_system_video_effects(_app: &AppHandle) -> Result<(), String> {
+  Ok(())
+}
+
 /// The decoded picture `effect` needs, if any.
 async fn load_background_picture(
   core: &CoreHost,
@@ -167,6 +189,7 @@ pub async fn call_action(
     CallAction::SetBackgroundEffect { effect } => apply_background(&core, &calls, effect).await?,
     CallAction::StartScreenShare { has_sound } => calls.start_screen_share(has_sound).await?,
     CallAction::StopScreenShare => calls.stop_screen_share().await,
+    CallAction::OpenSystemVideoEffects => open_system_video_effects(&app)?,
     CallAction::SetPushToTalk {
       is_enabled,
       maybe_shortcut,

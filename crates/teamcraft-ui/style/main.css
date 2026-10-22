@@ -2706,6 +2706,17 @@ select.input {
   color: #b9c3d6;
 }
 
+.system-effects-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.system-effects-hint p {
+  flex: 1;
+}
+
 .call-screen :focus-visible,
 .prejoin :focus-visible {
   outline-color: #fff;

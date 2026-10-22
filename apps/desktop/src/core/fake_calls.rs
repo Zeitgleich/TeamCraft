@@ -115,7 +115,8 @@ impl FakeCalls {
           active.screen_sound = ScreenShareSound::Off;
         }
       },
-      CallAction::SelectMicrophone { .. }
+      CallAction::OpenSystemVideoEffects
+      | CallAction::SelectMicrophone { .. }
       | CallAction::SelectSpeakers { .. }
       | CallAction::SetPushToTalk { .. }
       | CallAction::SetTalking { .. }

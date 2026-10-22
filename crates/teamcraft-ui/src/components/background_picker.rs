@@ -120,7 +120,31 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
     <Show when=move || error.get().is_some() fallback=|| ()>
       <p class="field-error" role="alert">{move || error.get().unwrap_or_default()}</p>
     </Show>
+    <SystemEffectsHint />
   }
+}
+
+/// macOS applies its own video effects (Portrait, background replacement, Studio Light) to every
+/// camera image before the app sees it. The app can't tell whether they are on, so it says how the
+/// two combine and opens the system's panel, where they are turned off.
+#[component]
+fn SystemEffectsHint() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_mac_app = crate::auth::tauri::is_available()
+    && web_sys::window()
+      .and_then(|window| window.navigator().platform().ok())
+      .is_some_and(|platform| platform.to_ascii_lowercase().contains("mac"));
+  is_mac_app.then(|| {
+    view! {
+      <div class="system-effects-hint" role="note">
+        <p class="muted-text small">{move || i18n.t("effects-system-hint")}</p>
+        <button class="btn btn-small" on:click=move |_| state.read(|backend| backend.open_system_video_effects())>
+          {move || i18n.t("effects-system-open")}
+        </button>
+      </div>
+    }
+  })
 }
 
 /// One selectable tile; own pictures carry a delete button next to the radio button (a button must

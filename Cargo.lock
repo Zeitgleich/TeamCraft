@@ -580,6 +580,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "avcapture"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a40bd4b86f4d2336c1f682d0954864d4ad802cf7eceaf3da343e435b6019e17d"
+dependencies = [
+ "apple-cf",
+ "doom-fish-utils",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9985,6 +9997,7 @@ version = "1.0.0-beta.1"
 dependencies = [
  "anyhow",
  "ashpd",
+ "avcapture",
  "futures-util",
  "keyring",
  "oauth2",

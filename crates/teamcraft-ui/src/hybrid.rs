@@ -670,6 +670,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       calls.act(CallAction::StopScreenShare);
     }
   }
+
+  fn open_system_video_effects(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::OpenSystemVideoEffects);
+    }
+  }
 }
 
 impl<C: ChatBackend> AdminBackend for Hybrid<C> {

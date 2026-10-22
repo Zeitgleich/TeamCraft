@@ -101,6 +101,8 @@ pub enum CallAction {
     has_sound: bool,
   },
   StopScreenShare,
+  /// Opens the system's video effects panel (macOS: Portrait, background, Studio Light).
+  OpenSystemVideoEffects,
   #[serde(other)]
   Unknown,
 }
@@ -851,6 +853,7 @@ mod tests {
         effect: BackgroundEffect::Preset(BackgroundPreset::Office),
       },
       CallAction::StartScreenShare { has_sound: true },
+      CallAction::OpenSystemVideoEffects,
     ] {
       let json = serde_json::to_string(&action).expect("serialize");
       assert_eq!(serde_json::from_str::<CallAction>(&json).expect("parse"), action);
