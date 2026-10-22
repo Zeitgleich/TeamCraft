@@ -44,6 +44,16 @@ wire_enum! {
   }
 }
 
+wire_enum! {
+  /// Who may see when the user was last active (PLAN.md §4).
+  pub enum LastSeenVisibility {
+    /// Everybody who sees the user's presence (unless the workspace switched last seen off).
+    Everyone => "everyone",
+    /// Nobody.
+    Nobody => "nobody",
+  }
+}
+
 /// A custom status (PLAN.md §4): "🌴 Vacation until Monday". Server-visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CustomStatus {
@@ -66,6 +76,10 @@ pub struct UserPresence {
   pub state: PresenceState,
   #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
   pub maybe_status: Option<CustomStatus>,
+  /// When the user was last active. Only given while they are offline, never for somebody who
+  /// appears offline or chose to hide it, and not at all if the workspace switched last seen off.
+  #[serde(rename = "last_seen", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_last_seen: Option<UnixMillis>,
 }
 
 /// `PUT /api/v1/me/status`: sets the caller's custom status (needs an emoji or a text). Replaces the
@@ -99,4 +113,18 @@ pub struct ListPresenceResponse {
 #[into_params(parameter_in = Query)]
 pub struct ListPresenceQuery {
   pub user_ids: String,
+}
+
+/// `GET /api/v1/me/privacy`: the caller's privacy choices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PrivacyResponse {
+  pub last_seen: LastSeenVisibility,
+  /// The workspace allows last seen at all; if not, the choice has no effect.
+  pub is_last_seen_available: bool,
+}
+
+/// `PUT /api/v1/me/privacy`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdatePrivacyRequest {
+  pub last_seen: LastSeenVisibility,
 }

@@ -21,6 +21,7 @@ mod ids;
 mod invite;
 mod key_bag;
 mod key_package;
+mod last_seen;
 mod local_account;
 mod meeting;
 mod message;
@@ -68,6 +69,7 @@ pub use identity::{IdentityKey, IdentityKeyOutcome, NewIdentityKey};
 pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};
 pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts};
+pub use last_seen::StoredLastSeen;
 pub use local_account::{LOCAL_ISSUER, LocalAccount, SessionLimits, SessionState};
 pub use meeting::{
   AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, StoredAttendee,

@@ -2,10 +2,11 @@
 
 use std::collections::HashSet;
 
-use teamcraft_db::{PresencePreference, StoredStatus};
+use teamcraft_db::{PresencePreference, StoredLastSeen, StoredStatus};
 use teamcraft_proto::{
-  CustomStatus, GatewayEvent, ListPresenceResponse, ManualPresence, PresenceActivity, PresenceState,
-  SetCustomStatusRequest, SetPresenceRequest, SetPresenceResponse, UserId, UserPresence,
+  CustomStatus, GatewayEvent, LastSeenVisibility, ListPresenceResponse, ManualPresence, PresenceActivity,
+  PresenceState, PrivacyResponse, SetCustomStatusRequest, SetPresenceRequest, SetPresenceResponse,
+  UpdatePrivacyRequest, UserId, UserPresence,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -155,7 +156,14 @@ async fn poll_calendar(state: &AppState, users: &[UserId], now: OffsetDateTime) 
 pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let preference = state.database.get_presence_preference(user).await?;
   let now = OffsetDateTime::now_utc();
-  let presence = derive_state(&preference, state.hub.device_aggregate(user), now);
+  let aggregate = state.hub.device_aggregate(user);
+  // Last seen is the moment the user stopped being active (idle or gone), whatever they show.
+  if state.hub.swap_aggregate(user, aggregate) == Some(DeviceAggregate::Active)
+    && aggregate != DeviceAggregate::Active
+  {
+    state.database.set_last_seen(user, now).await?;
+  }
+  let presence = derive_state(&preference, aggregate, now);
   let maybe_status = status_of(state, user, &presence, now).await?;
   let snapshot = PresenceSnapshot {
     state: presence.clone(),
@@ -241,11 +249,21 @@ pub async fn list_presence(
   } else {
     std::collections::HashMap::new()
   };
+  let is_last_seen_enabled = state.policy.get().presence.is_last_seen_enabled;
+  let mut last_seen = if is_last_seen_enabled {
+    state.database.get_last_seen(&visible).await?
+  } else {
+    std::collections::HashMap::new()
+  };
   Ok(ListPresenceResponse {
     presences: visible
       .into_iter()
       .map(|user_id| {
         let snapshot = state.hub.last_presence(user_id);
+        let maybe_last_seen = last_seen
+          .remove(&user_id)
+          .and_then(|stored| shown_last_seen(&snapshot.state, &stored))
+          .map(unix_millis);
         let maybe_status = statuses
           .remove(&user_id)
           .map(|status| status_response(&status))
@@ -258,10 +276,47 @@ pub async fn list_presence(
           user_id,
           state: snapshot.state,
           maybe_status,
+          maybe_last_seen,
         }
       })
       .collect(),
   })
+}
+
+/// What others may see of a user's last activity: only while the user is offline, never when they
+/// hide it or appear offline (the time would give the invisibility away).
+fn shown_last_seen(presence: &PresenceState, stored: &StoredLastSeen) -> Option<OffsetDateTime> {
+  let is_hidden = stored.is_invisible || stored.visibility != LastSeenVisibility::Everyone;
+  if *presence != PresenceState::Offline || is_hidden {
+    return None;
+  }
+  stored.maybe_at
+}
+
+/// The caller's privacy choices.
+pub async fn get_my_privacy(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+) -> Result<PrivacyResponse, ApiError> {
+  Ok(PrivacyResponse {
+    last_seen: state.database.get_last_seen_visibility(caller.user.id).await?,
+    is_last_seen_available: state.policy.get().presence.is_last_seen_enabled,
+  })
+}
+
+pub async fn put_my_privacy(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  request: UpdatePrivacyRequest,
+) -> Result<PrivacyResponse, ApiError> {
+  if matches!(request.last_seen, LastSeenVisibility::Unknown(_)) {
+    return Err(ApiError::InvalidRequest("unknown last_seen choice".into()));
+  }
+  state
+    .database
+    .set_last_seen_visibility(caller.user.id, &request.last_seen)
+    .await?;
+  get_my_privacy(state, caller).await
 }
 
 fn parse_user_ids(text: &str) -> Result<Vec<UserId>, ApiError> {
@@ -445,6 +500,47 @@ mod tests {
       derive_state(&expired, DeviceAggregate::Active, now()),
       PresenceState::Online
     );
+  }
+
+  mod last_seen {
+    use super::*;
+
+    fn stored(visibility: LastSeenVisibility, is_invisible: bool) -> StoredLastSeen {
+      StoredLastSeen {
+        maybe_at: Some(now()),
+        visibility,
+        is_invisible,
+      }
+    }
+
+    #[test]
+    fn it_is_shown_for_offline_users_who_allow_it() {
+      let shown = stored(LastSeenVisibility::Everyone, false);
+      assert_eq!(shown_last_seen(&PresenceState::Offline, &shown), Some(now()));
+      for state in [
+        PresenceState::Online,
+        PresenceState::Away,
+        PresenceState::DoNotDisturb,
+      ] {
+        assert_eq!(shown_last_seen(&state, &shown), None);
+      }
+    }
+
+    #[test]
+    fn it_is_hidden_when_the_user_chose_so_or_appears_offline() {
+      let nobody = stored(LastSeenVisibility::Nobody, false);
+      assert_eq!(shown_last_seen(&PresenceState::Offline, &nobody), None);
+      let invisible = stored(LastSeenVisibility::Everyone, true);
+      assert_eq!(shown_last_seen(&PresenceState::Offline, &invisible), None);
+      let unknown = stored(LastSeenVisibility::Unknown("friends".into()), false);
+      assert_eq!(shown_last_seen(&PresenceState::Offline, &unknown), None);
+      let never_active = StoredLastSeen {
+        maybe_at: None,
+        visibility: LastSeenVisibility::Everyone,
+        is_invisible: false,
+      };
+      assert_eq!(shown_last_seen(&PresenceState::Offline, &never_active), None);
+    }
   }
 
   #[test]

@@ -18,7 +18,9 @@ const REQUESTS_PER_ACCOUNT: usize = 4;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn first_requests_of_new_accounts_in_parallel_never_fail() {
-  let Some(mut app) = TestApp::start().await else { return };
+  let Some(mut app) = TestApp::start().await else {
+    return;
+  };
   let (space, channel) = default_workspace(&mut app).await;
   assert!(!space.is_empty());
 
@@ -30,15 +32,13 @@ async fn first_requests_of_new_accounts_in_parallel_never_fail() {
       match attempt % 3 {
         0 => app.get(user, "/me").await,
         1 => app.get(user, "/spaces").await,
-        _ => {
-          app
-            .post(
-              user,
-              "/devices",
-              json!({"name": format!("laptop {attempt}"), "public_key": "cHVibGlj", "cross_signature": "c2ln"}),
-            )
-            .await
-        },
+        _ => app
+          .post(
+            user,
+            "/devices",
+            json!({"name": format!("laptop {attempt}"), "public_key": "cHVibGlj", "cross_signature": "c2ln"}),
+          )
+          .await,
       }
     })
   }))
@@ -76,7 +76,9 @@ async fn default_workspace(app: &mut TestApp) -> (String, String) {
   let (space_raw, channel_raw) = (space.parse::<i64>().unwrap(), channel.parse::<i64>().unwrap());
   app.reconfigure(|settings| {
     settings.policy.default_spaces = vec![SpaceId::from_snowflake(Snowflake::new(space_raw).unwrap())];
-    settings.policy.default_channels = vec![ConversationId::from_snowflake(Snowflake::new(channel_raw).unwrap())];
+    settings.policy.default_channels = vec![ConversationId::from_snowflake(
+      Snowflake::new(channel_raw).unwrap(),
+    )];
   });
   assert_eq!(app.get(&alice, "/me").await.status, StatusCode::OK);
   (space, channel)
