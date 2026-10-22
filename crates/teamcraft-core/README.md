@@ -2,21 +2,26 @@
 
 Client logic shared by desktop, web and mobile (ARCHITECTURE.md §7–§8): the encrypted local store,
 the server API, the sync engine and first-run enrollment. All cryptography is delegated to
-`teamcraft-crypto`. Builds for `wasm32-unknown-unknown`.
+`teamcraft-crypto`. Builds for `wasm32-unknown-unknown` and runs there with a persistent store.
 
 ## Modules
 
-| Module        | What                                                                                                      |
-|---------------|-----------------------------------------------------------------------------------------------------------|
-| `store`       | `LocalStore` trait; `SqlCipherStore` (native, e2ee.md §9), `MemoryStore`; database key sources            |
-| `records`     | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                 |
-| `api`         | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite), `fake::FakeServer`       |
-| `client`      | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                               |
-| `attestation` | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)            |
-| `workspace`   | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                           |
-| `search`      | tantivy index of the store and shared encrypted segments (native only)                                    |
-| `ui_backend`  | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`) |
-| `clock`       | Injectable wall clock (`SystemClock`, `ManualClock`)                                                      |
+| Module         | What                                                                                                                    |
+|----------------|-------------------------------------------------------------------------------------------------------------------------|
+| `store`        | `LocalStore` trait; `SqlCipherStore` (native), `IndexedDbStore` (browser, e2ee.md §9.1), `MemoryStore`; key sources     |
+| `records`      | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                               |
+| `api`          | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite / browser WebSocket), `fake::FakeServer` |
+| `client`       | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                                             |
+| `runner`       | `SyncRunner`: the app loop (reconnect, heartbeats, outbox, UI commands, due membership changes)                         |
+| `platform`     | Timers on tokio or `setTimeout`, so the engine runs on a single-threaded browser executor                               |
+| `push_preview` | What a notification shows, read-only from the store (+ optional fetch); `PushSession`                                   |
+| `web_push`     | Browser: Web Push subscription; service worker entry points (feature `service-worker`)                                  |
+| `read_state`   | Followed threads, unread counts, read receipts, acknowledgements as the server reports them                             |
+| `attestation`  | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)                          |
+| `workspace`    | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                                         |
+| `search`       | tantivy index of the store and shared encrypted segments (native only)                                                  |
+| `ui_backend`   | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`)               |
+| `clock`        | Injectable wall clock (`SystemClock`, `ManualClock`)                                                                    |
 
 ## How it works
 
@@ -42,6 +47,30 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
   packages, key bag). Commits are only merged if `teamcraft-crypto` accepts them.
 - **UI**: `CoreChatBackend` reads the store synchronously; posting and reactions go into the outbox,
   other actions are `CoreCommand`s the app's sync task runs with `Client::run_ui_command`.
+- **Runner**: `SyncRunner::new(client, settings, on_change)` returns the runner and a `RunnerHandle`;
+  `run()` is a plain future (tokio task natively, `wasm_bindgen_futures::spawn_local` in the browser)
+  that keeps the gateway connected and hands the client back on `RunnerCommand::Stop`.
+
+## Browser
+
+- **Transport:** the gateway and the device-linking relay use the browser's `WebSocket`; REST goes
+  through reqwest's `fetch` backend. Nothing in the engine needs `Send` or threads.
+- **Store:** `IndexedDbStore::open(name, &browser_database_key(name).await?)`. Every record is
+  encrypted (`teamcraft-crypto::local_store`) under a pseudorandom ID; the database key is wrapped by
+  a non-extractable Web Crypto key in the same database (why: e2ee.md §9.1). Reads come from a memory
+  cache filled at open; writes go to IndexedDB immediately, `flush()` waits for them. Share the
+  store with `Rc` (it is not `Send`).
+- **Web Push:** `Client::register_web_push(vapid_public_key)` subscribes through the page's service
+  worker and registers the subscription with a fresh push key. `web/service-worker.js` is the
+  minimal glue (listeners must exist before wasm loads); the app builds its wasm with
+  `--target no-modules` and `teamcraft-core/service-worker`, and registers the worker as
+  `service-worker.js?db=<store name>`. The worker opens the store read-only, opens the wake-up, and
+  shows conversation, sender and — if the store has the message or a `PushSession`
+  (`push_preview::save_push_session`, refreshed by the app with its token) lets it fetch the message
+  — the decrypted text. Titles and bodies are only names and message text, so nothing needs i18n.
+  A click focuses an open window (`postMessage({type: "open_conversation", conversation_id})`) or
+  opens `<scope>?conversation_id=<id>`.
+- **Search:** scans the store (tantivy doesn't target wasm32).
 
 ## Features beyond messaging
 
@@ -54,10 +83,18 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
   `admin_self_join` and history defaults (guests always `from_join`) are enforced by the committer.
 - **Removals the server reports** (`device_remove`, `membership_remove` after admin removal or
   deactivation) are queued and committed by an online member, followed by key rotation.
+- **New devices of members** (`device_add`): every member that hears it queues the addition per
+  shared group, delayed by its rank (devices of online users first, ID-mixed order, capped at
+  `device_add_max_rank` × `device_add_stagger`), so normally one member commits and the rest find
+  the device present. Retried while the device has no key packages yet (the server announces it
+  before they are uploaded).
+- **Read state:** `thread_update` refetches `/threads` and `/unread` (last replies are decrypted into
+  the store), `read_receipt` and `message_ack` are stored; read them with `read_state`.
 - **Messages:** files (chunked encryption, presigned upload, hash checked before decrypting), edits
   and deletes of one's own messages, mentions (inside the message and as server metadata),
   reactions, typing indicators.
-- **Push:** registration with a fresh push key; `Client::open_push` opens sealed wake-ups.
+- **Push:** registration with a fresh push key; `Client::open_push` opens sealed wake-ups, and
+  `push_preview::push_preview` builds what a notification shows without a `Client`.
 - **Device linking** (e2ee.md §5): `LinkOffer` (QR code), `NewDeviceLink` on the new device,
   `Client::start_link_approval` / `complete_link_approval` on the existing one; both show the same
   short code before anything is transferred.
@@ -81,13 +118,13 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 
 ## Stubbed / not yet done
 
-- Browser: the gateway and rendezvous WebSockets return `Unsupported` on wasm, the store is
-  `MemoryStore`, and search scans the store (tantivy doesn't target wasm32).
-- Adding new devices of existing members is manual (`Client::add_missing_devices`).
+- Browser: no persistent search index (tantivy doesn't target wasm32); a stricter store mode with
+  a passkey-PRF database key is possible (`IndexedDbStore::open` takes any key) but not wired.
+- `apps/desktop` still has its own sync loop; it could switch to `SyncRunner`.
 - Content key rotation by message count / age (`RotationPolicy`) – only removals rotate.
 - Org key rotation after a recovery, and the approval flow (both need server endpoints).
 - An edit or delete that arrives before its target message isn't applied later.
-- Followed threads, custom status, link previews, passkey PRF wrapper wiring.
+- Custom status, link previews, passkey PRF wrapper wiring; sending receipts and acknowledgements.
 - The other UI traits (`CallBackend`, `AdminBackend`, `SecurityBackend`).
 - The MLS storage and the search index are rebuilt or rewritten whole; fine at today's sizes,
   incremental later.
@@ -99,7 +136,8 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
    `feat/server-gaps`).
 2. **Key package claims** take a package from every device of the user, including ones already in
    the group (being fixed).
-3. **No signal for new devices** to trigger `add_missing_devices` (being fixed: `device_add`).
+3. **No signal for new devices** to trigger `add_missing_devices`: fixed (`device_add`), handled by
+   the core.
 4. `epoch_conflict` has the epoch only in the text; non-member admins parse it to post proposals
    (being fixed).
 5. No custom status on the server (being fixed).
@@ -109,9 +147,20 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
    user's wrapped backup keys to the approving admins.
 8. **Search segments:** stored through the attachment endpoints and announced in messages; a segment
    listing per conversation would let devices find them without reading the messages first.
-9. **Dev environment:** the shared dev Postgres may carry migrations from unmerged branches; the
-   integration tests ran against a throwaway database and a server on port 8083 (another session's
-   server used 8081). They leave small encrypted test files in the dev Garage bucket.
+9. **VAPID public key:** the server logs its application server key at start but has no endpoint
+   for it; the web app has to be configured with it. A `GET /api/v1/push/vapid-key` (or a field in
+   an instance-info response) would remove that step.
+10. **Push previews without a session:** the service worker can only fetch the pushed message while
+    a stored access token is valid. If the server put the message ciphertext into the wake-up when
+    it fits (Web Push allows ~4 KB), previews would work without any token; it stays opaque to the
+    push service either way.
+11. **Stale devices accumulate:** devices that never come back stay registered with key packages, so
+    `add_member` claims and welcomes all of them. In the dev database, repeated integration runs
+    (each registers new devices for the same users) made a welcome exceed the server's body limit.
+    Real deployments need device expiry (and the client a way to skip stale devices).
+12. **Dev environment:** the shared dev Postgres may carry migrations from unmerged branches; the
+    integration tests ran against a throwaway database and a server on port 8083 (another session's
+    server used 8081). They leave small encrypted test files in the dev Garage bucket.
 
 ## UI wiring
 
@@ -128,3 +177,17 @@ cargo check -p teamcraft-core --target wasm32-unknown-unknown
 TEAMCRAFT_TEST_SERVER_URL=http://127.0.0.1:8081 cargo test -p teamcraft-core --features integration --test dev_stack
 # the server needs the [storage] section (dev Garage) for the attachment test
 ```
+
+### Browser tests
+
+`tests/web.rs` and `tests/web_service_worker.rs` run in headless Chromium (wasm-bindgen-test). The
+image in `dev/wasm-test` has Chromium, chromedriver and the matching `wasm-bindgen-cli`:
+
+```sh
+docker build -t teamcraft-wasm-test:local dev/wasm-test
+docker run --rm -v "$PWD":/src:ro -v teamcraft-wasm-target:/target -e CARGO_TARGET_DIR=/target -w /src \
+  teamcraft-wasm-test:local cargo test --target wasm32-unknown-unknown -p teamcraft-core \
+  --features service-worker --test web --test web_service_worker
+```
+
+`webdriver.json` passes `--no-sandbox` to Chromium for the container.

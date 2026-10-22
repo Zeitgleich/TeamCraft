@@ -17,14 +17,15 @@ use teamcraft_core::api::{HttpGateway, HttpServerApi, StaticToken};
 use teamcraft_core::attestation::{AttestationError, write_identity_attribute};
 use teamcraft_core::client::{NewDeviceLink, OutgoingFile};
 use teamcraft_core::clock::{Clock, SystemClock};
+use teamcraft_core::read_state;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
-  AdminSelfJoin, ConversationId, CreateSpaceRequest, JoinPolicy, PushProvider, SpaceId, SpaceResponse,
-  WorkspacePolicy,
+  AdminSelfJoin, ConversationId, CreateSpaceRequest, Id, JoinPolicy, PushProvider, SpaceId, SpaceResponse,
+  ThreadId, WorkspacePolicy,
 };
 
 const ISSUER: &str = "http://127.0.0.1:8080/realms/teamcraft-dev";
@@ -197,6 +198,94 @@ async fn a_second_device_is_linked_through_the_relay() {
 }
 
 #[tokio::test]
+async fn thread_updates_and_new_devices_follow_server_events() {
+  if server_url().is_none() {
+    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    return;
+  }
+  let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
+  let (mut alice, alice_store) = enroll("alice", &alice_token).await;
+  let (mut bob, bob_store) = enroll("bob", &bob_token).await;
+  let (mut alice_gateway, _) = alice.connect_gateway().await.unwrap();
+  let (mut bob_gateway, _) = bob.connect_gateway().await.unwrap();
+  let space = create_open_space(&alice_token, &bob_token).await;
+  let channel = alice.create_channel(space, "core-threads").await.unwrap();
+  alice.add_member(channel, bob.user_id()).await.unwrap();
+  pump_until("Bob joins the channel", &mut bob, &mut bob_gateway, |client| {
+    client.has_group(channel).unwrap()
+  })
+  .await;
+
+  // Alice starts a thread, Bob replies: Alice follows it and gets `thread_update`.
+  alice.send_text(channel, None, "thread root").await.unwrap();
+  let root = alice_store
+    .messages(channel, MessageFilter::TopLevel)
+    .unwrap()
+    .last()
+    .and_then(|message| message.maybe_server_id)
+    .unwrap();
+  pump_until("Bob has the root", &mut bob, &mut bob_gateway, |_| {
+    texts(&bob_store, channel).contains(&"thread root".to_string())
+  })
+  .await;
+  bob
+    .send_text(
+      channel,
+      Some(ThreadId::from_snowflake(root.snowflake())),
+      "thread reply",
+    )
+    .await
+    .unwrap();
+  pump_until(
+    "Alice's threads list the reply",
+    &mut alice,
+    &mut alice_gateway,
+    |_| {
+      read_state::threads(alice_store.as_ref())
+        .unwrap()
+        .iter()
+        .any(|thread| thread.conversation_id == channel && thread.reply_count >= 1)
+    },
+  )
+  .await;
+
+  // Bob links a laptop; `device_add` reaches Alice and Bob's phone, and the first-ranked of them
+  // adds the laptop to the channel without anybody calling add_missing_devices.
+  let laptop_api = HttpServerApi::new(required_server_url(), StaticToken(bob_token.clone()));
+  let offer = LinkOffer::generate();
+  let code = offer.to_code();
+  let (laptop_side, phone_side) = tokio::join!(
+    NewDeviceLink::connect(&laptop_api, &offer),
+    bob.start_link_approval(&code)
+  );
+  bob.complete_link_approval(phone_side.unwrap()).await.unwrap();
+  let mut options = enroll_options("bob linked laptop");
+  options.maybe_linked = Some(laptop_side.unwrap().receive_secrets().await.unwrap());
+  let mut laptop = PendingEnrollment::new()
+    .complete(
+      laptop_api,
+      Arc::new(MemoryStore::new()),
+      Box::new(SystemClock),
+      ClientSettings::default(),
+      options,
+    )
+    .await
+    .unwrap();
+  // Worst case: the first-ranked devices are gone (earlier runs leave devices behind), so the
+  // capped rank delay of the default settings (3 × 10 s) applies.
+  let deadline = Instant::now() + Duration::from_secs(45);
+  while !laptop.has_group(channel).unwrap() {
+    assert!(Instant::now() < deadline, "the laptop was never added");
+    alice.pump(&mut alice_gateway).await.unwrap();
+    bob.pump(&mut bob_gateway).await.unwrap();
+    alice.apply_pending_changes().await.unwrap();
+    bob.apply_pending_changes().await.unwrap();
+    laptop.sync_welcomes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+}
+
+#[tokio::test]
 async fn identity_attribute_can_be_attested_or_reports_why_not() {
   if server_url().is_none() {
     eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
@@ -223,18 +312,7 @@ async fn enroll(user: &str, token: &str) -> (DevClient, Arc<MemoryStore>) {
     .await;
   let api = HttpServerApi::new(required_server_url(), StaticToken(token.to_string()));
   let store = Arc::new(MemoryStore::new());
-  let options = EnrollmentOptions {
-    device_name: format!("{user} integration test"),
-    passphrase: SecretBytes::new(PASSPHRASE.as_bytes().to_vec()),
-    argon2: Argon2Settings {
-      memory_kib: 1024,
-      iterations: 1,
-      parallelism: 1,
-    },
-    maybe_attestation: None,
-    maybe_org_recovery: None,
-    maybe_linked: None,
-  };
+  let options = enroll_options(&format!("{user} integration test"));
   let client = PendingEnrollment::new()
     .complete(
       api,
@@ -246,6 +324,21 @@ async fn enroll(user: &str, token: &str) -> (DevClient, Arc<MemoryStore>) {
     .await
     .unwrap();
   (client, store)
+}
+
+fn enroll_options(device_name: &str) -> EnrollmentOptions {
+  EnrollmentOptions {
+    device_name: device_name.into(),
+    passphrase: SecretBytes::new(PASSPHRASE.as_bytes().to_vec()),
+    argon2: Argon2Settings {
+      memory_kib: 1024,
+      iterations: 1,
+      parallelism: 1,
+    },
+    maybe_attestation: None,
+    maybe_org_recovery: None,
+    maybe_linked: None,
+  }
 }
 
 /// Space setup isn't part of the client core; plain REST calls do it.

@@ -1,5 +1,5 @@
 //! [`ServerApi`] over HTTP (reqwest; `fetch` in the browser) and the gateway WebSocket
-//! (tokio-tungstenite on native targets).
+//! (tokio-tungstenite on native targets, the browser's `WebSocket` in wasm).
 
 use std::fmt;
 
@@ -25,8 +25,11 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, RegisterPushRequest,
 };
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, UnreadResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
+#[cfg(target_arch = "wasm32")]
+use super::web_socket::{BrowserSocket, SocketFrame};
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
 
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
@@ -331,6 +334,19 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.send_json(Method::PUT, "/me/key-bag", request).await
   }
 
+  async fn list_threads(&self, query: &ListThreadsQuery) -> Result<ListThreadsResponse, ApiError> {
+    let parameters = query_string(&[
+      ("unread_only", query.unread_only.then(|| "true".to_string())),
+      ("before", query.maybe_before.map(|id| id.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self.get(&format!("/threads{parameters}")).await
+  }
+
+  async fn unread(&self) -> Result<UnreadResponse, ApiError> {
+    self.get("/unread").await
+  }
+
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.get("/me/key-bag").await
   }
@@ -436,9 +452,11 @@ pub struct HttpGateway {
   socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 }
 
-/// Browser gateway: not implemented yet (web-sys WebSocket); see the crate README.
+/// The gateway WebSocket in the browser.
 #[cfg(target_arch = "wasm32")]
-pub struct HttpGateway;
+pub struct HttpGateway {
+  socket: BrowserSocket,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl HttpGateway {
@@ -486,19 +504,31 @@ impl GatewayConnection for HttpGateway {
 
 #[cfg(target_arch = "wasm32")]
 impl HttpGateway {
-  async fn connect(_url: &str) -> Result<Self, ApiError> {
-    Err(ApiError::Unsupported("gateway WebSocket in the browser"))
+  async fn connect(url: &str) -> Result<Self, ApiError> {
+    Ok(Self {
+      socket: BrowserSocket::connect(url).await?,
+    })
   }
 }
 
 #[cfg(target_arch = "wasm32")]
 impl GatewayConnection for HttpGateway {
-  async fn send(&mut self, _message: &GatewayClientMessage) -> Result<(), ApiError> {
-    Err(ApiError::Unsupported("gateway WebSocket in the browser"))
+  async fn send(&mut self, message: &GatewayClientMessage) -> Result<(), ApiError> {
+    let text = serde_json::to_string(message).map_err(|error| ApiError::Decode(error.to_string()))?;
+    self.socket.send_text(&text)
   }
 
   async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
-    None
+    loop {
+      match self.socket.next().await? {
+        Ok(SocketFrame::Text(text)) => {
+          return Some(serde_json::from_str(&text).map_err(|error| ApiError::Decode(error.to_string())));
+        },
+        // The gateway doesn't use binary frames.
+        Ok(SocketFrame::Binary(_)) => {},
+        Err(error) => return Some(Err(error)),
+      }
+    }
   }
 }
 
@@ -514,9 +544,11 @@ pub struct HttpRendezvous {
   socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 }
 
-/// Browser relay: not implemented yet (web-sys WebSocket), like the gateway.
+/// The device-linking relay in the browser.
 #[cfg(target_arch = "wasm32")]
-pub struct HttpRendezvous;
+pub struct HttpRendezvous {
+  socket: BrowserSocket,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl HttpRendezvous {
@@ -572,23 +604,32 @@ impl RendezvousConnection for HttpRendezvous {
 
 #[cfg(target_arch = "wasm32")]
 impl HttpRendezvous {
-  async fn connect(_url: &str) -> Result<Self, ApiError> {
-    Err(ApiError::Unsupported("device-linking relay in the browser"))
+  async fn connect(url: &str) -> Result<Self, ApiError> {
+    Ok(Self {
+      socket: BrowserSocket::connect(url).await?,
+    })
   }
 }
 
 #[cfg(target_arch = "wasm32")]
 impl RendezvousConnection for HttpRendezvous {
-  async fn send_control(&mut self, _message: &RendezvousClientMessage) -> Result<(), ApiError> {
-    Err(ApiError::Unsupported("device-linking relay in the browser"))
+  async fn send_control(&mut self, message: &RendezvousClientMessage) -> Result<(), ApiError> {
+    let text = serde_json::to_string(message).map_err(|error| ApiError::Decode(error.to_string()))?;
+    self.socket.send_text(&text)
   }
 
-  async fn send_binary(&mut self, _frame: Vec<u8>) -> Result<(), ApiError> {
-    Err(ApiError::Unsupported("device-linking relay in the browser"))
+  async fn send_binary(&mut self, frame: Vec<u8>) -> Result<(), ApiError> {
+    self.socket.send_binary(&frame)
   }
 
   async fn receive(&mut self) -> Option<Result<RendezvousFrame, ApiError>> {
-    None
+    Some(match self.socket.next().await? {
+      Ok(SocketFrame::Text(text)) => serde_json::from_str(&text)
+        .map(RendezvousFrame::Control)
+        .map_err(|error| ApiError::Decode(error.to_string())),
+      Ok(SocketFrame::Binary(bytes)) => Ok(RendezvousFrame::Binary(bytes)),
+      Err(error) => Err(error),
+    })
   }
 }
 

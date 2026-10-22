@@ -1,13 +1,13 @@
 //! Full state sync over REST, key package top-up and key bag upload.
 
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
-use teamcraft_proto::{Base64Bytes, ConversationId, UploadKeyPackagesRequest, UserSummary};
+use teamcraft_proto::{Base64Bytes, ConversationId, ListThreadsQuery, UploadKeyPackagesRequest, UserSummary};
 
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-use crate::records;
 use crate::store::{LocalStore, Table};
+use crate::{read_state, records};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the store up to date after a fresh gateway session (or at start): spaces,
@@ -41,6 +41,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.catch_up_messages(conversation.id).await?;
       self.retry_undecrypted(conversation.id)?;
     }
+    self.refresh_read_state().await?;
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
     self.top_up_key_packages().await?;
@@ -48,6 +49,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.upload_key_bag().await?;
     }
     Ok(())
+  }
+
+  /// Followed threads and unread counts (after `thread_update` and on fresh sessions). The threads'
+  /// last replies are decrypted into the message store like any message.
+  pub async fn refresh_read_state(&mut self) -> Result<(), CoreError> {
+    let query = ListThreadsQuery {
+      maybe_limit: Some(self.settings.history_page_size),
+      ..ListThreadsQuery::default()
+    };
+    let threads = self.api.list_threads(&query).await?.threads;
+    for reply in threads
+      .iter()
+      .filter_map(|thread| thread.maybe_last_reply.clone())
+    {
+      self.receive_message(reply)?;
+    }
+    read_state::save_threads(&self.store, &threads)?;
+    let unread = self.api.unread().await?;
+    read_state::save_unread(&self.store, &unread)
   }
 
   /// Keeps enough key packages on the server so others can add this device (e2ee.md §4.3), plus a

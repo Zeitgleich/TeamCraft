@@ -1,14 +1,18 @@
 //! The local store (e2ee.md §9): everything the client knows, already decrypted.
 //!
 //! [`LocalStore`] is deliberately small – a typed key-value space plus an ordered message table –
-//! so a native SQLCipher implementation and an in-memory one (browser for now, tests) stay
-//! interchangeable. Typed records on top live in [`crate::records`].
+//! so a native SQLCipher implementation, an encrypted IndexedDB one in the browser and an in-memory
+//! one for tests stay interchangeable. Typed records on top live in [`crate::records`].
 
+#[cfg(target_arch = "wasm32")]
+mod browser;
 mod key_source;
 mod memory;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
 
+#[cfg(target_arch = "wasm32")]
+pub use browser::{IndexedDbStore, browser_database_key};
 #[cfg(not(target_arch = "wasm32"))]
 pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
@@ -53,6 +57,14 @@ pub enum Table {
   SearchSegments,
   /// The user's saved searches.
   SavedSearches,
+  /// Followed threads (`GET /threads`), keyed `conversation/thread`.
+  Threads,
+  /// Unread and mention counts (`GET /unread`), one record.
+  Unread,
+  /// How far other members of DMs have read, keyed `conversation/user`.
+  ReadReceipts,
+  /// Who acknowledged an urgent message, keyed `conversation/message`.
+  MessageAcks,
 }
 
 /// A decrypted (or own, not yet sent) message.
@@ -171,47 +183,55 @@ pub trait LocalStore {
 }
 
 /// A store shared between the engine and readers (UI adapters, tests).
-impl<T: LocalStore + ?Sized> LocalStore for std::sync::Arc<T> {
-  fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-    (**self).get(table, key)
-  }
+macro_rules! forward_local_store {
+  ($pointer:ty) => {
+    impl<T: LocalStore + ?Sized> LocalStore for $pointer {
+      fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).get(table, key)
+      }
 
-  fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
-    (**self).put(table, key, value)
-  }
+      fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        (**self).put(table, key, value)
+      }
 
-  fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
-    (**self).delete(table, key)
-  }
+      fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
+        (**self).delete(table, key)
+      }
 
-  fn list(&self, table: Table) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-    (**self).list(table)
-  }
+      fn list(&self, table: Table) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        (**self).list(table)
+      }
 
-  fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
-    (**self).upsert_message(message)
-  }
+      fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
+        (**self).upsert_message(message)
+      }
 
-  fn message(
-    &self,
-    conversation: ConversationId,
-    client_message_id: ClientMessageId,
-  ) -> Result<Option<StoredMessage>, StoreError> {
-    (**self).message(conversation, client_message_id)
-  }
+      fn message(
+        &self,
+        conversation: ConversationId,
+        client_message_id: ClientMessageId,
+      ) -> Result<Option<StoredMessage>, StoreError> {
+        (**self).message(conversation, client_message_id)
+      }
 
-  fn messages(
-    &self,
-    conversation: ConversationId,
-    filter: MessageFilter,
-  ) -> Result<Vec<StoredMessage>, StoreError> {
-    (**self).messages(conversation, filter)
-  }
+      fn messages(
+        &self,
+        conversation: ConversationId,
+        filter: MessageFilter,
+      ) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).messages(conversation, filter)
+      }
 
-  fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    (**self).delete_messages(conversation)
-  }
+      fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
+        (**self).delete_messages(conversation)
+      }
+    }
+  };
 }
+
+forward_local_store!(std::sync::Arc<T>);
+// Single-threaded sharing in the browser, where the IndexedDB store is neither `Send` nor `Sync`.
+forward_local_store!(std::rc::Rc<T>);
 
 impl StoredMessage {
   /// Display order: server messages by ID; pending ones after all of them, by time written.
@@ -247,6 +267,36 @@ impl StoredMessage {
 }
 
 impl Table {
+  /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
+  pub const ALL: [Self; 21] = [
+    Self::Account,
+    Self::Spaces,
+    Self::Conversations,
+    Self::Members,
+    Self::Users,
+    Self::ContentKeys,
+    Self::MlsStorage,
+    Self::AppliedChanges,
+    Self::Outbox,
+    Self::SyncState,
+    Self::PinnedIdentities,
+    Self::Undecrypted,
+    Self::Presence,
+    Self::Workspace,
+    Self::PendingChanges,
+    Self::SearchSegments,
+    Self::SavedSearches,
+    Self::Threads,
+    Self::Unread,
+    Self::ReadReceipts,
+    Self::MessageAcks,
+  ];
+
+  /// The table with this [`Self::name`], if this version knows it.
+  pub fn from_name(name: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|table| table.name() == name)
+  }
+
   /// Stable name, used as the table key in persistent stores.
   pub fn name(self) -> &'static str {
     match self {
@@ -267,6 +317,10 @@ impl Table {
       Self::PendingChanges => "pending_changes",
       Self::SearchSegments => "search_segments",
       Self::SavedSearches => "saved_searches",
+      Self::Threads => "threads",
+      Self::Unread => "unread",
+      Self::ReadReceipts => "read_receipts",
+      Self::MessageAcks => "message_acks",
     }
   }
 }
@@ -276,6 +330,14 @@ pub(crate) mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  #[test]
+  fn every_table_round_trips_through_its_name() {
+    for table in Table::ALL {
+      assert_eq!(Table::from_name(table.name()), Some(table));
+    }
+    assert_eq!(Table::from_name("not_a_table"), None);
+  }
 
   /// Behaviour every [`LocalStore`] must show; run against each implementation.
   pub(crate) fn exercise_store(store: &impl LocalStore) {

@@ -316,6 +316,11 @@ Details:
 - The server decides *whether* to push using metadata it has anyway: membership, mute settings,
   presence (don't push to the phone while the desktop is active), DND, and the mention list (§4.4).
 - Keyword notifications ("notify me on 'deploy'") are matched on the client after decryption.
+- Browser (implemented): the service worker opens the encrypted local store (§9.1) read-only, opens
+  the wake-up with the push key and shows conversation and sender names. The message text appears
+  if the store already has the message, or if the app left a still valid access token
+  (`PushSession`, in the encrypted store) so the worker can fetch and decrypt it; otherwise the
+  notification has names only. Like the NSE, the worker never touches MLS state.
 - iOS caveat: an NSE must show every notification it receives, unless the app has Apple's
   `com.apple.developer.usernotifications.filtering` entitlement. Threema has it (its NSE entitlements
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,
@@ -357,6 +362,43 @@ key and are shown as "Guest (unverified)".
 - Local database: SQLite with SQLCipher; key in the OS keystore.
 - Decrypted search index (`tantivy`) also stored encrypted.
 - Attachments cached encrypted.
+
+### 9.1 Browser (implemented)
+
+The browser has neither SQLCipher nor an OS keystore. The web client keeps the same store
+(`LocalStore`) in IndexedDB and encrypts it record by record (`teamcraft-crypto::local_store`):
+
+1. **Database key:** 256 random bits. HKDF-SHA256 derives a *lookup key* and a *record key* from it.
+2. **Record IDs:** each record is stored under `HKDF-Expand(lookup key, labeled(namespace, name))`, a
+   pseudorandom 32-byte ID. Table names, conversation, user and message IDs never appear in
+   IndexedDB.
+3. **Records:** the plaintext name and value are sealed with XChaCha20-Poly1305 under the record key,
+   with the record ID as associated data, so records can't be swapped or moved unnoticed. Opening the
+   database with another key fails on the first record.
+4. **Where the database key lives:** wrapped (AES-256-GCM) by a **non-extractable Web Crypto key**,
+   both stored in the same IndexedDB database. Scripts, including the app's own, can use the wrapping
+   key but can never read its bytes.
+
+**Why a non-extractable key and not the passkey PRF or a passphrase:** the service worker must open
+the store without a user gesture to decrypt a push and show a notification with a preview (§7). A key
+derived from the passkey PRF or a passphrase needs the user every time the browser restarts, which
+would make push previews impossible and is a poor fit for a chat app that is opened many times a
+day.
+
+What this protects, and what it doesn't:
+
+| Attacker                                      | Protected                                                                               |
+|-----------------------------------------------|-----------------------------------------------------------------------------------------|
+| Copy of the whole browser profile             | No: the browser keeps the wrapping key's bytes in the profile                           |
+| Injected script on the origin (XSS)           | Can't take the key away for offline use; can read data while it runs, as in any web app |
+| Other origins, extensions without host access | Yes (same-origin policy)                                                                |
+| Server                                        | Yes (nothing leaves the browser)                                                        |
+
+The store is therefore as strong as the browser profile, like the browser's saved passwords.
+
+The design leaves room for a stricter mode: `IndexedDbStore::open` takes any 256-bit key, so a
+deployment can derive it from the passkey PRF (§6.2) instead, at the cost of push previews. Choosing
+that per workspace is a policy setting for later (PLAN.md).
 
 ## 10. Search
 

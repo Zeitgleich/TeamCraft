@@ -21,6 +21,7 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 | `workspace`      | Owner signatures on the admin roster and policy log entries                 | admin.md §2.3, e2ee.md §11       |
 | `org_recovery`   | Org key (HPKE DeriveKeyPair), Shamir shares (vsss-rs GF(2⁸)), HPKE wrapping | e2ee.md §6.3.1                   |
 | `rendezvous`     | Device linking handshake (AK auth keys, X25519, counter-nonce channel)      | e2ee.md §5                       |
+| `local_store`    | IndexedDB record encryption: HKDF lookup IDs, XChaCha20-Poly1305 records    | e2ee.md §9.1                     |
 | `aead`, `domain` | Internal: AEAD helper with random nonces; domain separation labels          | –                                |
 
 Dependencies are audited RustCrypto / dalek crates plus `openmls` with `openmls_rust_crypto`.

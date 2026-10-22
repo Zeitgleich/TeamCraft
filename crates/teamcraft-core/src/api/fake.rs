@@ -34,6 +34,9 @@ use teamcraft_proto::{
   CreateAttachmentResponse, RegisterPushRequest,
 };
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
+use teamcraft_proto::{
+  ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
+};
 
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
 
@@ -210,6 +213,12 @@ impl FakeServer {
     );
   }
 
+  /// Sends an event as the server would (for events whose endpoints the fake doesn't have, like
+  /// read receipts and acknowledgements).
+  pub fn publish_event(&self, users: &[UserId], event: &GatewayEvent) {
+    self.lock().publish(users.iter().copied(), event);
+  }
+
   /// Removes a member on the server's own authority (admin action, deactivation).
   pub fn remove_member_as_admin(&self, conversation: ConversationId, user: UserId) {
     let mut state = self.lock();
@@ -375,6 +384,16 @@ impl ServerApi for FakeServerApi {
         Device {
           user: me,
           response: response.clone(),
+        },
+      );
+      // Like the server: everybody sharing a conversation, and the user's other devices.
+      let mut audience = state.users_sharing_conversation(me);
+      audience.insert(me);
+      state.publish(
+        audience,
+        &GatewayEvent::DeviceAdd {
+          user_id: me,
+          device_id: id,
         },
       );
       Ok(response)
@@ -737,6 +756,19 @@ impl ServerApi for FakeServerApi {
           message: message.clone(),
         },
       );
+      if let Some(thread) = message.maybe_thread_id {
+        let followers: HashSet<UserId> = state
+          .thread_participants(conversation, thread)
+          .into_iter()
+          .collect();
+        state.publish(
+          followers,
+          &GatewayEvent::ThreadUpdate {
+            conversation_id: conversation,
+            thread_id: thread,
+          },
+        );
+      }
       Ok(message)
     })
   }
@@ -939,6 +971,34 @@ impl ServerApi for FakeServerApi {
       };
       state.key_bags.insert(me, stored.clone());
       Ok(stored)
+    })
+  }
+
+  async fn list_threads(&self, query: &ListThreadsQuery) -> Result<ListThreadsResponse, ApiError> {
+    self.with(|state, me| {
+      let mut threads: Vec<ThreadSummary> = state
+        .conversations
+        .values()
+        .filter(|conversation| conversation.members.contains_key(&me))
+        .flat_map(|conversation| conversation.threads(me))
+        .collect();
+      threads
+        .sort_by_key(|summary| std::cmp::Reverse(summary.maybe_last_reply.as_ref().map(|reply| reply.id)));
+      let limit = query.maybe_limit.map_or(PAGE_SIZE, |limit| limit as usize);
+      let has_more = threads.len() > limit;
+      threads.truncate(limit);
+      Ok(ListThreadsResponse { threads, has_more })
+    })
+  }
+
+  /// The fake doesn't track read positions; nothing is ever unread.
+  async fn unread(&self) -> Result<UnreadResponse, ApiError> {
+    self.with(|_, _| {
+      Ok(UnreadResponse {
+        conversations: Vec::new(),
+        unread_thread_count: 0,
+        thread_mention_count: 0,
+      })
     })
   }
 
@@ -1367,6 +1427,31 @@ impl State {
       .ok_or_else(|| ApiError::status(404, ErrorCode::ChannelNotFound, "unknown conversation"))
   }
 
+  fn users_sharing_conversation(&self, user: UserId) -> HashSet<UserId> {
+    self
+      .conversations
+      .values()
+      .filter(|conversation| conversation.members.contains_key(&user))
+      .flat_map(|conversation| conversation.members.keys().copied())
+      .collect()
+  }
+
+  /// Authors of a thread's root and replies: the users following it.
+  fn thread_participants(&self, conversation: ConversationId, thread: ThreadId) -> Vec<UserId> {
+    self
+      .conversations
+      .get(&conversation)
+      .map(|entry| {
+        entry
+          .messages
+          .iter()
+          .filter(|message| message.maybe_thread_id == Some(thread) || is_root(message, thread))
+          .map(|message| message.sender_user_id)
+          .collect()
+      })
+      .unwrap_or_default()
+  }
+
   fn member_conversation(&self, conversation: ConversationId, me: UserId) -> Result<&Conversation, ApiError> {
     let found = self.conversation(conversation)?;
     if found.members.contains_key(&me) {
@@ -1552,4 +1637,47 @@ fn page(
 fn snowflake(raw: i64) -> Snowflake {
   // Invariant: the counter starts at 1 and only grows, so it is always a valid snowflake.
   Snowflake::new(raw).unwrap_or_else(|_| unreachable!("positive counter"))
+}
+
+impl Conversation {
+  /// Threads `user` follows (started or replied to), without read positions.
+  fn threads(&self, user: UserId) -> Vec<ThreadSummary> {
+    let mut by_thread: BTreeMap<ThreadId, Vec<&MessageResponse>> = BTreeMap::new();
+    for message in &self.messages {
+      if let Some(thread) = message.maybe_thread_id {
+        by_thread.entry(thread).or_default().push(message);
+      }
+    }
+    by_thread
+      .into_iter()
+      .filter_map(|(thread, replies)| {
+        let is_starter = self
+          .messages
+          .iter()
+          .any(|message| is_root(message, thread) && message.sender_user_id == user);
+        let has_replied = replies.iter().any(|reply| reply.sender_user_id == user);
+        let follow_reason = match (is_starter, has_replied) {
+          (true, _) => ThreadFollowReason::Started,
+          (false, true) => ThreadFollowReason::Replied,
+          (false, false) => return None,
+        };
+        Some(ThreadSummary {
+          conversation_id: self.response.id,
+          thread_id: thread,
+          follow_reason,
+          reply_count: u32::try_from(replies.len()).unwrap_or(u32::MAX),
+          unread_count: 0,
+          mention_count: 0,
+          maybe_last_reply: replies
+            .iter()
+            .max_by_key(|reply| reply.id)
+            .map(|reply| (*reply).clone()),
+        })
+      })
+      .collect()
+  }
+}
+
+fn is_root(message: &MessageResponse, thread: ThreadId) -> bool {
+  message.id.snowflake() == thread.snowflake()
 }

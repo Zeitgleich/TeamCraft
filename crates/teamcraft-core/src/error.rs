@@ -52,6 +52,9 @@ pub enum CoreError {
   GaveUp { attempts: u32, reason: String },
   #[error("gateway: {0}")]
   Gateway(String),
+  /// A browser API failed or is missing (no service worker, permission denied, ...).
+  #[error("browser: {0}")]
+  Browser(String),
   #[error("local data is unreadable: {0}")]
   Corrupt(String),
 }

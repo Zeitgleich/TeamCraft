@@ -2,6 +2,7 @@
 //! key, decryption of incoming messages and paged history (e2ee.md §4.1, §4.4).
 
 use rand_core::OsRng;
+use teamcraft_crypto::key_bag::KeyBag;
 use teamcraft_crypto::message::{
   EncryptedMessage, MessageContext, MessageError, decrypt_message, encrypt_message,
 };
@@ -390,20 +391,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn decrypt(&self, message: &MessageResponse) -> Result<MessageContent, CoreError> {
-    let ring = self
-      .account
-      .key_bag
-      .ring(convert::conversation(message.conversation_id))
-      .ok_or(CoreError::NoContentKey(message.conversation_id))?;
-    let encrypted = EncryptedMessage::from_bytes(message.ciphertext.as_slice())?;
-    let context = MessageContext {
-      conversation_id: convert::conversation(message.conversation_id),
-      sender_user_id: convert::user(message.sender_user_id),
-      sender_device_id: convert::device(message.sender_device_id),
-      client_message_id: convert::client_message(message.client_message_id),
-    };
-    let plaintext = decrypt_message(ring, &context, &encrypted)?;
-    Ok(serde_json::from_slice(plaintext.expose_secret()).unwrap_or(MessageContent::Unknown))
+    decrypt_content(&self.account.key_bag, message)
   }
 
   fn message_context(
@@ -426,4 +414,24 @@ fn undecrypted_key(message: &MessageResponse) -> String {
     message.conversation_id,
     message.client_message_id.to_hex()
   )
+}
+
+/// Decrypts a message with the content keys in `key_bag`. Unknown content kinds (from newer
+/// clients) become [`MessageContent::Unknown`].
+pub(crate) fn decrypt_content(
+  key_bag: &KeyBag,
+  message: &MessageResponse,
+) -> Result<MessageContent, CoreError> {
+  let ring = key_bag
+    .ring(convert::conversation(message.conversation_id))
+    .ok_or(CoreError::NoContentKey(message.conversation_id))?;
+  let encrypted = EncryptedMessage::from_bytes(message.ciphertext.as_slice())?;
+  let context = MessageContext {
+    conversation_id: convert::conversation(message.conversation_id),
+    sender_user_id: convert::user(message.sender_user_id),
+    sender_device_id: convert::device(message.sender_device_id),
+    client_message_id: convert::client_message(message.client_message_id),
+  };
+  let plaintext = decrypt_message(ring, &context, &encrypted)?;
+  Ok(serde_json::from_slice(plaintext.expose_secret()).unwrap_or(MessageContent::Unknown))
 }

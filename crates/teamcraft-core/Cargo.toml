@@ -18,6 +18,9 @@ default = ["sqlcipher"]
 sqlcipher = ["dep:rusqlite"]
 # Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
 ui = ["dep:teamcraft-client-api"]
+# The Web Push service worker's entry points (`handlePush`, `handleNotificationClick`), exported
+# with wasm-bindgen for web/service-worker.js. Only has an effect on wasm32.
+service-worker = []
 # Tests against the running dev stack (README.md): server on 8081, Keycloak on 8080.
 integration = []
 
@@ -53,5 +56,56 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 # tantivy doesn't target wasm32; the browser falls back to scanning the local store.
 tantivy = { version = "0.27.0", default-features = false, features = ["lz4-compression", "stemmer"] }
 
-[dev-dependencies]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Browser bindings: gateway WebSocket, timers, IndexedDB, Web Crypto and Web Push. Same versions as
+# teamcraft-ui already pulls in.
+wasm-bindgen = "0.2.106"
+wasm-bindgen-futures = "0.4.56"
+js-sys = "0.3.83"
+web-sys = { version = "0.3.83", features = [
+  "AesGcmParams",
+  "AesKeyGenParams",
+  "BinaryType",
+  "Client",
+  "ClientQueryOptions",
+  "ClientType",
+  "Clients",
+  "CloseEvent",
+  "Crypto",
+  "CryptoKey",
+  "DomException",
+  "DomStringList",
+  "Event",
+  "ExtendableEvent",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "MessageEvent",
+  "Navigator",
+  "Notification",
+  "NotificationEvent",
+  "NotificationOptions",
+  "PushManager",
+  "PushSubscription",
+  "PushSubscriptionJson",
+  "PushSubscriptionOptionsInit",
+  "ServiceWorkerContainer",
+  "ServiceWorkerGlobalScope",
+  "ServiceWorkerRegistration",
+  "SubtleCrypto",
+  "WebSocket",
+  "Window",
+  "WindowClient",
+  "WorkerGlobalScope",
+] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# Store and crypto round trips in headless Chromium (tests/web.rs).
+wasm-bindgen-test = "0.3.56"

@@ -26,6 +26,7 @@ pub use enroll::{EnrollmentOptions, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::GatewayOutcome;
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use messaging::FlushReport;
+pub(crate) use messaging::decrypt_content;
 pub use notifications::TYPING_TIMEOUT_MS;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::SealedShare;
@@ -52,6 +53,14 @@ pub struct ClientSettings {
   pub history_page_size: u32,
   /// Attempts to land a commit when other members' commits win the epoch.
   pub max_commit_attempts: u32,
+  /// Delay per rank before a member commits a colleague's new device, and between retries while
+  /// the device has no key package yet.
+  pub device_add_stagger: std::time::Duration,
+  /// Checks before giving up on adding a new device that never uploads key packages.
+  pub device_add_attempts: u32,
+  /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
+  /// long a new device waits when the first-ranked members are away (presence isn't per device).
+  pub device_add_max_rank: u32,
 }
 
 pub struct Client<A, S> {
@@ -73,6 +82,9 @@ impl Default for ClientSettings {
       key_package_low_water: 10,
       history_page_size: 50,
       max_commit_attempts: 3,
+      device_add_stagger: std::time::Duration::from_secs(10),
+      device_add_attempts: 6,
+      device_add_max_rank: 3,
     }
   }
 }
@@ -276,7 +288,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  fn now_ms(&self) -> i64 {
+  pub(crate) fn now_ms(&self) -> i64 {
     self.clock.now_ms()
   }
 }

@@ -1,6 +1,7 @@
 //! The realtime gateway (docs/gateway.md): handshake with resume, and applying events.
 
 use futures_util::FutureExt;
+use futures_util::future::{Either, select};
 use teamcraft_proto::{
   DeviceActivity, GatewayClientMessage, GatewayEvent, GatewayServerMessage, MlsMessageKind,
 };
@@ -9,6 +10,8 @@ use super::Client;
 use super::groups::MlsProgress;
 use crate::api::{GatewayConnection, ServerApi};
 use crate::error::CoreError;
+use crate::platform;
+use crate::read_state;
 use crate::records::{self, GatewaySession};
 use crate::store::{LocalStore, Table};
 
@@ -112,20 +115,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// Runs a connection until it closes, sending heartbeats. Native only (needs a timer).
-  #[cfg(not(target_arch = "wasm32"))]
+  /// Runs a connection until it closes, sending a heartbeat every `heartbeat`.
   pub async fn run_gateway(
     &mut self,
     connection: &mut A::Gateway,
     heartbeat: std::time::Duration,
   ) -> Result<(), CoreError> {
-    let mut interval = tokio::time::interval(heartbeat);
+    let mut tick = Box::pin(platform::sleep(heartbeat));
     loop {
-      tokio::select! {
-        _ = interval.tick() => connection.send(&GatewayClientMessage::Heartbeat).await?,
-        maybe_frame = connection.receive() => match maybe_frame {
-          Some(frame) => self.handle_frame(frame?).await?,
-          None => return Ok(()),
+      let next = match select(Box::pin(connection.receive()), &mut tick).await {
+        Either::Left((maybe_frame, _)) => Some(maybe_frame),
+        Either::Right(((), _)) => None,
+      };
+      match next {
+        Some(Some(frame)) => self.handle_frame(frame?).await?,
+        Some(None) => return Ok(()),
+        None => {
+          connection.send(&GatewayClientMessage::Heartbeat).await?;
+          tick = Box::pin(platform::sleep(heartbeat));
         },
       }
     }
@@ -185,14 +192,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.note_typing(conversation_id, user_id);
         Ok(())
       },
-      // Not handled yet: adding a colleague's new device to shared groups (`add_missing_devices`).
-      GatewayEvent::DeviceAdd { .. }
-      // Thread follows and unread counts come from the server; the shell does not show them yet.
-      | GatewayEvent::ThreadUpdate { .. }
-      | GatewayEvent::ReadReceipt { .. }
-      | GatewayEvent::MessageAck { .. }
+      GatewayEvent::DeviceAdd { user_id, device_id } => self.queue_device_addition(user_id, device_id),
+      GatewayEvent::ThreadUpdate { .. } => self.refresh_read_state().await,
+      GatewayEvent::ReadReceipt {
+        conversation_id,
+        user_id,
+        message_id,
+      } => read_state::note_read_receipt(&self.store, conversation_id, user_id, message_id),
+      GatewayEvent::MessageAck {
+        conversation_id,
+        message_id,
+        user_id,
+      } => read_state::note_acknowledgement(&self.store, conversation_id, message_id, user_id),
       // Meetings are not shown by the shell yet.
-      | GatewayEvent::MeetingUpdate { .. }
+      GatewayEvent::MeetingUpdate { .. }
       | GatewayEvent::LobbyJoin { .. }
       | GatewayEvent::LobbyDecision { .. }
       // Call roster and ringing: the UI shell does not show calls from the server roster yet.

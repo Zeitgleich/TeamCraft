@@ -8,8 +8,7 @@ pub trait Clock {
   fn now_ms(&self) -> i64;
 }
 
-/// The operating system clock.
-#[cfg(not(target_arch = "wasm32"))]
+/// The operating system clock (`Date.now()` in the browser).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemClock;
 
@@ -29,6 +28,14 @@ impl Clock for SystemClock {
   }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl Clock for SystemClock {
+  fn now_ms(&self) -> i64 {
+    // Whole milliseconds since the epoch fit an f64 exactly.
+    js_sys::Date::now() as i64
+  }
+}
+
 impl ManualClock {
   pub fn new(now_ms: i64) -> Self {
     Self {
@@ -38,6 +45,13 @@ impl ManualClock {
 
   pub fn advance(&self, milliseconds: i64) {
     self.now_ms.fetch_add(milliseconds, Ordering::Relaxed);
+  }
+}
+
+/// One clock shared by several clients (tests that move time for all of them).
+impl<C: Clock + ?Sized> Clock for std::sync::Arc<C> {
+  fn now_ms(&self) -> i64 {
+    (**self).now_ms()
   }
 }
 

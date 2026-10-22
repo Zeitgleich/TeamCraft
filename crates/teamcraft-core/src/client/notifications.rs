@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use rand_core::OsRng;
-use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
   Base64Bytes, ConversationId, GatewayClientMessage, PushProvider, PushWakeUp, RegisterPushRequest, UserId,
@@ -12,10 +11,10 @@ use teamcraft_proto::{
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
+use crate::push_preview::{self, PUSH_KEY_RECORD};
 use crate::records;
 use crate::store::{LocalStore, Table};
 
-const PUSH_KEY_RECORD: &str = "push_key";
 /// How long a "typing" indicator stays without a new `typing_start` (the server throttles to 3 s).
 pub const TYPING_TIMEOUT_MS: i64 = 6_000;
 
@@ -47,12 +46,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Opens a sealed push payload (the app or its notification extension), naming the conversation
   /// and message to fetch and decrypt.
   pub fn open_push(&self, sealed: &[u8]) -> Result<PushWakeUp, CoreError> {
-    let stored: Base64Bytes = records::get_json(&self.store, Table::Account, PUSH_KEY_RECORD)?
-      .ok_or_else(|| CoreError::Corrupt("no push key registered".into()))?;
-    let key =
-      SymmetricKey::from_slice(stored.as_slice()).ok_or_else(|| CoreError::Corrupt("bad push key".into()))?;
-    let plaintext = open_wakeup(&key, sealed).map_err(|error| CoreError::Corrupt(error.to_string()))?;
-    serde_json::from_slice(plaintext.expose_secret()).map_err(|error| CoreError::Corrupt(error.to_string()))
+    push_preview::open_push_wakeup(&self.store, sealed)
   }
 
   /// The gateway frame announcing that the user types in a conversation (send it on the open

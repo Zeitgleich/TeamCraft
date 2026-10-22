@@ -24,6 +24,9 @@ pub(crate) const RENDEZVOUS_RESPONDER_AUTH: &str = "TeamCraft-v1 rendezvous resp
 pub(crate) const RENDEZVOUS_INITIATOR_TRANSPORT: &str = "TeamCraft-v1 rendezvous initiator transport";
 pub(crate) const RENDEZVOUS_RESPONDER_TRANSPORT: &str = "TeamCraft-v1 rendezvous responder transport";
 pub(crate) const RENDEZVOUS_PATH_HASH: &str = "TeamCraft-v1 rendezvous path hash";
+pub(crate) const LOCAL_STORE_LOOKUP_KEY: &str = "TeamCraft-v1 local store lookup key";
+pub(crate) const LOCAL_STORE_LOOKUP: &str = "TeamCraft-v1 local store lookup";
+pub(crate) const LOCAL_STORE_RECORD: &str = "TeamCraft-v1 local store record";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -40,7 +43,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 17] = [
+  const ALL_LABELS: [&str; 20] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -58,6 +61,9 @@ mod tests {
     RENDEZVOUS_INITIATOR_TRANSPORT,
     RENDEZVOUS_RESPONDER_TRANSPORT,
     RENDEZVOUS_PATH_HASH,
+    LOCAL_STORE_LOOKUP_KEY,
+    LOCAL_STORE_LOOKUP,
+    LOCAL_STORE_RECORD,
   ];
 
   #[test]

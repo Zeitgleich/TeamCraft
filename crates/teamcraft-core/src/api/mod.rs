@@ -6,6 +6,8 @@
 
 pub mod fake;
 mod http;
+#[cfg(target_arch = "wasm32")]
+mod web_socket;
 
 use std::future::Future;
 
@@ -29,6 +31,7 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, RegisterPushRequest,
 };
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, UnreadResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -119,6 +122,14 @@ pub trait ServerApi {
     conversation: ConversationId,
     query: &ListMessagesQuery,
   ) -> impl Future<Output = Result<ListMessagesResponse, ApiError>>;
+
+  /// Followed threads, most recently active first (`GET /threads`).
+  fn list_threads(
+    &self,
+    query: &ListThreadsQuery,
+  ) -> impl Future<Output = Result<ListThreadsResponse, ApiError>>;
+  /// Unread and mention counts (`GET /unread`).
+  fn unread(&self) -> impl Future<Output = Result<UnreadResponse, ApiError>>;
 
   fn post_mls_commit(
     &self,
