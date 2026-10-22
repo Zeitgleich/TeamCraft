@@ -75,6 +75,22 @@ pub trait Authenticator {
     maybe_body: Option<String>,
   ) -> LocalFuture<'_, Result<ApiResponse, AuthError>>;
 
+  /// Signs in with a local account (guests without an identity provider account): e-mail, password
+  /// and, when the account has one, the current code of the authenticator app. A refusal that asks for
+  /// the code comes back as `Denied("mfa_required")`. Only the browser build has local sign-in.
+  fn login_local(
+    &self,
+    _login: String,
+    _password: String,
+    _maybe_totp: Option<String>,
+  ) -> LocalFuture<'_, Result<(), AuthError>> {
+    Box::pin(async {
+      Err(AuthError::Unsupported(
+        "local accounts sign in in the browser".to_owned(),
+      ))
+    })
+  }
+
   /// A valid access token, refreshed when it is about to expire. Only the browser build has one to
   /// give: the client core runs in the page and signs its own requests. The desktop shell keeps
   /// tokens out of the webview.

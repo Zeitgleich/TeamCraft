@@ -23,6 +23,7 @@ openssl pkey -in call-signing.pem -pubout -out call-signing.pub.pem     # for th
 sfu_url = "https://sfu.example.com:4433/call"
 issuer = "https://chat.example.com"
 signing_key_path = "/etc/teamcraft/call-signing.pem"
+# sfu_control_url = "http://sfu.internal:8081"   # host controls; the registration token authenticates
 # join_token_ttl_secs = 60, call_idle_secs = 43200, ring_timeout_secs = 30
 # sfu_registration_token via TEAMCRAFT_CALLS__SFU_REGISTRATION_TOKEN
 ```

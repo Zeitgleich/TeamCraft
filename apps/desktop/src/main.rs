@@ -94,6 +94,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_media_devices,
       calls::commands::call_action,
       calls::commands::call_watch_video,
+      calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,
       notifications::notify_user,
       autostart::autostart_get,

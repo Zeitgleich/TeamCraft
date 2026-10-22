@@ -477,6 +477,9 @@ pub(crate) fn apply_control(
   content: &MessageContent,
   at_ms: i64,
 ) -> Result<(), CoreError> {
+  if let MessageContent::Bookmarks { items } = content {
+    return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
+  }
   let target = match content {
     MessageContent::Edit { target, .. }
     | MessageContent::Delete { target }
@@ -515,4 +518,9 @@ pub(crate) fn apply_control(
   }
   store.upsert_message(&stored)?;
   Ok(())
+}
+
+/// Where a conversation's bookmarks bar is kept: the newest `Bookmarks` message that was applied.
+pub(crate) fn bookmarks_key(conversation: ConversationId) -> String {
+  format!("bookmarks/{conversation}")
 }

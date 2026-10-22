@@ -10,7 +10,9 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
+use teamcraft_proto::{
+  BackgroundId, Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId,
+};
 
 /// Tombstones older than this are dropped when merging (every device has synced by then).
 pub const TOMBSTONE_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
@@ -34,6 +36,10 @@ pub struct AccountData {
   /// entry.
   #[serde(default)]
   pub pins: BTreeMap<String, Stamped<PinnedKey>>,
+  /// The user's own call background pictures, keyed by their ID: the key that opens each
+  /// encrypted picture lives only here.
+  #[serde(default)]
+  pub backgrounds: BTreeMap<String, Stamped<BackgroundEntry>>,
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
@@ -75,6 +81,17 @@ pub struct UnreadMark {
   pub from_message: MessageId,
 }
 
+/// One of the user's own call backgrounds: the encrypted picture on the server and its key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundEntry {
+  pub name: String,
+  /// The picture's key (an attachment key, e2ee.md §4.5).
+  pub key: Base64Bytes,
+  pub ciphertext_sha256: Base64Bytes,
+  /// Size of the picture (a JPEG) before encryption.
+  pub size_bytes: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedSearchEntry {
   pub name: String,
@@ -102,6 +119,7 @@ impl AccountData {
     merge_map(&mut self.saved_searches, &other.saved_searches);
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
+    merge_map(&mut self.backgrounds, &other.backgrounds);
     // The root never changes; the first one a device of the user verified stays.
     if self.maybe_workspace_root.is_none() {
       self.maybe_workspace_root = other.maybe_workspace_root.clone();
@@ -124,6 +142,9 @@ impl AccountData {
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
     self
       .marked_unread
+      .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+    self
+      .backgrounds
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
   }
 
@@ -284,6 +305,49 @@ impl AccountData {
         is_removed: false,
       },
     );
+  }
+
+  /// The user's backgrounds, oldest first (IDs grow with time).
+  pub fn backgrounds(&self) -> Vec<(BackgroundId, &BackgroundEntry)> {
+    let mut backgrounds: Vec<_> = self
+      .backgrounds
+      .iter()
+      .filter(|(_, entry)| !entry.is_removed)
+      .filter_map(|(id, entry)| Some((id.parse::<BackgroundId>().ok()?, &entry.value)))
+      .collect();
+    backgrounds.sort_by_key(|(id, _)| *id);
+    backgrounds
+  }
+
+  pub fn background(&self, id: BackgroundId) -> Option<&BackgroundEntry> {
+    self
+      .backgrounds
+      .get(&id.to_string())
+      .filter(|entry| !entry.is_removed)
+      .map(|entry| &entry.value)
+  }
+
+  pub fn add_background(&mut self, id: BackgroundId, entry: BackgroundEntry, now_ms: i64) {
+    self.backgrounds.insert(
+      id.to_string(),
+      Stamped {
+        value: entry,
+        updated_at_ms: now_ms,
+        is_removed: false,
+      },
+    );
+  }
+
+  /// Marks the background removed; returns whether it existed.
+  pub fn remove_background(&mut self, id: BackgroundId, now_ms: i64) -> bool {
+    match self.backgrounds.get_mut(&id.to_string()) {
+      Some(entry) if !entry.is_removed => {
+        entry.is_removed = true;
+        entry.updated_at_ms = now_ms;
+        true
+      },
+      _ => false,
+    }
   }
 
   pub fn delete_saved_search(&mut self, id: u64, now_ms: i64) {

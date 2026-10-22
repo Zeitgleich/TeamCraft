@@ -11,6 +11,7 @@ use teamcraft_client_api::remote::{
   MessageWindow,
 };
 use teamcraft_crypto::backup::Argon2Settings;
+use teamcraft_media::effects::normalize_background_file;
 use teamcraft_proto::{ConversationId, UserId};
 
 use super::runtime::{CoreConfig, CoreRuntime, KeyChoice, TokenCache};
@@ -181,6 +182,22 @@ pub async fn core_thread(
 
 #[tauri::command]
 pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Result<(), CommandError> {
+  let action = match action {
+    // A picture of the user's own: re-encoded here (decoded, scaled to Full HD, JPEG without
+    // metadata such as the photo's location) before it is encrypted and uploaded.
+    ChatAction::AddBackgroundImage { name, picture } => {
+      let picture =
+        tauri::async_runtime::spawn_blocking(move || normalize_background_file(picture.as_slice()))
+          .await
+          .map_err(|error| error.to_string())?
+          .map_err(|error| error.to_string())?;
+      ChatAction::AddBackgroundImage {
+        name,
+        picture: picture.into(),
+      }
+    },
+    other => other,
+  };
   Ok(host.current()?.action(action).await?)
 }
 

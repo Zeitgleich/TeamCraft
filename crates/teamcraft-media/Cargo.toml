@@ -60,7 +60,7 @@ gstreamer = ["native", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-vide
 
 # Background effects (blur, background images) as WGSL compute shaders on wgpu: Vulkan, Metal,
 # D3D12 natively, WebGPU in the browser.
-effects = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster"]
+effects = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster", "dep:zune-jpeg", "dep:zune-png", "dep:jpeg-encoder"]
 # Person segmentation for the effects with tract (pure-Rust ONNX inference; native and wasm).
 segmentation = ["effects", "dep:tract-onnx"]
 
@@ -91,6 +91,8 @@ zune-jpeg = { version = "0.4.21", optional = true }
 gstreamer = { version = "0.25.4", optional = true }
 gstreamer-app = { version = "0.25.2", optional = true }
 gstreamer-video = { version = "0.25.4", optional = true }
+# The user's background pictures (PNG; JPEG through zune-jpeg): pure Rust, MIT/Apache-2.0/Zlib.
+zune-png = { version = "0.4.10", optional = true }
 # JPEG for webviews without WebCodecs (decoded remote video re-encoded): pure Rust, MIT/Apache-2.0.
 jpeg-encoder = { version = "0.7.1", optional = true }
 # Effects: GPU access (MIT/Apache-2.0), plain-old-data casts for its buffers, and a oneshot for

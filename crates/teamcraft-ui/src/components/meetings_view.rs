@@ -8,6 +8,7 @@ use teamcraft_proto::{LobbyEntry, MeetingId, MeetingResponse, MeetingStatus, Rsv
 use crate::calls::{CallKind, CallRequest};
 use crate::clock::{format_date, format_local_datetime_input, format_time, local_day, now_ms};
 use crate::components::icons::{Icon, IconName};
+use crate::components::meeting_controls::{HostControls, RsvpList};
 use crate::components::modal::Modal;
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
@@ -138,6 +139,12 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
     .unwrap_or_default();
   let attendees = attendee_summary(&meeting, state.read(|backend| backend.users()));
   let guest_link = RwSignal::new(None::<String>);
+  let show_responses = RwSignal::new(false);
+  let response_total = meeting.attendees.len();
+  let attendees_for_list = meeting.attendees.clone();
+  let conversation = meeting.conversation_id;
+  // Host controls matter while the meeting runs (a little before the start counts, people dial in early).
+  let is_live_host = is_host && !over && meeting.starts_at.0 - 15 * 60_000 <= now_ms();
   let meeting_for_join = meeting.clone();
   let has_recurrence = meeting.maybe_recurrence.is_some();
   let has_lobby = hosts_lobby(&meeting, me);
@@ -223,6 +230,13 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
           }
         })
       }}
+      <button class="btn btn-quiet btn-small" aria-expanded=move || show_responses.get().to_string() on:click=move |_| show_responses.update(|open| *open = !*open)>
+        {move || i18n.t_with("meetings-responses", &[("count", &response_total.to_string())])}
+      </button>
+      <Show when=move || show_responses.get() fallback=|| ()>
+        <RsvpList attendees=attendees_for_list.clone() />
+      </Show>
+      {is_live_host.then(|| view! { <HostControls meeting=id conversation=conversation /> })}
       {has_lobby.then(|| view! { <Lobby meeting=id /> })}
     </li>
   }
