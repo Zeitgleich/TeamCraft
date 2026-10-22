@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="call_deafen">Deafen</string>
+  <string name="call_undeafen">Undeafen</string>
+  <string name="call_camera_on">Camera on</string>
+  <string name="call_camera_off">Camera off</string>
+  <string name="call_camera_flip">Switch camera</string>
+  <string name="call_speaker">Speaker</string>
+  <string name="call_video_waiting">Video starting…</string>
+  <string name="call_video_camera">Camera of a participant</string>
+  <string name="call_video_screen">Shared screen of a participant</string>
+  <string name="call_prejoin_title">Call %1$s</string>
+  <string name="call_prejoin_camera">Camera on</string>
+  <string name="call_prejoin_muted">Join muted</string>
+  <string name="call_prejoin_join">Join</string>
+  <string name="channel_mention_confirm_title">Notify everyone?</string>
+  <plurals name="channel_mention_confirm">
+    <item quantity="one">This message notifies %d member.</item>
+    <item quantity="other">This message notifies all %d members.</item>
+  </plurals>
+  <string name="mention_title">Mentions on this device</string>
+  <string name="mention_first_name">My first name counts as a mention</string>
+  <string name="mention_channel">Notify me for @channel, @here and @all</string>
+  <string name="mention_keywords">Keywords</string>
+  <string name="mention_keywords_hint">Comma-separated. Messages with these words count as mentions when they reach this phone.</string>
+  <string name="mention_confirm_over">Confirm @channel above this many members</string>
+  <string name="mention_confirm_over_hint">0 never asks.</string>
+  <string name="search_prefetch_title">Search</string>
+  <string name="search_prefetch">Download search history on Wi-Fi while charging</string>
+  <string name="search_prefetch_hint">Keeps older messages searchable without a connection. The search index stays encrypted on this phone.</string>
+  <string name="search_prefetch_cap">Up to %1$d MB</string>
+</resources>

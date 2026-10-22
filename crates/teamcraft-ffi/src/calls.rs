@@ -3,6 +3,7 @@
 //! its own. The app integrates the call with the platform (Android Telecom) and drives it through
 //! [`CallSession`]; [`CallListener`] tells it about rings and the call's state.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use teamcraft_core::client::CallKeySigner;
@@ -14,16 +15,27 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::openh264_library;
+use teamcraft_media::video::{VideoResolution, simulcast_layers};
+use teamcraft_media::video_capture::CaptureFormat;
+use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, UserId,
+  AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, GatewayEvent, MediaCapabilities,
+  MediaStreamId, UserId, VideoCodec, VideoTrack, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use crate::error::TeamCraftError;
+use crate::video::{AppCamera, CameraFrame, CameraSlot, VideoFrameRgba, i420_to_rgba};
 
 /// Worker threads of a call's runtime: network and engine; audio has its own thread.
 const CALL_WORKER_THREADS: usize = 2;
+/// Simulcast layers a phone sends: its uplink and encoder are small.
+const CAMERA_LAYERS: u8 = 2;
+const CAMERA_BITRATE_BPS: u32 = 800_000;
+/// The highest layer a phone receives of other devices' tracks (0 is the smallest).
+const RECEIVE_MAX_LAYER: u8 = 1;
 
 /// Told about rings and about the call this device is in. Called from the engine and call
 /// threads; implementations hand over to their UI thread.
@@ -36,10 +48,27 @@ pub trait CallListener: Send + Sync {
   fn on_ring_ended(&self, conversation_id: String);
 }
 
+/// Told about other devices' video in the call and their decoded frames (on decoder threads).
+#[uniffi::export(with_foreign)]
+pub trait VideoListener: Send + Sync {
+  /// The other devices' video tracks now in the call; each is received and decoded.
+  fn on_video_tracks(&self, tracks: Vec<VideoTrackInfo>);
+  fn on_video_frame(&self, frame: VideoFrameRgba);
+}
+
 /// The app's handle on the call this device is in.
 #[derive(uniffi::Object)]
 pub struct CallSession {
   controls: mpsc::UnboundedSender<Control>,
+  camera: CameraSlot,
+}
+
+/// Another device's video track.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct VideoTrackInfo {
+  pub stream_id: u32,
+  pub device_id: String,
+  pub is_screen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -47,6 +76,10 @@ pub struct CallStateInfo {
   pub conversation_id: String,
   pub phase: CallPhase,
   pub is_muted: bool,
+  /// Nothing of the call is played.
+  pub is_deafened: bool,
+  /// This device sends its camera.
+  pub is_camera_on: bool,
   /// End-to-end encrypted with every participant's device verified.
   pub is_secured: bool,
   /// Other devices in the call.
@@ -106,8 +139,25 @@ struct HubState {
 
 enum Control {
   SetMuted(bool),
+  SetDeafened(bool),
+  StartCamera {
+    format: CaptureFormat,
+    done: oneshot::Sender<Result<(), TeamCraftError>>,
+  },
+  StopCamera,
+  SetVideoListener(Arc<dyn VideoListener>),
   Leave,
 }
+
+/// Other devices' tracks being watched, and who hears about them.
+#[derive(Default)]
+struct RemoteVideo {
+  tracks: BTreeMap<MediaStreamId, VideoTrackInfo>,
+  listener: SharedVideoListener,
+}
+
+/// The decoder threads' sinks read the listener when a frame arrives, so it may come later.
+type SharedVideoListener = Arc<Mutex<Option<Arc<dyn VideoListener>>>>;
 
 /// Lets the media layer sign with the core's signer.
 struct CoreSigner(CallKeySigner);
@@ -116,6 +166,40 @@ struct CoreSigner(CallKeySigner);
 impl CallSession {
   pub fn set_muted(&self, is_muted: bool) {
     self.send(Control::SetMuted(is_muted));
+  }
+
+  /// Stops playing the call (and mutes, as on desktop).
+  pub fn set_deafened(&self, is_deafened: bool) {
+    self.send(Control::SetDeafened(is_deafened));
+  }
+
+  /// Other devices' video and frames go to `listener` from now on.
+  pub fn set_video_listener(&self, listener: Arc<dyn VideoListener>) {
+    self.send(Control::SetVideoListener(listener));
+  }
+
+  /// Publishes the camera: the app pushes frames of this size and rate with
+  /// [`CallSession::push_camera_frame`] (upright after the frame's rotation). Encoded in hardware
+  /// (MediaCodec) where the phone can.
+  pub async fn start_camera(&self, width: u16, height: u16, framerate: u8) -> Result<(), TeamCraftError> {
+    let (done, done_rx) = oneshot::channel();
+    let format = CaptureFormat {
+      resolution: upright(width, height),
+      framerate,
+    };
+    self.send(Control::StartCamera { format, done });
+    done_rx.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
+  /// One camera image; `false` while the camera isn't published (or the image is malformed).
+  /// Called from the camera's thread; doesn't wait for the call.
+  pub fn push_camera_frame(&self, frame: CameraFrame) -> bool {
+    self.camera.push(&frame)
+  }
+
+  pub fn stop_camera(&self) {
+    self.camera.clear();
+    self.send(Control::StopCamera);
   }
 
   /// Leaves the call; the listener gets the ended state.
@@ -184,7 +268,10 @@ pub(crate) async fn join(
   hub: CallHub,
 ) -> Result<Arc<CallSession>, TeamCraftError> {
   let conversation = preparation.conversation;
+  let own_device = preparation.device_id;
   let config = native_config(preparation)?;
+  let camera = CameraSlot::default();
+  let thread_camera = camera.clone();
   let (controls, control_rx) = mpsc::unbounded_channel();
   let (joined, joined_rx) = oneshot::channel();
   lock(&hub.inner).maybe_active = Some(conversation);
@@ -192,6 +279,8 @@ pub(crate) async fn join(
     conversation_id: conversation.to_string(),
     phase: CallPhase::Connecting,
     is_muted: false,
+    is_deafened: false,
+    is_camera_on: false,
     is_secured: false,
     participant_count: 0,
     maybe_privacy_code: None,
@@ -223,7 +312,12 @@ pub(crate) async fn join(
           },
         };
         let _ = joined.send(Ok(()));
-        run_call(call, control_rx, &thread_hub, &mut state).await;
+        let context = CallContext {
+          own_device,
+          camera: thread_camera,
+          hub: thread_hub,
+        };
+        run_call(call, control_rx, &context, &mut state).await;
       });
     });
   if let Err(error) = spawned {
@@ -235,31 +329,43 @@ pub(crate) async fn join(
     warn!(%error, "joining the call failed");
     hub.report(ended(conversation, CallEndReason::Failed));
   }
-  result.map(|()| Arc::new(CallSession { controls }))
+  result.map(|()| Arc::new(CallSession { controls, camera }))
+}
+
+/// What the call thread needs besides the call.
+struct CallContext {
+  own_device: DeviceId,
+  camera: CameraSlot,
+  hub: CallHub,
 }
 
 /// Applies the app's controls and reports the engine's events until the call ends.
 async fn run_call(
   mut call: NativeCall,
   mut controls: mpsc::UnboundedReceiver<Control>,
-  hub: &CallHub,
+  context: &CallContext,
   state: &mut CallStateInfo,
 ) {
   let mut reason = CallEndReason::Left;
+  let mut video = RemoteVideo::default();
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
-        Some(Control::SetMuted(is_muted)) => call.set_muted(is_muted),
         // Leave asked for, or the app dropped the session.
         Some(Control::Leave) | None => break,
+        Some(control) => {
+          apply_control(&call, control, context, state, &video).await;
+          context.hub.report(state.clone());
+        },
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
+          watch_video(&call, &event, context.own_device, &mut video);
           if let Some(end) = apply_event(state, event) {
             reason = end;
             break;
           }
-          hub.report(state.clone());
+          context.hub.report(state.clone());
         },
         None => {
           reason = CallEndReason::Failed;
@@ -268,12 +374,121 @@ async fn run_call(
       },
     }
   }
+  context.camera.clear();
   if let Err(error) = call.leave().await {
     info!(%error, "the call ended with an error");
   }
   state.phase = CallPhase::Ended;
   state.maybe_end_reason = Some(reason);
-  hub.report(state.clone());
+  context.hub.report(state.clone());
+}
+
+async fn apply_control(
+  call: &NativeCall,
+  control: Control,
+  context: &CallContext,
+  state: &mut CallStateInfo,
+  video: &RemoteVideo,
+) {
+  match control {
+    Control::SetMuted(is_muted) => call.set_muted(is_muted),
+    Control::SetDeafened(is_deafened) => {
+      call.set_deafened(is_deafened);
+      state.is_deafened = is_deafened;
+    },
+    Control::StartCamera { format, done } => {
+      let result = start_camera(call, format, context.camera.clone()).await;
+      state.is_camera_on = result.is_ok();
+      // The app may have stopped waiting; the state report tells it anyway.
+      let _ = done.send(result);
+    },
+    Control::StopCamera => {
+      call.stop_video(VideoTrackKind::Camera);
+      state.is_camera_on = false;
+    },
+    Control::SetVideoListener(listener) => {
+      listener.on_video_tracks(video.tracks.values().cloned().collect());
+      *lock_listener(&video.listener) = Some(listener);
+    },
+    Control::Leave => {},
+  }
+}
+
+async fn start_camera(
+  call: &NativeCall,
+  format: CaptureFormat,
+  camera: CameraSlot,
+) -> Result<(), TeamCraftError> {
+  let config = VideoSendConfig {
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(AppCamera::new(format, camera)),
+    layers: simulcast_layers(
+      format.resolution,
+      format.framerate,
+      CAMERA_BITRATE_BPS,
+      CAMERA_LAYERS,
+    ),
+    encoders: preferred_encoders(),
+    maybe_filter: None,
+  };
+  call
+    .start_video(config)
+    .await
+    .map_err(|error| TeamCraftError::Call(error.to_string()))
+}
+
+/// Receives other devices' tracks as they come and go, and tells the app.
+fn watch_video(call: &NativeCall, event: &CallEngineEvent, own_device: DeviceId, video: &mut RemoteVideo) {
+  match event {
+    CallEngineEvent::VideoPublished(track) if track.device_id != own_device => {
+      let stream_id = track.stream_id;
+      let listener = video.listener.clone();
+      call.watch_video(
+        stream_id,
+        Some(RECEIVE_MAX_LAYER),
+        Box::new(move |frame| {
+          let maybe_listener = lock_listener(&listener).clone();
+          if let Some(listener) = maybe_listener {
+            let resolution = frame.resolution();
+            listener.on_video_frame(VideoFrameRgba {
+              stream_id: stream_id.0,
+              width: u32::from(resolution.width),
+              height: u32::from(resolution.height),
+              rgba: i420_to_rgba(&frame),
+            });
+          }
+        }),
+      );
+      video.tracks.insert(stream_id, track_info(track));
+    },
+    CallEngineEvent::VideoUnpublished(stream_id) => {
+      if video.tracks.remove(stream_id).is_none() {
+        return;
+      }
+      call.unwatch_video(*stream_id);
+    },
+    _ => return,
+  }
+  let maybe_listener = lock_listener(&video.listener).clone();
+  if let Some(listener) = maybe_listener {
+    listener.on_video_tracks(video.tracks.values().cloned().collect());
+  }
+}
+
+fn track_info(track: &VideoTrack) -> VideoTrackInfo {
+  VideoTrackInfo {
+    stream_id: track.stream_id.0,
+    device_id: track.device_id.to_string(),
+    is_screen: track.kind == VideoTrackKind::Screen,
+  }
+}
+
+/// Camera frames arrive upright, so a portrait phone sends portrait video; I420 needs even sides.
+fn upright(width: u16, height: u16) -> VideoResolution {
+  VideoResolution {
+    width: width & !1,
+    height: height & !1,
+  }
 }
 
 /// Updates the call's state; returns why the call ends if the event ends it.
@@ -292,6 +507,7 @@ fn apply_event(state: &mut CallStateInfo, event: CallEngineEvent) -> Option<Call
       state.maybe_privacy_code = Some(privacy_code);
     },
     CallEngineEvent::MuteChanged(is_muted) => state.is_muted = is_muted,
+    CallEngineEvent::DeafenChanged(is_deafened) => state.is_deafened = is_deafened,
     CallEngineEvent::RemovedByHost { .. } => return Some(CallEndReason::RemovedByHost),
     CallEngineEvent::EndedByHost { .. } => return Some(CallEndReason::EndedByHost),
     CallEngineEvent::Error(error) => warn!(error_code = ?error.error_code, "the SFU rejected a call request"),
@@ -305,6 +521,8 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     conversation_id: conversation.to_string(),
     phase: CallPhase::Ended,
     is_muted: false,
+    is_deafened: false,
+    is_camera_on: false,
     is_secured: false,
     participant_count: 0,
     maybe_privacy_code: None,
@@ -312,14 +530,22 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
   }
 }
 
-/// Audio-only for now: the phone's default microphone and output (Telecom routes them).
+/// The phone's default microphone and output (Telecom routes them); H.264 video, sent from the
+/// app's camera frames and received once Cisco's OpenH264 is installed for decoding.
 fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamCraftError> {
+  let video_decoders = if openh264_library::is_available() {
+    vec![VideoCodec::H264]
+  } else {
+    Vec::new()
+  };
   let engine = CallEngineConfig {
     user_id: preparation.user_id,
     device_id: preparation.device_id,
     capabilities: MediaCapabilities {
       audio_codecs: vec![AudioCodec::Opus],
-      ..MediaCapabilities::default()
+      video_encoders: vec![VideoCodec::H264],
+      video_decoders,
+      max_simulcast_layers: CAMERA_LAYERS,
     },
     bwe: BweConfig::default(),
   };
@@ -351,6 +577,11 @@ impl CallBindingSigner for CoreSigner {
   ) -> Result<SignedCallKeyBinding, CallBindingError> {
     self.0.sign_call_key_binding(call_id, dave_public_key, not_after)
   }
+}
+
+fn lock_listener(listener: &SharedVideoListener) -> MutexGuard<'_, Option<Arc<dyn VideoListener>>> {
+  // A single assignment per update; a poisoned lock holds a consistent value.
+  listener.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {

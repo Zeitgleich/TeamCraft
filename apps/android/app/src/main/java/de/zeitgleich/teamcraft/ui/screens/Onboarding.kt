@@ -33,6 +33,9 @@ import de.zeitgleich.teamcraft.R
 
 private const val MIN_PASSPHRASE_LENGTH = 12
 
+/** Share of the screen width the link QR code takes. */
+private const val QR_CODE_WIDTH_FRACTION = 0.7f
+
 @Composable
 fun LoadingScreen() {
   Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -125,6 +128,8 @@ fun LinkThisDeviceScreen(code: String, maybeShortCode: String?, onCancel: () -> 
     Text(stringResource(R.string.link_new_title), style = MaterialTheme.typography.headlineSmall)
     Text(stringResource(R.string.link_new_hint), style = MaterialTheme.typography.bodyMedium)
     // The code holds the handshake key: shown on this screen only, never sent anywhere else.
+    QrCode(code, Modifier.fillMaxWidth(QR_CODE_WIDTH_FRACTION))
+    Text(stringResource(R.string.link_qr_hint), style = MaterialTheme.typography.bodySmall)
     SelectionContainer {
       Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
     }

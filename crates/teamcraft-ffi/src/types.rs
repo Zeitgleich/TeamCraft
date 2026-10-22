@@ -107,6 +107,26 @@ pub struct PushNotification {
   pub is_silent: bool,
 }
 
+/// Device-local mention preferences (as on desktop): the server routes push by explicit mentions,
+/// these are applied to the decrypted text on the device.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MentionSettings {
+  pub is_first_name_mention: bool,
+  pub do_channel_mentions_notify: bool,
+  /// Words that count as a mention (case-insensitive, matched anywhere in the text).
+  pub keywords: Vec<String>,
+}
+
+/// What a search segment prefetch did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SegmentPrefetchResult {
+  pub fetched: u32,
+  /// Left out because they would exceed the size cap.
+  pub skipped: u32,
+  /// Bytes of the segments kept on this device.
+  pub stored_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PushService {
   Fcm,
@@ -212,4 +232,25 @@ impl From<Presence> for PresenceStatus {
 pub struct OrgRecoveryStart {
   pub request_id: String,
   pub verification_code: String,
+}
+
+/// Desktop's defaults: the first name and `@channel` notify, no keywords.
+impl Default for MentionSettings {
+  fn default() -> Self {
+    Self {
+      is_first_name_mention: true,
+      do_channel_mentions_notify: true,
+      keywords: Vec::new(),
+    }
+  }
+}
+
+impl From<teamcraft_core::client::SegmentPrefetch> for SegmentPrefetchResult {
+  fn from(prefetch: teamcraft_core::client::SegmentPrefetch) -> Self {
+    Self {
+      fetched: u32::try_from(prefetch.fetched).unwrap_or(u32::MAX),
+      skipped: u32::try_from(prefetch.skipped).unwrap_or(u32::MAX),
+      stored_bytes: prefetch.stored_bytes,
+    }
+  }
 }

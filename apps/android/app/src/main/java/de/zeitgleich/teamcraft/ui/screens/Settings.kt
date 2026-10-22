@@ -14,6 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,6 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.LaunchedEffect
@@ -73,6 +76,8 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
       HorizontalDivider()
       Heading(R.string.push_title)
       NotificationSettingsSection(viewModel)
+      Heading(R.string.mention_title)
+      MentionSettingsSection(viewModel)
       val service = viewModel.pushService()
       Text(
         stringResource(
@@ -84,6 +89,10 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
           },
         ),
       )
+
+      HorizontalDivider()
+      Heading(R.string.search_prefetch_title)
+      SearchPrefetchSection(viewModel.segmentPrefetch)
 
       HorizontalDivider()
       Heading(R.string.fingerprint_title)
@@ -114,6 +123,27 @@ private fun ApproveDevice(viewModel: MainViewModel) {
   var maybeShortCode by rememberSaveable { mutableStateOf<String?>(null) }
   var isDone by rememberSaveable { mutableStateOf(false) }
   var hasFailed by rememberSaveable { mutableStateOf(false) }
+  var isScanning by rememberSaveable { mutableStateOf(false) }
+  val approve: (String) -> Unit = { linkCode ->
+    hasFailed = false
+    scope.launch {
+      viewModel.approveLink(linkCode).onSuccess { maybeShortCode = it }.onFailure { hasFailed = true }
+    }
+  }
+  if (isScanning) {
+    Dialog(onDismissRequest = { isScanning = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+      Surface(Modifier.fillMaxSize()) {
+        QrScanner(
+          onScanned = { scanned ->
+            isScanning = false
+            code = scanned
+            approve(scanned)
+          },
+          onCancel = { isScanning = false },
+        )
+      }
+    }
+  }
   Heading(R.string.approve_title)
   when {
     isDone -> Text(stringResource(R.string.approve_done))
@@ -135,14 +165,10 @@ private fun ApproveDevice(viewModel: MainViewModel) {
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
       )
-      Button(
-        onClick = {
-          scope.launch {
-            viewModel.approveLink(code).onSuccess { maybeShortCode = it }.onFailure { hasFailed = true }
-          }
-        },
-        enabled = code.isNotBlank(),
-      ) { Text(stringResource(R.string.approve_start)) }
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = { approve(code) }, enabled = code.isNotBlank()) { Text(stringResource(R.string.approve_start)) }
+        OutlinedButton(onClick = { isScanning = true }) { Text(stringResource(R.string.link_scan_qr)) }
+      }
     }
   }
   if (hasFailed) Text(stringResource(R.string.error_generic), color = MaterialTheme.colorScheme.error)

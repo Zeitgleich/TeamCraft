@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.PickedFile
 import uniffi.teamcraft_ffi.AccountState
@@ -190,7 +191,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** Joins (or starts) a conversation's call, e.g. a meeting's. */
-  fun startCall(conversationId: String, displayName: String) = graph.calls.startCall(conversationId, displayName)
+  fun startCall(conversationId: String, displayName: String, options: CallOptions = CallOptions()) =
+    graph.calls.startCall(conversationId, displayName, options)
+
+  /** Ask before `@channel` in conversations with more members than this (0 = never). */
+  fun confirmChannelOver(): Int = graph.mentionPrefs.confirmChannelOver
+
+  val mentionPrefs get() = graph.mentionPrefs
+
+  val segmentPrefetch get() = graph.segmentPrefetch
 
   fun pushService(): PushService? = graph.push.activeService()
 

@@ -12,8 +12,10 @@ import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.push.PushManager
+import de.zeitgleich.teamcraft.search.SegmentPrefetch
 import uniffi.teamcraft_ffi.AccountState
 
 /** Process-wide objects, shared by the activity, receivers and services. */
@@ -22,8 +24,10 @@ class AppGraph(context: Context) {
   val auth = AuthRepository(context)
   val core = CoreRepository(context, auth)
   val notifier = MessageNotifier(context)
-  val push = PushManager(context, core, notifier, scope)
+  val mentionPrefs = MentionPrefs(context)
+  val push = PushManager(context, core, notifier, mentionPrefs, scope)
   val calls = CallController(context, core, scope)
+  val segmentPrefetch = SegmentPrefetch(context)
 }
 
 class TeamCraftApplication : Application() {
@@ -33,6 +37,7 @@ class TeamCraftApplication : Application() {
   override fun onCreate() {
     super.onCreate()
     graph = AppGraph(this)
+    graph.segmentPrefetch.schedule()
     ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(graph))
   }
 

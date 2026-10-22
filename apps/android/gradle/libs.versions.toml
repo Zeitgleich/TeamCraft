@@ -15,6 +15,9 @@ unifiedpush = "3.3.5"
 jna = "5.15.0"
 coreTelecom = "1.0.0"
 carApp = "1.7.0"
+camerax = "1.4.1"
+zxing = "3.5.3"
+work = "2.10.0"
 junit = "4.13.2"
 androidxTestRunner = "1.6.2"
 androidxTestJunit = "1.2.1"
@@ -40,6 +43,11 @@ unifiedpush-connector = { module = "org.unifiedpush.android:connector", version.
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 androidx-core-telecom = { module = "androidx.core:core-telecom", version.ref = "coreTelecom" }
 androidx-car-app = { module = "androidx.car.app:app", version.ref = "carApp" }
+androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
+androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
+androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+androidx-work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }
 androidx-test-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestJunit" }
