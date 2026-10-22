@@ -196,7 +196,8 @@ pub enum BookmarkKind {
   File,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Ordered from least to most severe, so `level >= minimum` filters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LogLevel {
   Debug,
   Info,
@@ -231,11 +232,22 @@ impl LogLevel {
 /// Shows a message of an integration channel as one log line: the bridge writes `[LEVEL] text`
 /// (or a bare `ERROR text`), which becomes a level and the text without the prefix. Lines without a
 /// level are `info`.
+///
+/// A batch (several lines, usually in a code fence, see `docs/bridge.md`) keeps its lines as they
+/// are with the fence removed; its level is the worst of its lines and [`crate::log::log_entries`]
+/// splits it again for display.
 pub fn as_log_line(mut message: Message) -> Message {
   if message.kind != MessageKind::User {
     return message;
   }
-  let body = message.body.trim_start();
+  if let Some(lines) = crate::log::batch_lines(&message.body).filter(|lines| lines.len() > 1) {
+    message.kind = MessageKind::Log(crate::log::worst_level(&lines));
+    message.body = lines.join("\n");
+    return message;
+  }
+  let single_line =
+    crate::log::batch_lines(&message.body).and_then(|mut lines| (lines.len() == 1).then(|| lines.remove(0)));
+  let body = single_line.as_deref().unwrap_or(&message.body).trim_start();
   let (level, text) = match split_level(body) {
     Some((level, text)) => (level, text.to_owned()),
     None => (LogLevel::Info, body.to_owned()),
@@ -245,7 +257,7 @@ pub fn as_log_line(mut message: Message) -> Message {
   message
 }
 
-fn split_level(body: &str) -> Option<(LogLevel, &str)> {
+pub(crate) fn split_level(body: &str) -> Option<(LogLevel, &str)> {
   let first_end = body.find(char::is_whitespace).unwrap_or(body.len());
   let (first, rest) = body.split_at(first_end);
   let word = first.trim_matches(['[', ']', ':']);
