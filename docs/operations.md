@@ -1,7 +1,102 @@
 # Operations
 
-What an operator needs to run TeamCraft: the pieces, health checks, backups, upgrades and secret
-rotation. Configuration reference: `teamcraft.example.toml`; images: `containers/README.md`.
+What an operator needs to run TeamCraft: a quickstart for a fresh server, the pieces, health checks,
+backups, upgrades and secret rotation. Configuration reference: `teamcraft.example.toml`; images:
+`containers/README.md`; releases: `docs/release.md`.
+
+## Quickstart: a fresh server in 15 minutes
+
+The reference deployment is an Ansible playbook (kept in a separate deployment repository next to
+this one, `teamcraft-deploy`) that installs TeamCraft on one Debian VPS with **rootless Podman and
+Quadlet**, each service under its own unprivileged user:
+
+| Service             | User        | Listens on                                                |
+|---------------------|-------------|-----------------------------------------------------------|
+| Caddy (TLS, HTTP/3) | `tc-proxy`  | `80/tcp`, `443/tcp+udp`, IPv4 and IPv6                    |
+| `teamcraft-server`  | `tc-server` | `127.0.0.1:8080` (behind Caddy)                           |
+| `teamcraft-sfu`     | `tc-sfu`    | `4433/udp` (QUIC) IPv4 and IPv6; `127.0.0.1:8081` control |
+| PostgreSQL          | `tc-db`     | `127.0.0.1:5432`                                          |
+
+Not on the VPS: the OIDC provider (e.g. Keycloak) and the S3 storage.
+
+### What you need
+
+- A VPS with **Debian 13 (trixie)**, 2 vCPU, 4 GB RAM, 20 GB disk, a public IPv4 **and** IPv6 address,
+  SSH access as a user with `sudo`.
+- Two DNS names with A and AAAA records pointing at it: `chat.example.com` (API, web client) and
+  `sfu.chat.example.com` (calls).
+- Firewall open for `80/tcp`, `443/tcp`, `443/udp`, `4433/udp`, both address families. Nothing else.
+- An **OIDC provider** with a realm for TeamCraft: a public client `teamcraft` (code flow with PKCE;
+  redirect URIs of the apps), client roles `owner`, `admin`, `member`, `guest` and users who have
+  one of them. The Keycloak realm in `dev/keycloak/teamcraft-dev-realm.json` is a complete example.
+- An **S3 bucket** with an access key; clients upload to it directly, so it must be reachable from
+  them and allow CORS from `https://chat.example.com` for the web client.
+- On your machine: Ansible ≥ 2.16, `sops` and `age`, and the collections of
+  `ansible/requirements.yml`.
+
+### Steps
+
+1. **Inventory.** Copy `ansible/inventories/production` to an inventory of your own and set the host
+   (`hosts.yml`) and `group_vars/all.yml`: the two names, an ACME e-mail, the OIDC issuer, the S3
+   endpoint, region and bucket, and the image digests from `images.txt` of the release.
+2. **Secrets.** Generate them (commands in `secrets/README.md`), add your age key to `.sops.yaml` and
+   write them into the encrypted file:
+
+   ```sh
+   sops secrets/production.enc.yaml
+   ```
+
+   Needed: `postgres_password`, `s3_access_key`, `s3_secret_key`, `sfu_registration_token`,
+   `call_signing_key` + `call_signing_public_key`, `meetings_guest_token_secret`.
+3. **Deploy.**
+
+   ```sh
+   ansible-galaxy collection install -r ansible/requirements.yml
+   ansible-playbook -i ansible/inventories/<yours> ansible/site.yml
+   ```
+
+   The first run installs Podman, creates the four service users, pulls the images, gets the
+   certificates from Let's Encrypt and starts everything (about 5 minutes in the dry run, most of it
+   package installs and image pulls). A second run must report `changed=0`. The SFU certificate is
+   copied from Caddy hourly; the SFU restarts by itself when it changes (renewals).
+4. **Check.**
+
+   ```sh
+   curl -fsS https://chat.example.com/readyz                    # server and database
+   curl -fsS --http3-only https://chat.example.com/healthz      # HTTP/3 through Caddy
+   curl -sS -o /dev/null -w '%{http_version}\n' --http3-only https://sfu.chat.example.com:4433/  # 3: SFU reachable
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://chat.example.com/api/internal/v1/calls/participants/joined  # 404
+   ```
+
+   Repeat with `-4` and `-6`. On the server, `sudo -u tc-server XDG_RUNTIME_DIR=/run/user/$(id -u
+   tc-server) systemctl --user status teamcraft-server` and `journalctl --user` work per service user.
+5. **Sign in.** Point the desktop app at `https://chat.example.com` and sign in with an `owner`
+   user. The first device of every user creates their keys; set up the recovery passphrase when
+   asked. With the web client archive deployed (`teamcraft_web_archive`), the same works in the
+   browser at `https://chat.example.com`.
+
+Then read "Backup and restore" below and set up the database backup before inviting people.
+
+### Trying it locally first
+
+`test/dry-run.sh all` in the deployment repository (`TEAMCRAFT_REPO` points at this checkout) runs the whole playbook against a throwaway
+Debian trixie container (systemd, rootless Podman inside, its own dual-stack Docker network), with
+images built from this repository, generated secrets, Caddy's internal CA and the dev Keycloak and
+Garage of `docker-compose.dev.yml`. It then checks the health endpoints over IPv4 and IPv6, that
+`/api/internal/` is refused, the SFU's QUIC handshake over both families, and sends encrypted messages
+between two dev users through the deployment with the end-to-end harness
+(`tests/e2e/tests/suite/deployed.rs`, `E2E_DEPLOYED_URL`; `SSL_CERT_FILE` points the clients at Caddy's
+local root). `test/dry-run.sh down` removes it again.
+
+Pitfalls the dry run found, worth knowing for any other way of running the images:
+
+- The server image sets `TEAMCRAFT_SERVER__LISTEN_ADDR=[::]:8080`, and environment variables win over
+  the TOML file. With host networking, set the variable yourself (e.g. `127.0.0.1:8080`), or the server
+  is reachable on every address of the host, bypassing the proxy.
+- The images are distroless: health checks must use the exec form
+  (`HealthCmd=["/usr/local/bin/teamcraft-server", "healthcheck", "--ready"]`), there is no shell.
+- Rootless containers run as a subordinate uid: bind-mounted configuration files must be readable by
+  others (they hold no secrets; secrets go in as podman secrets).
 
 ## Pieces and what holds state
 
