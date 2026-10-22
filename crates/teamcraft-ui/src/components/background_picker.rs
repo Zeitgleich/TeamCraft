@@ -8,7 +8,7 @@ use wasm_bindgen_futures::JsFuture;
 use teamcraft_proto::BackgroundId;
 
 use crate::admin::format_bytes;
-use crate::calls::{BackgroundEffect, BackgroundImageInfo};
+use crate::calls::{BackgroundEffect, BackgroundImageInfo, EffectGroup};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
@@ -86,6 +86,7 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
     >
       {move || {
         let images = own.get();
+        let mut previous = EffectGroup::Basic;
         options
           .get()
           .into_iter()
@@ -94,7 +95,15 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
               BackgroundEffect::Custom(id) => images.iter().find(|image| image.id == id).cloned(),
               _ => None,
             };
-            view! { <EffectTile effect=effect option=option maybe_image=maybe_image error=error /> }
+            let maybe_heading = (option.group() != previous)
+              .then(|| group_heading_key(option.group()))
+              .flatten()
+              .map(|key| view! { <p class="effect-group" role="presentation">{move || i18n.t(key)}</p> });
+            previous = option.group();
+            view! {
+              {maybe_heading}
+              <EffectTile effect=effect option=option maybe_image=maybe_image error=error />
+            }
           })
           .collect_view()
       }}
@@ -202,12 +211,41 @@ fn EffectTile(
         on:click=move |_| effect.set(option)
       >
         <span class=format!("effect-swatch effect-{}", option.slug()) aria-hidden="true">
-          <span class="scene"></span>
+          {match option {
+            BackgroundEffect::Preset(preset) if preset.is_photo() => view! {
+              <img
+                class="effect-photo"
+                src=photo_thumbnail_url(preset.slug())
+                loading="lazy"
+                decoding="async"
+                width="320"
+                height="180"
+                alt=""
+              />
+            }
+              .into_any(),
+            _ => view! { <span class="scene"></span> }.into_any(),
+          }}
         </span>
         <span class="effect-name" translate=if label.is_empty() { "yes" } else { "no" }>{name_view}</span>
       </button>
       {delete}
     </div>
+  }
+}
+
+/// The picture shown for a photo preset: small files the web build serves next to the app
+/// (`assets/backgrounds/thumbs`, copied by Trunk), loaded when the tile scrolls into view.
+fn photo_thumbnail_url(slug: &str) -> String {
+  format!("/backgrounds/thumbs/{slug}.jpg")
+}
+
+/// The i18n key of the heading above a group of tiles; the first group needs none.
+fn group_heading_key(group: EffectGroup) -> Option<&'static str> {
+  match group {
+    EffectGroup::Basic | EffectGroup::Own => None,
+    EffectGroup::Photos => Some("effect-group-photos"),
+    EffectGroup::Illustrations => Some("effect-group-illustrations"),
   }
 }
 
@@ -272,6 +310,9 @@ mod tests {
   use super::*;
   use crate::calls::BackgroundPreset;
 
+  const EN_FTL: &str = include_str!("../../i18n/en.ftl");
+  const DE_FTL: &str = include_str!("../../i18n/de.ftl");
+
   #[test]
   fn slugs_round_trip_for_every_option() {
     let own = [image(7), image(9)];
@@ -293,10 +334,43 @@ mod tests {
     assert_eq!(options.len(), BackgroundEffect::ALL.len() + 1);
     assert_eq!(options[0], BackgroundEffect::None);
     assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::Forest)));
+    assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::LivingRoom)));
     assert_eq!(
       options.last(),
       Some(&BackgroundEffect::Custom("3".parse().unwrap()))
     );
+  }
+
+  #[test]
+  fn photos_get_thumbnails_and_groups_get_headings() {
+    assert_eq!(
+      photo_thumbnail_url("living-room"),
+      "/backgrounds/thumbs/living-room.jpg"
+    );
+    assert_eq!(
+      group_heading_key(EffectGroup::Photos),
+      Some("effect-group-photos")
+    );
+    assert_eq!(
+      group_heading_key(EffectGroup::Illustrations),
+      Some("effect-group-illustrations")
+    );
+    assert_eq!(group_heading_key(EffectGroup::Basic), None);
+    assert_eq!(group_heading_key(EffectGroup::Own), None);
+  }
+
+  #[test]
+  fn every_preset_name_and_heading_is_translated() {
+    for lang in [EN_FTL, DE_FTL] {
+      for option in BackgroundEffect::ALL {
+        let key = format!("effect-{} =", option.slug());
+        assert!(lang.lines().any(|line| line.starts_with(&key)), "missing {key}");
+      }
+      for group in [EffectGroup::Photos, EffectGroup::Illustrations] {
+        let key = format!("{} =", group_heading_key(group).unwrap());
+        assert!(lang.lines().any(|line| line.starts_with(&key)), "missing {key}");
+      }
+    }
   }
 
   #[test]

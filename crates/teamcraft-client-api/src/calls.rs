@@ -159,25 +159,106 @@ pub struct BackgroundImageInfo {
   pub size_bytes: u64,
 }
 
+/// A built-in background: a stock photo (`assets/backgrounds/SOURCES.md` lists where each comes
+/// from) or one of the drawn illustrations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundPreset {
+  // Photos.
+  LivingRoom,
+  BrightRoom,
+  LibraryShelves,
+  Loft,
+  SofaBeige,
+  WhitePanels,
+  Lounge,
+  GreyLounge,
+  OrangeWall,
+  LibraryAisle,
+  EmptyRoom,
+  LakeMorning,
+  // Illustrations, drawn by code (teamcraft-media).
   Office,
   Bookshelf,
   Sunrise,
   Forest,
 }
 
-impl BackgroundEffect {
-  pub const ALL: [BackgroundEffect; 7] = [
-    Self::None,
-    Self::BlurLight,
-    Self::BlurStrong,
-    Self::Preset(BackgroundPreset::Office),
-    Self::Preset(BackgroundPreset::Bookshelf),
-    Self::Preset(BackgroundPreset::Sunrise),
-    Self::Preset(BackgroundPreset::Forest),
+/// Where the picker puts an effect: the groups are separated by a heading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EffectGroup {
+  Basic,
+  Photos,
+  Illustrations,
+  Own,
+}
+
+impl BackgroundPreset {
+  pub const PHOTOS: [BackgroundPreset; 12] = [
+    Self::LivingRoom,
+    Self::BrightRoom,
+    Self::LibraryShelves,
+    Self::Loft,
+    Self::SofaBeige,
+    Self::WhitePanels,
+    Self::Lounge,
+    Self::GreyLounge,
+    Self::OrangeWall,
+    Self::LibraryAisle,
+    Self::EmptyRoom,
+    Self::LakeMorning,
   ];
+  pub const ILLUSTRATIONS: [BackgroundPreset; 4] =
+    [Self::Office, Self::Bookshelf, Self::Sunrise, Self::Forest];
+
+  /// Stable identifier, also the file name of a photo's picture and thumbnail
+  /// (`assets/backgrounds/<slug>.jpg`) and part of its i18n key.
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::LivingRoom => "living-room",
+      Self::BrightRoom => "bright-room",
+      Self::LibraryShelves => "library-shelves",
+      Self::Loft => "loft",
+      Self::SofaBeige => "sofa-beige",
+      Self::WhitePanels => "white-panels",
+      Self::Lounge => "lounge",
+      Self::GreyLounge => "grey-lounge",
+      Self::OrangeWall => "orange-wall",
+      Self::LibraryAisle => "library-aisle",
+      Self::EmptyRoom => "empty-room",
+      Self::LakeMorning => "lake-morning",
+      Self::Office => "office",
+      Self::Bookshelf => "bookshelf",
+      Self::Sunrise => "sunrise",
+      Self::Forest => "forest",
+    }
+  }
+
+  pub fn is_photo(self) -> bool {
+    Self::PHOTOS.contains(&self)
+  }
+}
+
+impl BackgroundEffect {
+  /// Every shipped effect in the picker's order: none, blur, photos, illustrations.
+  pub const ALL: [BackgroundEffect;
+    3 + BackgroundPreset::PHOTOS.len() + BackgroundPreset::ILLUSTRATIONS.len()] = {
+    let mut all = [Self::None; 3 + BackgroundPreset::PHOTOS.len() + BackgroundPreset::ILLUSTRATIONS.len()];
+    all[1] = Self::BlurLight;
+    all[2] = Self::BlurStrong;
+    let mut index = 0;
+    while index < BackgroundPreset::PHOTOS.len() {
+      all[3 + index] = Self::Preset(BackgroundPreset::PHOTOS[index]);
+      index += 1;
+    }
+    let mut index = 0;
+    while index < BackgroundPreset::ILLUSTRATIONS.len() {
+      all[3 + BackgroundPreset::PHOTOS.len() + index] = Self::Preset(BackgroundPreset::ILLUSTRATIONS[index]);
+      index += 1;
+    }
+    all
+  };
 
   /// Stable identifier, also used in CSS class names and i18n keys.
   pub fn slug(self) -> &'static str {
@@ -185,12 +266,18 @@ impl BackgroundEffect {
       Self::None => "none",
       Self::BlurLight => "blur-light",
       Self::BlurStrong => "blur-strong",
-      Self::Preset(BackgroundPreset::Office) => "office",
-      Self::Preset(BackgroundPreset::Bookshelf) => "bookshelf",
-      Self::Preset(BackgroundPreset::Sunrise) => "sunrise",
-      Self::Preset(BackgroundPreset::Forest) => "forest",
+      Self::Preset(preset) => preset.slug(),
       Self::Custom(_) => "custom",
       Self::Org(_) => "org",
+    }
+  }
+
+  pub fn group(self) -> EffectGroup {
+    match self {
+      Self::None | Self::BlurLight | Self::BlurStrong => EffectGroup::Basic,
+      Self::Preset(preset) if preset.is_photo() => EffectGroup::Photos,
+      Self::Preset(_) => EffectGroup::Illustrations,
+      Self::Custom(_) | Self::Org(_) => EffectGroup::Own,
     }
   }
 }
@@ -509,5 +596,59 @@ mod history_tests {
     assert_eq!(call.duration_ms(), Some(60_000));
     call.maybe_ended_at = Some(0);
     assert_eq!(call.duration_ms(), Some(0));
+  }
+}
+
+#[cfg(test)]
+mod preset_tests {
+  use std::collections::HashSet;
+  use std::path::Path;
+
+  use super::*;
+
+  #[test]
+  fn effects_list_each_preset_once_in_picker_order() {
+    let slugs: Vec<&str> = BackgroundEffect::ALL.iter().map(|effect| effect.slug()).collect();
+    assert_eq!(slugs.iter().collect::<HashSet<_>>().len(), slugs.len());
+    assert_eq!(&slugs[..3], ["none", "blur-light", "blur-strong"]);
+    let groups: Vec<EffectGroup> = BackgroundEffect::ALL
+      .iter()
+      .map(|effect| effect.group())
+      .collect();
+    assert!(groups.is_sorted_by_key(|group| *group as u8));
+    assert_eq!(
+      groups
+        .iter()
+        .filter(|group| **group == EffectGroup::Photos)
+        .count(),
+      BackgroundPreset::PHOTOS.len()
+    );
+    assert!(BackgroundEffect::ALL.contains(&BackgroundEffect::Preset(BackgroundPreset::Forest)));
+  }
+
+  #[test]
+  fn every_photo_has_a_picture_and_a_thumbnail() {
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/backgrounds");
+    for preset in BackgroundPreset::PHOTOS {
+      let name = format!("{}.jpg", preset.slug());
+      assert!(assets.join(&name).is_file(), "missing {name}");
+      assert!(
+        assets.join("thumbs").join(&name).is_file(),
+        "missing thumbs/{name}"
+      );
+    }
+  }
+
+  #[test]
+  fn presets_keep_their_wire_names() {
+    // Stored preferences and policies contain these; never rename without a migration.
+    for (preset, wire) in [
+      (BackgroundPreset::Office, "\"office\""),
+      (BackgroundPreset::Forest, "\"forest\""),
+      (BackgroundPreset::LivingRoom, "\"living_room\""),
+      (BackgroundPreset::LakeMorning, "\"lake_morning\""),
+    ] {
+      assert_eq!(serde_json::to_string(&preset).unwrap(), wire);
+    }
   }
 }

@@ -2219,6 +2219,22 @@ select.input {
   gap: 8px;
 }
 
+.effect-group {
+  grid-column: 1 / -1;
+  margin: 8px 0 0;
+  color: #9aa6ba;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.effect-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .effect-tile {
   display: flex;
   flex-direction: column;
