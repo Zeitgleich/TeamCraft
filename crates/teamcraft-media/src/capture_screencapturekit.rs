@@ -1,13 +1,12 @@
 //! Screens and their sound on macOS through ScreenCaptureKit, via the `screencapturekit` crate
-//! (a safe API; our crates have no `unsafe`). Behind the `screencapturekit` feature, macOS 13+.
+//! (a safe API; our crates have no `unsafe`). Behind the `screencapturekit` feature, macOS 14+.
 //!
 //! Compile-checked only (in CI): written against the crate's source, never run on a Mac yet.
 //! The first capture asks for the Screen Recording permission; until it is granted the system
 //! hands out no content and the capture reports [`CaptureError::Denied`].
 //!
-//! What to share is picked in the system's own picker (`SCContentSharingPicker`, macOS 14+): a
-//! window, an application or a display, never one of this app's windows. On macOS 13 the main
-//! display is shared, without this app's windows.
+//! What to share is picked in the system's own picker (`SCContentSharingPicker`): a window, an
+//! application or a display, never one of this app's windows.
 //!
 //! Video and sound are separate streams so a share without sound costs nothing extra. The sound
 //! stream sets `excludesCurrentProcessAudio`, so the call's own playback is never captured. Frames
@@ -41,23 +40,14 @@ pub enum DisplaySource {
   Index(usize),
 }
 
-/// A shared display, window or application.
+/// A display, window or application the user picked.
 pub struct ScreenCaptureKitScreen {
-  target: ShareTarget,
+  filter: SCContentFilter,
+  /// The picked content's size in pixels.
+  width: u32,
+  height: u32,
   format: CaptureFormat,
   maybe_stream: Option<SCStream>,
-}
-
-/// What a share shows.
-enum ShareTarget {
-  /// A display, without this app's windows.
-  Display(DisplaySource),
-  /// What the user chose in the system's picker, with its size in pixels.
-  Picked {
-    filter: SCContentFilter,
-    width: u32,
-    height: u32,
-  },
 }
 
 /// The computer's sound minus this app's, through ScreenCaptureKit.
@@ -96,24 +86,9 @@ impl DisplaySource {
 }
 
 impl ScreenCaptureKitScreen {
-  /// A display (the main one, or one a stored token names), without this app's windows.
-  pub fn open(source: DisplaySource, format: CaptureFormat) -> Result<Self, CaptureError> {
-    // Fails early without the Screen Recording permission.
-    shareable_display(source)?;
-    Ok(Self {
-      target: ShareTarget::Display(source),
-      format,
-      maybe_stream: None,
-    })
-  }
-
   /// Lets the user pick a window, an application or a display in the system's picker (blocks
   /// until they did; call it off the main thread). This app's own windows can't be picked.
-  /// Without the picker (macOS 13) it is the main display, without this app's windows.
   pub fn pick(format: CaptureFormat) -> Result<Self, CaptureError> {
-    if !SCContentSharingPicker::is_available() {
-      return Self::open(DisplaySource::Main, format);
-    }
     let mut config = SCContentSharingPickerConfiguration::new().map_err(device_error)?;
     config.set_allowed_picker_modes(&[
       SCContentSharingPickerMode::SingleWindow,
@@ -132,11 +107,9 @@ impl ScreenCaptureKitScreen {
       Ok(SCPickerOutcome::Picked(result)) => {
         let (width, height) = result.pixel_size();
         Ok(Self {
-          target: ShareTarget::Picked {
-            filter: result.filter(),
-            width,
-            height,
-          },
+          filter: result.filter(),
+          width,
+          height,
           format,
           maybe_stream: None,
         })
@@ -156,32 +129,14 @@ impl VideoCapture for ScreenCaptureKitScreen {
 
   fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
     self.stop();
-    let (filter, (width, height)) = match &self.target {
-      ShareTarget::Display(source) => {
-        let display = shareable_display(*source)?;
-        let content = SCShareableContent::get().map_err(|_| CaptureError::Denied("screen"))?;
-        let own_windows = own_windows(&content);
-        let excluded: Vec<&SCWindow> = own_windows.iter().collect();
-        let filter = SCContentFilter::create()
-          .with_display(&display)
-          .with_excluding_windows(&excluded)
-          .build()
-          .map_err(device_error)?;
-        (filter, fit(display.width(), display.height(), self.format))
-      },
-      ShareTarget::Picked {
-        filter,
-        width,
-        height,
-      } => (filter.clone(), fit(*width, *height, self.format)),
-    };
+    let (width, height) = fit(self.width, self.height, self.format);
     let config = SCStreamConfiguration::new()
       .with_width(width)
       .with_height(height)
       .with_pixel_format(PixelFormat::BGRA)
       .with_shows_cursor(true)
       .with_minimum_frame_interval(&CMTime::new(1, i32::from(self.format.framerate.max(1))));
-    let mut stream = SCStream::new(&filter, &config).map_err(device_error)?;
+    let mut stream = SCStream::new(&self.filter, &config).map_err(device_error)?;
     stream
       .add_output_handler(
         ScreenOutput {

@@ -126,8 +126,7 @@ pub(super) fn open_screen(
 }
 
 /// What the user picks in the system's picker each time (a window, an application or a display;
-/// never TeamCraft's own windows), on macOS 13 the main display without them. The first share
-/// asks for the Screen Recording permission. Runs on a blocking thread: the picker waits for the
+/// never TeamCraft's own windows). The first share asks for the Screen Recording permission. Runs on a blocking thread: the picker waits for the
 /// user.
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
