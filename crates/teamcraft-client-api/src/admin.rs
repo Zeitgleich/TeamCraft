@@ -218,10 +218,10 @@ pub enum AdminSection {
   /// Directory, statuses and notification defaults.
   People,
   Announcement,
+  Backgrounds,
   Retention,
   /// Media server, push providers, storage and telephony.
   Instance,
-  Backgrounds,
   Audit,
 }
 
@@ -233,9 +233,9 @@ impl AdminSection {
     Self::Security,
     Self::People,
     Self::Announcement,
+    Self::Backgrounds,
     Self::Retention,
     Self::Instance,
-    Self::Backgrounds,
     Self::Audit,
   ];
 
@@ -247,9 +247,9 @@ impl AdminSection {
       Self::Security => "security",
       Self::People => "people",
       Self::Announcement => "announcement",
+      Self::Backgrounds => "backgrounds",
       Self::Retention => "retention",
       Self::Instance => "instance",
-      Self::Backgrounds => "backgrounds",
       Self::Audit => "audit",
     }
   }
