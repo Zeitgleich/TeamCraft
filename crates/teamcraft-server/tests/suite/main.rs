@@ -1,0 +1,55 @@
+//! All integration tests of the crate in one test binary: one link step instead of one per file.
+//! Each module keeps its own `cfg` gates (features, target), so a module that does not apply
+//! here is empty.
+
+#[path = "../common/mod.rs"]
+mod common;
+
+mod admin;
+mod admin_extras;
+mod attachments;
+mod authz;
+mod bots;
+mod caldav_calcraft;
+mod call_e2e;
+mod call_features;
+mod call_roster;
+mod calls;
+mod conversations;
+mod device_gaps;
+mod gateway;
+mod guests;
+mod hardening;
+mod health;
+mod identity;
+mod integration_channels;
+mod key_bag;
+mod key_packages;
+mod local_accounts;
+mod log_hygiene;
+mod meeting_guests;
+mod meeting_mail;
+mod meetings;
+mod messages;
+mod mls;
+mod notification_settings;
+mod oidc;
+mod org_recovery;
+mod perf_gateway;
+mod perf_history;
+mod presence_derived;
+mod profiles;
+mod push;
+mod push_sending;
+mod read_receipts;
+mod rendezvous;
+mod rest;
+mod retention;
+mod security;
+mod session_policy;
+mod shares;
+mod status;
+mod threads;
+mod user_groups;
+mod web;
+mod workspace;
