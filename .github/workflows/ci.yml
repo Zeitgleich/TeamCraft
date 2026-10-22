@@ -125,6 +125,8 @@ jobs:
       RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
       CC: cl
       CXX: cl
+      # WebRTC uses C++20 designated initializers; MSVC needs the switch spelled out.
+      CXXFLAGS: /std:c++20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
