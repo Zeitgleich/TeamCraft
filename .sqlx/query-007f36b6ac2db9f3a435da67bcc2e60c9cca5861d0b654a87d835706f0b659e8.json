@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO mls_epoch_heads (conversation_id, epoch) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "007f36b6ac2db9f3a435da67bcc2e60c9cca5861d0b654a87d835706f0b659e8"
+}

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use teamcraft_db::{Category, ConversationView, Device, Invite, Membership, SpaceView, StoredMessage, User};
 use teamcraft_proto::{
   Base64Bytes, CategoryResponse, ConversationId, ConversationResponse, DeviceResponse, InviteResponse,
-  MessageResponse, MyMembership, SpaceResponse, UnixMillis, UserSummary,
+  MessageResponse, MyMembership, PushProvider, SpaceResponse, UnixMillis, UserSummary,
 };
 use time::OffsetDateTime;
 
@@ -32,6 +32,8 @@ pub fn device_response(device: &Device) -> DeviceResponse {
     id: device.id,
     name: device.name.clone(),
     public_key: Base64Bytes::new(device.public_key.clone()),
+    cross_signature: Base64Bytes::new(device.cross_signature.clone()),
+    maybe_push_provider: device.maybe_push_provider.clone().map(PushProvider::from),
     created_at: unix_millis(device.created_at),
   }
 }

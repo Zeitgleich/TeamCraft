@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO key_bags (user_id, version, encrypted_key_bag, wrapped_backup_keys)\n           VALUES ($1, 1, $2, $3) ON CONFLICT DO NOTHING RETURNING version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "key_bags",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "da3b8e249b45297809c248bb44d29bfec08d5081cf009f3851e519d7608a983c"
+}

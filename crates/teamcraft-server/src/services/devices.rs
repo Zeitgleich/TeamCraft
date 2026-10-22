@@ -1,5 +1,7 @@
 use teamcraft_db::NewDevice;
-use teamcraft_proto::{DeviceId, DeviceResponse, ListDevicesResponse, RegisterDeviceRequest};
+use teamcraft_proto::{
+  DeviceId, DeviceResponse, ListDevicesResponse, PushProvider, RegisterDeviceRequest, RegisterPushRequest,
+};
 
 use super::convert::device_response;
 use super::validate_name;
@@ -9,7 +11,6 @@ use crate::state::AppState;
 
 /// Upper bounds for the opaque key material; real keys are far smaller.
 const MAX_KEY_BYTES: usize = 4096;
-const MAX_PUSH_TOKEN_CHARS: usize = 4096;
 
 pub async fn register_device(
   state: &AppState,
@@ -29,13 +30,6 @@ pub async fn register_device(
       "cross_signature has an invalid size".into(),
     ));
   }
-  if request
-    .maybe_push_token
-    .as_ref()
-    .is_some_and(|token| token.chars().count() > MAX_PUSH_TOKEN_CHARS)
-  {
-    return Err(ApiError::InvalidRequest("push_token is too long".into()));
-  }
 
   let device = state
     .database
@@ -45,7 +39,6 @@ pub async fn register_device(
       name: &name,
       public_key: request.public_key.as_slice(),
       cross_signature: request.cross_signature.as_slice(),
-      maybe_push_token: request.maybe_push_token.as_deref(),
     })
     .await?;
   Ok(device_response(&device))
@@ -67,6 +60,60 @@ pub async fn revoke_device(
   device: DeviceId,
 ) -> Result<(), ApiError> {
   if state.database.revoke_device(caller.user.id, device).await? {
+    Ok(())
+  } else {
+    Err(ApiError::device_not_found())
+  }
+}
+
+const PUSH_KEY_BYTES: usize = 32;
+const MAX_PUSH_TOKEN_CHARS: usize = 4096;
+
+/// Registers the push channel of one of the caller's devices (token plus the shared push key).
+pub async fn register_push(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  device: DeviceId,
+  request: RegisterPushRequest,
+) -> Result<(), ApiError> {
+  if matches!(request.provider, PushProvider::Unknown(_)) {
+    return Err(ApiError::InvalidRequest("unknown push provider".into()));
+  }
+  if request.token.is_empty() || request.token.chars().count() > MAX_PUSH_TOKEN_CHARS {
+    return Err(ApiError::InvalidRequest("push token has an invalid size".into()));
+  }
+  if request.push_key.len() != PUSH_KEY_BYTES {
+    return Err(ApiError::InvalidRequest(format!(
+      "push_key must be {PUSH_KEY_BYTES} bytes"
+    )));
+  }
+  let stored = state
+    .database
+    .set_push_registration(
+      caller.user.id,
+      device,
+      request.provider.as_str(),
+      &request.token,
+      request.push_key.as_slice(),
+    )
+    .await?;
+  if stored {
+    Ok(())
+  } else {
+    Err(ApiError::device_not_found())
+  }
+}
+
+pub async fn unregister_push(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  device: DeviceId,
+) -> Result<(), ApiError> {
+  if state
+    .database
+    .clear_push_registration(caller.user.id, device)
+    .await?
+  {
     Ok(())
   } else {
     Err(ApiError::device_not_found())

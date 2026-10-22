@@ -11,8 +11,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  ConversationId, DeviceActivity, DeviceId, ErrorBody, MessageResponse, PresenceState, SpaceId, UserId,
-  UserSummary,
+  ConversationId, DeviceActivity, DeviceId, ErrorBody, MessageResponse, MlsMessageResponse, PresenceState,
+  SpaceId, UserId, UserSummary,
 };
 
 /// Frames sent by the client.
@@ -80,6 +80,10 @@ pub enum GatewayServerMessage {
 pub enum GatewayEvent {
   MessageCreate {
     message: MessageResponse,
+  },
+  /// A commit, proposal, welcome or application message of the conversation's MLS group.
+  MlsMessage {
+    message: MlsMessageResponse,
   },
   /// A conversation the user is in (or just joined) changed; refetch it.
   ConversationUpdate {

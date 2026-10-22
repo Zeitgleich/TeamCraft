@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attachments SET completed_at = COALESCE(completed_at, now()) WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fceb6ad3e3a845b3e22031cd7e1a5843f1a741b7cb98cc7948db85bd7cb47e41"
+}

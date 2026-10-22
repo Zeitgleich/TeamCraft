@@ -1,8 +1,9 @@
 //! Harness for integration tests (feature `integration`): a real server on a loopback port, a
 //! throwaway Postgres database and tokens signed with the throwaway test key.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use jsonwebtoken::jwk::JwkSet;
@@ -18,11 +19,13 @@ use crate::auth::test_keys::{TEST_KEY_ID, TEST_MODULUS_B64, TEST_PRIVATE_KEY_PEM
 use crate::auth::{
   AuthError, JwkSource, JwksCache, JwksCacheOptions, RoleMapping, TokenValidator, ValidatorOptions,
 };
-use crate::config::RoleNames;
+use crate::config::{RoleNames, StorageConfig};
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
+use crate::rendezvous::RendezvousHub;
 use crate::router::router;
 use crate::state::{AppState, Settings};
+use crate::storage::BlobStore;
 
 pub const TEST_ISSUER: &str = "https://auth.example.com/realms/test";
 pub const TEST_CLIENT: &str = "teamcraft";
@@ -76,6 +79,44 @@ impl TestApp {
   }
 
   pub async fn start_with(customize: impl FnOnce(&mut Settings)) -> Option<Self> {
+    Self::start_inner(customize, None).await
+  }
+
+  /// Like [`Self::start`] with attachment storage on the dev Garage (`TEAMCRAFT_TEST_S3_ENDPOINT`,
+  /// default `http://127.0.0.1:3900`; the bucket and key come from `dev/init-garage.sh`).
+  /// `None` (skip the test) if the database or the storage is not reachable.
+  pub async fn start_with_storage(customize: impl FnOnce(&mut Settings)) -> Option<Self> {
+    let endpoint =
+      std::env::var("TEAMCRAFT_TEST_S3_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:3900".into());
+    let reachable = reqwest::Client::new()
+      .get(&endpoint)
+      .timeout(Duration::from_secs(2))
+      .send()
+      .await
+      .is_ok();
+    if !reachable {
+      eprintln!("skipping: no S3 storage at {endpoint}");
+      return None;
+    }
+    let storage = StorageConfig {
+      endpoint,
+      region: "garage".into(),
+      bucket: "teamcraft-dev".into(),
+      access_key: "GKdeadbeef0000000000000000".into(),
+      secret_key: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        .to_owned()
+        .into(),
+      path_style: true,
+      presign_expiry_secs: 300,
+      max_attachment_bytes: 1024 * 1024,
+    };
+    Self::start_inner(customize, Some(storage)).await
+  }
+
+  async fn start_inner(
+    customize: impl FnOnce(&mut Settings),
+    maybe_storage: Option<StorageConfig>,
+  ) -> Option<Self> {
     let test_db = TestDatabase::create().await?;
     let mut settings = Settings::default();
     settings.gateway.presence_offline_grace_secs = 0;
@@ -101,11 +142,14 @@ impl TestApp {
     let state = AppState {
       database: test_db.db.clone(),
       validator: Arc::new(validator),
-      ids: Arc::new(SnowflakeGenerator::new(1).unwrap()),
+      // Each app gets its own worker ID: parallel tests share the S3 bucket, and IDs name its objects.
+      ids: Arc::new(SnowflakeGenerator::new(next_worker_id()).unwrap()),
       hub: Arc::new(Hub::new(HubOptions {
         resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
         buffer_events: settings.gateway.resume_buffer_events,
       })),
+      rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
+      maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
       scheme: Arc::new(PermissionScheme::default()),
       settings: Arc::new(settings),
     };
@@ -209,6 +253,11 @@ impl Reply {
       .to_owned()
   }
 
+  /// The `error_code` of an error reply, or `fallback` for successful ones.
+  pub fn error_code_or<'a>(&'a self, fallback: &'a str) -> &'a str {
+    self.body["error_code"].as_str().unwrap_or(fallback)
+  }
+
   /// The stable `error_code` of an error reply.
   pub fn error_code(&self) -> &str {
     self.body["error_code"]
@@ -228,4 +277,9 @@ impl JwkSource for StaticKeys {
       })
     })
   }
+}
+
+fn next_worker_id() -> u16 {
+  static NEXT: AtomicU16 = AtomicU16::new(1);
+  NEXT.fetch_add(1, Ordering::Relaxed) % 1024
 }

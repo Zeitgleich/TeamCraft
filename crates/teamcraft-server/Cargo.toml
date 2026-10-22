@@ -28,6 +28,7 @@ axum.workspace = true
 figment.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
+rusty-s3.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 socket2.workspace = true
@@ -36,6 +37,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+url.workspace = true
 utoipa.workspace = true
 tracing-subscriber.workspace = true
 
@@ -47,5 +49,6 @@ integration = ["teamcraft-db/integration"]
 reqwest.workspace = true
 tokio-tungstenite = "0.30"
 futures-util = "0.3"
+base64.workspace = true
 figment = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["test-util"] }

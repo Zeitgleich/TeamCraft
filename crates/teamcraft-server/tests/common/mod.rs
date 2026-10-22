@@ -114,3 +114,16 @@ pub async fn send(app: &TestApp, user: &TestUser, conversation: &str, device: &s
   assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
   reply.id()
 }
+
+/// alice owns a space; carol and dave are members of its private channel (returned).
+pub async fn channel_with(app: &TestApp, members: &[&TestUser]) -> String {
+  let alice = owner();
+  let space = create_space(app, &alice, "Team", "invite_only").await;
+  let channel = create_channel(app, &alice, &space, "secure", "private").await;
+  for member in members {
+    let id = user_id(app, member).await;
+    add_space_member(app, &alice, &space, &id, "member").await;
+    add_channel_member(app, &alice, &channel, &id).await;
+  }
+  channel
+}

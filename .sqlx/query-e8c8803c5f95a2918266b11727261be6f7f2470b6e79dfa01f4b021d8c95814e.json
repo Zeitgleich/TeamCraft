@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, user_id, name, public_key, created_at FROM devices\n         WHERE user_id = $1 AND revoked_at IS NULL ORDER BY id",
+  "query": "INSERT INTO devices (id, user_id, name, public_key, cross_signature)\n         VALUES ($1, $2, $3, $4, $5)\n         RETURNING id, user_id, name, public_key, cross_signature, push_provider, created_at",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,28 @@
       },
       {
         "ordinal": 4,
+        "name": "cross_signature",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "cross_signature"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "push_provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_provider"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -61,7 +83,11 @@
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Int8",
+        "Int8",
+        "Text",
+        "Bytea",
+        "Bytea"
       ]
     },
     "nullable": [
@@ -69,8 +95,10 @@
       false,
       false,
       false,
+      false,
+      true,
       false
     ]
   },
-  "hash": "1b658ad9c38db215fbc4543a4473539058120384d47405678f8135426dfdbeb1"
+  "hash": "e8c8803c5f95a2918266b11727261be6f7f2470b6e79dfa01f4b021d8c95814e"
 }

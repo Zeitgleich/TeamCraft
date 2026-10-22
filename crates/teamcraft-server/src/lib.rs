@@ -11,8 +11,10 @@ pub mod handlers;
 pub mod listener;
 pub mod logging;
 pub mod openapi;
+pub mod rendezvous;
 pub mod router;
 pub mod services;
 pub mod state;
+pub mod storage;
 #[cfg(feature = "integration")]
 pub mod testing;

@@ -15,9 +15,11 @@ use teamcraft_server::config::{CONFIG_PATH_ENV, Config};
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
+use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
 use teamcraft_server::services::presence::refresh_presence;
 use teamcraft_server::state::{AppState, Settings};
+use teamcraft_server::storage::BlobStore;
 use tokio::signal;
 use tracing::{info, warn};
 
@@ -51,11 +53,20 @@ async fn main() -> anyhow::Result<()> {
       resume_window: Duration::from_secs(config.gateway.resume_window_secs),
       buffer_events: config.gateway.resume_buffer_events,
     })),
+    rendezvous: Arc::new(RendezvousHub::new(&config.rendezvous)),
+    maybe_blob_store: config
+      .storage
+      .as_ref()
+      .map(BlobStore::new)
+      .transpose()
+      .context("configuring attachment storage")?
+      .map(Arc::new),
     scheme: Arc::new(PermissionScheme::default()),
     settings: Arc::new(Settings {
       policy: config.policy.clone(),
       limits: config.limits.clone(),
       gateway: config.gateway.clone(),
+      rendezvous: config.rendezvous.clone(),
     }),
   };
   spawn_session_sweeper(state.clone());

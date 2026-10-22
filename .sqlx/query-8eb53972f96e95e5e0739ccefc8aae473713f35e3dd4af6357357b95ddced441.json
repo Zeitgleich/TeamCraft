@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET push_provider = NULL, push_token = NULL, push_key = NULL\n         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8eb53972f96e95e5e0739ccefc8aae473713f35e3dd4af6357357b95ddced441"
+}

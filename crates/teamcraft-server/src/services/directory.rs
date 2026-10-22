@@ -33,6 +33,15 @@ pub async fn get_user(
   caller: &AuthenticatedUser,
   id: UserId,
 ) -> Result<UserSummary, ApiError> {
+  Ok(user_summary(&visible_user(state, caller, id).await?))
+}
+
+/// The active user the caller may know about, or `user_not_found`.
+pub async fn visible_user(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: UserId,
+) -> Result<teamcraft_db::User, ApiError> {
   let user = state
     .database
     .get_user(id)
@@ -50,5 +59,5 @@ pub async fn get_user(
   {
     return Err(ApiError::user_not_found());
   }
-  Ok(user_summary(&user))
+  Ok(user)
 }

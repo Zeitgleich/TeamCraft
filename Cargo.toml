@@ -75,6 +75,10 @@ base64 = "0.22"
 # Randomness (already in the tree through jsonwebtoken and reqwest)
 aws-lc-rs = "1"
 
+# S3 presigned URLs (sans-IO, no SDK)
+rusty-s3 = { version = "0.10", default-features = false, features = ["aws-lc-rs"] }
+url = "2"
+
 # Networking
 socket2 = "0.6"
 

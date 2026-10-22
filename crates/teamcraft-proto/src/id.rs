@@ -188,6 +188,14 @@ define_id!(
   InviteId
 );
 define_id!(
+  /// An uploaded encrypted file.
+  AttachmentId
+);
+define_id!(
+  /// An entry of a conversation's MLS delivery queue; IDs increase in delivery order.
+  MlsMessageId
+);
+define_id!(
   /// A thread, identified by the ID of its root message.
   ThreadId
 );

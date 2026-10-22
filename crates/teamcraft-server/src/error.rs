@@ -23,8 +23,19 @@ pub enum ApiError {
   InvalidRequest(String),
   #[error("conflict: {0}")]
   Conflict(String),
+  /// The MLS group left the epoch the request was created for (first commit wins).
+  #[error("the group is in epoch {current_epoch}; fetch the backlog and rebase")]
+  EpochConflict { current_epoch: u64 },
+  /// Compare-and-swap on a versioned object failed.
+  #[error("the stored version is {current_version}, not the expected one")]
+  VersionConflict { current_version: u64 },
+  #[error("the user has no key package left")]
+  KeyPackageExhausted,
   #[error("payload too large: {0}")]
   PayloadTooLarge(String),
+  /// A needed backend (e.g. attachment storage) is not configured or not reachable.
+  #[error("unavailable: {0}")]
+  Unavailable(String),
   #[error("internal error: {0}")]
   Internal(String),
 }
@@ -72,6 +83,27 @@ impl ApiError {
     }
   }
 
+  pub fn attachment_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::AttachmentNotFound,
+      what: "attachment",
+    }
+  }
+
+  pub fn key_bag_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::KeyBagNotFound,
+      what: "key bag",
+    }
+  }
+
+  pub fn identity_key_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::IdentityKeyNotFound,
+      what: "identity key",
+    }
+  }
+
   pub fn status(&self) -> StatusCode {
     match self {
       Self::Auth(AuthError::MissingToken | AuthError::InvalidToken(_)) => StatusCode::UNAUTHORIZED,
@@ -81,8 +113,12 @@ impl ApiError {
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
       Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-      Self::Conflict(_) => StatusCode::CONFLICT,
+      Self::Conflict(_)
+      | Self::KeyPackageExhausted
+      | Self::EpochConflict { .. }
+      | Self::VersionConflict { .. } => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+      Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
   }
@@ -97,7 +133,11 @@ impl ApiError {
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
       Self::Conflict(_) => ErrorCode::Conflict,
+      Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
+      Self::EpochConflict { .. } => ErrorCode::EpochConflict,
+      Self::VersionConflict { .. } => ErrorCode::VersionConflict,
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
+      Self::Unavailable(_) => ErrorCode::Unavailable,
       Self::Database(_) | Self::Internal(_) => ErrorCode::Internal,
     }
   }
@@ -107,6 +147,7 @@ impl ApiError {
     match self {
       Self::Auth(AuthError::KeysUnavailable(_)) => "authentication is temporarily unavailable".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
+      Self::Unavailable(_) => "the service is not available".into(),
       other => other.to_string(),
     }
   }

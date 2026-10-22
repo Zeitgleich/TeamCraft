@@ -30,6 +30,11 @@ pub struct Config {
   pub limits: LimitsConfig,
   #[serde(default)]
   pub gateway: GatewayConfig,
+  #[serde(default)]
+  pub rendezvous: RendezvousConfig,
+  /// Blob storage for attachments; without it the attachment endpoints answer 503.
+  #[serde(default)]
+  pub storage: Option<StorageConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +134,16 @@ pub struct LimitsConfig {
   pub default_page_size: u32,
   pub max_page_size: u32,
   pub max_directory_results: u32,
+  /// Unused key packages a device may have on the server.
+  pub max_key_packages_per_device: usize,
+  pub max_key_package_bytes: usize,
+  /// Key packages in one upload.
+  pub max_key_packages_per_upload: usize,
+  /// Size of one MLS commit, welcome, proposal or application message.
+  pub max_mls_payload_bytes: usize,
+  pub max_welcomes_per_commit: usize,
+  /// Encrypted key bag plus wrapped backup keys of one user.
+  pub max_key_bag_bytes: usize,
 }
 
 /// WebSocket gateway behaviour.
@@ -151,6 +166,47 @@ pub struct GatewayConfig {
   pub presence_offline_grace_secs: u64,
   /// Largest accepted client frame.
   pub max_frame_bytes: usize,
+}
+
+/// S3-compatible blob storage (Garage in development). Everything stored there is encrypted by the
+/// clients; the provider is untrusted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageConfig {
+  /// Endpoint URL clients can reach (they upload and download through presigned URLs).
+  pub endpoint: String,
+  #[serde(default = "default_region")]
+  pub region: String,
+  pub bucket: String,
+  pub access_key: String,
+  pub secret_key: SecretString,
+  /// Path-style addressing (`endpoint/bucket/key`), needed by Garage and MinIO.
+  #[serde(default = "default_true")]
+  pub path_style: bool,
+  /// Validity of presigned URLs.
+  #[serde(default = "default_presign_expiry_secs")]
+  pub presign_expiry_secs: u64,
+  /// Largest attachment (ciphertext) a client may announce.
+  #[serde(default = "default_max_attachment_bytes")]
+  pub max_attachment_bytes: u64,
+}
+
+/// Device-linking relay at /api/v1/rendezvous.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RendezvousConfig {
+  /// Lifetime of a relay from the first join.
+  pub ttl_secs: u64,
+  /// Largest relayed binary frame.
+  pub max_frame_bytes: usize,
+  /// Total bytes relayed per rendezvous, both directions.
+  pub max_total_bytes: usize,
+  /// Frames held for a device whose peer has not joined yet.
+  pub max_pending_frames: usize,
+  /// Open relays per user.
+  pub max_per_user: usize,
+  /// Time a new connection has to join.
+  pub join_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -240,6 +296,12 @@ impl Default for LimitsConfig {
       default_page_size: 50,
       max_page_size: 200,
       max_directory_results: 50,
+      max_key_packages_per_device: 200,
+      max_key_package_bytes: 16 * 1024,
+      max_key_packages_per_upload: 100,
+      max_mls_payload_bytes: 1024 * 1024,
+      max_welcomes_per_commit: 500,
+      max_key_bag_bytes: 1024 * 1024,
     }
   }
 }
@@ -259,6 +321,19 @@ impl Default for GatewayConfig {
   }
 }
 
+impl Default for RendezvousConfig {
+  fn default() -> Self {
+    Self {
+      ttl_secs: 300,
+      max_frame_bytes: 16 * 1024,
+      max_total_bytes: 256 * 1024,
+      max_pending_frames: 8,
+      max_per_user: 5,
+      join_timeout_secs: 10,
+    }
+  }
+}
+
 impl Default for LoggingConfig {
   fn default() -> Self {
     Self {
@@ -270,6 +345,22 @@ impl Default for LoggingConfig {
 
 fn env_provider() -> Env {
   Env::prefixed(ENV_PREFIX).ignore(&["config"]).split(ENV_NESTING)
+}
+
+fn default_region() -> String {
+  "us-east-1".into()
+}
+
+fn default_true() -> bool {
+  true
+}
+
+fn default_presign_expiry_secs() -> u64 {
+  900
+}
+
+fn default_max_attachment_bytes() -> u64 {
+  100 * 1024 * 1024
 }
 
 fn default_max_connections() -> u32 {
@@ -353,6 +444,10 @@ mod tests {
     assert_eq!(
       config.policy.guests_dm_only_with_shared_conversations,
       PolicyConfig::default().guests_dm_only_with_shared_conversations
+    );
+    assert_eq!(
+      config.rendezvous.max_total_bytes,
+      RendezvousConfig::default().max_total_bytes
     );
     assert_eq!(config.server.listen_addr, ServerConfig::default().listen_addr);
   }

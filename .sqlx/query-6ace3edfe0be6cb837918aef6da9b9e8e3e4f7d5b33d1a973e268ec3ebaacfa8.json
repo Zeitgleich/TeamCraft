@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) FILTER (WHERE NOT is_last_resort) AS \"available!\",\n                count(*) FILTER (WHERE is_last_resort) > 0 AS \"has_last_resort!\"\n         FROM key_packages WHERE device_id = $1 AND consumed_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "available!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "has_last_resort!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "6ace3edfe0be6cb837918aef6da9b9e8e3e4f7d5b33d1a973e268ec3ebaacfa8"
+}

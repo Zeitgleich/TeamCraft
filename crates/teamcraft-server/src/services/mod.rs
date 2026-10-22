@@ -2,13 +2,18 @@
 
 pub mod access;
 pub mod accounts;
+pub mod attachments;
 pub mod conversations;
 pub mod convert;
 pub mod devices;
 pub mod directory;
+pub mod identity;
 pub mod invites;
+pub mod key_bag;
+pub mod key_packages;
 pub mod members;
 pub mod messages;
+pub mod mls;
 pub mod presence;
 pub mod spaces;
 

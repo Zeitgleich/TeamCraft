@@ -3,17 +3,22 @@ use axum::routing::{delete, get, patch, post, put};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-  add_conversation_member_handler, add_space_member_handler, create_category_handler, create_channel_handler,
+  add_conversation_member_handler, add_space_member_handler, claim_key_packages_handler,
+  complete_attachment_handler, create_attachment_handler, create_category_handler, create_channel_handler,
   create_dm_handler, create_group_dm_handler, create_invite_handler, create_space_handler,
-  delete_category_handler, delete_invite_handler, gateway_handler, get_conversation_handler, get_me_handler,
-  get_space_handler, get_user_handler, healthz_handler, join_conversation_handler, join_space_handler,
-  list_categories_handler, list_conversation_members_handler, list_conversations_handler,
-  list_devices_handler, list_invites_handler, list_messages_handler, list_presence_handler,
-  list_space_members_handler, list_spaces_handler, readyz_handler, register_device_handler,
-  remove_conversation_member_handler, remove_space_member_handler, revoke_device_handler,
-  search_users_handler, send_message_handler, set_presence_handler, set_read_position_handler,
-  update_category_handler, update_conversation_handler, update_conversation_member_handler,
-  update_space_handler, update_space_member_handler,
+  delete_category_handler, delete_invite_handler, download_attachment_handler, gateway_handler,
+  get_conversation_handler, get_identity_key_handler, get_key_bag_handler, get_me_handler, get_space_handler,
+  get_user_handler, healthz_handler, join_conversation_handler, join_space_handler,
+  key_package_status_handler, list_categories_handler, list_conversation_members_handler,
+  list_conversations_handler, list_devices_handler, list_invites_handler, list_messages_handler,
+  list_mls_messages_handler, list_presence_handler, list_space_members_handler, list_spaces_handler,
+  list_user_devices_handler, list_welcomes_handler, post_mls_commit_handler, post_mls_message_handler,
+  put_identity_key_handler, put_key_bag_handler, readyz_handler, register_device_handler,
+  register_push_handler, remove_conversation_member_handler, remove_space_member_handler, rendezvous_handler,
+  revoke_device_handler, search_users_handler, send_message_handler, set_presence_handler,
+  set_read_position_handler, unregister_push_handler, update_category_handler, update_conversation_handler,
+  update_conversation_member_handler, update_space_handler, update_space_member_handler,
+  upload_key_packages_handler,
 };
 use crate::openapi::openapi_json_handler;
 use crate::state::AppState;
@@ -22,6 +27,7 @@ pub fn router(state: AppState) -> Router {
   let api_v1 = Router::new()
     .route("/me", get(get_me_handler))
     .route("/gateway", get(gateway_handler))
+    .route("/rendezvous", get(rendezvous_handler))
     .route("/openapi.json", get(openapi_json_handler))
     .route(
       "/devices",
@@ -89,7 +95,45 @@ pub fn router(state: AppState) -> Router {
       post(send_message_handler).get(list_messages_handler),
     )
     .route("/me/presence", put(set_presence_handler))
-    .route("/presence", get(list_presence_handler));
+    .route("/presence", get(list_presence_handler))
+    .route("/me/identity-key", put(put_identity_key_handler))
+    .route("/users/{user_id}/identity-key", get(get_identity_key_handler))
+    .route("/users/{user_id}/devices", get(list_user_devices_handler))
+    .route(
+      "/devices/{device_id}/key-packages",
+      post(upload_key_packages_handler).get(key_package_status_handler),
+    )
+    .route(
+      "/users/{user_id}/key-packages/claim",
+      post(claim_key_packages_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/mls/commits",
+      post(post_mls_commit_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/mls/messages",
+      post(post_mls_message_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/mls",
+      get(list_mls_messages_handler),
+    )
+    .route("/devices/{device_id}/welcomes", get(list_welcomes_handler))
+    .route("/me/key-bag", put(put_key_bag_handler).get(get_key_bag_handler))
+    .route(
+      "/devices/{device_id}/push",
+      put(register_push_handler).delete(unregister_push_handler),
+    )
+    .route("/attachments", post(create_attachment_handler))
+    .route(
+      "/attachments/{attachment_id}/complete",
+      post(complete_attachment_handler),
+    )
+    .route(
+      "/attachments/{attachment_id}/download",
+      get(download_attachment_handler),
+    );
 
   Router::new()
     .route("/healthz", get(healthz_handler))

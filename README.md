@@ -83,6 +83,12 @@ WebSocket `/api/v1/gateway` ([docs/gateway.md](docs/gateway.md)). Messages are o
 server stores and fans out; it never sees plaintext. Permissions are decided in one place,
 `teamcraft_proto::is_allowed` (PLAN.md §13).
 
+E2EE support (milestone 2): identity keys with OIDC attestation, device certificates, MLS key packages
+(atomic claiming), the MLS delivery queue with first-commit-wins epochs, versioned key bag storage, push
+registration, the device-linking relay and presigned attachment upload/download. The server stores and
+orders opaque bytes; it makes no trust decisions. Attachments need the `[storage]` section (the dev
+Garage from `./dev/init-garage.sh` works as configured in `teamcraft.example.toml`).
+
 ### 3. Checks before committing
 
 ```sh

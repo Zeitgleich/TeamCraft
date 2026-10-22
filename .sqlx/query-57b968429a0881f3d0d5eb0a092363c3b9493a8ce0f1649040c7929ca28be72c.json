@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE key_packages SET consumed_at = now()\n         WHERE id = (SELECT id FROM key_packages\n                     WHERE device_id = $1 AND consumed_at IS NULL AND NOT is_last_resort\n                     ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)\n         RETURNING key_package",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key_package",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "key_packages",
+            "name": "key_package"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "57b968429a0881f3d0d5eb0a092363c3b9493a8ce0f1649040c7929ca28be72c"
+}

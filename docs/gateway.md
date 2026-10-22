@@ -27,7 +27,7 @@ resumes.
 
 Events go to the *users* that are members at publish time, so a removed member stops receiving a
 conversation's events immediately. Event types: `message_create`, `conversation_update`, `membership_add`,
-`membership_remove`, `space_update`, `space_member_add`, `space_member_remove`, `typing_start`,
+`membership_remove`, `mls_message`, `space_update`, `space_member_add`, `space_member_remove`, `typing_start`,
 `presence_update`. `conversation_update` and `space_update` carry only IDs: refetch the object over REST (it
 differs per viewer).
 
@@ -53,3 +53,13 @@ known state; guests only learn about people they share a conversation with.
 
 State is in memory per server process; running several server instances needs a shared bus (Postgres
 `LISTEN/NOTIFY`). A do-not-disturb end time is evaluated when presence is recomputed, not by a timer.
+
+## Device-linking relay (`/api/v1/rendezvous`)
+
+A separate WebSocket for adding a device (e2ee.md §5). The new device and an existing device of the same
+user both connect, send `join` with their access token and the same random `rendezvous_id` (32 hex
+characters, chosen by the device that shows the QR code or prompt), and the server forwards **binary frames**
+between them in order without interpreting them; the devices run their own authenticated key exchange on top.
+Text frames are control frames (`joined`, `peer_joined`, `peer_left`, `expired`, `error`) and never relayed.
+Limits (config `[rendezvous]`): lifetime, frame size, total bytes, frames held for a peer that has not joined,
+open relays per user. A relay serves exactly two devices of one user, and ends when either side leaves.

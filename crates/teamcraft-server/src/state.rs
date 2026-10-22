@@ -4,9 +4,11 @@ use teamcraft_db::{Database, SnowflakeGenerator};
 use teamcraft_proto::PermissionScheme;
 
 use crate::auth::TokenValidator;
-use crate::config::{GatewayConfig, LimitsConfig, PolicyConfig};
+use crate::config::{GatewayConfig, LimitsConfig, PolicyConfig, RendezvousConfig};
 use crate::error::ApiError;
 use crate::gateway::Hub;
+use crate::rendezvous::RendezvousHub;
+use crate::storage::BlobStore;
 
 /// Shared, cheaply cloneable application state of all handlers.
 #[derive(Clone)]
@@ -15,6 +17,9 @@ pub struct AppState {
   pub validator: Arc<TokenValidator>,
   pub ids: Arc<SnowflakeGenerator>,
   pub hub: Arc<Hub>,
+  pub rendezvous: Arc<RendezvousHub>,
+  /// Attachment storage, if configured.
+  pub maybe_blob_store: Option<Arc<BlobStore>>,
   pub scheme: Arc<PermissionScheme>,
   pub settings: Arc<Settings>,
 }
@@ -25,6 +30,7 @@ pub struct Settings {
   pub policy: PolicyConfig,
   pub limits: LimitsConfig,
   pub gateway: GatewayConfig,
+  pub rendezvous: RendezvousConfig,
 }
 
 impl AppState {

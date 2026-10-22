@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM key_packages WHERE device_id = $1 AND is_last_resort AND consumed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3e8109f7e7639dcc787213ba483fafb57e9f4d5d2a26c423d5661e90dc04a8ae"
+}

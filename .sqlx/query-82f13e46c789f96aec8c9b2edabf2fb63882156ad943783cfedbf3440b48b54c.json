@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE key_bags SET version = version + 1, encrypted_key_bag = $3, wrapped_backup_keys = $4,\n                               updated_at = now()\n           WHERE user_id = $1 AND version = $2 RETURNING version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "key_bags",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "82f13e46c789f96aec8c9b2edabf2fb63882156ad943783cfedbf3440b48b54c"
+}
