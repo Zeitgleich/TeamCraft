@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+*.keystore
+# Built by scripts/build.sh from crates/teamcraft-ffi.
+app/src/main/jniLibs/
+app/src/main/java/uniffi/

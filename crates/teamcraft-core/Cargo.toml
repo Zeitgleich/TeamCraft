@@ -15,7 +15,10 @@ workspace = true
 [features]
 default = ["sqlcipher"]
 # Encrypted local database (SQLCipher) on native targets. Links the system libcrypto.
-sqlcipher = ["dep:rusqlite"]
+sqlcipher = ["dep:rusqlite", "rusqlite/bundled-sqlcipher"]
+# Plain SQLite with records sealed by teamcraft-crypto (e2ee.md §9.1): for Android, whose NDK has
+# no libcrypto for SQLCipher.
+sealed-sqlite = ["dep:rusqlite", "rusqlite/bundled"]
 # Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
 ui = ["dep:teamcraft-client-api"]
 # The Web Push service worker's entry points (`handlePush`, `handleNotificationClick`), exported
@@ -46,15 +49,23 @@ teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).
-rusqlite = { version = "0.39", features = ["bundled-sqlcipher"], optional = true }
-# OS keystore for the database key (Keychain, Secret Service, Windows Credential Manager).
-keyring = "4"
+rusqlite = { version = "0.39", optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 # Gateway WebSocket on native targets.
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 # Full-text search over decrypted messages and shared index segments (e2ee.md §10.1). Native only:
 # tantivy doesn't target wasm32; the browser falls back to scanning the local store.
 tantivy = { version = "0.27.0", default-features = false, features = ["lz4-compression", "stemmer"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# TLS trust without the platform verifier's JNI setup (src/api/tls.rs); same rustls as reqwest.
+rustls = "0.23.46"
+webpki-roots = "1.0.10"
+
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+# OS keystore for the database key (Keychain, Secret Service, Windows Credential Manager). Android
+# keeps it in the Android Keystore, managed by the app.
+keyring = "4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Browser bindings: gateway WebSocket, timers, IndexedDB, Web Crypto and Web Push. Same versions as

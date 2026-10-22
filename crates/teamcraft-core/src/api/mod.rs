@@ -6,6 +6,8 @@
 
 pub mod fake;
 mod http;
+#[cfg(target_os = "android")]
+mod tls;
 #[cfg(target_arch = "wasm32")]
 mod web_socket;
 

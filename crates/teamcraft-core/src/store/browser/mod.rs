@@ -5,4 +5,4 @@ mod idb;
 mod indexed_db;
 
 pub use browser_key::browser_database_key;
-pub use indexed_db::IndexedDbStore;
+pub use indexed_db::{IndexedDbRecords, IndexedDbStore};

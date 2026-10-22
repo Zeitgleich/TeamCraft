@@ -50,8 +50,12 @@ pub struct HttpServerApi<T> {
 impl<T: AccessTokenSource> HttpServerApi<T> {
   /// `base_url` without trailing slash, e.g. `https://chat.example.com`.
   pub fn new(base_url: impl Into<String>, tokens: T) -> Self {
+    #[cfg(target_os = "android")]
+    let client = super::tls::http_client();
+    #[cfg(not(target_os = "android"))]
+    let client = reqwest::Client::new();
     Self {
-      client: reqwest::Client::new(),
+      client,
       base_url: base_url.into().trim_end_matches('/').to_string(),
       tokens,
     }
@@ -476,10 +480,9 @@ pub struct HttpGateway {
 #[cfg(not(target_arch = "wasm32"))]
 impl HttpGateway {
   async fn connect(url: &str) -> Result<Self, ApiError> {
-    let (socket, _) = tokio_tungstenite::connect_async(url)
-      .await
-      .map_err(|error| ApiError::Network(error.to_string()))?;
-    Ok(Self { socket })
+    Ok(Self {
+      socket: connect_websocket(url).await?,
+    })
   }
 }
 
@@ -568,10 +571,9 @@ pub struct HttpRendezvous {
 #[cfg(not(target_arch = "wasm32"))]
 impl HttpRendezvous {
   async fn connect(url: &str) -> Result<Self, ApiError> {
-    let (socket, _) = tokio_tungstenite::connect_async(url)
-      .await
-      .map_err(|error| ApiError::Network(error.to_string()))?;
-    Ok(Self { socket })
+    Ok(Self {
+      socket: connect_websocket(url).await?,
+    })
   }
 }
 
@@ -652,6 +654,22 @@ impl fmt::Debug for HttpRendezvous {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str("HttpRendezvous")
   }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type NativeSocket =
+  tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
+  #[cfg(target_os = "android")]
+  let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
+  #[cfg(not(target_os = "android"))]
+  let maybe_connector = None;
+  let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector)
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?;
+  Ok(socket)
 }
 
 async fn send(request: RequestBuilder) -> Result<Response, ApiError> {

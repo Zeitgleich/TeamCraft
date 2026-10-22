@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <style name="Theme.TeamCraft" parent="android:Theme.Material.NoActionBar">
+    <item name="android:statusBarColor">#0A0E15</item>
+    <item name="android:windowBackground">#0F141D</item>
+  </style>
+</resources>

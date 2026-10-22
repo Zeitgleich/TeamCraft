@@ -1,0 +1,20 @@
+[package]
+name = "teamcraft-uniffi-bindgen"
+description = "Generates the Kotlin/Swift bindings of teamcraft-ffi from the built library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Separate from teamcraft-ffi so generating bindings doesn't build the client core for the host.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { version = "0.32.2", features = ["cli"] }

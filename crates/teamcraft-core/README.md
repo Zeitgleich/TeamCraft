@@ -6,22 +6,22 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 
 ## Modules
 
-| Module         | What                                                                                                                    |
-|----------------|-------------------------------------------------------------------------------------------------------------------------|
-| `store`        | `LocalStore` trait; `SqlCipherStore` (native), `IndexedDbStore` (browser, e2ee.md §9.1), `MemoryStore`; key sources     |
-| `records`      | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                               |
-| `api`          | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite / browser WebSocket), `fake::FakeServer` |
-| `client`       | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                                             |
-| `runner`       | `SyncRunner`: the app loop (reconnect, heartbeats, outbox, UI commands, due membership changes)                         |
-| `platform`     | Timers on tokio or `setTimeout`, so the engine runs on a single-threaded browser executor                               |
-| `push_preview` | What a notification shows, read-only from the store (+ optional fetch); `PushSession`                                   |
-| `web_push`     | Browser: Web Push subscription; service worker entry points (feature `service-worker`)                                  |
-| `read_state`   | Followed threads, unread counts, read receipts, acknowledgements as the server reports them                             |
-| `attestation`  | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)                          |
-| `workspace`    | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                                         |
-| `search`       | tantivy index of the store and shared encrypted segments (native only)                                                  |
-| `ui_backend`   | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`)               |
-| `clock`        | Injectable wall clock (`SystemClock`, `ManualClock`)                                                                    |
+| Module         | What                                                                                                                                                      |
+|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `store`        | `LocalStore` trait; `SqlCipherStore` (desktop), `SealedStore` over IndexedDB (browser) or SQLite (Android, e2ee.md §9.1–§9.2), `MemoryStore`; key sources |
+| `records`      | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                                                                 |
+| `api`          | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite / browser WebSocket; Mozilla roots on Android), `fake::FakeServer`         |
+| `client`       | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                                                                               |
+| `runner`       | `SyncRunner`: the app loop (reconnect, heartbeats, outbox, UI commands, due membership changes)                                                           |
+| `platform`     | Timers on tokio or `setTimeout`, so the engine runs on a single-threaded browser executor                                                                 |
+| `push_preview` | What a notification shows, read-only from the store (+ optional fetch); `PushSession`                                                                     |
+| `web_push`     | Browser: Web Push subscription; service worker entry points (feature `service-worker`)                                                                    |
+| `read_state`   | Followed threads, unread counts, read receipts, acknowledgements as the server reports them                                                               |
+| `attestation`  | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)                                                            |
+| `workspace`    | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                                                                           |
+| `search`       | tantivy index of the store and shared encrypted segments (native only)                                                                                    |
+| `ui_backend`   | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`)                                                 |
+| `clock`        | Injectable wall clock (`SystemClock`, `ManualClock`)                                                                                                      |
 
 ## How it works
 
@@ -161,6 +161,11 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 12. **Dev environment:** the shared dev Postgres may carry migrations from unmerged branches; the
     integration tests ran against a throwaway database and a server on port 8083 (another session's
     server used 8081). They leave small encrypted test files in the dev Garage bucket.
+
+## Mobile
+
+`crates/teamcraft-ffi` wraps the core for the mobile apps (UniFFI); Android builds with the
+`sealed-sqlite` feature instead of `sqlcipher`. See `apps/android/README.md`.
 
 ## UI wiring
 

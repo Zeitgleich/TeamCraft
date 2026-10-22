@@ -1,0 +1,39 @@
+[package]
+name = "teamcraft-ffi"
+description = "UniFFI bindings over teamcraft-core for the mobile apps (Kotlin today, Swift later)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# teamcraft-core needs it (tantivy).
+rust-version = "1.88"
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# cdylib for the apps, lib for tests.
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Tests against the dev stack (tests/dev_stack.rs; skipped without TEAMCRAFT_TEST_SERVER_URL).
+integration = []
+
+[dependencies]
+# Records sealed on plain SQLite (e2ee.md §9.2): SQLCipher can't link on Android.
+teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite"] }
+teamcraft-client-api = { path = "../teamcraft-client-api" }
+teamcraft-crypto = { path = "../teamcraft-crypto" }
+teamcraft-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# The engine thread runs the (non-Send) core on a current-thread runtime.
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+# Kotlin (and later Swift) bindings from proc-macros; Mozilla's generator, used by Firefox mobile.
+uniffi = "0.32.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+# The other side of the dev-stack conversation is a plain core client.
+reqwest.workspace = true

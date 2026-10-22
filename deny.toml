@@ -7,6 +7,10 @@ all-features = true
 [advisories]
 # Every ignored advisory needs a reason and a link.
 ignore = [
+  # Unmaintained TOML parser, no known vulnerability: askama (via uniffi_bindgen) reads UniFFI's own
+  # template config with it while generating the mobile bindings at build time; nothing at runtime.
+  # https://rustsec.org/advisories/RUSTSEC-2026-0374
+  { id = "RUSTSEC-2026-0374", reason = "unmaintained, build-time template config of uniffi_bindgen" },
   # Unmaintained, no known vulnerability. Proc macro used by Leptos (either_of, reactive_graph) for
   # the UI. Remove once Leptos drops it. https://rustsec.org/advisories/RUSTSEC-2024-0436
   { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro via Leptos, no vulnerability" },

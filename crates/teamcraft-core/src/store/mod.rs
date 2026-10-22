@@ -8,15 +8,20 @@
 mod browser;
 mod key_source;
 mod memory;
+pub mod sealed;
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+mod sealed_sqlite;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
 
 #[cfg(target_arch = "wasm32")]
-pub use browser::{IndexedDbStore, browser_database_key};
-#[cfg(not(target_arch = "wasm32"))]
+pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
 pub use memory::MemoryStore;
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
 
