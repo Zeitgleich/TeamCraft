@@ -87,3 +87,77 @@ async fn guests_need_an_allowed_e_mail_domain_to_be_invited_or_to_sign_in() {
 
   stack.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_guests_are_held_to_the_domain_list_at_every_sign_in() {
+  let Some(stack) = Stack::builder().with_mail().with_local_accounts().start().await else {
+    return;
+  };
+  let mut alice = Peer::enroll(&stack, "alice").await;
+  let space = stack
+    .create_space(&alice.tokens, "Project A", "invite_only")
+    .await;
+  alice
+    .set_policy(|policy| policy.guests.allowed_email_domains = vec!["partner.test".into()])
+    .await;
+  let address = format!("local-{}@partner.test", alice.client.device_id());
+  stack
+    .post(
+      &alice.tokens,
+      &format!("/spaces/{space}/local-guests"),
+      json!({"email": address, "display_name": "Local Guest"}),
+    )
+    .await
+    .expect(StatusCode::CREATED);
+  let mail = teamcraft_e2e::Mailpit::new()
+    .wait_for_mail_to(&address, std::time::Duration::from_secs(20))
+    .await;
+  let token = mail
+    .text
+    .split("#token=")
+    .nth(1)
+    .and_then(|rest| rest.split_whitespace().next())
+    .unwrap()
+    .to_owned();
+  let password = "a long local password 123";
+  stack
+    .request_with(
+      None,
+      reqwest::Method::POST,
+      "/auth/local/activate",
+      Some(json!({"token": token, "password": password})),
+    )
+    .await
+    .expect(StatusCode::OK);
+  let session = stack
+    .request_with(
+      None,
+      reqwest::Method::POST,
+      "/auth/local/login",
+      Some(json!({"login": address, "password": password})),
+    )
+    .await
+    .expect(StatusCode::OK)
+    .body["access_token"]
+    .as_str()
+    .unwrap()
+    .to_owned();
+  let me = |token: String| {
+    let stack = &stack;
+    async move {
+      stack
+        .request_with(Some(&token), reqwest::Method::GET, "/me", None)
+        .await
+    }
+  };
+  me(session.clone()).await.expect(StatusCode::OK);
+
+  // The list changes: the guest's session stops working although it is a local one.
+  alice
+    .set_policy(|policy| policy.guests.allowed_email_domains = vec!["other.test".into()])
+    .await;
+  let blocked = me(session).await;
+  assert_eq!(blocked.status, StatusCode::FORBIDDEN, "{blocked:?}");
+
+  stack.stop().await;
+}

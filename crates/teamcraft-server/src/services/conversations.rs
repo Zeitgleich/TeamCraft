@@ -187,13 +187,23 @@ pub async fn update_conversation(
   }
   let target = access.target();
   require(state, caller, Permission::ManageChannelProperties, &target)?;
-  if let Some(visibility) = &request.maybe_visibility {
-    if matches!(visibility, ConversationVisibility::Unknown(_)) {
-      return Err(ApiError::InvalidRequest("unknown visibility".into()));
-    }
-    if *visibility != access.view.conversation.visibility {
-      require(state, caller, Permission::ConvertChannelPrivacy, &target)?;
-    }
+  // Making a channel public or private is a conversion with its own rules, audit record and system
+  // event, whichever endpoint asks for it.
+  if let Some(visibility) = request.maybe_visibility.clone()
+    && visibility != access.view.conversation.visibility
+  {
+    convert_channel_privacy(
+      state,
+      caller,
+      id,
+      ConvertChannelRequest {
+        visibility,
+        maybe_history_policy: None,
+      },
+    )
+    .await?;
+  } else if matches!(request.maybe_visibility, Some(ConversationVisibility::Unknown(_))) {
+    return Err(ApiError::InvalidRequest("unknown visibility".into()));
   }
 
   let limits = &state.settings.limits;
@@ -216,19 +226,13 @@ pub async fn update_conversation(
     }
   }
 
-  let mut kinds = visible_changes(
+  let kinds = visible_changes(
     &access.view.conversation,
     maybe_name.as_deref(),
     request.maybe_is_archived,
     request.maybe_moderation.as_ref(),
   );
-  if request
-    .maybe_visibility
-    .as_ref()
-    .is_some_and(|visibility| *visibility != access.view.conversation.visibility)
-  {
-    kinds.push(SystemEventKind::PrivacyChanged);
-  }
+
   state
     .database
     .update_conversation(
@@ -237,7 +241,7 @@ pub async fn update_conversation(
         maybe_name: maybe_name.as_deref(),
         maybe_topic: request.maybe_topic.as_deref(),
         maybe_description: request.maybe_description.as_deref(),
-        maybe_visibility: request.maybe_visibility,
+        maybe_visibility: None,
         maybe_category: request.maybe_category_id,
         clear_category: request.clear_category,
         maybe_history_policy: request.maybe_history_policy,

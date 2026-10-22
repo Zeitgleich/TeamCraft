@@ -163,3 +163,102 @@ async fn converting_a_channel_changes_who_can_join_and_tells_the_members() {
 
   stack.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_history_in_a_public_channel_needs_an_explicit_choice_by_the_adding_member() {
+  let Some(stack) = Stack::start().await else { return };
+  let mut alice = Peer::enroll(&stack, "alice").await;
+  let mut carol = Peer::enroll(&stack, "carol").await;
+  let mut erin = Peer::enroll(&stack, "erin").await;
+  let space = space_with(
+    &stack,
+    &alice,
+    "Project A",
+    &[(&carol, "member"), (&erin, "member")],
+  )
+  .await;
+  let channel = channel_with(&mut alice, space, "plans", &mut []).await;
+  alice.client.send_text(channel, None, "old news").await.unwrap();
+
+  // The server says "public, newcomers get the full history". It is the server's word, so a
+  // member's client doesn't share the past with somebody who may just have joined on their own.
+  stack
+    .put(
+      &alice.tokens,
+      &format!("/conversations/{channel}/visibility"),
+      json!({"visibility": "public", "history_policy": "full"}),
+    )
+    .await
+    .expect(StatusCode::OK);
+  let join = format!("/conversations/{channel}/join");
+  stack
+    .post(&erin.tokens, &join, json!({}))
+    .await
+    .expect(StatusCode::NO_CONTENT);
+  alice.client.add_member(channel, erin.user_id()).await.unwrap();
+  erin.wait_joined(channel).await;
+  alice.client.send_text(channel, None, "new news").await.unwrap();
+  erin.wait_for_text(channel, "new news").await;
+  assert!(
+    !erin.texts(channel).contains(&"old news".to_owned()),
+    "history leaked to a self-joiner"
+  );
+
+  // Full history is possible when the adding member chooses it.
+  stack
+    .post(&carol.tokens, &join, json!({}))
+    .await
+    .expect(StatusCode::NO_CONTENT);
+  alice
+    .client
+    .add_member_with_history(
+      channel,
+      carol.user_id(),
+      Some(teamcraft_proto::HistoryPolicy::Full),
+    )
+    .await
+    .unwrap();
+  carol.wait_joined(channel).await;
+  // With the keys of the past, her client can read what it fetches from before her join.
+  carol.client.load_older_messages(channel).await.unwrap();
+  carol.wait_for_text(channel, "old news").await;
+
+  // PATCH is the same conversion: integration channels still can't become public, and it is audited.
+  let machine = alice.client.create_channel(space, "machine-logs").await.unwrap();
+  stack
+    .patch(
+      &alice.tokens,
+      &format!("/conversations/{machine}"),
+      json!({"is_integration": true}),
+    )
+    .await
+    .expect(StatusCode::OK);
+  let patched = stack
+    .patch(
+      &alice.tokens,
+      &format!("/conversations/{machine}"),
+      json!({"visibility": "public"}),
+    )
+    .await;
+  assert_eq!(patched.status, StatusCode::CONFLICT, "{patched:?}");
+  stack
+    .patch(
+      &alice.tokens,
+      &format!("/conversations/{channel}"),
+      json!({"visibility": "private"}),
+    )
+    .await
+    .expect(StatusCode::OK);
+  let audit = stack
+    .get(&alice.tokens, "/admin/audit")
+    .await
+    .expect(StatusCode::OK)
+    .body
+    .to_string();
+  assert!(
+    audit.matches("conversation_visibility_changed").count() >= 2,
+    "{audit}"
+  );
+
+  stack.stop().await;
+}

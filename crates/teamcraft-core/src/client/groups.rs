@@ -137,7 +137,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(HistoryPolicy::FromJoin) => HistoryShare::FromJoin,
       Some(HistoryPolicy::Full) => HistoryShare::Full,
       // No choice made: the signed default, not the server's word for the channel (A9).
-      _ => self.implicit_history(user)?,
+      _ => self.implicit_history_in(conversation, user).await?,
     };
     let history = self.effective_history(user, requested).await?;
     self
@@ -813,6 +813,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       HistoryPolicy::Full if is_vouched => HistoryShare::Full,
       _ => HistoryShare::FromJoin,
     })
+  }
+
+  /// [`Self::implicit_history`] for a conversation: in a public channel nobody chose anything for
+  /// the newcomer (they may have joined on their own), so they get history from their join on,
+  /// whatever the workspace default says. Full history there takes an explicit choice by the member
+  /// who adds them (e2ee.md §4.7). The conversation's visibility is the server's word, but trusting
+  /// it can only lower what is shared.
+  pub(crate) async fn implicit_history_in(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<HistoryShare, CoreError> {
+    self.refresh_conversation(conversation).await?;
+    let maybe_response: Option<teamcraft_proto::ConversationResponse> =
+      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    let is_public = maybe_response
+      .is_some_and(|response| response.visibility == teamcraft_proto::ConversationVisibility::Public);
+    if is_public {
+      return Ok(HistoryShare::FromJoin);
+    }
+    self.implicit_history(user)
   }
 
   /// Guests only ever see history from their join on (e2ee.md §4.3), whatever was asked for.

@@ -98,11 +98,12 @@ pub fn limits_for(state: &AppState) -> SessionLimits {
 /// limits and, if the policy requires it, signed in with a second factor. Local accounts check
 /// their sessions when the token is validated; bots and meeting guests are exempt.
 pub async fn enforce(state: &AppState, identity: &TokenIdentity) -> Result<(), ApiError> {
-  if identity.is_exempt_from_session_policy {
-    return Ok(());
+  // Local guests are exempt from the rest of the sign-in policy (their sessions are checked with
+  // the token) but not from the guest rules; bots and meeting guests have no mailbox to check.
+  if identity.issuer == LOCAL_ISSUER || !identity.is_exempt_from_session_policy {
+    check_guest_sign_in(state, identity)?;
   }
-  check_guest_sign_in(state, identity)?;
-  if identity.issuer == LOCAL_ISSUER {
+  if identity.is_exempt_from_session_policy || identity.issuer == LOCAL_ISSUER {
     return Ok(());
   }
   let policy = state.policy.get();
@@ -135,32 +136,34 @@ pub async fn enforce(state: &AppState, identity: &TokenIdentity) -> Result<(), A
   }
 }
 
-/// Guests may only sign in with an e-mail address of an allowed domain, also when the list changed
-/// after they were invited. Without an address there is nothing to check, so no sign-in while a
-/// restriction is in force.
+/// Guests may only sign in with a verified e-mail address of an allowed domain, also when the list
+/// changed after they were invited. Without a verified address there is nothing to check, so no
+/// sign-in while a restriction is in force (an unverified address could be claimed by anybody).
 fn check_guest_sign_in(state: &AppState, identity: &TokenIdentity) -> Result<(), ApiError> {
-  if identity.role != Role::Guest {
-    return Ok(());
-  }
   let policy = state.policy.get();
   let lists = [
     &state.settings.guests.allowed_email_domains,
     &policy.guests.allowed_email_domains,
   ];
-  let is_allowed = lists.into_iter().all(|allowed| {
-    allowed.is_empty()
-      || identity
-        .maybe_email
-        .as_deref()
-        .is_some_and(|email| is_domain_allowed(allowed, email))
-  });
-  if is_allowed {
+  if is_guest_sign_in_allowed(&lists, identity) {
     Ok(())
   } else {
     Err(ApiError::Forbidden(
       "guests from this e-mail domain are not allowed".into(),
     ))
   }
+}
+
+fn is_guest_sign_in_allowed(lists: &[&Vec<String>], identity: &TokenIdentity) -> bool {
+  identity.role != Role::Guest
+    || lists.iter().all(|allowed| {
+      allowed.is_empty()
+        || (identity.is_email_verified
+          && identity
+            .maybe_email
+            .as_deref()
+            .is_some_and(|email| is_domain_allowed(allowed, email)))
+    })
 }
 
 fn has_second_factor(identity: &TokenIdentity) -> bool {
@@ -180,6 +183,41 @@ mod tests {
   use teamcraft_proto::Role;
 
   use super::*;
+
+  #[test]
+  fn guests_need_a_verified_address_of_an_allowed_domain() {
+    let list = vec!["partner.test".to_owned()];
+    let none: Vec<String> = Vec::new();
+    let guest = |email: Option<&str>, is_verified: bool| TokenIdentity {
+      role: Role::Guest,
+      maybe_email: email.map(str::to_owned),
+      is_email_verified: is_verified,
+      ..identity(&[], None)
+    };
+    assert!(
+      is_guest_sign_in_allowed(&[&none, &none], &guest(None, false)),
+      "no restriction"
+    );
+    assert!(is_guest_sign_in_allowed(
+      &[&none, &list],
+      &guest(Some("g@partner.test"), true)
+    ));
+    assert!(
+      !is_guest_sign_in_allowed(&[&none, &list], &guest(Some("g@partner.test"), false)),
+      "unverified"
+    );
+    assert!(!is_guest_sign_in_allowed(
+      &[&none, &list],
+      &guest(Some("g@evil.test"), true)
+    ));
+    assert!(!is_guest_sign_in_allowed(&[&none, &list], &guest(None, true)));
+    assert!(!is_guest_sign_in_allowed(
+      &[&list, &none],
+      &guest(Some("g@evil.test"), true)
+    ));
+    // Members aren't touched.
+    assert!(is_guest_sign_in_allowed(&[&none, &list], &identity(&[], None)));
+  }
 
   #[test]
   fn second_factors_are_recognized_by_amr_and_acr() {
