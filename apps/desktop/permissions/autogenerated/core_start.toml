@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-start"
+description = "Enables the core_start command without any pre-configured scope."
+commands.allow = ["core_start"]
+
+[[permission]]
+identifier = "deny-core-start"
+description = "Denies the core_start command without any pre-configured scope."
+commands.deny = ["core_start"]

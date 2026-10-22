@@ -232,15 +232,20 @@ async fn a_second_device_is_linked_with_a_code_and_confirmed_on_the_first() {
     _ => None,
   })
   .await;
-  let first_short = first.runtime.approval_start(code).await.expect("approval start");
+  first.runtime.approval_start(code).await.expect("approval start");
   let second_short = wait_for_link(&second, |status| match status {
     LinkStatus::Confirm { short_code, .. } => Some(short_code),
     _ => None,
   })
   .await;
-  assert_eq!(first_short, second_short, "both devices show the same short code");
-
-  first.runtime.approval_confirm().await.expect("approval confirm");
+  // The existing device never learns the short code: the user types what the new device shows, and
+  // the core compares (a wrong code is refused and does not hand anything over).
+  assert!(first.runtime.approval_confirm("no digits".into()).await.is_err());
+  first
+    .runtime
+    .approval_confirm(second_short)
+    .await
+    .expect("approval confirm with the code of the new device");
   let deadline = tokio::time::Instant::now() + WAIT;
   loop {
     if let CoreStatus::Ready { identity_fingerprint } = second.status().await {

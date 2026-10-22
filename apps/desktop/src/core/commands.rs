@@ -137,13 +137,16 @@ pub fn core_link_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
 }
 
 #[tauri::command]
-pub async fn core_approval_start(host: State<'_, CoreHost>, code: String) -> Result<String, CommandError> {
+pub async fn core_approval_start(host: State<'_, CoreHost>, code: String) -> Result<(), CommandError> {
   Ok(host.current()?.approval_start(code).await?)
 }
 
 #[tauri::command]
-pub async fn core_approval_confirm(host: State<'_, CoreHost>) -> Result<(), CommandError> {
-  Ok(host.current()?.approval_confirm().await?)
+pub async fn core_approval_confirm(
+  host: State<'_, CoreHost>,
+  short_code: String,
+) -> Result<(), CommandError> {
+  Ok(host.current()?.approval_confirm(short_code).await?)
 }
 
 #[tauri::command]

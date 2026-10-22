@@ -403,7 +403,8 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
     .with_sender(&PushProvider::UnifiedPush, Arc::new(UnifiedPushSender));
   if let Some(private_key) = &push.maybe_vapid_private_key {
     let vapid = VapidKey::from_base64url(private_key.expose_secret()).context("push.vapid_private_key")?;
-    info!(public_key = %vapid.public_key_base64url(), "Web Push enabled (applicationServerKey)");
+    let public_key = vapid.public_key_base64url();
+    info!(%public_key, "Web Push enabled (applicationServerKey)");
     let sender = WebPushSender::new(
       vapid,
       push.vapid_subject.clone(),
@@ -411,7 +412,9 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
       push.allow_private_endpoints,
     )
     .context("building the Web Push client")?;
-    dispatcher = dispatcher.with_sender(&PushProvider::WebPush, Arc::new(sender));
+    dispatcher = dispatcher
+      .with_sender(&PushProvider::WebPush, Arc::new(sender))
+      .with_web_public_key(public_key);
   }
   Ok(dispatcher)
 }

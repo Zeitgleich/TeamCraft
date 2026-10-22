@@ -107,7 +107,7 @@ impl SessionControl {
   pub fn sign_out(&self) {
     let control = *self;
     spawn_local(async move {
-      if tauri::is_available()
+      if tauri::has_core()
         && let Err(error) = remote_backend::stop_core().await
       {
         tracing::warn!(%error, "could not stop the client core");
@@ -198,7 +198,7 @@ impl SessionControl {
       .and_then(interpret_me_response);
     match outcome {
       // The desktop shell hosts the client core, whose enrollment replaces the demo welcome step.
-      Ok(me) if tauri::is_available() => self.start_core(me).await,
+      Ok(me) if tauri::has_core() => self.start_core(me).await,
       Ok(me) => {
         let is_ready = load_string(&device_ready_key(&me)).is_some();
         self.state.set(if is_ready {

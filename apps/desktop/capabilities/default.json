@@ -1,12 +1,37 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Window permissions for the main window. No plugins are enabled yet.",
+  "description": "What the main window may call: the shell's own commands (listed in build.rs) and event subscriptions. No plugin commands: the webview never opens URLs or shows notifications itself.",
   "windows": [
     "main"
   ],
   "permissions": [
-    "core:default",
-    "opener:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-auth-restore",
+    "allow-auth-login",
+    "allow-auth-cancel",
+    "allow-auth-logout",
+    "allow-api-get",
+    "allow-api-request",
+    "allow-core-start",
+    "allow-core-status",
+    "allow-core-enroll",
+    "allow-core-snapshot",
+    "allow-core-link-start",
+    "allow-core-link-status",
+    "allow-core-link-cancel",
+    "allow-core-approval-start",
+    "allow-core-approval-confirm",
+    "allow-core-approval-cancel",
+    "allow-core-messages",
+    "allow-core-thread",
+    "allow-core-action",
+    "allow-core-query",
+    "allow-core-stop",
+    "allow-call-snapshot",
+    "allow-call-media-devices",
+    "allow-call-action",
+    "allow-notify-user"
   ]
 }

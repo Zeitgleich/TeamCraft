@@ -3,6 +3,7 @@ use std::rc::Rc;
 use leptos::ev;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 
 use crate::auth::tauri;
 use crate::backend::Backend;
@@ -10,14 +11,17 @@ use crate::calls::CallEvent;
 use crate::calls::CallPhase;
 use crate::clock::now_ms;
 use crate::components::admin_console::AdminConsole;
+use crate::components::bundle_banner::BundleBanner;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::channel_view::ChannelView;
+use crate::components::file_views::{FilesPanel, Gallery};
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
+use crate::components::message_actions::{ForwardDialog, PinsPanel, SavedView};
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
 use crate::components::search_view::SearchView;
@@ -31,6 +35,9 @@ use crate::components::status_menu::CustomStatusDialog;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
+use crate::components::workspace_dialogs::{
+  BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
+};
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
 use crate::mock::MockBackend;
@@ -56,6 +63,13 @@ pub fn App() -> impl IntoView {
     return view! { <GuestJoinPage meeting=meeting invite_token=invite_token /> }.into_any();
   }
 
+  // What the service worker says about the code that is running (docs/e2ee.md §9.3).
+  let bundle = crate::bundle::Bundle(RwSignal::new(crate::bundle::BundleState::Unknown));
+  provide_context(bundle);
+  if !tauri::is_available() {
+    crate::bundle::watch(bundle.0);
+  }
+
   match BackendMode::load() {
     BackendMode::Mock => {
       let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(now_ms()));
@@ -79,8 +93,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
   }
-  if tauri::is_available() {
+  if tauri::has_core() {
     watch_for_notifications(state, i18n);
+  }
+  if !tauri::is_available() {
+    open_conversations_from_notifications(state);
+  }
+  if tauri::is_available() {
     connect_calls(state);
   }
   watch_idle(state);
@@ -98,6 +117,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       {move || i18n.t("skip-to-content")}
     </a>
     <div class="app">
+      <BundleBanner />
       <TopBar />
       <div class="app-body">
         // The administration console takes the whole window, like a system console.
@@ -112,6 +132,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Admin(section) => view! { <AdminConsole section=section /> }.into_any(),
             MainView::Search => view! { <SearchView /> }.into_any(),
             MainView::Meetings => view! { <MeetingsView /> }.into_any(),
+            MainView::Saved => view! { <SavedView /> }.into_any(),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
@@ -119,6 +140,14 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             SidePanel::Closed => ().into_any(),
             SidePanel::Thread { conversation, thread } => {
               view! { <ThreadPanel conversation=conversation thread=thread /> }.into_any()
+            },
+            SidePanel::Files => match state.current_conversation_id() {
+              Some(id) => view! { <FilesPanel conversation=id /> }.into_any(),
+              None => ().into_any(),
+            },
+            SidePanel::Pins => match state.current_conversation_id() {
+              Some(id) => view! { <PinsPanel conversation=id /> }.into_any(),
+              None => ().into_any(),
             },
             SidePanel::Members => match state.current_conversation_id() {
               Some(id) => view! { <MembersPanel conversation=id /> }.into_any(),
@@ -147,6 +176,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::VerifyContact(user) => view! { <VerifyContactDialog user=user /> }.into_any(),
         Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
         Overlay::ScheduleMeeting => view! { <ScheduleMeetingDialog /> }.into_any(),
+        Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
+        Overlay::Gallery(conversation, message) => view! { <Gallery conversation=conversation start=message /> }.into_any(),
+        Overlay::NewSpace => view! { <NewSpaceDialog /> }.into_any(),
+        Overlay::NewChannel(space) => view! { <NewChannelDialog space=space /> }.into_any(),
+        Overlay::BrowseChannels(space) => view! { <BrowseChannelsDialog space=space /> }.into_any(),
+        Overlay::ChannelSettings(id) => view! { <ChannelSettingsDialog conversation=id /> }.into_any(),
+        Overlay::SpaceSettings(space) => view! { <SpaceSettingsDialog space=space /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
     </div>
@@ -300,6 +336,47 @@ fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
       leptos::task::spawn_local(async move { tauri::notify(&title, Some(&body)).await });
     }
   });
+}
+
+/// Browser: a click on a push notification names a conversation, either as a message from the service
+/// worker (a page is open) or as `?conversation_id=` of the page it opened.
+fn open_conversations_from_notifications(state: AppState) {
+  const FIELD: &str = "conversation_id";
+  let Some(window) = web_sys::window() else { return };
+  let open = move |text: &str| {
+    if let Ok(conversation) = text.parse::<ConversationId>() {
+      state.open_conversation(conversation);
+    }
+  };
+  if let Ok(search) = window.location().search()
+    && let Ok(params) = web_sys::UrlSearchParams::new_with_str(&search)
+    && let Some(value) = params.get(FIELD)
+  {
+    open(&value);
+  }
+  let listener = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+    let data = event.data();
+    let is_click = js_sys::Reflect::get(&data, &"type".into())
+      .ok()
+      .and_then(|value| value.as_string())
+      .is_some_and(|kind| kind == "open_conversation");
+    if is_click
+      && let Some(value) = js_sys::Reflect::get(&data, &FIELD.into())
+        .ok()
+        .and_then(|value| value.as_string())
+    {
+      open(&value);
+    }
+  });
+  if window
+    .navigator()
+    .service_worker()
+    .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
+    .is_ok()
+  {
+    // Lives as long as the page.
+    listener.forget();
+  }
 }
 
 fn window_has_focus() -> bool {

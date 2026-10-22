@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use chromiumoxide::page::Page;
 use teamcraft_e2e::browser::{BrowserSession, web_dir};
+use teamcraft_e2e::peer::PASSPHRASE;
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::ConversationId;
@@ -30,36 +31,111 @@ async fn the_web_client_signs_in_through_keycloak_and_shows_the_accounts_channel
   rig.finish().await;
 }
 
+/// The service worker carries the Rust push code: it loads in the browser and instantiates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_service_worker_loads_its_push_code() {
+  let Some(rig) = Rig::start().await else { return };
+  rig
+    .browser
+    .screenshot_on_failure("web-service-worker", |page| async move {
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      let script = r#"(async () => {
+        const registration = await navigator.serviceWorker.ready;
+        return await new Promise((resolve) => {
+          navigator.serviceWorker.addEventListener('message', (event) => {
+            if (event.data && event.data.type === 'push') resolve(JSON.stringify(event.data));
+          });
+          registration.active.postMessage({ type: 'push_probe' });
+        });
+      })()"#;
+      let answer: String = page.evaluate(script).await.unwrap().into_value().unwrap();
+      assert!(
+        answer.contains("\"ready\":true"),
+        "the push code did not load: {answer}"
+      );
+    })
+    .await;
+  rig.finish().await;
+}
+
 /// The goal of the browser e2e: Alice writes in the web client, Carol's client receives it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "the web build is read-only: it has no client core, so messages typed in the browser stay in \
-  memory and are never encrypted or sent (crates/teamcraft-ui/src/server_backend.rs); enable when the \
-  web client runs teamcraft-core"]
 async fn a_message_written_in_the_web_client_reaches_a_second_client() {
   let Some(mut rig) = Rig::start().await else { return };
   let channel = rig.channel;
+  let alice = &mut rig.alice;
   let carol = &mut rig.carol;
   let browser = &rig.browser;
   let outcome = async {
-    browser
-      .screenshot_on_failure("web-send-message", |page| async move {
-        sign_in_as_alice(&page).await;
-        wait_for_text(&page, "browser-channel").await;
-        click_text(&page, "browser-channel").await;
-        let composer = wait_for_element(&page, "textarea").await;
-        composer
-          .click()
-          .await
-          .unwrap()
-          .type_str("hello from the browser")
-          .await
-          .unwrap()
-          .press_key("Enter")
-          .await
-          .unwrap();
-      })
-      .await;
-    carol.wait_for_text(channel, "hello from the browser").await;
+    // The peers stay connected while the browser signs in: the new device is announced on their
+    // gateways, and the first-ranked other device of Alice commits it (a staggered commit that
+    // needs a nudge). Meanwhile the browser's queued message waits in its outbox.
+    let console_log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let console_sink = console_log.clone();
+    let page_work = browser.screenshot_on_failure("web-send-message", |page| async move {
+      let mut events = page
+        .event_listener::<chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled>()
+        .await
+        .unwrap();
+      tokio::spawn(async move {
+        use futures_util::StreamExt;
+        while let Some(event) = events.next().await {
+          let text: Vec<String> = event
+            .args
+            .iter()
+            .map(|arg| {
+              arg
+                .value
+                .as_ref()
+                .map_or_else(|| arg.description.clone().unwrap_or_default(), |v| v.to_string())
+            })
+            .collect();
+          console_sink.lock().unwrap().push(text.join(" "));
+        }
+      });
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      click_text(&page, "browser-channel").await;
+      let composer = wait_for_element(&page, "textarea").await;
+      composer
+        .click()
+        .await
+        .unwrap()
+        .type_str("hello from the browser")
+        .await
+        .unwrap()
+        .press_key("Enter")
+        .await
+        .unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let delivery = async {
+      let mut round = 0_u32;
+      while !carol
+        .texts(channel)
+        .iter()
+        .any(|text| text == "hello from the browser")
+      {
+        if Instant::now() >= deadline {
+          for line in console_log.lock().unwrap().iter() {
+            eprintln!("console: {line}");
+          }
+          panic!("the message of the browser never reached Carol");
+        }
+        if round.is_multiple_of(50) {
+          alice.heartbeat().await;
+          carol.heartbeat().await;
+        }
+        round += 1;
+        alice.pump_reconnecting().await;
+        alice.client.apply_pending_changes().await.unwrap();
+        carol.pump_reconnecting().await;
+        carol.client.apply_pending_changes().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+      }
+    };
+    let (_, ()) = tokio::join!(page_work, delivery);
   };
   outcome.await;
   rig.finish().await;
@@ -70,6 +146,7 @@ async fn a_message_written_in_the_web_client_reaches_a_second_client() {
 struct Rig {
   stack: Stack,
   browser: BrowserSession,
+  alice: Peer,
   carol: Peer,
   channel: ConversationId,
   _turn: tokio::sync::MutexGuard<'static, ()>,
@@ -101,6 +178,9 @@ impl Rig {
     let mut carol = Peer::enroll(&stack, "carol").await;
     let space = space_with(&stack, &alice, "Browser Space", &[(&carol, "member")]).await;
     let channel = channel_with(&mut alice, space, "browser-channel", &mut [&mut carol]).await;
+    // A device that enrolls later (the browser) gets the channel's content key from the key bag, so
+    // the key bag must be on the server by then; the app's runner does this on its tick.
+    alice.client.sync_account_data().await.unwrap();
     carol
       .client
       .send_text(channel, None, "hello from carol")
@@ -109,6 +189,7 @@ impl Rig {
     Some(Self {
       stack,
       browser,
+      alice,
       carol,
       channel,
       _turn: turn,
@@ -121,8 +202,7 @@ impl Rig {
   }
 }
 
-/// Signs in through Keycloak's login page and passes the welcome screen of a new browser (the web
-/// build has no keys yet and only opens the app).
+/// Signs in through Keycloak's login page and unlocks the account's keys on this new browser.
 async fn sign_in_as_alice(page: &Page) {
   // The UI follows the browser language; pin English before the app loads (same origin).
   page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
@@ -149,8 +229,17 @@ async fn sign_in_as_alice(page: &Page) {
     .await
     .unwrap();
 
-  wait_for_text(page, "Continue").await;
-  click_text(page, "Continue").await;
+  // The account already has keys (the test enrolled it): this browser is a new device and unlocks
+  // them with the recovery passphrase.
+  let passphrase = wait_for_element(page, "#enroll-passphrase").await;
+  passphrase
+    .click()
+    .await
+    .unwrap()
+    .type_str(PASSPHRASE)
+    .await
+    .unwrap();
+  click_text(page, "Unlock").await;
 }
 
 async fn wait_for_element(page: &Page, selector: &str) -> chromiumoxide::element::Element {

@@ -12,6 +12,7 @@ use crate::auth::{self, AppConfig};
 use crate::backend::Backend;
 use crate::clock::now_ms;
 use crate::components::app::Shell;
+use crate::components::bundle_banner::BundleBanner;
 use crate::components::icons::{Icon, IconName};
 use crate::components::security_ui::QrImage;
 use crate::hybrid::Hybrid;
@@ -53,6 +54,7 @@ pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <main class="auth-page">
+      <BundleBanner />
       <section class="auth-card">
         <div class="auth-brand" translate="no">
           <span class="auth-logo" aria-hidden="true">"T"</span>
@@ -206,19 +208,24 @@ async fn load_backend(
   auth: Rc<dyn crate::auth::Authenticator>,
   me: &GetMeResponse,
 ) -> Result<Rc<dyn Backend>, LoadError> {
-  if tauri::is_available() {
+  if tauri::has_core() {
     let chat = RemoteChat::connect().await.map_err(|reason| LoadError::Parse {
       path: "core_snapshot".to_owned(),
       reason,
     })?;
     let hybrid = Hybrid::with_live(chat, me.role.clone(), now_ms(), auth);
     // Calls are optional: without them the call screens keep their demo data.
-    let hybrid = match RemoteCalls::connect().await {
-      Ok(calls) => hybrid.with_calls(calls),
-      Err(error) => {
-        tracing::warn!(%error, "the shell has no call support");
-        hybrid
-      },
+    let hybrid = if tauri::is_available() {
+      match RemoteCalls::connect().await {
+        Ok(calls) => hybrid.with_calls(calls),
+        Err(error) => {
+          tracing::warn!(%error, "the shell has no call support");
+          hybrid
+        },
+      }
+    } else {
+      // Media runs in the desktop shell; the browser keeps the demo call screens for now.
+      hybrid
     };
     return Ok(Rc::new(hybrid));
   }

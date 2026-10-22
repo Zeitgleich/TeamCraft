@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-approval-start"
+description = "Enables the core_approval_start command without any pre-configured scope."
+commands.allow = ["core_approval_start"]
+
+[[permission]]
+identifier = "deny-core-approval-start"
+description = "Denies the core_approval_start command without any pre-configured scope."
+commands.deny = ["core_approval_start"]

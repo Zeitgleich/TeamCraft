@@ -18,5 +18,11 @@ stage = "post_build"
 command = "sh"
 command_arguments = ["scripts/externalize-init.sh"]
 
+# The service worker's Rust half goes into sw.js (it can only be verified there).
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["scripts/finish-sw.sh"]
+
 [watch]
 ignore = ["dist"]

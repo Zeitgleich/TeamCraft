@@ -75,6 +75,14 @@ pub struct RegisterPushRequest {
   pub push_key: Base64Bytes,
 }
 
+/// `GET /api/v1/push/web-key`: the key a browser subscribes to Web Push with (`applicationServerKey`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WebPushKeyResponse {
+  /// The VAPID public key, base64url; absent when the server does not send Web Push.
+  #[serde(rename = "public_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_public_key: Option<String>,
+}
+
 // The token and the key must not end up in logs, not even through a `{:?}` of a request.
 impl std::fmt::Debug for RegisterPushRequest {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

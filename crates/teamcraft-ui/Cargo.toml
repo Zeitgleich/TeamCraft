@@ -22,8 +22,8 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
   "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
   "HtmlCollection", "KeyboardEvent", "MediaQueryList", "Node", "NodeList", "Storage", "Window",
-  "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator", "ServiceWorkerContainer", "ServiceWorkerRegistration", "Location", "History",
-  "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams",
+  "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator", "ServiceWorkerContainer", "ServiceWorker", "MessageEvent", "ServiceWorkerRegistration", "Location", "History",
+  "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"
@@ -44,3 +44,10 @@ tracing = "0.1"
 console_error_panic_hook = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
 tracing-web = "0.1"
+
+# The browser build runs the client core in the page (src/web_core.rs): same engine as the desktop app.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui"] }
+teamcraft-crypto = { path = "../teamcraft-crypto" }
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }

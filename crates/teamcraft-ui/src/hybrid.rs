@@ -9,6 +9,12 @@ use std::rc::Rc;
 
 use teamcraft_proto::Role;
 
+use teamcraft_client_api::actions::{
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
+  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+};
+use teamcraft_proto::{CategoryId, HistoryPolicy};
+
 use crate::admin::{
   AdminChannel, AdminUser, AuditEntry, DeviceInfo, PolicyBlocker, PolicyField, Retention, SecurityPolicy,
   SelfJoinOutcome,
@@ -249,6 +255,150 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.set_activity(is_idle);
   }
 
+  fn search_backend(&self) -> Option<&dyn SearchBackend> {
+    self.chat.search_backend()
+  }
+
+  fn send_message(&self, message: OutgoingMessage) {
+    self.chat.send_message(message);
+  }
+
+  fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
+    self.chat.message_extras(conversation, messages)
+  }
+
+  fn edit_message(&self, conversation: ConversationId, message: MessageId, body: &str) {
+    self.chat.edit_message(conversation, message, body);
+  }
+
+  fn delete_message(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.delete_message(conversation, message);
+  }
+
+  fn forward_message(&self, from: ConversationId, message: MessageId, to: ConversationId, comment: &str) {
+    self.chat.forward_message(from, message, to, comment);
+  }
+
+  fn set_pinned(&self, conversation: ConversationId, message: MessageId, is_pinned: bool) {
+    self.chat.set_pinned(conversation, message, is_pinned);
+  }
+
+  fn pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {
+    self.chat.pinned_messages(conversation)
+  }
+
+  fn set_saved(&self, conversation: ConversationId, message: MessageId, is_saved: bool) {
+    self.chat.set_saved(conversation, message, is_saved);
+  }
+
+  fn saved_items(&self) -> Vec<SavedItem> {
+    self.chat.saved_items()
+  }
+
+  fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
+    self.chat.permalink(conversation, message)
+  }
+
+  fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
+    self.chat.resolve_permalink(link)
+  }
+
+  fn mark_unread(&self, conversation: ConversationId, from: MessageId) {
+    self.chat.mark_unread(conversation, from);
+  }
+
+  fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.chat.first_unread(conversation)
+  }
+
+  fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
+    self.chat.draft(conversation, maybe_thread)
+  }
+
+  fn set_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    self.chat.set_draft(conversation, maybe_thread, body);
+  }
+
+  fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.acknowledge(conversation, message);
+  }
+
+  fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
+    self.chat.conversation_files(conversation)
+  }
+
+  fn download_file(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.download_file(conversation, message);
+  }
+
+  fn create_share_link(&self, conversation: ConversationId, message: MessageId, options: ShareLinkOptions) {
+    self.chat.create_share_link(conversation, message, options);
+  }
+
+  fn share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
+    self.chat.share_links(conversation, message)
+  }
+
+  fn max_upload_bytes(&self) -> Option<u64> {
+    self.chat.max_upload_bytes()
+  }
+
+  fn create_space(&self, space: NewSpace) {
+    self.chat.create_space(space);
+  }
+
+  fn update_space(&self, space: SpaceId, changes: SpaceChanges) {
+    self.chat.update_space(space, changes);
+  }
+
+  fn create_channel_with(&self, channel: NewChannel) {
+    self.chat.create_channel_with(channel);
+  }
+
+  fn update_channel(&self, conversation: ConversationId, changes: ChannelChanges) {
+    self.chat.update_channel(conversation, changes);
+  }
+
+  fn browse_channels(&self, space: SpaceId) -> Vec<BrowsableChannel> {
+    self.chat.browse_channels(space)
+  }
+
+  fn join_channel(&self, conversation: ConversationId) {
+    self.chat.join_channel(conversation);
+  }
+
+  fn leave_channel(&self, conversation: ConversationId) {
+    self.chat.leave_channel(conversation);
+  }
+
+  fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
+    self.chat.categories(space)
+  }
+
+  fn create_category(&self, space: SpaceId, name: &str) {
+    self.chat.create_category(space, name);
+  }
+
+  fn rename_category(&self, space: SpaceId, category: CategoryId, name: &str) {
+    self.chat.rename_category(space, category, name);
+  }
+
+  fn delete_category(&self, space: SpaceId, category: CategoryId) {
+    self.chat.delete_category(space, category);
+  }
+
+  fn add_member_with_history(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
+    self.chat.add_member_with_history(conversation, user, history);
+  }
+
+  fn invite_to_space(&self, invite: SpaceInvite) {
+    self.chat.invite_to_space(invite);
+  }
+
+  fn has_external_people(&self, conversation: ConversationId) -> bool {
+    self.chat.has_external_people(conversation)
+  }
+
   fn is_in_call(&self, user: UserId) -> bool {
     self
       .maybe_calls
@@ -294,26 +444,41 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 }
 
 impl<C: ChatBackend> SearchBackend for Hybrid<C> {
-  /// Search needs decrypted messages, which the server cannot offer; until `teamcraft-core` provides
-  /// the local index, the mock answers so the screens can be used.
+  /// Search needs decrypted messages: the client core answers from its local index; without one the
+  /// mock answers so the screens can be used.
   fn search(&self, query: &ParsedQuery) -> SearchResults {
-    self.mock.search(query)
+    match self.chat.search_backend() {
+      Some(real) => real.search(query),
+      None => self.mock.search(query),
+    }
   }
 
   fn recent_mentions(&self) -> Vec<SearchHit> {
-    self.mock.recent_mentions()
+    match self.chat.search_backend() {
+      Some(real) => real.recent_mentions(),
+      None => self.mock.recent_mentions(),
+    }
   }
 
   fn saved_searches(&self) -> Vec<SavedSearch> {
-    self.mock.saved_searches()
+    match self.chat.search_backend() {
+      Some(real) => real.saved_searches(),
+      None => self.mock.saved_searches(),
+    }
   }
 
   fn save_search(&self, name: &str, query: &str) {
-    self.mock.save_search(name, query);
+    match self.chat.search_backend() {
+      Some(real) => real.save_search(name, query),
+      None => self.mock.save_search(name, query),
+    }
   }
 
   fn delete_saved_search(&self, id: u64) {
-    self.mock.delete_saved_search(id);
+    match self.chat.search_backend() {
+      Some(real) => real.delete_saved_search(id),
+      None => self.mock.delete_saved_search(id),
+    }
   }
 }
 

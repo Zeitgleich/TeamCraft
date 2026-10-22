@@ -12,7 +12,7 @@ use crate::model::{Conversation, DeviceId, UserId};
 use crate::prefs::{
   CallPrefs, Density, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, SidebarSort, ThreadReplies,
 };
-use crate::settings::{SendMode, Theme};
+use crate::settings::{SendMode, Theme, load_string, store_string};
 use crate::state::{Overlay, use_app_state};
 
 /// A labelled `<select>` bound to a stored slug.
@@ -176,7 +176,55 @@ pub fn NotificationsTab() -> impl IntoView {
     })
   });
 
+  let page_permission = RwSignal::new(crate::auth::tauri::notification_permission());
+  let push_key = StoredValue::new(format!("teamcraft.web_push.{}", state.me().id));
+  let is_push_on = RwSignal::new(load_string(&push_key.get_value()).is_some());
+  let push_error = RwSignal::new(None::<String>);
+  // Allowing notifications also subscribes to Web Push, so they arrive with no page open.
+  let allow_notifications = move |_| {
+    let push_key = push_key.get_value();
+    leptos::task::spawn_local(async move {
+      if page_permission.get_untracked().as_deref() != Some("granted") {
+        page_permission.set(crate::auth::tauri::request_notification_permission().await);
+      }
+      if page_permission.get_untracked().as_deref() != Some("granted") {
+        return;
+      }
+      let Some(session) = crate::session::use_session() else {
+        return;
+      };
+      match crate::remote_backend::enable_web_push(session.authenticator().as_ref()).await {
+        Ok(()) => {
+          store_string(&push_key, "1");
+          is_push_on.set(true);
+          push_error.set(None);
+        },
+        Err(error) => push_error.set(Some(error)),
+      }
+    });
+  };
+
   view! {
+    // The desktop app notifies through the system; the browser needs the user's permission.
+    <Show when=move || !crate::auth::tauri::is_available() && page_permission.get().is_some() fallback=|| ()>
+      <fieldset class="settings-group">
+        <legend>{move || i18n.t("notif-browser")}</legend>
+        <p class="muted-text small">
+          {move || match page_permission.get().as_deref() {
+            Some("granted") => i18n.t("notif-browser-granted"),
+            Some("denied") => i18n.t("notif-browser-denied"),
+            _ => i18n.t("notif-browser-hint"),
+          }}
+        </p>
+        <Show when=move || !is_push_on.get() && page_permission.get().as_deref() != Some("denied") fallback=|| ()>
+          <button class="btn" on:click=allow_notifications>{move || i18n.t("notif-browser-allow")}</button>
+        </Show>
+        <Show when=move || is_push_on.get() fallback=|| ()>
+          <p class="muted-text small">{move || i18n.t("notif-browser-background")}</p>
+        </Show>
+        {move || push_error.get().map(|error| view! { <p class="field-error" role="alert">{error}</p> })}
+      </fieldset>
+    </Show>
     <fieldset class="settings-group">
       <legend>{move || i18n.t("notif-what")}</legend>
       <SelectField
@@ -708,7 +756,7 @@ pub fn DevicesTab() -> impl IntoView {
       <p class="fingerprint" translate="no">{move || fingerprint.get()}</p>
     </fieldset>
 
-    <Show when=|| crate::auth::tauri::is_available() fallback=|| ()>
+    <Show when=|| crate::auth::tauri::has_core() fallback=|| ()>
       <RecoveryPassphrase />
     </Show>
 

@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{Space, initials};
-use crate::state::{MainView, use_app_state};
+use crate::state::{MainView, Overlay, use_app_state};
 
 /// Space switcher on the far left (Mattermost "team sidebar").
 #[component]
@@ -19,7 +19,7 @@ pub fn SpaceRail() -> impl IntoView {
           <SpaceButton space=space />
         </For>
       </ul>
-      <button class="rail-add" disabled aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
+      <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::NewSpace) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
         <Icon name=IconName::Plus />
       </button>
     </nav>
@@ -74,7 +74,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
             MainView::Conversation(current) => state
               .read(|backend| backend.conversation(current))
               .is_some_and(|conv| conv.maybe_space == Some(id) || conv.maybe_space.is_none()),
-            MainView::Threads | MainView::Search | MainView::Meetings => true,
+            MainView::Threads | MainView::Search | MainView::Meetings | MainView::Saved => true,
             MainView::Admin(_) => false,
           };
           if !belongs && let Some(conversation) = first_conversation(id) {

@@ -1,0 +1,47 @@
+TeamCraft
+Copyright (C) 2026 The TeamCraft contributors
+
+TeamCraft is free software: you can redistribute it and/or modify it under the terms of the
+GNU Affero General Public License as published by the Free Software Foundation, either version 3
+of the License, or (at your option) any later version. See LICENSE.
+
+The TeamCraft name and logo are not covered by the license above.
+
+
+Third-party material
+====================
+
+Bundled in this repository
+--------------------------
+
+davey (crates/vendor/davey/)
+  Rust implementation of Discord's DAVE protocol, vendored with patches for openmls 0.9 and
+  WebAssembly (see crates/vendor/davey/VENDORED.md).
+  MIT License, see crates/vendor/davey/LICENSE.
+
+Shipped with the apps, not stored in git
+----------------------------------------
+
+MediaPipe selfie segmentation model (background effects)
+  Copyright Google LLC. Apache License 2.0, https://www.apache.org/licenses/LICENSE-2.0
+  Fetched at packaging time with a pinned checksum, see crates/teamcraft-media/models/NOTICE.md.
+
+Downloaded by the apps at runtime
+---------------------------------
+
+OpenH264 Video Codec provided by Cisco Systems, Inc.
+  The apps download Cisco's prebuilt binary directly from Cisco (ciscobinary.openh264.org) on
+  first use, so Cisco's H.264 patent license applies. TeamCraft does not distribute it.
+
+Rust dependencies
+-----------------
+
+Dependencies from crates.io keep their own licenses; `cargo deny check licenses` enforces the
+allow list in deny.toml. Desktop and mobile builds list them on their about/licenses screen.
+
+Design references
+-----------------
+
+The device linking handshake (crates/teamcraft-crypto/src/rendezvous.rs) is modelled on the
+connection rendezvous protocol described in Threema's cryptography whitepaper; no Threema code is
+included. Calls use Discord's DAVE protocol design (via davey above).

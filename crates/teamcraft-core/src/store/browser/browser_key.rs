@@ -2,10 +2,12 @@
 //! by a non-extractable Web Crypto AES-GCM key.
 //!
 //! This is the browser's stand-in for the OS keystore ([`super::super::KeyringKeySource`]): the
-//! wrapping key's bytes can't be read by any script, so a copy of the database or an injected
-//! script can't take the key away for offline use. Pages and the service worker of the origin can
-//! still unwrap it without a user gesture, which push notifications need. The key itself is not
-//! cryptography of our own, just storage: Web Crypto encrypts, nothing is combined here.
+//! wrapping key's bytes can't be read by any script, so a copy of the IndexedDB files alone does not
+//! reveal the database key. It does **not** keep the key from script running on the origin: pages
+//! and the service worker unwrap it without a user gesture (push notifications need that), and one
+//! `decrypt` call returns the raw database key, which an injected script could copy away for offline
+//! use (docs/e2ee.md §9.1, docs/security-review.md C2). The key itself is not cryptography of our
+//! own, just storage: Web Crypto encrypts, nothing is combined here.
 
 use rand_core::{OsRng, RngCore};
 use teamcraft_crypto::secret::{SYMMETRIC_KEY_LEN, SymmetricKey};

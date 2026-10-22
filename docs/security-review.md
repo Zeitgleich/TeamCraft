@@ -663,6 +663,16 @@ confirm.
 
 ### (a) Browser store and web client
 
+**Status of the UI-side fixes (feat/ui-security-chat):**
+
+| # | Status | What changed |
+|---|--------|--------------|
+| 1 | Mitigated, limit documented | Signed release manifest checked by the service worker (`crates/teamcraft-ui/sw.js`, `scripts/sign-web-release.sh`, e2ee.md §9.3); the UI warns about unsigned or rejected bundles and shows the release key. A server that replaces `sw.js` still defeats it; the doc says so |
+| 2 | Fixed (docs and comments) | e2ee.md §9.1 and the `browser_key.rs` comment now say XSS gets the database key; the table lists what keeps script out |
+| 3 | Fixed | `withGlobalTauri` is off; every command is listed in `apps/desktop/build.rs` and allowed per command in `capabilities/default.json`; the core checks the short code of a device link itself (typed from the new device, three tries), so a script in the webview cannot approve a link |
+| 8 | Fixed, one item open | The CSP is built from the configuration (`connect-src` limited to self, issuer, SFU), an invalid CSP stops the server at startup, `sw.js` and `init.js` are revalidated. Trusted Types is an opt-in: the UI framework writes markup with `innerHTML` and the worker registers from a string URL, so the client does not start under it yet (the finding's assumption "no HTML sinks" does not hold for the framework's static templates) |
+| 13 | Open | The OIDC endpoint scheme check is not part of this change |
+
 #### 1. High: the web client is served by the untrusted server
 
 `web.rs:35-58` serves `index.html`, `init.js`, the wasm and `sw.js` from the same server the threat

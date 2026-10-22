@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Zeitgleich/TeamCraft/security/advisories/new
+    about: Report privately, please not as a public issue.

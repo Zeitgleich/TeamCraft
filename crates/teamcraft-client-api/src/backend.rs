@@ -97,6 +97,11 @@ pub trait ChatBackend {
   fn is_in_call(&self, _user: UserId) -> bool {
     false
   }
+  /// The backend's own search, saved searches and mentions, when it has them (the client core); the
+  /// UI answers those screens with demo data otherwise.
+  fn search_backend(&self) -> Option<&dyn SearchBackend> {
+    None
+  }
   /// The newest failure of an action sent to the core, in words for the user.
   fn last_action_error(&self) -> Option<String> {
     None

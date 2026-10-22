@@ -82,7 +82,7 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
         delimited(rest, marker).map(|(inner, used)| (Inline::Italic(parse_inline(inner)), used))
       },
       '@' if before_is_boundary => mention(rest),
-      'h' if before_is_boundary => link(rest),
+      'h' | 't' if before_is_boundary => link(rest),
       _ => None,
     };
     match parsed {
@@ -104,6 +104,9 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
   }
   out
 }
+
+/// How message permalinks start (the client core makes them).
+const PERMALINK_PREFIX: &str = "teamcraft:/c/";
 
 /// Returns the content between `marker` at the start of `rest` and the next `marker`, plus bytes used.
 fn delimited<'a>(rest: &'a str, marker: &str) -> Option<(&'a str, usize)> {
@@ -131,12 +134,13 @@ fn mention(rest: &str) -> Option<(Inline, usize)> {
 }
 
 fn link(rest: &str) -> Option<(Inline, usize)> {
-  if !(rest.starts_with("http://") || rest.starts_with("https://")) {
-    return None;
-  }
+  // `teamcraft:/c/...` is a permalink to a message (shown as a chip, never opened by the browser).
+  let prefix = ["https://", "http://", PERMALINK_PREFIX]
+    .into_iter()
+    .find(|prefix| rest.starts_with(prefix))?;
   let raw = rest.split(char::is_whitespace).next().unwrap_or(rest);
   let url = raw.trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
-  (url.len() > "https://".len()).then(|| (Inline::Link(url.to_owned()), url.len()))
+  (url.len() > prefix.len()).then(|| (Inline::Link(url.to_owned()), url.len()))
 }
 
 #[cfg(test)]
@@ -146,6 +150,18 @@ mod tests {
   #[test]
   fn plain_text_stays_text() {
     assert_eq!(parse_inline("hello world"), [Inline::Text("hello world".into())]);
+  }
+
+  #[test]
+  fn permalinks_are_links() {
+    assert_eq!(
+      parse_inline("see teamcraft:/c/1/m/2 now"),
+      [
+        Inline::Text("see ".into()),
+        Inline::Link("teamcraft:/c/1/m/2".into()),
+        Inline::Text(" now".into()),
+      ]
+    );
   }
 
   #[test]

@@ -105,6 +105,7 @@ previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
 | `src/notifier.rs`       | Desktop notification policy and the watcher for new messages            |
 | `src/hybrid.rs`         | `Hybrid`: a real chat backend plus mock search, calls, admin, security  |
 | `src/server_backend.rs` | `RestChat`: web build, read-only chat over the REST API                 |
+| `src/web_core.rs`       | Web build: runs the client core in the page, answers the `core_*` commands |
 | `src/calls.rs`          | `CallState` (session state of the user's call)                          |
 | `src/state.rs`          | `AppState` (context): current space, view, panel, overlay, backend      |
 | `src/settings.rs`       | Per-device preferences (theme, language, send mode) in `localStorage`   |
@@ -188,7 +189,7 @@ origin registered as a redirect URI of the identity provider's client.
 
 An ignored test serves the shell's commands over loopback HTTP, with a real core for alice and a
 second core (carol) that chats with her; `apps/desktop/dev/bridge-shim.js` implements
-`window.__TAURI__` on top of it, so the web build in any browser talks to a real core:
+`window.__TAURI_INTERNALS__` (the shell sets `withGlobalTauri: false`) on top of it, so the web build in any browser talks to a real core:
 
 ```sh
 docker compose -f docker-compose.dev.yml up -d              # dev stack; run teamcraft-server on :8081
