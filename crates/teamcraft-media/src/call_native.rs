@@ -10,9 +10,11 @@ use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle as ThreadHandle;
 use std::time::{Duration, Instant};
 
-use teamcraft_proto::{CallClientMessage, CallServerMessage, DeviceId};
+use teamcraft_proto::{
+  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use wtransport::tls::Sha256Digest;
@@ -20,10 +22,14 @@ use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 
 use crate::audio_codec::{FRAME_SAMPLES_PER_CHANNEL, OpusEncoderConfig};
 use crate::audio_device::{AudioDeviceError, AudioInput, AudioOutput, PlaybackBuffer};
-use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer, sine_tone};
+use crate::audio_io::{AudioSink, AudioSource, sine_tone};
+use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer};
 use crate::call_auth::CallKeyAuthenticator;
-use crate::call_engine::{CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, EngineOutput};
+use crate::call_engine::{
+  CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
+};
 use crate::jitter::JitterBufferConfig;
+use crate::video::EncodedVideoFrame;
 
 /// Audio frame period.
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
@@ -62,38 +68,6 @@ pub struct NativeCallConfig {
   pub maybe_processing: Option<crate::audio_processing::AudioProcessingConfig>,
 }
 
-/// What the call sends.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AudioSource {
-  Silence,
-  /// A sine tone (automated tests, "can you hear me" checks).
-  Tone {
-    frequency_hz: f32,
-    amplitude: f32,
-  },
-  /// The default microphone.
-  Microphone,
-}
-
-/// Where received audio goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AudioSink {
-  /// Decoded and mixed, then dropped (headless clients); still counted in [`CallStats`].
-  Discard,
-  /// The default output device.
-  Speakers,
-}
-
-/// Counters for tests and diagnostics.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct CallStats {
-  pub frames_sent: u64,
-  pub frames_received: u64,
-  /// 20 ms mix frames with audible content.
-  pub audible_frames_played: u64,
-  pub maybe_privacy_code: Option<String>,
-}
-
 #[derive(Debug, Error)]
 pub enum NativeCallError {
   #[error("connecting to the SFU failed: {0}")]
@@ -113,7 +87,32 @@ pub enum NativeCallError {
 enum Command {
   Mute(bool),
   Deafen(bool),
+  SwitchAudio {
+    source: AudioSource,
+    sink: AudioSink,
+    done: oneshot::Sender<Result<(), AudioDeviceError>>,
+  },
+  Video(VideoCommand),
   Leave,
+}
+
+/// Video requests the app makes; frames come from the app's encoder (capture and codecs are
+/// platform specific).
+enum VideoCommand {
+  Publish {
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  },
+  Unpublish(MediaStreamId),
+  Subscribe {
+    stream_id: MediaStreamId,
+    maybe_max_layer: Option<u8>,
+  },
+  Send {
+    stream_id: MediaStreamId,
+    frame: EncodedVideoFrame,
+  },
 }
 
 /// The audio thread's handles: samples from the microphone and the speakers' buffer.
@@ -170,6 +169,46 @@ impl NativeCall {
 
   pub fn set_deafened(&self, is_deafened: bool) {
     let _ = self.commands.send(Command::Deafen(is_deafened));
+  }
+
+  /// Publishes a video track; [`CallEngineEvent::VideoPublished`] for this device brings the stream
+  /// id for [`NativeCall::send_video`]. Screen shares use a single layer.
+  pub fn publish_video(&self, kind: VideoTrackKind, codec: VideoCodec, layers: Vec<VideoLayerInfo>) {
+    self.video(VideoCommand::Publish { kind, codec, layers });
+  }
+
+  pub fn unpublish_video(&self, stream_id: MediaStreamId) {
+    self.video(VideoCommand::Unpublish(stream_id));
+  }
+
+  /// Receives another device's track up to `max_layer` (`None` stops); frames arrive as
+  /// [`CallEngineEvent::VideoFrame`].
+  pub fn subscribe_video(&self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>) {
+    self.video(VideoCommand::Subscribe {
+      stream_id,
+      maybe_max_layer,
+    });
+  }
+
+  /// Sends one encoded frame of an own track.
+  pub fn send_video(&self, stream_id: MediaStreamId, frame: EncodedVideoFrame) {
+    self.video(VideoCommand::Send { stream_id, frame });
+  }
+
+  /// Switches microphone and speakers (or test signals) mid-call. On error the previous devices
+  /// keep running.
+  pub async fn set_audio(&self, source: AudioSource, sink: AudioSink) -> Result<(), NativeCallError> {
+    let (done, done_rx) = oneshot::channel();
+    self
+      .commands
+      .send(Command::SwitchAudio { source, sink, done })
+      .map_err(|_| NativeCallError::TaskEnded)?;
+    Ok(done_rx.await.map_err(|_| NativeCallError::TaskEnded)??)
+  }
+
+  fn video(&self, command: VideoCommand) {
+    // A closed channel means the call already ended.
+    let _ = self.commands.send(Command::Video(command));
   }
 
   /// The next event, or `None` once the call ended.
@@ -229,7 +268,8 @@ async fn run_call(
     capture = capture.with_processor(Arc::clone(processor));
     mixer = mixer.with_processor(Arc::clone(processor));
   }
-  let mut devices = AudioDevices::open(config.source, config.sink)?;
+  let mut source = config.source.clone();
+  let mut devices = AudioDevices::open(&source, &config.sink)?;
   let (signal_out, signal_out_rx) = mpsc::unbounded_channel::<CallClientMessage>();
   let writer = tokio::spawn(write_signaling(send, signal_out_rx));
   let (signal_in, mut signal_in_rx) = mpsc::unbounded_channel::<CallServerMessage>();
@@ -274,7 +314,7 @@ async fn run_call(
         }
       },
       _ = frame_tick.tick() => {
-        if let AudioSource::Tone { frequency_hz, amplitude } = config.source {
+        if let AudioSource::Tone { frequency_hz, amplitude } = source {
           let samples = sine_tone(frequency_hz, amplitude, tone_position, FRAME_SAMPLES_PER_CHANNEL);
           tone_position += FRAME_SAMPLES_PER_CHANNEL as u64;
           for frame in capture.push(&samples)? {
@@ -301,6 +341,19 @@ async fn run_call(
             engine.set_deafened(is_deafened);
             io.mixer.set_deafened(is_deafened);
           },
+          Some(Command::SwitchAudio { source: new_source, sink, done }) => {
+            // Open the new devices before closing the old ones, so a failure changes nothing.
+            let result = AudioDevices::open(&new_source, &sink).map(|new_devices| {
+              std::mem::replace(&mut devices, new_devices).close();
+              source = new_source;
+            });
+            if let Err(error) = &result {
+              warn!(%error, "switching audio devices failed");
+            }
+            // The caller may have given up waiting.
+            let _ = done.send(result);
+          },
+          Some(Command::Video(command)) => handle_video(&mut engine, command),
           Some(Command::Leave) | None => break Ok(()),
         }
       },
@@ -317,6 +370,18 @@ async fn run_call(
   stats.maybe_privacy_code = engine.privacy_code();
   info!(?stats, "call ended");
   result.map(|()| stats)
+}
+
+fn handle_video(engine: &mut CallEngine, command: VideoCommand) {
+  match command {
+    VideoCommand::Publish { kind, codec, layers } => engine.publish_video(kind, codec, layers),
+    VideoCommand::Unpublish(stream_id) => engine.unpublish_video(stream_id),
+    VideoCommand::Subscribe {
+      stream_id,
+      maybe_max_layer,
+    } => engine.subscribe_video(stream_id, maybe_max_layer),
+    VideoCommand::Send { stream_id, frame } => engine.send_video(stream_id, &frame, Instant::now()),
+  }
 }
 
 /// Where engine outputs go.
@@ -367,25 +432,36 @@ impl DriverIo<'_> {
 
 impl AudioDevices {
   /// Starts the audio thread with the devices the source and sink need.
-  fn open(source: AudioSource, sink: AudioSink) -> Result<Self, NativeCallError> {
+  fn open(source: &AudioSource, sink: &AudioSink) -> Result<Self, AudioDeviceError> {
     let (capture_tx, capture_rx) = mpsc::unbounded_channel();
-    let maybe_playback =
-      (sink == AudioSink::Speakers).then(|| Arc::new(PlaybackBuffer::new(MAX_PLAYBACK_BUFFER_SAMPLES)));
+    let maybe_output_choice = match sink {
+      AudioSink::Speakers(choice) => Some(choice.clone()),
+      AudioSink::Discard => None,
+    };
+    let maybe_input_choice = match source {
+      AudioSource::Microphone(choice) => Some(choice.clone()),
+      AudioSource::Silence | AudioSource::Tone { .. } => None,
+    };
+    let maybe_playback = maybe_output_choice
+      .is_some()
+      .then(|| Arc::new(PlaybackBuffer::new(MAX_PLAYBACK_BUFFER_SAMPLES)));
     let playback_for_thread = maybe_playback.clone();
-    let wants_microphone = source == AudioSource::Microphone;
+    let wants_microphone = maybe_input_choice.is_some();
     let (stop, stop_rx) = std_mpsc::channel::<()>();
     let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), AudioDeviceError>>();
     let thread = std::thread::spawn(move || {
       let opened = (|| -> Result<(Option<AudioInput>, Option<AudioOutput>), AudioDeviceError> {
-        let maybe_input = if wants_microphone {
-          Some(AudioInput::open_default(move |samples| {
+        let maybe_input = match &maybe_input_choice {
+          Some(choice) => Some(AudioInput::open(choice, move |samples| {
             // The call task may be gone; the device thread stops right after.
             let _ = capture_tx.send(samples.to_vec());
-          })?)
-        } else {
-          None
+          })?),
+          None => None,
         };
-        let maybe_output = playback_for_thread.map(AudioOutput::open_default).transpose()?;
+        let maybe_output = match (&maybe_output_choice, playback_for_thread) {
+          (Some(choice), Some(buffer)) => Some(AudioOutput::open(choice, buffer)?),
+          _ => None,
+        };
         Ok((maybe_input, maybe_output))
       })();
       match opened {
@@ -400,7 +476,7 @@ impl AudioDevices {
         },
       }
     });
-    ready_rx.recv().map_err(|_| NativeCallError::TaskEnded)??;
+    ready_rx.recv().map_err(|_| AudioDeviceError::AudioThread)??;
     Ok(Self {
       maybe_capture: wants_microphone.then_some(capture_rx),
       maybe_playback,

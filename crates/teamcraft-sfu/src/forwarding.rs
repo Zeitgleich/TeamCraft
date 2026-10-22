@@ -426,6 +426,7 @@ impl Forwarder {
       .iter()
       .filter_map(|(&stream_id, route)| {
         let subscription = route.subscribers.get(&receiver)?;
+        let is_screen = route.track.kind == VideoTrackKind::Screen;
         let priority = match route.track.kind {
           VideoTrackKind::Screen => 0,
           _ if speakers.contains(&route.track.device_id) => 1,
@@ -436,6 +437,7 @@ impl Forwarder {
           priority,
           max_layer: subscription.max_layer,
           layers: &route.track.layers,
+          can_pause: !is_screen || self.config.layers.can_pause_screen_shares,
         })
       })
       .collect();

@@ -23,6 +23,7 @@ use wtransport::{
 use crate::{
   auth::{JoinGrant, JoinTokenVerifier},
   config::SfuConfig,
+  reporting::{NoReporter, ParticipantReporter},
   room::{ParticipantHandle, Room, RoomError, Rooms},
   signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
 };
@@ -45,6 +46,7 @@ struct Shared {
   config: SfuConfig,
   rooms: Rooms,
   verifier: Arc<dyn JoinTokenVerifier>,
+  reporter: Arc<dyn ParticipantReporter>,
 }
 
 /// One joined participant's session.
@@ -108,8 +110,18 @@ impl Sfu {
         config,
         rooms,
         verifier,
+        reporter: Arc::new(NoReporter),
       }),
     })
+  }
+
+  /// Reports joins and leaves to `teamcraft-server` (call start, ringing, roster). Call before
+  /// [`Self::run`].
+  pub fn with_reporter(mut self, reporter: Arc<dyn ParticipantReporter>) -> Self {
+    if let Some(shared) = Arc::get_mut(&mut self.shared) {
+      shared.reporter = reporter;
+    }
+    self
   }
 
   pub fn local_addr(&self) -> Result<SocketAddr, SfuError> {
@@ -185,6 +197,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     },
   };
 
+  shared.reporter.joined(grant);
   let session = ParticipantSession {
     connection,
     room,
@@ -194,6 +207,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   };
   let result = session.run(send, recv, signal_rx).await;
   shared.rooms.leave(&session.room, grant.device_id);
+  shared.reporter.left(grant);
   result
 }
 

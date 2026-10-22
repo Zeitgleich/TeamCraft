@@ -5,6 +5,7 @@
 //! network-facing operation is an `async` method here.
 
 mod attachments;
+mod calls;
 mod enroll;
 mod gateway;
 mod groups;
@@ -22,6 +23,7 @@ mod workspace;
 use std::collections::{BTreeMap, HashMap};
 
 pub use attachments::OutgoingFile;
+pub use calls::{CallEventSink, CallKeySigner};
 pub use enroll::{EnrollmentOptions, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::GatewayOutcome;
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
@@ -73,6 +75,7 @@ pub struct Client<A, S> {
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
   typing: notifications::TypingState,
+  maybe_call_sink: Option<CallEventSink>,
 }
 
 impl Default for ClientSettings {
@@ -112,6 +115,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       groups: HashMap::new(),
       sync,
       typing: Default::default(),
+      maybe_call_sink: None,
     }))
   }
 

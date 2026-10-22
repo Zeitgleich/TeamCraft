@@ -18,9 +18,11 @@
 //! (uplink) and in the SFU per receiver (downlink). Time is passed in; nothing reads a clock.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use teamcraft_proto::TransportFeedback;
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
 
 use crate::datagram::TransportSeq;
 

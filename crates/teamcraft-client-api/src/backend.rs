@@ -9,7 +9,7 @@
 use teamcraft_proto::Role;
 
 use crate::admin::{AdminChannel, AdminUser, AuditEntry, Retention, SecurityPolicy, SelfJoinOutcome};
-use crate::calls::{HuddleInfo, MediaDevices, Participant};
+use crate::calls::{ActiveCall, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
   ThreadId, ThreadSummary, User, UserId,
@@ -51,7 +51,9 @@ pub trait ChatBackend {
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>);
 }
 
-/// Calls and huddles. Media runs in `teamcraft-media`; this is the roster and device view of it.
+/// Calls and huddles. Media runs in `teamcraft-media`; this is the roster and device view of it,
+/// and what the user does in a call. Actions return at once; the result shows up in the reads
+/// after a change notification. The defaults suit backends without calls.
 pub trait CallBackend {
   /// Cameras, microphones and speakers the OS reports.
   fn media_devices(&self) -> MediaDevices;
@@ -59,6 +61,25 @@ pub trait CallBackend {
   fn call_participants(&self, conversation: ConversationId) -> Vec<Participant>;
   /// The drop-in huddle running in a channel, if any.
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo>;
+
+  /// The call this device is in.
+  fn active_call(&self) -> Option<ActiveCall> {
+    None
+  }
+  /// Calls ringing for the user that they haven't answered or declined.
+  fn incoming_calls(&self) -> Vec<IncomingCall> {
+    Vec::new()
+  }
+  /// Joins (or starts) the conversation's call, leaving any other call first.
+  fn join_call(&self, _request: CallRequest) {}
+  fn leave_call(&self) {}
+  /// Stops ringing for this call on this device; the call goes on for the others.
+  fn decline_call(&self, _conversation: ConversationId) {}
+  fn set_call_muted(&self, _is_muted: bool) {}
+  fn set_call_deafened(&self, _is_deafened: bool) {}
+  /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.
+  fn select_microphone(&self, _maybe_device: Option<String>) {}
+  fn select_speakers(&self, _maybe_device: Option<String>) {}
 }
 
 /// Administration without content access: every read returns metadata only.

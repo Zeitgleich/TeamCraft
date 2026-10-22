@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::calls::{ActiveCall, CallRequest, IncomingCall, MediaDevices, RunningCall};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
   User, UserId,
@@ -11,6 +12,50 @@ use crate::model::{
 
 /// Event name the host emits whenever the local store changed (new messages, membership, presence).
 pub const CORE_CHANGED_EVENT: &str = "core-changed";
+
+/// Event name the host emits whenever call state changed (ringing, roster, media).
+pub const CALL_CHANGED_EVENT: &str = "call-changed";
+
+/// Everything the call UI shows, in one piece.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CallSnapshot {
+  #[serde(default)]
+  pub maybe_active: Option<ActiveCall>,
+  pub incoming: Vec<IncomingCall>,
+  /// Calls running in the user's conversations.
+  pub running: Vec<RunningCall>,
+  pub devices: MediaDevices,
+}
+
+/// Something the user did in or about a call.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CallAction {
+  Join {
+    request: CallRequest,
+  },
+  Leave,
+  Decline {
+    conversation: ConversationId,
+  },
+  SetMuted {
+    is_muted: bool,
+  },
+  SetDeafened {
+    is_deafened: bool,
+  },
+  /// `None` follows the system default.
+  SelectMicrophone {
+    #[serde(default)]
+    maybe_device: Option<String>,
+  },
+  SelectSpeakers {
+    #[serde(default)]
+    maybe_device: Option<String>,
+  },
+  #[serde(other)]
+  Unknown,
+}
 
 /// Everything the sidebar and headers need, in one piece.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,6 +171,28 @@ mod tests {
       r#"{"action":"post_message","conversation":"7","maybe_thread":null,"body":"hi"}"#
     );
     assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), action);
+  }
+
+  #[test]
+  fn call_actions_are_tagged_and_unknown_ones_tolerated() {
+    let action = CallAction::SetMuted { is_muted: true };
+    let json = serde_json::to_string(&action).expect("serialize");
+    assert_eq!(json, r#"{"action":"set_muted","is_muted":true}"#);
+    assert_eq!(serde_json::from_str::<CallAction>(&json).expect("parse"), action);
+    assert_eq!(
+      serde_json::from_str::<CallAction>(r#"{"action":"raise_hand"}"#).expect("parse"),
+      CallAction::Unknown
+    );
+    let join = CallAction::Join {
+      request: CallRequest {
+        conversation: id_from_raw(5),
+        kind: crate::calls::CallKind::Direct,
+      },
+    };
+    assert_eq!(
+      serde_json::to_string(&join).expect("serialize"),
+      r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
+    );
   }
 
   #[test]

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SFU engine test</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6b6b70; --ok: #1a7f37; --bad: #c62828; --line: #d9d9de; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e8e8ea; --bg: #161618; --muted: #9a9aa2; --ok: #4ac26b; --bad: #ff6b6b; --line: #333338; } }
+  body { font: 14px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 900px; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.note { color: var(--muted); margin: 0 0 16px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 16px; padding: 12px; min-width: 0; }
+  label { display: inline-flex; gap: 6px; align-items: center; margin: 0 12px 8px 0; }
+  input[type=text] { width: 12em; }
+  input[type=number] { width: 6em; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  canvas { max-width: 100%; background: color-mix(in srgb, var(--fg) 6%, transparent); border-radius: 6px; }
+  pre { background: color-mix(in srgb, var(--fg) 6%, transparent); padding: 8px; border-radius: 6px; max-height: 320px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>SFU engine test</h1>
+<p class="note">Development page running the Rust call engine compiled to WebAssembly: WebTransport, DAVE
+end-to-end encryption, WebCodecs Opus and AudioWorklet capture and playback. It talks to desktop clients
+(<code>teamcraft-call</code>) and other tabs in the same call. No device keys: DAVE keys are not bound to
+device identities here.</p>
+
+<fieldset>
+  <legend>Session</legend>
+  <label>Call <input id="call" type="number" min="1" value="1"></label>
+  <label>User <input id="user" type="number" min="1" value="2"></label>
+  <label>Device <input id="device" type="number" min="1" value="2"></label>
+  <label>Source
+    <select id="source">
+      <option value="tone">Test tone</option>
+      <option value="mic">Microphone</option>
+      <option value="silence">Silence</option>
+    </select>
+  </label>
+  <label>Tone Hz <input id="tone" type="number" min="100" max="2000" value="550"></label>
+  <div>
+    <button id="join">Join</button>
+    <button id="mute" disabled>Mute</button>
+    <button id="leave" disabled>Leave</button>
+    <span id="status"></span>
+  </div>
+  <div>
+    <button id="share" disabled>Share screen</button>
+    <button id="pattern" disabled>Share test pattern</button>
+    <button id="unshare" disabled>Stop sharing</button>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Screen shares of others</legend>
+  <canvas id="video" width="320" height="180"></canvas>
+</fieldset>
+
+<fieldset>
+  <legend>Events</legend>
+  <pre id="log"></pre>
+</fieldset>
+
+<script type="module">
+import init, { join_dev_call } from "./engine/web_call.js";
+
+const WEBTRANSPORT_PORT = __WEBTRANSPORT_PORT__;
+const CERT_HASH = new Uint8Array(__CERT_HASH__);
+const $ = (id) => document.getElementById(id);
+let call = null;
+let isMuted = false;
+
+function log(line) {
+  const time = new Date().toISOString().slice(11, 23);
+  $("log").textContent = `${time} ${line}\n` + $("log").textContent;
+}
+
+function setStatus(text, ok) {
+  $("status").textContent = text;
+  $("status").className = ok ? "ok" : "bad";
+}
+
+await init();
+setStatus("engine loaded", true);
+
+$("join").addEventListener("click", async () => {
+  const url = `https://${location.hostname}:${WEBTRANSPORT_PORT}/call`;
+  const [callId, user, device] = [$("call").value, $("user").value, $("device").value];
+  const source = $("source").value === "tone" ? `tone:${$("tone").value}` : $("source").value;
+  $("join").disabled = true;
+  setStatus(`joining ${url}…`, true);
+  try {
+    call = await join_dev_call(url, CERT_HASH, `dev:${callId}:${user}:${device}`, user, device, source, log, $("video"));
+    setStatus("in call", true);
+    for (const id of ["mute", "leave", "share", "pattern", "unshare"]) $(id).disabled = false;
+  } catch (error) {
+    setStatus(`join failed: ${error.message ?? error}`, false);
+    $("join").disabled = false;
+  }
+});
+
+$("mute").addEventListener("click", () => {
+  isMuted = !isMuted;
+  call.set_muted(isMuted);
+  $("mute").textContent = isMuted ? "Unmute" : "Mute";
+});
+
+async function share(maybeStream) {
+  try {
+    await call.start_screen_share(maybeStream);
+    log(maybeStream ? "sharing the test pattern" : "sharing the screen");
+  } catch (error) {
+    log(`sharing failed: ${error.message ?? error}`);
+  }
+}
+
+/** A 1280x720 canvas with a moving bar and a clock, as a video stream. */
+function testPattern() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1280;
+  canvas.height = 720;
+  const context = canvas.getContext("2d");
+  let frame = 0;
+  setInterval(() => {
+    context.fillStyle = "#1e3a5f";
+    context.fillRect(0, 0, 1280, 720);
+    context.fillStyle = "#f2c94c";
+    context.fillRect((frame * 8) % 1280, 300, 120, 120);
+    context.fillStyle = "#ffffff";
+    context.font = "64px system-ui";
+    context.fillText(`frame ${frame}`, 60, 120);
+    frame += 1;
+  }, 1000 / 15);
+  return canvas.captureStream(15);
+}
+
+$("share").addEventListener("click", () => share(undefined));
+$("pattern").addEventListener("click", () => share(testPattern()));
+$("unshare").addEventListener("click", () => call.stop_screen_share());
+
+$("leave").addEventListener("click", async () => {
+  for (const id of ["leave", "mute", "share", "pattern", "unshare"]) $(id).disabled = true;
+  try {
+    const stats = await call.leave();
+    window.lastStats = stats;
+    log(`left: ${JSON.stringify(stats)}`);
+    setStatus("left", true);
+  } catch (error) {
+    setStatus(`leave failed: ${error.message ?? error}`, false);
+  }
+  call = null;
+  $("join").disabled = false;
+});
+</script>
+</body>
+</html>

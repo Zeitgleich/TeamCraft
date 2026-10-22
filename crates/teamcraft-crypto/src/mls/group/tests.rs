@@ -38,6 +38,15 @@ fn add_member_and_share_full_history() {
   let mut bob_group = world.bob_joins(&output);
   assert_eq!(bob_group.epoch(), world.alice_group.epoch());
   assert_eq!(bob_group.members().unwrap().len(), 3);
+  let verified = bob_group.verified_members(&world.directory).unwrap();
+  let ids: Vec<_> = verified.iter().map(VerifiedDevice::device_id).collect();
+  let members: Vec<_> = bob_group
+    .members()
+    .unwrap()
+    .iter()
+    .map(|member| member.device_id)
+    .collect();
+  assert_eq!(ids, members, "final certificates with the members' device ids");
 
   let bundle = ContentKeyBundle::for_new_member(&mut world.alice_ring, HistoryShare::Full, &mut OsRng);
   let key_message = world

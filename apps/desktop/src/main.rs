@@ -6,16 +6,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod calls;
 mod core;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{AuthService, DesktopConfig, KeyringStore};
+use crate::calls::{CALL_CHANGED_EVENT, CallHost};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
 
@@ -38,6 +40,13 @@ fn main() -> anyhow::Result<()> {
     .manage(service)
     .manage(CoreHost::new(config, tokens))
     .setup(|app| {
+      let emitter = app.handle().clone();
+      let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if let Err(error) = emitter.emit(CALL_CHANGED_EVENT, ()) {
+          tracing::debug!(%error, "could not notify the webview");
+        }
+      });
+      app.manage(Arc::new(CallHost::new(notify)));
       create_main_window(app)?;
       Ok(())
     })
@@ -55,6 +64,9 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_thread,
       core::commands::core_action,
       core::commands::core_stop,
+      calls::commands::call_snapshot,
+      calls::commands::call_media_devices,
+      calls::commands::call_action,
     ])
     .run(tauri::generate_context!())
     .context("failed to run the TeamCraft desktop shell")

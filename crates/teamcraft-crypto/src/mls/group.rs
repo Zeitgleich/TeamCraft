@@ -167,6 +167,20 @@ impl ConversationGroup {
       .collect()
   }
 
+  /// All member devices with their certificates verified against the pinned identities, e.g. to
+  /// check the call key bindings of a conversation's call (e2ee.md §8). Unlike the certificates the
+  /// server stores (provisional, from registration), these carry the final device ids.
+  pub fn verified_members(
+    &self,
+    directory: &impl IdentityDirectory,
+  ) -> Result<Vec<VerifiedDevice>, MlsError> {
+    self
+      .group
+      .members()
+      .map(|member| credential::verify(&member.credential, &member.signature_key, directory))
+      .collect()
+  }
+
   /// Verifies a signed membership change and creates the commit for it. Adds need the key packages
   /// of every device of the added user; removes need none. The commit stays pending until
   /// [`Self::confirm_commit`] (after the server accepted it) or [`Self::discard_commit`].

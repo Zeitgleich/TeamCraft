@@ -9,10 +9,15 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, GatewayConnection, HttpSe
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::store::{DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
-use teamcraft_core::{Client, ClientSettings, CoreError, EnrollmentOptions, PendingEnrollment};
+use teamcraft_core::{
+  CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, PendingEnrollment,
+};
 use teamcraft_crypto::backup::Argon2Settings;
+use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
-use teamcraft_proto::{ConversationId, GatewayClientMessage, UserId};
+use teamcraft_proto::{
+  CallJoinTokenResponse, ConversationId, DeviceId, GatewayClientMessage, GatewayEvent, UserId,
+};
 use tokio::sync::{mpsc, oneshot};
 
 /// How often the gateway is kept alive (the server announces its own limit in `hello`).
@@ -77,6 +82,20 @@ impl DatabaseKeySource for KeyChoice {
   }
 }
 
+/// Receives the gateway's call events (start, update, end, ring) on the core thread.
+pub type CallEventHandler = Arc<dyn Fn(GatewayEvent) + Send + Sync>;
+
+/// Everything joining a conversation's call needs from the core (e2ee.md §8).
+pub struct CallPreparation {
+  pub join: CallJoinTokenResponse,
+  pub user_id: UserId,
+  pub device_id: DeviceId,
+  /// Signs this device's per-call DAVE key; the device key itself stays in the core.
+  pub signer: CallKeySigner,
+  /// The conversation's devices (this one included) whose certificates verified.
+  pub devices: Vec<VerifiedDevice>,
+}
+
 type Api = HttpServerApi<TokenCache>;
 type Gateway = <Api as ServerApi>::Gateway;
 type Store = Arc<SqlCipherStore>;
@@ -97,6 +116,7 @@ enum Request {
     reply: oneshot::Sender<Result<Vec<Message>, String>>,
   },
   Action(ChatAction, oneshot::Sender<Result<(), String>>),
+  PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
 }
 
 /// Handle to the core thread. Dropping it stops the thread.
@@ -106,13 +126,15 @@ pub struct CoreRuntime {
 }
 
 impl CoreRuntime {
-  /// Starts the core for one signed-in user. `on_change` is called after every store change.
+  /// Starts the core for one signed-in user. `on_change` is called after every store change,
+  /// `on_call_event` with every call event from the gateway.
   pub fn spawn(
     config: CoreConfig,
     user: UserId,
     key: KeyChoice,
     tokens: TokenCache,
     on_change: Arc<dyn Fn() + Send + Sync>,
+    on_call_event: CallEventHandler,
   ) -> Self {
     let (requests, receiver) = mpsc::unbounded_channel();
     let thread = std::thread::Builder::new()
@@ -125,7 +147,7 @@ impl CoreRuntime {
             return;
           },
         };
-        runtime.block_on(Core::new(config, user, key, tokens, on_change).run(receiver));
+        runtime.block_on(Core::new(config, user, key, tokens, on_change, on_call_event).run(receiver));
       })
       .ok();
     Self { requests, thread }
@@ -186,6 +208,13 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
+  pub async fn prepare_call(&self, conversation: ConversationId) -> Result<CallPreparation, String> {
+    self
+      .ask(|reply| Request::PrepareCall(conversation, reply))
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
   async fn ask<T>(&self, build: impl FnOnce(oneshot::Sender<T>) -> Request) -> Option<T> {
     let (reply, answer) = oneshot::channel();
     self.requests.send(build(reply)).ok()?;
@@ -214,6 +243,7 @@ struct Core {
   key: KeyChoice,
   tokens: TokenCache,
   on_change: Arc<dyn Fn() + Send + Sync>,
+  on_call_event: CallEventHandler,
   store: Option<Store>,
   client: Option<Client<Api, Store>>,
   backend: Option<CoreChatBackend<Store>>,
@@ -230,6 +260,7 @@ impl Core {
     key: KeyChoice,
     tokens: TokenCache,
     on_change: Arc<dyn Fn() + Send + Sync>,
+    on_call_event: CallEventHandler,
   ) -> Self {
     Self {
       config,
@@ -237,6 +268,7 @@ impl Core {
       key,
       tokens,
       on_change,
+      on_call_event,
       store: None,
       client: None,
       backend: None,
@@ -308,7 +340,9 @@ impl Core {
     }
   }
 
-  fn adopt(&mut self, client: Client<Api, Store>) -> CoreStatus {
+  fn adopt(&mut self, mut client: Client<Api, Store>) -> CoreStatus {
+    let on_call_event = self.on_call_event.clone();
+    client.set_call_event_sink(Box::new(move |event| on_call_event(event.clone())));
     let status = CoreStatus::Ready {
       identity_fingerprint: client.identity_fingerprint(),
     };
@@ -360,7 +394,24 @@ impl Core {
         self.changed();
         drop(reply.send(result));
       },
+      Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
     }
+  }
+
+  async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    let join = client.call_join_token(conversation).await.map_err(describe)?;
+    let devices = client
+      .verified_call_devices(conversation)
+      .await
+      .map_err(describe)?;
+    Ok(CallPreparation {
+      join,
+      user_id: client.user_id(),
+      device_id: client.device_id(),
+      signer: client.call_key_signer(),
+      devices,
+    })
   }
 
   async fn enroll(&mut self, request: EnrollRequest) -> Result<(), String> {

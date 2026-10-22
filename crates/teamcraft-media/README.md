@@ -11,7 +11,9 @@ platforms Opus, audio devices, echo cancellation and the WebTransport call drive
 | `dave`, `call_auth`           | DAVE groups, call key bindings (e2ee.md §8)                   |
 | `call_engine`                 | Sans-I/O call client used by desktop, web and mobile          |
 | `video`                       | Video frame types, simulcast layer plans, codec choice        |
+| `audio_frame`, `audio_io`     | Audio frame unit, sources, sinks and device choices           |
 | `audio_*`, `call_native`      | Native only (`native` feature): Opus, devices, driver         |
+| `call_web`, `web_api`         | Browser only (`web` feature): WebTransport, WebCodecs driver  |
 
 ## Features
 
@@ -19,6 +21,7 @@ platforms Opus, audio devices, echo cancellation and the WebTransport call drive
 |----------|---------|------------------------------------------------------------------------------|
 | `dave`   | yes     | DAVE and the call engine; builds for `wasm32-unknown-unknown`                |
 | `native` | no      | Opus, audio devices, the WebTransport driver and the `teamcraft-call` binary |
+| `web`    | no      | Browser driver: WebTransport, WebCodecs Opus, AudioWorklet (wasm32)          |
 
 `native` builds libopus with cmake and uses cpal for audio devices, which needs the ALSA headers on
 Linux (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora).
@@ -57,6 +60,20 @@ cargo run -p teamcraft-media --features native --bin teamcraft-call -- \
   --cert-hash <hash from the SFU's startup log> --source tone:440 --seconds 10
 ```
 
-`--source mic --sink speakers` uses the default devices. The client has no device keys, so its DAVE
+`--source mic --sink speakers` uses the default devices; `--list-devices` logs the device ids for
+`--source mic:<id>` and `--sink speakers:<id>`. Apps list devices with
+`audio_device::list_input_devices` / `list_output_devices` and switch mid-call with
+`NativeCall::set_audio`. The client has no device keys, so its DAVE
 keys are not bound to a device identity (it reports `UnauthenticatedKeys`); it is a development and
 test tool.
+
+## Browser driver
+
+`call_web::WebCall` runs the same engine in the browser: WebTransport datagrams and a signaling
+stream, WebCodecs Opus, AudioWorklet capture and playback, DAVE in WebAssembly. WebTransport and
+WebCodecs are declared in `web_api` instead of enabling `web_sys_unstable_apis` workspace-wide.
+Needs a browser with WebTransport and WebCodecs audio (Chrome/Edge, Firefox 130+).
+
+The `web_call` example exports it to JavaScript for the SFU's `/engine` development page; build
+steps are in `examples/web_call.rs`. With the SFU in dev mode, the page and `teamcraft-call` join
+the same call and hear each other.

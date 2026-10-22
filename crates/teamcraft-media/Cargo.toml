@@ -20,11 +20,21 @@ dave = [
   "dep:openmls_rust_crypto",
   "dep:tls_codec",
   "dep:teamcraft-crypto",
-  "dep:web-time",
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
 native = ["dave", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
+
+# Browser clients: the WebTransport + WebCodecs + Web Audio call driver (wasm32).
+web = [
+  "dave",
+  "dep:serde_json",
+  "dep:futures",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:js-sys",
+  "dep:web-sys",
+]
 
 [dependencies]
 teamcraft-proto.workspace = true
@@ -37,8 +47,9 @@ openmls_rust_crypto = { version = "0.6.0", optional = true }
 tls_codec = { version = "0.5.0", optional = true }
 # Call key bindings: DAVE keys signed by device keys (e2ee.md §8).
 teamcraft-crypto = { workspace = true, optional = true }
-# Wall clock that works in browsers (binding expiry checks).
-web-time = { version = "1.1.0", optional = true }
+# Clocks that work in browsers (std's Instant panics on wasm32-unknown-unknown): bandwidth
+# estimation timing and binding expiry checks. Re-exports std's types on native.
+web-time = "1.1.0"
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
 opus = { version = "0.4.0", optional = true }
 # Cross-platform audio device I/O (ALSA/PipeWire, CoreAudio, WASAPI, AAudio).
@@ -47,6 +58,21 @@ cpal = { version = "0.18.2", optional = true }
 tokio = { workspace = true, optional = true }
 wtransport = { version = "0.7.2", optional = true }
 serde_json = { workspace = true, optional = true }
+# Browser call driver: JS bindings, promises as futures, and channels into its single task.
+wasm-bindgen = { version = "0.2.129", optional = true }
+wasm-bindgen-futures = { version = "0.4.79", optional = true }
+js-sys = { version = "0.3.106", optional = true }
+web-sys = { version = "0.3.106", optional = true, features = [
+  "AudioContext", "AudioContextOptions", "AudioDestinationNode", "AudioNode", "AudioWorklet",
+  "AudioWorkletNode", "AudioWorkletNodeOptions", "BaseAudioContext", "Blob", "BlobPropertyBag",
+  "MediaDeviceInfo", "MediaDeviceKind", "MediaDevices", "MediaStream", "MediaStreamAudioSourceNode",
+  "MediaStreamConstraints", "MediaStreamTrack", "MediaTrackConstraints", "MessageEvent", "MessagePort",
+  "Navigator", "ReadableStream", "ReadableStreamDefaultReader", "Url", "Window", "Worklet",
+  "WritableStream", "WritableStreamDefaultWriter", "DisplayMediaStreamConstraints",
+  "Document", "Element", "EventTarget", "HtmlCanvasElement", "HtmlElement", "HtmlMediaElement",
+  "HtmlVideoElement", "MediaTrackSettings", "Node",
+] }
+futures = { version = "0.3.34", optional = true, default-features = false, features = ["std", "async-await"] }
 # Log output and error reporting of the headless teamcraft-call client.
 tracing-subscriber = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
@@ -69,6 +95,12 @@ rand_core.workspace = true
 [[bin]]
 name = "teamcraft-call"
 required-features = ["native"]
+
+# The browser driver as a JS module for the SFU's development page (see the example's docs).
+[[example]]
+name = "web_call"
+crate-type = ["cdylib"]
+required-features = ["web"]
 
 # davey pulls in rand 0.8 (getrandom 0.2), which needs its JS backend in the browser.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

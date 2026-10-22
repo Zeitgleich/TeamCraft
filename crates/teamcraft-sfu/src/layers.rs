@@ -2,7 +2,9 @@
 //!
 //! The receiver's downlink estimate, minus a reserve for audio, is the budget. Every subscribed
 //! track first gets its lowest layer in priority order (or is paused when even that doesn't fit),
-//! then tracks are upgraded one layer at a time in priority order up to the layer the receiver asked
+//! except tracks that may not be paused (screen shares by default: without simulcast there is no
+//! lower layer, and their traffic is what lets the estimate grow), which keep their lowest layer
+//! even over budget; then tracks are upgraded one layer at a time in priority order up to the layer the receiver asked
 //! for. Downgrades apply at once; an upgrade only when the budget covers the new layer with
 //! `upswitch_headroom` for `upswitch_hold`, so a noisy estimate doesn't make layers flap. A paused
 //! track resumes its lowest layer every `resume_probe_interval` as a probe: without traffic there is
@@ -25,6 +27,8 @@ pub struct LayerAllocationConfig {
   pub upswitch_hold: Duration,
   /// A track paused for lack of bandwidth is tried again at its lowest layer this often.
   pub resume_probe_interval: Duration,
+  /// Whether screen shares may be paused for lack of bandwidth like cameras.
+  pub can_pause_screen_shares: bool,
 }
 
 /// One subscribed track as the allocator sees it.
@@ -37,6 +41,8 @@ pub struct TrackDemand<'a> {
   pub max_layer: u8,
   /// Published layers, lowest first.
   pub layers: &'a [VideoLayerInfo],
+  /// `false`: the lowest layer is forwarded even over budget.
+  pub can_pause: bool,
 }
 
 /// Remembers the current allocation of one receiver for hysteresis.
@@ -57,6 +63,7 @@ impl Default for LayerAllocationConfig {
       upswitch_headroom: 1.15,
       upswitch_hold: Duration::from_secs(2),
       resume_probe_interval: Duration::from_secs(5),
+      can_pause_screen_shares: false,
     }
   }
 }
@@ -197,7 +204,9 @@ fn ideal_allocation(
   let mut spent = 0.0;
   for demand in &ordered {
     let lowest = demand.layers.first().map(|info| info.layer);
-    let chosen = lowest.filter(|&layer| layer <= demand.max_layer && spent + cost(demand, layer) <= budget);
+    let chosen = lowest.filter(|&layer| {
+      layer <= demand.max_layer && (spent + cost(demand, layer) <= budget || !demand.can_pause)
+    });
     if let Some(layer) = chosen {
       spent += cost(demand, layer);
     }
@@ -272,6 +281,19 @@ mod tests {
       let mut allocator = LayerAllocator::new();
       let result = allocator.allocate(&config(), 200_000, &[demand(1, 0, 2, &layers)], Instant::now());
       assert_eq!(result[&StreamId(1)], None);
+    }
+
+    #[test]
+    fn unpausable_track_keeps_its_lowest_layer_over_budget() {
+      let layers = three_layers();
+      let screen = TrackDemand {
+        can_pause: false,
+        ..demand(1, 0, 2, &layers)
+      };
+      let camera = demand(2, 2, 2, &layers);
+      let mut allocator = LayerAllocator::new();
+      let result = allocator.allocate(&config(), 200_000, &[screen, camera], Instant::now());
+      assert_eq!((result[&StreamId(1)], result[&StreamId(2)]), (Some(0), None));
     }
   }
 
@@ -370,6 +392,7 @@ mod tests {
       priority,
       max_layer,
       layers,
+      can_pause: true,
     }
   }
 

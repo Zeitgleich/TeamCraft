@@ -1,8 +1,9 @@
 //! Who may be in a call's DAVE group: call key bindings (e2ee.md §8).
 //!
 //! The engine asks a [`CallKeyAuthenticator`] to sign its own per-call DAVE key and to verify the
-//! bindings of others; [`DeviceCallKeyAuthenticator`] does both with the device key and the verified
-//! device certificates from `teamcraft-crypto`. Apps that don't have device keys (development tools)
+//! bindings of others; [`DeviceCallKeyAuthenticator`] does both with a [`CallBindingSigner`] (the
+//! device key, or the client core holding it) and the verified device certificates from
+//! `teamcraft-crypto`. Apps that don't have device keys (development tools)
 //! run without one and get [`crate::call_engine::CallEngineEvent::UnauthenticatedKeys`].
 
 use std::collections::HashMap;
@@ -28,9 +29,20 @@ pub trait CallKeyAuthenticator: fmt::Debug + Send + Sync {
   fn verify(&self, call_id: CallId, device_id: DeviceId, binding: &[u8]) -> Result<Vec<u8>, CallKeyError>;
 }
 
+/// Signs call key bindings with this device's key. The client core implements it so the private
+/// key never leaves it; tests use a [`DeviceKeyPair`] directly.
+pub trait CallBindingSigner: Send + Sync {
+  fn sign_call_key_binding(
+    &self,
+    call_id: CryptoCallId,
+    dave_public_key: &[u8],
+    not_after: u64,
+  ) -> Result<SignedCallKeyBinding, CallBindingError>;
+}
+
 /// [`CallKeyAuthenticator`] backed by the device key and verified device certificates.
 pub struct DeviceCallKeyAuthenticator {
-  device: Arc<DeviceKeyPair>,
+  signer: Arc<dyn CallBindingSigner>,
   devices: HashMap<DeviceId, VerifiedDevice>,
 }
 
@@ -49,8 +61,19 @@ pub enum CallKeyError {
 impl DeviceCallKeyAuthenticator {
   /// `devices`: the verified certificates of the devices that may be in the call (the trusted
   /// roster), keyed by device id.
-  pub fn new(device: Arc<DeviceKeyPair>, devices: HashMap<DeviceId, VerifiedDevice>) -> Self {
-    Self { device, devices }
+  pub fn new(signer: Arc<dyn CallBindingSigner>, devices: HashMap<DeviceId, VerifiedDevice>) -> Self {
+    Self { signer, devices }
+  }
+}
+
+impl CallBindingSigner for DeviceKeyPair {
+  fn sign_call_key_binding(
+    &self,
+    call_id: CryptoCallId,
+    dave_public_key: &[u8],
+    not_after: u64,
+  ) -> Result<SignedCallKeyBinding, CallBindingError> {
+    DeviceKeyPair::sign_call_key_binding(self, call_id, dave_public_key, not_after)
   }
 }
 
@@ -58,7 +81,7 @@ impl CallKeyAuthenticator for DeviceCallKeyAuthenticator {
   fn sign(&self, call_id: CallId, dave_public_key: &[u8]) -> Result<Vec<u8>, CallKeyError> {
     let not_after = now_unix_secs()? + BINDING_VALIDITY.as_secs();
     let signed = self
-      .device
+      .signer
       .sign_call_key_binding(crypto_call_id(call_id), dave_public_key, not_after)?;
     Ok(signed.to_bytes()?)
   }

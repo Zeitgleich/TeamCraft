@@ -33,6 +33,7 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, RegisterPushRequest,
 };
+use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
@@ -713,6 +714,30 @@ impl ServerApi for FakeServerApi {
 
   async fn set_presence(&self, _request: &SetPresenceRequest) -> Result<(), ApiError> {
     self.with(|_, _| Ok(()))
+  }
+
+  /// A placeholder token: the fake has no SFU, so nothing can join with it.
+  async fn create_call_join_token(
+    &self,
+    conversation: ConversationId,
+    request: &CreateCallJoinTokenRequest,
+  ) -> Result<CallJoinTokenResponse, ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, request.device_id)?;
+      if !state.conversations.contains_key(&conversation) {
+        return Err(ApiError::status(
+          404,
+          ErrorCode::ChannelNotFound,
+          "no such conversation",
+        ));
+      }
+      Ok(CallJoinTokenResponse {
+        call_id: CallId::from_snowflake(conversation.snowflake()),
+        token: format!("fake:{conversation}"),
+        sfu_url: "https://sfu.invalid/call".to_owned(),
+        expires_at: UnixMillis(0),
+      })
+    })
   }
 
   async fn send_message(

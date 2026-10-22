@@ -14,6 +14,7 @@ use teamcraft_proto::{ConversationId, UserId};
 
 use super::runtime::{CoreConfig, CoreRuntime, KeyChoice, TokenCache};
 use crate::auth::DesktopConfig;
+use crate::calls::CallHost;
 
 /// Holds the running core, if a user is signed in.
 pub struct CoreHost {
@@ -31,7 +32,7 @@ impl CoreHost {
     }
   }
 
-  fn current(&self) -> Result<Arc<CoreRuntime>, String> {
+  pub(crate) fn current(&self) -> Result<Arc<CoreRuntime>, String> {
     self
       .running
       .lock()
@@ -56,6 +57,7 @@ impl From<String> for CommandError {
 pub async fn core_start(
   app: AppHandle,
   host: State<'_, CoreHost>,
+  calls: State<'_, Arc<CallHost>>,
   user: UserId,
 ) -> Result<CoreStatus, CommandError> {
   let existing = {
@@ -94,6 +96,7 @@ pub async fn core_start(
         key,
         host.tokens.clone(),
         on_change,
+        calls.gateway_handler(),
       ));
       // Replacing a running core (another account signed in) drops, and so stops, the old one.
       *host

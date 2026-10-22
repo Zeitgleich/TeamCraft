@@ -3,8 +3,9 @@
 //!
 //! ```text
 //! teamcraft-call --sfu https://127.0.0.1:4433/call --token dev:1:1:1 --user 1 --device 1 \
-//!   [--cert-hash <64 hex chars>] [--source tone:440 | mic | silence] [--sink discard | speakers] \
-//!   [--seconds 10] [--roster 2,3] [--muted]
+//!   [--cert-hash <64 hex chars>] [--source tone:440 | mic[:<id>] | silence] \
+//!   [--sink discard | speakers[:<id>]] [--seconds 10] [--roster 2,3] [--muted]
+//! teamcraft-call --list-devices
 //! ```
 //!
 //! Ends after `--seconds` or on Ctrl-C and logs the call statistics.
@@ -12,9 +13,11 @@
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use teamcraft_media::audio_device::{list_input_devices, list_output_devices};
+use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
-use teamcraft_media::call_native::{AudioSink, AudioSource, NativeCall, NativeCallConfig};
+use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, UserId};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -24,6 +27,11 @@ async fn main() -> anyhow::Result<()> {
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
     .init();
+  if std::env::args().nth(1).as_deref() == Some("--list-devices") {
+    log_devices("input", &list_input_devices()?);
+    log_devices("output", &list_output_devices()?);
+    return Ok(());
+  }
   let options = Options::parse(std::env::args().skip(1))?;
   let mut call = NativeCall::join(options.config)
     .await
@@ -59,6 +67,12 @@ async fn main() -> anyhow::Result<()> {
     "call statistics"
   );
   Ok(())
+}
+
+fn log_devices(direction: &str, devices: &[AudioDeviceInfo]) {
+  for device in devices {
+    info!(direction, id = %device.id, name = %device.name, is_default = device.is_default, "audio device");
+  }
 }
 
 struct Options {
@@ -120,12 +134,12 @@ impl Options {
       engine,
     );
     config.maybe_certificate_hash = maybe_certificate_hash;
+    if matches!(source, AudioSource::Microphone(_)) {
+      config.maybe_processing = Some(teamcraft_media::audio_processing::AudioProcessingConfig::default());
+    }
     config.source = source;
     config.sink = sink;
     config.maybe_trusted_roster = maybe_trusted_roster;
-    if source == AudioSource::Microphone {
-      config.maybe_processing = Some(teamcraft_media::audio_processing::AudioProcessingConfig::default());
-    }
     Ok(Self {
       config,
       maybe_duration,
@@ -144,17 +158,23 @@ fn parse_source(value: &str) -> anyhow::Result<AudioSource> {
       frequency_hz: 440.0,
       amplitude: 0.3,
     },
-    None if value == "mic" => AudioSource::Microphone,
+    None if value == "mic" => AudioSource::Microphone(AudioDeviceChoice::Default),
+    Some(("mic", id)) => AudioSource::Microphone(AudioDeviceChoice::Device(AudioDeviceId::new(id))),
     None if value == "silence" => AudioSource::Silence,
-    _ => bail!("--source must be tone[:hz], mic or silence"),
+    _ => bail!("--source must be tone[:hz], mic[:<device id>] or silence"),
   })
 }
 
 fn parse_sink(value: &str) -> anyhow::Result<AudioSink> {
   match value {
     "discard" => Ok(AudioSink::Discard),
-    "speakers" => Ok(AudioSink::Speakers),
-    _ => bail!("--sink must be discard or speakers"),
+    "speakers" => Ok(AudioSink::Speakers(AudioDeviceChoice::Default)),
+    _ => match value.strip_prefix("speakers:") {
+      Some(id) => Ok(AudioSink::Speakers(AudioDeviceChoice::Device(
+        AudioDeviceId::new(id),
+      ))),
+      None => bail!("--sink must be discard, speakers or speakers:<device id>"),
+    },
   }
 }
 

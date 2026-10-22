@@ -17,12 +17,17 @@ use teamcraft_crypto::{
   ids::{DeviceId as CryptoDeviceId, UserId as CryptoUserId},
 };
 use teamcraft_media::{
+  audio_device::AudioDeviceError,
+  audio_io::{AudioDeviceChoice, AudioDeviceId, AudioSink, AudioSource},
   bwe::BweConfig,
   call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator},
   call_engine::{CallEngineConfig, CallEngineEvent},
-  call_native::{AudioSink, AudioSource, NativeCall, NativeCallConfig},
+  call_native::{NativeCall, NativeCallConfig, NativeCallError},
+  datagram::SimulcastLayer,
+  rtp::RtpTimestamp,
+  video::{EncodedVideoFrame, VideoResolution, simulcast_layers},
 };
-use teamcraft_proto::{DeviceId, MediaCapabilities};
+use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, MediaStreamId, VideoCodec, VideoTrackKind};
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
   config::SfuConfig,
@@ -97,6 +102,153 @@ async fn headless_clients_hear_each_other_through_the_sfu() {
   }
   assert!(secured.iter().all(|is_secured| *is_secured), "{secured:?}");
   assert!(codes.windows(2).all(|pair| pair[0] == pair[1]), "{codes:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audio_switches_mid_call_and_a_missing_device_keeps_the_old_one() {
+  let (port, certificate_hash) = start_sfu().await;
+  let engine = CallEngineConfig {
+    user_id: id_of(9),
+    device_id: id_of(9),
+    capabilities: MediaCapabilities::default(),
+    bwe: BweConfig::default(),
+  };
+  let sfu_url = format!("https://[::1]:{port}{CALL_PATH}");
+  let mut config = NativeCallConfig::new(sfu_url, "dev:12:9:9".into(), engine);
+  config.maybe_certificate_hash = Some(certificate_hash);
+  let call = NativeCall::join(config).await.unwrap();
+
+  let missing = AudioDeviceChoice::Device(AudioDeviceId::new("no-such-host:no-such-device"));
+  let result = call
+    .set_audio(AudioSource::Microphone(missing), AudioSink::Discard)
+    .await;
+  assert!(
+    matches!(
+      result,
+      Err(NativeCallError::Device(AudioDeviceError::DeviceGone("input")))
+    ),
+    "{result:?}"
+  );
+  let tone = AudioSource::Tone {
+    frequency_hz: 440.0,
+    amplitude: 0.3,
+  };
+  call.set_audio(tone, AudioSink::Discard).await.unwrap();
+  tokio::time::sleep(Duration::from_millis(500)).await;
+
+  let stats = call.leave().await.unwrap();
+  // Silence sends nothing, so every frame came from the tone switched in mid-call.
+  assert!(stats.frames_sent > 10, "{stats:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn screen_share_reaches_a_subscriber_through_the_sfu() {
+  let (port, certificate_hash) = start_sfu().await;
+  let mut authenticators = authenticators();
+  let [presenter_device, viewer_device] = [1u64, 2];
+  let mut calls = Vec::new();
+  for (device, other) in [
+    (presenter_device, viewer_device),
+    (viewer_device, presenter_device),
+  ] {
+    let engine = CallEngineConfig {
+      user_id: id_of(device),
+      device_id: id_of(device),
+      capabilities: MediaCapabilities {
+        audio_codecs: vec![AudioCodec::Opus],
+        video_encoders: vec![VideoCodec::Vp9],
+        video_decoders: vec![VideoCodec::Vp9],
+        max_simulcast_layers: 1,
+      },
+      bwe: BweConfig::default(),
+    };
+    let sfu_url = format!("https://[::1]:{port}{CALL_PATH}");
+    let mut config = NativeCallConfig::new(sfu_url, format!("dev:13:{device}:{device}"), engine);
+    config.maybe_certificate_hash = Some(certificate_hash);
+    config.maybe_trusted_roster = Some(vec![id_of(other)]);
+    config.maybe_authenticator = authenticators.remove(&device);
+    calls.push(NativeCall::join(config).await.unwrap());
+  }
+  let [mut presenter, mut viewer]: [NativeCall; 2] = calls.try_into().ok().unwrap();
+
+  // Simulcast off for screen shares: one full-resolution layer.
+  let layers = simulcast_layers(
+    VideoResolution {
+      width: 1920,
+      height: 1080,
+    },
+    15,
+    1_500_000,
+    1,
+  );
+  assert_eq!(layers.len(), 1);
+  let mut maybe_stream: Option<MediaStreamId> = None;
+  let mut is_presenter_secured = false;
+  let mut has_published = false;
+  let mut wants_keyframe = true;
+  let mut frame_index = 0u32;
+  let mut received: Vec<EncodedFrameCheck> = Vec::new();
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  while tokio::time::Instant::now() < deadline && received.len() < 10 {
+    if let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await {
+      match event {
+        CallEngineEvent::Secured { .. } => is_presenter_secured = true,
+        CallEngineEvent::VideoPublished(track) if track.device_id == id_of(presenter_device) => {
+          maybe_stream = Some(track.stream_id);
+        },
+        CallEngineEvent::KeyframeRequested { .. } => wants_keyframe = true,
+        _ => {},
+      }
+    }
+    if let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await {
+      match event {
+        CallEngineEvent::VideoPublished(track) => {
+          assert_eq!(track.kind, VideoTrackKind::Screen);
+          viewer.subscribe_video(track.stream_id, Some(0));
+        },
+        CallEngineEvent::VideoFrame(frame) => received.push(EncodedFrameCheck {
+          is_keyframe: frame.is_keyframe,
+          is_intact: frame.data == screen_frame(u32::from_be_bytes(frame.data[..4].try_into().unwrap())),
+        }),
+        _ => {},
+      }
+    }
+    if is_presenter_secured && !has_published {
+      presenter.publish_video(VideoTrackKind::Screen, VideoCodec::Vp9, layers.clone());
+      has_published = true;
+    }
+    if let Some(stream_id) = maybe_stream {
+      presenter.send_video(
+        stream_id,
+        EncodedVideoFrame {
+          codec: VideoCodec::Vp9,
+          layer: SimulcastLayer::BASE,
+          timestamp: RtpTimestamp(frame_index * 6000),
+          is_keyframe: std::mem::take(&mut wants_keyframe),
+          data: screen_frame(frame_index),
+        },
+      );
+      frame_index += 1;
+    }
+  }
+  presenter.leave().await.unwrap();
+  viewer.leave().await.unwrap();
+  assert!(received.len() >= 10, "{} frames arrived", received.len());
+  assert!(received[0].is_keyframe, "the SFU starts a receiver at a keyframe");
+  assert!(received.iter().all(|frame| frame.is_intact));
+}
+
+/// What the viewer saw of one frame.
+struct EncodedFrameCheck {
+  is_keyframe: bool,
+  is_intact: bool,
+}
+
+/// A 4 KB "encoded" frame (several fragments) that starts with its index.
+fn screen_frame(index: u32) -> Vec<u8> {
+  let mut data = index.to_be_bytes().to_vec();
+  data.extend((0..4000u32).map(|i| (i.wrapping_mul(31) ^ index) as u8));
+  data
 }
 
 /// One identity per device; every client trusts all device certificates of the call.

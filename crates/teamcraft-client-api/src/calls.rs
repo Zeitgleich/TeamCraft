@@ -1,10 +1,13 @@
 //! View models and session state for calls, huddles and the pre-join screen. Media itself lives in
 //! `teamcraft-media`; these types only describe what the UI shows and lets the user pick.
 
+use serde::{Deserialize, Serialize};
+
 use crate::model::{ConversationId, UserId};
 
 /// What kind of call a conversation is joined in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallKind {
   /// Ring-style 1:1 call from a DM.
   Direct,
@@ -73,13 +76,13 @@ impl BackgroundEffect {
 }
 
 /// One selectable input or output device.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaDevice {
   pub id: String,
   pub label: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MediaDevices {
   pub cameras: Vec<MediaDevice>,
   pub microphones: Vec<MediaDevice>,
@@ -87,7 +90,7 @@ pub struct MediaDevices {
 }
 
 /// A remote participant as the media layer reports it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Participant {
   pub user: UserId,
   pub is_muted: bool,
@@ -97,13 +100,13 @@ pub struct Participant {
 }
 
 /// A running drop-in huddle in a channel.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HuddleInfo {
   pub participants: Vec<UserId>,
 }
 
 /// A call someone started that the user can accept or decline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomingCall {
   pub caller: UserId,
   pub conversation: ConversationId,
@@ -111,10 +114,35 @@ pub struct IncomingCall {
 }
 
 /// What the user is about to join.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallRequest {
   pub conversation: ConversationId,
   pub kind: CallKind,
+}
+
+/// The call this device is in, as the media layer reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveCall {
+  pub conversation: ConversationId,
+  pub kind: CallKind,
+  pub is_muted: bool,
+  pub is_deafened: bool,
+  /// End-to-end encryption is set up; media flows only then.
+  pub is_secured: bool,
+  /// Group code to compare out of band (DAVE privacy code), once secured.
+  pub maybe_privacy_code: Option<String>,
+  pub participants: Vec<Participant>,
+  /// Whose audio is forwarded right now, loudest first.
+  pub active_speakers: Vec<UserId>,
+}
+
+/// A call running in a conversation (server roster), whether or not this device is in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningCall {
+  pub conversation: ConversationId,
+  pub participants: Vec<UserId>,
+  /// DMs ring until someone else joins.
+  pub is_ringing: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

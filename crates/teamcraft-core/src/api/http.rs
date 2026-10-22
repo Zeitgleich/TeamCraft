@@ -25,6 +25,7 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, RegisterPushRequest,
 };
+use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, UnreadResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -250,6 +251,20 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn set_presence(&self, request: &SetPresenceRequest) -> Result<(), ApiError> {
     self
       .send_without_response(Method::PUT, "/me/presence", Some(request))
+      .await
+  }
+
+  async fn create_call_join_token(
+    &self,
+    conversation: ConversationId,
+    request: &CreateCallJoinTokenRequest,
+  ) -> Result<CallJoinTokenResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/call/join-token"),
+        request,
+      )
       .await
   }
 

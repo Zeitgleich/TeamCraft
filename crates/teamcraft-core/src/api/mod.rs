@@ -31,6 +31,7 @@ use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
   CreateAttachmentResponse, RegisterPushRequest,
 };
+use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, UnreadResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
@@ -111,6 +112,12 @@ pub trait ServerApi {
     request: &SetReadPositionRequest,
   ) -> impl Future<Output = Result<(), ApiError>>;
   fn set_presence(&self, request: &SetPresenceRequest) -> impl Future<Output = Result<(), ApiError>>;
+  /// A token to join the conversation's call on the SFU (starts the call if none runs).
+  fn create_call_join_token(
+    &self,
+    conversation: ConversationId,
+    request: &CreateCallJoinTokenRequest,
+  ) -> impl Future<Output = Result<CallJoinTokenResponse, ApiError>>;
 
   fn send_message(
     &self,

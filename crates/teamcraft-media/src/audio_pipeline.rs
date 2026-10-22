@@ -188,16 +188,6 @@ impl PlaybackMixer {
   }
 }
 
-/// A sine tone as mono 48 kHz samples, for test clients.
-pub fn sine_tone(frequency_hz: f32, amplitude: f32, start_sample: u64, samples: usize) -> Vec<f32> {
-  (0..samples as u64)
-    .map(|offset| {
-      let t = (start_sample + offset) as f32 / crate::audio_codec::SAMPLE_RATE_HZ as f32;
-      amplitude * (2.0 * std::f32::consts::PI * frequency_hz * t).sin()
-    })
-    .collect()
-}
-
 fn to_i16(sample: f32) -> i16 {
   // Clamped first, so the cast can't overflow.
   (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
@@ -206,6 +196,7 @@ fn to_i16(sample: f32) -> i16 {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::audio_io::sine_tone;
 
   mod capture {
     use super::*;

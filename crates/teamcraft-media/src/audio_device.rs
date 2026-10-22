@@ -5,6 +5,9 @@
 //! playback. The capture callback hands samples to the caller; playback pulls from a shared
 //! [`PlaybackBuffer`] and plays silence when it runs dry.
 //!
+//! Devices are chosen by [`AudioDeviceId`] (from [`list_input_devices`] / [`list_output_devices`]),
+//! which stays stable across restarts where the platform allows, so it can be stored as a setting.
+//!
 //! cpal streams are not `Send` on every platform: keep [`AudioInput`] and [`AudioOutput`] on the
 //! thread that opened them and drop them to stop.
 
@@ -12,11 +15,12 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, StreamConfig, SupportedStreamConfigRange};
+use cpal::{Device, Host, SampleFormat, StreamConfig, SupportedStreamConfigRange};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::audio_codec::SAMPLE_RATE_HZ;
+use crate::audio_frame::SAMPLE_RATE_HZ;
+use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo};
 
 /// A running capture stream.
 pub struct AudioInput {
@@ -45,18 +49,42 @@ struct PlaybackState {
 pub enum AudioDeviceError {
   #[error("no {0} device available")]
   NoDevice(&'static str),
+  #[error("the {0} device is not available (unplugged?)")]
+  DeviceGone(&'static str),
   #[error("the {0} device supports no f32 configuration at 48 kHz")]
   UnsupportedFormat(&'static str),
+  #[error("the audio thread stopped while opening devices")]
+  AudioThread,
   #[error("audio device: {0}")]
   Device(#[from] cpal::Error),
 }
 
+/// Microphones, the default first.
+pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>, AudioDeviceError> {
+  let host = cpal::default_host();
+  let maybe_default = host.default_input_device();
+  list_devices(host.input_devices()?, maybe_default)
+}
+
+/// Speakers and headsets, the default first.
+pub fn list_output_devices() -> Result<Vec<AudioDeviceInfo>, AudioDeviceError> {
+  let host = cpal::default_host();
+  let maybe_default = host.default_output_device();
+  list_devices(host.output_devices()?, maybe_default)
+}
+
 impl AudioInput {
-  /// Opens the default microphone; `on_samples` gets mono 48 kHz samples on the audio thread.
-  pub fn open_default(mut on_samples: impl FnMut(&[f32]) + Send + 'static) -> Result<Self, AudioDeviceError> {
-    let device = cpal::default_host()
-      .default_input_device()
-      .ok_or(AudioDeviceError::NoDevice("input"))?;
+  /// Opens a microphone; `on_samples` gets mono 48 kHz samples on the audio thread.
+  pub fn open(
+    choice: &AudioDeviceChoice,
+    mut on_samples: impl FnMut(&[f32]) + Send + 'static,
+  ) -> Result<Self, AudioDeviceError> {
+    let host = cpal::default_host();
+    let device = match choice {
+      AudioDeviceChoice::Default => host.default_input_device(),
+      AudioDeviceChoice::Device(id) => find_device(&host, id),
+    }
+    .ok_or(no_device(choice, "input"))?;
     let config = pick_config(device.supported_input_configs()?, "input")?;
     let channels = usize::from(config.channels);
     let mut mono = Vec::new();
@@ -80,11 +108,14 @@ impl AudioInput {
 }
 
 impl AudioOutput {
-  /// Opens the default speakers, playing what is pushed into `buffer`.
-  pub fn open_default(buffer: Arc<PlaybackBuffer>) -> Result<Self, AudioDeviceError> {
-    let device = cpal::default_host()
-      .default_output_device()
-      .ok_or(AudioDeviceError::NoDevice("output"))?;
+  /// Opens speakers, playing what is pushed into `buffer`.
+  pub fn open(choice: &AudioDeviceChoice, buffer: Arc<PlaybackBuffer>) -> Result<Self, AudioDeviceError> {
+    let host = cpal::default_host();
+    let device = match choice {
+      AudioDeviceChoice::Default => host.default_output_device(),
+      AudioDeviceChoice::Device(id) => find_device(&host, id),
+    }
+    .ok_or(no_device(choice, "output"))?;
     let config = pick_config(device.supported_output_configs()?, "output")?;
     let channels = usize::from(config.channels);
     let mut mono = Vec::new();
@@ -149,6 +180,43 @@ impl PlaybackBuffer {
   fn lock(&self) -> std::sync::MutexGuard<'_, PlaybackState> {
     // Poisoning only means a callback panicked mid-update of a plain sample queue.
     self.state.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+}
+
+fn list_devices(
+  devices: impl Iterator<Item = Device>,
+  maybe_default: Option<Device>,
+) -> Result<Vec<AudioDeviceInfo>, AudioDeviceError> {
+  let maybe_default_id = maybe_default.and_then(|device| device.id().ok());
+  let mut infos: Vec<AudioDeviceInfo> = devices
+    .filter_map(|device| {
+      // Devices can vanish between listing and asking; skip those.
+      let id = device.id().ok()?;
+      let name = device
+        .description()
+        .map(|description| description.name().to_owned())
+        .unwrap_or_else(|_| device.to_string());
+      Some(AudioDeviceInfo {
+        is_default: maybe_default_id.as_ref() == Some(&id),
+        id: AudioDeviceId::new(id.to_string()),
+        name,
+      })
+    })
+    .collect();
+  infos.sort_by_key(|info| !info.is_default);
+  Ok(infos)
+}
+
+/// `None` for ids of devices that are gone or come from another platform.
+fn find_device(host: &Host, id: &AudioDeviceId) -> Option<Device> {
+  let cpal_id = id.as_str().parse::<cpal::DeviceId>().ok()?;
+  host.device_by_id(&cpal_id)
+}
+
+fn no_device(choice: &AudioDeviceChoice, direction: &'static str) -> AudioDeviceError {
+  match choice {
+    AudioDeviceChoice::Default => AudioDeviceError::NoDevice(direction),
+    AudioDeviceChoice::Device(_) => AudioDeviceError::DeviceGone(direction),
   }
 }
 

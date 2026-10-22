@@ -27,7 +27,7 @@ mod convert;
 mod trust;
 
 pub use client::{
-  Client, ClientSettings, EnrollmentOptions, FlushReport, GatewayOutcome, LinkOffer, OrgRecoveryUnlock,
-  PendingEnrollment,
+  CallEventSink, CallKeySigner, Client, ClientSettings, EnrollmentOptions, FlushReport, GatewayOutcome,
+  LinkOffer, OrgRecoveryUnlock, PendingEnrollment,
 };
 pub use error::CoreError;

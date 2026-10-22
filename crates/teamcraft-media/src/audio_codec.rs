@@ -6,10 +6,7 @@
 use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 use thiserror::Error;
 
-/// Opus always runs at 48 kHz here; capture and playback resample if needed.
-pub const SAMPLE_RATE_HZ: u32 = 48_000;
-/// Samples per channel in one 20 ms frame.
-pub const FRAME_SAMPLES_PER_CHANNEL: usize = 960;
+pub use crate::audio_frame::{FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ};
 /// Largest Opus packet we produce (RFC 6716 allows 1275 bytes per frame).
 const MAX_PACKET_BYTES: usize = 1275;
 

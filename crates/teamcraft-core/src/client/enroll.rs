@@ -149,6 +149,7 @@ impl PendingEnrollment {
       groups: HashMap::new(),
       sync,
       typing: Default::default(),
+      maybe_call_sink: None,
     };
     if is_new_identity {
       client

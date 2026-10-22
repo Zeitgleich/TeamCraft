@@ -17,10 +17,12 @@ teamcraft-proto.workspace = true
 anyhow.workspace = true
 jsonwebtoken.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# Reports call participants to teamcraft-server.
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util", "signal", "fs"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 wtransport = { version = "0.7.2", features = ["self-signed"] }
@@ -31,3 +33,5 @@ teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
 # Device identities for the clients' call key bindings.
 teamcraft-crypto.workspace = true
 rand_core.workspace = true
+# A stand-in for the server's internal endpoints in the reporting test.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }

@@ -8,13 +8,18 @@
 //!   server's `[calls] issuer`
 //! - `TEAMCRAFT_SFU_HEALTH_BIND`: TCP address of the `/healthz` endpoint, default `[::]:8081`;
 //!   `teamcraft-sfu healthcheck` probes it (for the container `HEALTHCHECK`)
-//! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test page; unsigned
+//! - `TEAMCRAFT_SFU_SERVER_URL` and `TEAMCRAFT_SFU_REGISTRATION_TOKEN`: report joins and leaves to
+//!   `teamcraft-server` (its `[calls] sfu_registration_token`), which starts calls and rings DMs
+//! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test pages; unsigned
 //!   dev tokens when no public key is configured)
+//! - `TEAMCRAFT_SFU_DEV_ENGINE_DIR`: in dev mode, the `wasm-bindgen` output of `teamcraft-media`'s
+//!   `web_call` example, served for the `/engine` test page
 //! - `TEAMCRAFT_SFU_CERT` / `TEAMCRAFT_SFU_KEY`: PEM files; without them a self-signed
 //!   certificate valid for 14 days is generated (browsers accept it via certificate hash)
 
 use std::io::Write;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -25,6 +30,7 @@ use teamcraft_sfu::{
   config::SfuConfig,
   dev_page::serve_dev_page,
   health::{DEFAULT_HEALTH_ADDR, serve_health},
+  reporting::HttpReporter,
   server::Sfu,
 };
 use tracing::{info, warn};
@@ -74,7 +80,17 @@ async fn run() -> anyhow::Result<()> {
   let verifier = load_verifier(&config)?;
 
   let maybe_dev_http_addr = config.maybe_dev_http_addr;
-  let sfu = Sfu::bind(config, identity, verifier).context("binding the SFU")?;
+  let mut sfu = Sfu::bind(config, identity, verifier).context("binding the SFU")?;
+  match (
+    std::env::var("TEAMCRAFT_SFU_SERVER_URL"),
+    std::env::var("TEAMCRAFT_SFU_REGISTRATION_TOKEN"),
+  ) {
+    (Ok(server_url), Ok(token)) => {
+      info!(%server_url, "reporting call participants to the server");
+      sfu = sfu.with_reporter(Arc::new(HttpReporter::new(server_url, token)));
+    },
+    _ => warn!("no server URL and registration token: calls are not reported to the server"),
+  }
   let local_addr = sfu.local_addr()?;
   let certificate_hash = sfu.certificate_hash();
   info!(
@@ -85,7 +101,10 @@ async fn run() -> anyhow::Result<()> {
 
   let dev_page = async {
     match maybe_dev_http_addr {
-      Some(http_addr) => serve_dev_page(http_addr, local_addr.port(), &certificate_hash).await,
+      Some(http_addr) => {
+        let maybe_engine_dir = std::env::var_os("TEAMCRAFT_SFU_DEV_ENGINE_DIR").map(PathBuf::from);
+        serve_dev_page(http_addr, local_addr.port(), &certificate_hash, maybe_engine_dir).await
+      },
       None => std::future::pending().await,
     }
   };

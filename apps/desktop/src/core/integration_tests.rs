@@ -174,6 +174,7 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     KeyChoice::Fixed(vec![7; 32]),
     tokens,
     Arc::new(|| {}),
+    Arc::new(|_| {}),
   );
   Person {
     name,

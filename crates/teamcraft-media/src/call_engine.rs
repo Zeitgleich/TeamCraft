@@ -1,8 +1,9 @@
-//! Platform-neutral call client: signaling, DAVE group, audio framing and bandwidth feedback.
+//! Platform-neutral call client: signaling, DAVE group, audio and video framing and bandwidth
+//! feedback.
 //!
 //! Sans I/O: the engine never touches sockets, clocks or devices. The embedding driver (the native
 //! driver in [`crate::call_native`], the browser worker, `teamcraft-core`) feeds it signaling
-//! messages, datagrams, encoded audio and the current time, and drains [`EngineOutput`]s: messages
+//! messages, datagrams, encoded audio and video and the current time, and drains [`EngineOutput`]s: messages
 //! to send on the signaling stream, datagrams to send, and events for the app. That keeps one
 //! implementation for desktop, web and mobile and makes it testable without a network.
 //!
@@ -13,21 +14,25 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
 
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
-  DeviceId, ErrorBody, MediaCapabilities, UserId,
+  DeviceId, ErrorBody, MediaCapabilities, MediaStreamId, UserId, VideoCodec, VideoLayerInfo, VideoTrack,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
 
 use crate::audio_frame::EncodedAudioFrame;
 use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{CallKeyAuthenticator, CallKeyError};
+use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
 use crate::dave::{DaveCallId, DaveError, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
+use crate::video::EncodedVideoFrame;
 
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz.
 const OPUS_FRAME_TICKS: u32 = 960;
@@ -40,6 +45,10 @@ pub struct CallEngine {
   phase: Phase,
   participants: BTreeMap<DeviceId, CallParticipant>,
   audio_streams: HashMap<StreamId, DeviceId>,
+  /// Tracks this device publishes, by the stream id the SFU assigned.
+  own_video: HashMap<StreamId, OutgoingVideo>,
+  /// Tracks other devices publish.
+  remote_video: HashMap<StreamId, IncomingVideo>,
   maybe_dave: Option<DaveParticipant>,
   maybe_trusted_roster: Option<BTreeSet<DeviceId>>,
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
@@ -101,6 +110,22 @@ pub enum CallEngineEvent {
     sequence_number: SequenceNumber,
     opus: Vec<u8>,
   },
+  /// A video track was published; for this device's own tracks it carries the stream id to send
+  /// on. Subscribe to other devices' tracks with [`CallEngine::subscribe_video`].
+  VideoPublished(VideoTrack),
+  VideoUnpublished(MediaStreamId),
+  /// A decrypted, complete video frame for the decoder.
+  VideoFrame(ReceivedVideoFrame),
+  /// Encode a keyframe on this layer of an own track soon (a receiver switched to it).
+  KeyframeRequested {
+    stream_id: MediaStreamId,
+    layer: u8,
+  },
+  /// The layers of an own track someone receives; the others may be paused.
+  LayersNeeded {
+    stream_id: MediaStreamId,
+    layers: Vec<u8>,
+  },
   MuteChanged(bool),
   DeafenChanged(bool),
   /// Estimated uplink bandwidth after new feedback.
@@ -113,6 +138,16 @@ pub enum CallEngineEvent {
   UnauthenticatedKeys,
   /// The SFU rejected a request.
   Error(ErrorBody),
+}
+
+/// What a driver counts during a call, for tests and diagnostics.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CallStats {
+  pub frames_sent: u64,
+  pub frames_received: u64,
+  /// 20 ms mix frames with audible content.
+  pub audible_frames_played: u64,
+  pub maybe_privacy_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +179,8 @@ impl CallEngine {
       phase: Phase::Idle,
       participants: BTreeMap::new(),
       audio_streams: HashMap::new(),
+      own_video: HashMap::new(),
+      remote_video: HashMap::new(),
       maybe_dave: None,
       maybe_trusted_roster: None,
       maybe_authenticator: None,
@@ -294,19 +331,64 @@ impl CallEngine {
     .to_bytes() else {
       return;
     };
-    let datagram_len = rtp.len() + crate::datagram::DATAGRAM_HEADER_BYTES + 2;
-    let transport_seq = self.uplink.on_send(datagram_len, now);
-    let datagram = MediaDatagram {
-      header: DatagramHeader {
-        stream_id: audio_stream,
-        layer: SimulcastLayer::BASE,
-        maybe_transport_seq: Some(transport_seq),
-      },
-      rtp: &rtp,
+    self.send_media(audio_stream, SimulcastLayer::BASE, &rtp, now);
+  }
+
+  /// Starts publishing a video track; [`CallEngineEvent::VideoPublished`] brings its stream id.
+  /// Screen shares use one layer (no simulcast).
+  pub fn publish_video(&mut self, kind: VideoTrackKind, codec: VideoCodec, layers: Vec<VideoLayerInfo>) {
+    self.signal(CallClientMessage::PublishVideo { kind, codec, layers });
+  }
+
+  pub fn unpublish_video(&mut self, stream_id: MediaStreamId) {
+    if self.own_video.remove(&StreamId(stream_id.0)).is_some() {
+      self.signal(CallClientMessage::UnpublishVideo { stream_id });
+    }
+  }
+
+  /// Receives another device's track up to `max_layer`; `None` stops receiving it.
+  pub fn subscribe_video(&mut self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>) {
+    self.signal(CallClientMessage::Subscribe {
+      stream_id,
+      maybe_max_layer,
+    });
+  }
+
+  /// Encrypts, splits and sends one encoded frame of an own track. Dropped before DAVE is ready,
+  /// like audio.
+  pub fn send_video(&mut self, stream_id: MediaStreamId, frame: &EncodedVideoFrame, now: Instant) {
+    let stream = StreamId(stream_id.0);
+    if self.is_compromised || !self.own_video.contains_key(&stream) {
+      return;
+    }
+    let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
+      return;
     };
-    match datagram.to_bytes(MAX_DATAGRAM_BYTES) {
-      Ok(bytes) => self.outputs.push_back(EngineOutput::Datagram(bytes)),
-      Err(error) => warn!(%error, "audio datagram too large"),
+    let encrypted = match dave.encrypt_frame(MediaKind::Video, frame_codec(&frame.codec), &frame.data) {
+      Ok(encrypted) => encrypted.into_owned(),
+      Err(error) => {
+        warn!(%error, "video frame not encrypted, dropped");
+        return;
+      },
+    };
+    let Some(track) = self.own_video.get_mut(&stream) else {
+      return;
+    };
+    let packets = match track.packetize(
+      stream,
+      frame.layer,
+      frame.timestamp,
+      frame.is_keyframe,
+      &encrypted,
+    ) {
+      Ok(packets) => packets,
+      Err(error) => {
+        warn!(%error, "video frame dropped");
+        return;
+      },
+    };
+    for rtp in packets {
+      self.send_media(stream, frame.layer, &rtp, now);
     }
   }
 
@@ -328,8 +410,14 @@ impl CallEngine {
         call_id,
         participant,
         participants,
-        ..
-      } => self.on_joined(call_id, participant, participants),
+        video_tracks,
+      } => {
+        self.on_joined(call_id, participant, participants)?;
+        for track in video_tracks {
+          self.add_video_track(track);
+        }
+        Ok(())
+      },
       CallEvent::ParticipantJoined { participant } => {
         self.add_participant(participant);
         self.event(CallEngineEvent::ParticipantJoined(participant));
@@ -338,6 +426,7 @@ impl CallEngine {
       CallEvent::ParticipantLeft { device_id } => {
         self.participants.remove(&device_id);
         self.audio_streams.retain(|_, owner| *owner != device_id);
+        self.remote_video.retain(|_, track| track.sender != device_id);
         self.event(CallEngineEvent::ParticipantLeft(device_id));
         Ok(())
       },
@@ -378,12 +467,25 @@ impl CallEngine {
         self.event(CallEngineEvent::UplinkEstimate { bps });
         Ok(())
       },
-      // Video is not wired into the engine yet (no capture); the events are ignored.
-      CallEvent::VideoPublished { .. }
-      | CallEvent::VideoUnpublished { .. }
-      | CallEvent::KeyframeRequested { .. }
-      | CallEvent::LayersNeeded { .. }
-      | CallEvent::Unknown => Ok(()),
+      CallEvent::VideoPublished { track } => {
+        self.add_video_track(track);
+        Ok(())
+      },
+      CallEvent::VideoUnpublished { stream_id } => {
+        self.remote_video.remove(&StreamId(stream_id.0));
+        self.own_video.remove(&StreamId(stream_id.0));
+        self.event(CallEngineEvent::VideoUnpublished(stream_id));
+        Ok(())
+      },
+      CallEvent::KeyframeRequested { stream_id, layer } => {
+        self.event(CallEngineEvent::KeyframeRequested { stream_id, layer });
+        Ok(())
+      },
+      CallEvent::LayersNeeded { stream_id, layers } => {
+        self.event(CallEngineEvent::LayersNeeded { stream_id, layers });
+        Ok(())
+      },
+      CallEvent::Unknown => Ok(()),
     }
   }
 
@@ -541,11 +643,16 @@ impl CallEngine {
     if let Some(seq) = datagram.header.maybe_transport_seq {
       self.downlink_feedback.on_arrival(seq, now);
     }
+    if self.is_compromised {
+      return Ok(());
+    }
+    if self.remote_video.contains_key(&datagram.header.stream_id) {
+      return self.receive_video(datagram.header.stream_id, datagram.header.layer, datagram.rtp);
+    }
     let Some(&sender) = self.audio_streams.get(&datagram.header.stream_id) else {
-      // Video and unknown streams are not handled by the engine yet.
       return Ok(());
     };
-    if self.is_deafened || self.is_compromised {
+    if self.is_deafened {
       return Ok(());
     }
     let packet = RtpPacket::parse(datagram.rtp).map_err(|_| CallEngineError::Protocol("bad RTP"))?;
@@ -560,6 +667,71 @@ impl CallEngine {
       opus,
     });
     Ok(())
+  }
+
+  fn receive_video(
+    &mut self,
+    stream: StreamId,
+    layer: SimulcastLayer,
+    rtp: &[u8],
+  ) -> Result<(), CallEngineError> {
+    let packet = RtpPacket::parse(rtp).map_err(|_| CallEngineError::Protocol("bad RTP"))?;
+    let Some(track) = self.remote_video.get_mut(&stream) else {
+      return Ok(());
+    };
+    let Some(complete) = track
+      .push(layer, &packet)
+      .map_err(|_| CallEngineError::Protocol("bad video fragment"))?
+    else {
+      return Ok(());
+    };
+    let (sender, codec) = (track.sender, track.codec.clone());
+    let data = self.dave()?.decrypt_frame(
+      DaveParticipantId::from_device(sender),
+      MediaKind::Video,
+      &complete.data,
+    )?;
+    self.event(CallEngineEvent::VideoFrame(ReceivedVideoFrame {
+      sender,
+      stream_id: MediaStreamId(stream.0),
+      codec,
+      layer,
+      timestamp: packet.header.timestamp,
+      is_keyframe: complete.is_keyframe,
+      data,
+    }));
+    Ok(())
+  }
+
+  fn add_video_track(&mut self, track: VideoTrack) {
+    let stream = StreamId(track.stream_id.0);
+    if track.device_id == self.config.device_id {
+      self.own_video.insert(
+        stream,
+        OutgoingVideo::new(track.kind.clone(), track.codec.clone()),
+      );
+    } else {
+      self.remote_video.insert(stream, IncomingVideo::new(&track));
+    }
+    self.event(CallEngineEvent::VideoPublished(track));
+  }
+
+  /// Wraps one RTP packet in a datagram with a transport sequence number for uplink estimation.
+  fn send_media(&mut self, stream: StreamId, layer: SimulcastLayer, rtp: &[u8], now: Instant) {
+    let datagram_len = rtp.len() + crate::datagram::DATAGRAM_HEADER_BYTES + 2;
+    let transport_seq = self.uplink.on_send(datagram_len, now);
+    let datagram = MediaDatagram {
+      header: DatagramHeader {
+        stream_id: stream,
+        layer,
+        maybe_transport_seq: Some(transport_seq),
+      },
+      rtp,
+    };
+    match datagram.to_bytes(MAX_DATAGRAM_BYTES) {
+      Ok(bytes) => self.outputs.push_back(EngineOutput::Datagram(bytes)),
+      Err(error) => warn!(%error, "media datagram too large"),
+    }
   }
 
   fn add_participant(&mut self, participant: CallParticipant) {
@@ -595,6 +767,17 @@ impl CallEngine {
 
   fn event(&mut self, event: CallEngineEvent) {
     self.outputs.push_back(EngineOutput::Event(event));
+  }
+}
+
+/// DAVE's codec for a video codec (it leaves codec headers such as AV1 OBU headers readable).
+fn frame_codec(codec: &VideoCodec) -> FrameCodec {
+  match codec {
+    VideoCodec::Av1 => FrameCodec::Av1,
+    VideoCodec::Vp9 => FrameCodec::Vp9,
+    VideoCodec::H264 => FrameCodec::H264,
+    // Unknown codecs are never negotiated (choose_video_codec skips them); encrypt the whole frame.
+    VideoCodec::Unknown(_) => FrameCodec::Vp9,
   }
 }
 
@@ -715,6 +898,84 @@ mod tests {
           .iter()
           .all(|output| !matches!(output, EngineOutput::Datagram(_)))
       );
+    }
+
+    #[test]
+    fn screen_share_frames_arrive_encrypted_and_whole() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let track = VideoTrack {
+        stream_id: MediaStreamId(50),
+        device_id: device(1),
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::Vp9,
+        layers: Vec::new(),
+      };
+      alice.publish_video(VideoTrackKind::Screen, VideoCodec::Vp9, Vec::new());
+      assert!(matches!(
+        alice.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::PublishVideo { .. }))
+      ));
+      let published = CallEvent::VideoPublished { track: track.clone() };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      drain(&mut alice);
+      assert_eq!(
+        drain(&mut bob),
+        vec![EngineOutput::Event(CallEngineEvent::VideoPublished(track))]
+      );
+
+      let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+      let frame = EncodedVideoFrame {
+        codec: VideoCodec::Vp9,
+        layer: SimulcastLayer::BASE,
+        timestamp: RtpTimestamp(3000),
+        is_keyframe: true,
+        data: data.clone(),
+      };
+      alice.send_video(MediaStreamId(50), &frame, now);
+      let datagrams: Vec<Vec<u8>> = drain(&mut alice)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => Some(bytes),
+          _ => None,
+        })
+        .collect();
+      assert!(datagrams.len() >= 5, "5000 bytes need several datagrams");
+      assert!(
+        datagrams
+          .iter()
+          .all(|datagram| datagram.len() <= MAX_DATAGRAM_BYTES)
+      );
+      for datagram in datagrams.iter().rev() {
+        bob.handle_datagram(datagram, now);
+      }
+      let frames: Vec<ReceivedVideoFrame> = drain(&mut bob)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => Some(frame),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(frames.len(), 1);
+      assert_eq!(frames[0].data, data);
+      assert!(frames[0].is_keyframe);
+      assert_eq!(frames[0].sender, device(1));
+    }
+
+    #[test]
+    fn video_of_an_unpublished_track_is_not_sent() {
+      let now = Instant::now();
+      let (mut alice, _) = secured_pair(now);
+      let frame = EncodedVideoFrame {
+        codec: VideoCodec::Vp9,
+        layer: SimulcastLayer::BASE,
+        timestamp: RtpTimestamp(0),
+        is_keyframe: true,
+        data: vec![1; 100],
+      };
+      alice.send_video(MediaStreamId(50), &frame, now);
+      assert!(drain(&mut alice).is_empty());
     }
 
     #[test]

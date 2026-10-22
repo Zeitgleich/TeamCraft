@@ -59,3 +59,9 @@ futures-util = "0.3"
 base64.workspace = true
 figment = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["test-util"] }
+# Full-stack call test (tests/call_e2e.rs): SFU, native call clients and their device identities.
+teamcraft-sfu = { path = "../teamcraft-sfu" }
+teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
+teamcraft-crypto.workspace = true
+rand_core.workspace = true
+wtransport = "0.7.2"
