@@ -245,6 +245,15 @@ pub enum ChatAction {
     #[serde(default)]
     admins: Vec<UserId>,
   },
+  /// Wraps the key backup with a new recovery passphrase (the old one stops working for recovery).
+  ChangePassphrase {
+    passphrase: String,
+  },
+  /// This device became idle (no input for a while) or active again; the server shows idle devices
+  /// as away (docs/gateway.md).
+  SetActivity {
+    is_idle: bool,
+  },
   /// The user compared the keys and accepts the contact's new identity key.
   AcceptKeyChange {
     user: UserId,

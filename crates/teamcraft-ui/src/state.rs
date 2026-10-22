@@ -75,6 +75,8 @@ pub struct AppState {
   pub device_prompt: RwSignal<Option<DeviceApproval>>,
   /// Bumped when the composer sent a message, so the feed scrolls to it.
   pub jump_to_latest: RwSignal<u64>,
+  /// A request to scroll a conversation's feed to a message index (jump to date).
+  pub jump_to_index: RwSignal<Option<(ConversationId, usize)>>,
   pub settings: Settings,
 }
 
@@ -96,6 +98,7 @@ impl AppState {
       call: CallState::new(),
       device_prompt: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
+      jump_to_index: RwSignal::new(None),
       settings,
     }
   }

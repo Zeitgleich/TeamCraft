@@ -21,7 +21,7 @@ const WATCH_WINDOW: usize = 10;
 const PREVIEW_CHARS: usize = 140;
 const MS_PER_SECOND: i64 = 1000;
 /// Words that notify the whole conversation.
-const CHANNEL_MENTIONS: [&str; 3] = ["channel", "here", "all"];
+pub const CHANNEL_MENTIONS: [&str; 3] = ["channel", "here", "all"];
 
 /// Everything the policy looks at for one candidate message.
 pub struct PolicyInput<'a> {
@@ -138,6 +138,23 @@ pub fn is_mentioned(body: &str, me: &User, prefs: &NotificationPrefs) -> bool {
     .map(|keyword| keyword.trim().to_lowercase())
     .filter(|keyword| !keyword.is_empty())
     .any(|keyword| lower.contains(&keyword))
+}
+
+/// Whether sending `body` would notify a whole large conversation and should be confirmed first:
+/// the text has `@channel`/`@here`/`@all` and the conversation has more than `confirm_over` members
+/// (`0` never asks).
+pub fn needs_channel_confirmation(body: &str, member_count: usize, confirm_over: u32) -> bool {
+  if confirm_over == 0 || member_count <= confirm_over as usize {
+    return false;
+  }
+  let lower = body.to_lowercase();
+  lower
+    .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_' && c != '-')
+    .any(|word| {
+      CHANNEL_MENTIONS
+        .iter()
+        .any(|mention| word == format!("@{mention}"))
+    })
 }
 
 /// What to show.
@@ -486,6 +503,16 @@ mod tests {
       ..NotificationPrefs::default()
     };
     assert!(!is_mentioned("@here please", &me(), &prefs));
+  }
+
+  #[test]
+  fn large_conversations_ask_before_a_channel_mention() {
+    assert!(needs_channel_confirmation("@channel standup", 25, 10));
+    assert!(needs_channel_confirmation("hi @Here!", 11, 10));
+    assert!(!needs_channel_confirmation("@channel standup", 10, 10));
+    assert!(!needs_channel_confirmation("@channel standup", 25, 0));
+    assert!(!needs_channel_confirmation("mail me@channel.example", 25, 10));
+    assert!(!needs_channel_confirmation("no mention", 25, 10));
   }
 
   #[test]

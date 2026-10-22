@@ -54,6 +54,15 @@ pub async fn link_cancel() -> Result<(), String> {
   call("core_link_cancel", &json!({})).await
 }
 
+/// Wraps the key backup with a new recovery passphrase.
+pub async fn change_passphrase(passphrase: &str) -> Result<(), String> {
+  call(
+    "core_action",
+    &json!({ "action": ChatAction::ChangePassphrase { passphrase: passphrase.to_owned() } }),
+  )
+  .await
+}
+
 /// Existing device: joins the link of a new device; returns the short code to compare.
 pub async fn approval_start(code: &str) -> Result<String, String> {
   call("core_approval_start", &json!({ "code": code })).await
@@ -271,6 +280,10 @@ impl RemoteChat {
 impl ChatBackend for RemoteChat {
   fn can_sign_workspace(&self) -> bool {
     true
+  }
+
+  fn set_activity(&self, is_idle: bool) {
+    self.act(ChatAction::SetActivity { is_idle });
   }
 
   fn security_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {

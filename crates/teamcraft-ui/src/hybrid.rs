@@ -245,6 +245,17 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     }
   }
 
+  fn set_activity(&self, is_idle: bool) {
+    self.chat.set_activity(is_idle);
+  }
+
+  fn is_in_call(&self, user: UserId) -> bool {
+    self
+      .maybe_calls
+      .as_ref()
+      .is_some_and(|calls| calls.is_in_call(user))
+  }
+
   fn is_thread_followed(&self, conversation: ConversationId, thread: ThreadId) -> bool {
     self.maybe_live.as_ref().is_none_or(|live| {
       live

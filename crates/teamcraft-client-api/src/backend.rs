@@ -91,6 +91,12 @@ pub trait ChatBackend {
   }
   /// Trusts the contact's new identity key after the user compared it.
   fn accept_key_change(&self, _user: UserId) {}
+  /// The device became idle or active; the server derives "away" from it.
+  fn set_activity(&self, _is_idle: bool) {}
+  /// Whether the person is in a call right now (server roster), shown next to their name.
+  fn is_in_call(&self, _user: UserId) -> bool {
+    false
+  }
   /// The newest failure of an action sent to the core, in words for the user.
   fn last_action_error(&self) -> Option<String> {
     None

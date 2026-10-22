@@ -27,8 +27,8 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, DeviceId, GatewayClientMessage, GatewayEvent, UserId,
-  WorkspacePolicy,
+  CallJoinTokenResponse, ConversationId, DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent,
+  UserId, WorkspacePolicy,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -713,6 +713,27 @@ impl Core {
       ChatAction::AddMember { conversation, user } => {
         return client.add_member(*conversation, *user).await.map_err(describe);
       },
+      ChatAction::ChangePassphrase { passphrase } => {
+        let passphrase = SecretBytes::new(passphrase.clone().into_bytes());
+        return client
+          .upload_key_bag_with(&passphrase, self.config.argon2)
+          .await
+          .map_err(describe);
+      },
+      ChatAction::SetActivity { is_idle } => {
+        self.send_activity(*is_idle).await;
+        return Ok(());
+      },
+      ChatAction::AcceptKeyChange { user } => {
+        let mut pinned = records::pinned_identities(client.store()).map_err(describe)?;
+        if let Some(entry) = pinned.get_mut(user)
+          && let Some(new_key) = entry.maybe_changed_to.take()
+        {
+          entry.public_key = new_key;
+          records::pin_identity(client.store(), *user, entry).map_err(describe)?;
+        }
+        return Ok(());
+      },
       ChatAction::PublishPolicy {
         policy,
         owners,
@@ -748,6 +769,8 @@ impl Core {
       ChatAction::CreateChannel { .. }
       | ChatAction::OpenDm { .. }
       | ChatAction::AddMember { .. }
+      | ChatAction::ChangePassphrase { .. }
+      | ChatAction::SetActivity { .. }
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::AdminJoinChannel { .. } => {},
@@ -838,6 +861,26 @@ impl Core {
     };
     if let Err(error) = connection.send(&GatewayClientMessage::Heartbeat).await {
       tracing::warn!(%error, "heartbeat failed");
+      self.schedule_reconnect();
+    }
+  }
+
+  /// Tells the server whether this device is idle (docs/gateway.md); a failure ends the connection
+  /// like a failed heartbeat.
+  async fn send_activity(&mut self, is_idle: bool) {
+    let Some(connection) = self.gateway.as_mut() else {
+      return;
+    };
+    let activity = if is_idle {
+      DeviceActivity::Idle
+    } else {
+      DeviceActivity::Active
+    };
+    if let Err(error) = connection
+      .send(&GatewayClientMessage::SetActivity { activity })
+      .await
+    {
+      tracing::warn!(%error, "could not report the device activity");
       self.schedule_reconnect();
     }
   }

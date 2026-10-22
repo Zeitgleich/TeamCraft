@@ -205,6 +205,16 @@ fn SidebarItem(conversation: Conversation) -> impl IntoView {
       view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence() /> }}</span> }.into_any()
     },
   };
+  let external_probe = conversation.clone();
+  let call_peer = (conversation.kind == ConversationKind::Direct)
+    .then(|| {
+      conversation
+        .member_ids
+        .iter()
+        .copied()
+        .find(|member| *member != me.id)
+    })
+    .flatten();
   let status_emoji = maybe_other
     .and_then(|user| user.maybe_custom_status)
     .map(|status| status.emoji);
@@ -236,6 +246,16 @@ fn SidebarItem(conversation: Conversation) -> impl IntoView {
       {leading} <span class="sb-name" translate="no">
         {name}
       </span> {status_emoji.map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
+      {move || {
+        state
+          .read(|backend| crate::components::channel_view::has_external_members(backend, &external_probe))
+          .then(|| view! { <span class="sb-external" title=i18n.t("external-badge-detail")><Icon name=IconName::User /></span> })
+      }}
+      {move || {
+        call_peer
+          .filter(|peer| state.read(|backend| backend.is_in_call(*peer)))
+          .map(|_| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
+      }}
       {(mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })}
     </button>
   }

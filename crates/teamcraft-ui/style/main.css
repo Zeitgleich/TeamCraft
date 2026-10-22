@@ -3843,3 +3843,37 @@ select.input {
   word-break: break-all;
   max-width: 100%;
 }
+
+.composer-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--mention-bg);
+  color: var(--mention-text);
+  font-size: 13px;
+}
+
+.composer-confirm span {
+  flex: 1;
+}
+
+.sb-external {
+  display: inline-flex;
+  margin-left: 4px;
+  color: var(--away);
+}
+
+.date-jump {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.date-jump-input {
+  width: 150px;
+}

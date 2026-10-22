@@ -82,6 +82,21 @@ impl RemoteCalls {
     (!participants.is_empty()).then_some(HuddleInfo { participants })
   }
 
+  /// Whether the user is in a call (on any device), per the server roster.
+  pub fn is_in_call(&self, user: UserId) -> bool {
+    let snapshot = self.snapshot.borrow();
+    snapshot
+      .running
+      .iter()
+      .any(|running| running.participants.contains(&user))
+      || snapshot.maybe_active.as_ref().is_some_and(|active| {
+        active
+          .participants
+          .iter()
+          .any(|participant| participant.user == user)
+      })
+  }
+
   pub fn act(&self, action: CallAction) {
     let calls = self.clone();
     spawn_local(async move {

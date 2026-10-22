@@ -708,6 +708,10 @@ pub fn DevicesTab() -> impl IntoView {
       <p class="fingerprint" translate="no">{move || fingerprint.get()}</p>
     </fieldset>
 
+    <Show when=|| crate::auth::tauri::is_available() fallback=|| ()>
+      <RecoveryPassphrase />
+    </Show>
+
     <fieldset class="settings-group">
       <legend>{move || i18n.t("security-verify")}</legend>
       <p class="muted-text small">{move || i18n.t("security-verify-hint")}</p>
@@ -882,4 +886,80 @@ pub fn apply_call_prefs(call: crate::calls::CallState, calls: &CallPrefs) {
   call.camera_id.set(calls.camera_id.clone());
   call.microphone_id.set(calls.microphone_id.clone());
   call.speaker_id.set(calls.speaker_id.clone());
+}
+
+/// Replaces the recovery passphrase: the key backup is wrapped with the new one (e2ee.md §6.2).
+#[component]
+fn RecoveryPassphrase() -> impl IntoView {
+  /// Same rule as at enrollment: short passphrases are cheap to guess offline.
+  const MIN_CHARS: usize = 12;
+  let i18n = use_i18n();
+  let passphrase = RwSignal::new(String::new());
+  let confirm = RwSignal::new(String::new());
+  let outcome = RwSignal::new(None::<Result<(), String>>);
+  let is_working = RwSignal::new(false);
+  let can_save = move || {
+    !is_working.get() && passphrase.get().chars().count() >= MIN_CHARS && passphrase.get() == confirm.get()
+  };
+  let save = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    if !can_save() {
+      return;
+    }
+    is_working.set(true);
+    let new_passphrase = passphrase.get_untracked();
+    leptos::task::spawn_local(async move {
+      let result = crate::remote_backend::change_passphrase(&new_passphrase).await;
+      if result.is_ok() {
+        passphrase.set(String::new());
+        confirm.set(String::new());
+      }
+      outcome.set(Some(result));
+      is_working.set(false);
+    });
+  };
+  view! {
+    <fieldset class="settings-group">
+      <legend>{move || i18n.t("recovery-title")}</legend>
+      <p class="muted-text small">{move || i18n.t("recovery-hint")}</p>
+      <form class="auth-form" on:submit=save>
+        <label for="recovery-new">{move || i18n.t("recovery-new")}</label>
+        <input
+          id="recovery-new"
+          class="input"
+          type="password"
+          autocomplete="new-password"
+          prop:value=move || passphrase.get()
+          on:input=move |ev| passphrase.set(event_target_value(&ev))
+        />
+        <label for="recovery-confirm">{move || i18n.t("enroll-confirm")}</label>
+        <input
+          id="recovery-confirm"
+          class="input"
+          type="password"
+          autocomplete="new-password"
+          prop:value=move || confirm.get()
+          on:input=move |ev| confirm.set(event_target_value(&ev))
+        />
+        <p class="muted-text small">{move || i18n.t_with("enroll-new-hint", &[("count", &MIN_CHARS.to_string())])}</p>
+        {move || {
+          outcome.get().map(|result| match result {
+            Ok(()) => view! { <p class="ok-text" role="status">{move || i18n.t("recovery-done")}</p> }.into_any(),
+            Err(message) => {
+              view! {
+                <p class="field-error" role="alert">{move || i18n.t("recovery-failed")}</p>
+                <p class="small mono" translate="no">{message}</p>
+              }
+              .into_any()
+            },
+          })
+        }}
+        <div class="auth-actions">
+          <button type="submit" class="btn btn-primary" prop:disabled=move || !can_save()>
+            {move || i18n.t("recovery-save")}
+          </button>
+        </div>
+      </form>
+    </fieldset>
+  }
 }

@@ -37,6 +37,7 @@ use crate::mock::MockBackend;
 use crate::model::{ConversationId, SpaceId};
 use crate::notifier::{NotificationTitle, Notifier, notifications_for};
 use crate::notify_sync::NotificationSync;
+use crate::reactive::use_interval;
 use crate::settings::{BackendMode, Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
 
@@ -82,6 +83,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     watch_for_notifications(state, i18n);
     connect_calls(state);
   }
+  watch_idle(state);
   // Call defaults follow the settings (and set the initial state of the call session).
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
@@ -351,6 +353,45 @@ fn connect_calls(state: AppState) {
     let ringing = state.read(|backend| backend.incoming_calls().first().copied());
     if call.phase.get_untracked() == CallPhase::Idle && call.incoming.get_untracked() != ringing {
       call.incoming.set(ringing);
+    }
+  });
+}
+
+/// How often the idle check runs.
+const IDLE_CHECK_MS: u64 = 10_000;
+const MS_PER_MINUTE: f64 = 60_000.0;
+
+/// No input for the configured time marks this device idle (the server then shows the user as
+/// away); the next input marks it active again. The setting is Privacy > "Away after".
+fn watch_idle(state: AppState) {
+  let last_input = std::rc::Rc::new(std::cell::Cell::new(js_sys::Date::now()));
+  let is_idle = std::rc::Rc::new(std::cell::Cell::new(false));
+  let mark_active: std::rc::Rc<dyn Fn()> = {
+    let (last_input, is_idle) = (last_input.clone(), is_idle.clone());
+    std::rc::Rc::new(move || {
+      last_input.set(js_sys::Date::now());
+      if is_idle.replace(false) {
+        state.read(|backend| backend.set_activity(false));
+      }
+    })
+  };
+  let (on_move, on_press, on_key, on_touch) = (
+    mark_active.clone(),
+    mark_active.clone(),
+    mark_active.clone(),
+    mark_active,
+  );
+  let _ = window_event_listener(ev::pointermove, move |_| on_move());
+  let _ = window_event_listener(ev::pointerdown, move |_| on_press());
+  let _ = window_event_listener(ev::keydown, move |_| on_key());
+  let _ = window_event_listener(ev::touchstart, move |_| on_touch());
+  use_interval(IDLE_CHECK_MS, move || {
+    let Some(minutes) = state.settings.prefs.get_untracked().privacy.away_after_minutes else {
+      return;
+    };
+    let idle_for = js_sys::Date::now() - last_input.get();
+    if idle_for >= f64::from(minutes) * MS_PER_MINUTE && !is_idle.replace(true) {
+      state.read(|backend| backend.set_activity(true));
     }
   });
 }

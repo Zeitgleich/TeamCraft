@@ -5,6 +5,7 @@ use wasm_bindgen::JsCast;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ThreadId};
+use crate::notifier::needs_channel_confirmation;
 use crate::settings::SendMode;
 use crate::state::use_app_state;
 
@@ -48,7 +49,9 @@ pub fn Composer(
     }
   };
 
-  let send = move || {
+  // A message with @channel in a large conversation waits here until the user confirms.
+  let pending_confirm = RwSignal::new(None::<usize>);
+  let send_checked = move |is_confirmed: bool| {
     let Some(element) = input.get_untracked() else {
       return;
     };
@@ -56,6 +59,22 @@ pub fn Composer(
     if text.trim().is_empty() && attachments.with_untracked(Vec::is_empty) {
       return;
     }
+    if !is_confirmed {
+      let members = state
+        .read(|backend| backend.conversation(conversation))
+        .map_or(0, |conv| conv.member_ids.len());
+      let threshold = state
+        .settings
+        .prefs
+        .get_untracked()
+        .notifications
+        .confirm_channel_over;
+      if needs_channel_confirmation(&text, members, threshold) {
+        pending_confirm.set(Some(members));
+        return;
+      }
+    }
+    pending_confirm.set(None);
     let names = attachments.get_untracked();
     let body = if names.is_empty() {
       text
@@ -71,6 +90,7 @@ pub fn Composer(
       state.jump_to_latest.update(|value| *value += 1);
     }
   };
+  let send = move || send_checked(false);
 
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
     if ev.key() != "Enter" || ev.is_composing() {
@@ -152,6 +172,21 @@ pub fn Composer(
             </For>
           </ul>
         </Show>
+        {move || {
+          pending_confirm.get().map(|members| {
+            view! {
+              <div class="composer-confirm" role="alertdialog" aria-live="assertive">
+                <span>{i18n.t_with("composer-confirm-channel", &[("count", &members.to_string())])}</span>
+                <button class="btn btn-small btn-primary" on:click=move |_| send_checked(true)>
+                  {move || i18n.t("composer-confirm-send")}
+                </button>
+                <button class="btn btn-small" on:click=move |_| pending_confirm.set(None)>
+                  {move || i18n.t("cancel")}
+                </button>
+              </div>
+            }
+          })
+        }}
         <div class="composer-box">
           <label class="visually-hidden" for=format!("composer-{conversation}-{}", maybe_thread.map_or_else(String::new, |thread| thread.to_string()))>
             {move || i18n.t("composer-label")}

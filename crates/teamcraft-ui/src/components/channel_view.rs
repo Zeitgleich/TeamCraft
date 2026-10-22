@@ -81,6 +81,40 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
       .map(|conv| conv.topic)
       .filter(|topic| !topic.is_empty())
   };
+  let has_external = move || {
+    info
+      .get()
+      .is_some_and(|conv| state.read(|backend| has_external_members(backend, &conv)))
+  };
+  // Jump to date: the picked day is searched in the feed; unloaded parts load while we wait.
+  let jump_target = RwSignal::new(None::<i64>);
+  let is_picking_date = RwSignal::new(false);
+  Effect::new(move |_| {
+    let Some(at) = jump_target.get() else {
+      return;
+    };
+    let outcome = state.read(|backend| {
+      let count = backend.message_count(conversation);
+      first_index_at_or_after(
+        count,
+        |index| {
+          backend
+            .messages(conversation, index, 1)
+            .first()
+            .map(|message| message.sent_at)
+        },
+        at,
+      )
+    });
+    match outcome {
+      DateSearch::Found(index) => {
+        state.jump_to_index.set(Some((conversation, index)));
+        jump_target.set(None);
+      },
+      DateSearch::Empty => jump_target.set(None),
+      DateSearch::Pending => {},
+    }
+  });
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
   let members_open = move || state.panel.get() == SidePanel::Members;
@@ -98,6 +132,36 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
         >
           <Icon name=IconName::Star />
         </button>
+        <div class="date-jump">
+          <button
+            class="icon-btn"
+            aria-label=move || i18n.t("jump-to-date")
+            title=move || i18n.t("jump-to-date")
+            aria-expanded=move || is_picking_date.get().to_string()
+            on:click=move |_| is_picking_date.update(|open| *open = !*open)
+          >
+            <Icon name=IconName::Calendar />
+          </button>
+          <Show when=move || is_picking_date.get() fallback=|| ()>
+            <input
+              class="input date-jump-input"
+              type="date"
+              aria-label=move || i18n.t("jump-to-date")
+              on:change=move |ev| {
+                let day = event_target_value(&ev);
+                if let Some(at) = crate::clock::parse_local_datetime(&format!("{day}T00:00")) {
+                  jump_target.set(Some(at));
+                  is_picking_date.set(false);
+                }
+              }
+            />
+          </Show>
+        </div>
+        <Show when=has_external fallback=|| ()>
+          <span class="badge badge-guest" title=move || i18n.t("external-badge-detail")>
+            {move || i18n.t("external-badge")}
+          </span>
+        </Show>
         <Show when=move || topic().is_some() fallback=|| ()>
           <span class="header-divider" aria-hidden="true"></span>
           <p class="header-topic" title=move || topic().unwrap_or_default()>
@@ -225,5 +289,66 @@ fn SeenLine(conversation: ConversationId) -> impl IntoView {
     names.get().map(|names| {
       view! { <div class="seen-line" translate="no">{i18n.t_with("message-seen-by", &[("names", &names)])}</div> }
     })
+  }
+}
+
+/// Whether the conversation has members from outside the organization (guests).
+pub fn has_external_members(backend: &dyn crate::backend::Backend, conversation: &Conversation) -> bool {
+  conversation
+    .member_ids
+    .iter()
+    .any(|member| backend.user(*member).is_some_and(|user| user.is_guest))
+}
+
+/// Where a search for the first message at or after a time stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DateSearch {
+  Found(usize),
+  /// A probed message is not loaded yet; ask again when the feed changed.
+  Pending,
+  /// The conversation has no messages.
+  Empty,
+}
+
+/// Binary search over the feed: the index of the first message sent at or after `at`, or the last
+/// index when every message is older. `sent_at_of` returns `None` while a message is not loaded.
+pub fn first_index_at_or_after(
+  count: usize,
+  sent_at_of: impl Fn(usize) -> Option<i64>,
+  at: i64,
+) -> DateSearch {
+  if count == 0 {
+    return DateSearch::Empty;
+  }
+  let (mut low, mut high) = (0, count);
+  while low < high {
+    let middle = low + (high - low) / 2;
+    match sent_at_of(middle) {
+      None => return DateSearch::Pending,
+      Some(sent_at) if sent_at < at => low = middle + 1,
+      Some(_) => high = middle,
+    }
+  }
+  DateSearch::Found(low.min(count - 1))
+}
+
+#[cfg(test)]
+mod date_search_tests {
+  use super::*;
+
+  #[test]
+  fn the_first_message_on_or_after_a_time_is_found() {
+    let times = [10_i64, 20, 20, 30, 50];
+    let probe = |index: usize| times.get(index).copied();
+    assert_eq!(first_index_at_or_after(5, probe, 0), DateSearch::Found(0));
+    assert_eq!(first_index_at_or_after(5, probe, 20), DateSearch::Found(1));
+    assert_eq!(first_index_at_or_after(5, probe, 21), DateSearch::Found(3));
+    assert_eq!(first_index_at_or_after(5, probe, 99), DateSearch::Found(4));
+    assert_eq!(first_index_at_or_after(0, probe, 5), DateSearch::Empty);
+  }
+
+  #[test]
+  fn an_unloaded_probe_means_ask_again_later() {
+    assert_eq!(first_index_at_or_after(5, |_| None, 5), DateSearch::Pending);
   }
 }

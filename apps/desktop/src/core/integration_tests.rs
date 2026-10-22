@@ -264,6 +264,44 @@ async fn a_second_device_is_linked_with_a_code_and_confirmed_on_the_first() {
   }
 }
 
+#[tokio::test]
+async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
+  const NEW_PASSPHRASE: &str = "a brand new passphrase 42";
+  let config = DesktopConfig::from_env();
+  let first = person("alice", &config).await;
+  match first.runtime.status().await {
+    CoreStatus::NeedsEnrollment { .. } => enroll(&first).await,
+    CoreStatus::Ready { .. } | CoreStatus::NotStarted | CoreStatus::Failed { .. } => {},
+  }
+  first
+    .runtime
+    .action(ChatAction::ChangePassphrase {
+      passphrase: NEW_PASSPHRASE.to_owned(),
+    })
+    .await
+    .expect("change the passphrase");
+
+  let second = second_device(&first, &config);
+  let wrong = second
+    .enroll(EnrollRequest {
+      passphrase: PASSPHRASE.to_owned(),
+      device_name: "Laptop".into(),
+    })
+    .await;
+  assert!(
+    wrong.is_err(),
+    "the old passphrase must not recover the keys any more"
+  );
+  second
+    .enroll(EnrollRequest {
+      passphrase: NEW_PASSPHRASE.to_owned(),
+      device_name: "Laptop".into(),
+    })
+    .await
+    .expect("the new passphrase recovers the keys");
+  assert!(matches!(second.status().await, CoreStatus::Ready { .. }));
+}
+
 async fn wait_for_link<T>(runtime: &CoreRuntime, pick: impl Fn(LinkStatus) -> Option<T>) -> T {
   let deadline = tokio::time::Instant::now() + WAIT;
   loop {

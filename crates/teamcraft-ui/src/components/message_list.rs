@@ -127,6 +127,25 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
     heights.with_value(|heights| compute_window(heights, scroll_top.get(), viewport.get()))
   });
 
+  // Jump to date: scroll so that the requested message is at the top.
+  Effect::new(move |_| {
+    let Some((target, index)) = state.jump_to_index.get() else {
+      return;
+    };
+    if target != conversation {
+      return;
+    }
+    let top: f32 = heights.with_value(|heights| heights.iter().take(index).sum());
+    if let Some(element) = container.get_untracked() {
+      stick_to_bottom.set(false);
+      element.set_scroll_top(top as i32);
+      scroll_top.set(f64::from(element.scroll_top()));
+      last_top.set_value(f64::from(element.scroll_top()));
+      layout_rev.update(|rev| *rev += 1);
+    }
+    state.jump_to_index.set(None);
+  });
+
   let scroll_to_bottom = move || {
     if let Some(element) = container.get_untracked() {
       element.set_scroll_top(element.scroll_height());
