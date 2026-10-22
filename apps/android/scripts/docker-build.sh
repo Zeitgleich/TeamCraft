@@ -5,6 +5,9 @@
 #   scripts/docker-build.sh                 debug APKs and unit tests
 #   scripts/docker-build.sh assembleRelease Gradle tasks of your choice
 #   scripts/docker-build.sh --emulator      instrumented tests on a headless emulator (needs /dev/kvm)
+#
+# TEAMCRAFT_RUST_PROFILE (release, or dev for faster builds) and TEAMCRAFT_ANDROID_ABIS
+# (default "arm64-v8a x86_64") are passed on to scripts/build.sh.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,6 +28,8 @@ docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e HOME=/android/home \
   -e CARGO_HOME=/android/cargo \
+  -e TEAMCRAFT_RUST_PROFILE \
+  -e TEAMCRAFT_ANDROID_ABIS \
   -v "${REPO_DIR}:/src" \
   -v "${CACHE}:/android" \
   -w /src/apps/android \

@@ -6,6 +6,8 @@ set -euo pipefail
 NDK_VERSION=27.2.12479018
 SDK_PACKAGES=("platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}")
 RUST_PROFILE="${TEAMCRAFT_RUST_PROFILE:-release}"
+# Space-separated; the Kotlin bindings are generated from the x86_64 library, so it must stay in.
+read -r -a ABIS <<<"${TEAMCRAFT_ANDROID_ABIS:-arm64-v8a x86_64}"
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_DIR="$(cd "${APP_DIR}/../.." && pwd)"
@@ -22,7 +24,9 @@ export PATH="${ANDROID_NDK_HOME}/prebuilt/linux-x86_64/bin:${PATH}"
 cd "${REPO_DIR}"
 # Background effects' segmentation model, bundled as an asset (not in git; checksum-verified).
 crates/teamcraft-media/models/fetch.sh "${APP_DIR}/app/src/main/assets/models"
-cargo ndk --platform 26 -t arm64-v8a -t x86_64 -o "${APP_DIR}/app/src/main/jniLibs" \
+abi_args=()
+for abi in "${ABIS[@]}"; do abi_args+=(-t "${abi}"); done
+cargo ndk --platform 26 "${abi_args[@]}" -o "${APP_DIR}/app/src/main/jniLibs" \
   build --locked -p teamcraft-ffi --profile "${RUST_PROFILE}"
 profile_dir="${RUST_PROFILE}"
 if [ "${RUST_PROFILE}" = "dev" ]; then profile_dir=debug; fi
