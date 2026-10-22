@@ -532,6 +532,31 @@ pub fn DisplayTab() -> impl IntoView {
         }
       })
     />
+    <fieldset class="settings-group">
+      <legend>{move || i18n.t("settings-composer")}</legend>
+      <label class="check-row">
+        <input
+          type="checkbox"
+          prop:checked=move || state.settings.prefs.get().composer.convert_emoticons
+          on:change=move |ev| {
+            let on = event_target_checked(&ev);
+            state.settings.prefs.update(|prefs| prefs.composer.convert_emoticons = on);
+          }
+        />
+        <span>{move || i18n.t("settings-convert-emoticons")}</span>
+      </label>
+      <label class="check-row">
+        <input
+          type="checkbox"
+          prop:checked=move || state.settings.prefs.get().composer.show_formatting
+          on:change=move |ev| {
+            let on = event_target_checked(&ev);
+            state.settings.prefs.update(|prefs| prefs.composer.show_formatting = on);
+          }
+        />
+        <span>{move || i18n.t("settings-show-formatting")}</span>
+      </label>
+    </fieldset>
     <fieldset class="field">
       <legend>{move || i18n.t("settings-send-mode")}</legend>
       {SendMode::ALL

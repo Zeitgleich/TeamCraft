@@ -55,6 +55,20 @@ pub struct SessionControl {
   /// Why the last enrollment attempt failed, for the enrollment screen.
   pub enroll_error: RwSignal<Option<String>>,
   pub is_enrolling: RwSignal<bool>,
+  /// Why the last local sign-in failed, for its form.
+  pub local_error: RwSignal<Option<LocalSignInProblem>>,
+  pub is_local_signing_in: RwSignal<bool>,
+}
+
+/// What went wrong in the local-account sign-in form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LocalSignInProblem {
+  /// The account has two-factor authentication: ask for the code.
+  CodeRequired,
+  /// Wrong e-mail, password or code (the server does not say which).
+  Refused,
+  /// The server or the network failed.
+  Failed(String),
 }
 
 impl SessionControl {
@@ -64,6 +78,8 @@ impl SessionControl {
       state: RwSignal::new(SessionState::Checking),
       enroll_error: RwSignal::new(None),
       is_enrolling: RwSignal::new(false),
+      local_error: RwSignal::new(None),
+      is_local_signing_in: RwSignal::new(false),
     }
   }
 
@@ -95,6 +111,24 @@ impl SessionControl {
         Err(error) => control
           .state
           .set(SessionState::SignedOut(Some(problem_from_auth(&error)))),
+      }
+    });
+  }
+
+  /// Signs in a local account (a guest without an identity provider account).
+  pub fn sign_in_local(&self, login: String, password: String, maybe_totp: Option<String>) {
+    let control = *self;
+    control.local_error.set(None);
+    control.is_local_signing_in.set(true);
+    spawn_local(async move {
+      let outcome = control
+        .authenticator()
+        .login_local(login, password, maybe_totp)
+        .await;
+      control.is_local_signing_in.set(false);
+      match outcome {
+        Ok(()) => control.load_account().await,
+        Err(error) => control.local_error.set(Some(local_problem(&error))),
       }
     });
   }
@@ -223,6 +257,14 @@ fn device_ready_key(me: &GetMeResponse) -> String {
   format!("{KEY_DEVICE_READY_PREFIX}{}", me.id)
 }
 
+fn local_problem(error: &AuthError) -> LocalSignInProblem {
+  match error {
+    AuthError::Denied(code) if code == "mfa_required" => LocalSignInProblem::CodeRequired,
+    AuthError::Denied(_) => LocalSignInProblem::Refused,
+    other => LocalSignInProblem::Failed(other.to_string()),
+  }
+}
+
 fn problem_from_auth(error: &AuthError) -> LoginProblem {
   match error {
     AuthError::Cancelled => LoginProblem::Cancelled,
@@ -281,6 +323,22 @@ mod tests {
     assert!(matches!(
       interpret_me_response(ApiResponse { status: 502, body: "<html>".into() }),
       Err(LoginProblem::Failed(text)) if text == "HTTP 502"
+    ));
+  }
+
+  #[test]
+  fn local_sign_in_problems_tell_code_from_wrong_password() {
+    assert_eq!(
+      local_problem(&AuthError::Denied("mfa_required".into())),
+      LocalSignInProblem::CodeRequired
+    );
+    assert_eq!(
+      local_problem(&AuthError::Denied("unauthorized".into())),
+      LocalSignInProblem::Refused
+    );
+    assert!(matches!(
+      local_problem(&AuthError::Network("down".into())),
+      LocalSignInProblem::Failed(_)
     ));
   }
 

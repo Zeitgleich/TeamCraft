@@ -8,14 +8,14 @@ use leptos::prelude::*;
 use teamcraft_proto::{
   CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody, GuestLinkResponse,
   JoinMeetingRequest, JoinMeetingResponse, ListLobbyResponse, ListMeetingsResponse, LobbyEntry, LobbyState,
-  LobbyStateResponse, MeetingId, MeetingInvitee, MeetingRecurrence, MeetingResponse, RecurrenceFrequency,
-  RsvpStatus, SetRsvpRequest, UnixMillis,
+  LobbyStateResponse, MeetingControlAction, MeetingControlRequest, MeetingId, MeetingInvitee,
+  MeetingRecurrence, MeetingResponse, RecurrenceFrequency, RsvpStatus, SetRsvpRequest, UnixMillis,
 };
 
 use crate::auth::fetch::fetch;
 use crate::auth::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator};
 use crate::clock::parse_local_datetime;
-use crate::model::{TimestampMs, UserId};
+use crate::model::{ConversationId, TimestampMs, UserId};
 
 /// Meetings that ended less than this long ago are still listed.
 const LIST_LOOKBACK_MS: i64 = 60 * 60_000;
@@ -73,6 +73,19 @@ impl MeetingsClient {
     self
       .call(ApiMethod::Post, "/api/v1/meetings/instant", Some(body))
       .await
+  }
+
+  /// Host controls: mute all, remove a participant, lock, unlock, end for everyone.
+  pub async fn control(&self, meeting: MeetingId, action: MeetingControlAction) -> Result<(), MeetingError> {
+    let body = to_json(&MeetingControlRequest { action })?;
+    self
+      .send(
+        ApiMethod::Post,
+        &format!("/api/v1/meetings/{meeting}/controls"),
+        Some(body),
+      )
+      .await
+      .map(|_| ())
   }
 
   pub async fn cancel(&self, meeting: MeetingId) -> Result<(), MeetingError> {
@@ -185,6 +198,16 @@ impl MeetingsHub {
 
   pub fn client(&self) -> MeetingsClient {
     self.client.get_value()
+  }
+
+  /// The meeting whose chat is `conversation`, if `me` organizes it. Reactive.
+  pub fn hosted_meeting_for(&self, conversation: ConversationId, me: UserId) -> Option<MeetingId> {
+    self.meetings.with(|all| {
+      all
+        .iter()
+        .find(|meeting| meeting.conversation_id == conversation && meeting.organizer_user_id == me)
+        .map(|meeting| meeting.id)
+    })
   }
 
   /// Reloads the list, then the lobbies of the meetings `me` hosts that use one.
