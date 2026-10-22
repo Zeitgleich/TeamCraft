@@ -36,8 +36,12 @@ pub struct ServiceAccount {
 
 impl ServiceAccount {
   pub fn from_json(json: &str) -> Result<Self, PushError> {
-    serde_json::from_str(json)
-      .map_err(|e| PushError::Invalid(format!("not a Google service account key: {e}")))
+    serde_json::from_str(json).map_err(|e| {
+      PushError::Invalid(format!(
+        "not a Google service account key: {}",
+        super::web_push::json_error(&e)
+      ))
+    })
   }
 }
 
@@ -239,6 +243,16 @@ fn classify(status: StatusCode, error_status: &str) -> Result<(), PushError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_malformed_key_file_is_not_echoed() {
+    // A key file encoded twice is a JSON string: serde would quote it, private key included.
+    let doubled = serde_json::to_string(r#"{"private_key": "-----BEGIN PRIVATE KEY-----SECRET"}"#).unwrap();
+    let Err(error) = ServiceAccount::from_json(&doubled) else {
+      panic!("a JSON string is not a key file");
+    };
+    assert!(!error.to_string().contains("SECRET"), "{error}");
+  }
 
   #[test]
   fn error_responses_are_classified() {

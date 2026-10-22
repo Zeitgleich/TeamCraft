@@ -30,12 +30,23 @@ impl WebPushSubscription {
   /// will POST to it, so it must be an https URL that doesn't point into private networks (unless
   /// `allow_private_endpoints` is set for development).
   pub fn parse(token: &str, allow_private_endpoints: bool) -> Result<(Self, SubscriptionKeys), PushError> {
-    let subscription: Self =
-      serde_json::from_str(token).map_err(|e| PushError::Invalid(format!("not a push subscription: {e}")))?;
+    let subscription: Self = serde_json::from_str(token)
+      .map_err(|e| PushError::Invalid(format!("not a push subscription: {}", json_error(&e))))?;
     let keys = SubscriptionKeys::from_base64url(&subscription.keys.p256dh, &subscription.keys.auth)?;
     check_endpoint(&subscription.endpoint, allow_private_endpoints)?;
     Ok((subscription, keys))
   }
+}
+
+/// Where and what kind of JSON error, without serde's quote of the input (which can be a user's
+/// endpoint or, for key files, a private key).
+pub(super) fn json_error(error: &serde_json::Error) -> String {
+  format!(
+    "{:?} error at line {}, column {}",
+    error.classify(),
+    error.line(),
+    error.column()
+  )
 }
 
 pub(super) fn check_endpoint(endpoint: &str, allow_private_endpoints: bool) -> Result<(), PushError> {
@@ -99,8 +110,10 @@ fn is_private_ip(ip: IpAddr) -> bool {
         || a == 0
         // 100.64.0.0/10 shared address space
         || (a == 100 && (64..128).contains(&b))
-        // 192.0.0.0/24 IETF protocol assignments, 198.18.0.0/15 benchmarking
+        // 192.0.0.0/24 IETF protocol assignments, 198.18.0.0/15 benchmarking, 192.88.99.0/24
+        // deprecated 6to4 relay anycast
         || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 88 && c == 99)
         || (a == 198 && (b == 18 || b == 19))
         // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 documentation
         || (a == 192 && b == 0 && c == 2)
@@ -122,11 +135,15 @@ fn is_private_ip(ip: IpAddr) -> bool {
         || (segments[0] == 0x64 && segments[1] == 0xff9b)
         || segments[0] == 0x2002
         || (segments[0] == 0x2001 && segments[1] == 0)
-        // 2001:db8::/32 documentation, 100::/64 discard-only
+        // 2001:db8::/32 and 3fff::/20 documentation, 2001:20::/28 ORCHIDv2, 100::/64 discard-only
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] & 0xfff0) == 0x3ff0
+        || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
         || (segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0)
         // ::a.b.c.d IPv4-compatible (and ::ffff:a.b.c.d mapped, checked as IPv4)
         || (segments[..6] == [0; 6])
+        // ::ffff:0:a.b.c.d IPv4-translated (SIIT)
+        || (segments[..4] == [0; 4] && segments[4] == 0xffff && segments[5] == 0)
         || ip.to_ipv4_mapped().is_some_and(|v4| is_private_ip(IpAddr::V4(v4)))
     },
   }
@@ -159,8 +176,11 @@ pub(super) fn build_client(
   timeout: Duration,
   allow_private_endpoints: bool,
 ) -> Result<reqwest::Client, reqwest::Error> {
+  // No proxy from the environment (HTTP(S)_PROXY): a proxy resolves names itself, past the
+  // resolver below.
   let builder = reqwest::Client::builder()
     .timeout(timeout)
+    .no_proxy()
     .redirect(reqwest::redirect::Policy::none());
   if allow_private_endpoints {
     builder.build()
@@ -297,6 +317,10 @@ mod tests {
       "https://224.0.0.1/x",
       "https://240.0.0.1/x",
       "https://[ff02::1]/x",
+      "https://192.88.99.1/x",
+      "https://[::ffff:0:a00:1]/x",
+      "https://[3fff::1]/x",
+      "https://[2001:20::1]/x",
       "https://user:pw@push.example.com/x",
       "ftp://push.example.com/x",
       "not a url",
@@ -343,6 +367,13 @@ mod tests {
     for ip in ["8.8.8.8", "142.250.0.1", "2606:4700::1111", "2a00:1450:4001::1"] {
       assert!(!is_private_ip(ip.parse().unwrap()), "{ip}");
     }
+  }
+
+  #[test]
+  fn parse_errors_do_not_quote_the_input() {
+    let secret = "https://push.example.com/SECRET-PATH";
+    let error = WebPushSubscription::parse(&format!("{secret:?}"), false).unwrap_err();
+    assert!(!error.to_string().contains("SECRET"), "{error}");
   }
 
   #[test]
