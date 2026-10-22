@@ -20,9 +20,8 @@ Read before changing behaviour:
 | [docs/notifications.md](docs/notifications.md) | Threads, unread counts, notifications, urgent                 |
 | [docs/bridge.md](docs/bridge.md)               | Integration bridge: webhooks and logs into encrypted channels |
 | [docs/meetings.md](docs/meetings.md)           | Meetings, invitations, guests and lobby                       |
-| [docs/operations.md](docs/operations.md)       | Running an instance: quickstart, backups, upgrades, secrets   |
+| [docs/operations.md](docs/operations.md)       | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
 | [docs/release.md](docs/release.md)             | Versions and the release procedure                            |
-| [deploy/README.md](deploy/README.md)           | Ansible deployment, own inventories, dry run                  |
 
 ## Repository layout
 
@@ -35,7 +34,6 @@ teamcraft/
 │   ├── teamcraft-core/      # Client logic shared by desktop, web and mobile
 │   ├── teamcraft-server/    # REST API + gateway (binary)
 │   └── teamcraft-sfu/       # Media forwarding (binary)
-├── deploy/                  # Ansible deployment (rootless Podman + Quadlet) and its dry run
 ├── docs/                    # Design documents
 └── .claude/rules/           # Detailed rules (code style, testing, API, security)
 ```

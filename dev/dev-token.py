@@ -9,12 +9,14 @@ disables the password grant), then prints the access token.
   ./dev/dev-token.py alice id      # the ID token instead (carries tc_identity_key once it is set)
 
 Dev only: passwords are "<user>-dev-pass" (see dev/keycloak/teamcraft-dev-realm.json).
+DEV_TOKEN_ISSUER points it at another realm with the same users, e.g. the deploy dry run's Keycloak.
 """
 import base64
 import hashlib
 import html
 import http.cookiejar
 import json
+import os
 import re
 import secrets
 import sys
@@ -22,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ISSUER = "http://127.0.0.1:8080/realms/teamcraft-dev"
+ISSUER = os.environ.get("DEV_TOKEN_ISSUER", "http://127.0.0.1:8080/realms/teamcraft-dev")
 CLIENT_ID = "teamcraft"
 REDIRECT_URI = "http://127.0.0.1:9/callback"  # never contacted; Keycloak ignores the loopback port
 
