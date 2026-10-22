@@ -11,4 +11,16 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-teamcraft-proto = { path = "../teamcraft-proto" }
+teamcraft-media = { path = "../teamcraft-media" }
+teamcraft-proto.workspace = true
+anyhow.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+serde.workspace = true
+serde_json.workspace = true
+# Dual-stack (IPV6_V6ONLY off) TCP listener for the dev page; already in the tree via quinn.
+socket2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wtransport = { version = "0.7.2", features = ["self-signed"] }
