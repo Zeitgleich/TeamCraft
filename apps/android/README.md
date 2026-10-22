@@ -83,7 +83,13 @@ flavors and runs the unit tests; other Gradle tasks can be passed:
 apps/android/scripts/docker-build.sh assembleFullRelease
 ```
 
-APKs end up in `app/build/outputs/apk/<flavor>/<type>/`.
+APKs end up in `app/build/outputs/apk/<flavor>/<type>/`. For a quicker build, `TEAMCRAFT_RUST_PROFILE=dev`
+builds the core without optimizations and `TEAMCRAFT_ANDROID_ABIS=x86_64` for the emulator only
+(the Kotlin bindings come from the x86_64 library, so it always stays in the list).
+
+CI (`.github/workflows/android.yml`) runs `docker-build.sh` with the dev profile for both ABIs:
+`assembleFullDebug` and the unit tests of both flavors, whenever `apps/android` or a crate the app
+links changes.
 
 ### Flavors
 
