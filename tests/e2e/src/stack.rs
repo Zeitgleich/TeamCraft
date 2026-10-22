@@ -235,6 +235,9 @@ impl Stack {
         "TEAMCRAFT_DATABASE__URL".into(),
         format!("postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/{database_name}"),
       ),
+      // Parallel tests each run a server: small pools keep their sum below the dev Postgres limit
+      // (the intermittent enrollment 500 was "too many clients" under parallel runs).
+      ("TEAMCRAFT_DATABASE__MAX_CONNECTIONS".into(), "4".into()),
       ("TEAMCRAFT_OIDC__ISSUER".into(), ISSUER.into()),
       ("TEAMCRAFT_OIDC__CLIENT_ID".into(), "teamcraft".into()),
       ("TEAMCRAFT_OIDC__SERVER_CLIENT".into(), "teamcraft-server".into()),

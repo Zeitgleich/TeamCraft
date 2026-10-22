@@ -27,6 +27,7 @@ teamcraft-ops.workspace = true
 anyhow.workspace = true
 aws-lc-rs.workspace = true
 time.workspace = true
+chrono-tz.workspace = true
 axum.workspace = true
 figment.workspace = true
 jsonwebtoken.workspace = true

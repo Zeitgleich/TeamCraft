@@ -202,6 +202,7 @@ impl ApiError {
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
       Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+      Self::Database(error) if error.is_transient() => StatusCode::SERVICE_UNAVAILABLE,
       Self::ShareUnavailable => StatusCode::GONE,
       Self::UnknownHost => StatusCode::MISDIRECTED_REQUEST,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -227,6 +228,7 @@ impl ApiError {
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
       Self::RateLimited { .. } => ErrorCode::RateLimited,
       Self::Unavailable(_) => ErrorCode::Unavailable,
+      Self::Database(error) if error.is_transient() => ErrorCode::Unavailable,
       Self::Database(_) | Self::Internal(_) => ErrorCode::Internal,
     }
   }
@@ -235,6 +237,7 @@ impl ApiError {
   pub fn public_message(&self) -> String {
     match self {
       Self::Auth(AuthError::KeysUnavailable(_)) => "authentication is temporarily unavailable".into(),
+      Self::Database(error) if error.is_transient() => "the service is busy, try again".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
       Self::Unavailable(_) => "the service is not available".into(),
       other => other.to_string(),
@@ -370,6 +373,11 @@ mod tests {
       ),
       (
         ApiError::Internal("x".into()),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::Internal,
+      ),
+      (
+        ApiError::Database(teamcraft_db::DbError::InvalidStoredValue("x".into())),
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorCode::Internal,
       ),

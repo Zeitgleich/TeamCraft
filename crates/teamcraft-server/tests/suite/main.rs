@@ -21,6 +21,7 @@ mod calls;
 mod conversations;
 mod device_gaps;
 mod gateway;
+mod first_sight;
 mod guests;
 mod hardening;
 mod health;
