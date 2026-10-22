@@ -11,7 +11,7 @@ notifications.
 |------------------------------------------------|--------------------------------------------------------------------------------|
 | `app/src/main/java/.../auth`                   | OIDC login with AppAuth (code + PKCE), session sealed with a Keystore key      |
 | `app/src/main/java/.../security`               | `KeystoreBox` (AES-256-GCM key in the Keystore), `SealedFile`                  |
-| `app/src/main/java/.../core`                   | Opens the Rust core per account with the Keystore-sealed database key          |
+| `app/src/main/java/.../core`                   | Opens the Rust core per account (Keystore-sealed key); chat bridge and models  |
 | `app/src/main/java/.../push`                   | `PushBackend`s, UnifiedPush receiver, payload format                           |
 | `app/src/full/java/.../push`                   | FCM (flavor `full` only)                                                       |
 | `app/src/main/java/.../notifications`          | MessagingStyle notifications with reply / mark-as-read (Android Auto)          |
@@ -28,6 +28,32 @@ inside, one Rust engine thread owns the store, the client and the sync loop (the
 are single-threaded). The app hands in access tokens (`TokenProvider`, backed by AppAuth with
 refresh) and gets `onChange` callbacks (`EventListener`), on which screens re-read. Sync runs while
 the app is in the foreground (`ProcessLifecycleOwner`); in the background, push wakes the app.
+
+Chat features go through a JSON bridge instead of a typed call each: `snapshot`, `messageWindow`,
+`act` and `query` exchange the same `ChatSnapshot` / `MessageWindow` / `ChatAction` / `ChatQuery` /
+`ChatAnswer` messages (teamcraft-client-api `remote`) that the desktop shell exchanges with its
+webview. `core/Wire.kt` mirrors the view models as plain `@Serializable` data, `core/ChatActions.kt`
+builds actions and queries, `core/ChatClient.kt` decodes the answers; all logic stays in the core.
+`apiRequest` reaches plain server endpoints (notification settings, meetings) with the session's
+token.
+
+### Features
+
+| Area                     | What the app does                                                                        |
+|--------------------------|------------------------------------------------------------------------------------------|
+| Messages                 | Reply, react, edit (with history), delete for everyone, forward, pin, save, copy link    |
+| Sending                  | Mentions with a picker, priority, read confirmation, silent, files with progress         |
+| Reading                  | Jump to the first unread message, mark unread, link previews, thumbnails, drafts         |
+| Threads                  | Thread view, follow / unfollow, inbox of followed threads with unread replies            |
+| Files                    | Per-conversation gallery; downloads decrypted to app storage, opened via FileProvider    |
+| Channels and people      | Browse and join public channels, create channels, direct messages, presence              |
+| Saved and mentions       | Saved items and recent mentions                                                          |
+| Status and notifications | Presence, custom status, push mode, read receipts, per-conversation level and mute       |
+| Meetings                 | Upcoming meetings, join the meeting's call                                               |
+| Devices and recovery     | Link a device (both sides), passphrase recovery and change, recovery by the organization |
+| Security                 | Own security code, changed contact keys to compare and accept                            |
+
+Workspace administration stays on desktop and web.
 
 ## Build
 
@@ -184,7 +210,7 @@ key (a lost upload key can be reset; a lost app signing key can't).
 
 ## Google Play closed testing
 
-1. Create the app in the Play Console with the deployment's application ID (`org.teamcraft.android`
+1. Create the app in the Play Console with the deployment's application ID (`de.zeitgleich.teamcraft`
    by default; change `applicationId` for your organization).
 2. Build `bundleFullRelease` (an AAB) with the upload key and the production server/issuer
    properties, and upload it to the **Closed testing** track.

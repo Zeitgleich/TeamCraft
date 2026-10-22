@@ -82,5 +82,15 @@
     <meta-data
       android:name="com.google.android.gms.car.application"
       android:resource="@xml/automotive_app_desc" />
+    <!-- Opens decrypted downloads in other apps without exposing the rest of the app's files. -->
+    <provider
+      android:name="androidx.core.content.FileProvider"
+      android:authorities="${applicationId}.files"
+      android:exported="false"
+      android:grantUriPermissions="true">
+      <meta-data
+        android:name="android.support.FILE_PROVIDER_PATHS"
+        android:resource="@xml/shared_files" />
+    </provider>
   </application>
 </manifest>

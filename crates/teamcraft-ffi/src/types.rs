@@ -200,3 +200,10 @@ impl From<Presence> for PresenceStatus {
     }
   }
 }
+
+/// A recovery request this device made: the server's ID and the code the user reads to an admin.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct OrgRecoveryStart {
+  pub request_id: String,
+  pub verification_code: String,
+}

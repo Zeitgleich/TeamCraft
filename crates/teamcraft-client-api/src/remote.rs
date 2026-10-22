@@ -17,7 +17,7 @@ use crate::calls::{
 };
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
-  User, UserId,
+  ThreadSummary, User, UserId,
 };
 use crate::search::{SavedSearch, SearchHit, SearchResults};
 
@@ -154,6 +154,42 @@ pub struct ContactKeys {
   /// Set when the server now presents another identity key (e2ee.md §3: shown, never trusted silently).
   #[serde(default)]
   pub maybe_new_fingerprint: Option<String>,
+}
+
+impl ChatSnapshot {
+  /// Reads the snapshot from a backend; `security` comes from the host (it knows the pins).
+  pub fn read(backend: &impl ChatBackend, security: SecuritySnapshot) -> Self {
+    let spaces = backend.spaces();
+    let mut conversations = Vec::new();
+    for space in &spaces {
+      conversations.extend(backend.space_conversations(space.id));
+    }
+    conversations.extend(backend.direct_conversations());
+    let message_counts = conversations
+      .iter()
+      .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
+      .collect();
+    Self {
+      me: backend.me(),
+      users: backend.users(),
+      spaces,
+      conversations,
+      message_counts,
+      security,
+    }
+  }
+}
+
+impl MessageWindow {
+  /// `len` messages of a conversation's feed from `start` on.
+  pub fn read(backend: &impl ChatBackend, conversation: ConversationId, start: usize, len: usize) -> Self {
+    Self {
+      conversation,
+      start,
+      total: backend.message_count(conversation),
+      messages: backend.messages(conversation, start, len),
+    }
+  }
 }
 
 /// Linking this (new) device to another one of the user (e2ee.md §5), as the shell reports it.
@@ -396,6 +432,15 @@ pub enum ChatAction {
   InviteToSpace {
     invite: SpaceInvite,
   },
+  SetThreadFollowed {
+    conversation: ConversationId,
+    thread: ThreadId,
+    is_followed: bool,
+  },
+  MarkThreadRead {
+    conversation: ConversationId,
+    thread: ThreadId,
+  },
   SaveSearch {
     name: String,
     query: String,
@@ -410,6 +455,29 @@ impl ChatAction {
   /// some of them itself (enrollment state, admin flows); returns them back.
   pub fn apply_to(self, backend: &(impl ChatBackend + SearchBackend)) -> Option<Self> {
     match self {
+      Self::PostMessage {
+        conversation,
+        maybe_thread,
+        body,
+      } => backend.post_message(conversation, maybe_thread, &body),
+      Self::ToggleReaction {
+        conversation,
+        message,
+        emoji,
+      } => backend.toggle_reaction(conversation, message, &emoji),
+      Self::MarkRead { conversation } => backend.mark_read(conversation),
+      Self::SetFavorite {
+        conversation,
+        is_favorite,
+      } => backend.set_favorite(conversation, is_favorite),
+      Self::SetPresence { presence } => backend.set_presence(presence),
+      Self::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
+      Self::SetThreadFollowed {
+        conversation,
+        thread,
+        is_followed,
+      } => backend.set_thread_followed(conversation, thread, is_followed),
+      Self::MarkThreadRead { conversation, thread } => backend.mark_thread_read(conversation, thread),
       Self::SendMessage { message } => backend.send_message(message),
       Self::EditMessage {
         conversation,
@@ -540,6 +608,19 @@ pub enum ChatQuery {
   },
   RecentMentions,
   SavedSearches,
+  Thread {
+    conversation: ConversationId,
+    thread: ThreadId,
+  },
+  FollowedThreads,
+  IsThreadFollowed {
+    conversation: ConversationId,
+    thread: ThreadId,
+  },
+  SeenBy {
+    conversation: ConversationId,
+    message: MessageId,
+  },
   HasExternalPeople {
     conversation: ConversationId,
   },
@@ -568,6 +649,8 @@ pub enum ChatAnswer {
   SearchHits { hits: Vec<SearchHit> },
   SavedSearches { searches: Vec<SavedSearch> },
   Flag { value: bool },
+  Threads { threads: Vec<ThreadSummary> },
+  Users { users: Vec<UserId> },
   Unsupported,
 }
 
@@ -638,6 +721,21 @@ impl ChatQuery {
       Self::HasExternalPeople { conversation } => ChatAnswer::Flag {
         value: backend.has_external_people(conversation),
       },
+      Self::Thread { conversation, thread } => ChatAnswer::Messages {
+        messages: backend.thread(conversation, thread),
+      },
+      Self::FollowedThreads => ChatAnswer::Threads {
+        threads: backend.followed_threads(),
+      },
+      Self::IsThreadFollowed { conversation, thread } => ChatAnswer::Flag {
+        value: backend.is_thread_followed(conversation, thread),
+      },
+      Self::SeenBy {
+        conversation,
+        message,
+      } => ChatAnswer::Users {
+        users: backend.seen_by(conversation, message),
+      },
       Self::Unknown => ChatAnswer::Unsupported,
     }
   }
@@ -661,6 +759,35 @@ mod tests {
       r#"{"action":"post_message","conversation":"7","maybe_thread":null,"body":"hi"}"#
     );
     assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), action);
+  }
+
+  #[test]
+  fn thread_actions_and_queries_are_tagged() {
+    let follow: ChatAction = serde_json::from_str(
+      r#"{"action":"set_thread_followed","conversation":"7","thread":"9","is_followed":true}"#,
+    )
+    .expect("parse");
+    assert_eq!(
+      follow,
+      ChatAction::SetThreadFollowed {
+        conversation: id_from_raw(7),
+        thread: id_from_raw(9),
+        is_followed: true,
+      }
+    );
+    let query: ChatQuery =
+      serde_json::from_str(r#"{"kind":"thread","conversation":"7","thread":"9"}"#).expect("parse");
+    assert_eq!(
+      query,
+      ChatQuery::Thread {
+        conversation: id_from_raw(7),
+        thread: id_from_raw(9),
+      }
+    );
+    assert_eq!(
+      serde_json::to_string(&ChatAnswer::Users { users: Vec::new() }).expect("serialize"),
+      r#"{"answer":"users","users":[]}"#
+    );
   }
 
   #[test]
