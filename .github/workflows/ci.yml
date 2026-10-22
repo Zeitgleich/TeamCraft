@@ -186,3 +186,18 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  # The release version must agree everywhere (docs/release.md); the release notes must still render.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Versions agree (Cargo, desktop, Android, iOS, CHANGELOG.md)
+        run: scripts/check-versions.sh
+      - name: Release notes render
+        run: |
+          version="$(scripts/check-versions.sh)"
+          printf 'ghcr.io/example/teamcraft-server:%s@sha256:0\n' "$version" > "$RUNNER_TEMP/images.txt"
+          scripts/render-release-notes.py --version "$version" --tag "v$version" --repo "$GITHUB_REPOSITORY" \
+            --images "$RUNNER_TEMP/images.txt" > "$RUNNER_TEMP/notes.md"
+          if grep -n '{{' "$RUNNER_TEMP/notes.md"; then echo "::error::unfilled placeholder"; exit 1; fi
