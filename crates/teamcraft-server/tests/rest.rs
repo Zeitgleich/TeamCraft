@@ -56,6 +56,15 @@ mod authentication_and_devices {
   }
 
   #[tokio::test]
+  async fn the_web_push_key_is_absent_until_web_push_is_configured() {
+    let app = app!();
+    let reply = app.get(&member("carol"), "/push/web-key").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(reply.body.get("public_key").is_none(), "{}", reply.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn devices_can_be_registered_listed_and_revoked() {
     let app = app!();
     let carol = member("carol");

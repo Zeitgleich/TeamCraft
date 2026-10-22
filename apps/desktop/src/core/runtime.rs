@@ -33,6 +33,8 @@ use teamcraft_proto::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+/// Wrong short codes allowed before a link approval is dropped.
+const MAX_APPROVAL_MISSES: u8 = 3;
 /// How often the gateway is kept alive (the server announces its own limit in `hello`).
 const HEARTBEAT: Duration = Duration::from_secs(25);
 /// Outbox retries while offline or after a failed send.
@@ -140,9 +142,12 @@ enum Request {
   LinkCancel,
   ApprovalStart {
     code: String,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: oneshot::Sender<Result<(), String>>,
   },
-  ApprovalConfirm(oneshot::Sender<Result<(), String>>),
+  ApprovalConfirm {
+    short_code: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
   ApprovalCancel,
 }
 
@@ -259,18 +264,21 @@ impl CoreRuntime {
     drop(self.requests.send(Request::LinkCancel));
   }
 
-  /// Existing device: joins the new device's link with its code; returns the short code to compare.
-  pub async fn approval_start(&self, code: String) -> Result<String, String> {
+  /// Existing device: joins the new device's link with its code. The short code is shown only on the
+  /// new device; the user has to type it into [`Self::approval_confirm`].
+  pub async fn approval_start(&self, code: String) -> Result<(), String> {
     self
       .ask(|reply| Request::ApprovalStart { code, reply })
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
 
-  /// Existing device: the codes match, hand over the keys.
-  pub async fn approval_confirm(&self) -> Result<(), String> {
+  /// Existing device: hands the keys over if `short_code` is the code the new device shows. The check
+  /// is here, not in the UI: a script in the webview cannot approve a link it did not see on the
+  /// new device (docs/security-review.md C3).
+  pub async fn approval_confirm(&self, short_code: String) -> Result<(), String> {
     self
-      .ask(Request::ApprovalConfirm)
+      .ask(|reply| Request::ApprovalConfirm { short_code, reply })
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -326,6 +334,7 @@ struct Core {
   /// Why the last link failed, until the user tries again.
   link_failure: LinkStatus,
   approval: Option<LinkApproval<<Api as ServerApi>::Rendezvous>>,
+  approval_misses: u8,
 }
 
 /// A link in progress on this (new) device.
@@ -361,6 +370,7 @@ impl Core {
       link: None,
       link_failure: LinkStatus::Idle,
       approval: None,
+      approval_misses: 0,
     }
   }
 
@@ -490,7 +500,9 @@ impl Core {
         self.link_failure = LinkStatus::Idle;
       },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
-      Request::ApprovalConfirm(reply) => drop(reply.send(self.approval_confirm().await)),
+      Request::ApprovalConfirm { short_code, reply } => {
+        drop(reply.send(self.approval_confirm(&short_code).await))
+      },
       Request::ApprovalCancel => self.approval = None,
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::Messages {
@@ -628,15 +640,30 @@ impl Core {
   }
 
   /// Existing device: joins the new device's link; the user compares the short code.
-  async fn approval_start(&mut self, code: &str) -> Result<String, String> {
+  async fn approval_start(&mut self, code: &str) -> Result<(), String> {
     let client = self.client.as_ref().ok_or("this device is not set up yet")?;
     let approval = client.start_link_approval(code).await.map_err(describe)?;
-    let short_code = approval.short_code();
     self.approval = Some(approval);
-    Ok(short_code)
+    self.approval_misses = 0;
+    Ok(())
   }
 
-  async fn approval_confirm(&mut self) -> Result<(), String> {
+  /// Compares what the user typed with the short code of the handshake; only a match hands over the
+  /// keys. A few wrong guesses end the attempt, so the code cannot be guessed by trial.
+  async fn approval_confirm(&mut self, typed: &str) -> Result<(), String> {
+    let approval = self
+      .approval
+      .as_ref()
+      .ok_or("there is no device waiting for approval")?;
+    let digits = |text: &str| text.chars().filter(char::is_ascii_digit).collect::<String>();
+    if digits(typed) != digits(&approval.short_code()) {
+      self.approval_misses += 1;
+      if self.approval_misses >= MAX_APPROVAL_MISSES {
+        self.approval = None;
+        return Err("the code did not match; start again on the new device".to_owned());
+      }
+      return Err("the code did not match the one on the new device".to_owned());
+    }
     let approval = self
       .approval
       .take()

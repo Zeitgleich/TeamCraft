@@ -9,7 +9,7 @@ use crate::components::message_list::MessageList;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::i18n::use_i18n;
 use crate::model::{BookmarkKind, Conversation, ConversationId, ConversationKind};
-use crate::state::{SidePanel, use_app_state};
+use crate::state::{Overlay, SidePanel, use_app_state};
 
 /// How far back the seen line looks for the user's own latest message.
 const SEEN_LOOKBACK: usize = 50;
@@ -173,6 +173,40 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
         <CallButtons conversation=conversation info=info />
         <button
           class="header-btn"
+          aria-label=move || i18n.t("channel-settings-title")
+          title=move || i18n.t("channel-settings-title")
+          on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))
+        >
+          <Icon name=IconName::Sliders />
+        </button>
+        <button
+          class="header-btn"
+          aria-pressed=move || (state.panel.get() == SidePanel::Files).to_string()
+          aria-label=move || i18n.t("files-title")
+          title=move || i18n.t("files-title")
+          on:click=move |_| {
+            state.panel.update(|panel| {
+              *panel = if *panel == SidePanel::Files { SidePanel::Closed } else { SidePanel::Files };
+            });
+          }
+        >
+          <Icon name=IconName::Paperclip />
+        </button>
+        <button
+          class="header-btn"
+          aria-pressed=move || (state.panel.get() == SidePanel::Pins).to_string()
+          aria-label=move || i18n.t("pins-title")
+          title=move || i18n.t("pins-title")
+          on:click=move |_| {
+            state.panel.update(|panel| {
+              *panel = if *panel == SidePanel::Pins { SidePanel::Closed } else { SidePanel::Pins };
+            });
+          }
+        >
+          <Icon name=IconName::Star />
+        </button>
+        <button
+          class="header-btn"
           aria-pressed=move || members_open().to_string()
           aria-label=move || i18n.t_count("members-button-label", member_count())
           on:click=move |_| {
@@ -294,10 +328,11 @@ fn SeenLine(conversation: ConversationId) -> impl IntoView {
 
 /// Whether the conversation has members from outside the organization (guests).
 pub fn has_external_members(backend: &dyn crate::backend::Backend, conversation: &Conversation) -> bool {
-  conversation
-    .member_ids
-    .iter()
-    .any(|member| backend.user(*member).is_some_and(|user| user.is_guest))
+  backend.has_external_people(conversation.id)
+    || conversation
+      .member_ids
+      .iter()
+      .any(|member| backend.user(*member).is_some_and(|user| user.is_guest))
 }
 
 /// Where a search for the first message at or after a time stands.

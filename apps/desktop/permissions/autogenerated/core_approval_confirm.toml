@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-approval-confirm"
+description = "Enables the core_approval_confirm command without any pre-configured scope."
+commands.allow = ["core_approval_confirm"]
+
+[[permission]]
+identifier = "deny-core-approval-confirm"
+description = "Denies the core_approval_confirm command without any pre-configured scope."
+commands.deny = ["core_approval_confirm"]

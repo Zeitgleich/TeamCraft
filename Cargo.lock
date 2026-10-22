@@ -9916,6 +9916,8 @@ version = "0.0.0"
 dependencies = [
  "console_error_panic_hook",
  "fluent-bundle",
+ "futures-channel",
+ "futures-util",
  "getrandom 0.2.17",
  "js-sys",
  "leptos",
@@ -9925,6 +9927,8 @@ dependencies = [
  "serde",
  "serde_json",
  "teamcraft-client-api",
+ "teamcraft-core",
+ "teamcraft-crypto",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tracing",
@@ -9941,6 +9945,13 @@ name = "teamcraft-uniffi-bindgen"
 version = "0.0.0"
 dependencies = [
  "uniffi",
+]
+
+[[package]]
+name = "teamcraft-web-sw"
+version = "0.0.0"
+dependencies = [
+ "teamcraft-core",
 ]
 
 [[package]]

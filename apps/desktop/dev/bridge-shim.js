@@ -1,4 +1,4 @@
-// Dev only: implements `window.__TAURI__` (core.invoke, event.listen) on top of the dev bridge
+// Dev only: implements `window.__TAURI_INTERNALS__` (invoke, transformCallback; `plugin:event|listen`) on top of the dev bridge
 // (`serve_dev_bridge` in src/core/dev_bridge.rs), so the web UI in a plain browser talks to a real
 // client core. Inject it before the page loads, e.g. with Playwright's `page.addInitScript`.
 (() => {
@@ -19,22 +19,23 @@
     }
     return post(cmd, args);
   };
-  window.__TAURI__ = {
-    core: { invoke },
-    event: {
-      listen: async (_name, handler) => {
-        let counter = 0;
-        let stopped = false;
-        (async () => {
-          while (!stopped) {
-            try {
-              const answer = await (await fetch(`${base}/events?since=${counter}`)).json();
-              if (answer.counter > counter) { counter = answer.counter; handler({ payload: null }); }
-            } catch (_) { await new Promise((resolve) => setTimeout(resolve, 1000)); }
-          }
-        })();
-        return () => { stopped = true; };
-      },
+  const callbacks = new Map();
+  let nextCallback = 1;
+  window.__TAURI_INTERNALS__ = {
+    transformCallback: (callback) => { const id = nextCallback++; callbacks.set(id, callback); return id; },
+    invoke: async (cmd, args) => {
+      if (cmd !== 'plugin:event|listen') return invoke(cmd, args);
+      const handler = callbacks.get(args.handler);
+      let counter = 0;
+      (async () => {
+        for (;;) {
+          try {
+            const answer = await (await fetch(`${base}/events?since=${counter}`)).json();
+            if (answer.counter > counter) { counter = answer.counter; handler({ event: args.event, id: 0, payload: null }); }
+          } catch (_) { await new Promise((resolve) => setTimeout(resolve, 1000)); }
+        }
+      })();
+      return 0;
     },
   };
 })();

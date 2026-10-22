@@ -1,0 +1,547 @@
+//! Managing the workspace: new spaces and channels, the channel browser, channel and space
+//! settings (rename, categories, privacy conversion, archive), adding people with the "share
+//! history" choice, and inviting guests. The core and server decide what the user may do; these
+//! dialogs only collect the choices.
+
+use leptos::prelude::*;
+use teamcraft_client_api::actions::{
+  BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
+  SpaceInvite,
+};
+use teamcraft_proto::{CategoryId, HistoryPolicy};
+
+use crate::components::icons::{Icon, IconName};
+use crate::components::modal::Modal;
+use crate::i18n::use_i18n;
+use crate::model::{ConversationId, SpaceId, UserId};
+use crate::state::use_app_state;
+
+/// How the history choice of a new channel is picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryChoice {
+  WorkspaceDefault,
+  FromJoin,
+  Full,
+}
+
+impl HistoryChoice {
+  fn policy(self) -> Option<HistoryPolicy> {
+    match self {
+      Self::WorkspaceDefault => None,
+      Self::FromJoin => Some(HistoryPolicy::FromJoin),
+      Self::Full => Some(HistoryPolicy::Full),
+    }
+  }
+
+  fn from_value(value: &str) -> Self {
+    match value {
+      "from_join" => Self::FromJoin,
+      "full" => Self::Full,
+      _ => Self::WorkspaceDefault,
+    }
+  }
+}
+
+/// Dialog frame: title, close button, scrolling body.
+#[component]
+fn Dialog(
+  title_key: &'static str,
+  #[prop(optional, into)] class: &'static str,
+  children: Children,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <Modal labelled_by="ws-dialog-title" class=class>
+      <header class="modal-head">
+        <h2 id="ws-dialog-title">{move || i18n.t(title_key)}</h2>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <div class="modal-body">{children()}</div>
+    </Modal>
+  }
+}
+
+fn non_empty(text: &str) -> Option<String> {
+  let trimmed = text.trim();
+  (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+#[component]
+pub fn NewSpaceDialog() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let name = RwSignal::new(String::new());
+  let description = RwSignal::new(String::new());
+  let is_open = RwSignal::new(true);
+  let submit = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    let Some(name) = non_empty(&name.get_untracked()) else {
+      return;
+    };
+    state.write(|backend| {
+      backend.create_space(NewSpace {
+        name,
+        maybe_description: non_empty(&description.get_untracked()),
+        is_open: is_open.get_untracked(),
+      })
+    });
+    state.close_overlay();
+  };
+  view! {
+    <Dialog title_key="space-new-title" class="modal-small">
+      <form on:submit=submit>
+        <label for="space-name">{move || i18n.t("space-name")}</label>
+        <input id="space-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <label for="space-description">{move || i18n.t("space-description")}</label>
+        <textarea id="space-description" class="input" rows="2" prop:value=move || description.get() on:input=move |ev| description.set(event_target_value(&ev))></textarea>
+        <label class="check-row">
+          <input type="checkbox" prop:checked=move || is_open.get() on:change=move |ev| is_open.set(event_target_checked(&ev)) />
+          <span>{move || i18n.t("space-open")}</span>
+        </label>
+        <footer class="modal-foot">
+          <span class="grow"></span>
+          <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
+          <button type="submit" class="btn btn-primary" prop:disabled=move || name.get().trim().is_empty()>{move || i18n.t("create")}</button>
+        </footer>
+      </form>
+    </Dialog>
+  }
+}
+
+#[component]
+pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let name = RwSignal::new(String::new());
+  let topic = RwSignal::new(String::new());
+  let is_private = RwSignal::new(false);
+  let category = RwSignal::new(String::new());
+  let history = RwSignal::new(HistoryChoice::WorkspaceDefault);
+  let categories = Memo::new(move |_| state.read(|backend| backend.categories(space)));
+  let submit = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    let Some(name) = non_empty(&name.get_untracked()) else {
+      return;
+    };
+    let maybe_category = category
+      .get_untracked()
+      .parse::<CategoryId>()
+      .ok()
+      .filter(|_| !category.get_untracked().is_empty());
+    state.write(|backend| {
+      backend.create_channel_with(NewChannel {
+        space,
+        name,
+        is_private: is_private.get_untracked(),
+        maybe_topic: non_empty(&topic.get_untracked()),
+        maybe_category,
+        maybe_history: history.get_untracked().policy(),
+      })
+    });
+    state.close_overlay();
+  };
+  view! {
+    <Dialog title_key="channel-new-title" class="modal-small">
+      <form on:submit=submit>
+        <label for="channel-name">{move || i18n.t("channel-name")}</label>
+        <input id="channel-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <label for="channel-topic">{move || i18n.t("channel-topic")}</label>
+        <input id="channel-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| topic.set(event_target_value(&ev)) />
+        <label class="check-row">
+          <input type="checkbox" prop:checked=move || is_private.get() on:change=move |ev| is_private.set(event_target_checked(&ev)) />
+          <span>{move || i18n.t("channel-private")}</span>
+        </label>
+        <label for="channel-category">{move || i18n.t("channel-category")}</label>
+        <select id="channel-category" class="input" on:change=move |ev| category.set(event_target_value(&ev))>
+          <option value="">{move || i18n.t("channel-uncategorized")}</option>
+          <For each=move || categories.get() key=|category| category.id let:category>
+            <option value=category.id.to_string() translate="no">{category.name.clone()}</option>
+          </For>
+        </select>
+        <label for="channel-history">{move || i18n.t("channel-history")}</label>
+        <select id="channel-history" class="input" on:change=move |ev| history.set(HistoryChoice::from_value(&event_target_value(&ev)))>
+          <option value="">{move || i18n.t("history-default")}</option>
+          <option value="from_join">{move || i18n.t("history-from-join")}</option>
+          <option value="full">{move || i18n.t("history-full")}</option>
+        </select>
+        <footer class="modal-foot">
+          <span class="grow"></span>
+          <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
+          <button type="submit" class="btn btn-primary" prop:disabled=move || name.get().trim().is_empty()>{move || i18n.t("create")}</button>
+        </footer>
+      </form>
+    </Dialog>
+  }
+}
+
+/// All public channels of a space, joined or not.
+#[component]
+pub fn BrowseChannelsDialog(space: SpaceId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let filter = RwSignal::new(String::new());
+  let show_archived = RwSignal::new(false);
+  let channels = Memo::new(move |_| {
+    let needle = filter.get().trim().to_lowercase();
+    let mut list = state.read(|backend| backend.browse_channels(space));
+    list.retain(|channel| {
+      (show_archived.get() || !channel.is_archived)
+        && (needle.is_empty() || channel.name.to_lowercase().contains(&needle))
+    });
+    list.sort_by_key(|channel| channel.name.to_lowercase());
+    list
+  });
+  view! {
+    <Dialog title_key="browse-title">
+      <label class="visually-hidden" for="browse-filter">{move || i18n.t("browse-filter")}</label>
+      <input id="browse-filter" class="input" data-autofocus placeholder=move || i18n.t("browse-filter") prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
+      <label class="check-row">
+        <input type="checkbox" prop:checked=move || show_archived.get() on:change=move |ev| show_archived.set(event_target_checked(&ev)) />
+        <span>{move || i18n.t("browse-archived")}</span>
+      </label>
+      <ul class="browse-list">
+        <For each=move || channels.get() key=|channel| (channel.conversation, channel.is_member, channel.is_archived) let:channel>
+          <BrowseRow channel=channel />
+        </For>
+        <Show when=move || channels.get().is_empty() fallback=|| ()>
+          <li class="empty-state">{move || i18n.t("browse-empty")}</li>
+        </Show>
+      </ul>
+    </Dialog>
+  }
+}
+
+#[component]
+fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let id = channel.conversation;
+  view! {
+    <li class="browse-row">
+      <div class="browse-text">
+        <span class="browse-name" translate="no"><Icon name=IconName::Hash />{channel.name.clone()}</span>
+        {channel.has_external_people.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-external")}</span> })}
+        {channel.is_archived.then(|| view! { <span class="badge">{move || i18n.t("badge-archived")}</span> })}
+        <span class="browse-topic" translate="no">{channel.topic.clone()}</span>
+      </div>
+      {if channel.is_member {
+        view! {
+          <button class="btn btn-small" on:click=move |_| { state.open_conversation(id); state.close_overlay(); }>{move || i18n.t("browse-open")}</button>
+          <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.leave_channel(id))>{move || i18n.t("browse-leave")}</button>
+        }
+        .into_any()
+      } else {
+        view! {
+          <button class="btn btn-small btn-primary" prop:disabled=channel.is_archived on:click=move |_| state.write(|backend| backend.join_channel(id))>
+            {move || i18n.t("browse-join")}
+          </button>
+        }
+        .into_any()
+      }}
+    </li>
+  }
+}
+
+/// Settings of one channel, plus adding people.
+#[component]
+pub fn ChannelSettingsDialog(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let info = state.read(|backend| backend.conversation(conversation));
+  let Some(info) = info else {
+    return view! { <Dialog title_key="channel-settings-title"><p>{move || i18n.t("channel-missing")}</p></Dialog> }.into_any();
+  };
+  let space = info.maybe_space;
+  let name = RwSignal::new(info.name.clone());
+  let topic = RwSignal::new(info.topic.clone());
+  let is_private = matches!(info.kind, crate::model::ConversationKind::Private);
+  let is_confirming_privacy = RwSignal::new(false);
+  let categories = Memo::new(move |_| {
+    space
+      .map(|space| state.read(|backend| backend.categories(space)))
+      .unwrap_or_default()
+  });
+  let save = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    state.write(|backend| {
+      backend.update_channel(
+        conversation,
+        ChannelChanges {
+          maybe_name: non_empty(&name.get_untracked()),
+          maybe_topic: Some(topic.get_untracked().trim().to_owned()),
+          ..ChannelChanges::default()
+        },
+      )
+    });
+    state.close_overlay();
+  };
+  let change = move |changes: ChannelChanges| {
+    state.write(|backend| backend.update_channel(conversation, changes));
+    state.close_overlay();
+  };
+  view! {
+    <Dialog title_key="channel-settings-title">
+      <form on:submit=save>
+        <label for="cs-name">{move || i18n.t("channel-name")}</label>
+        <input id="cs-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <label for="cs-topic">{move || i18n.t("channel-topic")}</label>
+        <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| topic.set(event_target_value(&ev)) />
+        <div class="modal-foot">
+          <span class="grow"></span>
+          <button type="submit" class="btn btn-primary">{move || i18n.t("save")}</button>
+        </div>
+      </form>
+      {space
+        .is_some()
+        .then(|| {
+          view! {
+            <label for="cs-category">{move || i18n.t("channel-move-category")}</label>
+            <select
+              id="cs-category"
+              class="input"
+              on:change=move |ev| {
+                let value = event_target_value(&ev);
+                let choice = match value.parse::<CategoryId>() {
+                  Ok(category) if !value.is_empty() => CategoryChoice::Category { category },
+                  _ => CategoryChoice::Uncategorized,
+                };
+                change(ChannelChanges { maybe_category: Some(choice), ..ChannelChanges::default() });
+              }
+            >
+              <option value="">{move || i18n.t("channel-uncategorized")}</option>
+              <For each=move || categories.get() key=|category| category.id let:category>
+                <option value=category.id.to_string() translate="no">{category.name.clone()}</option>
+              </For>
+            </select>
+          }
+        })}
+      <h3>{move || i18n.t("channel-privacy")}</h3>
+      <p class="hint">{move || if is_private { i18n.t("channel-privacy-hint-private") } else { i18n.t("channel-privacy-hint-public") }}</p>
+      <Show
+        when=move || is_confirming_privacy.get()
+        fallback=move || view! { <button class="btn" on:click=move |_| is_confirming_privacy.set(true)>{move || if is_private { i18n.t("channel-make-public") } else { i18n.t("channel-make-private") }}</button> }
+      >
+        <p role="alert">{move || if is_private { i18n.t("channel-make-public-confirm") } else { i18n.t("channel-make-private-confirm") }}</p>
+        <button class="btn btn-primary" on:click=move |_| change(ChannelChanges { maybe_is_private: Some(!is_private), ..ChannelChanges::default() })>{move || i18n.t("confirm")}</button>
+        <button class="btn" on:click=move |_| is_confirming_privacy.set(false)>{move || i18n.t("cancel")}</button>
+      </Show>
+      <h3>{move || i18n.t("channel-archive")}</h3>
+      <button class="btn" on:click=move |_| change(ChannelChanges { maybe_is_archived: Some(true), ..ChannelChanges::default() })>{move || i18n.t("channel-archive-action")}</button>
+      <AddPeople conversation=conversation />
+    </Dialog>
+  }
+  .into_any()
+}
+
+/// Adds a person to the channel. The "share history" toggle decides what they can read (e2ee.md).
+#[component]
+fn AddPeople(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let chosen = RwSignal::new(String::new());
+  let shares_history = RwSignal::new(false);
+  let candidates = Memo::new(move |_| {
+    let members = state
+      .read(|backend| backend.conversation(conversation))
+      .map(|info| info.member_ids)
+      .unwrap_or_default();
+    state
+      .read(|backend| backend.users())
+      .into_iter()
+      .filter(|user| !members.contains(&user.id))
+      .collect::<Vec<_>>()
+  });
+  let add = move |_| {
+    let Ok(user) = chosen.get_untracked().parse::<UserId>() else {
+      return;
+    };
+    let history = if shares_history.get_untracked() {
+      HistoryPolicy::Full
+    } else {
+      HistoryPolicy::FromJoin
+    };
+    state.write(|backend| backend.add_member_with_history(conversation, user, history));
+    chosen.set(String::new());
+  };
+  view! {
+    <h3>{move || i18n.t("channel-add-people")}</h3>
+    <label class="visually-hidden" for="cs-add">{move || i18n.t("channel-add-people")}</label>
+    <select id="cs-add" class="input" on:change=move |ev| chosen.set(event_target_value(&ev))>
+      <option value="">{move || i18n.t("channel-pick-person")}</option>
+      <For each=move || candidates.get() key=|user| user.id let:user>
+        <option value=user.id.to_string() translate="no">{user.display_name.clone()}</option>
+      </For>
+    </select>
+    <label class="check-row">
+      <input type="checkbox" prop:checked=move || shares_history.get() on:change=move |ev| shares_history.set(event_target_checked(&ev)) />
+      <span>{move || i18n.t("channel-share-history")}</span>
+    </label>
+    <p class="hint">{move || if shares_history.get() { i18n.t("channel-share-history-on") } else { i18n.t("channel-share-history-off") }}</p>
+    <button class="btn btn-primary" prop:disabled=move || chosen.get().is_empty() on:click=add>{move || i18n.t("channel-add")}</button>
+  }
+}
+
+/// Settings of a space: name, openness, archive, categories and invitations.
+#[component]
+pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let current_name = state
+    .read(|backend| backend.spaces())
+    .into_iter()
+    .find(|candidate| candidate.id == space)
+    .map(|space| space.name)
+    .unwrap_or_default();
+  let name = RwSignal::new(current_name);
+  let description = RwSignal::new(String::new());
+  let new_category = RwSignal::new(String::new());
+  let categories = Memo::new(move |_| state.read(|backend| backend.categories(space)));
+  let save = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    state.write(|backend| {
+      backend.update_space(
+        space,
+        SpaceChanges {
+          maybe_name: non_empty(&name.get_untracked()),
+          maybe_description: non_empty(&description.get_untracked()),
+          ..SpaceChanges::default()
+        },
+      )
+    });
+    state.close_overlay();
+  };
+  let add_category = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    if let Some(category) = non_empty(&new_category.get_untracked()) {
+      state.write(|backend| backend.create_category(space, &category));
+      new_category.set(String::new());
+    }
+  };
+  view! {
+    <Dialog title_key="space-settings-title">
+      <form on:submit=save>
+        <label for="ss-name">{move || i18n.t("space-name")}</label>
+        <input id="ss-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <label for="ss-description">{move || i18n.t("space-description")}</label>
+        <textarea id="ss-description" class="input" rows="2" prop:value=move || description.get() on:input=move |ev| description.set(event_target_value(&ev))></textarea>
+        <div class="modal-foot">
+          <span class="grow"></span>
+          <button type="submit" class="btn btn-primary">{move || i18n.t("save")}</button>
+        </div>
+      </form>
+      <h3>{move || i18n.t("space-categories")}</h3>
+      <ul class="category-list">
+        <For each=move || categories.get() key=|category| (category.id, category.name.clone()) let:category>
+          <CategoryRow space=space category=category />
+        </For>
+      </ul>
+      <form class="inline-form" on:submit=add_category>
+        <label class="visually-hidden" for="ss-new-category">{move || i18n.t("space-category-new")}</label>
+        <input id="ss-new-category" class="input" placeholder=move || i18n.t("space-category-new") prop:value=move || new_category.get() on:input=move |ev| new_category.set(event_target_value(&ev)) />
+        <button type="submit" class="btn" prop:disabled=move || new_category.get().trim().is_empty()>{move || i18n.t("create")}</button>
+      </form>
+      <InvitePeople space=space />
+      <h3>{move || i18n.t("channel-archive")}</h3>
+      <button
+        class="btn"
+        on:click=move |_| {
+          state.write(|backend| backend.update_space(space, SpaceChanges { maybe_is_archived: Some(true), ..SpaceChanges::default() }));
+          state.close_overlay();
+        }
+      >
+        {move || i18n.t("space-archive-action")}
+      </button>
+    </Dialog>
+  }
+}
+
+#[component]
+fn CategoryRow(space: SpaceId, category: CategoryInfo) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let id = category.id;
+  let name = RwSignal::new(category.name.clone());
+  let original = category.name;
+  let rename = move |_| {
+    if let Some(new_name) = non_empty(&name.get_untracked()).filter(|new_name| *new_name != original) {
+      state.write(|backend| backend.rename_category(space, id, &new_name));
+    }
+  };
+  view! {
+    <li class="category-row">
+      <input class="input" aria-label=move || i18n.t("space-category-rename") prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) on:change=rename />
+      <button class="icon-btn" aria-label=move || i18n.t("space-category-delete") on:click=move |_| state.write(|backend| backend.delete_category(space, id))>
+        <Icon name=IconName::Trash />
+      </button>
+    </li>
+  }
+}
+
+/// Invites a person by email as member or guest.
+#[component]
+fn InvitePeople(space: SpaceId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let email = RwSignal::new(String::new());
+  let is_guest = RwSignal::new(true);
+  let is_sent = RwSignal::new(false);
+  let submit = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    let Some(email_address) = non_empty(&email.get_untracked()) else {
+      return;
+    };
+    state.write(|backend| {
+      backend.invite_to_space(SpaceInvite {
+        space,
+        email: email_address,
+        is_guest: is_guest.get_untracked(),
+        channels: Vec::new(),
+        maybe_expires_at: None,
+      })
+    });
+    email.set(String::new());
+    is_sent.set(true);
+  };
+  view! {
+    <h3>{move || i18n.t("invite-title")}</h3>
+    <form on:submit=submit>
+      <label for="invite-email">{move || i18n.t("invite-email")}</label>
+      <input id="invite-email" class="input" type="email" required prop:value=move || email.get() on:input=move |ev| { is_sent.set(false); email.set(event_target_value(&ev)) } />
+      <label class="check-row">
+        <input type="checkbox" prop:checked=move || is_guest.get() on:change=move |ev| is_guest.set(event_target_checked(&ev)) />
+        <span>{move || i18n.t("invite-as-guest")}</span>
+      </label>
+      <button type="submit" class="btn btn-primary" prop:disabled=move || email.get().trim().is_empty()>{move || i18n.t("invite-send")}</button>
+      <Show when=move || is_sent.get() fallback=|| ()>
+        <span role="status">{move || i18n.t("invite-sent")}</span>
+      </Show>
+    </form>
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn history_choice_maps_to_policy() {
+    assert_eq!(HistoryChoice::from_value("").policy(), None);
+    assert_eq!(
+      HistoryChoice::from_value("full").policy(),
+      Some(HistoryPolicy::Full)
+    );
+    assert_eq!(
+      HistoryChoice::from_value("from_join").policy(),
+      Some(HistoryPolicy::FromJoin)
+    );
+  }
+
+  #[test]
+  fn blank_text_is_none() {
+    assert_eq!(non_empty("  \n"), None);
+    assert_eq!(non_empty(" a "), Some("a".to_owned()));
+  }
+}

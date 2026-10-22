@@ -75,6 +75,17 @@ pub trait Authenticator {
     maybe_body: Option<String>,
   ) -> LocalFuture<'_, Result<ApiResponse, AuthError>>;
 
+  /// A valid access token, refreshed when it is about to expire. Only the browser build has one to
+  /// give: the client core runs in the page and signs its own requests. The desktop shell keeps
+  /// tokens out of the webview.
+  fn access_token(&self) -> LocalFuture<'_, Result<String, AuthError>> {
+    Box::pin(async {
+      Err(AuthError::Unsupported(
+        "the tokens stay in the desktop shell".to_owned(),
+      ))
+    })
+  }
+
   /// `GET {server}{path}`, see [`Self::api_request`].
   fn api_get(&self, path: &str) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
     self.api_request(ApiMethod::Get, path, None)
@@ -86,6 +97,13 @@ pub fn detect(config: AppConfig) -> Rc<dyn Authenticator> {
   if tauri::is_available() {
     Rc::new(tauri::TauriAuth::new())
   } else {
-    Rc::new(browser::BrowserAuth::new(config))
+    let server_url = config.server_url.clone();
+    let auth: Rc<dyn Authenticator> = Rc::new(browser::BrowserAuth::new(config));
+    // The page runs the client core itself (web_core), signing with the page's session.
+    #[cfg(target_arch = "wasm32")]
+    crate::web_core::configure(auth.clone(), &server_url);
+    #[cfg(not(target_arch = "wasm32"))]
+    drop(server_url);
+    auth
   }
 }

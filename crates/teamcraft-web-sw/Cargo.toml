@@ -1,0 +1,18 @@
+[package]
+publish = false
+name = "teamcraft-web-sw"
+description = "The Rust half of the web client's service worker: opens Web Push wake-ups and shows notifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version = "1.88"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["service-worker"] }

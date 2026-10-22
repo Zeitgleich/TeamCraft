@@ -109,7 +109,7 @@ pub fn DeviceApprovalDialog() -> impl IntoView {
 /// new device's code, compare the short code, approve); without it the demo screen stays.
 #[component]
 pub fn LinkDeviceDialog() -> impl IntoView {
-  if crate::auth::tauri::is_available() {
+  if crate::auth::tauri::has_core() {
     view! { <ApproveLinkDialog /> }.into_any()
   } else {
     view! { <DemoLinkDialog /> }.into_any()
@@ -120,9 +120,10 @@ pub fn LinkDeviceDialog() -> impl IntoView {
 enum ApprovePhase {
   EnterCode,
   Connecting,
-  /// Both devices show the short code; the user compares and approves.
-  Compare {
-    short_code: String,
+  /// The new device shows a short code; the user types it here. The core checks it, so only
+  /// someone looking at the new device can approve.
+  ConfirmCode {
+    error: Option<String>,
   },
   Sending,
   Done,
@@ -149,16 +150,25 @@ fn ApproveLinkDialog() -> impl IntoView {
     phase.set(ApprovePhase::Connecting);
     spawn_local(async move {
       phase.set(match remote_backend::approval_start(&entered).await {
-        Ok(short_code) => ApprovePhase::Compare { short_code },
+        Ok(()) => ApprovePhase::ConfirmCode { error: None },
         Err(message) => ApprovePhase::Failed(message),
       });
     });
   };
-  let approve = move |_| {
+  let typed = RwSignal::new(String::new());
+  let approve = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    let short_code = typed.get_untracked();
     phase.set(ApprovePhase::Sending);
     spawn_local(async move {
-      phase.set(match remote_backend::approval_confirm().await {
+      phase.set(match remote_backend::approval_confirm(&short_code).await {
         Ok(()) => ApprovePhase::Done,
+        // A wrong code keeps the attempt open for a retry; after a few misses the core drops it and
+        // the next call fails with "no device waiting", which ends here as well.
+        Err(message) if message.contains("did not match the one") => {
+          typed.set(String::new());
+          ApprovePhase::ConfirmCode { error: Some(message) }
+        },
         Err(message) => ApprovePhase::Failed(message),
       });
     });
@@ -198,15 +208,27 @@ fn ApproveLinkDialog() -> impl IntoView {
             }
             .into_any()
           },
-          ApprovePhase::Compare { short_code } => {
+          ApprovePhase::ConfirmCode { error } => {
             view! {
-              <p>{move || i18n.t("approve-link-compare")}</p>
-              <p class="approval-code" translate="no">{short_code}</p>
-              <p class="no-content-note">
-                <Icon name=IconName::Alert />
-                <span>{move || i18n.t("approval-warning")}</span>
-              </p>
-              <button class="btn btn-primary" on:click=approve>{move || i18n.t("approval-approve")}</button>
+              <form on:submit=approve>
+                <p>{move || i18n.t("approve-link-type-code")}</p>
+                <label class="visually-hidden" for="approve-link-short">{move || i18n.t("approve-link-short")}</label>
+                <input
+                  id="approve-link-short"
+                  class="input mono"
+                  inputmode="numeric"
+                  data-autofocus
+                  autocomplete="off"
+                  prop:value=move || typed.get()
+                  on:input=move |ev| typed.set(event_target_value(&ev))
+                />
+                {error.map(|_| view! { <p class="field-error" role="alert">{move || i18n.t("approve-link-wrong")}</p> })}
+                <p class="no-content-note">
+                  <Icon name=IconName::Alert />
+                  <span>{move || i18n.t("approval-warning")}</span>
+                </p>
+                <button type="submit" class="btn btn-primary">{move || i18n.t("approval-approve")}</button>
+              </form>
             }
             .into_any()
           },

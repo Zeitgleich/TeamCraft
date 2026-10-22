@@ -250,6 +250,10 @@ impl Authenticator for BrowserAuth {
     Box::pin(self.restore_inner())
   }
 
+  fn access_token(&self) -> LocalFuture<'_, Result<String, AuthError>> {
+    Box::pin(BrowserAuth::access_token(self))
+  }
+
   fn login(&self) -> LocalFuture<'_, Result<(), AuthError>> {
     Box::pin(async move {
       self.begin_login().await?;

@@ -136,6 +136,10 @@ fn serde_wasm_json<T: for<'de> Deserialize<'de>>(value: &JsValue) -> Result<T, A
 
 /// Shows a system notification through the desktop shell. Failures are logged, never shown.
 pub async fn notify(title: &str, maybe_body: Option<&str>) {
+  if !is_available() {
+    show_page_notification(title, maybe_body);
+    return;
+  }
   let args = serde_json::json!({ "title": title, "body": maybe_body });
   if let Err(error) = call::<()>("notify_user", &args).await {
     tracing::debug!(%error, "could not show a notification");
@@ -147,6 +151,9 @@ pub async fn call<T: for<'de> Deserialize<'de>>(
   command: &str,
   args: &serde_json::Value,
 ) -> Result<T, String> {
+  if !is_available() {
+    return call_web_core(command, args).await;
+  }
   let js_args =
     js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
   let answer = invoke(command, js_args).await.map_err(|error| match error {
@@ -161,27 +168,75 @@ pub async fn call<T: for<'de> Deserialize<'de>>(
   serde_json::from_str(&text).map_err(|error| format!("unreadable answer of {command}: {error}"))
 }
 
+/// The browser has no shell: the core commands are answered by the core running in the page.
+#[cfg(target_arch = "wasm32")]
+async fn call_web_core<T: for<'de> Deserialize<'de>>(
+  command: &str,
+  args: &serde_json::Value,
+) -> Result<T, String> {
+  let answer = crate::web_core::call(command, args.clone()).await?;
+  serde_json::from_value(answer).map_err(|error| format!("unreadable answer of {command}: {error}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn call_web_core<T: for<'de> Deserialize<'de>>(
+  command: &str,
+  _args: &serde_json::Value,
+) -> Result<T, String> {
+  Err(format!("{command} needs the desktop app or a browser"))
+}
+
+/// Whether the client core is reachable: in the desktop shell, or in the page (browser build).
+pub fn has_core() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    is_available() || crate::web_core::is_available()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    is_available()
+  }
+}
+
 /// Calls `callback` whenever the desktop shell emits `event`.
 pub fn listen(event: &str, callback: impl FnMut() + 'static) {
-  let listener = (|| -> Option<(JsValue, js_sys::Function)> {
-    let window = web_sys::window()?;
-    let tauri = js_sys::Reflect::get(&window, &JsValue::from_str("__TAURI__")).ok()?;
-    let events = js_sys::Reflect::get(&tauri, &JsValue::from_str("event")).ok()?;
-    let listen = js_sys::Reflect::get(&events, &JsValue::from_str("listen"))
-      .ok()?
-      .dyn_into::<js_sys::Function>()
-      .ok()?;
-    Some((events, listen))
-  })();
-  let Some((events, function)) = listener else {
+  if !is_available() {
+    #[cfg(target_arch = "wasm32")]
+    crate::web_core::listen(callback);
+    #[cfg(not(target_arch = "wasm32"))]
+    drop((event, callback));
+    return;
+  }
+  let Some(internals) = internals() else {
+    tracing::warn!(event, "the desktop event bridge is not available");
+    return;
+  };
+  let transform = js_sys::Reflect::get(&internals, &JsValue::from_str("transformCallback"))
+    .ok()
+    .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
+  let (Some(invoke), Some(transform)) = (invoke_function(), transform) else {
     tracing::warn!(event, "the desktop event bridge is not available");
     return;
   };
   let mut callback = callback;
   let handler =
     wasm_bindgen::closure::Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| callback());
-  if function
-    .call2(&events, &JsValue::from_str(event), handler.as_ref())
+  // Same call the Tauri JS API makes: register the callback, then subscribe to the event with it.
+  let Ok(callback_id) = transform.call1(&internals, handler.as_ref()) else {
+    tracing::warn!(event, "could not register the event callback");
+    return;
+  };
+  let args = js_sys::Object::new();
+  let target = js_sys::Object::new();
+  let set = |object: &js_sys::Object, key: &str, value: &JsValue| {
+    drop(js_sys::Reflect::set(object, &JsValue::from_str(key), value));
+  };
+  set(&target, "kind", &JsValue::from_str("Any"));
+  set(&args, "event", &JsValue::from_str(event));
+  set(&args, "target", &target);
+  set(&args, "handler", &callback_id);
+  if invoke
+    .call2(&JsValue::NULL, &JsValue::from_str("plugin:event|listen"), &args)
     .is_err()
   {
     tracing::warn!(event, "could not subscribe to the desktop event");
@@ -190,15 +245,66 @@ pub fn listen(event: &str, callback: impl FnMut() + 'static) {
   handler.forget();
 }
 
-/// `window.__TAURI__.core.invoke`, present when the shell sets `withGlobalTauri`.
-fn invoke_function() -> Option<js_sys::Function> {
+/// `window.__TAURI_INTERNALS__`: what the shell injects into its webview for the command bridge.
+/// The shell does not set `withGlobalTauri`, so scripts find no friendlier `window.__TAURI__`.
+fn internals() -> Option<JsValue> {
   let window = web_sys::window()?;
-  let tauri = js_sys::Reflect::get(&window, &JsValue::from_str("__TAURI__")).ok()?;
-  let core = js_sys::Reflect::get(&tauri, &JsValue::from_str("core")).ok()?;
-  js_sys::Reflect::get(&core, &JsValue::from_str("invoke"))
+  let internals = js_sys::Reflect::get(&window, &JsValue::from_str("__TAURI_INTERNALS__")).ok()?;
+  (!internals.is_undefined() && !internals.is_null()).then_some(internals)
+}
+
+fn invoke_function() -> Option<js_sys::Function> {
+  js_sys::Reflect::get(&internals()?, &JsValue::from_str("invoke"))
     .ok()?
     .dyn_into()
     .ok()
+}
+
+/// The browser's `Notification` object, if it has one.
+fn notification_constructor() -> Option<js_sys::Function> {
+  let window = web_sys::window()?;
+  js_sys::Reflect::get(&window, &JsValue::from_str("Notification"))
+    .ok()?
+    .dyn_into()
+    .ok()
+}
+
+/// `granted`, `denied` or `default` (not asked yet); `None` where the browser has no notifications.
+pub fn notification_permission() -> Option<String> {
+  let constructor = notification_constructor()?;
+  js_sys::Reflect::get(&constructor, &JsValue::from_str("permission"))
+    .ok()?
+    .as_string()
+}
+
+/// Asks the user to allow notifications (must run from a click). Returns the new permission.
+pub async fn request_notification_permission() -> Option<String> {
+  let constructor = notification_constructor()?;
+  let request: js_sys::Function = js_sys::Reflect::get(&constructor, &JsValue::from_str("requestPermission"))
+    .ok()?
+    .dyn_into()
+    .ok()?;
+  let promise: js_sys::Promise = request.call0(&constructor).ok()?.dyn_into().ok()?;
+  JsFuture::from(promise).await.ok()?.as_string()
+}
+
+/// Shows a notification from the page while it is open. Closed pages need Web Push, which waits for
+/// the service worker build; without permission nothing is shown.
+fn show_page_notification(title: &str, maybe_body: Option<&str>) {
+  if notification_permission().as_deref() != Some("granted") {
+    return;
+  }
+  let Some(constructor) = notification_constructor() else {
+    return;
+  };
+  let options = js_sys::Object::new();
+  if let Some(body) = maybe_body {
+    drop(js_sys::Reflect::set(&options, &"body".into(), &body.into()));
+  }
+  let args = js_sys::Array::of2(&JsValue::from_str(title), &options);
+  if js_sys::Reflect::construct(&constructor, &args).is_err() {
+    tracing::debug!("could not show a notification");
+  }
 }
 
 #[cfg(test)]

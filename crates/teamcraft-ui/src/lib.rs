@@ -9,6 +9,7 @@ pub use teamcraft_client_api::{admin, backend, model, search, security};
 
 pub mod admin_live;
 pub mod auth;
+pub mod bundle;
 pub mod calls;
 pub mod clock;
 pub mod components;
@@ -29,6 +30,8 @@ pub mod server_backend;
 pub mod session;
 pub mod settings;
 pub mod state;
+#[cfg(target_arch = "wasm32")]
+pub mod web_core;
 
 pub use components::app::App;
 

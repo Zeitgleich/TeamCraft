@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::calls::IncomingCall;
+use crate::components::bundle_banner::AboutSection;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::settings_tabs::{
@@ -167,6 +168,7 @@ fn AdvancedTab() -> impl IntoView {
       </select>
       <p class="muted-text small">{move || i18n.t("settings-backend-hint")}</p>
     </div>
+    <AboutSection />
     <h3 class="settings-heading">{move || i18n.t("settings-demo-title")}</h3>
     <p class="muted-text small">{move || i18n.t("settings-demo-hint")}</p>
     <div class="demo-actions">

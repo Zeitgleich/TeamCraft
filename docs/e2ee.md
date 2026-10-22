@@ -461,7 +461,10 @@ Details:
   the wake-up with the push key and shows conversation and sender names. The message text appears
   if the store already has the message, or if the app left a still valid access token
   (`PushSession`, in the encrypted store) so the worker can fetch and decrypt it; otherwise the
-  notification has names only. Like the NSE, the worker never touches MLS state.
+  notification has names only. Like the NSE, the worker never touches MLS state. The page subscribes
+  with the server's VAPID key (`GET /api/v1/push/web-key`), registers the subscription with a fresh push
+  key, keeps the access token in the `PushSession` fresh, and tells the worker which database to open;
+  a click on a notification focuses an open window or opens `/?conversation_id=<id>`.
 - iOS caveat: an NSE must show every notification it receives, unless the app has Apple's
   `com.apple.developer.usernotifications.filtering` entitlement. Threema has it (its NSE entitlements
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,
@@ -520,8 +523,11 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
    with the record ID as associated data, so records can't be swapped or moved unnoticed. Opening the
    database with another key fails on the first record.
 4. **Where the database key lives:** wrapped (AES-256-GCM) by a **non-extractable Web Crypto key**,
-   both stored in the same IndexedDB database. Scripts, including the app's own, can use the wrapping
-   key but can never read its bytes.
+   both stored in the same IndexedDB database. The wrapping key's own bytes can never be read by a
+   script, but any script of the origin can *use* it: unwrapping the database key is one
+   `crypto.subtle.decrypt` call that returns the raw key. The wrapping only protects the key at rest
+   (a copy of the IndexedDB files without the browser's key store); it does not hide it from code
+   running in the page.
 
 **Why a non-extractable key and not the passkey PRF or a passphrase:** the service worker must open
 the store without a user gesture to decrypt a push and show a notification with a preview (§7). A key
@@ -534,11 +540,25 @@ What this protects, and what it doesn't:
 | Attacker                                      | Protected                                                                               |
 |-----------------------------------------------|-----------------------------------------------------------------------------------------|
 | Copy of the whole browser profile             | No: the browser keeps the wrapping key's bytes in the profile                           |
-| Injected script on the origin (XSS)           | Can't take the key away for offline use; can read data while it runs, as in any web app |
+| Injected script on the origin (XSS)           | No: it can unwrap the database key, copy it with all records and decrypt them offline, for good. Same for the wasm memory (decrypted cache, MLS state, device key) |
 | Other origins, extensions without host access | Yes (same-origin policy)                                                                |
-| Server                                        | Yes (nothing leaves the browser)                                                        |
+| Server                                        | Only as far as the web client's code is trustworthy: the server serves that code (§9.3) |
 
-The store is therefore as strong as the browser profile, like the browser's saved passwords.
+The store is therefore as strong as the browser profile *and* as the code running in the page. The
+mitigations are about keeping foreign script out (§9.3 and the policy below), not about hiding the
+key from script that got in. For people who need more, the desktop and mobile apps do not take their
+code from the server.
+
+**What keeps script out of the web client:** no `innerHTML` for user content (messages render from a
+typed tree, links only for `http(s)`); a Content-Security-Policy without inline scripts or styles
+(the loader is an external file and dynamic styles go through the CSSOM) and with `connect-src`
+limited to the app's own origin, the identity provider and the SFU, so injected script cannot send
+data elsewhere (`teamcraft-server` builds the policy from its configuration and refuses an invalid
+one at startup); `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'none'`. Trusted Types
+(`require-trusted-types-for 'script'`) would stop DOM XSS regressions as well, but the UI framework
+builds static markup through `innerHTML` and the service worker registers from a string URL, so the
+client does not start under it yet; a deployment can add the directive to `web.content_security_policy`
+once the client has a policy.
 
 The design leaves room for a stricter mode: `IndexedDbStore::open` takes any 256-bit key, so a
 deployment can derive it from the passkey PRF (§6.2) instead, at the cost of push previews. Choosing
@@ -554,6 +574,33 @@ browser, the Keystore key can't be read even with a copy of the app's data direc
 needs the device. No user authentication is required for the key, so push wake-ups (§7) can open
 the store while the screen is locked; the wrapped key is excluded from backups, so a restored
 backup can't be opened elsewhere.
+
+### 9.3 Web client integrity (implemented)
+
+The server serves the web client's code, so a compromised server could serve a client that leaks
+everything (§9.1). Signing the releases narrows this to what the operator controls:
+
+- **Release manifest.** `scripts/sign-web-release.sh` (run on the machine that holds the release key,
+  not on the server) writes `release.json`: every file of the bundle with its SHA-256, and an Ed25519
+  signature over `teamcraft-web-release-v1\n` + the canonical JSON of `{version, files}` (sorted keys).
+  It also pins the release public key into `sw.js`. The files include the Rust half of the service
+  worker (`teamcraft-web-sw_bg.wasm`).
+- **Verifying service worker.** On install and on every update `sw.js` fetches `release.json`,
+  checks the signature against the pinned key, fetches every listed file, compares the hashes and only
+  then stores the files in a versioned cache and activates. The app is served from that cache, never
+  from the network. An update that does not verify is dropped: the previous verified version keeps
+  running and the pages are told, so the UI warns (and shows the key's fingerprint on the About
+  screen). A worker the browser stopped restores what it verified from a cache before answering.
+- **Push code.** The service worker needs Rust for push (§7: open the sealed wake-up, read the store,
+  build the notification). A worker cannot verify scripts it loads with `importScripts`, so
+  `scripts/finish-sw.sh` (a Trunk hook) inlines the JS glue into `sw.js`, and the worker reads the wasm
+  only from the verified cache, where the manifest pins its hash. A build without a pinned key (development)
+  loads it from the network and says it is unsigned.
+- **Limits.** The browser fetches `sw.js` itself on update checks, outside the worker's control, so a
+  server that replaces `sw.js` defeats the check, and so does the very first visit (trust on first
+  use). The check protects returning users against a changed or partly replaced bundle, and gives
+  auditors a signed list of what a release is. People who need more use the desktop and mobile apps,
+  which do not take their code from the server.
 
 ## 10. Search
 

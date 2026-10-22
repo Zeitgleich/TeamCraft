@@ -67,6 +67,15 @@ pub fn Sidebar() -> impl IntoView {
         <h2 class="space-name" translate="no">
           {move || space_name.get().unwrap_or_default()}
         </h2>
+        <button class="icon-btn" aria-label=move || i18n.t("browse-title") title=move || i18n.t("browse-title") on:click=move |_| state.overlay.set(Overlay::BrowseChannels(state.space.get_untracked()))>
+          <Icon name=IconName::List />
+        </button>
+        <button class="icon-btn" aria-label=move || i18n.t("channel-new-title") title=move || i18n.t("channel-new-title") on:click=move |_| state.overlay.set(Overlay::NewChannel(state.space.get_untracked()))>
+          <Icon name=IconName::Plus />
+        </button>
+        <button class="icon-btn" aria-label=move || i18n.t("space-settings-title") title=move || i18n.t("space-settings-title") on:click=move |_| state.overlay.set(Overlay::SpaceSettings(state.space.get_untracked()))>
+          <Icon name=IconName::Sliders />
+        </button>
       </div>
       <button class="jump-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
         <Icon name=IconName::Search />
@@ -100,6 +109,15 @@ pub fn Sidebar() -> impl IntoView {
           </button>
         }
       })}
+      <button
+        class="sb-item"
+        class:current=move || state.view.get() == MainView::Saved
+        aria-current=move || (state.view.get() == MainView::Saved).then_some("page")
+        on:click=move |_| state.open_saved()
+      >
+        <Icon name=IconName::Bookmark />
+        <span class="sb-name">{move || i18n.t("sidebar-saved")}</span>
+      </button>
       <button
         class="sb-item"
         class:current=move || state.view.get() == MainView::Search

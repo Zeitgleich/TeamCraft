@@ -6,7 +6,7 @@
 //! cargo test -p teamcraft-desktop --features integration -- --ignored serve_dev_bridge --nocapture
 //! ```
 //!
-//! `dev/bridge-shim.js` implements `window.__TAURI__` on top of it. Dev tool only: no authentication,
+//! `dev/bridge-shim.js` implements `window.__TAURI_INTERNALS__` on top of it. Dev tool only: no authentication,
 //! listens on loopback, and the core's database key is a fixed test key.
 // Test-only module: a failing step should abort with a clear message.
 // The progress lines are the point of this hand-run tool.
@@ -338,11 +338,11 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       .runtime
       .approval_start(args["code"].as_str().unwrap_or("").to_owned())
       .await
-      .map(Value::String),
+      .map(|()| Value::Null),
     "core_approval_confirm" => bridge
       .alice
       .runtime
-      .approval_confirm()
+      .approval_confirm(args["short_code"].as_str().unwrap_or("").to_owned())
       .await
       .map(|()| Value::Null),
     "core_approval_cancel" => {

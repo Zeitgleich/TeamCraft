@@ -3,20 +3,21 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use teamcraft_core::api::{HttpGateway, HttpServerApi};
+use teamcraft_core::api::{GatewayConnection, HttpGateway, HttpServerApi};
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_proto::{ConversationId, ThreadId, UserId};
+use teamcraft_proto::{ConversationId, GatewayClientMessage, ThreadId, UserId};
 
 use crate::stack::Stack;
 use crate::tokens::UserTokens;
 
 pub type DevClient = Client<HttpServerApi<UserTokens>, Arc<MemoryStore>>;
 
-const PASSPHRASE: &str = "e2e recovery passphrase";
+/// The recovery passphrase every test account uses (also typed into the web client).
+pub const PASSPHRASE: &str = "e2e recovery passphrase";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Peer {
@@ -68,6 +69,24 @@ impl Peer {
       .pump(&mut self.gateway)
       .await
       .unwrap_or_else(|error| panic!("{} pumps its gateway: {error}", self.name));
+  }
+
+  /// Keeps the gateway session alive (the server closes connections without heartbeats).
+  pub async fn heartbeat(&mut self) {
+    let _ = self.gateway.send(&GatewayClientMessage::Heartbeat).await;
+  }
+
+  /// Like [`Self::pump`], but reconnects when the server closed the connection for lack of
+  /// heartbeats (a peer idles while a browser test drives a page).
+  pub async fn pump_reconnecting(&mut self) {
+    if self.client.pump(&mut self.gateway).await.is_err() {
+      let (gateway, _) = self
+        .client
+        .connect_gateway()
+        .await
+        .unwrap_or_else(|error| panic!("{} reconnects its gateway: {error}", self.name));
+      self.gateway = gateway;
+    }
   }
 
   /// Pumps the gateway until `done` holds; fails after 30 s.

@@ -7,11 +7,20 @@ use leptos::prelude::*;
 use crate::admin::AdminSection;
 use crate::backend::Backend;
 use crate::calls::CallState;
-use crate::model::{Conversation, ConversationId, SpaceId, ThreadId, User, UserId, id_from_raw};
+use crate::model::{Conversation, ConversationId, MessageId, SpaceId, ThreadId, User, UserId, id_from_raw};
 use crate::reactive::get_if_observed;
 use crate::sections::build_sections;
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
+
+/// A message the user is replying to with a quote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyTarget {
+  pub conversation: ConversationId,
+  pub message: MessageId,
+  pub author_name: String,
+  pub excerpt: String,
+}
 
 /// What fills the main column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +32,8 @@ pub enum MainView {
   Admin(AdminSection),
   /// Message search; the query lives in [`AppState::search_query`].
   Search,
+  /// Messages the user saved for later.
+  Saved,
   /// Scheduled and instant meetings (signed-in builds).
   Meetings,
 }
@@ -36,6 +47,10 @@ pub enum SidePanel {
     thread: ThreadId,
   },
   Members,
+  /// The pinned messages of the open conversation.
+  Pins,
+  /// Files shared in the open conversation.
+  Files,
 }
 
 /// Modal and popover visibility.
@@ -57,6 +72,15 @@ pub enum Overlay {
   VerifyContact(UserId),
   /// The dialog that schedules a meeting.
   ScheduleMeeting,
+  /// Pick a conversation to forward a message to.
+  Forward(ConversationId, MessageId),
+  NewSpace,
+  NewChannel(SpaceId),
+  BrowseChannels(SpaceId),
+  ChannelSettings(ConversationId),
+  SpaceSettings(SpaceId),
+  /// The images of a conversation, starting at the one in this message.
+  Gallery(ConversationId, MessageId),
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +98,8 @@ pub struct AppState {
   /// The login waiting for the user's approval, shown while the overlay is `DeviceApproval`.
   pub device_prompt: RwSignal<Option<DeviceApproval>>,
   /// Bumped when the composer sent a message, so the feed scrolls to it.
+  /// The message the composer quotes in its next message.
+  pub reply_target: RwSignal<Option<ReplyTarget>>,
   pub jump_to_latest: RwSignal<u64>,
   /// A request to scroll a conversation's feed to a message index (jump to date).
   pub jump_to_index: RwSignal<Option<(ConversationId, usize)>>,
@@ -97,6 +123,7 @@ impl AppState {
       search_query: RwSignal::new(String::new()),
       call: CallState::new(),
       device_prompt: RwSignal::new(None),
+      reply_target: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
       settings,
@@ -129,7 +156,9 @@ impl AppState {
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),
-      MainView::Threads | MainView::Admin(_) | MainView::Search | MainView::Meetings => None,
+      MainView::Threads | MainView::Admin(_) | MainView::Search | MainView::Meetings | MainView::Saved => {
+        None
+      },
     }
   }
 
@@ -182,6 +211,12 @@ impl AppState {
       self.search_query.set(query.to_owned());
     }
     self.view.set(MainView::Search);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  pub fn open_saved(&self) {
+    self.view.set(MainView::Saved);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
   }

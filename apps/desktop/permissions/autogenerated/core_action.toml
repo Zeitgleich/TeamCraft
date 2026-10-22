@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-action"
+description = "Enables the core_action command without any pre-configured scope."
+commands.allow = ["core_action"]
+
+[[permission]]
+identifier = "deny-core-action"
+description = "Denies the core_action command without any pre-configured scope."
+commands.deny = ["core_action"]

@@ -1,8 +1,12 @@
 use leptos::prelude::*;
+use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
+use teamcraft_proto::HistoryPolicy;
 
 use crate::clock::{format_time, format_time_seconds, local_day};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::file_views::{LinkPreviewCard, MessageFiles};
 use crate::components::icons::{Icon, IconName};
+use crate::components::message_actions::MessageMenu;
 use crate::components::rich_text::RichText;
 use crate::i18n::use_i18n;
 use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, thread_id_of};
@@ -79,7 +83,33 @@ fn system_line(
   let name = maybe_author.map(|user| user.display_name).unwrap_or_default();
   let event = event.clone();
   let time = format_time(message.sent_at, locale);
+  let (conversation, message_id) = (message.conversation, message.id);
+  // Archive, privacy and membership changes come from the core as workspace events.
+  let workspace_text = Memo::new(move |_| {
+    state.read(|backend| {
+      let extras = backend
+        .message_extras(conversation, &[message_id])
+        .into_iter()
+        .find(|extras| extras.message == message_id)?;
+      workspace_event_text(&extras.maybe_workspace_event?, |user| {
+        backend
+          .user(user)
+          .map(|user| user.display_name)
+          .unwrap_or_default()
+      })
+    })
+  });
   view! {
+    {move || {
+      workspace_text.get().map(|(key, args)| {
+        let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
+        view! {
+          <div class="msg msg-system" tabindex="-1" data-nav="row">
+            <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
+          </div>
+        }
+      })
+    }}
     {move || {
       state
         .settings
@@ -129,6 +159,15 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     .map(|user| user.display_name.clone())
     .unwrap_or_default();
   let aria_label = format!("{author_name}, {time}");
+  // Replies, pins, history and the rest come from the backend per visible message.
+  let extras = Memo::new(move |_| {
+    state
+      .read(|backend| backend.message_extras(conversation, &[message_id]))
+      .into_iter()
+      .find(|extras| extras.message == message_id)
+  });
+  let is_editing = RwSignal::new(false);
+  let is_history_open = RwSignal::new(false);
 
   let gutter = match (is_grouped, author.clone()) {
     (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
@@ -158,8 +197,106 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
   });
 
   let edited = message.is_edited.then(|| {
-    view! { <span class="edited">{move || i18n.t("message-edited")}</span> }
+    view! {
+      <button
+        class="edited link-btn"
+        aria-expanded=move || is_history_open.get().to_string()
+        on:click=move |_| is_history_open.update(|open| *open = !*open)
+      >
+        {move || i18n.t("message-edited")}
+      </button>
+    }
   });
+  let history = move || {
+    (is_history_open.get() && !extras.get().is_none_or(|extras| extras.edits.is_empty())).then(|| {
+      let edits = extras.get().map(|extras| extras.edits).unwrap_or_default();
+      view! {
+        <ol class="edit-history" aria-label=move || i18n.t("message-history")>
+          {edits
+            .into_iter()
+            .map(|edit| {
+              view! {
+                <li>
+                  <time>{crate::clock::format_date_time(edit.replaced_at, locale)}</time>
+                  <span translate="no">{edit.body}</span>
+                </li>
+              }
+            })
+            .collect_view()}
+        </ol>
+      }
+    })
+  };
+  let quote = move || {
+    extras.get().and_then(|extras| extras.maybe_reply).map(|reply| {
+      let name = state
+        .read(|backend| backend.user(reply.author))
+        .map(|user| user.display_name)
+        .unwrap_or_default();
+      view! {
+        <blockquote class="msg-quote">
+          <span class="quote-author" translate="no">{name}</span>
+          <span class="quote-text" translate="no">
+            {if reply.excerpt.is_empty() { i18n.t("quote-unavailable") } else { reply.excerpt }}
+          </span>
+        </blockquote>
+      }
+    })
+  };
+  let forwarded = move || {
+    extras
+      .get()
+      .and_then(|extras| extras.maybe_forwarded)
+      .map(|from| {
+        let source = from.maybe_conversation_name.unwrap_or_default();
+        view! {
+          <div class="msg-forwarded">
+            <Icon name=IconName::Send />
+            <span translate="no">
+              {i18n.t_with("forwarded-from", &[("name", &from.author_name), ("conversation", &source)])}
+            </span>
+          </div>
+        }
+      })
+  };
+  let badges = move || {
+    extras.get().map(|extras| {
+      view! {
+        {extras.is_pinned.then(|| view! { <span class="badge badge-pin">{move || i18n.t("badge-pinned")}</span> })}
+        {extras.is_saved.then(|| view! { <span class="badge badge-saved">{move || i18n.t("badge-saved")}</span> })}
+        {match extras.priority {
+          MessagePriority::Normal => ().into_any(),
+          MessagePriority::Important => view! { <span class="badge badge-important">{move || i18n.t("priority-important")}</span> }.into_any(),
+          MessagePriority::Urgent => view! { <span class="badge badge-urgent">{move || i18n.t("priority-urgent")}</span> }.into_any(),
+        }}
+      }
+    })
+  };
+  let attachments = move || {
+    extras.get().map(|extras| {
+      view! {
+        {(!extras.files.is_empty()).then(|| view! { <MessageFiles files=extras.files.clone() /> })}
+        {extras.maybe_link_preview.clone().map(|preview| view! { <LinkPreviewCard preview=preview /> })}
+      }
+    })
+  };
+  let acknowledge = move || {
+    extras
+      .get()
+      .filter(|extras| extras.wants_acknowledgement && !is_mine)
+      .map(|extras| {
+        let has_acknowledged = extras.acknowledged_by.contains(&me.id);
+        view! {
+          <button
+            class="btn btn-small"
+            prop:disabled=has_acknowledged
+            on:click=move |_| state.write(|backend| backend.acknowledge(conversation, message_id))
+          >
+            {move || if has_acknowledged { i18n.t("ack-done") } else { i18n.t("ack-confirm") }}
+          </button>
+        }
+      })
+  };
 
   let reaction_chips = (!reactions.is_empty()).then(|| {
     let chips: Vec<_> = reactions
@@ -194,6 +331,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     }
   });
 
+  let message_for_menu = message.clone();
   let actions = view! {
     <div class="msg-actions" role="toolbar" aria-label=move || i18n.t("message-actions")>
       <button
@@ -216,7 +354,62 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
           </button>
         }
       })}
+      <MessageMenu
+        message=message_for_menu
+        extras=Signal::derive(move || extras.get())
+        is_mine=is_mine
+        in_thread=in_thread
+        on_edit=Callback::new(move |()| is_editing.set(true))
+      />
     </div>
+  };
+
+  let body_text = message.body.clone();
+  let edit_draft = RwSignal::new(String::new());
+  let start_edit_text = body_text.clone();
+  Effect::new(move |_| {
+    if is_editing.get() {
+      edit_draft.set(start_edit_text.clone());
+    }
+  });
+  let save_edit = move || {
+    let text = edit_draft.get_untracked();
+    if !text.trim().is_empty() {
+      state.write(|backend| backend.edit_message(conversation, message_id, &text));
+    }
+    is_editing.set(false);
+  };
+  let rendered_body = {
+    let body_text = body_text.clone();
+    move || {
+      if extras.get().is_some_and(|extras| extras.is_deleted) {
+        return view! { <em class="msg-deleted">{i18n.t("message-deleted")}</em> }.into_any();
+      }
+      if is_editing.get() {
+        return view! {
+          <div class="msg-edit">
+            <textarea
+              class="input"
+              rows="3"
+              aria-label=i18n.t("action-edit")
+              prop:value=move || edit_draft.get()
+              on:input=move |ev| edit_draft.set(event_target_value(&ev))
+              on:keydown=move |ev| match ev.key().as_str() {
+                "Enter" if !ev.shift_key() => { ev.prevent_default(); save_edit(); },
+                "Escape" => is_editing.set(false),
+                _ => {},
+              }
+            ></textarea>
+            <div class="msg-edit-actions">
+              <button class="btn btn-small" on:click=move |_| is_editing.set(false)>{i18n.t("cancel")}</button>
+              <button class="btn btn-small btn-primary" on:click=move |_| save_edit()>{i18n.t("save")}</button>
+            </div>
+          </div>
+        }
+        .into_any();
+      }
+      view! { <RichText body=body_text.clone() me=me.username.clone() /> }.into_any()
+    }
   };
 
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
@@ -237,14 +430,41 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     >
       <div class="msg-gutter">{gutter}</div>
       <div class="msg-main">
-        {header} <div class="msg-body">
-          <RichText body=message.body.clone() me=me.username />
+        {header} {forwarded} {quote} <div class="msg-body">
+          {rendered_body}
           {edited}
-        </div> {reaction_chips} {replies}
+          {badges}
+        </div> {attachments} {history} {acknowledge} {reaction_chips} {replies}
       </div>
       {actions}
     </div>
   }
+}
+
+/// The i18n key and arguments that describe a workspace event; `None` for events not worth a line.
+fn workspace_event_text(
+  event: &WorkspaceEvent,
+  name_of: impl Fn(crate::model::UserId) -> String,
+) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+  Some(match event {
+    WorkspaceEvent::MemberAdded { user, by, history } => (
+      match history {
+        HistoryPolicy::Full => "ws-member-added-history",
+        _ => "ws-member-added",
+      },
+      vec![("name", name_of(*user)), ("by", name_of(*by))],
+    ),
+    WorkspaceEvent::MemberRemoved { user, by } => (
+      "ws-member-removed",
+      vec![("name", name_of(*user)), ("by", name_of(*by))],
+    ),
+    WorkspaceEvent::Archived { by } => ("ws-archived", vec![("by", name_of(*by))]),
+    WorkspaceEvent::Unarchived { by } => ("ws-unarchived", vec![("by", name_of(*by))]),
+    WorkspaceEvent::MadePrivate { by } => ("ws-made-private", vec![("by", name_of(*by))]),
+    WorkspaceEvent::MadePublic { by } => ("ws-made-public", vec![("by", name_of(*by))]),
+    WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
+    WorkspaceEvent::Unknown => return None,
+  })
 }
 
 fn is_grouped(message: &Message, maybe_prev: Option<&Message>) -> bool {
@@ -283,6 +503,32 @@ mod tests {
     assert!(date_divider(&first, None).is_some());
     assert!(date_divider(&message(2, 1, 1000), Some(&first)).is_none());
     assert!(date_divider(&message(3, 1, 86_400_000 + 1), Some(&first)).is_some());
+  }
+
+  #[test]
+  fn workspace_events_name_who_did_what() {
+    let by = id_from_raw::<UserId>(1);
+    let user = id_from_raw::<UserId>(2);
+    let name_of = |id: UserId| {
+      if id == by {
+        "Ada".to_owned()
+      } else {
+        "Sam".to_owned()
+      }
+    };
+    let added = WorkspaceEvent::MemberAdded {
+      user,
+      by,
+      history: HistoryPolicy::Full,
+    };
+    assert_eq!(
+      workspace_event_text(&added, name_of),
+      Some((
+        "ws-member-added-history",
+        vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
+      ))
+    );
+    assert_eq!(workspace_event_text(&WorkspaceEvent::Unknown, name_of), None);
   }
 
   fn message(id: u64, author: u64, sent_at: i64) -> Message {

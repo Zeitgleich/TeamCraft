@@ -92,6 +92,8 @@ pub trait PushSender: Send + Sync {
 pub struct PushDispatcher {
   senders: HashMap<&'static str, Arc<dyn PushSender>>,
   permits: Arc<Semaphore>,
+  /// The VAPID public key browsers subscribe with (`applicationServerKey`), if Web Push is on.
+  maybe_web_public_key: Option<String>,
 }
 
 impl PushDispatcher {
@@ -99,7 +101,18 @@ impl PushDispatcher {
     Self {
       senders: HashMap::new(),
       permits: Arc::new(Semaphore::new(max_concurrent_sends.max(1))),
+      maybe_web_public_key: None,
     }
+  }
+
+  /// Publishes the VAPID public key to browsers (`GET /api/v1/push/web-key`).
+  pub fn with_web_public_key(mut self, public_key: String) -> Self {
+    self.maybe_web_public_key = Some(public_key);
+    self
+  }
+
+  pub fn web_public_key(&self) -> Option<&str> {
+    self.maybe_web_public_key.as_deref()
   }
 
   /// Registers the sender for a provider (replacing a previous one).

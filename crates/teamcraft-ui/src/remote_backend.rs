@@ -14,15 +14,23 @@ use std::time::Duration;
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use serde_json::json;
-use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::actions::{
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
+  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+};
+use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
   ThreadSummary, User, UserId,
 };
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
+  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus,
+  MessageWindow,
 };
+use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
+use teamcraft_proto::{CategoryId, HistoryPolicy, WebPushKeyResponse};
 
+use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen};
 
 /// Messages fetched per request. Feeds are read in 2-row windows by the list, so pages keep the
@@ -63,18 +71,37 @@ pub async fn change_passphrase(passphrase: &str) -> Result<(), String> {
   .await
 }
 
-/// Existing device: joins the link of a new device; returns the short code to compare.
-pub async fn approval_start(code: &str) -> Result<String, String> {
+/// Existing device: joins the link of a new device. The short code appears only on the new device.
+pub async fn approval_start(code: &str) -> Result<(), String> {
   call("core_approval_start", &json!({ "code": code })).await
 }
 
-/// Existing device: the short codes match; hands the keys to the new device.
-pub async fn approval_confirm() -> Result<(), String> {
-  call("core_approval_confirm", &json!({})).await
+/// Existing device: the user typed the short code of the new device; the core checks it and then
+/// hands the keys over.
+pub async fn approval_confirm(short_code: &str) -> Result<(), String> {
+  call("core_approval_confirm", &json!({ "short_code": short_code })).await
 }
 
 pub async fn approval_cancel() -> Result<(), String> {
   call("core_approval_cancel", &json!({})).await
+}
+
+/// Browser: subscribes this browser to Web Push with the server's key, so the service worker can show
+/// notifications while no page is open.
+pub async fn enable_web_push(auth: &dyn Authenticator) -> Result<(), String> {
+  let reply = auth
+    .api_get("/api/v1/push/web-key")
+    .await
+    .map_err(|error| error.to_string())?;
+  if reply.status != 200 {
+    return Err(format!("the server answered HTTP {}", reply.status));
+  }
+  let key: WebPushKeyResponse =
+    serde_json::from_str(&reply.body).map_err(|error| format!("unreadable push key: {error}"))?;
+  let Some(vapid_key) = key.maybe_public_key else {
+    return Err("this server does not send Web Push".to_owned());
+  };
+  call("core_enable_push", &json!({ "vapid_key": vapid_key })).await
 }
 
 pub async fn stop_core() -> Result<(), String> {
@@ -102,12 +129,22 @@ enum LoadKey {
 
 type ChangeNotifier = Rc<dyn Fn()>;
 
+/// The answer to one query, kept so the synchronous trait can read it. A change in the core marks
+/// answers stale; they are shown as they are until the next read has fetched fresh ones.
+#[derive(Default)]
+struct Slot {
+  maybe_answer: Option<ChatAnswer>,
+  is_loading: bool,
+  is_stale: bool,
+}
+
 #[derive(Clone)]
 pub struct RemoteChat {
   mirror: Rc<RefCell<Mirror>>,
   notify: Rc<RefCell<Option<ChangeNotifier>>>,
   refresh_queued: Rc<Cell<bool>>,
   maybe_error: Rc<RefCell<Option<String>>>,
+  answers: Rc<RefCell<HashMap<String, Slot>>>,
 }
 
 impl RemoteChat {
@@ -124,10 +161,52 @@ impl RemoteChat {
       notify: Rc::new(RefCell::new(None)),
       refresh_queued: Rc::new(Cell::new(false)),
       maybe_error: Rc::new(RefCell::new(None)),
+      answers: Rc::new(RefCell::new(HashMap::new())),
     };
     let listener = backend.clone();
     listen(CORE_CHANGED_EVENT, move || listener.queue_refresh());
     Ok(backend)
+  }
+
+  /// The answer to a query, or `None` while it is being fetched (the UI re-reads when it arrives).
+  /// A stale answer is returned as it is while a fresh one is fetched.
+  fn ask(&self, query: ChatQuery) -> Option<ChatAnswer> {
+    let key = serde_json::to_string(&query).ok()?;
+    let (existing, must_load) = {
+      let mut answers = self.answers.borrow_mut();
+      let slot = answers.entry(key.clone()).or_default();
+      let must_load = !slot.is_loading && (slot.maybe_answer.is_none() || slot.is_stale);
+      if must_load {
+        slot.is_loading = true;
+      }
+      (slot.maybe_answer.clone(), must_load)
+    };
+    if must_load {
+      let backend = self.clone();
+      spawn_local(async move {
+        let outcome = call::<ChatAnswer>("core_query", &json!({ "query": query })).await;
+        {
+          let mut answers = backend.answers.borrow_mut();
+          let slot = answers.entry(key).or_default();
+          slot.is_loading = false;
+          // After a failure the old answer stays and nothing is asked again until something changes.
+          slot.is_stale = false;
+          match outcome {
+            Ok(answer) => slot.maybe_answer = Some(answer),
+            Err(error) => tracing::warn!(%error, "a query failed"),
+          }
+        }
+        backend.changed();
+      });
+    }
+    existing
+  }
+
+  /// Everything fetched so far may be out of date.
+  fn mark_answers_stale(&self) {
+    for slot in self.answers.borrow_mut().values_mut() {
+      slot.is_stale = true;
+    }
   }
 
   fn changed(&self) {
@@ -155,6 +234,7 @@ impl RemoteChat {
   async fn refresh(&self) {
     match call::<ChatSnapshot>("core_snapshot", &json!({})).await {
       Ok(snapshot) => {
+        self.mark_answers_stale();
         let pages: Vec<(ConversationId, usize)> = {
           let mut mirror = self.mirror.borrow_mut();
           for (conversation, total) in &snapshot.message_counts {
@@ -260,6 +340,7 @@ impl RemoteChat {
           *backend.maybe_error.borrow_mut() = Some(error);
         },
       }
+      backend.mark_answers_stale();
       backend.changed();
     });
   }
@@ -284,6 +365,251 @@ impl ChatBackend for RemoteChat {
 
   fn set_activity(&self, is_idle: bool) {
     self.act(ChatAction::SetActivity { is_idle });
+  }
+
+  fn search_backend(&self) -> Option<&dyn SearchBackend> {
+    Some(self)
+  }
+
+  fn send_message(&self, message: OutgoingMessage) {
+    self.act(ChatAction::SendMessage { message });
+  }
+
+  fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
+    match self.ask(ChatQuery::MessageExtras {
+      conversation,
+      messages: messages.to_vec(),
+    }) {
+      Some(ChatAnswer::MessageExtras { extras }) => extras,
+      _ => Vec::new(),
+    }
+  }
+
+  fn edit_message(&self, conversation: ConversationId, message: MessageId, body: &str) {
+    self.act(ChatAction::EditMessage {
+      conversation,
+      message,
+      body: body.to_owned(),
+    });
+  }
+
+  fn delete_message(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::DeleteMessage {
+      conversation,
+      message,
+    });
+  }
+
+  fn forward_message(&self, from: ConversationId, message: MessageId, to: ConversationId, comment: &str) {
+    self.act(ChatAction::ForwardMessage {
+      from,
+      message,
+      to,
+      comment: comment.to_owned(),
+    });
+  }
+
+  fn set_pinned(&self, conversation: ConversationId, message: MessageId, is_pinned: bool) {
+    self.act(ChatAction::SetPinned {
+      conversation,
+      message,
+      is_pinned,
+    });
+  }
+
+  fn pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {
+    match self.ask(ChatQuery::PinnedMessages { conversation }) {
+      Some(ChatAnswer::Messages { messages }) => messages,
+      _ => Vec::new(),
+    }
+  }
+
+  fn set_saved(&self, conversation: ConversationId, message: MessageId, is_saved: bool) {
+    self.act(ChatAction::SetSaved {
+      conversation,
+      message,
+      is_saved,
+    });
+  }
+
+  fn saved_items(&self) -> Vec<SavedItem> {
+    match self.ask(ChatQuery::SavedItems) {
+      Some(ChatAnswer::SavedItems { items }) => items,
+      _ => Vec::new(),
+    }
+  }
+
+  fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
+    match self.ask(ChatQuery::Permalink {
+      conversation,
+      message,
+    }) {
+      Some(ChatAnswer::Link { maybe_link }) => maybe_link,
+      _ => None,
+    }
+  }
+
+  fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
+    match self.ask(ChatQuery::ResolvePermalink {
+      link: link.to_owned(),
+    }) {
+      Some(ChatAnswer::PermalinkTarget { maybe_target }) => maybe_target,
+      _ => None,
+    }
+  }
+
+  fn mark_unread(&self, conversation: ConversationId, from: MessageId) {
+    self.act(ChatAction::MarkUnread { conversation, from });
+  }
+
+  fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
+    match self.ask(ChatQuery::FirstUnread { conversation }) {
+      Some(ChatAnswer::Message { maybe_message }) => maybe_message,
+      _ => None,
+    }
+  }
+
+  fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
+    match self.ask(ChatQuery::Draft {
+      conversation,
+      maybe_thread,
+    }) {
+      Some(ChatAnswer::Draft { maybe_body }) => maybe_body,
+      _ => None,
+    }
+  }
+
+  fn set_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    self.act(ChatAction::SetDraft {
+      conversation,
+      maybe_thread,
+      body: body.to_owned(),
+    });
+  }
+
+  fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::Acknowledge {
+      conversation,
+      message,
+    });
+  }
+
+  fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
+    match self.ask(ChatQuery::ConversationFiles { conversation }) {
+      Some(ChatAnswer::Files { files }) => files,
+      _ => Vec::new(),
+    }
+  }
+
+  fn download_file(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::DownloadFile {
+      conversation,
+      message,
+    });
+  }
+
+  fn create_share_link(&self, conversation: ConversationId, message: MessageId, options: ShareLinkOptions) {
+    self.act(ChatAction::CreateShareLink {
+      conversation,
+      message,
+      options,
+    });
+  }
+
+  fn share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
+    match self.ask(ChatQuery::ShareLinks {
+      conversation,
+      message,
+    }) {
+      Some(ChatAnswer::ShareLinks { links }) => links,
+      _ => Vec::new(),
+    }
+  }
+
+  fn max_upload_bytes(&self) -> Option<u64> {
+    match self.ask(ChatQuery::MaxUploadBytes) {
+      Some(ChatAnswer::Bytes { maybe_bytes }) => maybe_bytes,
+      _ => None,
+    }
+  }
+
+  fn create_space(&self, space: NewSpace) {
+    self.act(ChatAction::CreateSpace { space });
+  }
+
+  fn update_space(&self, space: SpaceId, changes: SpaceChanges) {
+    self.act(ChatAction::UpdateSpace { space, changes });
+  }
+
+  fn create_channel_with(&self, channel: NewChannel) {
+    self.act(ChatAction::CreateChannelWith { channel });
+  }
+
+  fn update_channel(&self, conversation: ConversationId, changes: ChannelChanges) {
+    self.act(ChatAction::UpdateChannel {
+      conversation,
+      changes,
+    });
+  }
+
+  fn browse_channels(&self, space: SpaceId) -> Vec<BrowsableChannel> {
+    match self.ask(ChatQuery::BrowseChannels { space }) {
+      Some(ChatAnswer::Channels { channels }) => channels,
+      _ => Vec::new(),
+    }
+  }
+
+  fn join_channel(&self, conversation: ConversationId) {
+    self.act(ChatAction::JoinChannel { conversation });
+  }
+
+  fn leave_channel(&self, conversation: ConversationId) {
+    self.act(ChatAction::LeaveChannel { conversation });
+  }
+
+  fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
+    match self.ask(ChatQuery::Categories { space }) {
+      Some(ChatAnswer::Categories { categories }) => categories,
+      _ => Vec::new(),
+    }
+  }
+
+  fn create_category(&self, space: SpaceId, name: &str) {
+    self.act(ChatAction::CreateCategory {
+      space,
+      name: name.to_owned(),
+    });
+  }
+
+  fn rename_category(&self, space: SpaceId, category: CategoryId, name: &str) {
+    self.act(ChatAction::RenameCategory {
+      space,
+      category,
+      name: name.to_owned(),
+    });
+  }
+
+  fn delete_category(&self, space: SpaceId, category: CategoryId) {
+    self.act(ChatAction::DeleteCategory { space, category });
+  }
+
+  fn add_member_with_history(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
+    self.act(ChatAction::AddMemberWithHistory {
+      conversation,
+      user,
+      history,
+    });
+  }
+
+  fn invite_to_space(&self, invite: SpaceInvite) {
+    self.act(ChatAction::InviteToSpace { invite });
+  }
+
+  fn has_external_people(&self, conversation: ConversationId) -> bool {
+    matches!(
+      self.ask(ChatQuery::HasExternalPeople { conversation }),
+      Some(ChatAnswer::Flag { value: true })
+    )
   }
 
   fn security_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {
@@ -474,5 +800,45 @@ impl ChatBackend for RemoteChat {
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.mirror.borrow_mut().snapshot.me.maybe_custom_status = maybe_status.clone();
     self.act(ChatAction::SetCustomStatus { maybe_status });
+  }
+}
+
+impl SearchBackend for RemoteChat {
+  fn search(&self, query: &ParsedQuery) -> SearchResults {
+    let raw = query
+      .tokens
+      .iter()
+      .map(|token| token.raw.as_str())
+      .collect::<Vec<_>>()
+      .join(" ");
+    match self.ask(ChatQuery::Search { query: raw }) {
+      Some(ChatAnswer::SearchResults { results }) => results,
+      _ => SearchResults::default(),
+    }
+  }
+
+  fn recent_mentions(&self) -> Vec<SearchHit> {
+    match self.ask(ChatQuery::RecentMentions) {
+      Some(ChatAnswer::SearchHits { hits }) => hits,
+      _ => Vec::new(),
+    }
+  }
+
+  fn saved_searches(&self) -> Vec<SavedSearch> {
+    match self.ask(ChatQuery::SavedSearches) {
+      Some(ChatAnswer::SavedSearches { searches }) => searches,
+      _ => Vec::new(),
+    }
+  }
+
+  fn save_search(&self, name: &str, query: &str) {
+    self.act(ChatAction::SaveSearch {
+      name: name.to_owned(),
+      query: query.to_owned(),
+    });
+  }
+
+  fn delete_saved_search(&self, id: u64) {
+    self.act(ChatAction::DeleteSavedSearch { id });
   }
 }
