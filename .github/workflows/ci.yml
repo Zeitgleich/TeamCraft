@@ -42,7 +42,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -95,7 +95,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -131,7 +131,7 @@ jobs:
   audio-processing:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
