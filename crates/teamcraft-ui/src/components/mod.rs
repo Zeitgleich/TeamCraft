@@ -9,6 +9,7 @@ pub mod admin_users;
 pub mod app;
 pub mod avatar;
 pub mod bookmarks;
+pub mod background_picker;
 pub mod bundle_banner;
 pub mod call_prejoin;
 pub mod call_screen;

@@ -237,7 +237,9 @@ effect-bookshelf = Bücherregal
 effect-sunrise = Sonnenaufgang
 effect-forest = Wald
 effect-upload = Bild hochladen
-effect-upload-soon = Eigene Hintergründe sind noch nicht verfügbar
+effect-upload-too-large = Dieses Bild ist größer als { $limit }.
+effect-upload-unreadable = Das Bild konnte nicht gelesen werden.
+effect-delete = Hintergrund { $name } löschen
 
 ## Eingehende Anrufe
 incoming-title = Eingehender Anruf
