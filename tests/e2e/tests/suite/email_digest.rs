@@ -22,7 +22,7 @@ async fn missed_mentions_arrive_as_one_content_free_mail_to_people_who_opted_in(
       "5",
     )
     .with_env("TEAMCRAFT_NOTIFICATIONS__EMAIL_DIGEST__MIN_INTERVAL_SECS", "120")
-    .with_env("TEAMCRAFT_NOTIFICATIONS__EMAIL_DIGEST__GRACE_SECS", "0")
+    .with_env("TEAMCRAFT_NOTIFICATIONS__EMAIL_DIGEST__GRACE_SECS", "2")
     .with_env(
       "TEAMCRAFT_NOTIFICATIONS__EMAIL_DIGEST__SCHEDULER_INTERVAL_SECS",
       "1",
