@@ -53,6 +53,8 @@ pub struct StaticToken(pub String);
 pub struct HttpServerApi<T> {
   client: reqwest::Client,
   base_url: String,
+  /// Why `base_url` is refused, checked once in [`HttpServerApi::new`].
+  maybe_insecure: Option<String>,
   tokens: T,
 }
 
@@ -63,14 +65,17 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     let client = super::tls::http_client();
     #[cfg(not(target_os = "android"))]
     let client = reqwest::Client::new();
+    let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
-      base_url: base_url.into().trim_end_matches('/').to_string(),
+      maybe_insecure: insecure_reason(&base_url),
+      base_url,
       tokens,
     }
   }
 
   fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
+    self.require_secure_transport()?;
     let token = self.tokens.access_token()?;
     Ok(
       self
@@ -108,6 +113,14 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
 
   fn gateway_url(&self) -> String {
     self.websocket_url("/api/v1/gateway")
+  }
+
+  /// Tokens and key material only travel over TLS; plain http only to a loopback dev server.
+  fn require_secure_transport(&self) -> Result<(), ApiError> {
+    match &self.maybe_insecure {
+      Some(reason) => Err(ApiError::InsecureServerUrl(reason.clone())),
+      None => Ok(()),
+    }
   }
 
   fn websocket_url(&self, path: &str) -> String {
@@ -609,15 +622,35 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   async fn connect_gateway(&self) -> Result<HttpGateway, ApiError> {
+    self.require_secure_transport()?;
     HttpGateway::connect(&self.gateway_url()).await
   }
 
   async fn connect_rendezvous(&self) -> Result<HttpRendezvous, ApiError> {
+    self.require_secure_transport()?;
     HttpRendezvous::connect(&self.websocket_url("/api/v1/rendezvous")).await
   }
 
   fn gateway_token(&self) -> Result<String, ApiError> {
     self.tokens.access_token()
+  }
+}
+
+/// `None` if `base_url` may carry tokens: `https://`, or `http://` to a loopback address.
+fn insecure_reason(base_url: &str) -> Option<String> {
+  let Ok(url) = url::Url::parse(base_url) else {
+    return Some(format!("{base_url:?} is not a URL"));
+  };
+  let is_loopback = match url.host() {
+    Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+    Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+    Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+    None => false,
+  };
+  match url.scheme() {
+    "https" => None,
+    "http" if is_loopback => None,
+    scheme => Some(format!("{scheme}:// to {}", url.host_str().unwrap_or(""))),
   }
 }
 
@@ -923,7 +956,50 @@ mod tests {
   }
 
   #[test]
+  fn only_https_or_loopback_http_carries_tokens() {
+    for allowed in [
+      "https://chat.example.com",
+      "http://127.0.0.1:8081",
+      "http://[::1]:8081",
+      "http://localhost:8080",
+    ] {
+      assert_eq!(insecure_reason(allowed), None, "{allowed}");
+    }
+    for refused in [
+      "http://chat.example.com",
+      "http://10.0.0.5",
+      "http://localhost.example.com",
+      "ftp://chat.example.com",
+      "chat.example.com",
+      "",
+    ] {
+      assert!(insecure_reason(refused).is_some(), "{refused}");
+    }
+  }
+
+  #[tokio::test]
+  async fn a_plain_http_server_gets_no_request_and_no_token() {
+    let api = HttpServerApi::new("http://chat.example.com", PanickingToken);
+    assert!(matches!(
+      api.get::<serde_json::Value>("/me").await,
+      Err(ApiError::InsecureServerUrl(_))
+    ));
+    assert!(matches!(
+      api.connect_gateway().await,
+      Err(ApiError::InsecureServerUrl(_))
+    ));
+  }
+
+  #[test]
   fn token_is_redacted() {
     assert!(!format!("{:?}", StaticToken("secret".into())).contains("secret"));
+  }
+
+  struct PanickingToken;
+
+  impl AccessTokenSource for PanickingToken {
+    fn access_token(&self) -> Result<String, ApiError> {
+      panic!("no token may be read for an insecure server");
+    }
   }
 }
