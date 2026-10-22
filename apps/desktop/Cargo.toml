@@ -1,0 +1,25 @@
+[package]
+name = "teamcraft-desktop"
+description = "Tauri 2 shell for the TeamCraft desktop client (macOS and Linux)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Leptos 0.8.2x and Tauri 2 need a newer compiler than the workspace baseline.
+rust-version = "1.88"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+anyhow = "1"
+
+[features]
+# Serve the embedded `dist` instead of the dev server URL. `cargo tauri build` enables it.
+custom-protocol = ["tauri/custom-protocol"]

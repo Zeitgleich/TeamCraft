@@ -1,0 +1,56 @@
+use leptos::prelude::*;
+
+use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::icons::{Icon, IconName};
+use crate::i18n::use_i18n;
+use crate::model::ConversationId;
+use crate::state::{SidePanel, use_app_state};
+
+#[component]
+pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let members = Memo::new(move |_| {
+    state.read(|backend| {
+      let ids = backend
+        .conversation(conversation)
+        .map(|conv| conv.member_ids)
+        .unwrap_or_default();
+      ids
+        .into_iter()
+        .filter_map(|id| backend.user(id))
+        .collect::<Vec<_>>()
+    })
+  });
+
+  view! {
+    <aside class="side-panel members-panel" aria-label=move || i18n.t("members-panel-label")>
+      <header class="panel-header">
+        <div class="panel-title">
+          <h2>{move || i18n.t("members-title")}</h2>
+          <span class="panel-subtitle">{move || i18n.t_count("members-count", members.get().len())}</span>
+        </div>
+        <button
+          class="icon-btn"
+          aria-label=move || i18n.t("close")
+          title=move || i18n.t("close")
+          on:click=move |_| state.panel.set(SidePanel::Closed)
+        >
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <ul class="member-list panel-scroll">
+        <For each=move || members.get() key=|user| (user.id, user.presence, user.maybe_custom_status.as_ref().map(|status| status.text.clone())) let:user>
+          <li class="member">
+            <Avatar user=user.clone() size=AvatarSize::Medium show_presence=true />
+            <span class="member-name" translate="no">
+              {user.display_name.clone()}
+            </span>
+            {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+            {user.maybe_custom_status.clone().map(|status| view! { <span title=status.text.clone()>{status.emoji}</span> })}
+          </li>
+        </For>
+      </ul>
+    </aside>
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "teamcraft-ui"
+description = "Leptos UI shared by the desktop (Tauri) and web clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Leptos 0.8.2x and Tauri 2 need a newer compiler than the workspace baseline.
+rust-version = "1.88"
+
+[lints]
+workspace = true
+
+[dependencies]
+leptos = { version = "0.8.22", features = ["csr"] }
+# Browser bindings: DOM access for focus, scroll measurement, storage and clipboard-free helpers.
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
+  "HtmlCollection", "KeyboardEvent", "MediaQueryList", "Node", "NodeList", "Storage", "Window",
+  "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator",
+] }
+# Fluent: the i18n format mandated by the project rules (English source + translations).
+fluent-bundle = "0.16"
+unic-langid = "0.9"
+tracing = "0.1"
+console_error_panic_hook = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
+tracing-web = "0.1"
