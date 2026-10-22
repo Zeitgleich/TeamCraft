@@ -2,12 +2,18 @@
 # **draft** GitHub release, which a maintainer reviews and publishes by hand.
 #
 # - Server and SFU images, multi-arch (amd64 + arm64, each built on a native runner), pushed to
-#   ghcr.io/<owner>/teamcraft-server and -sfu with the release version as tag, with SBOM and
-#   provenance attestations.
+#   ghcr.io/<owner>/teamcraft-server and -sfu: the version tag, X.Y and `latest` for releases, only
+#   the version for prereleases. Signed with cosign (keyless) and with a build provenance attestation.
 # - Desktop packages from desktop-release.yml (called, not copied), the web client bundle.
 # - Android APKs of both flavors: release builds (signed only when the upload key secrets exist,
-#   unsigned otherwise) and debug-signed builds for testers.
-# - SPDX SBOMs of the source tree and both images, image digests, SHA256SUMS over all files.
+#   `-unsigned` otherwise) and `-debug-signed` builds for testers.
+# - SBOMs (SPDX and CycloneDX) of the source tree and both images, image digests, SHA256SUMS, and a
+#   build provenance attestation for every file.
+# - Notes rendered from .github/release-notes.md: the CHANGELOG.md section, generated notes
+#   (.github/release.yml categories), install and verification instructions.
+#
+# A tag equal to the tree's version (v1.2.3) is a release; v1.2.3-rc.1 on the same tree is a candidate
+# that runs the same pipeline as a prerelease (scripts/check-versions.sh).
 name: Release
 
 on:
@@ -19,8 +25,8 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
+# Every job states what it needs.
+permissions: {}
 
 env:
   REGISTRY: ghcr.io
@@ -29,39 +35,23 @@ jobs:
   version:
     name: Version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
       image_owner: ${{ steps.version.outputs.image_owner }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      # The tag must match the workspace version, so packages, images and the tag never disagree.
-      - name: Tag matches the workspace version
+      # The tag must fit the versions in the tree (Cargo, desktop, Android, iOS) and CHANGELOG.md.
+      - name: Tag fits the versions in the tree
         id: version
         env:
           TAG: ${{ github.ref_name }}
           OWNER: ${{ github.repository_owner }}
         run: |
-          version="${TAG#v}"
-          workspace="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
-          desktop="$(sed -n 's/^  "version": "\(.*\)",/\1/p' apps/desktop/tauri.conf.json)"
-          android="$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' apps/android/app/build.gradle.kts)"
-          for found in "$workspace" "$desktop" "$android"; do
-            if [ "$found" != "$version" ]; then
-              echo "::error::tag $TAG does not match the versions in the tree (Cargo.toml $workspace, tauri.conf.json $desktop, Android $android)"
-              exit 1
-            fi
-          done
-          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
-            echo "::error::CHANGELOG.md has no section for $version"
-            exit 1
-          fi
-          case "$version" in *-*) is_prerelease=true ;; *) is_prerelease=false ;; esac
-          {
-            echo "version=$version"
-            echo "is_prerelease=$is_prerelease"
-            echo "image_owner=${OWNER,,}"
-          } >> "$GITHUB_OUTPUT"
+          scripts/check-versions.sh "$TAG"
+          echo "image_owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
 
   image:
     name: Image ${{ matrix.image }} (${{ matrix.platform }})
@@ -133,6 +123,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless signing and the provenance attestation (OIDC token, attestation store).
+      id-token: write
+      attestations: write
     env:
       IMAGE: ghcr.io/${{ needs.version.outputs.image_owner }}/${{ matrix.image }}
     steps:
@@ -147,8 +140,8 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # Semver tags: 1.2.3 and 1.2 for releases; prereleases (1.0.0-beta.1) only get their own tag.
-      # No `latest`: deployments pin a version or a digest (docs/operations.md).
+      # 1.2.3, 1.2 and latest for releases; a prerelease (1.0.0-rc.1) only gets its own tag.
+      # Deployments should still pin a version or a digest (images.txt).
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
@@ -157,6 +150,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ needs.version.outputs.is_prerelease == 'false' }}
       - name: Create the multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
         run: |
@@ -166,6 +160,7 @@ jobs:
           for digest in *; do sources+=("${IMAGE}@sha256:${digest}"); done
           docker buildx imagetools create "${tags[@]}" "${sources[@]}"
       - name: Record the manifest digest
+        id: digest
         env:
           VERSION: ${{ needs.version.outputs.version }}
           NAME: ${{ matrix.image }}
@@ -173,12 +168,33 @@ jobs:
           digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
           mkdir -p out
           echo "${IMAGE}:${VERSION}@${digest}" > "out/${NAME}.image"
-      - name: SBOM of the image
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # Keyless: the certificate names this workflow and the tag (cosign verify, release notes).
+      - name: Sign the image
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+      - name: SBOM of the image (SPDX)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
+          image: ${{ env.IMAGE }}@${{ steps.digest.outputs.digest }}
           format: spdx-json
           output-file: out/${{ matrix.image }}-${{ needs.version.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: SBOM of the image (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.digest.outputs.digest }}
+          format: cyclonedx-json
+          output-file: out/${{ matrix.image }}-${{ needs.version.outputs.version }}.cdx.json
           upload-artifact: false
           upload-release-assets: false
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -190,12 +206,18 @@ jobs:
   desktop:
     name: Desktop
     needs: version
+    permissions:
+      contents: read
+      # The Linux jobs run in the CI image on GHCR.
+      packages: read
     uses: ./.github/workflows/desktop-release.yml
 
   android:
     name: Android (full + libre)
     needs: version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
       TEAMCRAFT_ANDROID_CACHE: ${{ github.workspace }}/../android-cache
@@ -246,8 +268,11 @@ jobs:
           for apk in apps/android/app/build/outputs/apk/*/*/*.apk; do
             flavor="$(basename "$(dirname "$(dirname "$apk")")")"
             type="$(basename "$(dirname "$apk")")"
+            # Never leave it to the reader whether a file is signed: -unsigned (needs signing before it
+            # installs), -debug-signed (throwaway debug key, testing only), plain = upload key.
             suffix=""
             case "$apk" in *-unsigned.apk) suffix="-unsigned" ;; esac
+            [ "$type" = debug ] && suffix="-signed"
             cp "$apk" "out/teamcraft-android-${VERSION}-${flavor}-${type}${suffix}.apk"
           done
           rm -f apps/android/upload.keystore
@@ -264,6 +289,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
       IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
@@ -272,7 +299,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
-      - name: Source SBOM (Cargo.lock and the Android/Gradle dependencies in the tree)
+      - name: Source SBOM, SPDX (Cargo.lock and the Android/Gradle dependencies in the tree)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           path: .
@@ -280,14 +307,22 @@ jobs:
           output-file: teamcraft-source-${{ needs.version.outputs.version }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
+      - name: Source SBOM, CycloneDX
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: teamcraft-source-${{ needs.version.outputs.version }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
       - name: Assemble the release files
         run: |
           mkdir -p dist
-          mv "teamcraft-source-${VERSION}.spdx.json" dist/
+          mv "teamcraft-source-${VERSION}.spdx.json" "teamcraft-source-${VERSION}.cdx.json" dist/
           # Packages of every platform the desktop workflow builds (Windows joins with its jobs).
           find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
             -o -name '*.flatpak' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
-            -o -name '*.apk' -o -name '*.spdx.json' \) -exec cp {} dist/ \;
+            -o -name '*.apk' -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
           # The web client: the same trunk build the desktop app embeds, served by the server
           # ([web] static_dir).
           tar -C artifacts/ui-dist -czf "dist/teamcraft-web-${VERSION}.tar.gz" .
@@ -295,24 +330,21 @@ jobs:
           (cd dist && sha256sum -- * > SHA256SUMS)
           ls -l dist
           cat dist/images.txt
-      - name: Release notes from CHANGELOG.md
+      # One attestation over every file in SHA256SUMS: `gh attestation verify <file> --repo ...`.
+      - name: Build provenance attestation of the files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Release notes (.github/release-notes.md, CHANGELOG.md, generated notes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          awk -v v="$VERSION" '
-            $0 ~ "^## \\[" v "\\]" { on = 1; next }
-            on && /^## \[/ { exit }
-            on && /^\[.*\]: / { exit }
-            on { print }
-          ' CHANGELOG.md > notes.md
-          {
-            echo
-            echo "### Container images"
-            echo
-            echo '```'
-            cat dist/images.txt
-            echo '```'
-            echo
-            echo "Verify downloads with \`sha256sum -c SHA256SUMS\`."
-          } >> notes.md
+          gh api "repos/${REPO}/releases/generate-notes" -f tag_name="$TAG" -q .body > generated.md
+          scripts/render-release-notes.py --version "$VERSION" --tag "$TAG" --repo "$REPO" \
+            --images dist/images.txt --generated generated.md > notes.md
+          cat notes.md
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
