@@ -39,7 +39,13 @@ struct NotificationContentBuilder {
     content.threadIdentifier = notification.conversationId
     content.categoryIdentifier = NotificationCategories.messageCategory
     // Only what the core decrypted; the server-supplied userInfo is dropped.
-    content.userInfo = [NotificationCategories.conversationKey: notification.conversationId]
+    var info: [AnyHashable: Any] = [NotificationCategories.conversationKey: notification.conversationId]
+    if let tag = NotificationAuthenticator().tag(for: notification.conversationId) {
+      info[NotificationAuthenticator.tagKey] = tag
+    }
+    content.userInfo = info
+    // Without a tag (no key yet) the actions would be refused, so don't offer them.
+    if info[NotificationAuthenticator.tagKey] == nil { content.categoryIdentifier = "" }
     content.sound = notification.isSilent ? nil : .default
     if notification.isUrgent {
       content.interruptionLevel = .timeSensitive

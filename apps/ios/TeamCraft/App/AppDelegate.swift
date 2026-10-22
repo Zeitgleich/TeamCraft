@@ -38,7 +38,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     let info = response.notification.request.content.userInfo
     guard let conversationId = info[NotificationCategories.conversationKey] as? String else { return }
     let reply = (response as? UNTextInputNotificationResponse)?.userText
+    let tag = info[NotificationAuthenticator.tagKey] as? String
     await AppModel.shared.handle(
-      notificationAction: response.actionIdentifier, conversationId: conversationId, replyText: reply)
+      notificationAction: response.actionIdentifier, conversationId: conversationId, tag: tag,
+      replyText: reply)
   }
 }

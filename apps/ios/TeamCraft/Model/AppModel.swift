@@ -135,6 +135,7 @@ final class AppModel {
       }
       maybeCore = nil
       vault.clear()
+      NotificationAuthenticator().removeKey()
       container.wipeDownloads()
       container.activeAccount = nil
       container.displayName = nil
@@ -295,15 +296,20 @@ final class AppModel {
   /// The conversation ID comes from the notification, which a forged push could fill: it is only
   /// acted on if the local store knows that conversation (the extension sets it from the decrypted
   /// payload, and drops it when it decrypted nothing).
-  func handle(notificationAction identifier: String, conversationId: String, replyText: String?) async {
+  /// Reply and mark-as-read also need the extension's tag over the ID (`NotificationAuthenticator`):
+  /// the server can show an alert without the extension, naming a conversation the user is in.
+  func handle(notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?)
+    async
+  {
     guard await conversations().contains(where: { $0.id == conversationId }) else { return }
+    let isAuthentic = NotificationAuthenticator().isValid(tag: tag, for: conversationId)
     switch identifier {
     case NotificationCategories.replyAction:
-      if let replyText, !replyText.isEmpty {
+      if isAuthentic, let replyText, !replyText.isEmpty {
         await send(conversationId: conversationId, threadId: nil, body: replyText)
       }
     case NotificationCategories.markReadAction:
-      await markRead(conversationId: conversationId)
+      if isAuthentic { await markRead(conversationId: conversationId) }
     default:
       openConversationId = conversationId
     }
@@ -364,6 +370,7 @@ final class AppModel {
       return
     }
     container.displayName = displayName
+    try? NotificationAuthenticator().ensureKey()
     phase = .ready(Account(userId: userId, displayName: displayName, identityFingerprint: fingerprint))
     if let core = try? core() {
       await calls.attach(core: core)
