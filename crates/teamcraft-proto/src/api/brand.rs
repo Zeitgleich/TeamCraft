@@ -130,10 +130,24 @@ mod tests {
     for ok in ["#fff", "#0B7f78", "#000000"] {
       assert!(is_brand_hex_color(ok), "{ok}");
     }
-    for bad in ["", "#", "#ffff", "fff", "#ggg", "red", "#fff;}", "#12345g", "url(x)", "#fff }body{"] {
+    for bad in [
+      "",
+      "#",
+      "#ffff",
+      "fff",
+      "#ggg",
+      "red",
+      "#fff;}",
+      "#12345g",
+      "url(x)",
+      "#fff }body{",
+    ] {
       assert!(!is_brand_hex_color(bad), "{bad}");
     }
-    assert_eq!(brand_color_properties("accent"), Some(&["--accent", "--focus"][..]));
+    assert_eq!(
+      brand_color_properties("accent"),
+      Some(&["--accent", "--focus"][..])
+    );
     assert_eq!(brand_color_properties("danger"), None);
   }
 
@@ -142,7 +156,13 @@ mod tests {
     let parsed: BrandResponse =
       serde_json::from_str(r#"{"id":"x","display_name":"X","origin":"https://x.example.com"}"#).unwrap();
     assert!(parsed.assets.is_empty() && parsed.colors == BrandColors::default());
-    assert_eq!(BrandAssetSlot::from("hero".to_owned()), BrandAssetSlot::Unknown("hero".into()));
-    assert_eq!(BrandAssetSlot::from("logo_dark".to_owned()), BrandAssetSlot::LogoDark);
+    assert_eq!(
+      BrandAssetSlot::from("hero".to_owned()),
+      BrandAssetSlot::Unknown("hero".into())
+    );
+    assert_eq!(
+      BrandAssetSlot::from("logo_dark".to_owned()),
+      BrandAssetSlot::LogoDark
+    );
   }
 }

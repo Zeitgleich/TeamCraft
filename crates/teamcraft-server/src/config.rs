@@ -127,6 +127,11 @@ pub struct OidcConfig {
   pub http_timeout_secs: u64,
   #[serde(default)]
   pub roles: RoleNames,
+  /// Name of the access-token claim that holds the user's organization (a string, or a list whose
+  /// first entry counts), shown as a badge next to their name. Without it users have no
+  /// organization. In Keycloak add a token mapper (user attribute or group name) to the client.
+  #[serde(rename = "organization_claim", default)]
+  pub maybe_organization_claim: Option<String>,
   /// Periodic comparison with the provider's admin API (disabled users, role changes).
   #[serde(default)]
   pub sync: OidcSyncConfig,

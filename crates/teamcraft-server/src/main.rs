@@ -157,6 +157,7 @@ async fn run() -> anyhow::Result<()> {
       local_accounts: config.local_accounts.clone(),
       presence: config.presence.clone(),
       shares: config.shares.clone(),
+      maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
       branding: config.branding.clone(),
       brands: config.brands.clone(),
       push: PushSettings {
@@ -451,6 +452,7 @@ fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {
       algorithms,
       leeway_secs: oidc.leeway_secs,
       logout_audiences: vec![oidc.client_id.clone(), oidc.server_client.clone()],
+      maybe_organization_claim: oidc.maybe_organization_claim.clone(),
     },
   ))
 }

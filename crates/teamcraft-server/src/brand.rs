@@ -20,9 +20,7 @@ use teamcraft_proto::{
   BrandAssetSlot, BrandColors, BrandLinks, BrandResponse, brand_color_properties, is_brand_hex_color,
 };
 
-use crate::config::{
-  BrandConfig, BrandMailConfig, BrandingConfig, MailConfig, UnknownHostPolicy, WebConfig,
-};
+use crate::config::{BrandConfig, BrandMailConfig, BrandingConfig, MailConfig, UnknownHostPolicy, WebConfig};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -122,17 +120,24 @@ impl BrandRegistry {
       .map(|(brand, _)| Arc::clone(brand))
       .ok_or_else(|| BrandError::Invalid("exactly one brand needs is_default = true".into()))?;
     if defaults.next().is_some() {
-      return Err(BrandError::Invalid("more than one brand has is_default = true".into()));
+      return Err(BrandError::Invalid(
+        "more than one brand has is_default = true".into(),
+      ));
     }
     let mut by_host = HashMap::new();
     let mut ids = std::collections::HashSet::new();
     for brand in &built {
       if !ids.insert(brand.id.clone()) {
-        return Err(BrandError::Invalid(format!("brand id {:?} is used twice", brand.id)));
+        return Err(BrandError::Invalid(format!(
+          "brand id {:?} is used twice",
+          brand.id
+        )));
       }
       for host in &brand.hostnames {
         if by_host.insert(host.clone(), Arc::clone(brand)).is_some() {
-          return Err(BrandError::Invalid(format!("host name {host:?} belongs to two brands")));
+          return Err(BrandError::Invalid(format!(
+            "host name {host:?} belongs to two brands"
+          )));
         }
       }
     }
@@ -181,7 +186,9 @@ impl BrandRegistry {
 
   /// The home brand of an e-mail address: the brand that lists its domain, else the default.
   pub fn for_email(&self, email: &str) -> &Arc<Brand> {
-    let domain = email.rsplit_once('@').map(|(_, domain)| domain.to_ascii_lowercase());
+    let domain = email
+      .rsplit_once('@')
+      .map(|(_, domain)| domain.to_ascii_lowercase());
     domain
       .and_then(|domain| {
         self
@@ -223,7 +230,9 @@ impl Brand {
     let invalid = |message: String| BrandError::Invalid(format!("brand {id:?}: {message}"));
     if id.is_empty()
       || id.len() > MAX_BRAND_ID_LEN
-      || !id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+      || !id
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     {
       return Err(BrandError::Invalid(format!(
         "brand id {id:?} must be 1 to {MAX_BRAND_ID_LEN} characters of a-z, 0-9 and -"
@@ -233,7 +242,9 @@ impl Brand {
       return Err(invalid("display_name is empty or too long".into()));
     }
     if !config.is_default && config.hostnames.is_empty() {
-      return Err(invalid("a brand that is not the default needs at least one host name".into()));
+      return Err(invalid(
+        "a brand that is not the default needs at least one host name".into(),
+      ));
     }
     for host in &config.hostnames {
       if normalize_host(host).as_deref() != Some(host.as_str()) {
@@ -265,7 +276,9 @@ impl Brand {
           || !language.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
           || text.chars().count() > MAX_TEXT_CHARS * 5
         {
-          return Err(invalid(format!("login text for language {language:?} is invalid")));
+          return Err(invalid(format!(
+            "login text for language {language:?} is invalid"
+          )));
         }
       }
     }
@@ -362,7 +375,10 @@ pub fn normalize_host(raw: &str) -> Option<String> {
     Some(_) => return None,
     None => raw,
   };
-  let host = without_port.strip_suffix('.').unwrap_or(without_port).to_ascii_lowercase();
+  let host = without_port
+    .strip_suffix('.')
+    .unwrap_or(without_port)
+    .to_ascii_lowercase();
   if host.is_empty() || host.len() > 253 || host.parse::<IpAddr>().is_ok() {
     return None;
   }
@@ -371,10 +387,15 @@ pub fn normalize_host(raw: &str) -> Option<String> {
       && label.len() <= 63
       && !label.starts_with('-')
       && !label.ends_with('-')
-      && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+      && label
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
   });
   // `1.2.3` style names are numeric addresses to some resolvers; a brand needs a real name.
-  let is_numeric = host.rsplit('.').next().is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()));
+  let is_numeric = host
+    .rsplit('.')
+    .next()
+    .is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()));
   (is_valid && !is_numeric).then_some(host)
 }
 
@@ -429,7 +450,9 @@ fn checked_colors(
 ) -> Result<BTreeMap<String, String>, BrandError> {
   for (key, value) in colors {
     if brand_color_properties(key).is_none() {
-      return Err(BrandError::Invalid(format!("brand {brand:?}: {key:?} is not a brandable color")));
+      return Err(BrandError::Invalid(format!(
+        "brand {brand:?}: {key:?} is not a brandable color"
+      )));
     }
     if !is_brand_hex_color(value) {
       return Err(BrandError::Invalid(format!(
@@ -511,8 +534,11 @@ fn load_assets(
       .as_deref()
       .ok_or_else(|| fail("[branding].assets_dir is not set".into()))?;
     let (bytes, content_type) = read_asset(dir, name, branding.max_asset_bytes).map_err(fail)?;
-    let etag = HeaderValue::from_str(&format!("\"{}\"", teamcraft_crypto::account::subresource_integrity(&bytes)))
-      .map_err(|_| fail("cannot compute a validator".into()))?;
+    let etag = HeaderValue::from_str(&format!(
+      "\"{}\"",
+      teamcraft_crypto::account::subresource_integrity(&bytes)
+    ))
+    .map_err(|_| fail("cannot compute a validator".into()))?;
     assets.insert(
       slot.as_str().to_owned(),
       BrandAsset {
@@ -634,17 +660,31 @@ mod tests {
     fn the_forwarded_host_counts_only_when_trusted() {
       let mut headers = HeaderMap::new();
       headers.insert("host", HeaderValue::from_static("chat.a.example.com"));
-      headers.insert("x-forwarded-host", HeaderValue::from_static("forged.example, chat.b.example.com"));
+      headers.insert(
+        "x-forwarded-host",
+        HeaderValue::from_static("forged.example, chat.b.example.com"),
+      );
       let uri: Uri = "/".parse().unwrap();
       let untrusted = registry(&two_brands(), UnknownHostPolicy::Default).unwrap();
-      assert_eq!(untrusted.request_host(&headers, &uri).as_deref(), Some("chat.a.example.com"));
+      assert_eq!(
+        untrusted.request_host(&headers, &uri).as_deref(),
+        Some("chat.a.example.com")
+      );
       let branding = BrandingConfig {
         trust_forwarded_host: true,
         ..BrandingConfig::default()
       };
-      let trusted =
-        BrandRegistry::build(&branding, &two_brands(), &WebConfig::default(), &MailConfig::default()).unwrap();
-      assert_eq!(trusted.request_host(&headers, &uri).as_deref(), Some("chat.b.example.com"));
+      let trusted = BrandRegistry::build(
+        &branding,
+        &two_brands(),
+        &WebConfig::default(),
+        &MailConfig::default(),
+      )
+      .unwrap();
+      assert_eq!(
+        trusted.request_host(&headers, &uri).as_deref(),
+        Some("chat.b.example.com")
+      );
     }
 
     #[test]
@@ -679,7 +719,13 @@ mod tests {
 
     #[test]
     fn hosts_must_be_normalized_dns_names() {
-      for bad in ["Chat.A.example.com", "chat.a.example.com:443", "https://chat.a.example.com", "10.0.0.1", "a b"] {
+      for bad in [
+        "Chat.A.example.com",
+        "chat.a.example.com:443",
+        "https://chat.a.example.com",
+        "10.0.0.1",
+        "a b",
+      ] {
         let brands = vec![brand("a", &[bad], true)];
         assert!(registry(&brands, UnknownHostPolicy::Default).is_err(), "{bad}");
       }
@@ -689,19 +735,32 @@ mod tests {
 
     #[test]
     fn colors_must_be_plain_hex_for_known_tokens() {
-      for (key, value) in [("accent", "red"), ("accent", "#12"), ("accent", "#fff;}x{"), ("danger", "#fff")] {
+      for (key, value) in [
+        ("accent", "red"),
+        ("accent", "#12"),
+        ("accent", "#fff;}x{"),
+        ("danger", "#fff"),
+      ] {
         let mut brands = two_brands();
         brands[0].colors = BrandColorsConfig {
           light: BTreeMap::from([(key.to_owned(), value.to_owned())]),
           dark: BTreeMap::new(),
         };
-        assert!(registry(&brands, UnknownHostPolicy::Default).is_err(), "{key} {value}");
+        assert!(
+          registry(&brands, UnknownHostPolicy::Default).is_err(),
+          "{key} {value}"
+        );
       }
     }
 
     #[test]
     fn links_must_be_https_without_credentials() {
-      for bad in ["http://support.example.com", "javascript:alert(1)", "https://u:p@support.example.com", "nonsense"] {
+      for bad in [
+        "http://support.example.com",
+        "javascript:alert(1)",
+        "https://u:p@support.example.com",
+        "nonsense",
+      ] {
         let mut brands = two_brands();
         brands[0].maybe_support_url = Some(bad.into());
         assert!(registry(&brands, UnknownHostPolicy::Default).is_err(), "{bad}");
@@ -737,7 +796,11 @@ mod tests {
     fn a_file_inside_the_directory_is_served_and_anything_else_is_refused() {
       let dir = tempfile_dir("assets");
       std::fs::create_dir_all(dir.join("a")).unwrap();
-      std::fs::write(dir.join("a/logo.svg"), b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>").unwrap();
+      std::fs::write(
+        dir.join("a/logo.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+      )
+      .unwrap();
       std::fs::write(dir.join("a/big.png"), vec![0u8; 2048]).unwrap();
       std::fs::write(dir.join("a/page.html"), b"<html>").unwrap();
       let outside = dir.parent().unwrap().join("outside.svg");
@@ -747,12 +810,24 @@ mod tests {
       let logo = registry.default_brand().asset(&BrandAssetSlot::Logo).unwrap();
       assert_eq!(logo.content_type, "image/svg+xml");
       assert_eq!(
-        registry.default_brand().response.assets.get("logo").map(String::as_str),
+        registry
+          .default_brand()
+          .response
+          .assets
+          .get("logo")
+          .map(String::as_str),
         Some("/api/v1/brand/assets/logo")
       );
       assert!(registry.default_brand().asset(&BrandAssetSlot::Icon).is_none());
 
-      for bad in ["a/big.png", "a/page.html", "../outside.svg", "/etc/hostname", "a/missing.svg", "a"] {
+      for bad in [
+        "a/big.png",
+        "a/page.html",
+        "../outside.svg",
+        "/etc/hostname",
+        "a/missing.svg",
+        "a",
+      ] {
         assert!(registry_with_asset(bad, &dir).is_err(), "{bad}");
       }
       std::fs::remove_dir_all(&dir).unwrap();
@@ -792,8 +867,16 @@ mod tests {
       let registry = registry(&brands, UnknownHostPolicy::Default).unwrap();
       let css = &registry.default_brand().theme_css;
       assert!(css.contains(":root{--accent:#0b7f78;--focus:#0b7f78;}"), "{css}");
-      assert!(css.contains("@media (prefers-color-scheme: dark){:root:not([data-theme=\"light\"]){--accent:#35c6ba;"), "{css}");
-      assert!(css.contains(":root[data-theme=\"dark\"]{--accent:#35c6ba;"), "{css}");
+      assert!(
+        css.contains(
+          "@media (prefers-color-scheme: dark){:root:not([data-theme=\"light\"]){--accent:#35c6ba;"
+        ),
+        "{css}"
+      );
+      assert!(
+        css.contains(":root[data-theme=\"dark\"]{--accent:#35c6ba;"),
+        "{css}"
+      );
       assert!(registry.by_id("b").unwrap().theme_css.is_empty());
     }
 
@@ -802,13 +885,30 @@ mod tests {
       let mut brands = two_brands();
       brands[1].connect_origins = vec!["https://api.b.example.com".into()];
       let registry = registry(&brands, UnknownHostPolicy::Default).unwrap();
-      let policy = |id: &str| registry.by_id(id).unwrap().content_security_policy.to_str().unwrap().to_owned();
-      assert!(policy("b").contains("connect-src 'self' https://api.b.example.com;"), "{}", policy("b"));
+      let policy = |id: &str| {
+        registry
+          .by_id(id)
+          .unwrap()
+          .content_security_policy
+          .to_str()
+          .unwrap()
+          .to_owned()
+      };
+      assert!(
+        policy("b").contains("connect-src 'self' https://api.b.example.com;"),
+        "{}",
+        policy("b")
+      );
       assert!(!policy("a").contains("api.b.example.com"));
       brands[0].maybe_content_security_policy = Some("default-src 'none'".into());
       let registry = self::registry(&brands, UnknownHostPolicy::Default).unwrap();
       assert_eq!(
-        registry.by_id("a").unwrap().content_security_policy.to_str().unwrap(),
+        registry
+          .by_id("a")
+          .unwrap()
+          .content_security_policy
+          .to_str()
+          .unwrap(),
         "default-src 'none'"
       );
       brands[0].maybe_content_security_policy = Some("default-src 'self'\nscript-src *".into());
@@ -819,7 +919,10 @@ mod tests {
     fn origins_come_from_configured_hosts_only() {
       let registry = registry(&two_brands(), UnknownHostPolicy::Default).unwrap();
       assert_eq!(registry.default_brand().origin(), "https://chat.a.example.com");
-      assert_eq!(registry.default_brand().response.origin, "https://chat.a.example.com");
+      assert_eq!(
+        registry.default_brand().response.origin,
+        "https://chat.a.example.com"
+      );
       let local = self::registry(&[brand("l", &["localhost"], true)], UnknownHostPolicy::Default).unwrap();
       assert_eq!(local.default_brand().origin(), "http://localhost");
     }

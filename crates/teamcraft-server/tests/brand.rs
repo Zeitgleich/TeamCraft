@@ -100,7 +100,9 @@ async fn without_brands_the_builtin_default_answers_on_any_host() {
 #[tokio::test]
 async fn the_host_selects_the_brand() {
   let files = Files::create();
-  let Some(app) = start(&files, UnknownHostPolicy::Default).await else { return };
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
 
   let (status, headers, body) = get_as(&app, Some(HOST_B), "/api/v1/brand").await;
   assert_eq!(status, StatusCode::OK);
@@ -123,8 +125,14 @@ async fn the_host_selects_the_brand() {
 #[tokio::test]
 async fn an_unknown_host_gets_the_default_brand_and_is_never_reflected() {
   let files = Files::create();
-  let Some(app) = start(&files, UnknownHostPolicy::Default).await else { return };
-  for host in ["evil.example", "chat.b.example.com.evil.example", "evil-chat.b.example.com"] {
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
+  for host in [
+    "evil.example",
+    "chat.b.example.com.evil.example",
+    "evil-chat.b.example.com",
+  ] {
     for path in ["/api/v1/brand", "/api/v1/brand/theme.css", "/"] {
       let (status, headers, body) = get_as(&app, Some(host), path).await;
       assert_eq!(status, StatusCode::OK, "{host} {path}");
@@ -142,7 +150,9 @@ async fn an_unknown_host_gets_the_default_brand_and_is_never_reflected() {
 #[tokio::test]
 async fn unknown_hosts_can_be_refused_except_for_probes() {
   let files = Files::create();
-  let Some(app) = start(&files, UnknownHostPolicy::Reject).await else { return };
+  let Some(app) = start(&files, UnknownHostPolicy::Reject).await else {
+    return;
+  };
 
   for path in ["/api/v1/brand", "/", "/api/v1/me", "/api/v1/brand/theme.css"] {
     let (status, _, body) = get_as(&app, Some("evil.example"), path).await;
@@ -161,12 +171,19 @@ async fn unknown_hosts_can_be_refused_except_for_probes() {
 #[tokio::test]
 async fn assets_come_from_the_request_brand_with_validators() {
   let files = Files::create();
-  let Some(app) = start(&files, UnknownHostPolicy::Default).await else { return };
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
 
   let (status, headers, body) = get_as(&app, Some(HOST_B), "/api/v1/brand/assets/logo").await;
   assert_eq!((status, body.as_slice()), (StatusCode::OK, LOGO_B));
   assert_eq!(headers["content-type"], "image/svg+xml");
-  assert!(headers["content-security-policy"].to_str().unwrap().contains("default-src 'none'"));
+  assert!(
+    headers["content-security-policy"]
+      .to_str()
+      .unwrap()
+      .contains("default-src 'none'")
+  );
   let etag = headers["etag"].to_str().unwrap().to_owned();
 
   let response = app
@@ -197,12 +214,17 @@ async fn assets_come_from_the_request_brand_with_validators() {
 #[tokio::test]
 async fn the_theme_is_a_stylesheet_of_the_brands_colors() {
   let files = Files::create();
-  let Some(app) = start(&files, UnknownHostPolicy::Default).await else { return };
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
   let (status, headers, body) = get_as(&app, Some(HOST_B), "/api/v1/brand/theme.css").await;
   assert_eq!(status, StatusCode::OK);
   assert!(headers["content-type"].to_str().unwrap().starts_with("text/css"));
   let css = String::from_utf8(body).unwrap();
-  assert!(css.contains("--accent:#112233;") && css.contains("--accent:#445566;"), "{css}");
+  assert!(
+    css.contains("--accent:#112233;") && css.contains("--accent:#445566;"),
+    "{css}"
+  );
   let (_, _, body) = get_as(&app, Some(HOST_A), "/api/v1/brand/theme.css").await;
   assert!(body.is_empty());
   app.stop().await;
@@ -211,11 +233,21 @@ async fn the_theme_is_a_stylesheet_of_the_brands_colors() {
 #[tokio::test]
 async fn the_web_client_gets_the_policy_of_its_brand() {
   let files = Files::create();
-  let Some(app) = start(&files, UnknownHostPolicy::Default).await else { return };
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
   let (_, headers_b, _) = get_as(&app, Some(HOST_B), "/").await;
   let (_, headers_a, _) = get_as(&app, Some(HOST_A), "/").await;
   let policy = |headers: &HeaderMap| headers["content-security-policy"].to_str().unwrap().to_owned();
-  assert!(policy(&headers_b).contains("https://api.b.example.com"), "{}", policy(&headers_b));
-  assert!(!policy(&headers_a).contains("api.b.example.com"), "{}", policy(&headers_a));
+  assert!(
+    policy(&headers_b).contains("https://api.b.example.com"),
+    "{}",
+    policy(&headers_b)
+  );
+  assert!(
+    !policy(&headers_a).contains("api.b.example.com"),
+    "{}",
+    policy(&headers_a)
+  );
   app.stop().await;
 }

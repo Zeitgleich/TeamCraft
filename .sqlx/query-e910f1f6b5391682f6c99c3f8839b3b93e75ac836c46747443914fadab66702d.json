@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO share_links (id, attachment_id, created_by, expires_at, max_downloads, is_password_protected, brand_id)\n         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Int4",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e910f1f6b5391682f6c99c3f8839b3b93e75ac836c46747443914fadab66702d"
+}

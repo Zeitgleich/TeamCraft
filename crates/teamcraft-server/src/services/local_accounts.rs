@@ -538,6 +538,7 @@ pub async fn validate_session_token(
     authentication_methods: vec!["pwd".into(), "otp".into()],
     maybe_acr: None,
     is_exempt_from_session_policy: true,
+    maybe_organization: None,
   }))
 }
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               email = EXCLUDED.email,\n               display_name = EXCLUDED.display_name,\n               kind = EXCLUDED.kind,\n               oidc_role = EXCLUDED.oidc_role\n         RETURNING id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS \"is_deactivated!\"",
+  "query": "SELECT id, username, display_name, kind, created_at, organization,\n                deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users WHERE id = ANY($1) ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -60,6 +60,17 @@
       },
       {
         "ordinal": 5,
+        "name": "organization",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "organization"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "is_deactivated!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -67,14 +78,7 @@
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text"
+        "Int8Array"
       ]
     },
     "nullable": [
@@ -83,8 +87,9 @@
       false,
       false,
       false,
+      true,
       null
     ]
   },
-  "hash": "0cdc61ff3677f23a16f38bbc52f2a08dd243760b7f961e75422b4dc61584fc7c"
+  "hash": "1e4ef1b627c68641ef5201385dd4caa262295812bee55b25c9af4f39ccfebb36"
 }

@@ -22,6 +22,7 @@ pub fn user_summary(state: &AppState, user: &User) -> UserSummary {
     display_name: presented_name(&policy.directory, user),
     kind: user.kind.clone(),
     maybe_email: None,
+    maybe_organization: user.maybe_organization.clone(),
   }
 }
 

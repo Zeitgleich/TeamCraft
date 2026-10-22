@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users WHERE id = $1",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role, m.expires_at, m.sponsor_user_id\n         FROM space_members m JOIN users u ON u.id = m.user_id\n         WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())\n         ORDER BY u.display_name, u.id",
   "describe": {
     "columns": [
       {
@@ -60,9 +60,53 @@
       },
       {
         "ordinal": 5,
+        "name": "organization",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "organization"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "is_deactivated!",
         "type_info": "Bool",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "sponsor_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "sponsor_user_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -76,8 +120,12 @@
       false,
       false,
       false,
-      null
+      true,
+      null,
+      false,
+      true,
+      true
     ]
   },
-  "hash": "1410021149103089f020bf4067dd4648bc9aa362f9860cdfdce1d0538331c208"
+  "hash": "90c45473eaae36e0de5957de1e96551e45ad17c4a24570a5d2082339300e4c71"
 }

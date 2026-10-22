@@ -1,5 +1,5 @@
 use teamcraft_db::UserSearch;
-use teamcraft_proto::{SearchUsersResponse, UserId, UserSummary};
+use teamcraft_proto::{ListOrganizationsResponse, SearchUsersResponse, UserId, UserSummary};
 
 use super::access::is_guest;
 use super::convert::user_summary;
@@ -12,6 +12,7 @@ pub async fn search_users(
   state: &AppState,
   caller: &AuthenticatedUser,
   query: &str,
+  maybe_organization: Option<&str>,
 ) -> Result<SearchUsersResponse, ApiError> {
   let users = state
     .database
@@ -19,12 +20,26 @@ pub async fn search_users(
       viewer: caller.user.id,
       query: query.trim(),
       is_restricted_to_shared: is_guest(caller),
+      maybe_organization,
       limit: i64::from(state.settings.limits.max_directory_results),
     })
     .await?;
   let mut summaries: Vec<UserSummary> = users.iter().map(|user| user_summary(state, user)).collect();
   add_emails(state, caller, &mut summaries).await?;
   Ok(SearchUsersResponse { users: summaries })
+}
+
+/// The organizations for the directory filter; guests have no directory and get none.
+pub async fn list_organizations(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+) -> Result<ListOrganizationsResponse, ApiError> {
+  let organizations = if is_guest(caller) {
+    Vec::new()
+  } else {
+    state.database.list_organizations().await?
+  };
+  Ok(ListOrganizationsResponse { organizations })
 }
 
 /// One user; guests only see themselves and people they share a conversation with.

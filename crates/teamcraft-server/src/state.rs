@@ -7,9 +7,9 @@ use crate::brand::BrandRegistry;
 use secrecy::SecretString;
 
 use crate::config::{
-  BrandConfig, BrandingConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig, LocalAccountsConfig, MailConfig,
-  NotificationsConfig, PolicyConfig, PresenceConfig, RendezvousConfig, RetentionJobConfig, RoleNames,
-  SecurityConfig, SharesConfig, WebConfig,
+  BrandConfig, BrandingConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
+  LocalAccountsConfig, MailConfig, NotificationsConfig, PolicyConfig, PresenceConfig, RendezvousConfig,
+  RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, WebConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -74,6 +74,8 @@ pub struct Settings {
   pub presence: PresenceConfig,
   pub shares: SharesConfig,
   pub push: PushSettings,
+  /// Token claim the organization is read from, if any.
+  pub maybe_organization_claim: Option<String>,
   pub branding: BrandingConfig,
   pub brands: Vec<BrandConfig>,
 }

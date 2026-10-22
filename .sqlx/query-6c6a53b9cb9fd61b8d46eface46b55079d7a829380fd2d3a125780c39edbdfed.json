@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, email, display_name, kind, oidc_role, created_at, deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2",
+  "query": "SELECT id, username, display_name, kind, created_at, organization,\n                deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -27,17 +27,6 @@
       },
       {
         "ordinal": 2,
-        "name": "email",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "users",
-            "name": "email"
-          }
-        }
-      },
-      {
-        "ordinal": 3,
         "name": "display_name",
         "type_info": "Text",
         "origin": {
@@ -48,7 +37,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "kind",
         "type_info": "Text",
         "origin": {
@@ -59,18 +48,7 @@
         }
       },
       {
-        "ordinal": 5,
-        "name": "oidc_role",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "users",
-            "name": "oidc_role"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
+        "ordinal": 4,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -81,7 +59,18 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 5,
+        "name": "organization",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "organization"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "is_deactivated!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -89,20 +78,18 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text"
+        "Int8"
       ]
     },
     "nullable": [
       false,
       true,
+      false,
+      false,
+      false,
       true,
-      false,
-      false,
-      true,
-      false,
       null
     ]
   },
-  "hash": "caaca008eb293dccf76e3511671611308a8144f4ec5481f65625743837fc2e9b"
+  "hash": "6c6a53b9cb9fd61b8d46eface46b55079d7a829380fd2d3a125780c39edbdfed"
 }

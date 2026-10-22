@@ -276,5 +276,7 @@ fn identity<'a>(subject: &'a str, display_name: &'a str) -> OidcIdentity<'a> {
     display_name,
     kind: UserKind::Member,
     maybe_oidc_role: None,
+    maybe_organization: None,
+    should_sync_organization: false,
   }
 }

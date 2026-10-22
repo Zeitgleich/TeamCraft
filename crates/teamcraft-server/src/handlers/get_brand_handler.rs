@@ -17,6 +17,9 @@ pub async fn get_brand_handler(resolved: ResolvedBrand) -> Response {
 /// configuration, so a short shared cache is fine as long as it keys on the host.
 pub(super) fn set_public_cache(response: &mut Response) {
   let headers = response.headers_mut();
-  headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=300"));
+  headers.insert(
+    header::CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=300"),
+  );
   headers.insert(header::VARY, HeaderValue::from_static("Host, X-Forwarded-Host"));
 }

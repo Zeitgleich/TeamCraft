@@ -48,6 +48,7 @@ fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
     authentication_methods: Vec::new(),
     maybe_acr: None,
     is_exempt_from_session_policy: true,
+    maybe_organization: None,
   }
 }
 
@@ -67,6 +68,7 @@ pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i
     authentication_methods: Vec::new(),
     maybe_acr: None,
     is_exempt_from_session_policy: true,
+    maybe_organization: None,
   }
 }
 
@@ -98,6 +100,8 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
         display_name: &identity.display_name,
         kind,
         maybe_oidc_role: Some(identity.role.as_str()),
+        maybe_organization: identity.maybe_organization.as_deref(),
+        should_sync_organization: state.settings.maybe_organization_claim.is_some(),
       },
       state.next_id()?,
     )

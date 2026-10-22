@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, attachment_id, created_by, created_at, expires_at, max_downloads, is_password_protected,\n                download_count, last_downloaded_at, revoked_at IS NOT NULL AS \"is_revoked!\"\n         FROM share_links WHERE id = $1",
+  "query": "SELECT id, attachment_id, created_by, created_at, expires_at, max_downloads, is_password_protected,\n                download_count, last_downloaded_at, brand_id, revoked_at IS NOT NULL AS \"is_revoked!\"\n         FROM share_links WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "brand_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "share_links",
+            "name": "brand_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "is_revoked!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -124,8 +135,9 @@
       false,
       false,
       true,
+      true,
       null
     ]
   },
-  "hash": "c7543ee31c7f1bd2243c94d240f6d97af3987dcf299ae602a29a1bca830913bf"
+  "hash": "224b7c4e9e6f1b514498d35a9c0fbe53879ccffdb19194db99213ce6d7149065"
 }

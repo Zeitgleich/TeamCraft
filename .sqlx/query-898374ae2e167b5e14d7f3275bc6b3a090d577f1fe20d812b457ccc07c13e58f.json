@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role, m.expires_at, m.sponsor_user_id\n         FROM space_members m JOIN users u ON u.id = m.user_id\n         WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())\n         ORDER BY u.display_name, u.id",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role\n         FROM memberships m JOIN users u ON u.id = m.user_id\n         WHERE m.conversation_id = $1 ORDER BY u.display_name, u.id",
   "describe": {
     "columns": [
       {
@@ -60,40 +60,29 @@
       },
       {
         "ordinal": 5,
+        "name": "organization",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "organization"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "is_deactivated!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "role",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "space_members",
+            "table": "memberships",
             "name": "role"
-          }
-        }
-      },
-      {
-        "ordinal": 7,
-        "name": "expires_at",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "space_members",
-            "name": "expires_at"
-          }
-        }
-      },
-      {
-        "ordinal": 8,
-        "name": "sponsor_user_id",
-        "type_info": "Int8",
-        "origin": {
-          "Table": {
-            "table": "space_members",
-            "name": "sponsor_user_id"
           }
         }
       }
@@ -109,11 +98,10 @@
       false,
       false,
       false,
-      null,
-      false,
       true,
-      true
+      null,
+      false
     ]
   },
-  "hash": "7f9128e07e9bdf3eb43727a4f0d005f25fa0bdac04d5d5c46001458b56c42e0b"
+  "hash": "898374ae2e167b5e14d7f3275bc6b3a090d577f1fe20d812b457ccc07c13e58f"
 }

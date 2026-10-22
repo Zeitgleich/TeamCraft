@@ -282,7 +282,7 @@ impl Database {
     conversation: ConversationId,
   ) -> Result<Vec<ConversationMember>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at,
+      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
                 u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role
          FROM memberships m JOIN users u ON u.id = m.user_id
          WHERE m.conversation_id = $1 ORDER BY u.display_name, u.id"#,
@@ -301,6 +301,7 @@ impl Database {
             kind: row.kind.into(),
             created_at: row.created_at,
             is_deactivated: row.is_deactivated,
+            maybe_organization: row.organization,
           },
           role: ChannelRole::from(row.role),
         })
@@ -414,7 +415,7 @@ impl Database {
     conversations: &[ConversationId],
   ) -> Result<HashMap<ConversationId, Vec<User>>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT m.conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at,
+      r#"SELECT m.conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
                 u.deactivated_at IS NOT NULL AS "is_deactivated!"
          FROM memberships m JOIN users u ON u.id = m.user_id
          JOIN conversations c ON c.id = m.conversation_id
@@ -436,6 +437,7 @@ impl Database {
           kind: row.kind.into(),
           created_at: row.created_at,
           is_deactivated: row.is_deactivated,
+          maybe_organization: row.organization,
         });
     }
     Ok(by_conversation)

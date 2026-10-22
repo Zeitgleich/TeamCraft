@@ -235,7 +235,7 @@ impl Database {
 
   pub async fn list_space_members(&self, space: SpaceId) -> Result<Vec<SpaceMember>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at,
+      r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
                 u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role, m.expires_at, m.sponsor_user_id
          FROM space_members m JOIN users u ON u.id = m.user_id
          WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())
@@ -255,6 +255,7 @@ impl Database {
             kind: row.kind.into(),
             created_at: row.created_at,
             is_deactivated: row.is_deactivated,
+            maybe_organization: row.organization,
           },
           role: SpaceRole::from(row.role),
           maybe_expires_at: row.expires_at,

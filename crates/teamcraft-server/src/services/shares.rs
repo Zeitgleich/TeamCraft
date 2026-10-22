@@ -17,6 +17,7 @@ use super::attachments::readable_attachment;
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{offset_date_time, unix_millis};
 use crate::auth::AuthenticatedUser;
+use crate::brand::ResolvedBrand;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -27,6 +28,7 @@ const LIST_LIMIT: i64 = 200;
 pub async fn create_share(
   state: &AppState,
   caller: &AuthenticatedUser,
+  brand: &ResolvedBrand,
   request: CreateShareLinkRequest,
 ) -> Result<ShareLinkResponse, ApiError> {
   let settings = &state.settings.shares;
@@ -89,6 +91,7 @@ pub async fn create_share(
       expires_at,
       maybe_max_downloads,
       is_password_protected: request.is_password_protected,
+      maybe_brand_id: Some(&brand.brand.id),
     })
     .await?;
   // The link ID is a secret of sorts: the audit entry names the attachment, not the link.
@@ -145,8 +148,12 @@ pub async fn revoke_share(state: &AppState, caller: &AuthenticatedUser, id: &str
 
 /// Public: what the download page shows before it asks for the file. Unknown, revoked, expired and
 /// used-up links all answer the same.
-pub async fn share_info(state: &AppState, id: &str) -> Result<ShareInfoResponse, ApiError> {
-  let (link, target) = usable_share(state, id).await?;
+pub async fn share_info(
+  state: &AppState,
+  brand: &ResolvedBrand,
+  id: &str,
+) -> Result<ShareInfoResponse, ApiError> {
+  let (link, target) = usable_share(state, brand, id).await?;
   Ok(ShareInfoResponse {
     size_bytes: target.size_bytes,
     is_password_protected: link.is_password_protected,
@@ -155,12 +162,16 @@ pub async fn share_info(state: &AppState, id: &str) -> Result<ShareInfoResponse,
 }
 
 /// Public: counts one download and returns a short-lived URL of the ciphertext.
-pub async fn download_share(state: &AppState, id: &str) -> Result<ShareDownloadResponse, ApiError> {
+pub async fn download_share(
+  state: &AppState,
+  brand: &ResolvedBrand,
+  id: &str,
+) -> Result<ShareDownloadResponse, ApiError> {
   let store = state
     .maybe_blob_store
     .as_ref()
     .ok_or_else(|| ApiError::Unavailable("storage is not configured".into()))?;
-  let (_, target) = usable_share(state, id).await?;
+  let (_, target) = usable_share(state, brand, id).await?;
   if !state
     .database
     .count_share_download(id, OffsetDateTime::now_utc())
@@ -177,20 +188,48 @@ pub async fn download_share(state: &AppState, id: &str) -> Result<ShareDownloadR
 
 async fn usable_share(
   state: &AppState,
+  brand: &ResolvedBrand,
   id: &str,
 ) -> Result<(ShareLink, teamcraft_db::ShareTarget), ApiError> {
   if !state.settings.shares.is_enabled {
     return Err(ApiError::ShareUnavailable);
   }
-  state
+  let (link, target) = state
     .database
     .find_downloadable_share(id, OffsetDateTime::now_utc())
     .await?
-    .ok_or(ApiError::ShareUnavailable)
+    .ok_or(ApiError::ShareUnavailable)?;
+  if !is_served_on(state, &link, brand) {
+    return Err(ApiError::ShareUnavailable);
+  }
+  Ok((link, target))
+}
+
+/// A link works only on the host names of the brand that made it (docs/branding.md §8), so that a
+/// file is never presented under another brand's name. Links of a brand that is gone from the
+/// configuration belong to the default brand; links from before brands existed work everywhere.
+fn is_served_on(state: &AppState, link: &ShareLink, request: &ResolvedBrand) -> bool {
+  let Some(stored) = link.maybe_brand_id.as_deref() else {
+    return true;
+  };
+  let owner = state.brands.by_id(stored).unwrap_or(state.brands.default_brand());
+  request.brand.id == owner.id && (owner.hostnames.is_empty() || request.is_known_host)
 }
 
 fn response(state: &AppState, link: &ShareLink) -> ShareLinkResponse {
-  let base = state.settings.shares.public_base_url.trim_end_matches('/');
+  // The link names a host of the brand that made it; without brand hosts the configured base is used.
+  let brand = link
+    .maybe_brand_id
+    .as_deref()
+    .and_then(|id| state.brands.by_id(id))
+    .unwrap_or(state.brands.default_brand());
+  let brand_origin = brand.origin();
+  let configured = state.settings.shares.public_base_url.trim_end_matches('/');
+  let base = if brand_origin.is_empty() {
+    configured
+  } else {
+    brand_origin.as_str()
+  };
   ShareLinkResponse {
     id: link.id.clone(),
     attachment_id: link.attachment,

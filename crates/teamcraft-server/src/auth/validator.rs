@@ -22,6 +22,8 @@ pub struct TokenValidator {
 
 /// A logout token older than this is refused, and its `jti` is remembered this long.
 const LOGOUT_TOKEN_MAX_AGE_SECS: i64 = 600;
+/// Longest organization label accepted from a token.
+const MAX_ORGANIZATION_CHARS: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct ValidatorOptions {
@@ -31,6 +33,8 @@ pub struct ValidatorOptions {
   pub leeway_secs: u64,
   /// Clients a back-channel logout token may be addressed to (the app client and the server client).
   pub logout_audiences: Vec<String>,
+  /// Token claim holding the user's organization, if the server reads one.
+  pub maybe_organization_claim: Option<String>,
 }
 
 /// What a valid token tells us about the caller.
@@ -55,6 +59,8 @@ pub struct TokenIdentity {
   /// The identity provider vouches for the sign-in; bots and meeting guests are not people at an
   /// identity provider and exempt from sign-in policy.
   pub is_exempt_from_session_policy: bool,
+  /// The organization claim of the token (`None`: no claim configured or present).
+  pub maybe_organization: Option<String>,
 }
 
 /// Who a back-channel logout token ends sessions of.
@@ -90,6 +96,9 @@ struct AccessClaims {
   acr: Option<String>,
   #[serde(default)]
   resource_access: HashMap<String, ClientAccess>,
+  /// Every other claim; the configured organization claim is read from here.
+  #[serde(flatten)]
+  extra: HashMap<String, serde_json::Value>,
 }
 
 const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
@@ -263,6 +272,11 @@ impl TokenValidator {
       .resolve(claims.client_roles(&self.options.client_id))
       .ok_or(AuthError::NoTeamcraftRole)?;
 
+    let maybe_organization = self
+      .options
+      .maybe_organization_claim
+      .as_deref()
+      .and_then(|claim| organization_from(claims.extra.get(claim)));
     let display_name = claims
       .name
       .filter(|name| !name.trim().is_empty())
@@ -281,6 +295,7 @@ impl TokenValidator {
       authentication_methods: claims.amr,
       maybe_acr: claims.acr,
       is_exempt_from_session_policy: false,
+      maybe_organization,
     })
   }
 }
@@ -299,6 +314,19 @@ impl AccessClaims {
       .into_iter()
       .flat_map(|access| access.roles.iter().map(String::as_str))
   }
+}
+
+/// The organization out of a claim value: a string, or the first string of a list. Blank values
+/// and over-long ones count as absent (a label, not data to shorten).
+fn organization_from(maybe_value: Option<&serde_json::Value>) -> Option<String> {
+  let text = match maybe_value? {
+    serde_json::Value::String(text) => text.as_str(),
+    serde_json::Value::Array(items) => items.first()?.as_str()?,
+    _ => return None,
+  };
+  let text = text.trim();
+  (!text.is_empty() && text.chars().count() <= MAX_ORGANIZATION_CHARS && !text.chars().any(char::is_control))
+    .then(|| text.to_owned())
 }
 
 /// Maps library errors to messages that tell the client what is wrong without leaking internals.
@@ -658,6 +686,26 @@ mod tests {
     assert!(TokenValidator::parse_algorithms(&[]).is_err());
   }
 
+  #[test]
+  fn the_organization_claim_is_a_short_plain_string_or_the_first_of_a_list() {
+    let some = |value: Value| organization_from(Some(&value));
+    assert_eq!(some(json!("Brand A")).as_deref(), Some("Brand A"));
+    assert_eq!(some(json!(["  Brand B ", "Other"])).as_deref(), Some("Brand B"));
+    for bad in [
+      json!(""),
+      json!("   "),
+      json!([]),
+      json!([1]),
+      json!({"a": 1}),
+      json!(5),
+      json!("a\nb"),
+      json!("x".repeat(101)),
+    ] {
+      assert_eq!(some(bad.clone()), None, "{bad}");
+    }
+    assert_eq!(organization_from(None), None);
+  }
+
   fn assert_invalid<T: std::fmt::Debug>(result: Result<T, AuthError>, expected: &str) {
     match result {
       Err(AuthError::InvalidToken(reason)) => assert_eq!(reason, expected),
@@ -672,6 +720,7 @@ mod tests {
       algorithms: vec![Algorithm::RS256],
       leeway_secs: 30,
       logout_audiences: vec![CLIENT.into(), "teamcraft-server".into()],
+      maybe_organization_claim: None,
     }
   }
 

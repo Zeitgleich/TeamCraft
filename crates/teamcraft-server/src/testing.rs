@@ -446,6 +446,7 @@ impl TestApp {
         algorithms: vec![Algorithm::RS256],
         leeway_secs: 30,
         logout_audiences: vec![TEST_CLIENT.into(), "teamcraft-server".into()],
+        maybe_organization_claim: settings.maybe_organization_claim.clone(),
       },
     );
     let state = AppState {
@@ -474,7 +475,13 @@ impl TestApp {
       scheme: Arc::new(SchemeStore::default()),
       rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
       brands: Arc::new(
-        BrandRegistry::build(&settings.branding, &settings.brands, &settings.web, &settings.mail).unwrap(),
+        BrandRegistry::build(
+          &settings.branding,
+          &settings.brands,
+          &settings.web,
+          &settings.mail,
+        )
+        .unwrap(),
       ),
       settings: Arc::new(settings),
     };

@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use teamcraft_proto::{CreateShareLinkRequest, ErrorBody, ShareLinkResponse};
 
 use crate::auth::AuthenticatedUser;
+use crate::brand::ResolvedBrand;
 use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::services::shares;
@@ -14,8 +15,9 @@ use crate::state::AppState;
 pub async fn create_share_link_handler(
   State(state): State<AppState>,
   caller: AuthenticatedUser,
+  brand: ResolvedBrand,
   ApiJson(request): ApiJson<CreateShareLinkRequest>,
 ) -> Result<(StatusCode, Json<ShareLinkResponse>), ApiError> {
-  let response = shares::create_share(&state, &caller, request).await?;
+  let response = shares::create_share(&state, &caller, &brand, request).await?;
   Ok((StatusCode::CREATED, Json(response)))
 }

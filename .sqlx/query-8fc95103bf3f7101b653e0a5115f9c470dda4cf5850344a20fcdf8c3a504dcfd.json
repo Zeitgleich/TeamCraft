@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role\n         FROM memberships m JOIN users u ON u.id = m.user_id\n         WHERE m.conversation_id = $1 ORDER BY u.display_name, u.id",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users u\n         WHERE u.deactivated_at IS NULL\n           AND (u.display_name ILIKE $2 OR u.username ILIKE $2)\n           AND ($5::text IS NULL OR u.organization = $5)\n           AND (NOT $3 OR EXISTS (\n                 SELECT 1 FROM memberships a JOIN memberships b ON a.conversation_id = b.conversation_id\n                 WHERE a.user_id = $1 AND b.user_id = u.id))\n         ORDER BY u.display_name, u.id\n         LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -60,25 +60,29 @@
       },
       {
         "ordinal": 5,
-        "name": "is_deactivated!",
-        "type_info": "Bool",
-        "origin": "Expression"
-      },
-      {
-        "ordinal": 6,
-        "name": "role",
+        "name": "organization",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "memberships",
-            "name": "role"
+            "table": "users",
+            "name": "organization"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "is_deactivated!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Int8",
+        "Text",
+        "Bool",
+        "Int8",
+        "Text"
       ]
     },
     "nullable": [
@@ -87,9 +91,9 @@
       false,
       false,
       false,
-      null,
-      false
+      true,
+      null
     ]
   },
-  "hash": "cfbfa2842f07f3325871c9e7127d6f82f495ac9903753761304ca7f7bcb48861"
+  "hash": "8fc95103bf3f7101b653e0a5115f9c470dda4cf5850344a20fcdf8c3a504dcfd"
 }

@@ -25,6 +25,10 @@ pub struct UserSummary {
   /// Only when the directory policy shows e-mail addresses to the viewer.
   #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
   pub maybe_email: Option<String>,
+  /// The user's organization (from the identity provider), shown as a badge. No permission
+  /// depends on it.
+  #[serde(rename = "organization", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_organization: Option<String>,
 }
 
 /// `GET /api/v1/users?query=` – the directory. Guests only find people they share a conversation with.
@@ -151,6 +155,16 @@ pub struct SearchUsersQuery {
   /// Matched against display name and username; empty lists the first people alphabetically.
   #[serde(default)]
   pub query: String,
+  /// Only people of this organization (exact match).
+  #[serde(rename = "organization", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_organization: Option<String>,
+}
+
+/// `GET /api/v1/organizations`: the organizations people belong to, for the directory filter.
+/// Empty for guests, who have no directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ListOrganizationsResponse {
+  pub organizations: Vec<String>,
 }
 
 /// `PUT /api/v1/me/identity-key`: publishes the user's public identity key (e2ee.md §3).

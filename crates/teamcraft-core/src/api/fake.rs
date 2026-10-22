@@ -172,6 +172,7 @@ impl FakeServer {
         display_name: name.to_string(),
         kind: UserKind::Member,
         maybe_email: None,
+        maybe_organization: None,
       },
     );
     drop(state);
