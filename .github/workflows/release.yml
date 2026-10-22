@@ -34,7 +34,7 @@ jobs:
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
       image_owner: ${{ steps.version.outputs.image_owner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       # The tag must match the workspace version, so packages, images and the tag never disagree.
       - name: Tag matches the workspace version
         id: version
@@ -85,20 +85,20 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ needs.version.outputs.image_owner }}/${{ matrix.image }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.IMAGE }}
       # Pushed by digest only; the merge job puts both architectures under the version tags.
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: containers/${{ matrix.image }}.Containerfile
@@ -115,7 +115,7 @@ jobs:
         run: |
           mkdir -p "${RUNNER_TEMP}/digests"
           touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: digest-${{ matrix.image }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -136,13 +136,13 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ needs.version.outputs.image_owner }}/${{ matrix.image }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: digest-${{ matrix.image }}-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -150,7 +150,7 @@ jobs:
       # Semver tags: 1.2.3 and 1.2 for releases; prereleases (1.0.0-beta.1) only get their own tag.
       # No `latest`: deployments pin a version or a digest (docs/operations.md).
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.IMAGE }}
           flavor: latest=false
@@ -174,14 +174,14 @@ jobs:
           mkdir -p out
           echo "${IMAGE}:${VERSION}@${digest}" > "out/${NAME}.image"
       - name: SBOM of the image
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
           format: spdx-json
           output-file: out/${{ matrix.image }}-${{ needs.version.outputs.version }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-image-${{ matrix.image }}
           path: out/*
@@ -204,7 +204,7 @@ jobs:
       # we never use make room for them.
       - name: Free disk space on the runner
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Build image
         run: docker build -t teamcraft-android-build:local apps/android/docker
       # Release builds are signed with the upload key when its secrets exist (README.md, "Signing"),
@@ -252,7 +252,7 @@ jobs:
           done
           rm -f apps/android/upload.keystore
           ls -l out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-android
           path: out/*.apk
@@ -268,12 +268,12 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
       - name: Source SBOM (Cargo.lock and the Android/Gradle dependencies in the tree)
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           path: .
           format: spdx-json
