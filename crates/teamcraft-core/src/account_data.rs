@@ -40,6 +40,10 @@ pub struct AccountData {
   /// encrypted picture lives only here.
   #[serde(default)]
   pub backgrounds: BTreeMap<String, Stamped<BackgroundEntry>>,
+  /// Everything in the activity feed up to this time (the sent time of its newest entry when the
+  /// user looked) counts as read.
+  #[serde(rename = "activity_read", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_activity_read: Option<Stamped<i64>>,
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
@@ -120,6 +124,12 @@ impl AccountData {
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
     merge_map(&mut self.backgrounds, &other.backgrounds);
+    // Reading only moves forward: the later read time wins whatever device recorded it.
+    let newer_read = [self.maybe_activity_read.take(), other.maybe_activity_read.clone()]
+      .into_iter()
+      .flatten()
+      .max_by_key(|entry| (entry.value, entry.updated_at_ms));
+    self.maybe_activity_read = newer_read;
     // The root never changes; the first one a device of the user verified stays.
     if self.maybe_workspace_root.is_none() {
       self.maybe_workspace_root = other.maybe_workspace_root.clone();
@@ -146,6 +156,24 @@ impl AccountData {
     self
       .backgrounds
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+  }
+
+  /// Activity entries sent up to this time (Unix milliseconds) were read; 0 if never.
+  pub fn activity_read_at_ms(&self) -> i64 {
+    self.maybe_activity_read.as_ref().map_or(0, |entry| entry.value)
+  }
+
+  /// Records that the feed was read up to `read_at_ms`; returns whether that moved the mark.
+  pub fn mark_activity_read(&mut self, read_at_ms: i64, now_ms: i64) -> bool {
+    if read_at_ms <= self.activity_read_at_ms() {
+      return false;
+    }
+    self.maybe_activity_read = Some(Stamped {
+      value: read_at_ms,
+      updated_at_ms: now_ms,
+      is_removed: false,
+    });
+    true
   }
 
   /// The identity key the user's devices pinned for `user`.
@@ -421,6 +449,24 @@ mod tests {
       "the later unsave wins"
     );
     assert_eq!(merged_on_phone.draft(conversation, None), Some("a later thought"));
+  }
+
+  #[test]
+  fn the_activity_read_mark_only_moves_forward_and_merges_to_the_later_one() {
+    let mut phone = AccountData::default();
+    let mut laptop = AccountData::default();
+    assert!(phone.mark_activity_read(500, 10));
+    assert!(!phone.mark_activity_read(400, 11), "never back");
+    assert!(!phone.mark_activity_read(500, 12), "unchanged");
+    assert!(laptop.mark_activity_read(900, 20));
+
+    let mut merged_on_phone = phone.clone();
+    merged_on_phone.merge(&laptop, 30);
+    let mut merged_on_laptop = laptop.clone();
+    merged_on_laptop.merge(&phone, 30);
+    assert_eq!(merged_on_phone, merged_on_laptop);
+    assert_eq!(merged_on_phone.activity_read_at_ms(), 900);
+    assert_eq!(AccountData::default().activity_read_at_ms(), 0);
   }
 
   #[test]

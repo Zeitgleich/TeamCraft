@@ -20,6 +20,7 @@ mod messaging;
 mod notifications;
 mod org_backgrounds;
 mod org_recovery;
+pub mod people;
 pub mod previews;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;

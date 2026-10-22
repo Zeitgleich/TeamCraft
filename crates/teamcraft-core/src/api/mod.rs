@@ -44,6 +44,9 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{
+  ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
+};
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
@@ -178,6 +181,19 @@ pub trait ServerApi {
     request: &SetReadPositionRequest,
   ) -> impl Future<Output = Result<(), ApiError>>;
   fn set_presence(&self, request: &SetPresenceRequest) -> impl Future<Output = Result<(), ApiError>>;
+  /// Presence and last seen of some people (`GET /presence`, at most 200).
+  fn list_presence(&self, users: &[UserId]) -> impl Future<Output = Result<ListPresenceResponse, ApiError>>;
+  /// The caller's privacy choices (`GET /me/privacy`).
+  fn get_privacy(&self) -> impl Future<Output = Result<PrivacyResponse, ApiError>>;
+  fn put_privacy(
+    &self,
+    request: &UpdatePrivacyRequest,
+  ) -> impl Future<Output = Result<PrivacyResponse, ApiError>>;
+  /// The caller's calls, newest first (`GET /calls/history`).
+  fn list_call_history(
+    &self,
+    query: &ListCallHistoryQuery,
+  ) -> impl Future<Output = Result<ListCallHistoryResponse, ApiError>>;
   /// A token to join the conversation's call on the SFU (starts the call if none runs).
   fn create_call_join_token(
     &self,

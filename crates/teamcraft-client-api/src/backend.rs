@@ -15,18 +15,20 @@ use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
+use crate::activity::ActivityFeed;
 use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome,
 };
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
-  Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, HuddleInfo, IncomingCall,
+  MediaDevices, Participant,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
-  ThreadId, ThreadSummary, User, UserId,
+  ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
+use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 
 pub trait ChatBackend {
@@ -260,6 +262,32 @@ pub trait ChatBackend {
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false
   }
+
+  // Activity feed, last seen and call history.
+
+  /// Mentions, reactions to the user's messages and replies in their threads, newest first, built
+  /// from the decrypted local data.
+  fn activity(&self) -> ActivityFeed {
+    ActivityFeed::default()
+  }
+  /// The user looked at the feed: everything in it so far counts as read (synced to their devices).
+  fn mark_activity_read(&self) {}
+  /// When the person was last active, if they are offline and let others see it. Backends that
+  /// read the server ask for it on first look and answer `None` until it arrives.
+  fn last_seen(&self, _user: UserId) -> Option<TimestampMs> {
+    None
+  }
+  /// The user's own privacy choices.
+  fn privacy(&self) -> PrivacySettings {
+    PrivacySettings::default()
+  }
+  fn set_last_seen_visibility(&self, _visibility: LastSeenVisibility) {}
+  /// The user's calls, newest first. Backends that read the server fetch them on first look.
+  fn call_history(&self) -> Vec<CallHistoryItem> {
+    Vec::new()
+  }
+  /// Asks for the newest calls again (the call list opened).
+  fn refresh_call_history(&self) {}
 }
 
 /// Calls and huddles. Media runs in `teamcraft-media`; this is the roster and device view of it,
