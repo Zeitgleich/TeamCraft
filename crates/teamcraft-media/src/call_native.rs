@@ -5,6 +5,7 @@
 //! `Send` everywhere, so they live on a dedicated audio thread that exchanges samples with the call
 //! task over channels.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle as ThreadHandle;
@@ -30,6 +31,8 @@ use crate::call_engine::{
 };
 use crate::jitter::JitterBufferConfig;
 use crate::video::EncodedVideoFrame;
+use crate::video_capture::CaptureError;
+use crate::video_pipeline::{FrameSink, VideoReceiver, VideoSendConfig, VideoSender};
 
 /// Audio frame period.
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
@@ -80,6 +83,8 @@ pub enum NativeCallError {
   Audio(#[from] AudioPipelineError),
   #[error(transparent)]
   Device(#[from] AudioDeviceError),
+  #[error(transparent)]
+  Capture(#[from] CaptureError),
   #[error("the call task ended unexpectedly")]
   TaskEnded,
 }
@@ -113,6 +118,23 @@ enum VideoCommand {
     stream_id: MediaStreamId,
     frame: EncodedVideoFrame,
   },
+  /// Capture, encode and publish a track (camera or screen).
+  Start(VideoSendConfig, oneshot::Sender<Result<(), CaptureError>>),
+  Stop(VideoTrackKind),
+  Watch {
+    stream_id: MediaStreamId,
+    maybe_max_layer: Option<u8>,
+    sink: FrameSink,
+  },
+  Unwatch(MediaStreamId),
+}
+
+/// The driver's video: own tracks being captured and received tracks being decoded.
+#[derive(Default)]
+struct VideoState {
+  /// Own tracks; the stream id arrives with `VideoPublished`.
+  senders: Vec<(VideoSender, Option<MediaStreamId>)>,
+  receivers: HashMap<MediaStreamId, VideoReceiver>,
 }
 
 /// The audio thread's handles: samples from the microphone and the speakers' buffer.
@@ -188,6 +210,32 @@ impl NativeCall {
       stream_id,
       maybe_max_layer,
     });
+  }
+
+  /// Captures, encodes (simulcast per `config.layers`) and publishes a track; replaces a running
+  /// track of the same kind. Frames flow once the SFU confirmed the track.
+  pub async fn start_video(&self, config: VideoSendConfig) -> Result<(), NativeCallError> {
+    let (done, done_rx) = oneshot::channel();
+    self.video(VideoCommand::Start(config, done));
+    Ok(done_rx.await.map_err(|_| NativeCallError::TaskEnded)??)
+  }
+
+  pub fn stop_video(&self, kind: VideoTrackKind) {
+    self.video(VideoCommand::Stop(kind));
+  }
+
+  /// Receives and decodes another device's track; decoded frames go to `sink` on a decoder
+  /// thread.
+  pub fn watch_video(&self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>, sink: FrameSink) {
+    self.video(VideoCommand::Watch {
+      stream_id,
+      maybe_max_layer,
+      sink,
+    });
+  }
+
+  pub fn unwatch_video(&self, stream_id: MediaStreamId) {
+    self.video(VideoCommand::Unwatch(stream_id));
   }
 
   /// Sends one encoded frame of an own track.
@@ -280,12 +328,15 @@ async fn run_call(
   let mut frame_tick = tokio::time::interval(FRAME_INTERVAL);
   let mut timer_tick = tokio::time::interval(TIMER_INTERVAL);
   engine.join(config.token.clone());
+  let mut video = VideoState::default();
+  let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
   let mut io = DriverIo {
     connection: &connection,
     signal_out: &signal_out,
     events: &events,
     mixer: &mut mixer,
     stats: &mut stats,
+    video: &mut video,
   };
   io.flush(&mut engine)?;
 
@@ -331,6 +382,11 @@ async fn run_call(
         }
       },
       _ = timer_tick.tick() => engine.on_timer(Instant::now()),
+      Some((kind, frame)) = encoded_rx.recv() => {
+        if let Some(stream_id) = io.video.stream_of(&kind) {
+          engine.send_video(stream_id, &frame, Instant::now());
+        }
+      },
       maybe_command = commands.recv() => {
         match maybe_command {
           Some(Command::Mute(is_muted)) => {
@@ -353,7 +409,7 @@ async fn run_call(
             // The caller may have given up waiting.
             let _ = done.send(result);
           },
-          Some(Command::Video(command)) => handle_video(&mut engine, command),
+          Some(Command::Video(command)) => handle_video(&mut engine, io.video, &encoded_tx, command),
           Some(Command::Leave) | None => break Ok(()),
         }
       },
@@ -372,8 +428,39 @@ async fn run_call(
   result.map(|()| stats)
 }
 
-fn handle_video(engine: &mut CallEngine, command: VideoCommand) {
+fn handle_video(
+  engine: &mut CallEngine,
+  video: &mut VideoState,
+  encoded: &mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
+  command: VideoCommand,
+) {
   match command {
+    VideoCommand::Start(config, done) => {
+      video.stop(engine, &config.kind);
+      let result = VideoSender::start(config, encoded.clone()).map(|sender| {
+        engine.publish_video(sender.kind.clone(), VideoCodec::H264, sender.layers.clone());
+        video.senders.push((sender, None));
+      });
+      // The caller may have given up waiting.
+      let _ = done.send(result);
+    },
+    VideoCommand::Stop(kind) => video.stop(engine, &kind),
+    VideoCommand::Watch {
+      stream_id,
+      maybe_max_layer,
+      sink,
+    } => match VideoReceiver::start(sink) {
+      Ok(receiver) => {
+        video.receivers.insert(stream_id, receiver);
+        engine.subscribe_video(stream_id, maybe_max_layer.or(Some(u8::MAX)));
+      },
+      Err(error) => warn!(%error, "cannot decode video"),
+    },
+    VideoCommand::Unwatch(stream_id) => {
+      if video.receivers.remove(&stream_id).is_some() {
+        engine.subscribe_video(stream_id, None);
+      }
+    },
     VideoCommand::Publish { kind, codec, layers } => engine.publish_video(kind, codec, layers),
     VideoCommand::Unpublish(stream_id) => engine.unpublish_video(stream_id),
     VideoCommand::Subscribe {
@@ -391,6 +478,7 @@ struct DriverIo<'a> {
   events: &'a mpsc::UnboundedSender<CallEngineEvent>,
   mixer: &'a mut PlaybackMixer,
   stats: &'a mut CallStats,
+  video: &'a mut VideoState,
 }
 
 impl DriverIo<'_> {
@@ -417,9 +505,36 @@ impl DriverIo<'_> {
           self.stats.frames_received += 1;
           self.mixer.push(sender, sequence_number, opus)?;
         },
+        EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
+          // Watched tracks are decoded for the app's sink; tracks the app subscribed to itself
+          // (subscribe_video) arrive encoded as events.
+          match self.video.receivers.get(&frame.stream_id) {
+            Some(receiver) => receiver.push(frame),
+            None => {
+              let _ = self.events.send(CallEngineEvent::VideoFrame(frame));
+            },
+          }
+        },
         EngineOutput::Event(event) => {
-          if let CallEngineEvent::ParticipantLeft(device_id) = &event {
-            self.mixer.remove(*device_id);
+          match &event {
+            CallEngineEvent::ParticipantLeft(device_id) => self.mixer.remove(*device_id),
+            CallEngineEvent::VideoPublished(track) if track.device_id == engine.device_id() => {
+              self.video.on_published(&track.kind, track.stream_id);
+            },
+            CallEngineEvent::VideoUnpublished(stream_id) => {
+              self.video.receivers.remove(stream_id);
+            },
+            CallEngineEvent::KeyframeRequested { stream_id, layer } => {
+              if let Some(sender) = self.video.sender_of(*stream_id) {
+                sender.request_keyframe(*layer);
+              }
+            },
+            CallEngineEvent::LayersNeeded { stream_id, layers } => {
+              if let Some(sender) = self.video.sender_of(*stream_id) {
+                sender.set_needed_layers(layers.clone());
+              }
+            },
+            _ => {},
           }
           // The app may have stopped listening; the call goes on.
           let _ = self.events.send(event);
@@ -427,6 +542,48 @@ impl DriverIo<'_> {
       }
     }
     Ok(())
+  }
+}
+
+impl VideoState {
+  fn stream_of(&self, kind: &VideoTrackKind) -> Option<MediaStreamId> {
+    self
+      .senders
+      .iter()
+      .find(|(sender, _)| sender.kind == *kind)
+      .and_then(|(_, maybe_stream)| *maybe_stream)
+  }
+
+  fn sender_of(&self, stream_id: MediaStreamId) -> Option<&VideoSender> {
+    self
+      .senders
+      .iter()
+      .find(|(_, maybe_stream)| *maybe_stream == Some(stream_id))
+      .map(|(sender, _)| sender)
+  }
+
+  fn on_published(&mut self, kind: &VideoTrackKind, stream_id: MediaStreamId) {
+    if let Some((_, maybe_stream)) = self
+      .senders
+      .iter_mut()
+      .find(|(sender, maybe_stream)| sender.kind == *kind && maybe_stream.is_none())
+    {
+      *maybe_stream = Some(stream_id);
+    }
+  }
+
+  /// Stops capturing a track of `kind` and unpublishes it.
+  fn stop(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
+    let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
+      .into_iter()
+      .partition(|(sender, _)| sender.kind == *kind);
+    self.senders = kept;
+    for (sender, maybe_stream) in stopped {
+      if let Some(stream_id) = maybe_stream {
+        engine.unpublish_video(stream_id);
+      }
+      drop(sender);
+    }
   }
 }
 

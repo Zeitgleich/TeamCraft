@@ -23,7 +23,7 @@ dave = [
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
-native = ["dave", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
+native = ["dave", "dep:openh264", "dep:zune-jpeg", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
 
 # Browser clients: the WebTransport + WebCodecs + Web Audio call driver (wasm32).
 web = [
@@ -34,7 +34,22 @@ web = [
   "dep:wasm-bindgen-futures",
   "dep:js-sys",
   "dep:web-sys",
+  "dep:zune-jpeg",
 ]
+
+# Cameras and screens through the xdg-desktop-portal and PipeWire (Linux; needs libpipewire
+# headers and libclang at build time). The portal asks the user and works in sandboxes.
+pipewire = ["native", "dep:pipewire", "dep:ashpd"]
+# Cameras on macOS through AVFoundation (via nokhwa). Untested: no Mac in development so far.
+avfoundation = ["native", "dep:nokhwa"]
+# Cameras through V4L2 directly (Linux fallback when the camera portal is unavailable).
+v4l2 = ["native", "dep:v4l"]
+
+# Background effects (blur, background images) as WGSL compute shaders on wgpu: Vulkan, Metal,
+# D3D12 natively, WebGPU in the browser.
+effects = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster"]
+# Person segmentation for the effects with tract (pure-Rust ONNX inference; native and wasm).
+segmentation = ["effects", "dep:tract-onnx"]
 
 [dependencies]
 teamcraft-proto.workspace = true
@@ -47,9 +62,23 @@ openmls_rust_crypto = { version = "0.6.0", optional = true }
 tls_codec = { version = "0.5.0", optional = true }
 # Call key bindings: DAVE keys signed by device keys (e2ee.md §8).
 teamcraft-crypto = { workspace = true, optional = true }
+# Blocks on the effects' GPU read-back where the caller is synchronous (the encoder thread).
+pollster = { version = "1.0.1", optional = true }
 # Clocks that work in browsers (std's Instant panics on wasm32-unknown-unknown): bandwidth
 # estimation timing and binding expiry checks. Re-exports std's types on native.
 web-time = "1.1.0"
+# H.264 software encoder and decoder (Cisco's OpenH264, BSD-2-Clause, built from source): the
+# fallback when no hardware encoder is available, and decodable by every browser.
+openh264 = { version = "0.9.9", optional = true }
+# MJPEG camera frames (many USB cameras only deliver 720p+ as MJPEG): pure-Rust JPEG decoder.
+zune-jpeg = { version = "0.4.21", optional = true }
+# Effects: GPU access (MIT/Apache-2.0), plain-old-data casts for its buffers, and a oneshot for
+# buffer read-back, which is asynchronous in the browser.
+wgpu = { version = "30.0.1", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+futures-channel = { version = "0.3.34", optional = true }
+# Segmentation model inference (MediaPipe selfie segmentation as ONNX), MIT/Apache-2.0.
+tract-onnx = { version = "0.23.9", optional = true }
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
 opus = { version = "0.4.0", optional = true }
 # Cross-platform audio device I/O (ALSA/PipeWire, CoreAudio, WASAPI, AAudio).
@@ -70,12 +99,24 @@ web-sys = { version = "0.3.106", optional = true, features = [
   "Navigator", "ReadableStream", "ReadableStreamDefaultReader", "Url", "Window", "Worklet",
   "WritableStream", "WritableStreamDefaultWriter", "DisplayMediaStreamConstraints",
   "Document", "Element", "EventTarget", "HtmlCanvasElement", "HtmlElement", "HtmlMediaElement",
-  "HtmlVideoElement", "MediaTrackSettings", "Node",
+  "HtmlVideoElement", "MediaTrackSettings", "Node", "ImageData",
 ] }
 futures = { version = "0.3.34", optional = true, default-features = false, features = ["std", "async-await"] }
 # Log output and error reporting of the headless teamcraft-call client.
 tracing-subscriber = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+
+# Camera capture on Linux: V4L2 (safe ioctl wrappers, MIT).
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = { version = "0.14.0", optional = true }
+# Portal requests (Camera, ScreenCast) over D-Bus, MIT, and the PipeWire streams they hand out (MIT).
+ashpd = { version = "0.13.13", optional = true, features = ["camera", "screencast"] }
+pipewire = { version = "0.10.1", optional = true }
+
+# Camera capture on macOS: AVFoundation behind a safe API (Apache-2.0). Its own MJPEG decoding
+# (C code) is off; capture_convert decodes MJPEG.
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-avfoundation"] }
 
 # WebRTC's audio processing module (AEC3, noise suppression, AGC2; the only WebRTC component used,
 # ARCHITECTURE.md §6.1) is a C++ library, so it is opt-in at build time instead of a feature (which
@@ -89,12 +130,19 @@ webrtc-audio-processing = "2.1.0"
 webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
 
 [dev-dependencies]
+# Builds a tiny ONNX model in the segmentation tests (tract's own protobuf types).
+prost = "0.14"
 # Device identities for call key binding tests.
 rand_core.workspace = true
 
 [[bin]]
 name = "teamcraft-call"
 required-features = ["native"]
+
+# Per-frame costs of encoding, effects and segmentation (see the example's docs).
+[[example]]
+name = "video_bench"
+required-features = ["native", "segmentation"]
 
 # The browser driver as a JS module for the SFU's development page (see the example's docs).
 [[example]]

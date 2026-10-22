@@ -9,7 +9,9 @@
 use teamcraft_proto::Role;
 
 use crate::admin::{AdminChannel, AdminUser, AuditEntry, Retention, SecurityPolicy, SelfJoinOutcome};
-use crate::calls::{ActiveCall, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant};
+use crate::calls::{
+  ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
+};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
   ThreadId, ThreadSummary, User, UserId,
@@ -114,6 +116,11 @@ pub trait CallBackend {
   /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.
   fn select_microphone(&self, _maybe_device: Option<String>) {}
   fn select_speakers(&self, _maybe_device: Option<String>) {}
+  fn set_call_camera(&self, _is_on: bool) {}
+  fn select_camera(&self, _maybe_device: Option<String>) {}
+  fn set_background_effect(&self, _effect: BackgroundEffect) {}
+  fn start_screen_share(&self) {}
+  fn stop_screen_share(&self) {}
 }
 
 /// Administration without content access: every read returns metadata only.

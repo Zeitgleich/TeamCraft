@@ -83,6 +83,63 @@ impl VideoFrame {
     let (u, v) = rest.split_at(chroma);
     (y, u, v)
   }
+  /// The whole I420 buffer (Y, then U, then V).
+  pub fn data(&self) -> &[u8] {
+    &self.data
+  }
+
+  /// A copy scaled to `target` (bilinear per plane), e.g. for lower simulcast layers.
+  pub fn scaled(&self, target: VideoResolution) -> Result<VideoFrame, VideoError> {
+    if target == self.resolution {
+      return Ok(self.clone());
+    }
+    let mut data = Vec::with_capacity(target.i420_bytes()?);
+    let (y, u, v) = self.planes();
+    let (width, height) = (
+      usize::from(self.resolution.width),
+      usize::from(self.resolution.height),
+    );
+    let (target_width, target_height) = (usize::from(target.width), usize::from(target.height));
+    scale_plane(y, width, height, target_width, target_height, &mut data);
+    for chroma in [u, v] {
+      scale_plane(
+        chroma,
+        width / 2,
+        height / 2,
+        target_width / 2,
+        target_height / 2,
+        &mut data,
+      );
+    }
+    VideoFrame::new(target, self.timestamp_us, data)
+  }
+}
+
+/// Bilinear resampling of one 8-bit plane, appended to `out`.
+fn scale_plane(
+  plane: &[u8],
+  width: usize,
+  height: usize,
+  target_width: usize,
+  target_height: usize,
+  out: &mut Vec<u8>,
+) {
+  // 16.16 fixed point source positions of the target pixel centres.
+  let step_x = ((width << 16) / target_width.max(1)) as i64;
+  let step_y = ((height << 16) / target_height.max(1)) as i64;
+  let sample = |x: usize, y: usize| i64::from(plane[y.min(height - 1) * width + x.min(width - 1)]);
+  for target_y in 0..target_height {
+    let source_y = ((target_y as i64 * step_y) + step_y / 2 - (1 << 15)).max(0);
+    let (y0, fraction_y) = ((source_y >> 16) as usize, source_y & 0xffff);
+    for target_x in 0..target_width {
+      let source_x = ((target_x as i64 * step_x) + step_x / 2 - (1 << 15)).max(0);
+      let (x0, fraction_x) = ((source_x >> 16) as usize, source_x & 0xffff);
+      let top = sample(x0, y0) * (0x10000 - fraction_x) + sample(x0 + 1, y0) * fraction_x;
+      let bottom = sample(x0, y0 + 1) * (0x10000 - fraction_x) + sample(x0 + 1, y0 + 1) * fraction_x;
+      let value = (top * (0x10000 - fraction_y) + bottom * fraction_y + (1 << 31)) >> 32;
+      out.push(value.clamp(0, 255) as u8);
+    }
+  }
 }
 
 impl EncodedVideoFrame {
@@ -213,6 +270,25 @@ mod tests {
         VideoFrame::new(odd, 0, Vec::new()),
         Err(VideoError::InvalidDimensions { .. })
       ));
+    }
+
+    #[test]
+    fn scaling_keeps_flat_colours_and_halves_planes() {
+      let mut data = vec![200u8; 1280 * 720];
+      data.extend(vec![60u8; 1280 * 720 / 4]);
+      data.extend(vec![180u8; 1280 * 720 / 4]);
+      let frame = VideoFrame::new(HD, 7, data).unwrap();
+      let half = frame
+        .scaled(VideoResolution {
+          width: 640,
+          height: 360,
+        })
+        .unwrap();
+      let (y, u, v) = half.planes();
+      assert_eq!((y.len(), u.len(), v.len()), (640 * 360, 320 * 180, 320 * 180));
+      assert!(y.iter().all(|value| *value == 200) && u.iter().all(|value| *value == 60));
+      assert!(v.iter().all(|value| *value == 180));
+      assert_eq!(half.timestamp_us(), 7);
     }
 
     #[test]

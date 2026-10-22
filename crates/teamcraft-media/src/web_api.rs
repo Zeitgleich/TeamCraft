@@ -242,6 +242,26 @@ extern "C" {
 
   #[wasm_bindgen(method, catch, js_name = drawImage)]
   pub fn draw_video_frame(this: &Canvas2d, frame: &VideoFrame, x: f64, y: f64) -> Result<(), JsValue>;
+
+  /// `drawImage(video, dx, dy, dw, dh)`.
+  #[wasm_bindgen(method, catch, js_name = drawImage)]
+  pub fn draw_video(
+    this: &Canvas2d,
+    video: &web_sys::HtmlVideoElement,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+  ) -> Result<(), JsValue>;
+
+  #[wasm_bindgen(method, catch, js_name = getImageData)]
+  pub fn get_image_data(
+    this: &Canvas2d,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+  ) -> Result<web_sys::ImageData, JsValue>;
 }
 
 /// A plain JS object with the given properties (WebIDL dictionaries).

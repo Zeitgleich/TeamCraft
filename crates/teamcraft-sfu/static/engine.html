@@ -49,11 +49,13 @@ device identities here.</p>
     <button id="share" disabled>Share screen</button>
     <button id="pattern" disabled>Share test pattern</button>
     <button id="unshare" disabled>Stop sharing</button>
+    <button id="camera" disabled>Camera on</button>
+    <button id="nocamera" disabled>Camera off</button>
   </div>
 </fieldset>
 
 <fieldset>
-  <legend>Screen shares of others</legend>
+  <legend>Video of others</legend>
   <canvas id="video" width="320" height="180"></canvas>
 </fieldset>
 
@@ -93,7 +95,7 @@ $("join").addEventListener("click", async () => {
   try {
     call = await join_dev_call(url, CERT_HASH, `dev:${callId}:${user}:${device}`, user, device, source, log, $("video"));
     setStatus("in call", true);
-    for (const id of ["mute", "leave", "share", "pattern", "unshare"]) $(id).disabled = false;
+    for (const id of ["mute", "leave", "share", "pattern", "unshare", "camera", "nocamera"]) $(id).disabled = false;
   } catch (error) {
     setStatus(`join failed: ${error.message ?? error}`, false);
     $("join").disabled = false;
@@ -138,9 +140,18 @@ function testPattern() {
 $("share").addEventListener("click", () => share(undefined));
 $("pattern").addEventListener("click", () => share(testPattern()));
 $("unshare").addEventListener("click", () => call.stop_screen_share());
+$("camera").addEventListener("click", async () => {
+  try {
+    await call.start_camera();
+    log("camera on");
+  } catch (error) {
+    log(`camera failed: ${error.message ?? error}`);
+  }
+});
+$("nocamera").addEventListener("click", () => call.stop_camera());
 
 $("leave").addEventListener("click", async () => {
-  for (const id of ["leave", "mute", "share", "pattern", "unshare"]) $(id).disabled = true;
+  for (const id of ["leave", "mute", "share", "pattern", "unshare", "camera", "nocamera"]) $(id).disabled = true;
   try {
     const stats = await call.leave();
     window.lastStats = stats;

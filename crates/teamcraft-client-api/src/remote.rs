@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::calls::{ActiveCall, CallRequest, IncomingCall, MediaDevices, RunningCall};
+use crate::calls::{ActiveCall, BackgroundEffect, CallRequest, IncomingCall, MediaDevices, RunningCall};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
   User, UserId,
@@ -53,6 +53,20 @@ pub enum CallAction {
     #[serde(default)]
     maybe_device: Option<String>,
   },
+  SetCamera {
+    is_on: bool,
+  },
+  /// `None` follows the system default (or the portal's choice).
+  SelectCamera {
+    #[serde(default)]
+    maybe_device: Option<String>,
+  },
+  SetBackgroundEffect {
+    effect: BackgroundEffect,
+  },
+  /// Asks the system for a screen or window and shares it as its own stream.
+  StartScreenShare,
+  StopScreenShare,
   #[serde(other)]
   Unknown,
 }
@@ -228,6 +242,29 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&join).expect("serialize"),
       r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
+    );
+  }
+
+  #[test]
+  fn video_actions_round_trip() {
+    use crate::calls::BackgroundPreset;
+
+    for action in [
+      CallAction::SetCamera { is_on: true },
+      CallAction::SetBackgroundEffect {
+        effect: BackgroundEffect::Preset(BackgroundPreset::Office),
+      },
+      CallAction::StartScreenShare,
+    ] {
+      let json = serde_json::to_string(&action).expect("serialize");
+      assert_eq!(serde_json::from_str::<CallAction>(&json).expect("parse"), action);
+    }
+    assert_eq!(
+      serde_json::to_string(&CallAction::SetBackgroundEffect {
+        effect: BackgroundEffect::BlurLight
+      })
+      .expect("serialize"),
+      r#"{"action":"set_background_effect","effect":"blur_light"}"#
     );
   }
 

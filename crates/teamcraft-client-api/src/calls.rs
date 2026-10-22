@@ -34,15 +34,18 @@ impl CallLayout {
 }
 
 /// Background shown behind the user's camera image (applied on the device, before encoding).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundEffect {
+  #[default]
   None,
   BlurLight,
   BlurStrong,
   Preset(BackgroundPreset),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundPreset {
   Office,
   Bookshelf,
@@ -134,6 +137,13 @@ pub struct ActiveCall {
   pub participants: Vec<Participant>,
   /// Whose audio is forwarded right now, loudest first.
   pub active_speakers: Vec<UserId>,
+  #[serde(default)]
+  pub is_camera_on: bool,
+  #[serde(default)]
+  pub is_sharing_screen: bool,
+  /// The effect behind this device's camera image.
+  #[serde(default)]
+  pub background: BackgroundEffect,
 }
 
 /// A call running in a conversation (server roster), whether or not this device is in it.

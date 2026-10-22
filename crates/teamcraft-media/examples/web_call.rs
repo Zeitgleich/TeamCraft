@@ -41,6 +41,8 @@ enum Control {
     done: oneshot::Sender<Result<(), String>>,
   },
   StopScreenShare,
+  StartCamera(oneshot::Sender<Result<(), String>>),
+  StopCamera,
   Leave,
 }
 
@@ -64,8 +66,8 @@ pub async fn join_dev_call(
     device_id,
     capabilities: MediaCapabilities {
       audio_codecs: vec![AudioCodec::Opus],
-      video_encoders: vec![VideoCodec::Vp9],
-      video_decoders: vec![VideoCodec::Vp9],
+      video_encoders: vec![VideoCodec::H264],
+      video_decoders: vec![VideoCodec::H264, VideoCodec::Vp9],
       max_simulcast_layers: 1,
     },
     bwe: BweConfig::default(),
@@ -131,6 +133,20 @@ impl DevCall {
     let _ = self.controls.unbounded_send(Control::StopScreenShare);
   }
 
+  /// Turns the camera on (three simulcast layers).
+  pub async fn start_camera(&self) -> Result<(), JsError> {
+    let (done, done_rx) = oneshot::channel();
+    let _ = self.controls.unbounded_send(Control::StartCamera(done));
+    done_rx
+      .await
+      .map_err(|_| JsError::new("the call ended"))?
+      .map_err(|error| JsError::new(&error))
+  }
+
+  pub fn stop_camera(&self) {
+    let _ = self.controls.unbounded_send(Control::StopCamera);
+  }
+
   /// Leaves and resolves to `{ frames_sent, frames_received, audible_frames_played, privacy_code }`.
   pub async fn leave(&self) -> Result<Object, JsError> {
     let _ = self.controls.unbounded_send(Control::Leave);
@@ -185,6 +201,11 @@ async fn pump(
         let _ = done.send(result);
       },
       future::Either::Left(Some(Control::StopScreenShare)) => call.stop_screen_share(),
+      future::Either::Left(Some(Control::StartCamera(done))) => {
+        let result = call.start_camera(None).await.map_err(|error| error.to_string());
+        let _ = done.send(result);
+      },
+      future::Either::Left(Some(Control::StopCamera)) => call.stop_camera(),
       future::Either::Left(Some(Control::Leave) | None) | future::Either::Right(None) => break,
       // Every 100 ms; too chatty for the event log.
       future::Either::Right(Some(CallEngineEvent::UplinkEstimate { .. })) => {},

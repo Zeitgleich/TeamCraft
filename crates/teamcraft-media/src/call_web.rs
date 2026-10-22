@@ -38,7 +38,7 @@ use web_sys::{
 };
 use web_time::Instant;
 
-use self::video::{ScreenShare, VideoView};
+use self::video::{TrackSender, VideoView};
 
 use crate::audio_frame::{EncodedAudioFrame, FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ};
 use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource, sine_tone};
@@ -130,13 +130,15 @@ enum Input {
   CodecFailed(String),
   FrameTick,
   TimerTick,
-  ScreenTick,
-  ScreenEncoded {
+  VideoTick(VideoTrackKind),
+  VideoEncoded {
+    kind: VideoTrackKind,
+    layer: u8,
     data: Vec<u8>,
     is_keyframe: bool,
     timestamp_us: f64,
   },
-  ScreenEnded,
+  VideoEnded(VideoTrackKind),
   Command(Command),
 }
 
@@ -148,11 +150,15 @@ enum Command {
     sink: AudioSink,
     done: oneshot::Sender<Result<(), WebCallError>>,
   },
-  StartScreenShare {
+  StartVideo {
     stream: MediaStream,
+    // Boxed: the plan (with an effects pipeline) dwarfs the other commands.
+    plan: Box<video::TrackPlan>,
     done: oneshot::Sender<Result<(), WebCallError>>,
   },
-  StopScreenShare,
+  StopVideo(VideoTrackKind),
+  #[cfg(feature = "effects")]
+  SetEffect(crate::effects::BackgroundEffect),
   WatchVideo {
     stream_id: MediaStreamId,
     canvas: HtmlCanvasElement,
@@ -268,8 +274,40 @@ impl WebCall {
     done_rx.await.map_err(|_| WebCallError::Ended)?
   }
 
-  /// Asks the user for a screen or window and shares it (one VP9 layer). Call it from a user
-  /// gesture, like `join`.
+  /// Turns the camera on (three H.264 simulcast layers from 720p); `maybe_device` is a
+  /// `MediaDeviceInfo.deviceId`. Call it from a user gesture, like `join`.
+  pub async fn start_camera(&self, maybe_device: Option<&str>) -> Result<(), WebCallError> {
+    let stream = video::capture_camera(maybe_device).await?;
+    self.start_video(stream, video::camera_plan()).await
+  }
+
+  /// [`WebCall::start_camera`] with background effects (segmentation and the WebGPU compositor);
+  /// change the effect with [`WebCall::set_background_effect`].
+  #[cfg(feature = "effects")]
+  pub async fn start_camera_with_effects(
+    &self,
+    maybe_device: Option<&str>,
+    effects: crate::effects::EffectsPipeline,
+  ) -> Result<(), WebCallError> {
+    let stream = video::capture_camera(maybe_device).await?;
+    let plan = video::TrackPlan {
+      maybe_effects: Some(effects),
+      ..video::camera_plan()
+    };
+    self.start_video(stream, plan).await
+  }
+
+  #[cfg(feature = "effects")]
+  pub fn set_background_effect(&self, effect: crate::effects::BackgroundEffect) {
+    let _ = self.command(Command::SetEffect(effect));
+  }
+
+  pub fn stop_camera(&self) {
+    let _ = self.command(Command::StopVideo(VideoTrackKind::Camera));
+  }
+
+  /// Asks the user for a screen or window and shares it (one H.264 layer, no simulcast). Call it
+  /// from a user gesture, like `join`.
   pub async fn start_screen_share(&self) -> Result<(), WebCallError> {
     let stream = video::capture_screen().await?;
     self.share_video_stream(stream).await
@@ -278,13 +316,21 @@ impl WebCall {
   /// Shares any video stream as the screen share (e.g. a canvas' `captureStream()`), replacing a
   /// running one.
   pub async fn share_video_stream(&self, stream: MediaStream) -> Result<(), WebCallError> {
-    let (done, done_rx) = oneshot::channel();
-    self.command(Command::StartScreenShare { stream, done })?;
-    done_rx.await.map_err(|_| WebCallError::Ended)?
+    self.start_video(stream, video::screen_plan()).await
   }
 
   pub fn stop_screen_share(&self) {
-    let _ = self.command(Command::StopScreenShare);
+    let _ = self.command(Command::StopVideo(VideoTrackKind::Screen));
+  }
+
+  async fn start_video(&self, stream: MediaStream, plan: video::TrackPlan) -> Result<(), WebCallError> {
+    let (done, done_rx) = oneshot::channel();
+    self.command(Command::StartVideo {
+      stream,
+      plan: Box::new(plan),
+      done,
+    })?;
+    done_rx.await.map_err(|_| WebCallError::Ended)?
   }
 
   /// Receives another device's track (from [`CallEngineEvent::VideoPublished`]) and draws it into
@@ -378,7 +424,7 @@ async fn run_call(
     is_deafened: false,
     stats: CallStats::default(),
     own_device: config.engine.device_id,
-    maybe_screen: None,
+    senders: Vec::new(),
     views: HashMap::new(),
   };
   let _frame_timer = Interval::start(FRAME_INTERVAL_MS, &inputs, || Input::FrameTick)?;
@@ -427,7 +473,7 @@ struct CallState<'a> {
   is_deafened: bool,
   stats: CallStats,
   own_device: DeviceId,
-  maybe_screen: Option<ScreenShare>,
+  senders: Vec<TrackSender>,
   views: HashMap<MediaStreamId, VideoView>,
 }
 
@@ -463,17 +509,19 @@ impl CallState<'_> {
       Input::CodecFailed(message) => warn!(%message, "audio codec error"),
       Input::FrameTick => self.on_frame_tick(audio)?,
       Input::TimerTick => engine.on_timer(Instant::now()),
-      Input::ScreenTick => {
-        if let Some(screen) = &mut self.maybe_screen {
-          screen.capture()?;
+      Input::VideoTick(kind) => {
+        if let Some(sender) = self.senders.iter_mut().find(|sender| sender.kind == kind) {
+          sender.capture().await?;
         }
       },
-      Input::ScreenEncoded {
+      Input::VideoEncoded {
+        kind,
+        layer,
         data,
         is_keyframe,
         timestamp_us,
-      } => self.send_screen_frame(engine, data, is_keyframe, timestamp_us),
-      Input::ScreenEnded => self.stop_screen_share(engine),
+      } => self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us),
+      Input::VideoEnded(kind) => self.stop_video(engine, &kind),
       Input::Command(command) => return self.on_command(command, engine, audio).await,
     }
     Ok(Flow::Continue)
@@ -509,24 +557,25 @@ impl CallState<'_> {
               self.remotes.remove(device_id);
             },
             CallEngineEvent::VideoPublished(track) if track.device_id == self.own_device => {
-              if let Some(screen) = self
-                .maybe_screen
-                .as_mut()
-                .filter(|_| track.kind == VideoTrackKind::Screen)
+              if let Some(sender) = self
+                .senders
+                .iter_mut()
+                .find(|sender| sender.kind == track.kind && sender.maybe_stream_id.is_none())
               {
-                screen.maybe_stream_id = Some(track.stream_id);
+                sender.maybe_stream_id = Some(track.stream_id);
               }
             },
             CallEngineEvent::VideoUnpublished(stream_id) => {
               self.views.remove(stream_id);
             },
-            CallEngineEvent::KeyframeRequested { stream_id, .. } => {
-              if let Some(screen) = self
-                .maybe_screen
-                .as_mut()
-                .filter(|screen| screen.maybe_stream_id == Some(*stream_id))
-              {
-                screen.request_keyframe();
+            CallEngineEvent::KeyframeRequested { stream_id, layer } => {
+              if let Some(sender) = self.sender_of(*stream_id) {
+                sender.request_keyframe(*layer);
+              }
+            },
+            CallEngineEvent::LayersNeeded { stream_id, layers } => {
+              if let Some(sender) = self.sender_of(*stream_id) {
+                sender.set_needed_layers(layers);
               }
             },
             _ => {},
@@ -603,13 +652,19 @@ impl CallState<'_> {
         // The caller may have given up waiting.
         let _ = done.send(result);
       },
-      Command::StartScreenShare { stream, done } => {
-        let result = self.start_screen_share(engine, stream).await;
+      Command::StartVideo { stream, plan, done } => {
+        let result = self.start_video(engine, stream, *plan).await;
         let _ = done.send(result);
       },
-      Command::StopScreenShare => self.stop_screen_share(engine),
+      Command::StopVideo(kind) => self.stop_video(engine, &kind),
+      #[cfg(feature = "effects")]
+      Command::SetEffect(effect) => {
+        for sender in &mut self.senders {
+          sender.set_effect(effect.clone());
+        }
+      },
       Command::WatchVideo { stream_id, canvas } => {
-        let view = VideoView::new(canvas, self.inputs)?;
+        let view = VideoView::new(canvas, self.inputs);
         self.views.insert(stream_id, view);
         engine.subscribe_video(stream_id, Some(0));
       },
@@ -625,44 +680,64 @@ impl CallState<'_> {
 }
 
 impl CallState<'_> {
-  async fn start_screen_share(
+  /// Starts capturing and encoding a track, replacing one of the same kind.
+  async fn start_video(
     &mut self,
     engine: &mut CallEngine,
     stream: MediaStream,
+    plan: video::TrackPlan,
   ) -> Result<(), WebCallError> {
-    self.stop_screen_share(engine);
-    let screen = ScreenShare::start(stream, self.inputs).await?;
-    engine.publish_video(VideoTrackKind::Screen, VideoCodec::Vp9, screen.layers());
-    self.maybe_screen = Some(screen);
+    let kind = plan.kind.clone();
+    self.stop_video(engine, &kind);
+    let sender = TrackSender::start(stream, plan, self.inputs).await?;
+    engine.publish_video(kind, VideoCodec::H264, sender.layers());
+    self.senders.push(sender);
     Ok(())
   }
 
-  fn stop_screen_share(&mut self, engine: &mut CallEngine) {
-    if let Some(screen) = self.maybe_screen.take() {
-      if let Some(stream_id) = screen.maybe_stream_id {
+  fn stop_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
+    let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
+      .into_iter()
+      .partition(|sender| sender.kind == *kind);
+    self.senders = kept;
+    for sender in stopped {
+      if let Some(stream_id) = sender.maybe_stream_id {
         engine.unpublish_video(stream_id);
       }
-      screen.stop();
+      sender.stop();
     }
   }
 
-  fn send_screen_frame(
+  fn sender_of(&mut self, stream_id: MediaStreamId) -> Option<&mut TrackSender> {
+    self
+      .senders
+      .iter_mut()
+      .find(|sender| sender.maybe_stream_id == Some(stream_id))
+  }
+
+  fn send_video_frame(
     &mut self,
     engine: &mut CallEngine,
+    kind: &VideoTrackKind,
+    layer: u8,
     data: Vec<u8>,
     is_keyframe: bool,
     timestamp_us: f64,
   ) {
     let Some(stream_id) = self
-      .maybe_screen
-      .as_ref()
-      .and_then(|screen| screen.maybe_stream_id)
+      .senders
+      .iter()
+      .find(|sender| sender.kind == *kind)
+      .and_then(|sender| sender.maybe_stream_id)
     else {
       return;
     };
+    let Ok(layer) = SimulcastLayer::new(layer) else {
+      return;
+    };
     let frame = EncodedVideoFrame {
-      codec: VideoCodec::Vp9,
-      layer: SimulcastLayer::BASE,
+      codec: VideoCodec::H264,
+      layer,
       // Encoder timestamps start at 0 and stay far below u64::MAX microseconds.
       timestamp: EncodedVideoFrame::rtp_timestamp(timestamp_us.max(0.0) as u64),
       is_keyframe,

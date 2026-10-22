@@ -234,6 +234,10 @@ impl CallEngine {
     }
   }
 
+  pub fn device_id(&self) -> DeviceId {
+    self.config.device_id
+  }
+
   pub fn is_muted(&self) -> bool {
     self.is_muted
   }

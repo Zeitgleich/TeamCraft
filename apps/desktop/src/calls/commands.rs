@@ -37,6 +37,11 @@ pub async fn call_action(
     CallAction::SetDeafened { is_deafened } => calls.set_deafened(is_deafened).await,
     CallAction::SelectMicrophone { maybe_device } => calls.select_microphone(maybe_device).await?,
     CallAction::SelectSpeakers { maybe_device } => calls.select_speakers(maybe_device).await?,
+    CallAction::SetCamera { is_on } => calls.set_camera(is_on).await?,
+    CallAction::SelectCamera { maybe_device } => calls.select_camera(maybe_device).await?,
+    CallAction::SetBackgroundEffect { effect } => calls.set_background_effect(effect),
+    CallAction::StartScreenShare => calls.start_screen_share().await?,
+    CallAction::StopScreenShare => calls.stop_screen_share().await,
     CallAction::Unknown => return Err(CommandError::from("unknown call action".to_owned())),
   }
   Ok(())

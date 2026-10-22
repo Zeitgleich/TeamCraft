@@ -18,11 +18,13 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: System packages for the Tauri desktop shell and native call audio
+      - name: System packages for the Tauri desktop shell, native call media and capture
+        # libpipewire/libspa + libclang: portal capture (bindgen); mesa-vulkan-drivers: lavapipe, a
+        # software GPU, so the effects' golden-image tests run instead of skipping.
         run: >
           sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev
-          libasound2-dev
+          libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev mesa-vulkan-drivers
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Format

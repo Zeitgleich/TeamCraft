@@ -4,7 +4,8 @@
 //! ```text
 //! teamcraft-call --sfu https://127.0.0.1:4433/call --token dev:1:1:1 --user 1 --device 1 \
 //!   [--cert-hash <64 hex chars>] [--source tone:440 | mic[:<id>] | silence] \
-//!   [--sink discard | speakers[:<id>]] [--seconds 10] [--roster 2,3] [--muted]
+//!   [--sink discard | speakers[:<id>]] [--seconds 10] [--roster 2,3] [--muted] [--watch-video]
+//!   [--send-video]
 //! teamcraft-call --list-devices
 //! ```
 //!
@@ -18,7 +19,10 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
-use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, UserId};
+use teamcraft_media::video::{VideoResolution, simulcast_layers};
+use teamcraft_media::video_capture::{CaptureFormat, TestPatternCapture};
+use teamcraft_media::video_pipeline::{VideoSendConfig, software_encoders};
+use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, UserId, VideoCodec, VideoTrackKind};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -39,6 +43,8 @@ async fn main() -> anyhow::Result<()> {
   if options.is_muted {
     call.set_muted(true);
   }
+  let decoded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+  let mut is_video_pending = options.is_sending_video;
   let deadline = async {
     match options.maybe_duration {
       Some(duration) => tokio::time::sleep(duration).await,
@@ -53,7 +59,25 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
       () = &mut deadline => break,
       maybe_event = call.next_event() => match maybe_event {
-        Some(event) => log_event(&event),
+        Some(event) => {
+          log_event(&event);
+          if is_video_pending && matches!(event, CallEngineEvent::Secured { .. }) {
+            is_video_pending = false;
+            call.start_video(test_pattern_camera()).await.context("starting video")?;
+          }
+          if let (true, CallEngineEvent::VideoPublished(track)) = (options.is_watching_video, &event)
+            && track.device_id != options.device_id
+          {
+            let counter = std::sync::Arc::clone(&decoded);
+            call.watch_video(track.stream_id, None, Box::new(move |frame| {
+              let count = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+              if count % 30 == 1 {
+                let resolution = frame.resolution();
+                info!(count, width = resolution.width, height = resolution.height, "decoded video");
+              }
+            }));
+          }
+        },
         None => break,
       },
     }
@@ -64,9 +88,28 @@ async fn main() -> anyhow::Result<()> {
     frames_received = stats.frames_received,
     audible_frames_played = stats.audible_frames_played,
     privacy_code = stats.maybe_privacy_code.as_deref().unwrap_or("-"),
+    video_frames_decoded = decoded.load(std::sync::atomic::Ordering::Relaxed),
     "call statistics"
   );
   Ok(())
+}
+
+/// A 720p test pattern as a camera with three simulcast layers.
+fn test_pattern_camera() -> VideoSendConfig {
+  let format = CaptureFormat {
+    resolution: VideoResolution {
+      width: 1280,
+      height: 720,
+    },
+    framerate: 30,
+  };
+  VideoSendConfig {
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(TestPatternCapture::new(format)),
+    layers: simulcast_layers(format.resolution, format.framerate, 1_500_000, 3),
+    encoders: software_encoders(),
+    maybe_filter: None,
+  }
 }
 
 fn log_devices(direction: &str, devices: &[AudioDeviceInfo]) {
@@ -79,6 +122,11 @@ struct Options {
   config: NativeCallConfig,
   maybe_duration: Option<Duration>,
   is_muted: bool,
+  /// Decode other devices' video and log it.
+  is_watching_video: bool,
+  /// Publish a test pattern as camera once the call is secured.
+  is_sending_video: bool,
+  device_id: DeviceId,
 }
 
 impl Options {
@@ -93,9 +141,19 @@ impl Options {
     let mut maybe_duration = None;
     let mut maybe_trusted_roster = None;
     let mut is_muted = false;
+    let mut is_watching_video = false;
+    let mut is_sending_video = false;
     while let Some(flag) = args.next() {
       if flag == "--muted" {
         is_muted = true;
+        continue;
+      }
+      if flag == "--watch-video" {
+        is_watching_video = true;
+        continue;
+      }
+      if flag == "--send-video" {
+        is_sending_video = true;
         continue;
       }
       let value = args.next().with_context(|| format!("{flag} needs a value"))?;
@@ -119,12 +177,15 @@ impl Options {
         other => bail!("unknown option {other}"),
       }
     }
+    let device_id = maybe_device.context("--device is required")?;
     let engine = CallEngineConfig {
       user_id: maybe_user.context("--user is required")?,
-      device_id: maybe_device.context("--device is required")?,
+      device_id,
       capabilities: MediaCapabilities {
         audio_codecs: vec![AudioCodec::Opus],
-        ..MediaCapabilities::default()
+        video_encoders: vec![VideoCodec::H264],
+        video_decoders: vec![VideoCodec::H264],
+        max_simulcast_layers: 3,
       },
       bwe: BweConfig::default(),
     };
@@ -144,6 +205,9 @@ impl Options {
       config,
       maybe_duration,
       is_muted,
+      is_watching_video,
+      is_sending_video,
+      device_id,
     })
   }
 }

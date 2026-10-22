@@ -8,12 +8,14 @@
 //! call key binding (e2ee.md §8), so DAVE only admits devices the user's contacts certified.
 
 pub mod commands;
+mod video;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_client_api::calls::{
-  ActiveCall, CallRequest, IncomingCall, MediaDevice, MediaDevices, Participant, RunningCall,
+  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallRequest, IncomingCall, MediaDevice, MediaDevices,
+  Participant, RunningCall,
 };
 use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_core::CallKeySigner;
@@ -25,9 +27,11 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::effects::EffectHandle;
+use teamcraft_media::video_pipeline::{VideoSendConfig, software_encoders};
 use teamcraft_proto::{
-  CallRosterEntry, ConversationId, DeviceId, GatewayEvent, Id, MediaCapabilities, Snowflake, UserId,
-  VideoTrackKind,
+  AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, Id, MediaCapabilities, Snowflake,
+  UserId, VideoCodec, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -55,6 +59,12 @@ struct CallState {
   devices: MediaDevices,
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
+  maybe_camera: Option<String>,
+  background: UiBackgroundEffect,
+  /// Changes the effect of the running camera without restarting it.
+  maybe_effect_handle: Option<EffectHandle>,
+  /// Lets the screen picker remember the last choice.
+  maybe_screen_token: Option<String>,
 }
 
 /// Control of the task that owns the [`NativeCall`].
@@ -71,6 +81,8 @@ enum Control {
     sink: AudioSink,
     done: oneshot::Sender<Result<(), String>>,
   },
+  StartVideo(VideoSendConfig, oneshot::Sender<Result<(), String>>),
+  StopVideo(VideoTrackKind),
   Leave,
 }
 
@@ -115,8 +127,17 @@ impl CallHost {
     let (inputs, outputs) = tokio::task::spawn_blocking(|| (list_input_devices(), list_output_devices()))
       .await
       .map_err(|error| error.to_string())?;
+    let cameras = tokio::task::spawn_blocking(video::list_cameras)
+      .await
+      .map_err(|error| error.to_string())?;
     let devices = MediaDevices {
-      cameras: Vec::new(),
+      cameras: cameras
+        .into_iter()
+        .map(|camera| MediaDevice {
+          id: camera.id,
+          label: camera.name,
+        })
+        .collect(),
       microphones: inputs
         .map_err(|error| error.to_string())?
         .iter()
@@ -159,6 +180,9 @@ impl CallHost {
         maybe_privacy_code: None,
         participants: Vec::new(),
         active_speakers: Vec::new(),
+        is_camera_on: false,
+        is_sharing_screen: false,
+        background: state.background,
       });
     }
     let (controls, control_rx) = mpsc::unbounded_channel();
@@ -225,6 +249,120 @@ impl CallHost {
     }
     // No answer means the call ended meanwhile; the choice still applies to the next one.
     done_rx.await.unwrap_or(Ok(()))
+  }
+
+  /// Starts (opening the camera; the portal may ask the user) or stops the camera.
+  pub async fn set_camera(&self, is_on: bool) -> Result<(), String> {
+    if !is_on {
+      self.control(Control::StopVideo(VideoTrackKind::Camera)).await;
+      self.update_active(|active| active.is_camera_on = false);
+      lock(&self.state).maybe_effect_handle = None;
+      return Ok(());
+    }
+    let (maybe_camera, background) = {
+      let state = lock(&self.state);
+      (state.maybe_camera.clone(), state.background)
+    };
+    let (capture, maybe_effects) = tokio::task::spawn_blocking(move || {
+      let capture = video::open_camera(maybe_camera.as_deref())?;
+      Ok::<_, String>((capture, video::effects_filter(background)))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let (maybe_filter, maybe_handle) = match maybe_effects {
+      Some((filter, handle)) => (Some(filter), Some(handle)),
+      None => (None, None),
+    };
+    let config = VideoSendConfig {
+      kind: VideoTrackKind::Camera,
+      layers: video::camera_layers(capture.format()),
+      capture,
+      encoders: software_encoders(),
+      maybe_filter,
+    };
+    self.start_video(config).await?;
+    lock(&self.state).maybe_effect_handle = maybe_handle;
+    self.update_active(|active| active.is_camera_on = true);
+    Ok(())
+  }
+
+  /// Remembers the camera and restarts a running one with it.
+  pub async fn select_camera(&self, maybe_device: Option<String>) -> Result<(), String> {
+    lock(&self.state).maybe_camera = maybe_device;
+    if self.is_camera_on() {
+      self.set_camera(true).await?;
+    }
+    Ok(())
+  }
+
+  pub fn set_background_effect(&self, effect: UiBackgroundEffect) {
+    let maybe_handle = {
+      let mut state = lock(&self.state);
+      state.background = effect;
+      state.maybe_effect_handle.clone()
+    };
+    match maybe_handle {
+      Some(handle) => handle.set(video::media_effect(effect)),
+      None if effect != UiBackgroundEffect::None && self.is_camera_on() => {
+        tracing::warn!("background effects are unavailable (no segmentation model or GPU)");
+      },
+      None => {},
+    }
+    self.update_active(|active| active.background = effect);
+  }
+
+  /// Shows the system's screen/window picker and shares the choice as its own stream.
+  pub async fn start_screen_share(&self) -> Result<(), String> {
+    let maybe_token = lock(&self.state).maybe_screen_token.clone();
+    let (capture, maybe_new_token) =
+      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref()))
+        .await
+        .map_err(|error| error.to_string())??;
+    let config = VideoSendConfig {
+      kind: VideoTrackKind::Screen,
+      layers: video::screen_layers(capture.format()),
+      capture,
+      encoders: software_encoders(),
+      maybe_filter: None,
+    };
+    self.start_video(config).await?;
+    if maybe_new_token.is_some() {
+      lock(&self.state).maybe_screen_token = maybe_new_token;
+    }
+    self.update_active(|active| active.is_sharing_screen = true);
+    Ok(())
+  }
+
+  pub async fn stop_screen_share(&self) {
+    self.control(Control::StopVideo(VideoTrackKind::Screen)).await;
+    self.update_active(|active| active.is_sharing_screen = false);
+  }
+
+  async fn start_video(&self, config: VideoSendConfig) -> Result<(), String> {
+    let (done, done_rx) = oneshot::channel();
+    {
+      let media = self.media.lock().await;
+      let call = media.as_ref().ok_or("not in a call")?;
+      call
+        .controls
+        .send(Control::StartVideo(config, done))
+        .map_err(|_| "the call ended".to_owned())?;
+    }
+    done_rx.await.map_err(|_| "the call ended".to_owned())?
+  }
+
+  fn is_camera_on(&self) -> bool {
+    lock(&self.state)
+      .maybe_active
+      .as_ref()
+      .is_some_and(|active| active.is_camera_on)
+  }
+
+  fn update_active(&self, change: impl FnOnce(&mut ActiveCall)) {
+    if let Some(active) = lock(&self.state).maybe_active.as_mut() {
+      change(active);
+    }
+    self.changed();
   }
 
   async fn control(&self, control: Control) {
@@ -334,6 +472,11 @@ async fn run_media(
           let result = call.set_audio(source, sink).await.map_err(|error| error.to_string());
           let _ = done.send(result);
         },
+        Some(Control::StartVideo(config, done)) => {
+          let result = call.start_video(config).await.map_err(|error| error.to_string());
+          let _ = done.send(result);
+        },
+        Some(Control::StopVideo(kind)) => call.stop_video(kind),
         Some(Control::Leave) | None => break,
       },
       maybe_event = call.next_event() => match maybe_event {
@@ -454,7 +597,12 @@ fn native_config(
   let engine = CallEngineConfig {
     user_id: preparation.user_id,
     device_id: preparation.device_id,
-    capabilities: MediaCapabilities::default(),
+    capabilities: MediaCapabilities {
+      audio_codecs: vec![AudioCodec::Opus],
+      video_encoders: vec![VideoCodec::H264],
+      video_decoders: vec![VideoCodec::H264],
+      max_simulcast_layers: 3,
+    },
     bwe: BweConfig::default(),
   };
   let mut config = NativeCallConfig::new(preparation.join.sfu_url, preparation.join.token, engine);
@@ -667,6 +815,9 @@ mod tests {
       maybe_privacy_code: None,
       participants: Vec::new(),
       active_speakers: Vec::new(),
+      is_camera_on: false,
+      is_sharing_screen: false,
+      background: UiBackgroundEffect::None,
     }
   }
 
