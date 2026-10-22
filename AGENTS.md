@@ -20,6 +20,8 @@ Read before changing behaviour:
 | [docs/notifications.md](docs/notifications.md) | Threads, unread counts, notifications, urgent                 |
 | [docs/bridge.md](docs/bridge.md)               | Integration bridge: webhooks and logs into encrypted channels |
 | [docs/meetings.md](docs/meetings.md)           | Meetings, invitations, guests and lobby                       |
+| [docs/operations.md](docs/operations.md)       | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
+| [docs/release.md](docs/release.md)             | Versions and the release procedure                            |
 
 ## Repository layout
 

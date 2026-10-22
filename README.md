@@ -6,6 +6,9 @@ written in Rust. License: AGPL-3.0-or-later.
 - Architecture, threat model and data model: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Feature catalog and roadmap: [PLAN.md](PLAN.md)
 - User and administrator guide: [docs/guide/index.md](docs/guide/index.md)
+- Run your own server: [Zeitgleich/teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)
+  (Ansible playbook, rootless Podman) and [docs/operations.md](docs/operations.md)
+- Releases and changes: [CHANGELOG.md](CHANGELOG.md), [docs/release.md](docs/release.md)
 - Rules for contributors and coding agents: [AGENTS.md](AGENTS.md)
 
 ## Development setup
