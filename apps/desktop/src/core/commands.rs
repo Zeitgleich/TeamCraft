@@ -7,7 +7,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
+  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus,
+  MessageWindow,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{ConversationId, UserId};
@@ -178,6 +179,12 @@ pub async fn core_thread(
 #[tauri::command]
 pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Result<(), CommandError> {
   Ok(host.current()?.action(action).await?)
+}
+
+/// Search, saved items, files, message extras and the other reads of client-api's `ChatQuery`.
+#[tauri::command]
+pub async fn core_query(host: State<'_, CoreHost>, query: ChatQuery) -> Result<ChatAnswer, CommandError> {
+  Ok(host.current()?.query(query).await?)
 }
 
 /// Stops the core, e.g. on sign-out. The encrypted database stays on disk.

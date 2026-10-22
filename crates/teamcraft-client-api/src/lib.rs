@@ -6,6 +6,7 @@
 //! network or decryption happens below them and shows up as a store update. No UI framework, no
 //! I/O; builds for the browser.
 
+pub mod actions;
 pub mod admin;
 pub mod backend;
 pub mod calls;

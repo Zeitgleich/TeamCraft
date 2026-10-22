@@ -10,17 +10,16 @@ use std::cell::RefCell;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::backend::SearchBackend;
-use teamcraft_client_api::model::{ConversationId, Message, UserId};
+use teamcraft_client_api::model::{ConversationId, Message};
 use teamcraft_client_api::search::{
   Filter, ParsedQuery, SavedSearch, SearchHit, SearchResults, find_ci, has_file, has_link, make_snippet,
 };
 
+use crate::client::stored_account_data;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
-use crate::ui_backend::CoreChatBackend;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::ui_backend::CoreCommand;
+use crate::ui_backend::{CoreChatBackend, CoreCommand};
 
 /// Hits shown per search.
 const MAX_HITS: usize = 50;
@@ -71,40 +70,41 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
       .collect()
   }
 
+  /// Saved searches live in the synced account data (e2ee.md §6.4); ones saved on this device
+  /// before that are still listed.
   fn saved_searches(&self) -> Vec<SavedSearch> {
-    let records: Vec<SavedSearchRecord> =
-      records::list_json(self.store_ref(), Table::SavedSearches).unwrap_or_default();
-    records
+    let mut searches: Vec<SavedSearch> = self
+      .read(stored_account_data(self.store_ref()))
+      .saved_searches()
       .into_iter()
-      .map(|record| SavedSearch {
-        id: record.id,
-        name: record.name,
-        query: record.query,
+      .map(|(id, entry)| SavedSearch {
+        id,
+        name: entry.name.clone(),
+        query: entry.query.clone(),
       })
-      .collect()
+      .collect();
+    let legacy: Vec<SavedSearchRecord> =
+      records::list_json(self.store_ref(), Table::SavedSearches).unwrap_or_default();
+    for record in legacy {
+      if !searches.iter().any(|search| search.id == record.id) {
+        searches.push(SavedSearch {
+          id: record.id,
+          name: record.name,
+          query: record.query,
+        });
+      }
+    }
+    searches.sort_by(|left, right| left.name.cmp(&right.name));
+    searches
   }
 
   fn save_search(&self, name: &str, query: &str) {
-    let id = self
-      .saved_searches()
-      .iter()
-      .map(|saved| saved.id)
-      .max()
-      .unwrap_or(0)
-      + 1;
-    let record = SavedSearchRecord {
-      id,
+    self.command(CoreCommand::SaveSearch {
+      // Random, so two devices saving at the same time don't take the same ID.
+      id: rand_core::RngCore::next_u64(&mut rand_core::OsRng) >> 11,
       name: name.to_string(),
       query: query.to_string(),
-    };
-    if let Err(error) = records::put_json(
-      self.store_ref(),
-      Table::SavedSearches,
-      &format!("{id:020}"),
-      &record,
-    ) {
-      tracing::error!(%error, "could not save the search");
-    }
+    });
   }
 
   fn delete_saved_search(&self, id: u64) {
@@ -114,6 +114,7 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
     {
       tracing::error!(%error, "could not delete the saved search");
     }
+    self.command(CoreCommand::DeleteSavedSearch { id });
   }
 }
 
@@ -232,10 +233,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .unwrap_or_default()
   }
 
-  fn me_id(&self) -> UserId {
-    teamcraft_client_api::backend::ChatBackend::me(self).id
-  }
-
   #[cfg(not(target_arch = "wasm32"))]
   fn search_state(&self) -> &RefCell<UiSearchState> {
     &self.search
@@ -285,20 +282,22 @@ mod tests {
     assert_eq!(mentions.len(), 1);
     assert_eq!(mentions[0].message.body, "@alice the budget is final");
 
+    // Saved searches are account data: the engine applies them (tests/account_data.rs).
     backend.save_search("Budget", "budget in:finance");
-    backend.save_search("Mine", "from:alice");
-    let saved = backend.saved_searches();
-    assert_eq!(
-      saved.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-      vec!["Budget", "Mine"]
-    );
-    backend.delete_saved_search(saved[0].id);
-    assert_eq!(backend.saved_searches().len(), 1);
+    backend.delete_saved_search(42);
+    let commands = backend.drain_commands();
+    assert!(matches!(&commands[0], CoreCommand::SaveSearch { name, query, .. }
+      if name == "Budget" && query == "budget in:finance"));
+    assert_eq!(commands[1], CoreCommand::DeleteSavedSearch { id: 42 });
   }
 
   fn backend() -> CoreChatBackend<MemoryStore> {
     let store = MemoryStore::new();
-    let (alice, bob, channel) = (id::<UserId>(1), id::<UserId>(2), id::<ConversationId>(10));
+    let (alice, bob, channel) = (
+      id::<teamcraft_client_api::model::UserId>(1),
+      id::<teamcraft_client_api::model::UserId>(2),
+      id::<ConversationId>(10),
+    );
     for (user, name) in [(alice, "alice"), (bob, "bob")] {
       let summary = UserSummary {
         id: user,
@@ -343,8 +342,11 @@ mod tests {
           content: MessageContent::Text {
             body: body.into(),
             mentions,
+            meta: Default::default(),
           },
           is_edited: false,
+          edits: Vec::new(),
+          is_pinned: false,
         })
         .unwrap();
     }

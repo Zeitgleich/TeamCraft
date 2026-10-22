@@ -29,6 +29,7 @@ pub struct SyncRunner<A: ServerApi, S> {
   backoff: Duration,
   reconnect_at_ms: i64,
   last_heartbeat_ms: i64,
+  last_account_sync_ms: i64,
 }
 
 /// Timing of the runner. Configurable; the defaults suit desktop and browser alike.
@@ -40,6 +41,9 @@ pub struct RunnerSettings {
   pub heartbeat: Duration,
   pub reconnect_min: Duration,
   pub reconnect_max: Duration,
+  /// How often account data (saved items, drafts, saved searches) is pulled from the user's other
+  /// devices; local changes are pushed on the next tick regardless.
+  pub account_sync: Duration,
 }
 
 /// Sends commands to a running [`SyncRunner`].
@@ -74,6 +78,7 @@ impl Default for RunnerSettings {
       heartbeat: Duration::from_secs(25),
       reconnect_min: Duration::from_secs(1),
       reconnect_max: Duration::from_secs(30),
+      account_sync: Duration::from_secs(60),
     }
   }
 }
@@ -96,6 +101,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       backoff,
       reconnect_at_ms: i64::MIN,
       last_heartbeat_ms: i64::MIN,
+      last_account_sync_ms: i64::MIN,
     };
     (runner, RunnerHandle { sender })
   }
@@ -194,6 +200,15 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         self.schedule_reconnect();
       }
     }
+    if self.client.is_key_bag_dirty()
+      || now.saturating_sub(self.last_account_sync_ms) >= millis(self.settings.account_sync)
+    {
+      self.last_account_sync_ms = now;
+      match self.client.sync_account_data().await {
+        Ok(()) => self.changed(),
+        Err(error) => tracing::debug!(%error, "account data not synced yet"),
+      }
+    }
     // Staggered commits (a colleague's new device) come due without a gateway event.
     if let Err(error) = self.client.apply_pending_changes().await {
       tracing::debug!(%error, "pending membership changes not applied yet");
@@ -202,6 +217,14 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   }
 
   async fn flush(&mut self) {
+    if let Err(error) = self.client.generate_pending_previews().await {
+      tracing::debug!(%error, "link previews not made");
+    }
+    match self.client.upload_pending().await {
+      Ok(uploaded) if uploaded > 0 => self.changed(),
+      Ok(_) => {},
+      Err(error) => tracing::debug!(%error, "uploads did not finish"),
+    }
     match self.client.flush_outbox().await {
       Ok(report) if report.sent > 0 => self.changed(),
       Ok(_) => {},

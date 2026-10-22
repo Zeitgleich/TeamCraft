@@ -42,10 +42,15 @@ enum Record {
     value: Base64Bytes,
   },
   Message {
-    message: StoredMessage,
+    message: Box<StoredMessage>,
   },
 }
 
+// Constructed by the IndexedDB and SQLite backends, which not every build has.
+#[cfg_attr(
+  not(any(feature = "sealed-sqlite", target_arch = "wasm32", test)),
+  allow(dead_code)
+)]
 impl<B: RecordBackend> SealedStore<B> {
   /// Decrypts `records` (everything the backend holds) into the cache. A record that doesn't open
   /// means the key is wrong.
@@ -148,7 +153,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.write(
       &self.message_id(message.conversation_id, message.client_message_id),
       &Record::Message {
-        message: message.clone(),
+        message: Box::new(message.clone()),
       },
     )
   }

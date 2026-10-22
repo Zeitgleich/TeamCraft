@@ -180,8 +180,11 @@ fn message(conversation: i64, client: u8, text: &str) -> StoredMessage {
     content: MessageContent::Text {
       body: text.into(),
       mentions: Vec::new(),
+      meta: Default::default(),
     },
     is_edited: false,
+    edits: Vec::new(),
+    is_pinned: false,
   }
 }
 

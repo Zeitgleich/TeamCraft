@@ -614,8 +614,11 @@ mod tests {
       content: MessageContent::Text {
         body: body.into(),
         mentions: Vec::new(),
+        meta: Default::default(),
       },
       is_edited: false,
+      edits: Vec::new(),
+      is_pinned: false,
     }
   }
 

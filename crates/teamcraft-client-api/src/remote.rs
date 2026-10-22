@@ -4,11 +4,19 @@
 
 use serde::{Deserialize, Serialize};
 
+use teamcraft_proto::{CategoryId, HistoryPolicy};
+
+use crate::actions::{
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
+  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+};
+use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{ActiveCall, BackgroundEffect, CallRequest, IncomingCall, MediaDevices, RunningCall};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
   User, UserId,
 };
+use crate::search::{SavedSearch, SearchHit, SearchResults};
 
 /// Event name the host emits whenever the local store changed (new messages, membership, presence).
 pub const CORE_CHANGED_EVENT: &str = "core-changed";
@@ -245,6 +253,333 @@ pub enum ChatAction {
   AdminJoinChannel {
     conversation: ConversationId,
   },
+  // The actions of crate::actions; `apply_to` runs them on a backend.
+  SendMessage {
+    message: OutgoingMessage,
+  },
+  EditMessage {
+    conversation: ConversationId,
+    message: MessageId,
+    body: String,
+  },
+  DeleteMessage {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  ForwardMessage {
+    from: ConversationId,
+    message: MessageId,
+    to: ConversationId,
+    #[serde(default)]
+    comment: String,
+  },
+  SetPinned {
+    conversation: ConversationId,
+    message: MessageId,
+    is_pinned: bool,
+  },
+  SetSaved {
+    conversation: ConversationId,
+    message: MessageId,
+    is_saved: bool,
+  },
+  MarkUnread {
+    conversation: ConversationId,
+    from: MessageId,
+  },
+  SetDraft {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+    body: String,
+  },
+  Acknowledge {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  DownloadFile {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  CreateShareLink {
+    conversation: ConversationId,
+    message: MessageId,
+    options: ShareLinkOptions,
+  },
+  CreateSpace {
+    space: NewSpace,
+  },
+  UpdateSpace {
+    space: SpaceId,
+    changes: SpaceChanges,
+  },
+  CreateChannelWith {
+    channel: NewChannel,
+  },
+  UpdateChannel {
+    conversation: ConversationId,
+    changes: ChannelChanges,
+  },
+  JoinChannel {
+    conversation: ConversationId,
+  },
+  LeaveChannel {
+    conversation: ConversationId,
+  },
+  CreateCategory {
+    space: SpaceId,
+    name: String,
+  },
+  RenameCategory {
+    space: SpaceId,
+    category: CategoryId,
+    name: String,
+  },
+  DeleteCategory {
+    space: SpaceId,
+    category: CategoryId,
+  },
+  AddMemberWithHistory {
+    conversation: ConversationId,
+    user: UserId,
+    history: HistoryPolicy,
+  },
+  InviteToSpace {
+    invite: SpaceInvite,
+  },
+  SaveSearch {
+    name: String,
+    query: String,
+  },
+  DeleteSavedSearch {
+    id: u64,
+  },
+}
+
+impl ChatAction {
+  /// Runs the action on a backend. The original actions are left to the host, which handles
+  /// some of them itself (enrollment state, admin flows); returns them back.
+  pub fn apply_to(self, backend: &(impl ChatBackend + SearchBackend)) -> Option<Self> {
+    match self {
+      Self::SendMessage { message } => backend.send_message(message),
+      Self::EditMessage {
+        conversation,
+        message,
+        body,
+      } => backend.edit_message(conversation, message, &body),
+      Self::DeleteMessage {
+        conversation,
+        message,
+      } => backend.delete_message(conversation, message),
+      Self::ForwardMessage {
+        from,
+        message,
+        to,
+        comment,
+      } => backend.forward_message(from, message, to, &comment),
+      Self::SetPinned {
+        conversation,
+        message,
+        is_pinned,
+      } => backend.set_pinned(conversation, message, is_pinned),
+      Self::SetSaved {
+        conversation,
+        message,
+        is_saved,
+      } => backend.set_saved(conversation, message, is_saved),
+      Self::MarkUnread { conversation, from } => backend.mark_unread(conversation, from),
+      Self::SetDraft {
+        conversation,
+        maybe_thread,
+        body,
+      } => backend.set_draft(conversation, maybe_thread, &body),
+      Self::Acknowledge {
+        conversation,
+        message,
+      } => backend.acknowledge(conversation, message),
+      Self::DownloadFile {
+        conversation,
+        message,
+      } => backend.download_file(conversation, message),
+      Self::CreateShareLink {
+        conversation,
+        message,
+        options,
+      } => backend.create_share_link(conversation, message, options),
+      Self::CreateSpace { space } => backend.create_space(space),
+      Self::UpdateSpace { space, changes } => backend.update_space(space, changes),
+      Self::CreateChannelWith { channel } => backend.create_channel_with(channel),
+      Self::UpdateChannel {
+        conversation,
+        changes,
+      } => backend.update_channel(conversation, changes),
+      Self::JoinChannel { conversation } => backend.join_channel(conversation),
+      Self::LeaveChannel { conversation } => backend.leave_channel(conversation),
+      Self::CreateCategory { space, name } => backend.create_category(space, &name),
+      Self::RenameCategory {
+        space,
+        category,
+        name,
+      } => backend.rename_category(space, category, &name),
+      Self::DeleteCategory { space, category } => backend.delete_category(space, category),
+      Self::AddMemberWithHistory {
+        conversation,
+        user,
+        history,
+      } => backend.add_member_with_history(conversation, user, history),
+      Self::InviteToSpace { invite } => backend.invite_to_space(invite),
+      Self::SaveSearch { name, query } => backend.save_search(&name, &query),
+      Self::DeleteSavedSearch { id } => backend.delete_saved_search(id),
+      original => return Some(original),
+    }
+    None
+  }
+}
+
+/// Reads the UI asks a core outside it for, beyond [`ChatSnapshot`] and [`MessageWindow`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatQuery {
+  MessageExtras {
+    conversation: ConversationId,
+    messages: Vec<MessageId>,
+  },
+  PinnedMessages {
+    conversation: ConversationId,
+  },
+  SavedItems,
+  Permalink {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  ResolvePermalink {
+    link: String,
+  },
+  FirstUnread {
+    conversation: ConversationId,
+  },
+  Draft {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+  },
+  ConversationFiles {
+    conversation: ConversationId,
+  },
+  ShareLinks {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  MaxUploadBytes,
+  BrowseChannels {
+    space: SpaceId,
+  },
+  Categories {
+    space: SpaceId,
+  },
+  /// A raw query in the search box syntax (`from:`, `in:`, ...).
+  Search {
+    query: String,
+  },
+  RecentMentions,
+  SavedSearches,
+  HasExternalPeople {
+    conversation: ConversationId,
+  },
+  #[serde(other)]
+  Unknown,
+}
+
+/// The answer to a [`ChatQuery`], same variant names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "snake_case")]
+pub enum ChatAnswer {
+  MessageExtras { extras: Vec<MessageExtras> },
+  Messages { messages: Vec<Message> },
+  SavedItems { items: Vec<SavedItem> },
+  Link { maybe_link: Option<String> },
+  PermalinkTarget { maybe_target: Option<PermalinkTarget> },
+  Message { maybe_message: Option<MessageId> },
+  Draft { maybe_body: Option<String> },
+  Files { files: Vec<FileInfo> },
+  ShareLinks { links: Vec<ShareLink> },
+  Bytes { maybe_bytes: Option<u64> },
+  Channels { channels: Vec<BrowsableChannel> },
+  Categories { categories: Vec<CategoryInfo> },
+  SearchResults { results: SearchResults },
+  SearchHits { hits: Vec<SearchHit> },
+  SavedSearches { searches: Vec<SavedSearch> },
+  Flag { value: bool },
+  Unsupported,
+}
+
+impl ChatQuery {
+  /// Answers the query from a backend (the host side of the IPC).
+  pub fn answer(self, backend: &(impl ChatBackend + SearchBackend)) -> ChatAnswer {
+    match self {
+      Self::MessageExtras {
+        conversation,
+        messages,
+      } => ChatAnswer::MessageExtras {
+        extras: backend.message_extras(conversation, &messages),
+      },
+      Self::PinnedMessages { conversation } => ChatAnswer::Messages {
+        messages: backend.pinned_messages(conversation),
+      },
+      Self::SavedItems => ChatAnswer::SavedItems {
+        items: backend.saved_items(),
+      },
+      Self::Permalink {
+        conversation,
+        message,
+      } => ChatAnswer::Link {
+        maybe_link: backend.permalink(conversation, message),
+      },
+      Self::ResolvePermalink { link } => ChatAnswer::PermalinkTarget {
+        maybe_target: backend.resolve_permalink(&link),
+      },
+      Self::FirstUnread { conversation } => ChatAnswer::Message {
+        maybe_message: backend.first_unread(conversation),
+      },
+      Self::Draft {
+        conversation,
+        maybe_thread,
+      } => ChatAnswer::Draft {
+        maybe_body: backend.draft(conversation, maybe_thread),
+      },
+      Self::ConversationFiles { conversation } => ChatAnswer::Files {
+        files: backend.conversation_files(conversation),
+      },
+      Self::ShareLinks {
+        conversation,
+        message,
+      } => ChatAnswer::ShareLinks {
+        links: backend.share_links(conversation, message),
+      },
+      Self::MaxUploadBytes => ChatAnswer::Bytes {
+        maybe_bytes: backend.max_upload_bytes(),
+      },
+      Self::BrowseChannels { space } => ChatAnswer::Channels {
+        channels: backend.browse_channels(space),
+      },
+      Self::Categories { space } => ChatAnswer::Categories {
+        categories: backend.categories(space),
+      },
+      Self::Search { query } => ChatAnswer::SearchResults {
+        results: backend.search(&crate::search::parse_query(&query)),
+      },
+      Self::RecentMentions => ChatAnswer::SearchHits {
+        hits: backend.recent_mentions(),
+      },
+      Self::SavedSearches => ChatAnswer::SavedSearches {
+        searches: backend.saved_searches(),
+      },
+      Self::HasExternalPeople { conversation } => ChatAnswer::Flag {
+        value: backend.has_external_people(conversation),
+      },
+      Self::Unknown => ChatAnswer::Unsupported,
+    }
+  }
 }
 
 #[cfg(test)]

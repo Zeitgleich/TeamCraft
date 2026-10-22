@@ -49,7 +49,7 @@ async fn a_new_member_searches_history_through_published_segments() {
     .await
     .unwrap();
   settle(&mut [&mut alice, &mut carol]).await;
-  carol.client.catch_up_messages(channel).await.unwrap();
+  carol.client.load_older_messages(channel).await.unwrap();
   assert_eq!(carol.client.fetch_index_segments().await.unwrap(), 1);
 
   // A phone that keeps little history: the messages are gone locally, the segment stays.

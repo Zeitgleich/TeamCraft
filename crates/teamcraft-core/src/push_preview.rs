@@ -34,6 +34,8 @@ pub struct PushPreview {
   pub content: PreviewContent,
   /// A DM or group DM: the sender's name is the title, no "sender:" prefix needed.
   pub is_direct: bool,
+  /// The sender sent it silently: show it without sound or vibration.
+  pub is_silent: bool,
 }
 
 /// What of the message itself can be shown.
@@ -88,9 +90,9 @@ pub async fn push_preview<A: ServerApi>(
       .or_else(|| participant_name(maybe_conversation.as_ref(), sender)),
     None => None,
   };
-  let content = match wake_up.maybe_message_id {
+  let (content, is_silent) = match wake_up.maybe_message_id {
     Some(message_id) => preview_content(store, maybe_api, &wake_up, message_id).await,
-    None => PreviewContent::Unavailable,
+    None => (PreviewContent::Unavailable, false),
   };
   Ok(PushPreview {
     wake_up,
@@ -98,6 +100,7 @@ pub async fn push_preview<A: ServerApi>(
     maybe_sender_name,
     content,
     is_direct,
+    is_silent,
   })
 }
 
@@ -124,13 +127,13 @@ impl std::fmt::Debug for PushSession {
 }
 
 /// From the store if the app already has the message, else fetched and decrypted; failures only
-/// cost the preview.
+/// cost the preview. Also whether the sender sent it silently.
 async fn preview_content<A: ServerApi>(
   store: &impl LocalStore,
   maybe_api: Option<&A>,
   wake_up: &PushWakeUp,
   message_id: MessageId,
-) -> PreviewContent {
+) -> (PreviewContent, bool) {
   let conversation = wake_up.conversation_id;
   let local = store
     .messages(conversation, MessageFilter::All)
@@ -141,18 +144,22 @@ async fn preview_content<A: ServerApi>(
         .find(|message| message.maybe_server_id == Some(message_id))
     });
   if let Some(message) = local {
-    return content_preview(&message.content);
+    return (content_preview(&message.content), is_silent(&message.content));
   }
   let Some(api) = maybe_api else {
-    return PreviewContent::Unavailable;
+    return (PreviewContent::Unavailable, false);
   };
   match fetch_and_decrypt(store, api, wake_up, message_id).await {
-    Ok(content) => content_preview(&content),
+    Ok(content) => (content_preview(&content), is_silent(&content)),
     Err(error) => {
       tracing::debug!(%error, conversation_id = %conversation, "no preview for push");
-      PreviewContent::Unavailable
+      (PreviewContent::Unavailable, false)
     },
   }
+}
+
+fn is_silent(content: &MessageContent) -> bool {
+  matches!(content, MessageContent::Text { meta, .. } if meta.is_silent)
 }
 
 async fn fetch_and_decrypt<A: ServerApi>(

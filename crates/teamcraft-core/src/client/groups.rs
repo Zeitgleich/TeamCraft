@@ -20,7 +20,7 @@ use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
-use crate::store::{LocalStore, Table};
+use crate::store::{ConversationEvent, LocalStore, Table};
 use crate::trust::{PinnedDirectory, WorkspaceAuthority};
 
 /// Who signs a membership change this device commits.
@@ -56,7 +56,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_description: None,
       is_integration: false,
     };
-    let conversation = self.api.create_channel(space, &request).await?;
+    self.create_channel_from(space, &request).await
+  }
+
+  pub(crate) async fn create_channel_from(
+    &mut self,
+    space: SpaceId,
+    request: &CreateChannelRequest,
+  ) -> Result<ConversationId, CoreError> {
+    let conversation = self.api.create_channel(space, request).await?;
     records::put_json(
       &self.store,
       Table::Conversations,
@@ -104,6 +112,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Adds `user` to the conversation on the server and in the MLS group, and shares history keys
   /// according to the conversation's history policy (e2ee.md §4.3).
   pub async fn add_member(&mut self, conversation: ConversationId, user: UserId) -> Result<(), CoreError> {
+    self.add_member_with_history(conversation, user, None).await
+  }
+
+  /// Like [`Self::add_member`], with an explicit "share history" choice (guests still only get
+  /// what is sent from their join on). Announces the addition to the members.
+  pub async fn add_member_with_history(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    maybe_history: Option<HistoryPolicy>,
+  ) -> Result<(), CoreError> {
     self
       .api
       .add_member(
@@ -114,11 +133,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await?;
-    let history = match self
-      .cached_conversations()?
-      .get(&conversation)
-      .map(|c| c.history_policy.clone())
-    {
+    let policy = match maybe_history {
+      Some(choice) => Some(choice),
+      None => self
+        .cached_conversations()?
+        .get(&conversation)
+        .map(|c| c.history_policy.clone()),
+    };
+    let history = match policy {
       Some(HistoryPolicy::FromJoin) => HistoryShare::FromJoin,
       Some(HistoryPolicy::Full) => HistoryShare::Full,
       // Unknown to this client: fall back to the signed workspace default (admin.md §2.4).
@@ -135,6 +157,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           history,
         }),
       )
+      .await?;
+    let shared = match history {
+      HistoryShare::FromJoin => HistoryPolicy::FromJoin,
+      _ => HistoryPolicy::Full,
+    };
+    self
+      .announce(
+        conversation,
+        ConversationEvent::MemberAdded {
+          user,
+          history: shared,
+        },
+      )
       .await
   }
 
@@ -149,6 +184,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           user_id: convert::user(user),
         }),
       )
+      .await?;
+    // After the key rotation, so the removed person doesn't read it.
+    self
+      .announce(conversation, ConversationEvent::MemberRemoved { user })
       .await
   }
 
@@ -600,11 +639,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   fn group_authority(&mut self, conversation: ConversationId) -> Result<WorkspaceAuthority, CoreError> {
     let workspace = self.workspace()?;
     let group = self.group_or_error(conversation)?;
-    Ok(WorkspaceAuthority::new(
-      group.members()?.into_iter().map(|member| member.user_id),
-      workspace.admins().collect::<Vec<_>>(),
-      workspace.policy.admin_self_join.clone(),
-    ))
+    let members: Vec<_> = group
+      .members()?
+      .into_iter()
+      .map(|member| member.user_id)
+      .collect();
+    let maybe_response: Option<teamcraft_proto::ConversationResponse> =
+      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    let is_public_channel = maybe_response.is_some_and(|response| {
+      response.kind == teamcraft_proto::ConversationKind::Channel
+        && response.visibility == teamcraft_proto::ConversationVisibility::Public
+        && !response.is_archived
+    });
+    Ok(
+      WorkspaceAuthority::new(
+        members,
+        workspace.admins().collect::<Vec<_>>(),
+        workspace.policy.admin_self_join.clone(),
+      )
+      .for_public_channel(is_public_channel),
+    )
   }
 
   /// Guests only ever see history from their join on (e2ee.md §4.3), whatever was asked for.

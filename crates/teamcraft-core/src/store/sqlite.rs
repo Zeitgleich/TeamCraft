@@ -65,6 +65,7 @@ impl SqlCipherStore {
       })
       .map_err(|_| StoreError::WrongKey)?;
     connection.execute_batch(SCHEMA).map_err(database_error)?;
+    migrate(&connection)?;
     Ok(Self {
       connection: Mutex::new(connection),
     })
@@ -133,11 +134,12 @@ impl LocalStore for SqlCipherStore {
       .lock()
       .execute(
         "INSERT INTO messages
-           (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, record)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT (conversation_id, client_message_id) DO UPDATE SET
            sort_group = excluded.sort_group, sort_value = excluded.sort_value,
-           thread_id = excluded.thread_id, is_hidden = excluded.is_hidden, record = excluded.record",
+           thread_id = excluded.thread_id, is_hidden = excluded.is_hidden,
+           in_channel = excluded.in_channel, record = excluded.record",
         params![
           message.conversation_id.snowflake().get(),
           message.client_message_id.as_bytes().as_slice(),
@@ -145,6 +147,7 @@ impl LocalStore for SqlCipherStore {
           sort_value,
           message.maybe_thread_id.map(|thread| thread.snowflake().get()),
           message.is_hidden(),
+          message.is_also_in_channel(),
           record,
         ],
       )
@@ -180,7 +183,10 @@ impl LocalStore for SqlCipherStore {
     let connection = self.lock();
     let (condition, maybe_thread) = match filter {
       MessageFilter::All => ("", None),
-      MessageFilter::TopLevel => ("AND thread_id IS NULL AND is_hidden = 0", None),
+      MessageFilter::TopLevel => (
+        "AND (thread_id IS NULL OR in_channel = 1) AND is_hidden = 0",
+        None,
+      ),
       MessageFilter::Thread(thread) => (
         "AND thread_id = ?2 AND is_hidden = 0",
         Some(thread.snowflake().get()),
@@ -220,6 +226,21 @@ impl std::fmt::Debug for SqlCipherStore {
 
 fn decode_message(record: &[u8]) -> Result<StoredMessage, StoreError> {
   serde_json::from_slice(record).map_err(|error| StoreError::Corrupt(error.to_string()))
+}
+
+/// Schema changes after the first version, applied in order to older databases.
+fn migrate(connection: &Connection) -> Result<(), StoreError> {
+  // Thread replies also sent to the conversation (`MessageMeta::is_also_in_channel`).
+  let has_in_channel = connection
+    .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'in_channel'")
+    .and_then(|mut statement| statement.exists([]))
+    .map_err(database_error)?;
+  if !has_in_channel {
+    connection
+      .execute_batch("ALTER TABLE messages ADD COLUMN in_channel INTEGER NOT NULL DEFAULT 0")
+      .map_err(database_error)?;
+  }
+  Ok(())
 }
 
 fn database_error(error: rusqlite::Error) -> StoreError {

@@ -126,7 +126,8 @@ async fn removal_rotates_the_content_key() {
   assert!(!carol.client.has_group(channel).unwrap());
   // Even with the ciphertext in hand, Carol lacks the rotated key.
   let ciphertexts = server.stored_ciphertexts();
-  assert_eq!(ciphertexts.len(), 2);
+  // Two texts and three announcements (Bob and Carol added, Carol removed).
+  assert_eq!(ciphertexts.len(), 5);
 }
 
 #[tokio::test]
@@ -195,7 +196,13 @@ async fn outbox_survives_being_offline() {
     .send_text(channel, None, "written on the train")
     .await
     .unwrap();
-  let pending = bob.store.messages(channel, MessageFilter::TopLevel).unwrap();
+  let pending: Vec<_> = bob
+    .store
+    .messages(channel, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .filter(|message| matches!(message.content, MessageContent::Text { .. }))
+    .collect();
   assert_eq!(pending.len(), 1);
   assert!(pending[0].maybe_server_id.is_none());
   assert_eq!(bob.client.flush_outbox().await.unwrap().pending, 1);

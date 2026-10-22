@@ -28,6 +28,7 @@ pub(crate) struct WorkspaceAuthority {
   members: HashSet<crypto::UserId>,
   admins: HashSet<crypto::UserId>,
   self_join: AdminSelfJoin,
+  is_public_channel: bool,
 }
 
 impl PinnedDirectory {
@@ -64,7 +65,14 @@ impl WorkspaceAuthority {
       members: members.into_iter().collect(),
       admins: admins.into_iter().map(convert::user).collect(),
       self_join,
+      is_public_channel: false,
     }
+  }
+
+  /// A public, unarchived channel: members joining by themselves is fine.
+  pub(crate) fn for_public_channel(mut self, is_public_channel: bool) -> Self {
+    self.is_public_channel = is_public_channel;
+    self
   }
 }
 
@@ -76,6 +84,12 @@ impl MembershipAuthority for WorkspaceAuthority {
     action: &MembershipAction,
   ) -> bool {
     if self.members.contains(&actor) {
+      return true;
+    }
+    // Anyone the server let into a public channel may add themselves (and only themselves).
+    if self.is_public_channel
+      && matches!(action, MembershipAction::AddUser { user_id, .. } if *user_id == actor)
+    {
       return true;
     }
     if !self.admins.contains(&actor) {
@@ -124,5 +138,25 @@ mod tests {
       );
       assert!(!authority.is_authorized(stranger, conversation, &add(stranger)));
     }
+  }
+
+  #[test]
+  fn anyone_may_join_a_public_channel_but_only_themselves() {
+    let (member, stranger, other) = (
+      crypto::UserId::new(1),
+      crypto::UserId::new(3),
+      crypto::UserId::new(4),
+    );
+    let conversation = crypto::ConversationId::new(9);
+    let add = |user| MembershipAction::AddUser {
+      user_id: user,
+      history: HistoryShare::FromJoin,
+    };
+    let public = WorkspaceAuthority::new([member], Vec::<UserId>::new(), AdminSelfJoin::Visible)
+      .for_public_channel(true);
+    assert!(public.is_authorized(stranger, conversation, &add(stranger)));
+    assert!(!public.is_authorized(stranger, conversation, &add(other)));
+    let private = WorkspaceAuthority::new([member], Vec::<UserId>::new(), AdminSelfJoin::Visible);
+    assert!(!private.is_authorized(stranger, conversation, &add(stranger)));
   }
 }

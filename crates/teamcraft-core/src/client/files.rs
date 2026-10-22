@@ -1,0 +1,492 @@
+//! Files beyond single attachments: sending text with several files (uploads resume per file
+//! after a restart or network loss), downloading to disk, and share links (e2ee.md §4.5.1).
+
+use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
+use teamcraft_crypto::attachment::AttachmentKey;
+use teamcraft_crypto::backup::Argon2Settings;
+use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
+use teamcraft_crypto::share_link::create_fragment;
+use teamcraft_proto::{
+  AttachmentId, Base64Bytes, ClientMessageId, ConversationId, CreateShareLinkRequest, ErrorCode, UnixMillis,
+};
+
+use super::Client;
+use super::attachments::OutgoingFile;
+use crate::api::{ApiError, ServerApi};
+use crate::error::CoreError;
+use crate::records;
+use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageFilter, Table};
+
+/// Argon2id for share link passwords: the browser download page runs it in WebAssembly, so it is
+/// lighter than the backup passphrase's (the link itself is the main secret).
+const SHARE_LINK_ARGON2: Argon2Settings = Argon2Settings {
+  memory_kib: 32 * 1024,
+  iterations: 3,
+  parallelism: 1,
+};
+
+/// Files of an outbox message that aren't uploaded yet; the message waits until they are.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingUpload {
+  pub conversation_id: ConversationId,
+  pub client_message_id: ClientMessageId,
+  pub files: Vec<PendingFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingFile {
+  pub file_name: String,
+  pub media_type: String,
+  pub source: UploadSource,
+  pub size_bytes: u64,
+  /// Set once uploaded.
+  #[serde(rename = "done", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_done: Option<AttachmentRef>,
+  #[serde(rename = "failure", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_failure: Option<TransferFailure>,
+}
+
+/// Where an upload reads from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UploadSource {
+  /// Kept in the (encrypted) local store until uploaded.
+  Bytes { bytes: Base64Bytes },
+  /// A file on this device, read when uploading.
+  Path { path: String },
+}
+
+/// Progress of a file on this device, keyed by attachment ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TransferState {
+  Downloading { total_bytes: u64 },
+  Local { path: String },
+  Failed { reason: TransferFailure },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferFailure {
+  TooLarge,
+  Network,
+  Corrupted,
+  LocalFile,
+}
+
+/// A share link this user created (only its creator has the fragment).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredShareLink {
+  pub attachment_id: AttachmentId,
+  pub share_id: String,
+  /// Including the `#fragment` with the key.
+  pub url: String,
+  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<i64>,
+  #[serde(rename = "max_downloads", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_max_downloads: Option<u32>,
+  pub has_password: bool,
+}
+
+/// Options of a new share link.
+#[derive(Default)]
+pub struct ShareLinkSettings {
+  pub maybe_expires_at: Option<i64>,
+  pub maybe_max_downloads: Option<u32>,
+  pub maybe_password: Option<SecretBytes>,
+}
+
+impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Sends text with files: the message is stored at once and sent after its files are uploaded.
+  pub async fn send_files(
+    &mut self,
+    conversation: ConversationId,
+    maybe_thread: Option<teamcraft_proto::ThreadId>,
+    body: &str,
+    files: Vec<OutgoingFile>,
+  ) -> Result<ClientMessageId, CoreError> {
+    let content = MessageContent::text(body, Vec::new());
+    let id = self.enqueue(conversation, maybe_thread, content)?;
+    let pending = PendingUpload {
+      conversation_id: conversation,
+      client_message_id: id,
+      files: files
+        .into_iter()
+        .map(|file| PendingFile {
+          size_bytes: file.content.len() as u64,
+          file_name: file.file_name,
+          media_type: file.media_type,
+          source: UploadSource::Bytes {
+            bytes: Base64Bytes::new(file.content),
+          },
+          maybe_done: None,
+          maybe_failure: None,
+        })
+        .collect(),
+    };
+    save_pending_upload(&self.store, &pending)?;
+    self.upload_pending().await?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Uploads what's pending, file by file; finished messages are completed and become sendable.
+  /// Stops at the first network error (the rest resumes next time). Returns how many files went up.
+  pub async fn upload_pending(&mut self) -> Result<usize, CoreError> {
+    let mut uploaded = 0;
+    let pending: Vec<PendingUpload> = records::list_json(&self.store, Table::PendingUploads)?;
+    for mut upload in pending {
+      for index in 0..upload.files.len() {
+        let file = &upload.files[index];
+        if file.maybe_done.is_some() || file.maybe_failure.is_some() {
+          continue;
+        }
+        match self.upload_one(upload.conversation_id, file).await {
+          Ok(attachment) => {
+            upload.files[index].maybe_done = Some(attachment);
+            uploaded += 1;
+          },
+          Err(UploadError::Retry(error)) => {
+            save_pending_upload(&self.store, &upload)?;
+            return Err(error);
+          },
+          Err(UploadError::Failed(reason)) => upload.files[index].maybe_failure = Some(reason),
+        }
+        save_pending_upload(&self.store, &upload)?;
+      }
+      self.complete_upload(&upload)?;
+    }
+    Ok(uploaded)
+  }
+
+  /// Downloads and decrypts a file into the download directory; progress and the path are in
+  /// [`transfer_state`].
+  pub async fn download_attachment_to_disk(
+    &mut self,
+    conversation: ConversationId,
+    attachment: AttachmentId,
+  ) -> Result<String, CoreError> {
+    let reference = find_attachment(&self.store, conversation, attachment)?
+      .ok_or_else(|| CoreError::Corrupt("no such file in this conversation".into()))?;
+    set_transfer(
+      &self.store,
+      attachment,
+      &TransferState::Downloading {
+        total_bytes: reference.size_bytes,
+      },
+    )?;
+    let result = self.download_to_disk(&reference).await;
+    let state = match &result {
+      Ok(path) => TransferState::Local { path: path.clone() },
+      Err(error) => TransferState::Failed {
+        reason: failure_of(error),
+      },
+    };
+    set_transfer(&self.store, attachment, &state)?;
+    result
+  }
+
+  /// Creates a public download link for a file of the conversation (e2ee.md §4.5.1).
+  pub async fn create_share_link(
+    &mut self,
+    conversation: ConversationId,
+    attachment: AttachmentId,
+    settings: ShareLinkSettings,
+  ) -> Result<StoredShareLink, CoreError> {
+    let reference = find_attachment(&self.store, conversation, attachment)?
+      .ok_or_else(|| CoreError::Corrupt("no such file in this conversation".into()))?;
+    let key = SymmetricKey::from_slice(reference.key.as_slice())
+      .ok_or_else(|| CoreError::Corrupt("bad attachment key".into()))?;
+    let fragment = create_fragment(
+      &AttachmentKey::from_key(key),
+      &reference.file_name,
+      settings.maybe_password.as_ref(),
+      SHARE_LINK_ARGON2,
+      &mut OsRng,
+    )
+    .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    let response = self
+      .api
+      .create_share_link(
+        attachment,
+        &CreateShareLinkRequest {
+          maybe_expires_at: settings.maybe_expires_at.map(UnixMillis),
+          maybe_max_downloads: settings.maybe_max_downloads,
+        },
+      )
+      .await?;
+    let link = StoredShareLink {
+      attachment_id: attachment,
+      share_id: response.share_id,
+      url: format!("{}#{fragment}", response.url),
+      maybe_expires_at: settings.maybe_expires_at,
+      maybe_max_downloads: settings.maybe_max_downloads,
+      has_password: settings.maybe_password.is_some(),
+    };
+    let mut links = share_links(&self.store, attachment)?;
+    links.push(link.clone());
+    records::put_json(&self.store, Table::ShareLinks, &attachment.to_string(), &links)?;
+    Ok(link)
+  }
+
+  async fn upload_one(
+    &self,
+    conversation: ConversationId,
+    file: &PendingFile,
+  ) -> Result<AttachmentRef, UploadError> {
+    if file.size_bytes > self.settings.max_upload_bytes {
+      return Err(UploadError::Failed(TransferFailure::TooLarge));
+    }
+    let content = read_source(&file.source).map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
+    let maybe_thumbnail = crate::thumbnail::thumbnail_png(&content, &file.media_type);
+    let outgoing = OutgoingFile {
+      file_name: file.file_name.clone(),
+      media_type: file.media_type.clone(),
+      content,
+    };
+    match self.upload_encrypted(conversation, outgoing).await {
+      Ok(mut attachment) => {
+        attachment.maybe_thumbnail = maybe_thumbnail.map(Base64Bytes::new);
+        Ok(attachment)
+      },
+      Err(error) if error.is_transient() => Err(UploadError::Retry(error)),
+      Err(CoreError::Api(api))
+        if api.error_code() == Some(&ErrorCode::PayloadTooLarge) || is_status(&api, 413) =>
+      {
+        Err(UploadError::Failed(TransferFailure::TooLarge))
+      },
+      Err(_) => Err(UploadError::Failed(TransferFailure::Network)),
+    }
+  }
+
+  /// Puts the uploaded files into the waiting message, which the outbox then sends.
+  fn complete_upload(&mut self, upload: &PendingUpload) -> Result<(), CoreError> {
+    if upload
+      .files
+      .iter()
+      .any(|file| file.maybe_done.is_none() && file.maybe_failure.is_none())
+    {
+      return Ok(());
+    }
+    let key = records::outbox_key(upload.conversation_id, upload.client_message_id);
+    if let Some(mut stored) = self
+      .store
+      .message(upload.conversation_id, upload.client_message_id)?
+      && let MessageContent::Text { meta, .. } = &mut stored.content
+    {
+      meta.attachments = upload
+        .files
+        .iter()
+        .filter_map(|file| file.maybe_done.clone())
+        .collect();
+      self.store.upsert_message(&stored)?;
+    }
+    let failed: Vec<PendingFile> = upload
+      .files
+      .iter()
+      .filter(|file| file.maybe_failure.is_some())
+      .map(|file| PendingFile {
+        // The bytes aren't needed any more, only the name and the reason.
+        source: UploadSource::Bytes {
+          bytes: Base64Bytes::new(Vec::new()),
+        },
+        ..file.clone()
+      })
+      .collect();
+    if !failed.is_empty() {
+      records::put_json(&self.store, Table::FileTransfers, &failed_key(&key), &failed)?;
+    }
+    self.store.delete(Table::PendingUploads, &key)?;
+    Ok(())
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  async fn download_to_disk(&self, reference: &AttachmentRef) -> Result<String, CoreError> {
+    let directory = self
+      .settings
+      .maybe_download_dir
+      .clone()
+      .ok_or_else(|| CoreError::Corrupt("no download directory configured".into()))?;
+    let plaintext = self.download_decrypted(reference).await?;
+    std::fs::create_dir_all(&directory).map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    let path = unique_path(&directory, &reference.file_name);
+    std::fs::write(&path, plaintext.expose_secret())
+      .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    Ok(path.to_string_lossy().into_owned())
+  }
+
+  /// The browser has no download directory; the page saves files itself.
+  #[cfg(target_arch = "wasm32")]
+  async fn download_to_disk(&self, _reference: &AttachmentRef) -> Result<String, CoreError> {
+    Err(CoreError::Browser("downloads to disk".into()))
+  }
+}
+
+enum UploadError {
+  /// Network trouble: keep the file pending and try again later.
+  Retry(CoreError),
+  Failed(TransferFailure),
+}
+
+/// Every file of a conversation's messages: single-file messages and files sent with text.
+pub fn attachments_of(content: &MessageContent) -> Vec<&AttachmentRef> {
+  match content {
+    MessageContent::File { attachment } => vec![attachment],
+    MessageContent::Text { meta, .. } => meta.attachments.iter().collect(),
+    _ => Vec::new(),
+  }
+}
+
+pub fn pending_upload(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  message: ClientMessageId,
+) -> Result<Option<PendingUpload>, CoreError> {
+  records::get_json(
+    store,
+    Table::PendingUploads,
+    &records::outbox_key(conversation, message),
+  )
+}
+
+pub fn save_pending_upload(store: &impl LocalStore, upload: &PendingUpload) -> Result<(), CoreError> {
+  records::put_json(
+    store,
+    Table::PendingUploads,
+    &records::outbox_key(upload.conversation_id, upload.client_message_id),
+    upload,
+  )
+}
+
+/// Files of a sent message that couldn't be uploaded (shown to the sender only).
+pub fn failed_uploads(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  message: ClientMessageId,
+) -> Result<Vec<PendingFile>, CoreError> {
+  let key = failed_key(&records::outbox_key(conversation, message));
+  Ok(records::get_json(store, Table::FileTransfers, &key)?.unwrap_or_default())
+}
+
+fn failed_key(outbox_key: &str) -> String {
+  format!("failed/{outbox_key}")
+}
+
+pub fn transfer_state(
+  store: &impl LocalStore,
+  attachment: AttachmentId,
+) -> Result<Option<TransferState>, CoreError> {
+  records::get_json(store, Table::FileTransfers, &attachment.to_string())
+}
+
+pub fn share_links(
+  store: &impl LocalStore,
+  attachment: AttachmentId,
+) -> Result<Vec<StoredShareLink>, CoreError> {
+  Ok(records::get_json(store, Table::ShareLinks, &attachment.to_string())?.unwrap_or_default())
+}
+
+fn set_transfer(
+  store: &impl LocalStore,
+  attachment: AttachmentId,
+  state: &TransferState,
+) -> Result<(), CoreError> {
+  records::put_json(store, Table::FileTransfers, &attachment.to_string(), state)
+}
+
+fn find_attachment(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  attachment: AttachmentId,
+) -> Result<Option<AttachmentRef>, CoreError> {
+  Ok(
+    store
+      .messages(conversation, MessageFilter::All)?
+      .iter()
+      .flat_map(|message| {
+        attachments_of(&message.content)
+          .into_iter()
+          .cloned()
+          .collect::<Vec<_>>()
+      })
+      .find(|reference| reference.attachment_id == attachment),
+  )
+}
+
+fn read_source(source: &UploadSource) -> Result<Vec<u8>, ()> {
+  match source {
+    UploadSource::Bytes { bytes } => Ok(bytes.as_slice().to_vec()),
+    #[cfg(not(target_arch = "wasm32"))]
+    UploadSource::Path { path } => std::fs::read(path).map_err(|error| {
+      tracing::warn!(%error, "could not read a file to upload");
+    }),
+    #[cfg(target_arch = "wasm32")]
+    UploadSource::Path { .. } => Err(()),
+  }
+}
+
+fn failure_of(error: &CoreError) -> TransferFailure {
+  match error {
+    CoreError::Api(_) => TransferFailure::Network,
+    CoreError::Attachment(_) => TransferFailure::Corrupted,
+    CoreError::Corrupt(message) if message.contains("hash") => TransferFailure::Corrupted,
+    _ => TransferFailure::LocalFile,
+  }
+}
+
+fn is_status(error: &ApiError, status: u16) -> bool {
+  matches!(error, ApiError::Status { status: actual, .. } if *actual == status)
+}
+
+/// `name`, or `name (2)`, `name (3)`, ... if taken. Path separators in the sender's name are
+/// replaced, so a file can't land outside the directory.
+#[cfg(not(target_arch = "wasm32"))]
+fn unique_path(directory: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+  let safe: String = file_name
+    .chars()
+    .map(|character| {
+      if matches!(character, '/' | '\\' | '\0') {
+        '_'
+      } else {
+        character
+      }
+    })
+    .collect();
+  let safe = match safe.trim_start_matches('.') {
+    "" => "file".to_string(),
+    trimmed => trimmed.to_string(),
+  };
+  let candidate = directory.join(&safe);
+  if !candidate.exists() {
+    return candidate;
+  }
+  let (stem, extension) = match safe.rsplit_once('.') {
+    Some((stem, extension)) => (stem.to_string(), format!(".{extension}")),
+    None => (safe.clone(), String::new()),
+  };
+  (2..)
+    .map(|number| directory.join(format!("{stem} ({number}){extension}")))
+    .find(|path| !path.exists())
+    .unwrap_or(candidate)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn downloaded_names_stay_in_the_directory_and_do_not_overwrite() {
+    let directory = std::env::temp_dir().join(format!(
+      "teamcraft-files-{}",
+      rand_core::RngCore::next_u64(&mut OsRng)
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let escaped = unique_path(&directory, "../../etc/passwd");
+    assert_eq!(escaped.parent(), Some(directory.as_path()));
+    assert_eq!(unique_path(&directory, "...").file_name().unwrap(), "file");
+    std::fs::write(directory.join("a.txt"), b"x").unwrap();
+    assert_eq!(unique_path(&directory, "a.txt").file_name().unwrap(), "a (2).txt");
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+}

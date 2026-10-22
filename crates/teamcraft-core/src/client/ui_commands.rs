@@ -16,6 +16,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match command {
       CoreCommand::FlushOutbox => self.flush_outbox().await.map(|_| ()),
       CoreCommand::MarkRead { conversation } => {
+        self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
         let maybe_latest = self
           .store
           .messages(conversation, MessageFilter::All)?
@@ -63,6 +64,104 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       #[cfg(not(target_arch = "wasm32"))]
       CoreCommand::FetchSearchHits { hits } => self.fetch_search_hits(&hits).await.map(|_| ()),
+      CoreCommand::SetSaved {
+        conversation,
+        client_message_id,
+        is_saved,
+      } => self.update_account_data(|data, now| {
+        data.set_saved(conversation, client_message_id, is_saved, now);
+        true
+      }),
+      CoreCommand::SetDraft {
+        conversation,
+        maybe_thread,
+        body,
+      } => self.update_account_data(|data, now| data.set_draft(conversation, maybe_thread, &body, now)),
+      CoreCommand::SaveSearch { id, name, query } => self.update_account_data(|data, now| {
+        data.save_search(id, &name, &query, now);
+        true
+      }),
+      CoreCommand::DeleteSavedSearch { id } => self.update_account_data(|data, now| {
+        data.delete_saved_search(id, now);
+        true
+      }),
+      CoreCommand::SetServerPin {
+        conversation,
+        target,
+        is_pinned,
+      } => self.set_server_pin(conversation, target, is_pinned).await,
+      CoreCommand::Acknowledge {
+        conversation,
+        message,
+      } => self.acknowledge(conversation, message).await,
+      CoreCommand::MarkUnread { conversation, from } => self.mark_unread(conversation, from),
+      CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
+      CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
+      CoreCommand::DownloadFile {
+        conversation,
+        attachment,
+      } => self
+        .download_attachment_to_disk(conversation, attachment)
+        .await
+        .map(|_| ()),
+      CoreCommand::CreateShareLink {
+        conversation,
+        attachment,
+        maybe_expires_at,
+        maybe_max_downloads,
+        maybe_password,
+      } => {
+        let settings = crate::client::files::ShareLinkSettings {
+          maybe_expires_at,
+          maybe_max_downloads,
+          maybe_password: maybe_password
+            .map(|password| teamcraft_crypto::secret::SecretBytes::new(password.0.into_bytes())),
+        };
+        self
+          .create_share_link(conversation, attachment, settings)
+          .await
+          .map(|_| ())
+      },
+      CoreCommand::CreateSpace { request } => self.create_space(&request).await.map(|_| ()),
+      CoreCommand::UpdateSpace { space, request } => self.update_space(space, &request).await.map(|_| ()),
+      CoreCommand::CreateChannelWith { space, options } => {
+        self.create_channel_with(space, *options).await.map(|_| ())
+      },
+      CoreCommand::UpdateChannel {
+        conversation,
+        request,
+      } => self.update_channel(conversation, &request).await,
+      CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
+      CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
+      CoreCommand::LeaveChannel { conversation } => self.leave_channel(conversation).await,
+      CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
+      CoreCommand::CreateCategory { space, name } => self.create_category(space, &name).await,
+      CoreCommand::RenameCategory {
+        space,
+        category,
+        name,
+      } => self.rename_category(space, category, &name).await,
+      CoreCommand::DeleteCategory { space, category } => self.delete_category(space, category).await,
+      CoreCommand::AddMemberWithHistory {
+        conversation,
+        user,
+        history,
+      } => {
+        self
+          .add_member_with_history(conversation, user, Some(history))
+          .await
+      },
+      CoreCommand::InviteToSpace {
+        space,
+        email,
+        is_guest,
+        channels,
+        maybe_expires_at,
+      } => {
+        self
+          .invite_to_space(space, &email, is_guest, channels, maybe_expires_at)
+          .await
+      },
       CoreCommand::SetCustomStatus { .. } => {
         // The server has no custom status yet (crate README: server gaps).
         tracing::debug!("custom status is not stored on the server yet");

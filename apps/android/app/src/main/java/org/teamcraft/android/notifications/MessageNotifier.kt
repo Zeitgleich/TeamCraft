@@ -49,7 +49,7 @@ class MessageNotifier(private val context: Context) {
     lines.addLast(NotificationCompat.MessagingStyle.Message(text.text, System.currentTimeMillis(), sender))
     while (lines.size > MAX_LINES) lines.removeFirst()
     val channel = if (notification.isDirect || notification.isMention) CHANNEL_MENTIONS else CHANNEL_MESSAGES
-    post(notification.conversationId, text.maybeConversationTitle, channel)
+    post(notification.conversationId, text.maybeConversationTitle, channel, isSilent = notification.isSilent)
   }
 
   /** Adds the user's own reply to the conversation's notification (Android Auto expects this). */
@@ -77,6 +77,7 @@ class MessageNotifier(private val context: Context) {
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       .setAutoCancel(true)
       .setOnlyAlertOnce(isSilent)
+      .setSilent(isSilent)
       .setContentIntent(openIntent(conversationId))
       .addAction(replyAction(conversationId))
       .addAction(markReadAction(conversationId))

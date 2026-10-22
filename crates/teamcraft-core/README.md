@@ -6,22 +6,25 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 
 ## Modules
 
-| Module         | What                                                                                                                                                      |
-|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `store`        | `LocalStore` trait; `SqlCipherStore` (desktop), `SealedStore` over IndexedDB (browser) or SQLite (Android, e2ee.md §9.1–§9.2), `MemoryStore`; key sources |
-| `records`      | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                                                                 |
-| `api`          | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite / browser WebSocket; Mozilla roots on Android), `fake::FakeServer`         |
-| `client`       | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                                                                               |
-| `runner`       | `SyncRunner`: the app loop (reconnect, heartbeats, outbox, UI commands, due membership changes)                                                           |
-| `platform`     | Timers on tokio or `setTimeout`, so the engine runs on a single-threaded browser executor                                                                 |
-| `push_preview` | What a notification shows, read-only from the store (+ optional fetch); `PushSession`                                                                     |
-| `web_push`     | Browser: Web Push subscription; service worker entry points (feature `service-worker`)                                                                    |
-| `read_state`   | Followed threads, unread counts, read receipts, acknowledgements as the server reports them                                                               |
-| `attestation`  | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)                                                            |
-| `workspace`    | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                                                                           |
-| `search`       | tantivy index of the store and shared encrypted segments (native only)                                                                                    |
-| `ui_backend`   | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`)                                                 |
-| `clock`        | Injectable wall clock (`SystemClock`, `ManualClock`)                                                                                                      |
+| Module         | What                                                                                                                                                               |
+|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `store`        | `LocalStore` trait; `SqlCipherStore` (desktop), `SealedStore` over IndexedDB (browser) or SQLite (Android, e2ee.md §9.1–§9.2), `MemoryStore`; key sources          |
+| `records`      | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                                                                          |
+| `account_data` | Saved items, drafts, saved searches and unread marks synced in the key bag (e2ee.md §6.4)                                                                          |
+| `link_preview` | Finding links, the policy's domain list and reading page metadata (e2ee.md §12)                                                                                    |
+| `thumbnail`    | Small PNG previews of images, generated before upload                                                                                                              |
+| `api`          | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite / browser WebSocket; Mozilla roots on Android), `fake::FakeServer`                  |
+| `client`       | `Client`, the per-device sync engine; `PendingEnrollment` for the first run                                                                                        |
+| `runner`       | `SyncRunner`: the app loop (reconnect, heartbeats, outbox, UI commands, due membership changes)                                                                    |
+| `platform`     | Timers on tokio or `setTimeout`, so the engine runs on a single-threaded browser executor                                                                          |
+| `push_preview` | What a notification shows, read-only from the store (+ optional fetch); `PushSession`                                                                              |
+| `web_push`     | Browser: Web Push subscription; service worker entry points (feature `service-worker`)                                                                             |
+| `read_state`   | Followed threads, unread counts, read receipts, acknowledgements as the server reports them                                                                        |
+| `attestation`  | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)                                                                     |
+| `workspace`    | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                                                                                    |
+| `search`       | tantivy index of the store and shared encrypted segments (native only)                                                                                             |
+| `ui_backend`   | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`); `ui_actions`, `ui_files`, `ui_workspace` hold its parts |
+| `clock`        | Injectable wall clock (`SystemClock`, `ManualClock`)                                                                                                               |
 
 ## How it works
 
@@ -93,6 +96,23 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 - **Messages:** files (chunked encryption, presigned upload, hash checked before decrypting), edits
   and deletes of one's own messages, mentions (inside the message and as server metadata),
   reactions, typing indicators.
+- **Message actions:** replies (reference and excerpt inside the encrypted body), forwards
+  (re-encrypted copy with the original author), priority and acknowledgement requests (urgent also
+  sets the server's push bit), silent messages, "also send to channel" for thread replies, edits
+  with history, delete for everyone, pins (encrypted control message plus the server's pin list),
+  permalinks (`teamcraft:/c/<conversation>/m/<message>`, resolved only from the local store).
+- **Account data** (`account_data`): saved items, drafts, saved searches and "mark unread" travel in
+  the key bag; entries merge last-writer-wins with tombstones; the runner pulls every minute.
+- **Files from the UI:** per-file resumable uploads honoring the server's size limit, thumbnails,
+  files list per conversation, downloads into the configured folder, share links (e2ee.md §4.5.1).
+  A message waits in the outbox until its uploads finish.
+- **Link previews:** the sender's core fetches title, description and a small image (timeouts and
+  size caps in `LinkPreviewSettings`) and embeds them encrypted; senders and receivers both apply
+  the signed policy's domain list. None in the browser build.
+- **Workspace management:** spaces, channels with options, updates (rename, topic, archive,
+  public/private, category), channel browser and self-join of public channels (signed self-add
+  committed by a member), categories, space invitations, adding members with a history choice.
+  Changes are announced as encrypted system messages (`MessageContent::Event`).
 - **Push:** registration with a fresh push key; `Client::open_push` opens sealed wake-ups, and
   `push_preview::push_preview` builds what a notification shows without a `Client`.
 - **Device linking** (e2ee.md §5): `LinkOffer` (QR code), `NewDeviceLink` on the new device,
@@ -124,7 +144,8 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 - Content key rotation by message count / age (`RotationPolicy`) – only removals rotate.
 - Org key rotation after a recovery, and the approval flow (both need server endpoints).
 - An edit or delete that arrives before its target message isn't applied later.
-- Custom status, link previews, passkey PRF wrapper wiring; sending receipts and acknowledgements.
+- Custom status, passkey PRF wrapper wiring; sending read receipts.
+- Moving a channel to another space (no server endpoint).
 - The other UI traits (`CallBackend`, `AdminBackend`, `SecurityBackend`).
 - The MLS storage and the search index are rebuilt or rewritten whole; fine at today's sizes,
   incremental later.
@@ -161,6 +182,15 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 12. **Dev environment:** the shared dev Postgres may carry migrations from unmerged branches; the
     integration tests ran against a throwaway database and a server on port 8083 (another session's
     server used 8081). They leave small encrypted test files in the dev Garage bucket.
+
+13. **Chat actions:** the server's read position only moves forward (mark unread is account data
+    instead); no server-side silent flag (recipients' devices decide); delete for everyone hides
+    the message but the ciphertext stays stored; no key-bag-update gateway event, so account data
+    syncs by polling.
+14. **Files:** no endpoint reports the attachment size limit (the client has a setting); no
+    share-link endpoint or public download page yet (`POST /attachments/{id}/share-links`).
+15. **Workspace:** no endpoint to move a channel between spaces; `membership_add` has no
+    `added_by`, so "added by" comes from the encrypted system message only.
 
 ## Mobile
 

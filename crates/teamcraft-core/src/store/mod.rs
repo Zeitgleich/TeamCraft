@@ -70,6 +70,18 @@ pub enum Table {
   ReadReceipts,
   /// Who acknowledged an urgent message, keyed `conversation/message`.
   MessageAcks,
+  /// Files of outbox messages not uploaded yet, keyed like the outbox.
+  PendingUploads,
+  /// Download state of files on this device, keyed by attachment ID.
+  FileTransfers,
+  /// Share links this user created, keyed by attachment ID.
+  ShareLinks,
+  /// Outbox messages waiting for their link preview, keyed like the outbox.
+  PendingPreviews,
+  /// Categories per space (`GET /spaces/{id}/categories`), keyed by space.
+  Categories,
+  /// Public channels the user could join, per space (the channel browser).
+  ChannelBrowser,
 }
 
 /// A decrypted (or own, not yet sent) message.
@@ -87,6 +99,18 @@ pub struct StoredMessage {
   pub content: MessageContent,
   #[serde(default)]
   pub is_edited: bool,
+  /// Earlier versions of an edited text, oldest first.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub edits: Vec<EditRecord>,
+  #[serde(default)]
+  pub is_pinned: bool,
+}
+
+/// A text that an edit replaced.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditRecord {
+  pub body: String,
+  pub replaced_at_ms: i64,
 }
 
 /// Plaintext inside a message ciphertext. Serialized as JSON before encryption, so new kinds can
@@ -100,6 +124,9 @@ pub enum MessageContent {
     /// (e2ee.md §4.4).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mentions: Vec<UserId>,
+    /// Replies, priority, forwards, files, link previews; absent in a plain message.
+    #[serde(default, skip_serializing_if = "MessageMeta::is_plain")]
+    meta: MessageMeta,
   },
   /// An encrypted attachment in object storage (e2ee.md §4.5).
   File { attachment: AttachmentRef },
@@ -116,6 +143,13 @@ pub enum MessageContent {
     segment: AttachmentRef,
     message_count: u32,
   },
+  /// Pins or unpins a message of the conversation for everyone.
+  Pin {
+    target: ClientMessageId,
+    is_pinned: bool,
+  },
+  /// A change to the conversation, announced by whoever made it (shown as a system message).
+  Event { event: ConversationEvent },
   /// Adds or removes the sender's reaction to another message (e2ee.md §4.4: reactions are
   /// encrypted messages, so the server can't count them).
   Reaction {
@@ -125,6 +159,110 @@ pub enum MessageContent {
   },
   #[serde(other)]
   Unknown,
+}
+
+/// What changed in a conversation; sent encrypted by the member who changed it, so every member's
+/// history shows the same.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ConversationEvent {
+  /// The sender joined (a public channel).
+  Joined,
+  /// The sender left.
+  Left,
+  MemberAdded {
+    user: UserId,
+    history: teamcraft_proto::HistoryPolicy,
+  },
+  MemberRemoved {
+    user: UserId,
+  },
+  Renamed {
+    name: String,
+  },
+  TopicChanged {
+    topic: String,
+  },
+  Archived,
+  Unarchived,
+  MadePrivate,
+  MadePublic,
+  /// From a newer client.
+  #[serde(other)]
+  Unknown,
+}
+
+/// The optional parts of a text message. Everything is inside the ciphertext; only the urgency bit
+/// is also told to the server (push routing).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageMeta {
+  #[serde(rename = "reply_to", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_reply_to: Option<ReplyRef>,
+  #[serde(default, skip_serializing_if = "Priority::is_normal")]
+  pub priority: Priority,
+  #[serde(default, skip_serializing_if = "is_false")]
+  pub wants_acknowledgement: bool,
+  /// Recipients' devices don't alert.
+  #[serde(default, skip_serializing_if = "is_false")]
+  pub is_silent: bool,
+  /// A thread reply that also shows in the conversation.
+  #[serde(default, skip_serializing_if = "is_false")]
+  pub is_also_in_channel: bool,
+  #[serde(rename = "forwarded", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_forwarded: Option<Forwarded>,
+  /// Files sent with the text (a `File` message carries a single file without text).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub attachments: Vec<AttachmentRef>,
+  #[serde(rename = "link_preview", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_link_preview: Option<LinkPreviewData>,
+}
+
+/// The quoted message: the reference, plus enough to show it where it isn't loaded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyRef {
+  pub target: ClientMessageId,
+  pub author: UserId,
+  pub excerpt: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+  #[default]
+  Normal,
+  Important,
+  Urgent,
+  /// From a newer client; shown as normal.
+  #[serde(other)]
+  Unknown,
+}
+
+/// Where a forwarded message came from, and its text (the comment is the message body).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forwarded {
+  pub author_name: String,
+  #[serde(
+    rename = "conversation_name",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_conversation_name: Option<String>,
+  pub sent_at_ms: i64,
+  pub body: String,
+}
+
+/// The sender's link preview (e2ee.md §12).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkPreviewData {
+  pub url: String,
+  #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_title: Option<String>,
+  #[serde(rename = "description", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_description: Option<String>,
+  #[serde(rename = "site_name", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_site_name: Option<String>,
+  #[serde(rename = "image", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_image: Option<teamcraft_proto::Base64Bytes>,
 }
 
 /// Everything needed to fetch and decrypt an attachment; travels inside the encrypted message.
@@ -138,12 +276,16 @@ pub struct AttachmentRef {
   pub file_name: String,
   pub media_type: String,
   pub size_bytes: u64,
+  /// A small PNG preview of an image, made by the sender.
+  #[serde(rename = "thumbnail", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thumbnail: Option<teamcraft_proto::Base64Bytes>,
 }
 
 /// Which messages of a conversation to list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageFilter {
-  /// Top-level messages (no thread replies), reactions excluded.
+  /// Top-level messages (no thread replies, except those also sent to the conversation),
+  /// reactions excluded.
   TopLevel,
   /// Replies of one thread, reactions excluded.
   Thread(ThreadId),
@@ -238,6 +380,33 @@ forward_local_store!(std::sync::Arc<T>);
 // Single-threaded sharing in the browser, where the IndexedDB store is neither `Send` nor `Sync`.
 forward_local_store!(std::rc::Rc<T>);
 
+impl MessageMeta {
+  pub fn is_plain(&self) -> bool {
+    self == &Self::default()
+  }
+}
+
+impl Priority {
+  pub fn is_normal(&self) -> bool {
+    matches!(self, Self::Normal)
+  }
+}
+
+impl MessageContent {
+  /// A plain text message.
+  pub fn text(body: impl Into<String>, mentions: Vec<UserId>) -> Self {
+    Self::Text {
+      body: body.into(),
+      mentions,
+      meta: MessageMeta::default(),
+    }
+  }
+}
+
+fn is_false(value: &bool) -> bool {
+  !*value
+}
+
 impl StoredMessage {
   /// Display order: server messages by ID; pending ones after all of them, by time written.
   pub fn sort_key(&self) -> (u8, i64) {
@@ -251,21 +420,29 @@ impl StoredMessage {
     matches!(self.content, MessageContent::Reaction { .. })
   }
 
-  /// Reactions, edits and deletes act on other messages and aren't listed themselves.
+  /// Reactions, edits, deletes and pins act on other messages and aren't listed themselves.
   pub fn is_hidden(&self) -> bool {
     matches!(
       self.content,
       MessageContent::Reaction { .. }
         | MessageContent::Edit { .. }
         | MessageContent::Delete { .. }
+        | MessageContent::Pin { .. }
         | MessageContent::IndexSegment { .. }
     )
+  }
+
+  /// A thread reply the sender also posted to the conversation.
+  pub fn is_also_in_channel(&self) -> bool {
+    matches!(&self.content, MessageContent::Text { meta, .. } if meta.is_also_in_channel)
   }
 
   fn matches(&self, filter: MessageFilter) -> bool {
     match filter {
       MessageFilter::All => true,
-      MessageFilter::TopLevel => !self.is_hidden() && self.maybe_thread_id.is_none(),
+      MessageFilter::TopLevel => {
+        !self.is_hidden() && (self.maybe_thread_id.is_none() || self.is_also_in_channel())
+      },
       MessageFilter::Thread(thread) => !self.is_hidden() && self.maybe_thread_id == Some(thread),
     }
   }
@@ -273,7 +450,7 @@ impl StoredMessage {
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 21] = [
+  pub const ALL: [Self; 27] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -295,6 +472,12 @@ impl Table {
     Self::Unread,
     Self::ReadReceipts,
     Self::MessageAcks,
+    Self::PendingUploads,
+    Self::FileTransfers,
+    Self::ShareLinks,
+    Self::PendingPreviews,
+    Self::Categories,
+    Self::ChannelBrowser,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -326,6 +509,12 @@ impl Table {
       Self::Unread => "unread",
       Self::ReadReceipts => "read_receipts",
       Self::MessageAcks => "message_acks",
+      Self::PendingUploads => "pending_uploads",
+      Self::FileTransfers => "file_transfers",
+      Self::ShareLinks => "share_links",
+      Self::PendingPreviews => "pending_previews",
+      Self::Categories => "categories",
+      Self::ChannelBrowser => "channel_browser",
     }
   }
 }
@@ -348,6 +537,34 @@ pub(crate) mod tests {
   pub(crate) fn exercise_store(store: &impl LocalStore) {
     key_value_round_trip(store);
     messages_are_ordered_and_filtered(store);
+    replies_also_sent_to_the_conversation_are_listed_in_both(store);
+  }
+
+  fn replies_also_sent_to_the_conversation_are_listed_in_both(store: &impl LocalStore) {
+    let conversation = id(20);
+    let root = message(conversation, 21, Some(600), None, 1_000);
+    let mut reply = message(conversation, 22, Some(700), Some(600), 2_000);
+    let quiet_reply = message(conversation, 23, Some(800), Some(600), 3_000);
+    if let MessageContent::Text { meta, .. } = &mut reply.content {
+      meta.is_also_in_channel = true;
+    }
+    for stored in [&root, &reply, &quiet_reply] {
+      store.upsert_message(stored).unwrap();
+    }
+    let top: Vec<ClientMessageId> = store
+      .messages(conversation, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .map(|m| m.client_message_id)
+      .collect();
+    assert_eq!(top, vec![root.client_message_id, reply.client_message_id]);
+    assert_eq!(
+      store
+        .messages(conversation, MessageFilter::Thread(id(600)))
+        .unwrap()
+        .len(),
+      2
+    );
   }
 
   fn key_value_round_trip(store: &impl LocalStore) {
@@ -450,8 +667,11 @@ pub(crate) mod tests {
       content: MessageContent::Text {
         body: format!("message {client}"),
         mentions: Vec::new(),
+        meta: Default::default(),
       },
       is_edited: false,
+      edits: Vec::new(),
+      is_pinned: false,
     }
   }
 

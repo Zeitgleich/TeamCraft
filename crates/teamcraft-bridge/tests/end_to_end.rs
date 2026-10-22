@@ -65,7 +65,7 @@ fn texts(store: &MemoryStore, conversation: ConversationId) -> Vec<(String, Vec<
     .unwrap()
     .into_iter()
     .filter_map(|message| match message.content {
-      MessageContent::Text { body, mentions } => Some((body, mentions)),
+      MessageContent::Text { body, mentions, .. } => Some((body, mentions)),
       _ => None,
     })
     .collect()
@@ -260,13 +260,15 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
     for secret in ["Deploy", "Backup failed", "disk at 91%"] {
       assert!(!raw.contains(secret), "{secret} leaked");
     }
-    let from_bot = stored.body["messages"].as_array().unwrap();
+    // Besides the bot's three messages, the channel holds the encrypted system messages the
+    // members' clients post (channel created, member added).
+    let from_bot: Vec<_> = stored.body["messages"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter(|message| message["sender_user_id"] == bot_id.as_str())
+      .collect();
     assert_eq!(from_bot.len(), 3);
-    assert!(
-      from_bot
-        .iter()
-        .all(|message| message["sender_user_id"] == bot_id.as_str())
-    );
 
     // Bad input is refused without reaching the channel.
     assert_eq!(

@@ -72,6 +72,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_messages,
       core::commands::core_thread,
       core::commands::core_action,
+      core::commands::core_query,
       core::commands::core_stop,
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,

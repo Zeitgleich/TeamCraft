@@ -45,10 +45,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
     self.top_up_key_packages().await?;
-    if self.sync.is_key_bag_dirty {
-      self.upload_key_bag().await?;
-    }
-    Ok(())
+    // Also picks up saved items and drafts other devices changed while this one was away.
+    self.sync_account_data().await
   }
 
   /// Followed threads and unread counts (after `thread_update` and on fresh sessions). The threads'

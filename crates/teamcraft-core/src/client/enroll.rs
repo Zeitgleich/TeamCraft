@@ -139,6 +139,7 @@ impl PendingEnrollment {
       ..SyncState::default()
     };
     records::save_sync_state(&store, &sync)?;
+    let maybe_preview_fetcher = super::previews::default_fetcher(&settings.link_previews);
     let mut client = Client {
       api,
       store,
@@ -150,6 +151,7 @@ impl PendingEnrollment {
       sync,
       typing: Default::default(),
       maybe_call_sink: None,
+      maybe_preview_fetcher,
     };
     if is_new_identity {
       client
@@ -262,21 +264,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   async fn merge_remote_key_bag(&mut self) -> Result<(), CoreError> {
     let remote = self.api.key_bag().await?;
-    let decrypted = EncryptedKeyBag::from_bytes(remote.encrypted_key_bag.as_slice())?
-      .decrypt(convert::user(self.account.user_id), &self.account.backup_key())?;
-    for ring in decrypted.conversations() {
-      let local = self.account.key_bag.ring_mut(ring.conversation_id());
-      for key in ring.keys() {
-        local.insert(key.duplicate())?;
-      }
-      if local.current().is_none()
-        && let Some(current) = ring.current()
-      {
-        local.set_current(current.id())?;
-      }
-    }
-    self.sync.key_bag_version = remote.version;
-    records::save_key_bag(&self.store, &self.account)
+    self.merge_key_bag(remote.encrypted_key_bag.as_slice(), remote.version)
   }
 }
 

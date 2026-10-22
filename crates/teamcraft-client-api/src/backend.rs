@@ -6,8 +6,12 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
-use teamcraft_proto::Role;
+use teamcraft_proto::{CategoryId, HistoryPolicy, Role};
 
+use crate::actions::{
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
+  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+};
 use crate::admin::{AdminChannel, AdminUser, AuditEntry, Retention, SecurityPolicy, SelfJoinOutcome};
 use crate::calls::{
   ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
@@ -90,6 +94,107 @@ pub trait ChatBackend {
   /// The newest failure of an action sent to the core, in words for the user.
   fn last_action_error(&self) -> Option<String> {
     None
+  }
+
+  // Message actions (crate::actions). Defaults suit backends without them.
+
+  /// Sends a message with everything the composer can set. The default sends the plain text.
+  fn send_message(&self, message: OutgoingMessage) {
+    self.post_message(message.conversation, message.maybe_thread, &message.body);
+  }
+  /// Replies, pins, files, previews, edits and the rest for messages on screen.
+  fn message_extras(&self, _conversation: ConversationId, _messages: &[MessageId]) -> Vec<MessageExtras> {
+    Vec::new()
+  }
+  /// Replaces the text of one of the user's own messages; earlier versions stay visible as history.
+  fn edit_message(&self, _conversation: ConversationId, _message: MessageId, _body: &str) {}
+  /// Deletes one of the user's own messages for everyone.
+  fn delete_message(&self, _conversation: ConversationId, _message: MessageId) {}
+  /// Sends a copy of a message (re-encrypted for the target) with an optional comment.
+  fn forward_message(&self, _from: ConversationId, _message: MessageId, _to: ConversationId, _comment: &str) {
+  }
+  fn set_pinned(&self, _conversation: ConversationId, _message: MessageId, _is_pinned: bool) {}
+  fn pinned_messages(&self, _conversation: ConversationId) -> Vec<Message> {
+    Vec::new()
+  }
+  /// Saves a message for later (personal, synced to the user's devices, encrypted).
+  fn set_saved(&self, _conversation: ConversationId, _message: MessageId, _is_saved: bool) {}
+  fn saved_items(&self) -> Vec<SavedItem> {
+    Vec::new()
+  }
+  /// A link to the message that only members of the conversation can open.
+  fn permalink(&self, _conversation: ConversationId, _message: MessageId) -> Option<String> {
+    None
+  }
+  /// Where a permalink points, if the user is a member there.
+  fn resolve_permalink(&self, _link: &str) -> Option<PermalinkTarget> {
+    None
+  }
+  /// Marks the conversation unread from this message on.
+  fn mark_unread(&self, _conversation: ConversationId, _from: MessageId) {}
+  /// The first message the user hasn't read, to jump to.
+  fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
+    None
+  }
+  /// The unsent text of a conversation or thread (synced to the user's devices, encrypted).
+  fn draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>) -> Option<String> {
+    None
+  }
+  /// Stores the draft; an empty body removes it. Call debounced while typing.
+  fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Confirms having read a message that asked for acknowledgement.
+  fn acknowledge(&self, _conversation: ConversationId, _message: MessageId) {}
+
+  // Files.
+
+  /// Files of a conversation, newest first.
+  fn conversation_files(&self, _conversation: ConversationId) -> Vec<FileInfo> {
+    Vec::new()
+  }
+  /// Fetches and decrypts a file; its [`FileInfo::transfer`] reports progress and the local path.
+  fn download_file(&self, _conversation: ConversationId, _message: MessageId) {}
+  /// Creates a public download link for a file (e2ee.md §4.5.1); it appears in [`Self::share_links`].
+  fn create_share_link(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    _options: ShareLinkOptions,
+  ) {
+  }
+  fn share_links(&self, _conversation: ConversationId, _message: MessageId) -> Vec<ShareLink> {
+    Vec::new()
+  }
+  /// Largest file the server accepts, if known.
+  fn max_upload_bytes(&self) -> Option<u64> {
+    None
+  }
+
+  // Spaces and channels.
+
+  fn create_space(&self, _space: NewSpace) {}
+  fn update_space(&self, _space: SpaceId, _changes: SpaceChanges) {}
+  /// Founds a channel with the options of the "new channel" dialog.
+  fn create_channel_with(&self, _channel: NewChannel) {}
+  fn update_channel(&self, _conversation: ConversationId, _changes: ChannelChanges) {}
+  /// Public channels of a space, joined or not (the channel browser).
+  fn browse_channels(&self, _space: SpaceId) -> Vec<BrowsableChannel> {
+    Vec::new()
+  }
+  fn join_channel(&self, _conversation: ConversationId) {}
+  fn leave_channel(&self, _conversation: ConversationId) {}
+  fn categories(&self, _space: SpaceId) -> Vec<CategoryInfo> {
+    Vec::new()
+  }
+  fn create_category(&self, _space: SpaceId, _name: &str) {}
+  fn rename_category(&self, _space: SpaceId, _category: CategoryId, _name: &str) {}
+  fn delete_category(&self, _space: SpaceId, _category: CategoryId) {}
+  /// Adds a person with an explicit history choice ("share history" toggle, e2ee.md §4.3).
+  fn add_member_with_history(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
+  /// Invites someone by email to a space, as member or guest.
+  fn invite_to_space(&self, _invite: SpaceInvite) {}
+  /// The conversation includes people from outside the organization (the "external" badge).
+  fn has_external_people(&self, _conversation: ConversationId) -> bool {
+    false
   }
 }
 

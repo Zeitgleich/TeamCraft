@@ -77,6 +77,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       file_name: file.file_name,
       media_type: file.media_type,
       size_bytes: file.content.len() as u64,
+      maybe_thumbnail: None,
     })
   }
 

@@ -23,10 +23,15 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
-  CreateAttachmentResponse, RegisterPushRequest,
+  CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
-use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, UnreadResponse};
+use teamcraft_proto::{
+  CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
+  InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
+  UpdateSpaceRequest,
+};
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
 #[cfg(target_arch = "wasm32")]
@@ -353,6 +358,121 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.send_json(Method::PUT, "/me/key-bag", request).await
   }
 
+  async fn join_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::POST, &format!("/conversations/{conversation}/join"), None)
+      .await
+  }
+
+  async fn update_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &UpdateConversationRequest,
+  ) -> Result<ConversationResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/conversations/{conversation}"), request)
+      .await
+  }
+
+  async fn list_joinable(&self, space: SpaceId) -> Result<ListConversationsResponse, ApiError> {
+    self
+      .get(&format!("/conversations?space_id={space}&joinable=true"))
+      .await
+  }
+
+  async fn create_space(&self, request: &CreateSpaceRequest) -> Result<SpaceResponse, ApiError> {
+    self.send_json(Method::POST, "/spaces", request).await
+  }
+
+  async fn update_space(
+    &self,
+    space: SpaceId,
+    request: &UpdateSpaceRequest,
+  ) -> Result<SpaceResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/spaces/{space}"), request)
+      .await
+  }
+
+  async fn list_categories(&self, space: SpaceId) -> Result<ListCategoriesResponse, ApiError> {
+    self.get(&format!("/spaces/{space}/categories")).await
+  }
+
+  async fn create_category(
+    &self,
+    space: SpaceId,
+    request: &CreateCategoryRequest,
+  ) -> Result<CategoryResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/spaces/{space}/categories"), request)
+      .await
+  }
+
+  async fn update_category(
+    &self,
+    space: SpaceId,
+    category: CategoryId,
+    request: &UpdateCategoryRequest,
+  ) -> Result<CategoryResponse, ApiError> {
+    self
+      .send_json(
+        Method::PATCH,
+        &format!("/spaces/{space}/categories/{category}"),
+        request,
+      )
+      .await
+  }
+
+  async fn delete_category(&self, space: SpaceId, category: CategoryId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/spaces/{space}/categories/{category}"),
+        None,
+      )
+      .await
+  }
+
+  async fn create_invite(
+    &self,
+    space: SpaceId,
+    request: &CreateInviteRequest,
+  ) -> Result<InviteResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/spaces/{space}/invites"), request)
+      .await
+  }
+
+  async fn set_message_pinned(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    is_pinned: bool,
+  ) -> Result<(), ApiError> {
+    let method = if is_pinned { Method::PUT } else { Method::DELETE };
+    self
+      .send_without_response::<()>(
+        method,
+        &format!("/conversations/{conversation}/messages/{message}/pin"),
+        None,
+      )
+      .await
+  }
+
+  async fn acknowledge_message(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::PUT,
+        &format!("/conversations/{conversation}/messages/{message}/acknowledgement"),
+        None,
+      )
+      .await
+  }
+
   async fn list_threads(&self, query: &ListThreadsQuery) -> Result<ListThreadsResponse, ApiError> {
     let parameters = query_string(&[
       ("unread_only", query.unread_only.then(|| "true".to_string())),
@@ -424,6 +544,20 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
       .map(|bytes| bytes.to_vec())
       .map_err(|error| ApiError::Network(error.to_string()))
+  }
+
+  async fn create_share_link(
+    &self,
+    attachment: AttachmentId,
+    request: &CreateShareLinkRequest,
+  ) -> Result<ShareLinkResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/attachments/{attachment}/share-links"),
+        request,
+      )
+      .await
   }
 
   async fn register_push(&self, device: DeviceId, request: &RegisterPushRequest) -> Result<(), ApiError> {

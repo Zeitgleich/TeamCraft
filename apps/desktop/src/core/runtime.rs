@@ -9,8 +9,8 @@ use std::time::Duration;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
-  ChatAction, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
-  SecuritySnapshot,
+  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
+  MessageWindow, SecuritySnapshot,
 };
 use teamcraft_core::api::{AccessTokenSource, ApiError, GatewayConnection, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
@@ -128,6 +128,7 @@ enum Request {
     reply: oneshot::Sender<Result<Vec<Message>, String>>,
   },
   Action(ChatAction, oneshot::Sender<Result<(), String>>),
+  Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
   LinkStart {
     device_name: String,
@@ -236,6 +237,14 @@ impl CoreRuntime {
   pub async fn link_start(&self, device_name: String) -> Result<(), String> {
     self
       .ask(|reply| Request::LinkStart { device_name, reply })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// Answers a read beyond snapshot and windows (search, saved items, files, message extras, ...).
+  pub async fn query(&self, query: ChatQuery) -> Result<ChatAnswer, String> {
+    self
+      .ask(|reply| Request::Query(query, reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -505,6 +514,16 @@ impl Core {
         self.changed();
         drop(reply.send(result));
       },
+      Request::Query(query, reply) => {
+        let result = self
+          .backend
+          .as_ref()
+          .map(|backend| query.answer(backend))
+          .ok_or_else(|| "this device is not set up yet".to_owned());
+        drop(reply.send(result));
+        // A search can ask for messages found only in shared index segments.
+        self.run_queued_commands().await;
+      },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
     }
   }
@@ -732,6 +751,13 @@ impl Core {
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::AdminJoinChannel { .. } => {},
+      // Message actions, files and workspace management (client-api actions) go to the backend,
+      // which queues what needs the engine as commands.
+      other => {
+        if let Some(unhandled) = other.apply_to(backend) {
+          tracing::warn!(?unhandled, "chat action not handled");
+        }
+      },
     }
     self.run_queued_commands().await;
     // New messages go out right away; failures stay in the outbox for the periodic retry.

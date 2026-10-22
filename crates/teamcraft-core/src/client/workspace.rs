@@ -22,7 +22,7 @@ use crate::records;
 use crate::store::{LocalStore, Table};
 use crate::workspace::{RosterDocument, RosterMember, RosterRole, WorkspaceState};
 
-const WORKSPACE_KEY: &str = "state";
+pub(crate) const WORKSPACE_KEY: &str = "state";
 
 /// A membership change waiting to be committed by this device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,7 +411,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }))
   }
 
-  async fn post_admin_change(
+  pub(crate) async fn post_admin_change(
     &mut self,
     conversation: ConversationId,
     action: MembershipAction,

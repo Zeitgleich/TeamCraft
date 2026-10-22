@@ -2,11 +2,13 @@
 //! store, the server API, the sync engine and first-run enrollment. UIs read the local store through
 //! adapters; network and decryption happen below them.
 
+pub mod account_data;
 pub mod api;
 pub mod attestation;
 pub mod client;
 pub mod clock;
 pub mod error;
+pub mod link_preview;
 pub mod platform;
 pub mod push_preview;
 pub mod read_state;
@@ -15,10 +17,17 @@ pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod search;
 pub mod store;
+pub mod thumbnail;
+#[cfg(feature = "ui")]
+mod ui_actions;
 #[cfg(feature = "ui")]
 pub mod ui_backend;
 #[cfg(feature = "ui")]
+mod ui_files;
+#[cfg(feature = "ui")]
 mod ui_search;
+#[cfg(feature = "ui")]
+mod ui_workspace;
 #[cfg(target_arch = "wasm32")]
 pub mod web_push;
 pub mod workspace;

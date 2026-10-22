@@ -233,7 +233,7 @@ pub fn has_file(body: &str) -> bool {
 }
 
 /// A run of snippet text, marked when it matched a search term.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnippetPart {
   pub text: String,
   pub is_match: bool,
@@ -354,7 +354,7 @@ fn find_all_ci(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
 }
 
 /// One search hit with everything the result list shows.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SearchHit {
   pub message: Message,
   pub conversation_name: String,
@@ -362,14 +362,14 @@ pub struct SearchHit {
   pub snippet: Vec<SnippetPart>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SearchResults {
   pub hits: Vec<SearchHit>,
   /// Matches in total; `hits` is capped.
   pub total: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SavedSearch {
   pub id: u64,
   pub name: String,

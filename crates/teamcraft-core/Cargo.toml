@@ -45,6 +45,11 @@ futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # REST client; uses fetch in the browser.
 reqwest.workspace = true
+# Thumbnails of image attachments, made by the sender's client (already in the tree via the
+# desktop stack; only the common decoders, no native code).
+# Link previews: the URL in a message and the page's image URL (already in the tree via reqwest).
+url = "2.5.8"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

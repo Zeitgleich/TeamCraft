@@ -31,10 +31,15 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
-  CreateAttachmentResponse, RegisterPushRequest,
+  CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
-use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, UnreadResponse};
+use teamcraft_proto::{
+  CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
+  InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
+  UpdateSpaceRequest,
+};
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -101,6 +106,52 @@ pub trait ServerApi {
     conversation: ConversationId,
     user: UserId,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Joins a public channel (`POST /conversations/{id}/join`).
+  fn join_conversation(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Renames, converts, archives or recategorizes a channel (`PATCH /conversations/{id}`).
+  fn update_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &UpdateConversationRequest,
+  ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
+  /// Public channels of a space the caller hasn't joined (the channel browser).
+  fn list_joinable(
+    &self,
+    space: SpaceId,
+  ) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
+  fn create_space(
+    &self,
+    request: &CreateSpaceRequest,
+  ) -> impl Future<Output = Result<SpaceResponse, ApiError>>;
+  fn update_space(
+    &self,
+    space: SpaceId,
+    request: &UpdateSpaceRequest,
+  ) -> impl Future<Output = Result<SpaceResponse, ApiError>>;
+  fn list_categories(&self, space: SpaceId)
+  -> impl Future<Output = Result<ListCategoriesResponse, ApiError>>;
+  fn create_category(
+    &self,
+    space: SpaceId,
+    request: &CreateCategoryRequest,
+  ) -> impl Future<Output = Result<CategoryResponse, ApiError>>;
+  fn update_category(
+    &self,
+    space: SpaceId,
+    category: CategoryId,
+    request: &UpdateCategoryRequest,
+  ) -> impl Future<Output = Result<CategoryResponse, ApiError>>;
+  fn delete_category(
+    &self,
+    space: SpaceId,
+    category: CategoryId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Invites someone by email to a space, as member or guest.
+  fn create_invite(
+    &self,
+    space: SpaceId,
+    request: &CreateInviteRequest,
+  ) -> impl Future<Output = Result<InviteResponse, ApiError>>;
   /// A member's role, or the caller's own preferences (favorite, notification level).
   fn update_member(
     &self,
@@ -131,6 +182,21 @@ pub trait ServerApi {
     conversation: ConversationId,
     query: &ListMessagesQuery,
   ) -> impl Future<Output = Result<ListMessagesResponse, ApiError>>;
+
+  /// Sets the server's pin flag (pinned messages survive retention). Members learn about pins from
+  /// the encrypted pin message.
+  fn set_message_pinned(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    is_pinned: bool,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Confirms having read a message that asked for acknowledgement.
+  fn acknowledge_message(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
 
   /// Followed threads, most recently active first (`GET /threads`).
   fn list_threads(
@@ -195,6 +261,12 @@ pub trait ServerApi {
   fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
   /// Downloads an encrypted blob from a presigned URL.
   fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
+  /// Makes an attachment downloadable without an account (`POST /attachments/{id}/share-links`).
+  fn create_share_link(
+    &self,
+    attachment: AttachmentId,
+    request: &CreateShareLinkRequest,
+  ) -> impl Future<Output = Result<ShareLinkResponse, ApiError>>;
   fn register_push(
     &self,
     device: DeviceId,

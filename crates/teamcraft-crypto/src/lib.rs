@@ -19,6 +19,7 @@ pub mod org_recovery;
 pub mod push;
 pub mod rendezvous;
 pub mod secret;
+pub mod share_link;
 pub mod workspace;
 
 mod aead;

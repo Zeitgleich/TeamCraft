@@ -200,20 +200,29 @@ impl PassphraseWrapper {
     settings: &Argon2Settings,
     salt: &[u8; PASSPHRASE_SALT_LEN],
   ) -> Result<SymmetricKey, BackupError> {
-    settings.validate()?;
-    let params = Params::new(
-      settings.memory_kib,
-      settings.iterations,
-      settings.parallelism,
-      Some(SYMMETRIC_KEY_LEN),
-    )
-    .map_err(|_| BackupError::InvalidArgon2Settings(*settings))?;
-    let mut output = Zeroizing::new([0u8; SYMMETRIC_KEY_LEN]);
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-      .hash_password_into(self.passphrase.expose_secret(), salt, output.as_mut())
-      .map_err(|_| BackupError::KeyDerivation)?;
-    Ok(SymmetricKey::from_bytes(*output))
+    argon2id(self.passphrase.expose_secret(), settings, salt)
   }
+}
+
+/// Argon2id with the given settings to a 256-bit key (also used for share link passwords).
+pub(crate) fn argon2id(
+  passphrase: &[u8],
+  settings: &Argon2Settings,
+  salt: &[u8],
+) -> Result<SymmetricKey, BackupError> {
+  settings.validate()?;
+  let params = Params::new(
+    settings.memory_kib,
+    settings.iterations,
+    settings.parallelism,
+    Some(SYMMETRIC_KEY_LEN),
+  )
+  .map_err(|_| BackupError::InvalidArgon2Settings(*settings))?;
+  let mut output = Zeroizing::new([0u8; SYMMETRIC_KEY_LEN]);
+  Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    .hash_password_into(passphrase, salt, output.as_mut())
+    .map_err(|_| BackupError::KeyDerivation)?;
+  Ok(SymmetricKey::from_bytes(*output))
 }
 
 impl BackupKeyWrapper for PassphraseWrapper {

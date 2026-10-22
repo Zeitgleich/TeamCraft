@@ -20,6 +20,7 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
   let sealed = wake_up_for(&server, &bob, &alice, channel, message);
 
   // Bob's app hasn't processed its gateway, so only the fetch can show the text.
+  let stored_before = bob.store.messages(channel, MessageFilter::All).unwrap().len();
   let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
     .await
     .unwrap();
@@ -28,12 +29,9 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
   assert!(!preview.is_direct);
   // A preview only reads: the store didn't change.
-  assert!(
-    bob
-      .store
-      .messages(channel, MessageFilter::All)
-      .unwrap()
-      .is_empty()
+  assert_eq!(
+    bob.store.messages(channel, MessageFilter::All).unwrap().len(),
+    stored_before
   );
   settle(&mut [&mut bob]).await;
 }

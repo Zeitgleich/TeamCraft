@@ -101,6 +101,8 @@ pub struct PushNotification {
   pub is_direct: bool,
   pub is_mention: bool,
   pub is_urgent: bool,
+  /// Show without sound or vibration (the sender sent it silently).
+  pub is_silent: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -174,6 +176,7 @@ impl From<PushPreview> for PushNotification {
       is_direct: preview.is_direct,
       is_mention: preview.wake_up.kind == PushKind::Mention,
       is_urgent: preview.wake_up.is_urgent,
+      is_silent: preview.is_silent,
     }
   }
 }

@@ -210,6 +210,8 @@ pub fn enqueue_message(
     sent_at_ms: now_ms,
     content: draft.content,
     is_edited: false,
+    edits: Vec::new(),
+    is_pinned: false,
   })?;
   let entry = OutboxEntry {
     conversation_id: draft.conversation_id,

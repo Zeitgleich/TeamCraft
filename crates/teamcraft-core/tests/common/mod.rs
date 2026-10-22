@@ -69,6 +69,52 @@ impl Peer {
   }
 }
 
+/// Links a second device of `owner` over the relay (e2ee.md §5) and enrolls it.
+pub async fn link_device(owner: &mut Peer) -> TestClient {
+  let api = owner.api.clone();
+  let offer = teamcraft_core::LinkOffer::generate();
+  let code = offer.to_code();
+  let (new_side, owner_side) = tokio::join!(
+    teamcraft_core::client::NewDeviceLink::connect(&api, &offer),
+    owner.client.start_link_approval(&code)
+  );
+  owner
+    .client
+    .complete_link_approval(owner_side.unwrap())
+    .await
+    .unwrap();
+  let mut link_options = options("unused");
+  link_options.maybe_linked = Some(new_side.unwrap().receive_secrets().await.unwrap());
+  PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      clock(),
+      settings(),
+      link_options,
+    )
+    .await
+    .unwrap()
+}
+
+/// A UI adapter over a peer's store, as the desktop shell creates it.
+#[cfg(feature = "ui")]
+pub fn backend_of(peer: &Peer) -> teamcraft_core::ui_backend::CoreChatBackend<Arc<MemoryStore>> {
+  teamcraft_core::ui_backend::CoreChatBackend::new(peer.store.clone(), peer.client.user_id(), clock())
+}
+
+/// Runs what the UI adapter queued, as the app's sync task does, then sends the outbox.
+#[cfg(feature = "ui")]
+pub async fn run_commands(
+  peer: &mut Peer,
+  backend: &teamcraft_core::ui_backend::CoreChatBackend<Arc<MemoryStore>>,
+) {
+  for command in backend.drain_commands() {
+    peer.client.run_ui_command(command).await.unwrap();
+  }
+  peer.client.flush_outbox().await.unwrap();
+}
+
 /// Lets every client process its gateway frames until nobody receives anything new.
 pub async fn settle(peers: &mut [&mut Peer]) {
   for _ in 0..50 {

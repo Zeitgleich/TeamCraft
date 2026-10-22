@@ -4,8 +4,9 @@
 //! with the backup key ([`crate::backup`]) and stored on the server. Messages are already on the
 //! server as ciphertext, so the key bag is all that's needed to restore a device.
 //!
-//! Not yet included: index keys (§10.1) and settings; they get their own fields when those
-//! features land (bump [`KEY_BAG_VERSION`]).
+//! Version 2 adds the user's *account data* (saved items, drafts, saved searches; e2ee.md §6.4): opaque
+//! bytes to this crate, encrypted together with the keys, so every device of the user sees the same.
+//! Version 1 bags still decode (with empty account data).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,7 +24,9 @@ use crate::ids::{ConversationId, UserId};
 use crate::secret::{SYMMETRIC_KEY_LEN, SymmetricKey};
 
 /// Version of the plaintext key bag encoding.
-pub const KEY_BAG_VERSION: u8 = 1;
+pub const KEY_BAG_VERSION: u8 = 2;
+/// The first encoding, without account data.
+const KEY_BAG_VERSION_1: u8 = 1;
 const ENCRYPTED_KEY_BAG_VERSION: u8 = 1;
 
 /// Decrypted key bag of one user.
@@ -32,6 +35,7 @@ pub struct KeyBag {
   user_id: UserId,
   identity: IdentityKeyPair,
   conversations: BTreeMap<ConversationId, ContentKeyRing>,
+  account_data: Zeroizing<Vec<u8>>,
 }
 
 /// A key bag encrypted with the backup key, as stored on the server.
@@ -42,9 +46,21 @@ pub struct EncryptedKeyBag {
   ciphertext: Vec<u8>,
 }
 
-/// Plaintext encoding of the key bag. Zeroized on drop.
+/// Plaintext encoding of the key bag (version 2). Zeroized on drop.
 #[derive(Zeroize, ZeroizeOnDrop, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 struct KeyBagWire {
+  #[zeroize(skip)]
+  version: u8,
+  #[zeroize(skip)]
+  user_id: UserId,
+  identity_secret: [u8; SYMMETRIC_KEY_LEN],
+  conversations: Vec<ConversationKeysWire>,
+  account_data: Vec<u8>,
+}
+
+/// Version 1 of the plaintext encoding, read for bags uploaded before account data existed.
+#[derive(Zeroize, ZeroizeOnDrop, TlsDeserializeBytes, TlsSize)]
+struct KeyBagWireV1 {
   #[zeroize(skip)]
   version: u8,
   #[zeroize(skip)]
@@ -93,6 +109,7 @@ impl KeyBag {
       user_id,
       identity,
       conversations: BTreeMap::new(),
+      account_data: Zeroizing::new(Vec::new()),
     }
   }
 
@@ -118,6 +135,15 @@ impl KeyBag {
 
   pub fn conversations(&self) -> impl Iterator<Item = &ContentKeyRing> {
     self.conversations.values()
+  }
+
+  /// The user's account data (opaque here; teamcraft-core defines and merges it).
+  pub fn account_data(&self) -> &[u8] {
+    &self.account_data
+  }
+
+  pub fn set_account_data(&mut self, account_data: Vec<u8>) {
+    self.account_data = Zeroizing::new(account_data);
   }
 
   /// Serializes and encrypts the key bag with the backup key.
@@ -152,16 +178,38 @@ impl KeyBag {
       user_id: self.user_id,
       identity_secret: *self.identity.to_secret().expose_secret(),
       conversations,
+      account_data: self.account_data.to_vec(),
     }
   }
 
-  fn from_wire(wire: &KeyBagWire) -> Result<Self, KeyBagError> {
-    if wire.version != KEY_BAG_VERSION {
-      return Err(KeyBagError::UnsupportedVersion(wire.version));
+  /// Decodes either version of the plaintext.
+  fn decode(plaintext: &[u8], user_id: UserId) -> Result<Self, KeyBagError> {
+    match plaintext.first() {
+      Some(&KEY_BAG_VERSION) => {
+        let wire = KeyBagWire::tls_deserialize_exact_bytes(plaintext)?;
+        check_owner(wire.user_id, user_id)?;
+        let mut key_bag = Self::from_parts(wire.user_id, &wire.identity_secret, &wire.conversations)?;
+        key_bag.account_data = Zeroizing::new(wire.account_data.clone());
+        Ok(key_bag)
+      },
+      Some(&KEY_BAG_VERSION_1) => {
+        let wire = KeyBagWireV1::tls_deserialize_exact_bytes(plaintext)?;
+        check_owner(wire.user_id, user_id)?;
+        Self::from_parts(wire.user_id, &wire.identity_secret, &wire.conversations)
+      },
+      Some(&other) => Err(KeyBagError::UnsupportedVersion(other)),
+      None => Err(KeyBagError::DecryptionFailed),
     }
-    let identity = IdentityKeyPair::from_secret(&SymmetricKey::from_bytes(wire.identity_secret));
-    let mut key_bag = Self::new(wire.user_id, identity);
-    for conversation in &wire.conversations {
+  }
+
+  fn from_parts(
+    user_id: UserId,
+    identity_secret: &[u8; SYMMETRIC_KEY_LEN],
+    conversations: &[ConversationKeysWire],
+  ) -> Result<Self, KeyBagError> {
+    let identity = IdentityKeyPair::from_secret(&SymmetricKey::from_bytes(*identity_secret));
+    let mut key_bag = Self::new(user_id, identity);
+    for conversation in conversations {
       if key_bag.conversations.contains_key(&conversation.conversation_id) {
         return Err(KeyBagError::DuplicateConversation(conversation.conversation_id));
       }
@@ -186,14 +234,7 @@ impl EncryptedKeyBag {
     let aad = key_bag_aad(user_id)?;
     let plaintext = aead::open(backup_key.key(), &self.nonce, &aad, &self.ciphertext)
       .map_err(|_| KeyBagError::DecryptionFailed)?;
-    let wire = KeyBagWire::tls_deserialize_exact_bytes(plaintext.expose_secret())?;
-    if wire.user_id != user_id {
-      return Err(KeyBagError::WrongUser {
-        expected: user_id,
-        actual: wire.user_id,
-      });
-    }
-    KeyBag::from_wire(&wire)
+    KeyBag::decode(plaintext.expose_secret(), user_id)
   }
 
   pub fn to_bytes(&self) -> Result<Vec<u8>, KeyBagError> {
@@ -213,11 +254,27 @@ impl fmt::Debug for KeyBagWire {
   }
 }
 
+impl fmt::Debug for KeyBagWireV1 {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("KeyBagWireV1")
+      .field("user_id", &self.user_id)
+      .finish_non_exhaustive()
+  }
+}
+
 impl fmt::Debug for ConversationKeysWire {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("ConversationKeysWire")
       .field("conversation_id", &self.conversation_id)
       .finish_non_exhaustive()
+  }
+}
+
+fn check_owner(actual: UserId, expected: UserId) -> Result<(), KeyBagError> {
+  if actual == expected {
+    Ok(())
+  } else {
+    Err(KeyBagError::WrongUser { expected, actual })
   }
 }
 
@@ -264,6 +321,36 @@ mod tests {
         assert!(bool::from(copy.get(key.id()).unwrap().key().ct_eq(key.key())));
       }
     }
+  }
+
+  #[test]
+  fn account_data_round_trips() {
+    let mut key_bag = sample_key_bag();
+    key_bag.set_account_data(b"{\"saved\":[]}".to_vec());
+    let backup_key = BackupKey::generate(&mut OsRng);
+    let restored = key_bag
+      .encrypt(&backup_key, &mut OsRng)
+      .unwrap()
+      .decrypt(ALICE, &backup_key)
+      .unwrap();
+    assert_eq!(restored.account_data(), b"{\"saved\":[]}");
+  }
+
+  #[test]
+  fn version_1_bags_still_open_without_account_data() {
+    let key_bag = sample_key_bag();
+    // Version 1 is the version 2 layout without the trailing account data (empty: one length byte).
+    let mut plaintext = key_bag.to_wire().tls_serialize_detached().unwrap();
+    plaintext.truncate(plaintext.len() - 1);
+    plaintext[0] = KEY_BAG_VERSION_1;
+    let restored = KeyBag::decode(&plaintext, ALICE).unwrap();
+    assert!(restored.account_data().is_empty());
+    assert_eq!(restored.conversations().count(), key_bag.conversations().count());
+    assert_eq!(restored.identity().public_key(), key_bag.identity().public_key());
+    assert!(matches!(
+      KeyBag::decode(&plaintext, UserId::new(2)),
+      Err(KeyBagError::WrongUser { .. })
+    ));
   }
 
   #[test]

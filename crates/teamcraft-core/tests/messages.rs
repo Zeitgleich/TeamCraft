@@ -76,13 +76,15 @@ async fn authors_edit_and_delete_their_own_messages_only() {
   let stored = bob.store.message(channel, original).unwrap().unwrap();
   assert_eq!(stored.content, MessageContent::Deleted);
   assert!(bob.texts(channel).is_empty());
-  // Edits and deletes themselves aren't listed.
+  // Edits and deletes themselves aren't listed (the rest: the deleted message and "Bob joined").
   assert_eq!(
     bob
       .store
       .messages(channel, MessageFilter::TopLevel)
       .unwrap()
-      .len(),
+      .iter()
+      .filter(|message| !matches!(message.content, MessageContent::Event { .. }))
+      .count(),
     1
   );
 }
@@ -98,9 +100,17 @@ async fn mentions_reach_the_server_as_metadata() {
     .unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
 
-  assert_eq!(server.stored_mentions(), vec![vec![bob_id]]);
+  // The "Bob joined" announcement mentions nobody.
+  let mentions: Vec<_> = server
+    .stored_mentions()
+    .into_iter()
+    .filter(|mentions| !mentions.is_empty())
+    .collect();
+  assert_eq!(mentions, vec![vec![bob_id]]);
   let received = bob.store.messages(channel, MessageFilter::TopLevel).unwrap();
-  assert!(matches!(&received[0].content, MessageContent::Text { mentions, .. } if *mentions == vec![bob_id]));
+  assert!(received.iter().any(
+    |message| matches!(&message.content, MessageContent::Text { mentions, .. } if *mentions == vec![bob_id])
+  ));
 }
 
 #[tokio::test]

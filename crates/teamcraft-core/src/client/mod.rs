@@ -4,30 +4,42 @@
 //! [`ServerApi`] and keeps the store current. UIs read the store (see [`crate::view`]); every
 //! network-facing operation is an `async` method here.
 
+mod account;
+mod actions;
 mod attachments;
 mod calls;
 mod enroll;
+pub mod files;
 mod gateway;
 mod groups;
 mod linking;
 mod messaging;
 mod notifications;
 mod org_recovery;
+pub mod previews;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
 mod sync;
 #[cfg(feature = "ui")]
 mod ui_commands;
 mod workspace;
+pub mod workspace_admin;
+pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};
 
+pub use account::stored_account_data;
+/// Where the engine records its upload limit for the UI.
+pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
+pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
 pub use attachments::OutgoingFile;
 pub use calls::{CallEventSink, CallKeySigner};
 pub use enroll::{EnrollmentOptions, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::GatewayOutcome;
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use messaging::FlushReport;
+#[cfg(feature = "ui")]
+pub(crate) use messaging::apply_control;
 pub(crate) use messaging::decrypt_content;
 pub use notifications::TYPING_TIMEOUT_MS;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -58,6 +70,11 @@ pub struct ClientSettings {
   /// Delay per rank before a member commits a colleague's new device, and between retries while
   /// the device has no key package yet.
   pub device_add_stagger: std::time::Duration,
+  /// Largest file this client uploads (the server's default limit; it rejects larger ones too).
+  pub max_upload_bytes: u64,
+  /// Where downloaded files are written (native apps); `None` disables downloads to disk.
+  pub maybe_download_dir: Option<std::path::PathBuf>,
+  pub link_previews: previews::LinkPreviewSettings,
   /// Checks before giving up on adding a new device that never uploads key packages.
   pub device_add_attempts: u32,
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
@@ -76,6 +93,7 @@ pub struct Client<A, S> {
   sync: SyncState,
   typing: notifications::TypingState,
   maybe_call_sink: Option<CallEventSink>,
+  maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
 }
 
 impl Default for ClientSettings {
@@ -87,6 +105,9 @@ impl Default for ClientSettings {
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
+      max_upload_bytes: 100 * 1024 * 1024,
+      maybe_download_dir: None,
+      link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
     }
   }
@@ -104,7 +125,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(None);
     };
     let provider = records::load_mls_storage(&store)?;
+    // The UI shows the upload limit before sending.
+    records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
     let sync = records::load_sync_state(&store)?;
+    let maybe_preview_fetcher = previews::default_fetcher(&settings.link_previews);
     Ok(Some(Self {
       api,
       store,
@@ -116,7 +140,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       sync,
       typing: Default::default(),
       maybe_call_sink: None,
+      maybe_preview_fetcher,
     }))
+  }
+
+  /// Where downloaded files go (native apps; e.g. the user's downloads folder).
+  pub fn set_download_dir(&mut self, maybe_directory: Option<std::path::PathBuf>) {
+    self.settings.maybe_download_dir = maybe_directory;
   }
 
   pub fn user_id(&self) -> UserId {
@@ -211,7 +241,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Writes the key bag after content keys changed, and marks it for upload.
-  fn persist_keys(&mut self) -> Result<(), CoreError> {
+  pub(crate) fn persist_keys(&mut self) -> Result<(), CoreError> {
     records::save_key_bag(&self.store, &self.account)?;
     self.sync.is_key_bag_dirty = true;
     self.persist_sync()

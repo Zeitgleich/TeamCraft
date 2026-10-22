@@ -31,9 +31,14 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
-  CreateAttachmentResponse, RegisterPushRequest,
+  CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest};
+use teamcraft_proto::{
+  CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
+  InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
+  UpdateSpaceRequest,
+};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
@@ -85,6 +90,13 @@ struct State {
   relays: HashMap<String, Relay>,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
+  /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
+  maybe_max_attachment_bytes: Option<u64>,
+  share_links: HashMap<String, AttachmentId>,
+  /// Spaces besides the default one, and changes to the default one.
+  spaces: BTreeMap<SpaceId, SpaceResponse>,
+  categories: BTreeMap<CategoryId, CategoryResponse>,
+  invites: Vec<InviteResponse>,
 }
 
 /// A device-linking relay: at most two endpoints of one user, frames held for an absent peer.
@@ -131,6 +143,7 @@ struct Conversation {
   messages: Vec<MessageResponse>,
   favorites: HashMap<UserId, bool>,
   read_positions: HashMap<UserId, MessageId>,
+  pinned: HashSet<MessageId>,
 }
 
 struct Session {
@@ -263,6 +276,30 @@ impl FakeServer {
       .key_bags
       .get(&user)
       .map(|bag| bag.wrapped_backup_keys.as_slice().to_vec())
+  }
+
+  /// Space invitations sent so far.
+  pub fn invites(&self) -> Vec<InviteResponse> {
+    self.lock().invites.clone()
+  }
+
+  /// Marks a conversation as having guests in it, as the server reports once a guest joins.
+  pub fn set_contains_guests(&self, conversation: ConversationId) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
+      entry.response.contains_guests = true;
+    }
+  }
+
+  /// Refuses attachments larger than `limit` bytes, like the server's `max_attachment_bytes`.
+  pub fn set_max_attachment_bytes(&self, limit: u64) {
+    self.lock().maybe_max_attachment_bytes = Some(limit);
+  }
+
+  /// What the public download page of a share link serves: the ciphertext, no account needed.
+  pub fn shared_blob(&self, share_id: &str) -> Option<Vec<u8>> {
+    let state = self.lock();
+    let attachment = state.share_links.get(share_id)?;
+    state.attachments.get(attachment)?.maybe_blob.clone()
   }
 
   /// The push registration of a device (to seal wake-ups in tests).
@@ -528,18 +565,9 @@ impl ServerApi for FakeServerApi {
 
   async fn list_spaces(&self) -> Result<ListSpacesResponse, ApiError> {
     self.with(|state, _| {
-      let id = state.space();
+      state.default_space_entry();
       Ok(ListSpacesResponse {
-        spaces: vec![SpaceResponse {
-          id,
-          name: "Space A".into(),
-          maybe_icon: None,
-          maybe_color: None,
-          maybe_description: None,
-          join_policy: JoinPolicy::Open,
-          is_archived: false,
-          maybe_my_role: Some(SpaceRole::Member),
-        }],
+        spaces: state.spaces.values().cloned().collect(),
       })
     })
   }
@@ -601,6 +629,10 @@ impl ServerApi for FakeServerApi {
         history,
         &[me],
       );
+      let entry = state.conversation_mut(id)?;
+      entry.response.visibility = request.visibility.clone();
+      entry.response.maybe_topic = request.maybe_topic.clone();
+      entry.response.maybe_category_id = request.maybe_category_id;
       state.publish([me], &GatewayEvent::ConversationUpdate { conversation_id: id });
       Ok(state.conversation(id)?.view(me))
     })
@@ -999,6 +1031,280 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn join_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let floor = state.peek_id();
+      let user = state.user(me)?.clone();
+      let entry = state.conversation_mut(conversation)?;
+      if entry.response.visibility != ConversationVisibility::Public || entry.response.is_archived {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "not a public channel",
+        ));
+      }
+      if entry.members.contains_key(&me) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::AlreadyJoined,
+          "already a member",
+        ));
+      }
+      entry.members.insert(me, (ChannelRole::Member, floor));
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(
+        members,
+        &GatewayEvent::MembershipAdd {
+          conversation_id: conversation,
+          user,
+        },
+      );
+      Ok(())
+    })
+  }
+
+  async fn update_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &UpdateConversationRequest,
+  ) -> Result<ConversationResponse, ApiError> {
+    self.with(|state, me| {
+      let entry = state.member_conversation_mut(conversation, me)?;
+      let response = &mut entry.response;
+      if let Some(name) = &request.maybe_name {
+        response.maybe_name = Some(name.clone());
+      }
+      if let Some(topic) = &request.maybe_topic {
+        response.maybe_topic = (!topic.is_empty()).then(|| topic.clone());
+      }
+      if let Some(description) = &request.maybe_description {
+        response.maybe_description = (!description.is_empty()).then(|| description.clone());
+      }
+      if let Some(visibility) = &request.maybe_visibility {
+        response.visibility = visibility.clone();
+      }
+      if let Some(is_archived) = request.maybe_is_archived {
+        response.is_archived = is_archived;
+      }
+      if let Some(category) = request.maybe_category_id {
+        response.maybe_category_id = Some(category);
+      } else if request.clear_category {
+        response.maybe_category_id = None;
+      }
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      let view = entry.view(me);
+      state.publish(
+        members,
+        &GatewayEvent::ConversationUpdate {
+          conversation_id: conversation,
+        },
+      );
+      Ok(view)
+    })
+  }
+
+  async fn list_joinable(&self, space: SpaceId) -> Result<ListConversationsResponse, ApiError> {
+    self.with(|state, me| {
+      let conversations = state
+        .conversations
+        .values()
+        .filter(|conversation| {
+          conversation.response.maybe_space_id == Some(space)
+            && conversation.response.visibility == ConversationVisibility::Public
+            && !conversation.members.contains_key(&me)
+        })
+        .map(|conversation| conversation.view(me))
+        .collect();
+      Ok(ListConversationsResponse { conversations })
+    })
+  }
+
+  async fn create_space(&self, request: &CreateSpaceRequest) -> Result<SpaceResponse, ApiError> {
+    self.with(|state, _| {
+      state.default_space_entry();
+      let id: SpaceId = state.next_id();
+      let space = SpaceResponse {
+        id,
+        name: request.name.clone(),
+        maybe_icon: request.maybe_icon.clone(),
+        maybe_color: request.maybe_color.clone(),
+        maybe_description: request.maybe_description.clone(),
+        join_policy: request.join_policy.clone(),
+        is_archived: false,
+        maybe_my_role: Some(SpaceRole::SpaceAdmin),
+      };
+      state.spaces.insert(id, space.clone());
+      Ok(space)
+    })
+  }
+
+  async fn update_space(
+    &self,
+    space: SpaceId,
+    request: &UpdateSpaceRequest,
+  ) -> Result<SpaceResponse, ApiError> {
+    self.with(|state, _| {
+      state.default_space_entry();
+      let entry = state
+        .spaces
+        .get_mut(&space)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"))?;
+      if let Some(name) = &request.maybe_name {
+        entry.name = name.clone();
+      }
+      if let Some(description) = &request.maybe_description {
+        entry.maybe_description = (!description.is_empty()).then(|| description.clone());
+      }
+      if let Some(policy) = &request.maybe_join_policy {
+        entry.join_policy = policy.clone();
+      }
+      if let Some(is_archived) = request.maybe_is_archived {
+        entry.is_archived = is_archived;
+      }
+      Ok(entry.clone())
+    })
+  }
+
+  async fn list_categories(&self, space: SpaceId) -> Result<ListCategoriesResponse, ApiError> {
+    self.with(|state, _| {
+      let mut categories: Vec<CategoryResponse> = state
+        .categories
+        .values()
+        .filter(|category| category.space_id == space)
+        .cloned()
+        .collect();
+      categories.sort_by_key(|category| category.position);
+      Ok(ListCategoriesResponse { categories })
+    })
+  }
+
+  async fn create_category(
+    &self,
+    space: SpaceId,
+    request: &CreateCategoryRequest,
+  ) -> Result<CategoryResponse, ApiError> {
+    self.with(|state, _| {
+      let id: CategoryId = state.next_id();
+      let position = request
+        .maybe_position
+        .unwrap_or_else(|| i32::try_from(state.categories.len()).unwrap_or(i32::MAX));
+      let category = CategoryResponse {
+        id,
+        space_id: space,
+        name: request.name.clone(),
+        position,
+      };
+      state.categories.insert(id, category.clone());
+      Ok(category)
+    })
+  }
+
+  async fn update_category(
+    &self,
+    space: SpaceId,
+    category: CategoryId,
+    request: &UpdateCategoryRequest,
+  ) -> Result<CategoryResponse, ApiError> {
+    self.with(|state, _| {
+      let entry = state
+        .categories
+        .get_mut(&category)
+        .filter(|entry| entry.space_id == space)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::CategoryNotFound, "no such category"))?;
+      if let Some(name) = &request.maybe_name {
+        entry.name = name.clone();
+      }
+      if let Some(position) = request.maybe_position {
+        entry.position = position;
+      }
+      Ok(entry.clone())
+    })
+  }
+
+  async fn delete_category(&self, space: SpaceId, category: CategoryId) -> Result<(), ApiError> {
+    self.with(|state, _| match state.categories.get(&category) {
+      Some(entry) if entry.space_id == space => {
+        state.categories.remove(&category);
+        Ok(())
+      },
+      _ => Err(ApiError::status(
+        404,
+        ErrorCode::CategoryNotFound,
+        "no such category",
+      )),
+    })
+  }
+
+  async fn create_invite(
+    &self,
+    space: SpaceId,
+    request: &CreateInviteRequest,
+  ) -> Result<InviteResponse, ApiError> {
+    self.with(|state, me| {
+      let invite = InviteResponse {
+        id: state.next_id(),
+        space_id: space,
+        email: request.email.clone(),
+        role: request.role.clone(),
+        channel_ids: request.channel_ids.clone(),
+        sponsor_user_id: me,
+        maybe_expires_at: request.maybe_expires_at,
+      };
+      state.invites.push(invite.clone());
+      Ok(invite)
+    })
+  }
+
+  async fn set_message_pinned(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    is_pinned: bool,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = state.member_conversation_mut(conversation, me)?;
+      if !entry.messages.iter().any(|stored| stored.id == message) {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "unknown message",
+        ));
+      }
+      if is_pinned {
+        entry.pinned.insert(message);
+      } else {
+        entry.pinned.remove(&message);
+      }
+      Ok(())
+    })
+  }
+
+  /// Like the server: the sender and the acknowledging user's devices hear about it.
+  async fn acknowledge_message(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let sender = state
+        .member_conversation(conversation, me)?
+        .messages
+        .iter()
+        .find(|stored| stored.id == message)
+        .map(|stored| stored.sender_user_id)
+        .ok_or_else(|| ApiError::status(400, ErrorCode::InvalidRequest, "unknown message"))?;
+      state.publish(
+        [sender, me],
+        &GatewayEvent::MessageAck {
+          conversation_id: conversation,
+          message_id: message,
+          user_id: me,
+        },
+      );
+      Ok(())
+    })
+  }
+
   async fn list_threads(&self, query: &ListThreadsQuery) -> Result<ListThreadsResponse, ApiError> {
     self.with(|state, me| {
       let mut threads: Vec<ThreadSummary> = state
@@ -1104,6 +1410,16 @@ impl ServerApi for FakeServerApi {
   ) -> Result<CreateAttachmentResponse, ApiError> {
     self.with(|state, me| {
       state.member_conversation(request.conversation_id, me)?;
+      if state
+        .maybe_max_attachment_bytes
+        .is_some_and(|limit| request.size_bytes > limit)
+      {
+        return Err(ApiError::status(
+          413,
+          ErrorCode::PayloadTooLarge,
+          "attachment too large",
+        ));
+      }
       let id: AttachmentId = state.next_id();
       state.attachments.insert(
         id,
@@ -1118,6 +1434,33 @@ impl ServerApi for FakeServerApi {
         id,
         upload_url: format!("{BLOB_SCHEME}{id}"),
         expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn create_share_link(
+    &self,
+    attachment: AttachmentId,
+    request: &CreateShareLinkRequest,
+  ) -> Result<ShareLinkResponse, ApiError> {
+    self.with(|state, me| {
+      let conversation = state
+        .attachments
+        .get(&attachment)
+        .filter(|stored| stored.is_complete)
+        .map(|stored| stored.conversation)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::AttachmentNotFound, "no such attachment"))?;
+      state.member_conversation(conversation, me)?;
+      let share_id = format!("share{}", state.next_id::<AttachmentId>());
+      state.share_links.insert(share_id.clone(), attachment);
+      Ok(ShareLinkResponse {
+        url: format!("https://chat.example.com/f/{share_id}"),
+        share_id,
+        attachment_id: attachment,
+        maybe_expires_at: request.maybe_expires_at,
+        maybe_max_downloads: request.maybe_max_downloads,
+        download_count: 0,
+        is_revoked: false,
       })
     })
   }
@@ -1436,6 +1779,21 @@ impl State {
     }
   }
 
+  /// The default space as an entry of `spaces`, created on first use.
+  fn default_space_entry(&mut self) {
+    let id = self.space();
+    self.spaces.entry(id).or_insert_with(|| SpaceResponse {
+      id,
+      name: "Space A".into(),
+      maybe_icon: None,
+      maybe_color: None,
+      maybe_description: None,
+      join_policy: JoinPolicy::Open,
+      is_archived: false,
+      maybe_my_role: Some(SpaceRole::Member),
+    });
+  }
+
   fn space(&mut self) -> SpaceId {
     if let Some(space) = self.space {
       return space;
@@ -1443,6 +1801,13 @@ impl State {
     let space = self.next_id();
     self.space = Some(space);
     space
+  }
+
+  fn conversation_mut(&mut self, conversation: ConversationId) -> Result<&mut Conversation, ApiError> {
+    self
+      .conversations
+      .get_mut(&conversation)
+      .ok_or_else(|| ApiError::status(404, ErrorCode::ChannelNotFound, "unknown conversation"))
   }
 
   fn conversation(&self, conversation: ConversationId) -> Result<&Conversation, ApiError> {
@@ -1558,6 +1923,7 @@ impl State {
         messages: Vec::new(),
         favorites: HashMap::new(),
         read_positions: HashMap::new(),
+        pinned: HashSet::new(),
       },
     );
     id

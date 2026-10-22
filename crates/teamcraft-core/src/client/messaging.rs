@@ -17,7 +17,7 @@ use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
-use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
+use crate::store::{EditRecord, LocalStore, MessageContent, MessageFilter, Priority, StoredMessage, Table};
 
 /// Result of [`Client::flush_outbox`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -54,6 +54,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let content = MessageContent::Text {
       body: body.to_string(),
       mentions,
+      meta: Default::default(),
     };
     let id = self.enqueue(conversation, maybe_thread, content)?;
     self.flush_outbox().await?;
@@ -75,13 +76,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         body: body.to_string(),
       },
     )?;
-    self.apply_control(
+    apply_control(
+      &self.store,
       conversation,
       self.account.user_id,
       &MessageContent::Edit {
         target,
         body: body.to_string(),
       },
+      self.now_ms(),
     )?;
     self.flush_outbox().await?;
     Ok(id)
@@ -94,10 +97,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     target: ClientMessageId,
   ) -> Result<ClientMessageId, CoreError> {
     let id = self.enqueue(conversation, None, MessageContent::Delete { target })?;
-    self.apply_control(
+    apply_control(
+      &self.store,
       conversation,
       self.account.user_id,
       &MessageContent::Delete { target },
+      self.now_ms(),
     )?;
     self.flush_outbox().await?;
     Ok(id)
@@ -139,7 +144,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         report.failed += 1;
         continue;
       }
-      if is_offline {
+      if is_offline
+        || super::files::pending_upload(&self.store, entry.conversation_id, entry.client_message_id)?
+          .is_some()
+        || super::previews::has_pending_preview(&self.store, entry.conversation_id, entry.client_message_id)?
+      {
+        // Offline, its files are still uploading, or its link preview is being made.
         report.pending += 1;
         continue;
       }
@@ -250,8 +260,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           sent_at_ms: message.id.snowflake().unix_millis(),
           content: content.clone(),
           is_edited: false,
+          edits: Vec::new(),
+          is_pinned: false,
         })?;
-        self.apply_control(conversation, message.sender_user_id, &content)?;
+        apply_control(
+          &self.store,
+          conversation,
+          message.sender_user_id,
+          &content,
+          message.id.snowflake().unix_millis(),
+        )?;
         self
           .store
           .delete(Table::Undecrypted, &undecrypted_key(&message))?;
@@ -275,47 +293,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Applies an edit or delete to its target. Only the target's author may change it; others' edits
   /// and deletes are ignored (moderator deletion is a server-side feature, PLAN.md).
-  fn apply_control(
-    &self,
-    conversation: ConversationId,
-    sender: UserId,
-    content: &MessageContent,
-  ) -> Result<(), CoreError> {
-    let (target, replacement) = match content {
-      MessageContent::Edit { target, body } => (
-        *target,
-        MessageContent::Text {
-          body: body.clone(),
-          mentions: Vec::new(),
-        },
-      ),
-      MessageContent::Delete { target } => (*target, MessageContent::Deleted),
-      _ => return Ok(()),
-    };
-    let Some(mut stored) = self.store.message(conversation, target)? else {
-      // TODO(ordering): an edit that arrives before its target is kept but not applied later.
-      return Ok(());
-    };
-    if stored.sender_user_id != sender || matches!(stored.content, MessageContent::Deleted) {
-      return Ok(());
-    }
-    if let (MessageContent::Text { mentions, .. }, MessageContent::Text { body, .. }) =
-      (&stored.content, &replacement)
-    {
-      stored.content = MessageContent::Text {
-        body: body.clone(),
-        mentions: mentions.clone(),
-      };
-      stored.is_edited = true;
-    } else if matches!(replacement, MessageContent::Deleted) {
-      stored.content = MessageContent::Deleted;
-    } else {
-      return Ok(());
-    }
-    self.store.upsert_message(&stored)?;
-    Ok(())
-  }
-
   /// Tries the parked messages of a conversation again (after new content keys arrived).
   pub(crate) fn retry_undecrypted(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let parked: Vec<MessageResponse> = records::list_json(&self.store, Table::Undecrypted)?;
@@ -380,7 +357,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         MessageContent::Text { mentions, .. } => mentions.clone(),
         _ => Vec::new(),
       },
-      is_urgent: false,
+      // The one piece of metadata the server sees: it routes urgent pushes past do-not-disturb.
+      is_urgent: matches!(&stored.content, MessageContent::Text { meta, .. } if meta.priority == Priority::Urgent),
     };
     let response = self.api.send_message(entry.conversation_id, &request).await?;
     stored.maybe_server_id = Some(response.id);
@@ -434,4 +412,54 @@ pub(crate) fn decrypt_content(
   };
   let plaintext = decrypt_message(ring, &context, &encrypted)?;
   Ok(serde_json::from_slice(plaintext.expose_secret()).unwrap_or(MessageContent::Unknown))
+}
+
+/// Applies a message that acts on another one: an edit (keeping the earlier text as history), a
+/// delete or a pin. Edits and deletes count only from the original sender; pins from any member
+/// (the server checks who may pin).
+pub(crate) fn apply_control(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sender: UserId,
+  content: &MessageContent,
+  at_ms: i64,
+) -> Result<(), CoreError> {
+  let target = match content {
+    MessageContent::Edit { target, .. }
+    | MessageContent::Delete { target }
+    | MessageContent::Pin { target, .. } => *target,
+    _ => return Ok(()),
+  };
+  let Some(mut stored) = store.message(conversation, target)? else {
+    // TODO(ordering): a control that arrives before its target is kept but not applied later.
+    return Ok(());
+  };
+  if matches!(stored.content, MessageContent::Deleted) {
+    return Ok(());
+  }
+  let is_own = stored.sender_user_id == sender;
+  match content {
+    MessageContent::Edit { body, .. } if is_own => {
+      let MessageContent::Text { body: old, .. } = &mut stored.content else {
+        return Ok(());
+      };
+      if old == body {
+        return Ok(());
+      }
+      let previous = std::mem::replace(old, body.clone());
+      stored.edits.push(EditRecord {
+        body: previous,
+        replaced_at_ms: at_ms,
+      });
+      stored.is_edited = true;
+    },
+    MessageContent::Delete { .. } if is_own => {
+      stored.content = MessageContent::Deleted;
+      stored.edits.clear();
+    },
+    MessageContent::Pin { is_pinned, .. } => stored.is_pinned = *is_pinned,
+    _ => return Ok(()),
+  }
+  store.upsert_message(&stored)?;
+  Ok(())
 }

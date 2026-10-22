@@ -163,6 +163,18 @@ https://chat.example.com/f/<share-id>#<file-key>
   and the desktop/mobile app can verify its hash.
 - Admin controls: on/off, max expiry, which roles may create links (default: members, not guests).
 
+**Implemented (client side):** the fragment is `version || flags || key material || name nonce ||
+encrypted name`, base64url. Without a password the key material is the file key; with one it is
+`salt || Argon2id parameters || nonce || XChaCha20-Poly1305(Argon2id(password, salt), file key)`,
+using lighter parameters than the backup passphrase (32 MiB, 3 passes) because the download page
+runs them in WebAssembly, and refusing parameters outside the backup's limits when opening, so a
+hostile link can't make the browser allocate absurd memory. The file name is encrypted with the
+file key. The server endpoint for creating links (`POST /attachments/{id}/share-links`) and the
+download page are not built yet.
+
+**Thumbnails:** the sender's client makes a small PNG of image attachments (decoding capped at
+40 megapixels) and puts it next to the file key inside the encrypted message.
+
 ### 4.6 Who may change a group
 
 Member clients only commit membership changes signed by someone allowed to make them: a member with
@@ -285,6 +297,23 @@ sharing); nothing below is a new primitive.
   colluding admins can recover anyone, as stated above; one admin alone cannot.
 - **Server endpoints needed** (not yet there): storing sealed shares per admin device, a recovery
   request with approvals, and handing the user's wrapped backup keys to the approving admins.
+
+### 6.4 Account data in the key bag (implemented)
+
+Saved items, drafts and saved searches are personal and must follow the user to every device, but
+the server must not learn them. They live in the key bag (version 2 adds an `account_data` field
+next to the identity and content keys), so they are encrypted with the backup key like the keys and
+restored together with them on a new device.
+
+- Devices edit independently and upload the whole key bag with compare-and-swap on its version. On a
+  conflict the device downloads the newer bag, merges and retries: content keys are a union; every
+  account data entry carries the time of its last change, the newer side wins per entry, and
+  removals stay as tombstones (dropped after 90 days) so a removal isn't undone by an older copy.
+- Other devices pull the key bag when a gateway session starts and periodically while running
+  (default every 60 s). A gateway event announcing a new key bag version would make this instant
+  (server gap).
+- The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
+  change while typing; clients upload at most once per sync round.
 
 ## 7. Push notifications (Threema model, extended)
 
@@ -502,6 +531,14 @@ protocol change:
   - the sender's client only generates previews for allowed domains,
   - receiving clients drop previews for disallowed domains before rendering.
 - Same effect as server-side filtering, without leaking URLs.
+
+**Implemented:** the first http(s) link of a message is previewed. The message waits in the outbox
+while the sender's client reads the page (5 s timeout, at most 512 KiB of it, 3 redirects; a redirect
+to a disallowed domain gets no preview), takes OpenGraph title, description, site name and image
+(falling back to `<title>` and `description`), fetches the image (at most 2 MiB) and turns it into a
+small PNG. All of it goes into the encrypted message. The fetch comes from the sender's network,
+so the linked site sees the sender's IP address, as it would on opening the link. Browsers can't
+read cross-origin pages, so the web client sends links without previews.
 
 ## 13. Bots and integrations
 
