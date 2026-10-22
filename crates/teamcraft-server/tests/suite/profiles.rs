@@ -80,6 +80,7 @@ mod fields {
       json!({"phone": "call me maybe"}),
       json!({"time_zone": "Europe/Berlin; DROP"}),
       json!({"time_zone": "../etc/passwd"}),
+      json!({"time_zone": "Mars/Base"}),
       json!({"working_hours": {"weekdays": [], "start_minute": 0, "end_minute": 60}}),
       json!({"working_hours": {"weekdays": ["mon"], "start_minute": 600, "end_minute": 500}}),
       json!({"working_hours": {"weekdays": ["mon"], "start_minute": 0, "end_minute": 2000}}),

@@ -217,7 +217,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     })
   }
 
-  fn conversation_ids(&self) -> Vec<ConversationId> {
+  pub(crate) fn conversation_ids(&self) -> Vec<ConversationId> {
     self
       .store_ref()
       .list(Table::Conversations)
@@ -227,7 +227,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  fn stored(&self, conversation: ConversationId) -> Vec<StoredMessage> {
+  pub(crate) fn stored(&self, conversation: ConversationId) -> Vec<StoredMessage> {
     self
       .store_ref()
       .messages(conversation, MessageFilter::All)

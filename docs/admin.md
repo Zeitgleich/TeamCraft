@@ -210,7 +210,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
-timeout) the thread options (threaded view on/off, auto-follow default) and the allowed guest e-mail domains
+timeout, last seen on/off) the thread options (threaded view on/off, auto-follow default) and the allowed guest e-mail domains
 (`guests.allowed_email_domains`: invitations, meeting invitees and guest sign-in; added to the server's
 `[guests] allowed_email_domains`) are part of the signed workspace policy; the server enforces them. The display name format and the full name/e-mail privacy apply
 to every response that names a person (directory, member lists, `/me`, meeting attendees, gateway events)

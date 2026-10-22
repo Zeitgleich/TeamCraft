@@ -285,7 +285,6 @@ impl NotificationPrefs {
 pub struct PrivacyPrefs {
   pub share_read_receipts: bool,
   pub share_typing: bool,
-  pub share_last_seen: bool,
   /// Minutes of inactivity before status turns to away; `None` never.
   pub away_after_minutes: Option<u32>,
 }
@@ -295,7 +294,6 @@ impl Default for PrivacyPrefs {
     Self {
       share_read_receipts: true,
       share_typing: true,
-      share_last_seen: true,
       away_after_minutes: Some(10),
     }
   }

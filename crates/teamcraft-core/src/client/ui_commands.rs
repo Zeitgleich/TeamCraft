@@ -118,6 +118,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         message,
       } => self.acknowledge(conversation, message).await,
       CoreCommand::MarkUnread { conversation, from } => self.mark_unread(conversation, from),
+      CoreCommand::MarkActivityRead { up_to_ms } => self.mark_activity_read(up_to_ms),
+      CoreCommand::RefreshPresence { users } => self.refresh_presence(&users).await,
+      CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),
+      CoreCommand::SetLastSeenVisibility { visibility } => self.set_last_seen_visibility(visibility).await,
+      CoreCommand::RefreshCallHistory => self.refresh_call_history().await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
       CoreCommand::DownloadFile {

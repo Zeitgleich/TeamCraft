@@ -38,6 +38,9 @@ use teamcraft_proto::{
   UpdateSpaceRequest,
 };
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
+use teamcraft_proto::{
+  ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
+};
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -322,6 +325,31 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self
       .send_without_response(Method::PUT, "/me/presence", Some(request))
       .await
+  }
+
+  async fn list_presence(&self, users: &[UserId]) -> Result<ListPresenceResponse, ApiError> {
+    let ids: Vec<String> = users.iter().map(ToString::to_string).collect();
+    let parameters = query_string(&[("user_ids", Some(ids.join(",")))]);
+    self.get(&format!("/presence{parameters}")).await
+  }
+
+  async fn get_privacy(&self) -> Result<PrivacyResponse, ApiError> {
+    self.get("/me/privacy").await
+  }
+
+  async fn put_privacy(&self, request: &UpdatePrivacyRequest) -> Result<PrivacyResponse, ApiError> {
+    self.send_json(Method::PUT, "/me/privacy", request).await
+  }
+
+  async fn list_call_history(
+    &self,
+    query: &ListCallHistoryQuery,
+  ) -> Result<ListCallHistoryResponse, ApiError> {
+    let parameters = query_string(&[
+      ("before", query.maybe_before.map(|id| id.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self.get(&format!("/calls/history{parameters}")).await
   }
 
   async fn create_call_join_token(

@@ -23,9 +23,13 @@ pub mod thumbnail;
 #[cfg(feature = "ui")]
 mod ui_actions;
 #[cfg(feature = "ui")]
+pub mod ui_activity;
+#[cfg(feature = "ui")]
 pub mod ui_backend;
 #[cfg(feature = "ui")]
 mod ui_files;
+#[cfg(feature = "ui")]
+mod ui_people;
 #[cfg(feature = "ui")]
 mod ui_search;
 #[cfg(feature = "ui")]

@@ -6,12 +6,14 @@ use teamcraft_proto::{UpdateProfileRequest, UserId, WorkingHours};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::clock::{local_time_zone, now_ms, time_in_zone, time_zone_names};
+use crate::clock::{
+  format_date_time, format_relative, local_time_zone, now_ms, time_in_zone, time_zone_names,
+};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
-use crate::model::User;
+use crate::model::{PresenceStatus, User};
 use crate::profiles::{MAX_AVATAR_BYTES, avatar_type, use_profiles};
 use crate::state::use_app_state;
 
@@ -278,6 +280,30 @@ pub fn InMeetingBadge(user: UserId) -> impl IntoView {
   }
 }
 
+/// "Last seen 5 minutes ago" for a person who is offline and lets others see it. Shows nothing
+/// while they are online, hide it, appear offline or the workspace switched last seen off.
+#[component]
+pub fn LastSeen(user: UserId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let locale = i18n.locale().tag();
+  view! {
+    {move || {
+      let is_offline = state
+        .read(|backend| backend.user(user))
+        .is_some_and(|person| person.presence == PresenceStatus::Offline);
+      let maybe_at = is_offline.then(|| state.read(|backend| backend.last_seen(user))).flatten();
+      maybe_at.map(|at| {
+        let when = format_relative(at, now_ms(), locale);
+        let exact = format_date_time(at, locale);
+        view! {
+          <span class="last-seen" title=exact>{i18n.t_with("last-seen", &[("when", &when)])}</span>
+        }
+      })
+    }}
+  }
+}
+
 /// Another person's card: name, status, role in the company, local time and a way to message them.
 #[component]
 pub fn UserProfileDialog(user: UserId) -> impl IntoView {
@@ -303,6 +329,7 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
         <Avatar user=person.clone() size=AvatarSize::Large show_presence=true />
         {person.maybe_custom_status.clone().map(|status| view! { <p>{status.emoji} " " {status.text}</p> })}
         <p><InMeetingBadge user=user /></p>
+        <p><LastSeen user=user /></p>
         {person.maybe_organization.clone().map(|name| view! { <p><crate::components::org_badge::OrgBadge organization=Some(name) /></p> })}
         {move || {
           profile().map(|profile| {

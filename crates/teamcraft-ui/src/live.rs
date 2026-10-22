@@ -244,6 +244,7 @@ impl LiveServer {
           user_id: me,
           state: PresenceState::Online,
           maybe_status: None,
+          maybe_last_seen: None,
         });
         entry.maybe_status = Some(wire);
       },

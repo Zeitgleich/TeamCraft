@@ -88,6 +88,8 @@ struct Inner {
   sessions: HashMap<String, Session>,
   by_user: HashMap<UserId, HashSet<String>>,
   last_presence: HashMap<UserId, PresenceSnapshot>,
+  /// What the user's devices reported at the last presence refresh.
+  last_aggregate: HashMap<UserId, DeviceAggregate>,
   next_created_seq: u64,
   /// Busy periods from the users' calendars, as last polled.
   busy: HashMap<UserId, Vec<(OffsetDateTime, OffsetDateTime)>>,
@@ -372,6 +374,7 @@ impl Hub {
       }
     }
     inner.last_presence.remove(&user);
+    inner.last_aggregate.remove(&user);
   }
 
   /// `true` if the device has a live gateway connection (it gets events directly, no push needed).
@@ -450,6 +453,12 @@ impl Hub {
       }
     }
     aggregate
+  }
+
+  /// Remembers what the user's devices report and returns what they reported before (`None`: this
+  /// is the first refresh since the server started).
+  pub fn swap_aggregate(&self, user: UserId, aggregate: DeviceAggregate) -> Option<DeviceAggregate> {
+    self.lock().last_aggregate.insert(user, aggregate)
   }
 
   /// Remembers the broadcast presence of a user; `true` if it differs from the previous one.

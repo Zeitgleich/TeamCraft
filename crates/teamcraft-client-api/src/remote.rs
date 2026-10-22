@@ -10,15 +10,17 @@ use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
+use crate::activity::ActivityFeed;
 use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallRequest, IncomingCall, MediaDevices,
-  OrgBackgroundRule, OrgBackgrounds, PushToTalk, RemoteVideoTrack, RunningCall,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallRequest,
+  IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk, RemoteVideoTrack, RunningCall,
 };
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
-  ThreadSummary, User, UserId,
+  ThreadSummary, TimestampMs, User, UserId,
 };
+use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{SavedSearch, SearchHit, SearchResults};
 
 /// Event name the host emits whenever the local store changed (new messages, membership, presence).
@@ -286,6 +288,12 @@ pub enum ChatAction {
     #[serde(default)]
     maybe_status: Option<CustomStatus>,
   },
+  /// Everything in the activity feed counts as read.
+  MarkActivityRead,
+  SetLastSeenVisibility {
+    visibility: LastSeenVisibility,
+  },
+  RefreshCallHistory,
   /// Founds a new channel (and its encryption group) in a space.
   CreateChannel {
     space: SpaceId,
@@ -489,6 +497,9 @@ impl ChatAction {
       } => backend.set_favorite(conversation, is_favorite),
       Self::SetPresence { presence } => backend.set_presence(presence),
       Self::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
+      Self::MarkActivityRead => backend.mark_activity_read(),
+      Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),
+      Self::RefreshCallHistory => backend.refresh_call_history(),
       Self::SetThreadFollowed {
         conversation,
         thread,
@@ -645,6 +656,12 @@ pub enum ChatQuery {
   HasExternalPeople {
     conversation: ConversationId,
   },
+  Activity,
+  LastSeen {
+    user: UserId,
+  },
+  Privacy,
+  CallHistory,
   #[serde(other)]
   Unknown,
 }
@@ -673,6 +690,10 @@ pub enum ChatAnswer {
   Flag { value: bool },
   Threads { threads: Vec<ThreadSummary> },
   Users { users: Vec<UserId> },
+  Activity { feed: ActivityFeed },
+  LastSeen { maybe_at: Option<TimestampMs> },
+  Privacy { settings: PrivacySettings },
+  CallHistory { calls: Vec<CallHistoryItem> },
   Unsupported,
 }
 
@@ -760,6 +781,18 @@ impl ChatQuery {
         message,
       } => ChatAnswer::Users {
         users: backend.seen_by(conversation, message),
+      },
+      Self::Activity => ChatAnswer::Activity {
+        feed: backend.activity(),
+      },
+      Self::LastSeen { user } => ChatAnswer::LastSeen {
+        maybe_at: backend.last_seen(user),
+      },
+      Self::Privacy => ChatAnswer::Privacy {
+        settings: backend.privacy(),
+      },
+      Self::CallHistory => ChatAnswer::CallHistory {
+        calls: backend.call_history(),
       },
       Self::Unknown => ChatAnswer::Unsupported,
     }

@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{BackgroundId, CallBackgroundMode, OrgBackgroundId};
 
-use crate::model::{ConversationId, UserId};
+use crate::model::{ConversationId, TimestampMs, UserId};
 
 /// What kind of call a conversation is joined in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,5 +426,71 @@ mod tests {
     slugs.sort_unstable();
     slugs.dedup();
     assert_eq!(slugs.len(), BackgroundEffect::ALL.len());
+  }
+}
+
+/// How a call in the history relates to the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallDirection {
+  /// The call rang the user and they never joined.
+  Missed,
+  /// Somebody else started it and the user joined.
+  Incoming,
+  /// The user started it.
+  Outgoing,
+}
+
+/// One call of the history list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallHistoryItem {
+  /// The call's ID as text (the server's ID, used to page and as the list key).
+  pub id: String,
+  pub conversation: ConversationId,
+  pub direction: CallDirection,
+  pub started_at: TimestampMs,
+  /// Absent while the call goes on.
+  #[serde(default)]
+  pub maybe_ended_at: Option<TimestampMs>,
+  /// Who started it, if known.
+  #[serde(default)]
+  pub maybe_started_by: Option<UserId>,
+  /// Everybody who joined at some point.
+  pub participants: Vec<UserId>,
+}
+
+impl CallHistoryItem {
+  /// How long the call lasted; `None` while it goes on.
+  pub fn duration_ms(&self) -> Option<i64> {
+    self.maybe_ended_at.map(|ended| (ended - self.started_at).max(0))
+  }
+
+  pub fn is_ongoing(&self) -> bool {
+    self.maybe_ended_at.is_none()
+  }
+}
+
+#[cfg(test)]
+mod history_tests {
+  use super::*;
+  use crate::model::id_from_raw;
+
+  #[test]
+  fn duration_is_known_once_the_call_ended() {
+    let mut call = CallHistoryItem {
+      id: "1".into(),
+      conversation: id_from_raw(1),
+      direction: CallDirection::Outgoing,
+      started_at: 1_000,
+      maybe_ended_at: None,
+      maybe_started_by: None,
+      participants: Vec::new(),
+    };
+    assert!(call.is_ongoing());
+    assert_eq!(call.duration_ms(), None);
+    call.maybe_ended_at = Some(61_000);
+    assert_eq!(call.duration_ms(), Some(60_000));
+    call.maybe_ended_at = Some(0);
+    assert_eq!(call.duration_ms(), Some(0));
   }
 }

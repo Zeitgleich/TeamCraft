@@ -244,7 +244,7 @@ fn clean_phone(maybe_phone: Option<String>) -> Result<Option<String>, ApiError> 
   }
 }
 
-/// An IANA name has the shape `Area/Location` (or `UTC`); the list changes too often to embed.
+/// Accepts only names from the IANA time zone database (compiled in), e.g. `Europe/Berlin`.
 fn clean_time_zone(maybe_zone: Option<String>) -> Result<Option<String>, ApiError> {
   let Some(zone) = maybe_zone else {
     return Ok(None);
@@ -253,15 +253,7 @@ fn clean_time_zone(maybe_zone: Option<String>) -> Result<Option<String>, ApiErro
   if zone.is_empty() {
     return Ok(None);
   }
-  let is_name = zone.len() <= MAX_TIME_ZONE_CHARS
-    && zone.split('/').all(|part| {
-      !part.is_empty()
-        && part.starts_with(|c: char| c.is_ascii_alphabetic())
-        && part
-          .chars()
-          .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'))
-    });
-  if is_name {
+  if zone.len() <= MAX_TIME_ZONE_CHARS && zone.parse::<chrono_tz::Tz>().is_ok() {
     Ok(Some(zone.to_owned()))
   } else {
     Err(ApiError::InvalidRequest("invalid time_zone".into()))
@@ -363,6 +355,7 @@ mod tests {
         "UTC",
         "America/Argentina/Buenos_Aires",
         "Etc/GMT+5",
+        "Asia/Kolkata",
       ] {
         assert!(clean_time_zone(Some(good.into())).unwrap().is_some(), "{good}");
       }
@@ -373,6 +366,9 @@ mod tests {
         "../etc",
         "Europe/Berlin; drop",
         "9/9",
+        "Mars/Base",
+        "Europe/Berlinn",
+        "Europe/Berlin/Mitte",
       ] {
         assert!(clean_time_zone(Some(bad.into())).is_err(), "{bad}");
       }

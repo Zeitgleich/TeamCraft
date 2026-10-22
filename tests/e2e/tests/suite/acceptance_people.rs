@@ -98,10 +98,9 @@ async fn profiles_directory_and_user_groups_work_and_guests_see_little() {
   stack.stop().await;
 }
 
-/// Bug: the profile's time zone is stored as sent; "Mars/Base" is accepted although the profile
+/// Regression: "Mars/Base" was accepted although the profile
 /// promises an IANA name (clients show "it's 22:14 for Anna" from it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "bug: PUT /me/profile accepts time zones that are not IANA names"]
 async fn a_time_zone_that_does_not_exist_is_refused() {
   let Some(stack) = Stack::start().await else { return };
   let carol = Peer::enroll(&stack, "carol").await;

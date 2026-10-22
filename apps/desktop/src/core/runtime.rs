@@ -555,8 +555,11 @@ impl Core {
           .map(|backend| query.answer(backend))
           .ok_or_else(|| "this device is not set up yet".to_owned());
         drop(reply.send(result));
-        // A search can ask for messages found only in shared index segments.
-        self.run_queued_commands().await;
+        // A read can ask for data it doesn't have yet (messages found only in shared index
+        // segments, last seen, the call history): tell the UI to read again when it arrived.
+        if self.run_queued_commands().await > 0 {
+          self.changed();
+        }
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
       Request::BackgroundPicture(id, reply) => drop(reply.send(self.background_picture(id).await)),
@@ -801,20 +804,23 @@ impl Core {
     Ok(())
   }
 
-  async fn run_queued_commands(&mut self) {
+  /// Runs what the UI adapter queued; returns how many commands there were.
+  async fn run_queued_commands(&mut self) -> usize {
     let commands: Vec<CoreCommand> = self
       .backend
       .as_ref()
       .map(CoreChatBackend::drain_commands)
       .unwrap_or_default();
     let Some(client) = self.client.as_mut() else {
-      return;
+      return 0;
     };
+    let count = commands.len();
     for command in commands {
       if let Err(error) = client.run_ui_command(command).await {
         tracing::warn!(%error, "UI command failed");
       }
     }
+    count
   }
 
   async fn flush(&mut self) {

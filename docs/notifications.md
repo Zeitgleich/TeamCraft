@@ -107,3 +107,25 @@ are pushed again every `urgent_repeat_interval_secs` until `urgent_max_pushes` p
 scheduler runs every `urgent_scheduler_interval_secs`, claims due reminders with
 `FOR UPDATE SKIP LOCKED` (safe with several instances) and sends them through the normal routing, so
 mutes and DND still apply and a suppressed attempt still counts. All three are in `[notifications]`.
+
+## Activity feed
+
+The feed (mentions, reactions to my messages, replies in my threads) is **not** a server feature: the
+server cannot read reactions or message text. The client core builds it from its decrypted local
+messages (`teamcraft-core`, `ui_activity`), newest first, and the UI shows it with an unread state and
+a jump to the message.
+
+- Mention: a message from somebody else whose `mentions` list contains me (a reply that mentions me is
+  a mention, not also a thread reply).
+- Reaction: the newest reaction message of a person, message and emoji, if it adds the reaction and
+  the message is mine. Removed reactions leave nothing.
+- Thread reply: a reply from somebody else in a thread I started or replied in.
+- Read mark: the sent time of the newest entry I looked at, kept in the account data of the key bag
+  (`activity_read`, e2ee.md §6.4), so it follows me across devices; reading only moves it forward.
+
+## Call history
+
+`GET /calls/history` lists the calls of the conversations the caller belongs to, newest first. The
+client shows them as missed (rang the caller, never joined), incoming and outgoing, with a button to
+call back.
+

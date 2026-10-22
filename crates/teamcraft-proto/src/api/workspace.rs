@@ -197,6 +197,14 @@ pub struct PresencePolicy {
   pub maybe_away_timeout_minutes: Option<u32>,
   #[serde(default)]
   pub presets: Vec<StatusPreset>,
+  /// People's "last seen" time is shown to others (each person can still hide theirs). Off shows
+  /// it to nobody.
+  #[serde(default = "is_last_seen_enabled_by_default")]
+  pub is_last_seen_enabled: bool,
+}
+
+fn is_last_seen_enabled_by_default() -> bool {
+  true
 }
 
 impl Default for PresencePolicy {
@@ -206,6 +214,7 @@ impl Default for PresencePolicy {
       custom_status_enabled: true,
       maybe_away_timeout_minutes: None,
       presets: Vec::new(),
+      is_last_seen_enabled: true,
     }
   }
 }

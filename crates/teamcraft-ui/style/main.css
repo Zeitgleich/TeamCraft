@@ -4234,6 +4234,102 @@ select.input {
   :root:not([data-theme="light"]) .badge-unknown { background: #4a2a12; color: #f3b98f; }
 }
 
+/* Activity feed, call history and last seen */
+.activity-view,
+.calls-view {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.activity-list,
+.calls-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  text-align: left;
+}
+
+.activity-item:hover {
+  background: var(--surface-2);
+}
+
+.activity-item.unread {
+  background: var(--accent-soft);
+}
+
+.activity-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-summary {
+  font-weight: 600;
+}
+
+.activity-excerpt {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-time {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.activity-kind {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.call-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.call-item.missed .call-title {
+  color: var(--danger, #c0392b);
+}
+
+.call-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.call-title {
+  font-weight: 600;
+}
+
+.call-detail,
+.last-seen {
+  color: var(--text-muted);
+  font-size: 12px;
+
 /* Grouped sidebar: one header per space with its mute and settings buttons. */
 .sb-space-head {
   padding-top: 10px;

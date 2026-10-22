@@ -8,6 +8,10 @@ use std::collections::HashMap;
 
 use teamcraft_proto::BackgroundId;
 
+use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
+use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
+use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
+
 use crate::backend::ChatBackend;
 use crate::calls::BackgroundImageInfo;
 use crate::model::{
@@ -167,6 +171,13 @@ pub struct MockBackend {
   state: RefCell<State>,
   ops: RefCell<ops::OpsState>,
   search: RefCell<search_impl::SearchState>,
+  people: RefCell<DemoPeople>,
+}
+
+/// What the demo remembers about the user's activity feed and privacy choice.
+struct DemoPeople {
+  is_activity_read: bool,
+  last_seen: LastSeenVisibility,
 }
 
 struct State {
@@ -219,11 +230,86 @@ impl MockBackend {
       ops: RefCell::new(ops::OpsState::new(now, &users_snapshot)),
       search: RefCell::new(search_impl::SearchState::new()),
       state: RefCell::new(state),
+      people: RefCell::new(DemoPeople {
+        is_activity_read: false,
+        last_seen: LastSeenVisibility::Everyone,
+      }),
     }
   }
 }
 
 impl ChatBackend for MockBackend {
+  fn activity(&self) -> ActivityFeed {
+    let is_read = self.people.borrow().is_activity_read;
+    let count = self.message_count(ch_general());
+    let recent = self.messages(ch_general(), count.saturating_sub(12), 12);
+    let others = recent.iter().rev().filter(|message| message.author != me());
+    let items = others
+      .take(3)
+      .zip([
+        ActivityKind::Mention,
+        ActivityKind::Reaction { emoji: "🎉".into() },
+        ActivityKind::ThreadReply,
+      ])
+      .enumerate()
+      .map(|(index, (message, kind))| ActivityItem {
+        id: format!("demo:{index}"),
+        kind,
+        conversation: message.conversation,
+        message: message.id,
+        maybe_thread: None,
+        actor: message.author,
+        at: message.sent_at,
+        excerpt: message.body.chars().take(140).collect(),
+        is_unread: !is_read && index < 2,
+      })
+      .collect();
+    ActivityFeed::from_items(items)
+  }
+
+  fn mark_activity_read(&self) {
+    self.people.borrow_mut().is_activity_read = true;
+  }
+
+  fn last_seen(&self, user: UserId) -> Option<TimestampMs> {
+    let state = self.state.borrow();
+    let person = state.users.iter().find(|candidate| candidate.id == user)?;
+    (person.presence == PresenceStatus::Offline).then(|| self.now - 95 * MINUTE)
+  }
+
+  fn privacy(&self) -> PrivacySettings {
+    PrivacySettings {
+      last_seen: self.people.borrow().last_seen.clone(),
+      is_last_seen_available: true,
+    }
+  }
+
+  fn set_last_seen_visibility(&self, visibility: LastSeenVisibility) {
+    self.people.borrow_mut().last_seen = visibility;
+  }
+
+  fn call_history(&self) -> Vec<CallHistoryItem> {
+    let direct = self.direct_conversations();
+    let Some(first) = direct.first() else {
+      return Vec::new();
+    };
+    let call = |index: i64, direction, minutes: i64| CallHistoryItem {
+      id: format!("demo-call-{index}"),
+      conversation: first.id,
+      direction,
+      started_at: self.now - index * 180 * MINUTE,
+      maybe_ended_at: (direction != CallDirection::Missed)
+        .then(|| self.now - index * 180 * MINUTE + minutes * MINUTE),
+      maybe_started_by: first.member_ids.first().copied(),
+      participants: first.member_ids.clone(),
+    };
+    vec![
+      call(1, CallDirection::Missed, 0),
+      call(2, CallDirection::Outgoing, 14),
+      call(3, CallDirection::Incoming, 32),
+    ]
+  }
+
   fn background_images(&self) -> Vec<BackgroundImageInfo> {
     self.state.borrow().backgrounds.clone()
   }

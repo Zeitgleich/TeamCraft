@@ -477,6 +477,9 @@ restored together with them on a new device.
   on first use again: it verifies colleagues' credentials with the inherited pins and refuses a
   forged genesis roster. A key change the user accepted on one device is a newer entry and reaches
   the others. The root's fingerprint is available for comparing (admin.md §2.3).
+- **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
+  user looked at. Merging takes the later one, so reading on any device counts everywhere and never
+  moves back. The feed itself is computed from decrypted messages on each device (notifications.md).
 
 ## 7. Push notifications (Threema model, extended)
 

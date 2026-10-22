@@ -106,6 +106,11 @@ struct State {
   spaces: BTreeMap<SpaceId, SpaceResponse>,
   categories: BTreeMap<CategoryId, CategoryResponse>,
   invites: Vec<InviteResponse>,
+  /// Calls served by `list_call_history` to everybody who took part (newest first).
+  call_history: Vec<teamcraft_proto::CallHistoryEntry>,
+  /// When people were last active, and who chose to hide it.
+  last_seen: HashMap<UserId, i64>,
+  hidden_last_seen: HashSet<UserId>,
 }
 
 /// A device-linking relay: at most two endpoints of one user, frames held for an absent peer.
@@ -232,6 +237,17 @@ impl FakeServer {
 
   /// Grants a user the server-side admin permissions (adding people to channels they're not in,
   /// posting admin proposals).
+  /// Adds a call to the history that `list_call_history` serves to everybody (newest added first).
+  pub fn add_call_history(&self, entry: teamcraft_proto::CallHistoryEntry) {
+    let mut state = self.lock();
+    state.call_history.insert(0, entry);
+  }
+
+  /// Sets when the user was last active (Unix milliseconds).
+  pub fn set_last_seen(&self, user: UserId, at: i64) {
+    self.lock().last_seen.insert(user, at);
+  }
+
   pub fn set_admin(&self, user: UserId) {
     self.lock().admins.insert(user);
   }
@@ -834,6 +850,64 @@ impl ServerApi for FakeServerApi {
 
   async fn set_presence(&self, _request: &SetPresenceRequest) -> Result<(), ApiError> {
     self.with(|_, _| Ok(()))
+  }
+
+  async fn list_presence(&self, users: &[UserId]) -> Result<teamcraft_proto::ListPresenceResponse, ApiError> {
+    self.with(|state, _| {
+      Ok(teamcraft_proto::ListPresenceResponse {
+        presences: users
+          .iter()
+          .map(|user| teamcraft_proto::UserPresence {
+            user_id: *user,
+            state: teamcraft_proto::PresenceState::Offline,
+            maybe_status: None,
+            maybe_last_seen: state
+              .last_seen
+              .get(user)
+              .filter(|_| !state.hidden_last_seen.contains(user))
+              .copied()
+              .map(teamcraft_proto::UnixMillis),
+          })
+          .collect(),
+      })
+    })
+  }
+
+  async fn get_privacy(&self) -> Result<teamcraft_proto::PrivacyResponse, ApiError> {
+    self.with(|state, me| Ok(privacy_of(state, me)))
+  }
+
+  async fn put_privacy(
+    &self,
+    request: &teamcraft_proto::UpdatePrivacyRequest,
+  ) -> Result<teamcraft_proto::PrivacyResponse, ApiError> {
+    self.with(|state, me| {
+      if request.last_seen == teamcraft_proto::LastSeenVisibility::Nobody {
+        state.hidden_last_seen.insert(me);
+      } else {
+        state.hidden_last_seen.remove(&me);
+      }
+      Ok(privacy_of(state, me))
+    })
+  }
+
+  async fn list_call_history(
+    &self,
+    query: &teamcraft_proto::ListCallHistoryQuery,
+  ) -> Result<teamcraft_proto::ListCallHistoryResponse, ApiError> {
+    // The fake has no call membership: everybody sees every call of the history.
+    self.with(|state, _| {
+      let limit = query.maybe_limit.map_or(PAGE_SIZE, |limit| limit as usize);
+      let mut calls: Vec<_> = state
+        .call_history
+        .iter()
+        .filter(|call| query.maybe_before.is_none_or(|before| call.call_id < before))
+        .cloned()
+        .collect();
+      let has_more = calls.len() > limit;
+      calls.truncate(limit);
+      Ok(teamcraft_proto::ListCallHistoryResponse { calls, has_more })
+    })
   }
 
   /// A placeholder token: the fake has no SFU, so nothing can join with it.
@@ -2442,4 +2516,15 @@ impl Conversation {
 
 fn is_root(message: &MessageResponse, thread: ThreadId) -> bool {
   message.id.snowflake() == thread.snowflake()
+}
+
+fn privacy_of(state: &State, user: UserId) -> teamcraft_proto::PrivacyResponse {
+  teamcraft_proto::PrivacyResponse {
+    last_seen: if state.hidden_last_seen.contains(&user) {
+      teamcraft_proto::LastSeenVisibility::Nobody
+    } else {
+      teamcraft_proto::LastSeenVisibility::Everyone
+    },
+    is_last_seen_available: true,
+  }
 }

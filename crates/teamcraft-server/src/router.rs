@@ -33,9 +33,10 @@ use crate::handlers::{
   get_conversation_handler, get_conversation_notification_settings_handler,
   get_conversation_retention_handler, get_email_digest_handler, get_identity_key_handler,
   get_key_bag_handler, get_me_handler, get_meeting_handler, get_my_lobby_state_handler,
-  get_my_org_recovery_shares_handler, get_my_profile_handler, get_notification_settings_handler,
-  get_policy_handler, get_read_receipts_handler, get_recovery_material_handler, get_recovery_request_handler,
-  get_recovery_result_handler, get_security_log_handler, get_share_info_handler, get_space_handler,
+  get_my_org_recovery_shares_handler, get_my_privacy_handler, get_my_profile_handler,
+  get_notification_settings_handler, get_policy_handler, get_read_receipts_handler,
+  get_recovery_material_handler, get_recovery_request_handler, get_recovery_result_handler,
+  get_security_log_handler, get_share_info_handler, get_space_handler,
   get_space_notification_settings_handler, get_space_retention_handler, get_unread_handler,
   get_user_avatar_handler, get_user_device_list_handler, get_user_group_handler, get_user_handler,
   get_user_profile_handler, get_web_push_key_handler, healthz_handler, join_conversation_handler,
@@ -49,18 +50,19 @@ use crate::handlers::{
   local_activate_handler, local_login_handler, local_logout_handler, move_channel_handler,
   pin_message_handler, post_mls_commit_handler, post_mls_message_handler,
   put_conversation_notification_settings_handler, put_email_digest_handler, put_identity_key_handler,
-  put_key_bag_handler, put_my_device_list_handler, put_my_profile_handler, put_notification_settings_handler,
-  put_org_recovery_shares_handler, put_recovery_result_handler, put_recovery_share_handler,
-  put_space_notification_settings_handler, readyz_handler, receive_meeting_reply_handler,
-  register_device_handler, register_push_handler, remove_conversation_member_handler,
-  remove_space_member_handler, remove_user_group_member_handler, rendezvous_handler,
-  report_participant_joined_handler, report_participant_left_handler, revoke_device_handler,
-  revoke_share_link_handler, search_users_handler, send_message_handler, set_conversation_retention_handler,
-  set_custom_status_handler, set_device_certificate_handler, set_meeting_rsvp_handler, set_presence_handler,
-  set_read_position_handler, set_space_retention_handler, set_thread_read_handler, unfollow_thread_handler,
-  unpin_message_handler, unregister_push_handler, update_category_handler, update_conversation_handler,
-  update_conversation_member_handler, update_meeting_handler, update_space_handler,
-  update_space_member_handler, update_user_group_handler, upload_key_packages_handler,
+  put_key_bag_handler, put_my_device_list_handler, put_my_privacy_handler, put_my_profile_handler,
+  put_notification_settings_handler, put_org_recovery_shares_handler, put_recovery_result_handler,
+  put_recovery_share_handler, put_space_notification_settings_handler, readyz_handler,
+  receive_meeting_reply_handler, register_device_handler, register_push_handler,
+  remove_conversation_member_handler, remove_space_member_handler, remove_user_group_member_handler,
+  rendezvous_handler, report_participant_joined_handler, report_participant_left_handler,
+  revoke_device_handler, revoke_share_link_handler, search_users_handler, send_message_handler,
+  set_conversation_retention_handler, set_custom_status_handler, set_device_certificate_handler,
+  set_meeting_rsvp_handler, set_presence_handler, set_read_position_handler, set_space_retention_handler,
+  set_thread_read_handler, unfollow_thread_handler, unpin_message_handler, unregister_push_handler,
+  update_category_handler, update_conversation_handler, update_conversation_member_handler,
+  update_meeting_handler, update_space_handler, update_space_member_handler, update_user_group_handler,
+  upload_key_packages_handler,
 };
 use crate::handlers::{
   complete_org_background_upload_handler, create_org_background_upload_handler,
@@ -297,6 +299,10 @@ pub fn router(state: AppState) -> Router {
       get(get_email_digest_handler).put(put_email_digest_handler),
     )
     .route("/me/presence", put(set_presence_handler))
+    .route(
+      "/me/privacy",
+      get(get_my_privacy_handler).put(put_my_privacy_handler),
+    )
     .route("/presence", get(list_presence_handler))
     .route("/me/identity-key", put(put_identity_key_handler))
     .route("/users/{user_id}/identity-key", get(get_identity_key_handler))

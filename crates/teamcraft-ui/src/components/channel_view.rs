@@ -183,7 +183,12 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
             (conv.kind == crate::model::ConversationKind::Direct)
               .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
               .flatten()
-              .map(|other| view! { <crate::components::profile_views::InMeetingBadge user=other /> })
+              .map(|other| {
+                view! {
+                  <crate::components::profile_views::InMeetingBadge user=other />
+                  <crate::components::profile_views::LastSeen user=other />
+                }
+              })
           })
         }}
         {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}

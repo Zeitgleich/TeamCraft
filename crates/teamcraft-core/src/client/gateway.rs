@@ -180,7 +180,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
       },
       GatewayEvent::PresenceUpdate { user_id, state, .. } => {
-        records::put_json(&self.store, Table::Presence, &user_id.to_string(), &state)
+        records::put_json(&self.store, Table::Presence, &user_id.to_string(), &state)?;
+        if state == teamcraft_proto::PresenceState::Offline {
+          // The server records "last seen" when the person stops being active; the event doesn't
+          // carry it. A failure only leaves the old time (or none) until the next look.
+          if let Err(error) = self.refresh_presence(&[user_id]).await {
+            tracing::debug!(%error, "reading last seen failed");
+          }
+        } else {
+          let record = super::people::LastSeenRecord {
+            maybe_at_ms: None,
+            fetched_at_ms: self.now_ms(),
+          };
+          records::put_json(
+            &self.store,
+            Table::Presence,
+            &super::people::last_seen_key(user_id),
+            &record,
+          )?;
+        }
+        Ok(())
       },
       GatewayEvent::SpaceUpdate { .. }
       | GatewayEvent::SpaceMemberAdd { .. }

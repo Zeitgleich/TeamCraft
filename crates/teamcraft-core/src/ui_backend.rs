@@ -123,6 +123,19 @@ pub enum CoreCommand {
     conversation: ConversationId,
     from: MessageId,
   },
+  /// The activity feed was read up to the entry sent at this time.
+  MarkActivityRead {
+    up_to_ms: i64,
+  },
+  /// Presence and last seen of these people.
+  RefreshPresence {
+    users: Vec<UserId>,
+  },
+  RefreshPrivacy,
+  SetLastSeenVisibility {
+    visibility: teamcraft_proto::LastSeenVisibility,
+  },
+  RefreshCallHistory,
   /// Files of outbox messages are waiting for upload.
   UploadFiles,
   /// Outbox messages wait for their link previews.
@@ -225,6 +238,8 @@ pub struct CoreChatBackend<S> {
   me: UserId,
   clock: Box<dyn Clock>,
   commands: Rc<RefCell<Vec<CoreCommand>>>,
+  /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
+  pub(crate) requests: RefCell<crate::ui_people::RequestLog>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
@@ -237,6 +252,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       me,
       clock,
       commands: Rc::new(RefCell::new(Vec::new())),
+      requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
@@ -872,6 +888,34 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
     self.ui_resolve_permalink(link)
+  }
+
+  fn activity(&self) -> teamcraft_client_api::activity::ActivityFeed {
+    self.ui_activity()
+  }
+
+  fn mark_activity_read(&self) {
+    self.ui_mark_activity_read();
+  }
+
+  fn last_seen(&self, user: UserId) -> Option<teamcraft_client_api::model::TimestampMs> {
+    self.ui_last_seen(user)
+  }
+
+  fn privacy(&self) -> teamcraft_client_api::privacy::PrivacySettings {
+    self.ui_privacy()
+  }
+
+  fn set_last_seen_visibility(&self, visibility: teamcraft_client_api::privacy::LastSeenVisibility) {
+    self.command(CoreCommand::SetLastSeenVisibility { visibility });
+  }
+
+  fn call_history(&self) -> Vec<teamcraft_client_api::calls::CallHistoryItem> {
+    self.ui_call_history()
+  }
+
+  fn refresh_call_history(&self) {
+    self.ui_refresh_call_history();
   }
 
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {

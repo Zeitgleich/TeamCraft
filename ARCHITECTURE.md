@@ -272,6 +272,10 @@ guest  = "external"
   (online > away > offline) and merges manual states (DND, appear offline, in a call, in a meeting).
 - "In a meeting" comes from CalCraft free/busy; "in a call" from the SFU roster.
 - Presence also drives push routing (no phone push while the desktop is active).
+- **Last seen**: the server stores when a user's devices last stopped being active (`users.last_seen_at`)
+  and returns it in `GET /presence` only while the user is offline, never for somebody who appears
+  offline or chose `nobody` (`PUT /me/privacy`), and never when the signed policy has
+  `presence.is_last_seen_enabled = false`. It is one timestamp of metadata the server has anyway.
 
 ## 6. Calls and meetings
 

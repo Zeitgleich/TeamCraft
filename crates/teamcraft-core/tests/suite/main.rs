@@ -3,6 +3,7 @@
 //! here is empty.
 
 mod account_data;
+mod activity;
 mod backgrounds;
 mod calls;
 mod chat_actions;

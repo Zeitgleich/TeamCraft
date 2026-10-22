@@ -6,6 +6,8 @@ use leptos::prelude::*;
 use crate::clock::{format_relative, now_ms};
 use crate::components::background_picker::{BackgroundPicker, effect_from_slug, effect_slug};
 use crate::components::icons::{Icon, IconName};
+use teamcraft_client_api::privacy::LastSeenVisibility;
+
 use crate::i18n::{Locale, use_i18n};
 use crate::model::{Conversation, DeviceId, UserId};
 use crate::prefs::{
@@ -665,6 +667,8 @@ pub fn PrivacyTab() -> impl IntoView {
   let i18n = use_i18n();
   let prefs = state.settings.prefs;
   let privacy = Memo::new(move |_| prefs.get().privacy);
+  // Who may see when the user was last active lives on the server, not in the local preferences.
+  let last_seen_choice = Memo::new(move |_| state.read(|backend| backend.privacy()));
 
   view! {
     <fieldset class="settings-group">
@@ -683,9 +687,20 @@ pub fn PrivacyTab() -> impl IntoView {
       <CheckField
         label="privacy-last-seen"
         hint="privacy-last-seen-hint"
-        value=Signal::derive(move || privacy.get().share_last_seen)
-        on_change=Callback::new(move |value: bool| prefs.update(|all| all.privacy.share_last_seen = value))
+        value=Signal::derive(move || last_seen_choice.get().last_seen == LastSeenVisibility::Everyone)
+        on_change=Callback::new(move |value: bool| {
+          state.write(|backend| {
+            backend.set_last_seen_visibility(if value {
+              LastSeenVisibility::Everyone
+            } else {
+              LastSeenVisibility::Nobody
+            })
+          })
+        })
       />
+      <Show when=move || !last_seen_choice.get().is_last_seen_available fallback=|| ()>
+        <p class="muted-text small">{move || i18n.t("privacy-last-seen-off")}</p>
+      </Show>
     </fieldset>
     <SelectField
       id="privacy-away"

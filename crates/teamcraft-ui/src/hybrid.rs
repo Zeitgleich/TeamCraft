@@ -445,6 +445,34 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.has_external_people(conversation)
   }
 
+  fn activity(&self) -> teamcraft_client_api::activity::ActivityFeed {
+    self.chat.activity()
+  }
+
+  fn mark_activity_read(&self) {
+    self.chat.mark_activity_read();
+  }
+
+  fn last_seen(&self, user: UserId) -> Option<TimestampMs> {
+    self.chat.last_seen(user)
+  }
+
+  fn privacy(&self) -> teamcraft_client_api::privacy::PrivacySettings {
+    self.chat.privacy()
+  }
+
+  fn set_last_seen_visibility(&self, visibility: teamcraft_client_api::privacy::LastSeenVisibility) {
+    self.chat.set_last_seen_visibility(visibility);
+  }
+
+  fn call_history(&self) -> Vec<teamcraft_client_api::calls::CallHistoryItem> {
+    self.chat.call_history()
+  }
+
+  fn refresh_call_history(&self) {
+    self.chat.refresh_call_history();
+  }
+
   fn is_in_call(&self, user: UserId) -> bool {
     self
       .maybe_calls
