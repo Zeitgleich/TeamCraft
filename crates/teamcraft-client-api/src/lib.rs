@@ -13,6 +13,7 @@ pub mod brand;
 pub mod calls;
 pub mod log;
 pub mod model;
+pub mod notify;
 pub mod remote;
 pub mod search;
 pub mod security;

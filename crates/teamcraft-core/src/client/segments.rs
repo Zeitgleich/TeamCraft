@@ -10,7 +10,7 @@ use super::attachments::OutgoingFile;
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::search::{SearchMatch, export_segment, is_searchable, month_of};
-use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
+use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
 
 const SEGMENT_MEDIA_TYPE: &str = "application/x-teamcraft-index-segment";
 
@@ -66,35 +66,42 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Downloads the published segments of this device's conversations that it doesn't have yet.
   pub async fn fetch_index_segments(&mut self) -> Result<usize, CoreError> {
-    let mut fetched = 0;
-    for conversation in self.cached_conversations()?.into_keys() {
-      // Oldest announcement per month wins.
-      let mut first_per_month = BTreeMap::new();
-      for message in self.store.messages(conversation, MessageFilter::All)? {
-        if let MessageContent::IndexSegment { month, segment, .. } = message.content {
-          first_per_month.entry(month).or_insert(segment);
-        }
-      }
-      for (month, segment) in first_per_month {
-        let key = segment_key(conversation, &month);
-        if self.store.get(Table::SearchSegments, &key)?.is_some() {
-          continue;
-        }
-        match self.download_decrypted(&segment).await {
-          Ok(bundle) => {
-            self
-              .store
-              .put(Table::SearchSegments, &key, bundle.expose_secret())?;
-            fetched += 1;
-          },
-          Err(error) if error.is_transient() => return Err(error),
-          Err(error) => tracing::warn!(conversation_id = %conversation, %error, "skipped an index segment"),
-        }
-      }
-    }
-    Ok(fetched)
+    Ok(self.prefetch_index_segments(u64::MAX).await?.fetched)
   }
 
+  /// Downloads missing published segments, newest months first, while the segments kept on this
+  /// device stay within `max_total_bytes` (a phone prefetches on unmetered networks with a cap, so
+  /// older history stays searchable offline without filling the storage). Segments that don't fit
+  /// are skipped; a smaller older one may still fit.
+  pub async fn prefetch_index_segments(
+    &mut self,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetch, CoreError> {
+    let (mut used_bytes, missing) = self.segment_inventory()?;
+    let mut prefetch = SegmentPrefetch::default();
+    for candidate in missing {
+      let size_bytes = candidate.segment.size_bytes;
+      if used_bytes.saturating_add(size_bytes) > max_total_bytes {
+        prefetch.skipped += 1;
+        continue;
+      }
+      match self.download_decrypted(&candidate.segment).await {
+        Ok(bundle) => {
+          self
+            .store
+            .put(Table::SearchSegments, &candidate.key, bundle.expose_secret())?;
+          used_bytes = used_bytes.saturating_add(size_bytes);
+          prefetch.fetched += 1;
+        },
+        Err(error) if error.is_transient() => return Err(error),
+        Err(error) => {
+          tracing::warn!(conversation_id = %candidate.conversation, %error, "skipped an index segment")
+        },
+      }
+    }
+    prefetch.stored_bytes = used_bytes;
+    Ok(prefetch)
+  }
   /// Fetches and decrypts the messages a search found only in segments, so they can be shown.
   pub async fn fetch_search_hits(&mut self, hits: &[SearchMatch]) -> Result<usize, CoreError> {
     let mut fetched = 0;
@@ -124,6 +131,54 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     Ok(fetched)
   }
+
+  /// The bytes of the segments this device keeps, and the announced segments it lacks (the first
+  /// announcement per month wins), newest month first.
+  fn segment_inventory(&self) -> Result<(u64, Vec<MissingSegment>), CoreError> {
+    let mut used_bytes = 0u64;
+    let mut missing = Vec::new();
+    for conversation in self.cached_conversations()?.into_keys() {
+      let mut first_per_month = BTreeMap::new();
+      for message in self.store.messages(conversation, MessageFilter::All)? {
+        if let MessageContent::IndexSegment { month, segment, .. } = message.content {
+          first_per_month.entry(month).or_insert(segment);
+        }
+      }
+      for (month, segment) in first_per_month {
+        let key = segment_key(conversation, &month);
+        if self.store.get(Table::SearchSegments, &key)?.is_some() {
+          used_bytes = used_bytes.saturating_add(segment.size_bytes);
+        } else {
+          missing.push(MissingSegment {
+            conversation,
+            month,
+            key,
+            segment,
+          });
+        }
+      }
+    }
+    missing.sort_by(|a, b| b.month.cmp(&a.month));
+    Ok((used_bytes, missing))
+  }
+}
+
+/// What [`Client::prefetch_index_segments`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SegmentPrefetch {
+  pub fetched: usize,
+  /// Missing segments left out because they would exceed the size cap.
+  pub skipped: usize,
+  /// Bytes of the segments kept on this device afterwards (as uploaded, i.e. encrypted sizes).
+  pub stored_bytes: u64,
+}
+
+/// An announced segment this device doesn't have.
+struct MissingSegment {
+  conversation: ConversationId,
+  month: String,
+  key: String,
+  segment: AttachmentRef,
 }
 
 fn announced_months(messages: &[StoredMessage]) -> BTreeSet<String> {

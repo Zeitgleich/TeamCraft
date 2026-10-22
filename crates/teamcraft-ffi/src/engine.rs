@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::model::Message as MessageView;
+use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::LinkApproval;
@@ -31,8 +32,8 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MessageItem, Presence, PushNotification,
-  PushService, SearchHitItem,
+  AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem, Presence,
+  PushNotification, PushService, SearchHitItem, SegmentPrefetchResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -64,6 +65,8 @@ pub(crate) struct Engine {
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
   calls: CallHub,
+  /// Applied to decrypted push texts (keywords, first name).
+  mentions: MentionSettings,
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
@@ -180,6 +183,7 @@ impl Engine {
       maybe_new_link: None,
       maybe_approval: None,
       calls: CallHub::default(),
+      mentions: MentionSettings::default(),
     };
     if let Some(client) = Client::open(
       engine.api(),
@@ -464,7 +468,43 @@ impl Engine {
     // Without a token the preview still names conversation and sender.
     let maybe_api = self.tokens.0.access_token().map(|_| &api);
     let preview = push_preview(self.store.as_ref(), maybe_api, &payload).await?;
-    Ok(preview.into())
+    let mut notification: PushNotification = preview.into();
+    if !notification.is_mention
+      && let (Some(text), Ok(backend)) = (&notification.maybe_text, self.backend())
+    {
+      let me = backend.me();
+      notification.is_mention = is_mentioned(
+        text,
+        &MentionRules {
+          username: &me.username,
+          display_name: &me.display_name,
+          first_name_is_mention: self.mentions.is_first_name_mention,
+          channel_mentions_notify: self.mentions.do_channel_mentions_notify,
+          keywords: &self.mentions.keywords,
+        },
+      );
+    }
+    Ok(notification)
+  }
+
+  pub(crate) fn set_mention_settings(&mut self, settings: MentionSettings) {
+    self.mentions = settings;
+  }
+
+  /// Downloads missing search segments, newest first, within `max_total_bytes`; pauses syncing
+  /// meanwhile.
+  pub(crate) async fn prefetch_search_segments(
+    &mut self,
+    max_total_bytes: u64,
+  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = client.prefetch_index_segments(max_total_bytes).await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    Ok(result?.into())
   }
 
   pub(crate) async fn complete_enrollment(
