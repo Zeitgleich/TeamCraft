@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use teamcraft_proto::GetMeResponse;
 
 use crate::auth::tauri;
@@ -12,14 +13,18 @@ use crate::backend::Backend;
 use crate::clock::now_ms;
 use crate::components::app::Shell;
 use crate::components::icons::{Icon, IconName};
+use crate::components::security_ui::QrImage;
 use crate::hybrid::Hybrid;
 use crate::i18n::use_i18n;
 use crate::meetings::{MeetingsClient, MeetingsHub};
 use crate::notify_sync::NotificationSync;
-use crate::remote_backend::RemoteChat;
+use crate::reactive::use_interval;
+use crate::remote_backend::{self, RemoteChat};
+use crate::remote_calls::RemoteCalls;
 use crate::server_backend::{LoadError, RestChat};
 use crate::session::{LoginProblem, SessionControl, SessionState};
 use crate::settings::{BackendMode, Settings};
+use teamcraft_client_api::remote::{CoreStatus, LinkStatus};
 
 /// Shows the right screen for the sign-in state and the chat shell once the user is in.
 #[component]
@@ -206,7 +211,16 @@ async fn load_backend(
       path: "core_snapshot".to_owned(),
       reason,
     })?;
-    return Ok(Rc::new(Hybrid::with_live(chat, me.role.clone(), now_ms(), auth)));
+    let hybrid = Hybrid::with_live(chat, me.role.clone(), now_ms(), auth);
+    // Calls are optional: without them the call screens keep their demo data.
+    let hybrid = match RemoteCalls::connect().await {
+      Ok(calls) => hybrid.with_calls(calls),
+      Err(error) => {
+        tracing::warn!(%error, "the shell has no call support");
+        hybrid
+      },
+    };
+    return Ok(Rc::new(hybrid));
   }
   let chat = RestChat::load(auth.as_ref(), me, now_ms()).await?;
   Ok(Rc::new(Hybrid::with_live(chat, me.role.clone(), now_ms(), auth)))
@@ -271,6 +285,8 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
 #[component]
 fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionControl) -> impl IntoView {
   let i18n = use_i18n();
+  let is_linking = RwSignal::new(false);
+  let name = StoredValue::new(name);
   let passphrase = RwSignal::new(String::new());
   let confirm = RwSignal::new(String::new());
   let device_name = RwSignal::new(default_device_name());
@@ -297,9 +313,14 @@ fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionContr
     }
   };
 
+  let device_name_for_link = device_name;
   view! {
+    <Show when=move || is_linking.get() fallback=|| ()>
+      <LinkScreen device_name=device_name_for_link.get_untracked() control=control on_back=Callback::new(move |()| is_linking.set(false)) />
+    </Show>
+    <Show when=move || !is_linking.get() fallback=|| ()>
     <AuthFrame>
-      <h1 translate="no">{move || i18n.t_with("enroll-title", &[("name", &name)])}</h1>
+      <h1 translate="no">{move || i18n.t_with("enroll-title", &[("name", &name.get_value())])}</h1>
       <p class="muted-text">
         {move || if has_existing_identity { i18n.t("enroll-recover-subtitle") } else { i18n.t("enroll-new-subtitle") }}
       </p>
@@ -389,12 +410,94 @@ fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionContr
               }
             }}
           </button>
+          <Show when=move || has_existing_identity fallback=|| ()>
+            <button type="button" class="btn" on:click=move |_| is_linking.set(true)>{move || i18n.t("enroll-link")}</button>
+          </Show>
           <button type="button" class="btn" on:click=move |_| control.sign_out()>{move || i18n.t("menu-log-out")}</button>
         </div>
       </form>
     </AuthFrame>
+    </Show>
   }
 }
+
+/// New device of an existing account: shows a code (QR), waits for an existing device to answer,
+/// shows the short code to compare, then receives the keys (e2ee.md §5).
+#[component]
+fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()>) -> impl IntoView {
+  let i18n = use_i18n();
+  let status = RwSignal::new(LinkStatus::Idle);
+  let device_name = StoredValue::new(device_name);
+
+  spawn_local(async move {
+    if let Err(message) = remote_backend::link_start(&device_name.get_value()).await {
+      status.set(LinkStatus::Failed { message });
+    }
+  });
+  use_interval(LINK_POLL_MS, move || {
+    spawn_local(async move {
+      if matches!(status.get_untracked(), LinkStatus::Failed { .. }) {
+        return;
+      }
+      if let Some(user) = control.enrolling_user()
+        && let Ok(CoreStatus::Ready { .. }) = remote_backend::core_status(user).await
+      {
+        control.finish_link();
+        return;
+      }
+      if let Ok(latest) = remote_backend::link_status().await {
+        status.set(latest);
+      }
+    });
+  });
+  let back = move |_| {
+    spawn_local(async { drop(remote_backend::link_cancel().await) });
+    on_back.run(());
+  };
+
+  view! {
+    <AuthFrame>
+      <h1>{move || i18n.t("link-new-title")}</h1>
+      {move || match status.get() {
+        LinkStatus::Idle => view! { <p class="auth-status" role="status"><span class="spinner" aria-hidden="true"></span></p> }.into_any(),
+        LinkStatus::WaitingForScan { code } | LinkStatus::Confirm { code, .. } => {
+          let short = match status.get() {
+            LinkStatus::Confirm { short_code, .. } => Some(short_code),
+            _ => None,
+          };
+          view! {
+            <p class="muted-text">{move || i18n.t("link-new-steps")}</p>
+            <div class="link-qr"><QrImage data=code.clone() /></div>
+            <p class="small mono link-code" translate="no">{code}</p>
+            {match short {
+              Some(short_code) => {
+                view! {
+                  <p>{move || i18n.t("link-new-compare")}</p>
+                  <p class="approval-code" translate="no">{short_code}</p>
+                }
+                .into_any()
+              },
+              None => view! { <p class="status-line" role="status">{move || i18n.t("link-waiting")}</p> }.into_any(),
+            }}
+          }
+          .into_any()
+        },
+        LinkStatus::Failed { message } => {
+          view! {
+            <p class="field-error" role="alert">{move || i18n.t("link-new-failed")}</p>
+            <p class="small mono" translate="no">{message}</p>
+          }
+          .into_any()
+        },
+      }}
+      <div class="auth-actions">
+        <button type="button" class="btn" on:click=back>{move || i18n.t("link-new-back")}</button>
+      </div>
+    </AuthFrame>
+  }
+}
+
+const LINK_POLL_MS: u64 = 1000;
 
 /// Short passphrases are cheap to guess offline; the minimum is a UI rule, the cost of the key
 /// derivation (Argon2id) does the rest.

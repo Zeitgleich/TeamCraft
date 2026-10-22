@@ -3838,3 +3838,8 @@ select.input {
 .schedule-form .field-row > * {
   min-width: 0;
 }
+
+.link-code {
+  word-break: break-all;
+  max-width: 100%;
+}

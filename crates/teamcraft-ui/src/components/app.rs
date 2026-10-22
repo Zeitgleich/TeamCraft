@@ -6,6 +6,7 @@ use wasm_bindgen::JsCast;
 
 use crate::auth::tauri;
 use crate::backend::Backend;
+use crate::calls::CallEvent;
 use crate::calls::CallPhase;
 use crate::clock::now_ms;
 use crate::components::admin_console::AdminConsole;
@@ -79,6 +80,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
   if tauri::is_available() {
     watch_for_notifications(state, i18n);
+    connect_calls(state);
   }
   // Call defaults follow the settings (and set the initial state of the call session).
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
@@ -308,4 +310,47 @@ fn window_has_focus() -> bool {
 fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
   let location = web_sys::window()?.location();
   parse_guest_link(&location.pathname().ok()?, &location.hash().ok()?)
+}
+
+/// Desktop: the user's call actions go to the shell, and calls that ring there show the dialog.
+fn connect_calls(state: AppState) {
+  let call = state.call;
+  call.set_handler(move |event| {
+    state.read(|backend| match event {
+      CallEvent::Join(request) => backend.join_call(request),
+      CallEvent::Leave => backend.leave_call(),
+      CallEvent::Decline(conversation) => backend.decline_call(conversation),
+      CallEvent::Muted(is_muted) => backend.set_call_muted(is_muted),
+      CallEvent::Deafened(is_deafened) => backend.set_call_deafened(is_deafened),
+      CallEvent::Microphone(device) => backend.select_microphone(Some(device)),
+      CallEvent::Speakers(device) => backend.select_speakers(Some(device)),
+      CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
+      CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
+      CallEvent::Effect(effect) => backend.set_background_effect(effect),
+      CallEvent::ScreenShare(true) => backend.start_screen_share(),
+      CallEvent::ScreenShare(false) => backend.stop_screen_share(),
+    });
+  });
+  // The effect picker writes the signal; the media layer applies it to the camera image.
+  Effect::new(move |previous: Option<()>| {
+    let effect = call.effect.get();
+    if previous.is_some() {
+      call.emit(CallEvent::Effect(effect));
+    }
+  });
+  // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
+  let was_connected = std::cell::Cell::new(false);
+  Effect::new(move |_| {
+    let is_connected = state.read(|backend| backend.active_call().is_some());
+    if was_connected.replace(is_connected) && !is_connected && call.phase.get_untracked() == CallPhase::Active
+    {
+      call.leave();
+    }
+  });
+  Effect::new(move |_| {
+    let ringing = state.read(|backend| backend.incoming_calls().first().copied());
+    if call.phase.get_untracked() == CallPhase::Idle && call.incoming.get_untracked() != ringing {
+      call.incoming.set(ringing);
+    }
+  });
 }

@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::auth::tauri;
 use crate::calls::{CallKind, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
@@ -52,15 +53,17 @@ pub fn IncomingCallDialog() -> impl IntoView {
           </p>
         </div>
         <div class="incoming-actions">
-          <button class="round-btn decline" aria-label=move || i18n.t("incoming-decline") title=move || i18n.t("incoming-decline") on:click=move |_| call.incoming.set(None)>
+          <button class="round-btn decline" aria-label=move || i18n.t("incoming-decline") title=move || i18n.t("incoming-decline") on:click=move |_| call.decline_incoming()>
             <Icon name=IconName::Phone class="hangup" />
           </button>
           <button class="round-btn accept" data-accept aria-label=move || i18n.t("incoming-accept-audio") title=move || i18n.t("incoming-accept-audio") on:click=move |_| accept(false)>
             <Icon name=IconName::Phone />
           </button>
+          <Show when=|| !tauri::is_available() fallback=|| ()>
           <button class="round-btn accept" aria-label=move || i18n.t("incoming-accept-video") title=move || i18n.t("incoming-accept-video") on:click=move |_| accept(true)>
             <Icon name=IconName::Video />
           </button>
+          </Show>
         </div>
       </div>
     })

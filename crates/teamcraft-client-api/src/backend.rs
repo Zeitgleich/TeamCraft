@@ -81,6 +81,12 @@ pub trait ChatBackend {
   }
   /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
   fn admin_add_self(&self, _conversation: ConversationId) {}
+  /// Identity keys this device knows (empty when the backend has no encryption keys).
+  fn security_keys(&self) -> crate::remote::SecuritySnapshot {
+    crate::remote::SecuritySnapshot::default()
+  }
+  /// Trusts the contact's new identity key after the user compared it.
+  fn accept_key_change(&self, _user: UserId) {}
   /// The newest failure of an action sent to the core, in words for the user.
   fn last_action_error(&self) -> Option<String> {
     None

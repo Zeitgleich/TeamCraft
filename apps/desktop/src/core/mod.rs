@@ -15,4 +15,6 @@ pub use runtime::{CallPreparation, TokenCache};
 #[cfg(all(test, feature = "integration"))]
 mod dev_bridge;
 #[cfg(all(test, feature = "integration"))]
+mod fake_calls;
+#[cfg(all(test, feature = "integration"))]
 mod integration_tests;

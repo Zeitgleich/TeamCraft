@@ -1,19 +1,29 @@
+use std::cell::RefCell;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
-use teamcraft_client_api::remote::{ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, MessageWindow};
+use teamcraft_client_api::remote::{
+  ChatAction, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
+  SecuritySnapshot,
+};
 use teamcraft_core::api::{AccessTokenSource, ApiError, GatewayConnection, HttpServerApi, ServerApi};
+use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::SystemClock;
+use teamcraft_core::records;
 use teamcraft_core::store::{DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{
-  CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, PendingEnrollment,
+  CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, LinkOffer, PendingEnrollment,
 };
 use teamcraft_crypto::backup::Argon2Settings;
+use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
@@ -119,6 +129,18 @@ enum Request {
   },
   Action(ChatAction, oneshot::Sender<Result<(), String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  LinkStart {
+    device_name: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
+  LinkStatus(oneshot::Sender<LinkStatus>),
+  LinkCancel,
+  ApprovalStart {
+    code: String,
+    reply: oneshot::Sender<Result<String, String>>,
+  },
+  ApprovalConfirm(oneshot::Sender<Result<(), String>>),
+  ApprovalCancel,
 }
 
 /// Handle to the core thread. Dropping it stops the thread.
@@ -210,6 +232,42 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
+  /// New device: starts showing a link code and waiting for an existing device.
+  pub async fn link_start(&self, device_name: String) -> Result<(), String> {
+    self
+      .ask(|reply| Request::LinkStart { device_name, reply })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  pub async fn link_status(&self) -> LinkStatus {
+    self.ask(Request::LinkStatus).await.unwrap_or_default()
+  }
+
+  pub fn link_cancel(&self) {
+    drop(self.requests.send(Request::LinkCancel));
+  }
+
+  /// Existing device: joins the new device's link with its code; returns the short code to compare.
+  pub async fn approval_start(&self, code: String) -> Result<String, String> {
+    self
+      .ask(|reply| Request::ApprovalStart { code, reply })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// Existing device: the codes match, hand over the keys.
+  pub async fn approval_confirm(&self) -> Result<(), String> {
+    self
+      .ask(Request::ApprovalConfirm)
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  pub fn approval_cancel(&self) {
+    drop(self.requests.send(Request::ApprovalCancel));
+  }
+
   pub async fn prepare_call(&self, conversation: ConversationId) -> Result<CallPreparation, String> {
     self
       .ask(|reply| Request::PrepareCall(conversation, reply))
@@ -253,6 +311,17 @@ struct Core {
   status: CoreStatus,
   backoff: Duration,
   reconnect_at: tokio::time::Instant,
+  link: Option<LinkRun>,
+  /// Why the last link failed, until the user tries again.
+  link_failure: LinkStatus,
+  approval: Option<LinkApproval<<Api as ServerApi>::Rendezvous>>,
+}
+
+/// A link in progress on this (new) device.
+struct LinkRun {
+  device_name: String,
+  view: Rc<RefCell<LinkStatus>>,
+  future: Pin<Box<dyn Future<Output = Result<LinkedSecrets, String>>>>,
 }
 
 impl Core {
@@ -278,6 +347,9 @@ impl Core {
       status: CoreStatus::NotStarted,
       backoff: RECONNECT_MIN,
       reconnect_at: tokio::time::Instant::now(),
+      link: None,
+      link_failure: LinkStatus::Idle,
+      approval: None,
     }
   }
 
@@ -297,6 +369,7 @@ impl Core {
         _ = heartbeat.tick(), if is_connected => self.send_heartbeat().await,
         _ = flush.tick(), if self.client.is_some() => self.flush().await,
         () = tokio::time::sleep_until(self.reconnect_at), if wants_connection => self.connect().await,
+        linked = poll_link(&mut self.link), if self.link.is_some() => self.on_linked(linked).await,
       }
     }
   }
@@ -342,6 +415,24 @@ impl Core {
     }
   }
 
+  /// Another device may have enrolled the account since the database was opened; the enrollment
+  /// screen must then offer recovery and linking instead of a new identity.
+  async fn refresh_enrollment_hint(&mut self) {
+    if self.client.is_none()
+      && self.link.is_none()
+      && let CoreStatus::NeedsEnrollment { .. } = self.status
+      && let Ok(has_existing_identity) = match self.api().identity_key(self.user).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error),
+      }
+    {
+      self.status = CoreStatus::NeedsEnrollment {
+        has_existing_identity,
+      };
+    }
+  }
+
   fn adopt(&mut self, mut client: Client<Api, Store>) -> CoreStatus {
     let on_call_event = self.on_call_event.clone();
     client.set_call_event_sink(Box::new(move |event| on_call_event(event.clone())));
@@ -364,7 +455,10 @@ impl Core {
 
   async fn handle(&mut self, request: Request) {
     match request {
-      Request::Status(reply) => drop(reply.send(self.status.clone())),
+      Request::Status(reply) => {
+        self.refresh_enrollment_hint().await;
+        drop(reply.send(self.status.clone()));
+      },
       Request::Enroll(request, reply) => {
         let result = self.enroll(request).await;
         if result.is_ok() {
@@ -372,6 +466,21 @@ impl Core {
         }
         drop(reply.send(result));
       },
+      Request::LinkStart { device_name, reply } => drop(reply.send(self.link_start(device_name))),
+      Request::LinkStatus(reply) => {
+        let view = self
+          .link
+          .as_ref()
+          .map_or(self.link_failure.clone(), |run| run.view.borrow().clone());
+        drop(reply.send(view));
+      },
+      Request::LinkCancel => {
+        self.link = None;
+        self.link_failure = LinkStatus::Idle;
+      },
+      Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
+      Request::ApprovalConfirm(reply) => drop(reply.send(self.approval_confirm().await)),
+      Request::ApprovalCancel => self.approval = None,
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::Messages {
         conversation,
@@ -444,6 +553,82 @@ impl Core {
     Ok(())
   }
 
+  /// New device: shows a code and waits for an existing device to scan it.
+  fn link_start(&mut self, device_name: String) -> Result<(), String> {
+    if self.client.is_some() {
+      return Err("this device is already set up".to_owned());
+    }
+    let offer = LinkOffer::generate();
+    let view = Rc::new(RefCell::new(LinkStatus::WaitingForScan {
+      code: offer.to_code(),
+    }));
+    let future = Box::pin(link_task(self.api(), offer, view.clone(), self.on_change.clone()));
+    self.link_failure = LinkStatus::Idle;
+    self.link = Some(LinkRun {
+      device_name,
+      view,
+      future,
+    });
+    Ok(())
+  }
+
+  /// The existing device handed over the keys: enroll with them.
+  async fn on_linked(&mut self, result: Result<LinkedSecrets, String>) {
+    let Some(run) = self.link.take() else { return };
+    let outcome = match result {
+      Ok(secrets) => self.enroll_linked(run.device_name, secrets).await,
+      Err(message) => Err(message),
+    };
+    match outcome {
+      Ok(()) => self.link_failure = LinkStatus::Idle,
+      Err(message) => self.link_failure = LinkStatus::Failed { message },
+    }
+    self.changed();
+  }
+
+  async fn enroll_linked(&mut self, device_name: String, secrets: LinkedSecrets) -> Result<(), String> {
+    let store = self.store.clone().ok_or("the local database is not open")?;
+    let options = EnrollmentOptions {
+      device_name,
+      // Linked devices get the backup key from the existing device; no passphrase is involved.
+      passphrase: SecretBytes::new(Vec::new()),
+      argon2: self.config.argon2,
+      maybe_attestation: None,
+      maybe_org_recovery: None,
+      maybe_linked: Some(secrets),
+    };
+    let client = PendingEnrollment::new()
+      .complete(
+        self.api(),
+        store,
+        Box::new(SystemClock),
+        ClientSettings::default(),
+        options,
+      )
+      .await
+      .map_err(describe)?;
+    self.status = self.adopt(client);
+    Ok(())
+  }
+
+  /// Existing device: joins the new device's link; the user compares the short code.
+  async fn approval_start(&mut self, code: &str) -> Result<String, String> {
+    let client = self.client.as_ref().ok_or("this device is not set up yet")?;
+    let approval = client.start_link_approval(code).await.map_err(describe)?;
+    let short_code = approval.short_code();
+    self.approval = Some(approval);
+    Ok(short_code)
+  }
+
+  async fn approval_confirm(&mut self) -> Result<(), String> {
+    let approval = self
+      .approval
+      .take()
+      .ok_or("there is no device waiting for approval")?;
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    client.complete_link_approval(approval).await.map_err(describe)
+  }
+
   fn snapshot(&self) -> Result<ChatSnapshot, String> {
     let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
     let mut conversations = Vec::new();
@@ -461,6 +646,26 @@ impl Core {
       spaces: backend.spaces(),
       conversations,
       message_counts,
+      security: self.security_snapshot()?,
+    })
+  }
+
+  /// Fingerprints of the keys this device pinned, and of keys the server showed since.
+  fn security_snapshot(&self) -> Result<SecuritySnapshot, String> {
+    let client = self.client.as_ref().ok_or("this device is not set up yet")?;
+    let fingerprint = |key: [u8; 32]| IdentityPublicKey::from_bytes(key).fingerprint().to_string();
+    let contacts = records::pinned_identities(client.store())
+      .map_err(describe)?
+      .into_iter()
+      .map(|(user, pinned)| ContactKeys {
+        user,
+        fingerprint: fingerprint(pinned.public_key),
+        maybe_new_fingerprint: pinned.maybe_changed_to.map(fingerprint),
+      })
+      .collect();
+    Ok(SecuritySnapshot {
+      my_fingerprint: client.identity_fingerprint(),
+      contacts,
     })
   }
 
@@ -524,6 +729,7 @@ impl Core {
       ChatAction::CreateChannel { .. }
       | ChatAction::OpenDm { .. }
       | ChatAction::AddMember { .. }
+      | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::AdminJoinChannel { .. } => {},
     }
@@ -656,4 +862,27 @@ async fn publish_policy(
     client.publish_roster(&roles).await.map_err(describe)?;
   }
   client.publish_policy(policy).await.map_err(describe)
+}
+
+/// Waits for the existing device to answer, shows the short code, then waits for the keys.
+async fn link_task(
+  api: Api,
+  offer: LinkOffer,
+  view: Rc<RefCell<LinkStatus>>,
+  on_change: Arc<dyn Fn() + Send + Sync>,
+) -> Result<LinkedSecrets, String> {
+  let link = NewDeviceLink::connect(&api, &offer).await.map_err(describe)?;
+  *view.borrow_mut() = LinkStatus::Confirm {
+    code: offer.to_code(),
+    short_code: link.short_code(),
+  };
+  on_change();
+  link.receive_secrets().await.map_err(describe)
+}
+
+async fn poll_link(link: &mut Option<LinkRun>) -> Result<LinkedSecrets, String> {
+  match link {
+    Some(run) => run.future.as_mut().await,
+    None => std::future::pending().await,
+  }
 }

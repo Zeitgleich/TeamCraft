@@ -12,5 +12,11 @@ open = false
 [[proxy]]
 backend = "http://127.0.0.1:8081/api/"
 
+# The server's Content-Security-Policy forbids inline scripts, so the loader goes into its own file.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["scripts/externalize-init.sh"]
+
 [watch]
 ignore = ["dist"]

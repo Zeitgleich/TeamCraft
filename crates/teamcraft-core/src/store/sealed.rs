@@ -49,6 +49,8 @@ enum Record {
 impl<B: RecordBackend> SealedStore<B> {
   /// Decrypts `records` (everything the backend holds) into the cache. A record that doesn't open
   /// means the key is wrong.
+  // Only the IndexedDB (wasm) and sealed-SQLite (Android) backends open a sealed store.
+  #[cfg_attr(not(any(target_arch = "wasm32", feature = "sealed-sqlite")), allow(dead_code))]
   pub(crate) fn load(
     backend: B,
     database_key: &SymmetricKey,
@@ -70,6 +72,8 @@ impl<B: RecordBackend> SealedStore<B> {
     &self.backend
   }
 
+  // Only the IndexedDB (wasm) and sealed-SQLite (Android) backends open a sealed store.
+  #[cfg_attr(not(any(target_arch = "wasm32", feature = "sealed-sqlite")), allow(dead_code))]
   fn load_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
     let plaintext = self.keys.open(id, sealed).map_err(|_| StoreError::WrongKey)?;
     let record: Record = serde_json::from_slice(plaintext.expose_secret())

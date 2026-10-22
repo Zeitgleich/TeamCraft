@@ -7,7 +7,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, MessageWindow,
+  CORE_CHANGED_EVENT, ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{ConversationId, UserId};
@@ -117,6 +117,38 @@ pub async fn core_status(host: State<'_, CoreHost>) -> Result<CoreStatus, Comman
 #[tauri::command]
 pub async fn core_enroll(host: State<'_, CoreHost>, request: EnrollRequest) -> Result<(), CommandError> {
   Ok(host.current()?.enroll(request).await?)
+}
+
+#[tauri::command]
+pub async fn core_link_start(host: State<'_, CoreHost>, device_name: String) -> Result<(), CommandError> {
+  Ok(host.current()?.link_start(device_name).await?)
+}
+
+#[tauri::command]
+pub async fn core_link_status(host: State<'_, CoreHost>) -> Result<LinkStatus, CommandError> {
+  Ok(host.current()?.link_status().await)
+}
+
+#[tauri::command]
+pub fn core_link_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  host.current()?.link_cancel();
+  Ok(())
+}
+
+#[tauri::command]
+pub async fn core_approval_start(host: State<'_, CoreHost>, code: String) -> Result<String, CommandError> {
+  Ok(host.current()?.approval_start(code).await?)
+}
+
+#[tauri::command]
+pub async fn core_approval_confirm(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  Ok(host.current()?.approval_confirm().await?)
+}
+
+#[tauri::command]
+pub fn core_approval_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  host.current()?.approval_cancel();
+  Ok(())
 }
 
 #[tauri::command]

@@ -20,7 +20,7 @@ use teamcraft_client_api::model::{
   ThreadSummary, User, UserId,
 };
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, MessageWindow,
+  CORE_CHANGED_EVENT, ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
 };
 
 use crate::auth::tauri::{call, listen};
@@ -39,6 +39,33 @@ pub async fn core_status(user: UserId) -> Result<CoreStatus, String> {
 /// Creates (or recovers) the keys of this device.
 pub async fn enroll(request: &EnrollRequest) -> Result<(), String> {
   call("core_enroll", &json!({ "request": request })).await
+}
+
+/// New device: shows a link code and waits for an existing device (e2ee.md §5).
+pub async fn link_start(device_name: &str) -> Result<(), String> {
+  call("core_link_start", &json!({ "device_name": device_name })).await
+}
+
+pub async fn link_status() -> Result<LinkStatus, String> {
+  call("core_link_status", &json!({})).await
+}
+
+pub async fn link_cancel() -> Result<(), String> {
+  call("core_link_cancel", &json!({})).await
+}
+
+/// Existing device: joins the link of a new device; returns the short code to compare.
+pub async fn approval_start(code: &str) -> Result<String, String> {
+  call("core_approval_start", &json!({ "code": code })).await
+}
+
+/// Existing device: the short codes match; hands the keys to the new device.
+pub async fn approval_confirm() -> Result<(), String> {
+  call("core_approval_confirm", &json!({})).await
+}
+
+pub async fn approval_cancel() -> Result<(), String> {
+  call("core_approval_cancel", &json!({})).await
 }
 
 pub async fn stop_core() -> Result<(), String> {
@@ -244,6 +271,16 @@ impl RemoteChat {
 impl ChatBackend for RemoteChat {
   fn can_sign_workspace(&self) -> bool {
     true
+  }
+
+  fn security_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {
+    self.mirror.borrow().snapshot.security.clone()
+  }
+
+  fn accept_key_change(&self, user: UserId) {
+    self.act(ChatAction::AcceptKeyChange { user });
+    // The pin changed in the core; read it back right away so the banner goes.
+    self.queue_refresh();
   }
 
   fn publish_policy(

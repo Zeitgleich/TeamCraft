@@ -63,7 +63,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
       <button
         class="space-btn"
         class:current=is_current
-        style=format!("--hue: {}", space.hue)
+        style:--hue=space.hue.to_string()
         aria-label=label.clone()
         title=label
         aria-current=move || is_current().then_some("true")

@@ -18,12 +18,13 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use teamcraft_client_api::model::thread_id_of;
-use teamcraft_client_api::remote::{ApiMethod, ChatAction, CoreStatus, EnrollRequest};
+use teamcraft_client_api::remote::{ApiMethod, CallAction, ChatAction, CoreStatus, EnrollRequest};
 use teamcraft_proto::{ConversationId, UserId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+use super::fake_calls::FakeCalls;
 use super::integration_tests::{Person, conversation_named, create_space, direct_with, enroll, find, person};
 use crate::auth::DesktopConfig;
 
@@ -33,6 +34,7 @@ const EVENT_WAIT: Duration = Duration::from_secs(20);
 
 struct Bridge {
   alice: Person,
+  calls: FakeCalls,
   changes: AtomicU64,
   changed: Notify,
 }
@@ -50,6 +52,7 @@ async fn serve_dev_bridge() {
   let alice = person("alice", &config).await;
   let carol = Arc::new(person("carol", &config).await);
   let bridge = Arc::new(Bridge {
+    calls: FakeCalls::new(carol.id),
     alice,
     changes: AtomicU64::new(0),
     changed: Notify::new(),
@@ -106,6 +109,7 @@ async fn colleague(bridge: Arc<Bridge>, carol: Arc<Person>, config: DesktopConfi
   )
   .await;
   set_status(&carol, &config, "🏖️", "Out on Friday").await;
+  log_channel(&carol, &bridge, &config, space).await;
   carol
     .runtime
     .action(ChatAction::OpenDm {
@@ -134,6 +138,58 @@ async fn say(person: &Person, conversation: ConversationId, body: &str) {
     })
     .await
     .expect("post");
+}
+
+/// An integration channel with lines like the bridge writes them (`[LEVEL] text`).
+async fn log_channel(
+  carol: &Person,
+  bridge: &Bridge,
+  config: &DesktopConfig,
+  space: teamcraft_proto::SpaceId,
+) {
+  let name = "app-logs";
+  carol
+    .runtime
+    .action(ChatAction::CreateChannel {
+      space,
+      name: name.into(),
+    })
+    .await
+    .expect("log channel");
+  let channel = find(carol, |snapshot| conversation_named(snapshot, name)).await;
+  carol
+    .runtime
+    .action(ChatAction::AddMember {
+      conversation: channel,
+      user: bridge.alice.id,
+    })
+    .await
+    .expect("add alice to the log channel");
+  let base = config.server_url.trim_end_matches('/');
+  let response = reqwest::Client::new()
+    .patch(format!("{base}/api/v1/conversations/{channel}"))
+    .bearer_auth(&carol.token)
+    .json(&json!({ "is_integration": true }))
+    .send()
+    .await
+    .expect("mark the channel as integration channel");
+  assert!(
+    response.status().is_success(),
+    "integration flag: {}",
+    response.status()
+  );
+  let lines = [
+    "[INFO] worker started, 4 queues attached",
+    "[INFO] job 4812 finished in 120 ms",
+    "[WARN] queue `mail` is 40 jobs behind",
+    "[INFO] job 4813 finished in 98 ms",
+    "[ERROR] job 4814 failed: upstream timed out after 30 s",
+    "[DEBUG] retry scheduled in 60 s",
+    "[INFO] job 4814 finished in 210 ms",
+  ];
+  for line in lines {
+    say(carol, channel, line).await;
+  }
 }
 
 /// Sets a custom status over REST (the server stores it; it is not message content).
@@ -207,6 +263,15 @@ async fn connection(mut stream: TcpStream, bridge: Arc<Bridge>) {
   let (status, payload) = match (method.as_str(), path.split('?').next().unwrap_or("")) {
     ("OPTIONS", _) => (204, String::new()),
     ("POST", "/invoke") => (200, invoke(&bridge, &body).await.to_string()),
+    // Dev only: carol calls alice in the conversation named in the body.
+    ("POST", "/dev/ring") => {
+      match serde_json::from_str::<ConversationId>(body.trim()) {
+        Ok(conversation) => bridge.calls.ring(conversation),
+        Err(error) => eprintln!("ring: {error}"),
+      }
+      bump(&bridge);
+      (200, "{}".to_owned())
+    },
     ("GET", "/events") => {
       let since = path
         .split("since=")
@@ -254,6 +319,42 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
         Ok(response) => Ok(json!({ "status": response.status, "body": response.body })),
         Err(error) => Err(error.to_string()),
       }
+    },
+    "core_link_start" => bridge
+      .alice
+      .runtime
+      .link_start(args["device_name"].as_str().unwrap_or("Desktop").to_owned())
+      .await
+      .map(|()| Value::Null),
+    "core_link_status" => {
+      Ok(serde_json::to_value(bridge.alice.runtime.link_status().await).expect("link status"))
+    },
+    "core_link_cancel" => {
+      bridge.alice.runtime.link_cancel();
+      Ok(Value::Null)
+    },
+    "core_approval_start" => bridge
+      .alice
+      .runtime
+      .approval_start(args["code"].as_str().unwrap_or("").to_owned())
+      .await
+      .map(Value::String),
+    "core_approval_confirm" => bridge
+      .alice
+      .runtime
+      .approval_confirm()
+      .await
+      .map(|()| Value::Null),
+    "core_approval_cancel" => {
+      bridge.alice.runtime.approval_cancel();
+      Ok(Value::Null)
+    },
+    "call_snapshot" => Ok(serde_json::to_value(bridge.calls.snapshot()).expect("call snapshot")),
+    "call_media_devices" => Ok(serde_json::to_value(bridge.calls.snapshot().devices).expect("devices")),
+    "call_action" => {
+      let action: CallAction = serde_json::from_value(args["action"].clone()).expect("call action");
+      bridge.calls.act(action);
+      Ok(Value::Null)
     },
     "core_start" | "core_status" => {
       Ok(serde_json::to_value(bridge.alice.runtime.status().await).expect("status"))

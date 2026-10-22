@@ -153,6 +153,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let kind = match (&response.kind, &response.visibility) {
       (ConversationKindProto::Dm, _) => ConversationKind::Direct,
       (ConversationKindProto::Group, _) => ConversationKind::Group,
+      (_, _) if response.is_integration => ConversationKind::Integration,
       (_, ConversationVisibility::Public) => ConversationKind::Public,
       _ => ConversationKind::Private,
     };

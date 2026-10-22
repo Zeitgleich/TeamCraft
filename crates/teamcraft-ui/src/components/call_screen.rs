@@ -2,6 +2,7 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 
+use crate::auth::tauri;
 use crate::calls::{CallKind, CallLayout, CallRequest, Participant};
 use crate::components::call_video::{BackgroundPicker, VideoTile};
 use crate::components::icons::{Icon, IconName};
@@ -49,10 +50,29 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   });
   let is_share_layout = move || call.is_sharing_screen.get() || remote_sharer.get().is_some();
 
-  // Simulated speech: rotate the active speaker among people who are not muted.
+  // Real calls report who is speaking; the demo rotates the active speaker among people who are not
+  // muted.
+  let is_real = tauri::is_available();
   let speaking = RwSignal::new(None::<UserId>);
+  Effect::new(move |_| {
+    if is_real {
+      let loudest = state.read(|backend| {
+        backend
+          .active_call()
+          .and_then(|active| active.active_speakers.first().copied())
+      });
+      speaking.set(loudest);
+    }
+  });
+  let privacy_code = Memo::new(move |_| {
+    state.read(|backend| backend.active_call().and_then(|active| active.maybe_privacy_code))
+  });
+  let is_connecting = Memo::new(move |_| is_real && state.read(|backend| backend.active_call().is_none()));
   let rotation = Cell::new(0_usize);
   use_interval(SPEAKER_ROTATE_MS, move || {
+    if is_real {
+      return;
+    }
     let candidates: Vec<UserId> = remote
       .get_untracked()
       .into_iter()
@@ -152,7 +172,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               <Icon name=IconName::Monitor />
               <span>{banner}</span>
               <Show when=move || call.is_sharing_screen.get() fallback=|| ()>
-                <button class="btn btn-small" on:click=move |_| call.is_sharing_screen.set(false)>
+                <button class="btn btn-small" on:click=move |_| call.set_screen_share(false)>
                   {move || i18n.t("share-stop")}
                 </button>
               </Show>
@@ -193,7 +213,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           .map(|tile| remote_tile(tile, false).into_any())
           .collect();
         view! {
-          <div class="stage stage-gallery" style=format!("--cols: {columns}")>
+          <div class="stage stage-gallery" style:--cols=columns.to_string()>
             {tiles} {self_tile(false)}
           </div>
         }
@@ -246,8 +266,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         <span class="e2ee-pill" title=move || i18n.t("call-encrypted-detail")>
           <Icon name=IconName::Shield />
           <span>{move || i18n.t("call-encrypted")}</span>
-          <span class="mono" translate="no">{move || i18n.t_with("call-verification-code", &[("code", "48 20 17")])}</span>
+          {move || {
+            let code = if is_real { privacy_code.get() } else { Some("48 20 17".to_owned()) };
+            code.map(|code| view! { <span class="mono" translate="no">{i18n.t_with("call-verification-code", &[("code", &code)])}</span> })
+          }}
         </span>
+        <Show when=move || is_connecting.get() fallback=|| ()>
+          <span class="muted-text" role="status">{move || i18n.t("call-connecting")}</span>
+        </Show>
       </header>
       <div class="call-stage-wrap">{stage}</div>
       <Show when=move || effects_open.get() fallback=|| ()>
@@ -261,26 +287,37 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           is_off=Signal::derive(move || !call.is_mic_on.get())
           icon=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff })
           label=Signal::derive(move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") })
-          on_press=move || call.is_mic_on.update(|on| *on = !*on)
+          on_press=move || call.set_muted(call.is_mic_on.get_untracked())
         />
+        <Show when=move || is_real fallback=|| ()>
+          <ControlButton
+            is_off=Signal::derive(move || call.is_deafened.get())
+            icon=IconName::Headphones
+            label=Signal::derive(move || if call.is_deafened.get() { i18n.t("control-undeafen") } else { i18n.t("control-deafen") })
+            on_press=move || call.set_deafened(!call.is_deafened.get_untracked())
+          />
+        </Show>
         <ControlButton
           is_off=Signal::derive(move || !call.is_camera_on.get())
           icon=Signal::derive(move || if call.is_camera_on.get() { IconName::Video } else { IconName::VideoOff })
           label=Signal::derive(move || if call.is_camera_on.get() { i18n.t("control-camera-off") } else { i18n.t("control-camera-on") })
-          on_press=move || call.is_camera_on.update(|on| *on = !*on)
+          on_press=move || call.set_camera(!call.is_camera_on.get_untracked())
         />
         <ControlButton
           is_active=Signal::derive(move || call.is_sharing_screen.get())
           icon=IconName::Monitor
           label=Signal::derive(move || if call.is_sharing_screen.get() { i18n.t("share-stop") } else { i18n.t("share-start") })
-          on_press=move || call.is_sharing_screen.update(|on| *on = !*on)
+          on_press=move || call.set_screen_share(!call.is_sharing_screen.get_untracked())
         />
-        <ControlButton
-          is_active=Signal::derive(move || call.has_hand_raised.get())
-          icon=IconName::Hand
-          label=Signal::derive(move || if call.has_hand_raised.get() { i18n.t("call-hand-lower") } else { i18n.t("call-hand-raise") })
-          on_press=move || call.has_hand_raised.update(|on| *on = !*on)
-        />
+        // Raising a hand has no wire message yet; it stays a demo-only control.
+        <Show when=move || !is_real fallback=|| ()>
+          <ControlButton
+            is_active=Signal::derive(move || call.has_hand_raised.get())
+            icon=IconName::Hand
+            label=Signal::derive(move || if call.has_hand_raised.get() { i18n.t("call-hand-lower") } else { i18n.t("call-hand-raise") })
+            on_press=move || call.has_hand_raised.update(|on| *on = !*on)
+          />
+        </Show>
         <ControlButton
           is_active=Signal::derive(move || effects_open.get())
           icon=IconName::Image

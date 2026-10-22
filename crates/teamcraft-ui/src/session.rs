@@ -10,6 +10,7 @@ use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse};
 use teamcraft_client_api::remote::{CoreStatus, EnrollRequest};
 
 use crate::auth::{ApiResponse, AuthError, Authenticator, tauri};
+use crate::model::UserId;
 use crate::remote_backend;
 use crate::settings::{load_string, store_string};
 
@@ -173,6 +174,21 @@ impl SessionControl {
       }
       control.is_enrolling.set(false);
     });
+  }
+
+  /// The account the enrollment screen is for.
+  pub fn enrolling_user(&self) -> Option<UserId> {
+    match self.state.get_untracked() {
+      SessionState::NeedsEnrollment { me, .. } => Some(me.id),
+      _ => None,
+    }
+  }
+
+  /// The core received the keys of another device: enter the app.
+  pub fn finish_link(&self) {
+    if let SessionState::NeedsEnrollment { me, .. } = self.state.get_untracked() {
+      self.state.set(SessionState::Ready(me));
+    }
   }
 
   async fn load_account(&self) {

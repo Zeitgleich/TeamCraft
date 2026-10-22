@@ -215,6 +215,44 @@ impl LogLevel {
   }
 }
 
+impl LogLevel {
+  /// The level named by a log word (`warning`, `ERR`, `fatal`, …); `None` for anything else.
+  pub fn from_word(word: &str) -> Option<Self> {
+    match word.to_lowercase().as_str() {
+      "trace" | "debug" => Some(Self::Debug),
+      "info" | "notice" => Some(Self::Info),
+      "warn" | "warning" => Some(Self::Warn),
+      "error" | "err" | "fatal" | "critical" | "alert" | "emergency" => Some(Self::Error),
+      _ => None,
+    }
+  }
+}
+
+/// Shows a message of an integration channel as one log line: the bridge writes `[LEVEL] text`
+/// (or a bare `ERROR text`), which becomes a level and the text without the prefix. Lines without a
+/// level are `info`.
+pub fn as_log_line(mut message: Message) -> Message {
+  if message.kind != MessageKind::User {
+    return message;
+  }
+  let body = message.body.trim_start();
+  let (level, text) = match split_level(body) {
+    Some((level, text)) => (level, text.to_owned()),
+    None => (LogLevel::Info, body.to_owned()),
+  };
+  message.kind = MessageKind::Log(level);
+  message.body = text;
+  message
+}
+
+fn split_level(body: &str) -> Option<(LogLevel, &str)> {
+  let first_end = body.find(char::is_whitespace).unwrap_or(body.len());
+  let (first, rest) = body.split_at(first_end);
+  let word = first.trim_matches(['[', ']', ':']);
+  let level = LogLevel::from_word(word)?;
+  Some((level, rest.trim_start()))
+}
+
 /// Which system event a system message reports; the text is built from i18n.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemEvent {
@@ -269,6 +307,31 @@ pub struct ThreadSummary {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn bridge_lines_become_log_lines() {
+    let line = |body: &str| {
+      as_log_line(Message {
+        id: id_from_raw(1),
+        conversation: id_from_raw(2),
+        author: id_from_raw(3),
+        kind: MessageKind::User,
+        sent_at: 0,
+        body: body.to_owned(),
+        is_edited: false,
+        reactions: Vec::new(),
+        reply_count: 0,
+        maybe_thread: None,
+      })
+    };
+    assert_eq!(line("[ERROR] disk full").kind, MessageKind::Log(LogLevel::Error));
+    assert_eq!(line("[ERROR] disk full").body, "disk full");
+    assert_eq!(line("warning: slow query").kind, MessageKind::Log(LogLevel::Warn));
+    assert_eq!(line("warning: slow query").body, "slow query");
+    assert_eq!(line("started").kind, MessageKind::Log(LogLevel::Info));
+    assert_eq!(line("started").body, "started");
+    assert_eq!(line("[DEBUG]").body, "");
+  }
 
   #[test]
   fn initials_take_two_letters() {

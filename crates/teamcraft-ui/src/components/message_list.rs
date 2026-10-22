@@ -281,13 +281,13 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
         <Show when=move || count.get() == 0 fallback=|| ()>
           <p class="empty-state">{move || i18n.t("channel-empty")}</p>
         </Show>
-        <div class="spacer" style=move || format!("height: {}px", window.get().pad_top)></div>
+        <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
         <div class="rows" node_ref=rows>
           <For each=indices key=|index| *index let:index>
             <RowSlot conversation=conversation index=index />
           </For>
         </div>
-        <div class="spacer" style=move || format!("height: {}px", window.get().pad_bottom)></div>
+        <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
       </div>
       <Show when=move || !stick_to_bottom.get() fallback=|| ()>
         <button

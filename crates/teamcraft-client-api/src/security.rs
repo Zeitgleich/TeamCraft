@@ -69,6 +69,30 @@ pub fn demo_safety_number(a: u64, b: u64) -> String {
     .join(" ")
 }
 
+/// The number two people compare out of band: the same for both whichever way round the
+/// fingerprints come in. Twelve groups of five digits, each from 16 bits of the first 96 bits of a
+/// fingerprint (the fingerprints themselves are hashes, so no further hashing is needed).
+pub fn safety_number(fingerprint_a: &str, fingerprint_b: &str) -> String {
+  let (low, high) = if fingerprint_a <= fingerprint_b {
+    (fingerprint_a, fingerprint_b)
+  } else {
+    (fingerprint_b, fingerprint_a)
+  };
+  [low, high]
+    .iter()
+    .flat_map(|fingerprint| {
+      let hex: Vec<char> = fingerprint.chars().filter(char::is_ascii_hexdigit).collect();
+      (0..6)
+        .map(|group| {
+          let digits: String = hex.iter().skip(group * 4).take(4).collect();
+          format!("{:05}", u32::from_str_radix(&digits, 16).unwrap_or(0))
+        })
+        .collect::<Vec<_>>()
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
 /// Groups a hex fingerprint into blocks of four characters: "ab12 cd34 …".
 pub fn group_fingerprint(fingerprint: &str) -> String {
   let chars: Vec<char> = fingerprint.chars().filter(|ch| !ch.is_whitespace()).collect();
@@ -82,6 +106,15 @@ pub fn group_fingerprint(fingerprint: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn the_safety_number_is_symmetric_and_depends_on_both_keys() {
+    let (a, b, c) = ("00ff10ab".repeat(8), "1234abcd".repeat(8), "5678abcd".repeat(8));
+    assert_eq!(safety_number(&a, &b), safety_number(&b, &a));
+    assert_ne!(safety_number(&a, &b), safety_number(&a, &c));
+    assert_eq!(safety_number(&a, &b).split(' ').count(), 12);
+    assert!(safety_number(&a, &b).split(' ').all(|group| group.len() == 5));
+  }
   use crate::model::id_from_raw;
 
   #[test]

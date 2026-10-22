@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teamcraft_client_api::model::ConversationKind;
-use teamcraft_client_api::remote::{ChatAction, ChatSnapshot, CoreStatus, EnrollRequest};
+use teamcraft_client_api::remote::{ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{ConversationId, GetMeResponse, SpaceId, UserId};
 
@@ -27,6 +27,7 @@ pub(super) struct Person {
   pub(super) token: String,
   pub(super) runtime: CoreRuntime,
   pub(super) service: Arc<AuthService<SharedStore>>,
+  tokens: TokenCache,
   directory: PathBuf,
 }
 
@@ -172,7 +173,7 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     core_config,
     me.id,
     KeyChoice::Fixed(vec![7; 32]),
-    tokens,
+    tokens.clone(),
     Arc::new(|| {}),
     Arc::new(|_| {}),
   );
@@ -182,7 +183,102 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     token,
     runtime,
     service,
+    tokens,
     directory,
+  }
+}
+
+/// A second, empty device of the same user (its own database).
+fn second_device(person: &Person, config: &DesktopConfig) -> CoreRuntime {
+  let core_config = CoreConfig {
+    server_url: config.server_url.clone(),
+    data_dir: person.directory.join("second-device"),
+    keystore_scope: "test".into(),
+    argon2: Argon2Settings {
+      memory_kib: 1024,
+      iterations: 1,
+      parallelism: 1,
+    },
+  };
+  CoreRuntime::spawn(
+    core_config,
+    person.id,
+    KeyChoice::Fixed(vec![8; 32]),
+    person.tokens.clone(),
+    Arc::new(|| {}),
+    Arc::new(|_| {}),
+  )
+}
+
+#[tokio::test]
+async fn a_second_device_is_linked_with_a_code_and_confirmed_on_the_first() {
+  let config = DesktopConfig::from_env();
+  let first = person("alice", &config).await;
+  match first.runtime.status().await {
+    CoreStatus::NeedsEnrollment { .. } => enroll(&first).await,
+    CoreStatus::Ready { .. } | CoreStatus::NotStarted | CoreStatus::Failed { .. } => {},
+  }
+  let second = second_device(&first, &config);
+  assert!(matches!(
+    second.status().await,
+    CoreStatus::NeedsEnrollment {
+      has_existing_identity: true
+    }
+  ));
+
+  second.link_start("Laptop".into()).await.expect("link start");
+  let code = wait_for_link(&second, |status| match status {
+    LinkStatus::WaitingForScan { code } => Some(code),
+    _ => None,
+  })
+  .await;
+  let first_short = first.runtime.approval_start(code).await.expect("approval start");
+  let second_short = wait_for_link(&second, |status| match status {
+    LinkStatus::Confirm { short_code, .. } => Some(short_code),
+    _ => None,
+  })
+  .await;
+  assert_eq!(first_short, second_short, "both devices show the same short code");
+
+  first.runtime.approval_confirm().await.expect("approval confirm");
+  let deadline = tokio::time::Instant::now() + WAIT;
+  loop {
+    if let CoreStatus::Ready { identity_fingerprint } = second.status().await {
+      let CoreStatus::Ready {
+        identity_fingerprint: expected,
+      } = first.runtime.status().await
+      else {
+        panic!("the first device lost its keys");
+      };
+      assert_eq!(
+        identity_fingerprint, expected,
+        "the linked device has the same identity"
+      );
+      break;
+    }
+    assert!(
+      tokio::time::Instant::now() < deadline,
+      "the second device never became ready"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+}
+
+async fn wait_for_link<T>(runtime: &CoreRuntime, pick: impl Fn(LinkStatus) -> Option<T>) -> T {
+  let deadline = tokio::time::Instant::now() + WAIT;
+  loop {
+    let status = runtime.link_status().await;
+    if let LinkStatus::Failed { message } = &status {
+      panic!("linking failed: {message}");
+    }
+    if let Some(found) = pick(status) {
+      return found;
+    }
+    assert!(
+      tokio::time::Instant::now() < deadline,
+      "the link did not progress"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
   }
 }
 

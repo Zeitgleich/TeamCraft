@@ -16,17 +16,22 @@ use crate::admin::{
 use crate::admin_live::{AdminLive, policy_from_security};
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
-use crate::calls::{HuddleInfo, MediaDevices, Participant};
+use crate::calls::{
+  ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
+};
 use crate::clock::now_ms;
 use crate::live::{LiveScope, LiveServer, POLL_INTERVAL_MS, thread_summary};
 use crate::mock::MockBackend;
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
-  ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
+  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId, as_log_line,
 };
 use crate::reactive::use_interval;
+use crate::remote_calls::RemoteCalls;
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::security::KeyChange;
+use crate::settings::{load_string, store_string};
+use teamcraft_client_api::remote::CallAction;
 
 pub struct Hybrid<C> {
   chat: Rc<C>,
@@ -35,9 +40,18 @@ pub struct Hybrid<C> {
   maybe_live: Option<LiveServer>,
   /// The administration console on the admin API; only for admins and owners.
   maybe_admin: Option<AdminLive>,
+  /// Calls of the desktop shell; without them the call screens run on demo data.
+  maybe_calls: Option<RemoteCalls>,
 }
 
 impl<C: ChatBackend + 'static> Hybrid<C> {
+  /// Real calls from the desktop shell instead of the demo roster.
+  #[must_use]
+  pub fn with_calls(mut self, calls: RemoteCalls) -> Self {
+    self.maybe_calls = Some(calls);
+    self
+  }
+
   /// Chat only: whatever `chat` knows is all there is (demo and tests).
   pub fn new(chat: C, role: Role, now: TimestampMs) -> Self {
     Self {
@@ -46,6 +60,7 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
       mock: MockBackend::new(now),
       maybe_live: None,
       maybe_admin: None,
+      maybe_calls: None,
     }
   }
 
@@ -68,6 +83,7 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
       mock: MockBackend::new(now),
       maybe_live: Some(LiveServer::new(auth, scope)),
       maybe_admin,
+      maybe_calls: None,
     }
   }
 }
@@ -96,6 +112,9 @@ impl<C: ChatBackend> Hybrid<C> {
 
 impl<C: ChatBackend> ChatBackend for Hybrid<C> {
   fn set_change_notifier(&self, notify: Rc<dyn Fn()>) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.set_change_notifier(notify.clone());
+    }
     let Some(live) = &self.maybe_live else {
       self.chat.set_change_notifier(notify);
       return;
@@ -166,7 +185,17 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
-    self.chat.messages(conversation, start, len)
+    let messages = self.chat.messages(conversation, start, len);
+    // Integration channels are fed by bridges that write `[LEVEL] text`; show them as log lines.
+    let is_log = self
+      .chat
+      .conversation(conversation)
+      .is_some_and(|conversation| conversation.kind == ConversationKind::Integration);
+    if is_log {
+      messages.into_iter().map(as_log_line).collect()
+    } else {
+      messages
+    }
   }
 
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
@@ -279,10 +308,21 @@ impl<C: ChatBackend> SearchBackend for Hybrid<C> {
 
 impl<C: ChatBackend> CallBackend for Hybrid<C> {
   fn media_devices(&self) -> MediaDevices {
-    self.mock.media_devices()
+    match &self.maybe_calls {
+      Some(calls) => calls.devices(),
+      None => self.mock.media_devices(),
+    }
   }
 
   fn call_participants(&self, conversation: ConversationId) -> Vec<Participant> {
+    if let Some(calls) = &self.maybe_calls {
+      let me = self.chat.me().id;
+      return calls
+        .participants(conversation)
+        .into_iter()
+        .filter(|participant| participant.user != me)
+        .collect();
+    }
     let members = self
       .conversation(conversation)
       .map(|conv| conv.member_ids)
@@ -302,8 +342,94 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .collect()
   }
 
-  fn huddle(&self, _conversation: ConversationId) -> Option<HuddleInfo> {
-    None
+  fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {
+    self
+      .maybe_calls
+      .as_ref()
+      .and_then(|calls| calls.huddle(conversation))
+  }
+
+  fn active_call(&self) -> Option<ActiveCall> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::active)
+  }
+
+  fn incoming_calls(&self) -> Vec<IncomingCall> {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or_else(Vec::new, RemoteCalls::incoming)
+  }
+
+  fn join_call(&self, request: CallRequest) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.join(request);
+    }
+  }
+
+  fn leave_call(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::Leave);
+    }
+  }
+
+  fn decline_call(&self, conversation: ConversationId) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::Decline { conversation });
+    }
+  }
+
+  fn set_call_muted(&self, is_muted: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetMuted { is_muted });
+    }
+  }
+
+  fn set_call_deafened(&self, is_deafened: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetDeafened { is_deafened });
+    }
+  }
+
+  fn select_microphone(&self, maybe_device: Option<String>) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SelectMicrophone { maybe_device });
+    }
+  }
+
+  fn select_speakers(&self, maybe_device: Option<String>) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SelectSpeakers { maybe_device });
+    }
+  }
+
+  fn set_call_camera(&self, is_on: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetCamera { is_on });
+    }
+  }
+
+  fn select_camera(&self, maybe_device: Option<String>) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SelectCamera { maybe_device });
+    }
+  }
+
+  fn set_background_effect(&self, effect: BackgroundEffect) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetBackgroundEffect { effect });
+    }
+  }
+
+  fn start_screen_share(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::StartScreenShare);
+    }
+  }
+
+  fn stop_screen_share(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::StopScreenShare);
+    }
   }
 }
 
@@ -426,7 +552,7 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   }
 }
 
-impl<C> SecurityBackend for Hybrid<C> {
+impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
   fn my_devices(&self) -> Vec<DeviceInfo> {
     self.mock.my_devices()
   }
@@ -435,21 +561,63 @@ impl<C> SecurityBackend for Hybrid<C> {
     self.mock.remove_my_device(device);
   }
 
-  fn key_change(&self, _conversation: ConversationId) -> Option<KeyChange> {
-    None
+  fn key_change(&self, conversation: ConversationId) -> Option<KeyChange> {
+    let keys = self.chat.security_keys();
+    let members = self.chat.conversation(conversation)?.member_ids;
+    keys.contacts.into_iter().find_map(|contact| {
+      let new_fingerprint = contact.maybe_new_fingerprint?;
+      members.contains(&contact.user).then_some(KeyChange {
+        user: contact.user,
+        conversation,
+        old_fingerprint: contact.fingerprint,
+        new_fingerprint,
+        // The core does not record when the server first showed the new key.
+        changed_at: 0,
+      })
+    })
   }
 
-  fn acknowledge_key_change(&self, _conversation: ConversationId) {}
+  fn acknowledge_key_change(&self, conversation: ConversationId) {
+    if let Some(change) = self.key_change(conversation) {
+      // A new key resets the verification: it was done for the old one.
+      store_string(&verified_key(change.user), "");
+      self.chat.accept_key_change(change.user);
+    }
+  }
 
   fn my_identity_fingerprint(&self) -> String {
-    self.mock.my_identity_fingerprint()
+    let keys = self.chat.security_keys();
+    if keys.my_fingerprint.is_empty() {
+      self.mock.my_identity_fingerprint()
+    } else {
+      keys.my_fingerprint
+    }
   }
 
   fn contact_verification(&self, user: UserId) -> crate::security::ContactVerification {
-    self.mock.contact_verification(user)
+    let keys = self.chat.security_keys();
+    let Some(contact) = keys.contacts.iter().find(|contact| contact.user == user) else {
+      return self.mock.contact_verification(user);
+    };
+    crate::security::ContactVerification {
+      safety_number: crate::security::safety_number(&keys.my_fingerprint, &contact.fingerprint),
+      is_verified: load_string(&verified_key(user)).as_deref() == Some(contact.fingerprint.as_str()),
+    }
   }
 
   fn set_contact_verified(&self, user: UserId, is_verified: bool) {
-    self.mock.set_contact_verified(user, is_verified);
+    let keys = self.chat.security_keys();
+    match keys.contacts.iter().find(|contact| contact.user == user) {
+      // The mark names the fingerprint it was made for, so a changed key is never shown as verified.
+      Some(contact) => store_string(
+        &verified_key(user),
+        if is_verified { &contact.fingerprint } else { "" },
+      ),
+      None => self.mock.set_contact_verified(user, is_verified),
+    }
   }
+}
+
+fn verified_key(user: UserId) -> String {
+  format!("teamcraft.verified.{user}")
 }

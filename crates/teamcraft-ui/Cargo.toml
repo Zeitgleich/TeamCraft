@@ -22,7 +22,7 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
   "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
   "HtmlCollection", "KeyboardEvent", "MediaQueryList", "Node", "NodeList", "Storage", "Window",
-  "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator", "Location", "History",
+  "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator", "ServiceWorkerContainer", "ServiceWorkerRegistration", "Location", "History",
   "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).

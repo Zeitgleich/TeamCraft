@@ -174,6 +174,16 @@ new version with the owner's device key (and founds the signed roster from the a
 if there is none yet). Browser builds and non-owners see it read-only; fields the signed policy does
 not hold (sign-in rules, guest domains, DM scope) are shown disabled.
 
+### The web build served by the server
+
+`trunk build --release` produces the web client; point the server's `[web] static_dir` at the output
+and it serves the app with its Content-Security-Policy (no inline scripts or styles). A Trunk hook
+(`scripts/externalize-init.sh`) moves the loader script into `init.js`, and all dynamic styles are set
+through the CSSOM (`style:prop=`), so the default policy needs no `unsafe-inline`. `sw.js` is copied to
+the root and registered in the browser (not in the desktop shell); it wakes the app for pushes and, until
+the worker can open sealed payloads, shows a generic notification. Browser login needs the server's
+origin registered as a redirect URI of the identity provider's client.
+
 ### Try it without the desktop window
 
 An ignored test serves the shell's commands over loopback HTTP, with a real core for alice and a

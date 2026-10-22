@@ -104,6 +104,46 @@ pub struct ChatSnapshot {
   pub conversations: Vec<Conversation>,
   /// Top-level messages per conversation, so the feed knows its length before loading any row.
   pub message_counts: Vec<(ConversationId, usize)>,
+  /// Identity keys this device knows, for key verification and key-change warnings.
+  #[serde(default)]
+  pub security: SecuritySnapshot,
+}
+
+/// Fingerprints (hex) of the identity keys on this device.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecuritySnapshot {
+  pub my_fingerprint: String,
+  pub contacts: Vec<ContactKeys>,
+}
+
+/// What this device pinned for one contact, and a different key the server has shown since.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactKeys {
+  pub user: UserId,
+  pub fingerprint: String,
+  /// Set when the server now presents another identity key (e2ee.md §3: shown, never trusted silently).
+  #[serde(default)]
+  pub maybe_new_fingerprint: Option<String>,
+}
+
+/// Linking this (new) device to another one of the user (e2ee.md §5), as the shell reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LinkStatus {
+  #[default]
+  Idle,
+  /// Showing the code (QR) and waiting for the other device to answer.
+  WaitingForScan {
+    code: String,
+  },
+  /// Both devices show the short code; the user confirms on the existing device.
+  Confirm {
+    code: String,
+    short_code: String,
+  },
+  Failed {
+    message: String,
+  },
 }
 
 /// A slice of one conversation's feed, oldest first.
@@ -196,6 +236,10 @@ pub enum ChatAction {
     owners: Vec<UserId>,
     #[serde(default)]
     admins: Vec<UserId>,
+  },
+  /// The user compared the keys and accepts the contact's new identity key.
+  AcceptKeyChange {
+    user: UserId,
   },
   /// An admin adds themselves to a conversation (subject to the policy's `admin_self_join`).
   AdminJoinChannel {

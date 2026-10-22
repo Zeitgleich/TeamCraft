@@ -2,7 +2,8 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 
-use crate::calls::{CallKind, CallRequest, MediaDevice};
+use crate::auth::tauri;
+use crate::calls::{CallEvent, CallKind, CallRequest, MediaDevice};
 use crate::components::call_video::{BackgroundPicker, VideoTile};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -27,6 +28,8 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
       .read(|backend| backend.call_participants(request.conversation))
       .len()
   });
+
+  let is_real = tauri::is_available();
 
   // Remember the first device of each kind when nothing was chosen before.
   for (signal, list) in [
@@ -54,6 +57,9 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let level = RwSignal::new(0_usize);
   let tick = Cell::new(7_u32);
   use_interval(METER_TICK_MS, move || {
+    if is_real {
+      return;
+    }
     if call.is_mic_on.get_untracked() {
       let next = tick.get().wrapping_mul(1_103_515_245).wrapping_add(12_345);
       tick.set(next);
@@ -93,7 +99,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
             class:off=move || !call.is_mic_on.get()
             aria-pressed=move || (!call.is_mic_on.get()).to_string()
             aria-label=move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") }
-            on:click=move |_| call.is_mic_on.update(|on| *on = !*on)
+            on:click=move |_| call.set_muted(call.is_mic_on.get_untracked())
           >
             <Icon name=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff }) />
           </button>
@@ -102,7 +108,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
             class:off=move || !call.is_camera_on.get()
             aria-pressed=move || (!call.is_camera_on.get()).to_string()
             aria-label=move || if call.is_camera_on.get() { i18n.t("control-camera-off") } else { i18n.t("control-camera-on") }
-            on:click=move |_| call.is_camera_on.update(|on| *on = !*on)
+            on:click=move |_| call.set_camera(!call.is_camera_on.get_untracked())
           >
             <Icon name=Signal::derive(move || if call.is_camera_on.get() { IconName::Video } else { IconName::VideoOff }) />
           </button>
@@ -124,11 +130,12 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         </p>
         <div class="field">
           <label for="prejoin-camera">{move || i18n.t("prejoin-camera")}</label>
-          <DeviceSelect id="prejoin-camera" list=devices.cameras.clone() selected=call.camera_id />
+          <DeviceSelect id="prejoin-camera" list=devices.cameras.clone() selected=call.camera_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::CameraDevice(id))) />
         </div>
         <div class="field">
           <label for="prejoin-mic">{move || i18n.t("prejoin-microphone")}</label>
-          <DeviceSelect id="prejoin-mic" list=devices.microphones.clone() selected=call.microphone_id />
+          <DeviceSelect id="prejoin-mic" list=devices.microphones.clone() selected=call.microphone_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Microphone(id))) />
+          <Show when=move || !is_real fallback=|| ()>
           <div
             class="meter"
             role="meter"
@@ -141,11 +148,12 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
               .map(|bar| view! { <span class="meter-bar" class:lit=move || bar < level.get()></span> })
               .collect_view()}
           </div>
+          </Show>
         </div>
         <div class="field">
           <label for="prejoin-speaker">{move || i18n.t("prejoin-speaker")}</label>
           <div class="field-row">
-            <DeviceSelect id="prejoin-speaker" list=devices.speakers.clone() selected=call.speaker_id />
+            <DeviceSelect id="prejoin-speaker" list=devices.speakers.clone() selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
             <button type="button" class="btn" on:click=test_speaker disabled=move || is_testing_speaker.get()>
               <Icon name=IconName::Volume />
               <span>
@@ -185,12 +193,21 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
 }
 
 #[component]
-fn DeviceSelect(id: &'static str, list: Vec<MediaDevice>, selected: RwSignal<String>) -> impl IntoView {
+fn DeviceSelect(
+  id: &'static str,
+  list: Vec<MediaDevice>,
+  selected: RwSignal<String>,
+  on_pick: Callback<String>,
+) -> impl IntoView {
   view! {
     <select
       id=id
       class="input grow"
-      on:change=move |ev| selected.set(event_target_value(&ev))
+      on:change=move |ev| {
+        let value = event_target_value(&ev);
+        selected.set(value.clone());
+        on_pick.run(value);
+      }
     >
       {list
         .into_iter()

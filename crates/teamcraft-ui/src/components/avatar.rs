@@ -28,7 +28,7 @@ pub fn Avatar(
 ) -> impl IntoView {
   let presence = user.presence;
   view! {
-    <span class=size.class() style=format!("--hue: {}", user.avatar_hue) aria-hidden="true">
+    <span class=size.class() style:--hue=user.avatar_hue.to_string() aria-hidden="true">
       <span class="avatar-initials">{user.initials()}</span>
       {show_presence.then(|| view! { <PresenceDot presence=presence /> })}
     </span>

@@ -37,7 +37,7 @@ pub fn VideoTile(
       class="tile"
       class:tile-speaking=move || is_speaking.get()
       class:tile-large=is_large
-      style=format!("--hue: {hue}")
+      style:--hue=hue.to_string()
       role="group"
       aria-label=move || {
         let mut parts = vec![if is_self { i18n.t("tile-you") } else { display.clone() }];

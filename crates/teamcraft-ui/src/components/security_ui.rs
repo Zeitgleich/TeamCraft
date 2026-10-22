@@ -1,12 +1,14 @@
 //! Device approval prompt, QR linking and the key-change banner (e2ee.md §3 and §5).
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use qrcode::{Color, QrCode};
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, UserId};
+use crate::remote_backend;
 use crate::security::group_fingerprint;
 use crate::state::{Overlay, use_app_state};
 
@@ -103,9 +105,129 @@ pub fn DeviceApprovalDialog() -> impl IntoView {
   }
 }
 
-/// Shown on the new device: a QR code for a phone to scan, or the code to approve on another device.
+/// On the existing device: link a new device. With the desktop core this is the real flow (enter the
+/// new device's code, compare the short code, approve); without it the demo screen stays.
 #[component]
 pub fn LinkDeviceDialog() -> impl IntoView {
+  if crate::auth::tauri::is_available() {
+    view! { <ApproveLinkDialog /> }.into_any()
+  } else {
+    view! { <DemoLinkDialog /> }.into_any()
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ApprovePhase {
+  EnterCode,
+  Connecting,
+  /// Both devices show the short code; the user compares and approves.
+  Compare {
+    short_code: String,
+  },
+  Sending,
+  Done,
+  Failed(String),
+}
+
+#[component]
+fn ApproveLinkDialog() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let code = RwSignal::new(String::new());
+  let phase = RwSignal::new(ApprovePhase::EnterCode);
+  let close = move || {
+    spawn_local(async { drop(remote_backend::approval_cancel().await) });
+    state.close_overlay();
+  };
+
+  let connect = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    let entered = code.get_untracked().trim().to_owned();
+    if entered.is_empty() {
+      return;
+    }
+    phase.set(ApprovePhase::Connecting);
+    spawn_local(async move {
+      phase.set(match remote_backend::approval_start(&entered).await {
+        Ok(short_code) => ApprovePhase::Compare { short_code },
+        Err(message) => ApprovePhase::Failed(message),
+      });
+    });
+  };
+  let approve = move |_| {
+    phase.set(ApprovePhase::Sending);
+    spawn_local(async move {
+      phase.set(match remote_backend::approval_confirm().await {
+        Ok(()) => ApprovePhase::Done,
+        Err(message) => ApprovePhase::Failed(message),
+      });
+    });
+  };
+
+  view! {
+    <Modal labelled_by="approve-link-title" class="modal-small">
+      <header class="modal-head">
+        <h2 id="approve-link-title">{move || i18n.t("approve-link-title")}</h2>
+        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| close()>
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <div class="modal-body approval">
+        {move || match phase.get() {
+          ApprovePhase::EnterCode | ApprovePhase::Connecting => {
+            let is_connecting = phase.get() == ApprovePhase::Connecting;
+            view! {
+              <form on:submit=connect>
+                <p>{move || i18n.t("approve-link-intro")}</p>
+                <label class="visually-hidden" for="approve-link-code">{move || i18n.t("approve-link-code")}</label>
+                <input
+                  id="approve-link-code"
+                  class="input mono"
+                  data-autofocus
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="tclink1:…"
+                  prop:value=move || code.get()
+                  on:input=move |ev| code.set(event_target_value(&ev))
+                />
+                <p class="muted-text small">{move || i18n.t("approve-link-hint")}</p>
+                <button type="submit" class="btn btn-primary" prop:disabled=is_connecting>
+                  {move || i18n.t("approve-link-connect")}
+                </button>
+              </form>
+            }
+            .into_any()
+          },
+          ApprovePhase::Compare { short_code } => {
+            view! {
+              <p>{move || i18n.t("approve-link-compare")}</p>
+              <p class="approval-code" translate="no">{short_code}</p>
+              <p class="no-content-note">
+                <Icon name=IconName::Alert />
+                <span>{move || i18n.t("approval-warning")}</span>
+              </p>
+              <button class="btn btn-primary" on:click=approve>{move || i18n.t("approval-approve")}</button>
+            }
+            .into_any()
+          },
+          ApprovePhase::Sending => view! { <p role="status">{move || i18n.t("approve-link-sending")}</p> }.into_any(),
+          ApprovePhase::Done => view! { <p role="status">{move || i18n.t("approval-approved")}</p> }.into_any(),
+          ApprovePhase::Failed(message) => {
+            view! {
+              <p class="field-error" role="alert">{move || i18n.t("approve-link-failed")}</p>
+              <p class="small mono" translate="no">{message}</p>
+            }
+            .into_any()
+          },
+        }}
+      </div>
+    </Modal>
+  }
+}
+
+/// Demo screen of the browser-only build: a QR code that is not a real login.
+#[component]
+fn DemoLinkDialog() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let is_linked = RwSignal::new(false);
@@ -120,7 +242,7 @@ pub fn LinkDeviceDialog() -> impl IntoView {
       </header>
       <div class="link-body">
         <div class="link-qr">
-          <QrImage data=DEMO_LINK_URI />
+          <QrImage data=DEMO_LINK_URI.to_owned() />
           <p class="muted-text small">{move || i18n.t("link-qr-note")}</p>
         </div>
         <div class="link-steps">
@@ -153,7 +275,7 @@ pub fn LinkDeviceDialog() -> impl IntoView {
 
 /// A QR code drawn as one SVG path. Light modules on a white quiet zone keep it scannable in dark mode.
 #[component]
-fn QrImage(data: &'static str) -> impl IntoView {
+pub(crate) fn QrImage(data: String) -> impl IntoView {
   const QUIET_ZONE: usize = 3;
   let i18n = use_i18n();
   let Ok(code) = QrCode::new(data.as_bytes()) else {
