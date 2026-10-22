@@ -102,7 +102,7 @@ jobs:
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: teamcraft-desktop-${{ matrix.arch }}.flatpak
-          manifest-path: apps/desktop/packaging/linux/org.teamcraft.desktop.yml
+          manifest-path: apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml
           arch: ${{ matrix.arch }}
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
 

@@ -16,7 +16,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-MANIFEST="${HERE}/org.teamcraft.desktop.yml"
+MANIFEST="${HERE}/de.zeitgleich.teamcraft.yml"
 STATE="${TEAMCRAFT_FLATPAK_DIR:-${HOME}/.cache/teamcraft-flatpak}"
 BUILDER=(flatpak run --filesystem="${STATE}" org.flatpak.Builder)
 mkdir -p "${STATE}"
@@ -30,7 +30,7 @@ fi
 
 case "${1:-}" in
   --bundle)
-    flatpak build-bundle "${STATE}/repo" "${STATE}/teamcraft-desktop.flatpak" org.teamcraft.desktop
+    flatpak build-bundle "${STATE}/repo" "${STATE}/teamcraft-desktop.flatpak" de.zeitgleich.teamcraft
     echo "bundle: ${STATE}/teamcraft-desktop.flatpak"
     ;;
   --run)

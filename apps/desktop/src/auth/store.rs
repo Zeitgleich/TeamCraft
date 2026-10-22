@@ -3,7 +3,7 @@ use std::future::Future;
 
 use super::AuthError;
 
-const SERVICE: &str = "org.teamcraft.desktop";
+const SERVICE: &str = "de.zeitgleich.teamcraft";
 const ACCOUNT: &str = "oidc-refresh-token";
 
 /// Where the refresh token lives between runs.

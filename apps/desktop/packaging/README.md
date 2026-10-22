@@ -4,7 +4,7 @@ What the build produces and how to build it. Nothing here publishes anything.
 
 | Platform | Formats                            | Where it is configured                                              |
 |----------|------------------------------------|---------------------------------------------------------------------|
-| Linux    | Flatpak (primary)                  | `linux/org.teamcraft.desktop.yml`, `.desktop` file, AppStream data  |
+| Linux    | Flatpak (primary)                  | `linux/de.zeitgleich.teamcraft.yml`, `.desktop` file, AppStream data  |
 | Linux    | `.deb`, `.rpm`, AppImage           | `bundle.linux` in `tauri.conf.json`                                 |
 | macOS    | `.dmg` (arm64 and x86_64)          | `bundle.macOS`, `Info.plist`, `macos/Entitlements.plist`            |
 | Windows  | NSIS `.exe` and `.msi` (x64, arm64) | `tauri.windows.conf.json`, [`windows/README.md`](windows/README.md) |

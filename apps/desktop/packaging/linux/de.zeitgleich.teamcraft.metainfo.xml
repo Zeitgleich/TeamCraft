@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>org.teamcraft.desktop</id>
+  <id>de.zeitgleich.teamcraft</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>AGPL-3.0-or-later</project_license>
   <name>TeamCraft</name>
@@ -9,10 +9,10 @@
     <p>TeamCraft is a self-hosted business team chat. Spaces, channels, threads, calls and meetings run on your own server, and every message is end-to-end encrypted: the server only stores ciphertext.</p>
     <p>You need an account on a TeamCraft server of your organization.</p>
   </description>
-  <developer id="org.teamcraft">
+  <developer id="de.zeitgleich">
     <name>TeamCraft contributors</name>
   </developer>
-  <launchable type="desktop-id">org.teamcraft.desktop.desktop</launchable>
+  <launchable type="desktop-id">de.zeitgleich.teamcraft.desktop</launchable>
   <provides>
     <binary>teamcraft-desktop</binary>
   </provides>
