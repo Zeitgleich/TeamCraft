@@ -8,14 +8,15 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{PASSPHRASE, Peer, options, settings, settle};
+use common::{PASSPHRASE, Peer, linked_options, options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::read_state;
 use teamcraft_core::store::{LocalStore, MemoryStore, Table};
-use teamcraft_core::{Client, ClientSettings, LinkOffer, PendingEnrollment};
+use teamcraft_core::{Client, ClientSettings, CoreError, LinkOffer, PendingEnrollment};
+use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
   Base64Bytes, ConversationId, GatewayEvent, ListMlsMessagesQuery, RegisterDeviceRequest,
 };
@@ -215,8 +216,7 @@ async fn link_new_device(
     .complete_link_approval(owner_side.unwrap())
     .await
     .unwrap();
-  let mut link_options = options("unused");
-  link_options.maybe_linked = Some(new_side.unwrap().receive_secrets().await.unwrap());
+  let link_options = linked_options(new_side.unwrap().receive_secrets().await.unwrap());
   PendingEnrollment::new()
     .complete(
       api,
@@ -260,4 +260,86 @@ fn settings_with_stagger() -> ClientSettings {
 
 fn millis(duration: Duration) -> i64 {
   i64::try_from(duration.as_millis()).unwrap()
+}
+
+#[tokio::test]
+async fn key_bag_rollback_and_swapped_wraps_are_refused() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let me = alice.client.user_id();
+  let old = server.key_bag_of(me).unwrap();
+  alice
+    .client
+    .upload_key_bag_with(
+      &SecretBytes::new(b"the new passphrase".to_vec()),
+      options(PASSPHRASE).argon2,
+    )
+    .await
+    .unwrap();
+  let newest = server.key_bag_of(me).unwrap();
+
+  // The server serves the first upload again, under a newer version number (security review B11).
+  server.serve_key_bag(me, old.clone());
+  assert!(matches!(
+    alice.client.sync_account_data().await,
+    Err(CoreError::KeyBagRollback { .. })
+  ));
+
+  // The server puts the old wraps (still opening with the old passphrase) next to the newest bag:
+  // the bag is bound to the wraps it was uploaded with and doesn't open.
+  let mut swapped = newest.clone();
+  swapped.wrapped_backup_keys = old.wrapped_backup_keys;
+  server.serve_key_bag(me, swapped);
+  assert!(enroll_again(&alice, PASSPHRASE).await.is_err());
+  server.serve_key_bag(me, newest);
+  assert!(enroll_again(&alice, "the new passphrase").await.is_ok());
+}
+
+async fn enroll_again(peer: &Peer, passphrase: &str) -> Result<common::TestClient, CoreError> {
+  PendingEnrollment::new()
+    .complete(
+      peer.api.clone(),
+      Arc::new(MemoryStore::new()),
+      common::clock(),
+      settings(),
+      options(passphrase),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_linked_device_inherits_pins_and_the_workspace_root() {
+  // Security review A2: the new laptop doesn't trust the server on first use again.
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let (alice_id, bob_id) = (phone.client.user_id(), bob.client.user_id());
+  phone
+    .client
+    .publish_roster(&[(alice_id, teamcraft_core::workspace::RosterRole::Owner)])
+    .await
+    .unwrap();
+  let channel = phone
+    .client
+    .create_channel(phone.space().await, "pins")
+    .await
+    .unwrap();
+  phone.client.add_member(channel, bob_id).await.unwrap();
+  settle(&mut [&mut phone, &mut bob]).await;
+  phone.client.sync_account_data().await.unwrap();
+
+  let mut laptop = common::link_device(&mut phone).await;
+  server.replace_identity_key(bob_id, vec![7; 32]);
+  phone.client.add_missing_devices(channel).await.unwrap();
+  laptop.sync_welcomes().await.unwrap();
+  laptop.add_missing_devices(channel).await.unwrap();
+
+  // The laptop verified the group's members with Bob's key from the phone's pins, not the
+  // server's substitute (with that, Bob's credential wouldn't verify and the welcome would fail).
+  assert!(laptop.has_group(channel).unwrap());
+  laptop.sync_workspace().await.unwrap();
+  assert_eq!(
+    laptop.workspace_root_fingerprint().unwrap(),
+    phone.client.workspace_root_fingerprint().unwrap()
+  );
 }

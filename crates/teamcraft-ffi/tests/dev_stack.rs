@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use teamcraft_core::api::{HttpServerApi, StaticToken};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::store::MemoryStore;
-use teamcraft_core::{ClientSettings, EnrollmentOptions, PendingEnrollment};
+use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_ffi::{AccountState, AppConfig, EventListener, TeamCraft, TokenProvider};
@@ -61,15 +61,13 @@ async fn mobile_client_receives_and_answers_a_message() {
       ClientSettings::default(),
       EnrollmentOptions {
         device_name: "alice ffi integration".into(),
-        passphrase: SecretBytes::new(PASSPHRASE.as_bytes().to_vec()),
+        secret: EnrollmentSecret::Passphrase(SecretBytes::new(PASSPHRASE.as_bytes().to_vec())),
         argon2: Argon2Settings {
           memory_kib: 1024,
           iterations: 1,
           parallelism: 1,
         },
         maybe_attestation: None,
-        maybe_org_recovery: None,
-        maybe_linked: None,
       },
     )
     .await

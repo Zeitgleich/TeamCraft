@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Mutex;
 
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -15,7 +16,12 @@ pub struct TokenValidator {
   keys: JwksCache,
   roles: RoleMapping,
   options: ValidatorOptions,
+  /// Logout tokens seen lately (`jti` -> when), so a captured one cannot be replayed.
+  seen_logout_tokens: Mutex<HashMap<String, i64>>,
 }
+
+/// A logout token older than this is refused, and its `jti` is remembered this long.
+const LOGOUT_TOKEN_MAX_AGE_SECS: i64 = 600;
 
 #[derive(Debug, Clone)]
 pub struct ValidatorOptions {
@@ -63,8 +69,9 @@ struct AccessClaims {
   sub: String,
   #[serde(default)]
   azp: Option<String>,
+  /// `Bearer` for access tokens; `ID`, `Logout` and `Refresh` tokens must not be accepted as one.
   #[serde(default)]
-  aud: Audience,
+  typ: Option<String>,
   #[serde(default)]
   preferred_username: Option<String>,
   #[serde(default)]
@@ -103,15 +110,6 @@ struct LogoutClaims {
   events: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(untagged)]
-enum Audience {
-  #[default]
-  None,
-  One(String),
-  Many(Vec<String>),
-}
-
 #[derive(Deserialize)]
 struct ClientAccess {
   #[serde(default)]
@@ -120,7 +118,12 @@ struct ClientAccess {
 
 impl TokenValidator {
   pub fn new(keys: JwksCache, roles: RoleMapping, options: ValidatorOptions) -> Self {
-    Self { keys, roles, options }
+    Self {
+      keys,
+      roles,
+      options,
+      seen_logout_tokens: Mutex::new(HashMap::new()),
+    }
   }
 
   /// The issuer tokens must come from.
@@ -178,6 +181,25 @@ impl TokenValidator {
     if claims.iat == 0 || claims.jti.as_deref().is_none_or(str::is_empty) {
       return Err(AuthError::InvalidToken("logout token needs iat and jti".into()));
     }
+    // Logout tokens are short-lived by nature: one that is old (or from the future) was kept
+    // somewhere it should not have been, and each may be used once.
+    let now = i64::try_from(jsonwebtoken::get_current_timestamp()).unwrap_or(i64::MAX);
+    let leeway = i64::try_from(self.options.leeway_secs).unwrap_or(0);
+    if claims.iat > now.saturating_add(leeway)
+      || now.saturating_sub(claims.iat) > LOGOUT_TOKEN_MAX_AGE_SECS + leeway
+    {
+      return Err(AuthError::InvalidToken("logout token is not recent".into()));
+    }
+    if let Some(jti) = claims.jti.as_deref() {
+      let mut seen = self
+        .seen_logout_tokens
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      seen.retain(|_, at| now.saturating_sub(*at) <= LOGOUT_TOKEN_MAX_AGE_SECS + leeway);
+      if seen.insert(jti.to_owned(), now).is_some() {
+        return Err(AuthError::InvalidToken("logout token was used already".into()));
+      }
+    }
     if claims.nonce.is_some() {
       return Err(AuthError::InvalidToken(
         "a logout token must not carry a nonce".into(),
@@ -211,7 +233,7 @@ impl TokenValidator {
     validation.leeway = self.options.leeway_secs;
     validation.validate_nbf = true;
     // The audience of Keycloak access tokens is often "account"; the client binding is checked
-    // below against `azp` and `aud` instead.
+    // below against `azp` instead.
     validation.validate_aud = false;
     validation.set_issuer(&[&self.options.issuer]);
     validation.set_required_spec_claims(&["exp", "iss", "sub"]);
@@ -223,6 +245,13 @@ impl TokenValidator {
     // An empty subject would map every such token to one shared account.
     if claims.sub.trim().is_empty() {
       return Err(AuthError::InvalidToken("token has no subject".into()));
+    }
+    if claims
+      .typ
+      .as_deref()
+      .is_some_and(|typ| !typ.eq_ignore_ascii_case("Bearer"))
+    {
+      return Err(AuthError::InvalidToken("not an access token".into()));
     }
     if !claims.is_issued_to(&self.options.client_id) {
       return Err(AuthError::InvalidToken(
@@ -257,15 +286,10 @@ impl TokenValidator {
 }
 
 impl AccessClaims {
+  /// Only tokens the app's own client asked for count. Another client of the realm gets
+  /// `aud: [teamcraft]` once its token carries TeamCraft roles, but its `azp` is its own.
   fn is_issued_to(&self, client_id: &str) -> bool {
-    if self.azp.as_deref() == Some(client_id) {
-      return true;
-    }
-    match &self.aud {
-      Audience::None => false,
-      Audience::One(aud) => aud == client_id,
-      Audience::Many(auds) => auds.iter().any(|aud| aud == client_id),
-    }
+    self.azp.as_deref() == Some(client_id)
   }
 
   fn client_roles(&self, client_id: &str) -> impl Iterator<Item = &str> {
@@ -377,9 +401,23 @@ mod tests {
   }
 
   #[test]
-  fn accepts_client_in_audience_list_without_azp() {
+  fn a_token_of_another_client_is_refused_even_if_this_one_is_in_its_audience() {
+    let token = sign(&claims(json!({"azp": "other-app", "aud": ["account", CLIENT]})));
+    assert!(validator().verify(&token, &public_key()).is_err());
     let token = sign(&claims(json!({"azp": null, "aud": ["account", CLIENT]})));
-    assert!(validator().verify(&token, &public_key()).is_ok());
+    assert!(validator().verify(&token, &public_key()).is_err());
+  }
+
+  #[test]
+  fn id_logout_and_refresh_tokens_are_not_access_tokens() {
+    for typ in ["ID", "Logout", "Refresh", "Offline", "id"] {
+      let token = sign(&claims(json!({"typ": typ})));
+      assert!(validator().verify(&token, &public_key()).is_err(), "{typ}");
+    }
+    for typ in [json!("Bearer"), json!("bearer"), json!(null)] {
+      let token = sign(&claims(json!({"typ": typ})));
+      assert!(validator().verify(&token, &public_key()).is_ok(), "{typ}");
+    }
   }
 
   #[test]
@@ -508,6 +546,27 @@ mod tests {
     ));
   }
 
+  #[test]
+  fn a_logout_token_works_once_and_only_while_it_is_recent() {
+    let validator = validator();
+    let token = sign(&logout_claims(json!({"jti": "once"})));
+    assert!(validator.verify_logout(&token, &public_key()).is_ok());
+    assert_invalid(
+      validator.verify_logout(&token, &public_key()),
+      "logout token was used already",
+    );
+    // Another token with another jti is fine.
+    let other = sign(&logout_claims(json!({"jti": "twice"})));
+    assert!(validator.verify_logout(&other, &public_key()).is_ok());
+    for iat in [now() - 3600, now() + 3600] {
+      let stale = sign(&logout_claims(json!({"jti": format!("t{iat}"), "iat": iat})));
+      assert_invalid(
+        validator.verify_logout(&stale, &public_key()),
+        "logout token is not recent",
+      );
+    }
+  }
+
   fn logout_claims(overrides: Value) -> Value {
     let mut claims = json!({
       "iss": ISSUER,
@@ -599,7 +658,7 @@ mod tests {
     assert!(TokenValidator::parse_algorithms(&[]).is_err());
   }
 
-  fn assert_invalid(result: Result<TokenIdentity, AuthError>, expected: &str) {
+  fn assert_invalid<T: std::fmt::Debug>(result: Result<T, AuthError>, expected: &str) {
     match result {
       Err(AuthError::InvalidToken(reason)) => assert_eq!(reason, expected),
       other => panic!("expected invalid token ({expected}), got {other:?}"),

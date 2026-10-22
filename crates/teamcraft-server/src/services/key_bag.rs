@@ -1,7 +1,7 @@
 //! Encrypted key bag storage (e2ee.md §6): opaque, versioned, one per user.
 
 use teamcraft_db::KeyBagOutcome;
-use teamcraft_proto::{Base64Bytes, KeyBagResponse, PutKeyBagRequest};
+use teamcraft_proto::{Base64Bytes, GatewayEvent, KeyBagResponse, PutKeyBagRequest};
 
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
@@ -33,7 +33,13 @@ pub async fn put_key_bag(
     )
     .await?;
   match outcome {
-    KeyBagOutcome::Stored { .. } => get_key_bag(state, caller).await,
+    KeyBagOutcome::Stored { version } => {
+      // The user's other devices fetch the new bag.
+      state
+        .hub
+        .publish([caller.user.id], &GatewayEvent::KeyBagUpdate { version });
+      get_key_bag(state, caller).await
+    },
     KeyBagOutcome::VersionConflict { current_version } => Err(ApiError::VersionConflict { current_version }),
   }
 }

@@ -9,7 +9,7 @@ use teamcraft_core::api::{HttpServerApi, ServerApi, StaticToken};
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::records;
 use teamcraft_core::store::{LocalStore, SqlCipherStore, StaticKeySource};
-use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
+use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::secret::SecretBytes;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
@@ -47,11 +47,9 @@ pub async fn enroll_or_open<A: ServerApi, S: LocalStore>(
       .context("the first run needs identity.passphrase to protect the bot's keys")?;
     let options = EnrollmentOptions {
       device_name: config.identity.device_name.clone(),
-      passphrase: SecretBytes::new(passphrase.expose_secret().as_bytes().to_vec()),
+      secret: EnrollmentSecret::Passphrase(SecretBytes::new(passphrase.expose_secret().as_bytes().to_vec())),
       argon2: config.argon2(),
       maybe_attestation: None,
-      maybe_org_recovery: None,
-      maybe_linked: None,
     };
     let client = PendingEnrollment::new()
       .complete(

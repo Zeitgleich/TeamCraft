@@ -7,11 +7,18 @@
 //! Version 2 adds the user's *account data* (saved items, drafts, saved searches; e2ee.md §6.4): opaque
 //! bytes to this crate, encrypted together with the keys, so every device of the user sees the same.
 //! Version 1 bags still decode (with empty account data).
+//!
+//! The encrypted form (version 2) carries a *sequence number* chosen by the uploading device and
+//! binds it, plus a hash of the user's wrapped backup keys, into the AEAD's associated data. Devices
+//! keep the highest sequence they saw and refuse older bags, so the server can't roll a bag back;
+//! and it can't drop or swap wraps (a passkey, the org wrap) without the bag failing to open
+//! (security review B11).
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use rand_core::CryptoRngCore;
+use sha2::{Digest, Sha256};
 use tls_codec::{DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -27,7 +34,10 @@ use crate::secret::{SYMMETRIC_KEY_LEN, SymmetricKey};
 pub const KEY_BAG_VERSION: u8 = 2;
 /// The first encoding, without account data.
 const KEY_BAG_VERSION_1: u8 = 1;
-const ENCRYPTED_KEY_BAG_VERSION: u8 = 1;
+/// Encrypted form with a sequence number and the wrapped-keys hash in the associated data.
+const ENCRYPTED_KEY_BAG_VERSION: u8 = 2;
+/// The first encrypted form, bound only to the user.
+const ENCRYPTED_KEY_BAG_VERSION_1: u8 = 1;
 
 /// Decrypted key bag of one user.
 #[derive(Debug)]
@@ -41,6 +51,24 @@ pub struct KeyBag {
 /// A key bag encrypted with the backup key, as stored on the server.
 #[derive(Clone, Debug, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct EncryptedKeyBag {
+  version: u8,
+  /// Chosen by the uploading device, higher than any it saw (0 in version 1).
+  sequence: u64,
+  nonce: [u8; NONCE_LEN],
+  ciphertext: Vec<u8>,
+}
+
+/// What an encrypted key bag is bound to besides its owner.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyBagBinding<'a> {
+  pub sequence: u64,
+  /// The user's wrapped backup keys exactly as uploaded next to the bag (empty for local copies).
+  pub wrapped_keys: &'a [u8],
+}
+
+/// Version 1 of the encrypted form.
+#[derive(TlsDeserializeBytes, TlsSize)]
+struct EncryptedKeyBagV1 {
   version: u8,
   nonce: [u8; NONCE_LEN],
   ciphertext: Vec<u8>,
@@ -78,9 +106,18 @@ struct ConversationKeysWire {
   keys: Vec<ContentKeyWire>,
 }
 
-/// Associated data of the encrypted key bag: binds it to its owner.
+/// Associated data of the encrypted key bag (version 2).
 #[derive(TlsSerialize, TlsSize)]
 struct KeyBagAad {
+  version: u8,
+  user_id: UserId,
+  sequence: u64,
+  wrapped_keys_hash: [u8; 32],
+}
+
+/// Associated data of version 1: binds the bag to its owner only.
+#[derive(TlsSerialize, TlsSize)]
+struct KeyBagAadV1 {
   version: u8,
   user_id: UserId,
 }
@@ -150,14 +187,16 @@ impl KeyBag {
   pub fn encrypt(
     &self,
     backup_key: &BackupKey,
+    binding: KeyBagBinding<'_>,
     rng: &mut impl CryptoRngCore,
   ) -> Result<EncryptedKeyBag, KeyBagError> {
     let plaintext = Zeroizing::new(self.to_wire().tls_serialize_detached()?);
-    let aad = key_bag_aad(self.user_id)?;
+    let aad = key_bag_aad(self.user_id, binding)?;
     let (nonce, ciphertext) =
       aead::seal(backup_key.key(), &aad, &plaintext, rng).map_err(|_| KeyBagError::EncryptionFailed)?;
     Ok(EncryptedKeyBag {
       version: ENCRYPTED_KEY_BAG_VERSION,
+      sequence: binding.sequence,
       nonce,
       ciphertext,
     })
@@ -226,15 +265,33 @@ impl KeyBag {
 }
 
 impl EncryptedKeyBag {
-  /// Decrypts the key bag of `user_id`. Fails if the bag belongs to someone else.
-  pub fn decrypt(&self, user_id: UserId, backup_key: &BackupKey) -> Result<KeyBag, KeyBagError> {
-    if self.version != ENCRYPTED_KEY_BAG_VERSION {
-      return Err(KeyBagError::UnsupportedVersion(self.version));
-    }
-    let aad = key_bag_aad(user_id)?;
+  /// Decrypts the key bag of `user_id`. Fails if the bag belongs to someone else, or if
+  /// `wrapped_keys` (the wraps the server stores next to it) aren't the ones it was uploaded with.
+  pub fn decrypt(
+    &self,
+    user_id: UserId,
+    backup_key: &BackupKey,
+    wrapped_keys: &[u8],
+  ) -> Result<KeyBag, KeyBagError> {
+    let aad = match self.version {
+      ENCRYPTED_KEY_BAG_VERSION => key_bag_aad(
+        user_id,
+        KeyBagBinding {
+          sequence: self.sequence,
+          wrapped_keys,
+        },
+      )?,
+      ENCRYPTED_KEY_BAG_VERSION_1 => key_bag_aad_v1(user_id)?,
+      other => return Err(KeyBagError::UnsupportedVersion(other)),
+    };
     let plaintext = aead::open(backup_key.key(), &self.nonce, &aad, &self.ciphertext)
       .map_err(|_| KeyBagError::DecryptionFailed)?;
     KeyBag::decode(plaintext.expose_secret(), user_id)
+  }
+
+  /// The uploader's sequence number; 0 for version 1 bags, which have none.
+  pub fn sequence(&self) -> u64 {
+    self.sequence
   }
 
   pub fn to_bytes(&self) -> Result<Vec<u8>, KeyBagError> {
@@ -242,6 +299,15 @@ impl EncryptedKeyBag {
   }
 
   pub fn from_bytes(bytes: &[u8]) -> Result<Self, KeyBagError> {
+    if bytes.first() == Some(&ENCRYPTED_KEY_BAG_VERSION_1) {
+      let v1 = EncryptedKeyBagV1::tls_deserialize_exact_bytes(bytes)?;
+      return Ok(Self {
+        version: v1.version,
+        sequence: 0,
+        nonce: v1.nonce,
+        ciphertext: v1.ciphertext,
+      });
+    }
     Ok(Self::tls_deserialize_exact_bytes(bytes)?)
   }
 }
@@ -278,9 +344,22 @@ fn check_owner(actual: UserId, expected: UserId) -> Result<(), KeyBagError> {
   }
 }
 
-fn key_bag_aad(user_id: UserId) -> Result<Vec<u8>, KeyBagError> {
+fn key_bag_aad(user_id: UserId, binding: KeyBagBinding<'_>) -> Result<Vec<u8>, KeyBagError> {
   let aad = KeyBagAad {
     version: ENCRYPTED_KEY_BAG_VERSION,
+    user_id,
+    sequence: binding.sequence,
+    wrapped_keys_hash: Sha256::digest(binding.wrapped_keys).into(),
+  };
+  Ok(domain::labeled(
+    domain::KEY_BAG_AAD,
+    &aad.tls_serialize_detached()?,
+  ))
+}
+
+fn key_bag_aad_v1(user_id: UserId) -> Result<Vec<u8>, KeyBagError> {
+  let aad = KeyBagAadV1 {
+    version: ENCRYPTED_KEY_BAG_VERSION_1,
     user_id,
   };
   Ok(domain::labeled(
@@ -299,14 +378,19 @@ mod tests {
   const ALICE: UserId = UserId::new(1);
   const GENERAL: ConversationId = ConversationId::new(100);
   const RANDOM: ConversationId = ConversationId::new(101);
+  const WRAPS: &[u8] = b"passphrase wrap and passkey wrap";
+  const BINDING: KeyBagBinding<'static> = KeyBagBinding {
+    sequence: 7,
+    wrapped_keys: WRAPS,
+  };
 
   #[test]
   fn round_trip_restores_identity_and_all_keys() {
     let key_bag = sample_key_bag();
     let backup_key = BackupKey::generate(&mut OsRng);
-    let encrypted = key_bag.encrypt(&backup_key, &mut OsRng).unwrap();
+    let encrypted = key_bag.encrypt(&backup_key, BINDING, &mut OsRng).unwrap();
     let decoded = EncryptedKeyBag::from_bytes(&encrypted.to_bytes().unwrap()).unwrap();
-    let restored = decoded.decrypt(ALICE, &backup_key).unwrap();
+    let restored = decoded.decrypt(ALICE, &backup_key, WRAPS).unwrap();
 
     assert_eq!(restored.identity().public_key(), key_bag.identity().public_key());
     for conversation in [GENERAL, RANDOM] {
@@ -329,9 +413,9 @@ mod tests {
     key_bag.set_account_data(b"{\"saved\":[]}".to_vec());
     let backup_key = BackupKey::generate(&mut OsRng);
     let restored = key_bag
-      .encrypt(&backup_key, &mut OsRng)
+      .encrypt(&backup_key, BINDING, &mut OsRng)
       .unwrap()
-      .decrypt(ALICE, &backup_key)
+      .decrypt(ALICE, &backup_key, WRAPS)
       .unwrap();
     assert_eq!(restored.account_data(), b"{\"saved\":[]}");
   }
@@ -354,13 +438,45 @@ mod tests {
   }
 
   #[test]
+  fn version_1_encrypted_bags_still_open() {
+    let key_bag = sample_key_bag();
+    let backup_key = BackupKey::generate(&mut OsRng);
+    let plaintext = key_bag.to_wire().tls_serialize_detached().unwrap();
+    let (nonce, ciphertext) = aead::seal(
+      backup_key.key(),
+      &key_bag_aad_v1(ALICE).unwrap(),
+      &plaintext,
+      &mut OsRng,
+    )
+    .unwrap();
+    let v1 = EncryptedKeyBagV1Writer {
+      version: ENCRYPTED_KEY_BAG_VERSION_1,
+      nonce,
+      ciphertext,
+    }
+    .tls_serialize_detached()
+    .unwrap();
+    let decoded = EncryptedKeyBag::from_bytes(&v1).unwrap();
+    assert_eq!(decoded.sequence(), 0);
+    let restored = decoded.decrypt(ALICE, &backup_key, b"ignored").unwrap();
+    assert_eq!(restored.conversations().count(), 2);
+  }
+
+  #[derive(TlsSerialize, TlsSize)]
+  struct EncryptedKeyBagV1Writer {
+    version: u8,
+    nonce: [u8; NONCE_LEN],
+    ciphertext: Vec<u8>,
+  }
+
+  #[test]
   fn empty_key_bag_round_trips() {
     let key_bag = KeyBag::new(ALICE, IdentityKeyPair::generate(&mut OsRng));
     let backup_key = BackupKey::generate(&mut OsRng);
     let restored = key_bag
-      .encrypt(&backup_key, &mut OsRng)
+      .encrypt(&backup_key, BINDING, &mut OsRng)
       .unwrap()
-      .decrypt(ALICE, &backup_key)
+      .decrypt(ALICE, &backup_key, WRAPS)
       .unwrap();
     assert_eq!(restored.conversations().count(), 0);
   }
@@ -371,10 +487,10 @@ mod tests {
     #[test]
     fn rejects_wrong_backup_key() {
       let encrypted = sample_key_bag()
-        .encrypt(&BackupKey::generate(&mut OsRng), &mut OsRng)
+        .encrypt(&BackupKey::generate(&mut OsRng), BINDING, &mut OsRng)
         .unwrap();
       assert!(matches!(
-        encrypted.decrypt(ALICE, &BackupKey::generate(&mut OsRng)),
+        encrypted.decrypt(ALICE, &BackupKey::generate(&mut OsRng), WRAPS),
         Err(KeyBagError::DecryptionFailed)
       ));
     }
@@ -383,9 +499,11 @@ mod tests {
     fn rejects_other_users_key_bag() {
       // The server hands Bob's (or an old) bag to Alice's device: the AAD doesn't match.
       let backup_key = BackupKey::generate(&mut OsRng);
-      let encrypted = sample_key_bag().encrypt(&backup_key, &mut OsRng).unwrap();
+      let encrypted = sample_key_bag()
+        .encrypt(&backup_key, BINDING, &mut OsRng)
+        .unwrap();
       assert!(matches!(
-        encrypted.decrypt(UserId::new(2), &backup_key),
+        encrypted.decrypt(UserId::new(2), &backup_key, WRAPS),
         Err(KeyBagError::DecryptionFailed)
       ));
     }
@@ -393,25 +511,38 @@ mod tests {
     #[test]
     fn rejects_tampering() {
       let backup_key = BackupKey::generate(&mut OsRng);
-      let encrypted = sample_key_bag().encrypt(&backup_key, &mut OsRng).unwrap();
+      let encrypted = sample_key_bag()
+        .encrypt(&backup_key, BINDING, &mut OsRng)
+        .unwrap();
       let mut body = encrypted.clone();
       body.ciphertext[10] ^= 1;
       let mut nonce = encrypted.clone();
       nonce.nonce[0] ^= 1;
-      let mut version = encrypted;
-      version.version = 2;
+      let mut version = encrypted.clone();
+      version.version = 3;
+      let mut sequence = encrypted;
+      sequence.sequence -= 1;
 
       assert!(matches!(
-        body.decrypt(ALICE, &backup_key),
+        body.decrypt(ALICE, &backup_key, WRAPS),
         Err(KeyBagError::DecryptionFailed)
       ));
       assert!(matches!(
-        nonce.decrypt(ALICE, &backup_key),
+        nonce.decrypt(ALICE, &backup_key, WRAPS),
         Err(KeyBagError::DecryptionFailed)
       ));
       assert!(matches!(
-        version.decrypt(ALICE, &backup_key),
-        Err(KeyBagError::UnsupportedVersion(2))
+        version.decrypt(ALICE, &backup_key, WRAPS),
+        Err(KeyBagError::UnsupportedVersion(3))
+      ));
+      // The server rolls the sequence back or drops a wrap: the bag no longer opens.
+      assert!(matches!(
+        sequence.decrypt(ALICE, &backup_key, WRAPS),
+        Err(KeyBagError::DecryptionFailed)
+      ));
+      assert!(matches!(
+        body_for_wraps(&backup_key).decrypt(ALICE, &backup_key, b"only the passphrase wrap"),
+        Err(KeyBagError::DecryptionFailed)
       ));
     }
 
@@ -425,7 +556,7 @@ mod tests {
       wire.conversations[0].keys.push(conflicting.to_wire());
       wire.conversations[0].keys.push(key.to_wire());
       assert!(matches!(
-        encrypt_wire(&wire, &backup_key).decrypt(ALICE, &backup_key),
+        encrypt_wire(&wire, &backup_key).decrypt(ALICE, &backup_key, WRAPS),
         Err(KeyBagError::InvalidContentKeys(_))
       ));
 
@@ -437,7 +568,7 @@ mod tests {
       };
       duplicate.conversations.push(copy);
       assert!(matches!(
-        encrypt_wire(&duplicate, &backup_key).decrypt(ALICE, &backup_key),
+        encrypt_wire(&duplicate, &backup_key).decrypt(ALICE, &backup_key, WRAPS),
         Err(KeyBagError::DuplicateConversation(GENERAL))
       ));
     }
@@ -452,16 +583,21 @@ mod tests {
       let plaintext = wire.tls_serialize_detached().unwrap();
       let (nonce, ciphertext) = aead::seal(
         backup_key.key(),
-        &key_bag_aad(ALICE).unwrap(),
+        &key_bag_aad(ALICE, BINDING).unwrap(),
         &plaintext,
         &mut OsRng,
       )
       .unwrap();
       EncryptedKeyBag {
         version: ENCRYPTED_KEY_BAG_VERSION,
+        sequence: BINDING.sequence,
         nonce,
         ciphertext,
       }
+    }
+
+    fn body_for_wraps(backup_key: &BackupKey) -> EncryptedKeyBag {
+      sample_key_bag().encrypt(backup_key, BINDING, &mut OsRng).unwrap()
     }
   }
 

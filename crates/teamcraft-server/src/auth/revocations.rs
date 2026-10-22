@@ -16,30 +16,43 @@ pub struct Revocations {
 
 #[derive(Default)]
 struct Inner {
-  /// Subject -> time of the logout (Unix seconds).
-  subjects: HashMap<String, i64>,
-  /// Provider session ID -> time of the logout.
-  sessions: HashMap<String, i64>,
+  /// (Issuer, subject) -> time of the logout (Unix seconds). Subjects of different issuers (the
+  /// identity provider, bots, guests) never collide.
+  subjects: HashMap<(String, String), i64>,
+  /// (Issuer, provider session ID) -> time of the logout.
+  sessions: HashMap<(String, String), i64>,
 }
 
 impl Revocations {
   /// Tokens of `subject` issued at or before `at` are no longer accepted.
-  pub fn revoke_subject(&self, subject: &str, at: i64) {
+  pub fn revoke_subject(&self, issuer: &str, subject: &str, at: i64) {
     let mut inner = self.lock();
-    inner.subjects.insert(subject.to_owned(), at);
+    inner.subjects.insert((issuer.to_owned(), subject.to_owned()), at);
     inner.prune(at);
   }
 
-  pub fn revoke_session(&self, session_id: &str, at: i64) {
+  pub fn revoke_session(&self, issuer: &str, session_id: &str, at: i64) {
     let mut inner = self.lock();
-    inner.sessions.insert(session_id.to_owned(), at);
+    inner
+      .sessions
+      .insert((issuer.to_owned(), session_id.to_owned()), at);
     inner.prune(at);
   }
 
-  pub fn is_revoked(&self, subject: &str, maybe_session_id: Option<&str>, issued_at: i64) -> bool {
+  pub fn is_revoked(
+    &self,
+    issuer: &str,
+    subject: &str,
+    maybe_session_id: Option<&str>,
+    issued_at: i64,
+  ) -> bool {
     let inner = self.lock();
-    let subject_revoked = inner.subjects.get(subject).is_some_and(|at| issued_at <= *at);
-    let session_revoked = maybe_session_id.is_some_and(|sid| inner.sessions.contains_key(sid));
+    let subject_revoked = inner
+      .subjects
+      .get(&(issuer.to_owned(), subject.to_owned()))
+      .is_some_and(|at| issued_at <= *at);
+    let session_revoked =
+      maybe_session_id.is_some_and(|sid| inner.sessions.contains_key(&(issuer.to_owned(), sid.to_owned())));
     subject_revoked || session_revoked
   }
 
@@ -59,34 +72,46 @@ impl Inner {
 mod tests {
   use super::*;
 
+  const ISSUER: &str = "https://auth.example.com/realms/company";
+
+  #[test]
+  fn a_logout_at_one_issuer_does_not_touch_the_same_subject_elsewhere() {
+    let revocations = Revocations::default();
+    revocations.revoke_subject(ISSUER, "42", 1000);
+    assert!(revocations.is_revoked(ISSUER, "42", None, 900));
+    assert!(!revocations.is_revoked("teamcraft-bot", "42", None, 900));
+    revocations.revoke_session(ISSUER, "s", 1000);
+    assert!(!revocations.is_revoked("teamcraft-guest", "x", Some("s"), 2000));
+  }
+
   #[test]
   fn tokens_issued_before_or_at_the_logout_are_refused() {
     let revocations = Revocations::default();
-    revocations.revoke_subject("user-1", 1000);
-    assert!(revocations.is_revoked("user-1", None, 999));
-    assert!(revocations.is_revoked("user-1", None, 1000));
+    revocations.revoke_subject(ISSUER, "user-1", 1000);
+    assert!(revocations.is_revoked(ISSUER, "user-1", None, 999));
+    assert!(revocations.is_revoked(ISSUER, "user-1", None, 1000));
     assert!(
-      !revocations.is_revoked("user-1", None, 1001),
+      !revocations.is_revoked(ISSUER, "user-1", None, 1001),
       "a later login works"
     );
-    assert!(!revocations.is_revoked("user-2", None, 500));
+    assert!(!revocations.is_revoked(ISSUER, "user-2", None, 500));
   }
 
   #[test]
   fn a_revoked_provider_session_is_refused_whenever_the_token_was_issued() {
     let revocations = Revocations::default();
-    revocations.revoke_session("sid-1", 1000);
-    assert!(revocations.is_revoked("anyone", Some("sid-1"), 5000));
-    assert!(!revocations.is_revoked("anyone", Some("sid-2"), 500));
-    assert!(!revocations.is_revoked("anyone", None, 500));
+    revocations.revoke_session(ISSUER, "sid-1", 1000);
+    assert!(revocations.is_revoked(ISSUER, "anyone", Some("sid-1"), 5000));
+    assert!(!revocations.is_revoked(ISSUER, "anyone", Some("sid-2"), 500));
+    assert!(!revocations.is_revoked(ISSUER, "anyone", None, 500));
   }
 
   #[test]
   fn old_entries_are_forgotten() {
     let revocations = Revocations::default();
-    revocations.revoke_subject("old", 0);
-    revocations.revoke_subject("new", RETENTION_SECS + 10);
-    assert!(!revocations.is_revoked("old", None, 0));
-    assert!(revocations.is_revoked("new", None, 0));
+    revocations.revoke_subject(ISSUER, "old", 0);
+    revocations.revoke_subject(ISSUER, "new", RETENTION_SECS + 10);
+    assert!(!revocations.is_revoked(ISSUER, "old", None, 0));
+    assert!(revocations.is_revoked(ISSUER, "new", None, 0));
   }
 }

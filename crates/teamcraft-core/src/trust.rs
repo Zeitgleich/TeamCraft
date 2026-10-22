@@ -3,7 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use teamcraft_crypto::identity::IdentityPublicKey;
+use teamcraft_crypto::device_list::VerifiedDeviceList;
+use teamcraft_crypto::identity::{IdentityPublicKey, VerifiedDevice};
 use teamcraft_crypto::ids as crypto;
 use teamcraft_crypto::membership::{IdentityDirectory, MembershipAction, MembershipAuthority};
 use teamcraft_proto::{AdminSelfJoin, UserId};
@@ -16,6 +17,9 @@ use crate::records::PinnedIdentity;
 /// accepts the change.
 pub(crate) struct PinnedDirectory {
   keys: BTreeMap<crypto::UserId, IdentityPublicKey>,
+  /// The newest verified device list per user. A user without one never published a list (older
+  /// clients); their certified devices are accepted as before.
+  device_lists: BTreeMap<crypto::UserId, VerifiedDeviceList>,
 }
 
 /// Who may change a group's membership (e2ee.md §4.6, admin.md §2.3):
@@ -45,13 +49,34 @@ impl PinnedDirectory {
     for (user, key) in roster {
       keys.insert(convert::user(*user), IdentityPublicKey::from_bytes(*key));
     }
-    Self { keys }
+    Self {
+      keys,
+      device_lists: BTreeMap::new(),
+    }
+  }
+
+  pub(crate) fn with_device_lists(mut self, lists: impl IntoIterator<Item = VerifiedDeviceList>) -> Self {
+    for list in lists {
+      self.device_lists.insert(list.user_id(), list);
+    }
+    self
+  }
+
+  pub(crate) fn device_list(&self, user: crypto::UserId) -> Option<&VerifiedDeviceList> {
+    self.device_lists.get(&user)
   }
 }
 
 impl IdentityDirectory for PinnedDirectory {
   fn pinned_identity(&self, user_id: crypto::UserId) -> Option<IdentityPublicKey> {
     self.keys.get(&user_id).copied()
+  }
+
+  fn is_active_device(&self, device: &VerifiedDevice) -> bool {
+    self
+      .device_lists
+      .get(&device.user_id())
+      .is_none_or(|list| list.is_active(device))
   }
 }
 

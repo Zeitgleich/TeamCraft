@@ -333,6 +333,7 @@ pub async fn remove_everywhere(state: &AppState, id: SpaceId, user_id: UserId) -
     },
   );
   for channel in left_channels {
+    super::calls::evict_from_call(state, channel, user_id).await;
     let members = state.database.conversation_member_ids(channel).await?;
     state.hub.publish(
       members.into_iter().chain([user_id]),

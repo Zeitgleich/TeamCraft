@@ -2,8 +2,8 @@ use openmls::prelude::{KeyPackageIn, ProtocolVersion};
 use rand_core::OsRng;
 
 use super::*;
-use crate::content_key::ContentKeyRing;
-use crate::ids::{ClientMessageId, UserId};
+use crate::content_key::{ContentKey, ContentKeyRing};
+use crate::ids::{ClientMessageId, DeviceId, UserId};
 use crate::membership::tests::{TestAuthority, TestDirectory, TestUser};
 use crate::membership::{HistoryShare, MembershipError};
 use crate::message::{MessageContext, MessageError, decrypt_message, encrypt_message};
@@ -48,7 +48,7 @@ fn add_member_and_share_full_history() {
     .collect();
   assert_eq!(ids, members, "final certificates with the members' device ids");
 
-  let bundle = ContentKeyBundle::for_new_member(&mut world.alice_ring, HistoryShare::Full, &mut OsRng);
+  let bundle = ContentKeyBundle::full_history(&mut world.alice_ring, &mut OsRng);
   let key_message = world
     .alice_group
     .send_content_keys(&world.alice.provider, &world.alice.user.device, &bundle)
@@ -63,7 +63,13 @@ fn add_member_and_share_full_history() {
     &mut bob_ring,
   );
 
-  let plaintext = decrypt_message(&bob_ring, &world.alice_context(), &message_before_bob).unwrap();
+  let plaintext = decrypt_message(
+    &bob_ring,
+    &world.alice_context(),
+    &message_before_bob,
+    &world.alice_key(),
+  )
+  .unwrap();
   assert_eq!(plaintext.expose_secret(), b"before Bob joined");
 }
 
@@ -75,7 +81,13 @@ fn from_join_history_hides_earlier_messages() {
   let output = world.commit_change(&change, &[world.bob.key_package()]);
   let mut bob_group = world.bob_joins(&output);
 
-  let bundle = ContentKeyBundle::for_new_member(&mut world.alice_ring, HistoryShare::FromJoin, &mut OsRng);
+  // The members switch to the new epoch's key; Bob derives the same one and gets it as current.
+  let epoch_key = world.alice_rotates_to_epoch_key();
+  assert_eq!(
+    bob_group.epoch_content_key(&world.bob.provider).unwrap().id(),
+    epoch_key.id()
+  );
+  let bundle = ContentKeyBundle::epoch_key(CONVERSATION, epoch_key);
   let key_message = world
     .alice_group
     .send_content_keys(&world.alice.provider, &world.alice.user.device, &bundle)
@@ -91,14 +103,24 @@ fn from_join_history_hides_earlier_messages() {
   );
 
   assert!(matches!(
-    decrypt_message(&bob_ring, &world.alice_context(), &message_before_bob),
+    decrypt_message(
+      &bob_ring,
+      &world.alice_context(),
+      &message_before_bob,
+      &world.alice_key()
+    ),
     Err(MessageError::UnknownKey(_))
   ));
   let message_after = world.alice_message(b"welcome Bob");
   assert_eq!(
-    decrypt_message(&bob_ring, &world.alice_context(), &message_after)
-      .unwrap()
-      .expose_secret(),
+    decrypt_message(
+      &bob_ring,
+      &world.alice_context(),
+      &message_after,
+      &world.alice_key()
+    )
+    .unwrap()
+    .expose_secret(),
     b"welcome Bob"
   );
 }
@@ -136,33 +158,44 @@ fn removed_member_cannot_read_new_messages() {
   };
   assert!(bob_update.is_self_removed);
 
-  // Rotation after removal (e2ee.md §4.2): Carol gets the new key, Bob can't decrypt the bundle.
-  let bundle = ContentKeyBundle::rotate(&mut world.alice_ring, &mut OsRng);
-  let key_message = world
-    .alice_group
-    .send_content_keys(&world.alice.provider, &world.alice.user.device, &bundle)
-    .unwrap();
-  assert!(matches!(
-    world.carol_processes(&key_message),
-    Ok(GroupEvent::ContentKeys { .. })
-  ));
-  assert!(
-    bob_group
-      .process_message(
-        &world.bob.provider,
-        &key_message,
-        &world.directory,
-        &world.authority
-      )
-      .is_err()
+  // Rotation after removal (e2ee.md §4.2): every remaining member derives the new epoch's key
+  // when it merges the removal; there is no separate message the server could hold back.
+  let epoch_key = world.alice_rotates_to_epoch_key();
+  assert_eq!(
+    world
+      .carol_group
+      .epoch_content_key(&world.carol.provider)
+      .unwrap()
+      .id(),
+    epoch_key.id()
   );
-
   let bobs_old_ring = ContentKeyRing::new(CONVERSATION);
   let message_after = world.alice_message(b"after Bob left");
   assert!(matches!(
-    decrypt_message(&bobs_old_ring, &world.alice_context(), &message_after),
+    decrypt_message(
+      &bobs_old_ring,
+      &world.alice_context(),
+      &message_after,
+      &world.alice_key()
+    ),
     Err(MessageError::UnknownKey(_))
   ));
+}
+
+#[test]
+fn epoch_keys_differ_per_epoch_and_conversation() {
+  let mut world = World::new();
+  let first = world
+    .alice_group
+    .epoch_content_key(&world.alice.provider)
+    .unwrap();
+  let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+  world.commit_change(&change, &[world.bob.key_package()]);
+  let second = world
+    .alice_group
+    .epoch_content_key(&world.alice.provider)
+    .unwrap();
+  assert_ne!(first.id(), second.id());
 }
 
 #[test]
@@ -380,11 +413,200 @@ mod rejection {
   }
 
   #[test]
+  fn later_joiner_refuses_an_old_add_replayed_after_a_removal() {
+    // Security review A3: Alice added Bob, Bob was removed, Dave joined later. The server hands
+    // Dave the old signed "add Bob"; Dave never saw it applied, but it predates his join.
+    let mut world = World::new();
+    let add_bob = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+    world.commit_change(&add_bob, &[world.bob.key_package()]);
+    let remove_bob = world.signed_change(
+      ALICE,
+      MembershipAction::RemoveUser {
+        user_id: UserId::new(BOB),
+      },
+    );
+    world.commit_change(&remove_bob, &[]);
+    let add_dave = world.signed_change(ALICE, add(DAVE, HistoryShare::Full));
+    let output = world.commit_change(&add_dave, &[world.dave.key_package()]);
+    let mut dave_group = ConversationGroup::join(
+      &world.dave.provider,
+      output.maybe_welcome.as_ref().unwrap(),
+      CONVERSATION,
+      &world.directory,
+    )
+    .unwrap();
+
+    let result = dave_group.commit_membership_change(
+      &world.dave.provider,
+      &world.dave.user.device,
+      &add_bob,
+      &[world.bob.key_package()],
+      &world.directory,
+      &world.authority,
+    );
+    assert!(matches!(result, Err(MlsError::StaleChange { .. })));
+  }
+
+  #[test]
+  fn change_is_stale_once_its_user_changed_again() {
+    // Two adds of Bob signed in the same epoch: once one is committed, the other is stale.
+    let mut world = World::new();
+    let first = world.signed_change(ALICE, add(BOB, HistoryShare::FromJoin));
+    let second = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+    let output = world.commit_change(&first, &[world.bob.key_package()]);
+    world.carol_processes(&output.commit).unwrap();
+    let remove_bob = world.signed_change(
+      ALICE,
+      MembershipAction::RemoveUser {
+        user_id: UserId::new(BOB),
+      },
+    );
+    let output = world.commit_change(&remove_bob, &[]);
+    world.carol_processes(&output.commit).unwrap();
+
+    let commit = world.raw_alice_commit(&[world.bob.key_package()], &[], second.to_bytes().unwrap());
+    world.expect_carol_rejects(&commit, |error| matches!(error, MlsError::StaleChange { .. }));
+  }
+
+  #[test]
+  fn change_signed_for_a_future_epoch_is_refused() {
+    let mut world = World::new();
+    let future = MembershipChange::new(
+      CONVERSATION,
+      world.alice_group.epoch() + 1,
+      add(BOB, HistoryShare::Full),
+      &mut OsRng,
+    )
+    .sign(&world.alice.user.device, world.alice.user.certificate.clone())
+    .unwrap();
+    let commit = world.raw_alice_commit(&[world.bob.key_package()], &[], future.to_bytes().unwrap());
+    world.expect_carol_rejects(&commit, |error| matches!(error, MlsError::StaleChange { .. }));
+  }
+
+  #[test]
+  fn a_revoked_device_is_not_added_back() {
+    // Security review A4: Carol's lost phone was removed; the server serves its old key package.
+    let mut world = World::new();
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let output = world
+      .carol_group
+      .commit_device_additions(
+        &world.carol.provider,
+        &world.carol.user.device,
+        &[carol_phone.key_package()],
+        &world.directory,
+      )
+      .unwrap();
+    world.carol_group.confirm_commit(&world.carol.provider).unwrap();
+    world
+      .alice_group
+      .process_message(
+        &world.alice.provider,
+        &output.commit,
+        &world.directory,
+        &world.authority,
+      )
+      .unwrap();
+    let revoke = world.signed_change(
+      CAROL,
+      MembershipAction::RemoveDevice {
+        user_id: UserId::new(CAROL),
+        device_id: DeviceId::new(301),
+      },
+    );
+    let output = world
+      .carol_group
+      .commit_membership_change(
+        &world.carol.provider,
+        &world.carol.user.device,
+        &revoke,
+        &[],
+        &world.directory,
+        &world.authority,
+      )
+      .unwrap();
+    world.carol_group.confirm_commit(&world.carol.provider).unwrap();
+    world
+      .alice_group
+      .process_message(
+        &world.alice.provider,
+        &output.commit,
+        &world.directory,
+        &world.authority,
+      )
+      .unwrap();
+
+    let result = world.alice_group.commit_device_additions(
+      &world.alice.provider,
+      &world.alice.user.device,
+      &[carol_phone.key_package()],
+      &world.directory,
+    );
+    assert!(matches!(result, Err(MlsError::RemovedDevice(_))));
+  }
+
+  #[test]
+  fn devices_missing_from_the_device_list_are_refused() {
+    let mut world = World::new();
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let directory = InactiveDevices {
+      inner: &world.directory,
+      inactive: DeviceId::new(301),
+    };
+    let result = world.carol_group.commit_device_additions(
+      &world.carol.provider,
+      &world.carol.user.device,
+      &[carol_phone.key_package()],
+      &directory,
+    );
+    assert!(matches!(result, Err(MlsError::InactiveDevice(_))));
+
+    // A member whose directory has the newer list refuses the commit of one that doesn't.
+    let commit = world
+      .carol_group
+      .commit_device_additions(
+        &world.carol.provider,
+        &world.carol.user.device,
+        &[carol_phone.key_package()],
+        &world.directory,
+      )
+      .unwrap()
+      .commit;
+    let error = world
+      .alice_group
+      .process_message(&world.alice.provider, &commit, &directory, &world.authority)
+      .unwrap_err();
+    assert!(matches!(error, MlsError::InactiveDevice(_)));
+  }
+
+  /// A directory whose device lists leave out one device.
+  struct InactiveDevices<'a> {
+    inner: &'a TestDirectory,
+    inactive: DeviceId,
+  }
+
+  impl IdentityDirectory for InactiveDevices<'_> {
+    fn pinned_identity(&self, user_id: UserId) -> Option<crate::identity::IdentityPublicKey> {
+      self.inner.pinned_identity(user_id)
+    }
+
+    fn is_active_device(&self, device: &VerifiedDevice) -> bool {
+      device.device_id() != self.inactive
+    }
+  }
+
+  #[test]
   fn member_rejects_change_for_other_conversation() {
     let mut world = World::new();
-    let change = MembershipChange::new(ConversationId::new(43), add(DAVE, HistoryShare::Full), &mut OsRng)
-      .sign(&world.alice.user.device, world.alice.user.certificate.clone())
-      .unwrap();
+    let epoch = world.alice_group.epoch();
+    let change = MembershipChange::new(
+      ConversationId::new(43),
+      epoch,
+      add(DAVE, HistoryShare::Full),
+      &mut OsRng,
+    )
+    .sign(&world.alice.user.device, world.alice.user.certificate.clone())
+    .unwrap();
     let commit = world.raw_alice_commit(&[world.dave.key_package()], &[], change.to_bytes().unwrap());
     world.expect_carol_rejects(&commit, |error| {
       matches!(error, MlsError::WrongConversation { .. })
@@ -427,7 +649,7 @@ mod rejection {
   #[test]
   fn rejects_old_epoch_application_message() {
     let mut world = World::new();
-    let bundle = ContentKeyBundle::rotate(&mut world.alice_ring, &mut OsRng);
+    let bundle = ContentKeyBundle::full_history(&mut world.alice_ring, &mut OsRng);
     let stale = world
       .alice_group
       .send_content_keys(&world.alice.provider, &world.alice.user.device, &bundle)
@@ -445,7 +667,7 @@ mod rejection {
   #[test]
   fn rejects_replayed_application_message() {
     let mut world = World::new();
-    let bundle = ContentKeyBundle::rotate(&mut world.alice_ring, &mut OsRng);
+    let bundle = ContentKeyBundle::full_history(&mut world.alice_ring, &mut OsRng);
     let key_message = world
       .alice_group
       .send_content_keys(&world.alice.provider, &world.alice.user.device, &bundle)
@@ -524,7 +746,7 @@ impl World {
       CONVERSATION,
     )
     .unwrap();
-    let add_carol = MembershipChange::new(CONVERSATION, add(CAROL, HistoryShare::Full), &mut OsRng)
+    let add_carol = MembershipChange::new(CONVERSATION, 0, add(CAROL, HistoryShare::Full), &mut OsRng)
       .sign(&alice.user.device, alice.user.certificate.clone())
       .unwrap();
     let output = alice_group
@@ -565,7 +787,7 @@ impl World {
       .into_iter()
       .find(|client| client.user.user_id == UserId::new(signer))
       .unwrap();
-    MembershipChange::new(CONVERSATION, action, &mut OsRng)
+    MembershipChange::new(CONVERSATION, self.alice_group.epoch(), action, &mut OsRng)
       .sign(&user.user.device, user.user.certificate.clone())
       .unwrap()
   }
@@ -661,6 +883,19 @@ impl World {
       .index
   }
 
+  /// Alice derives the current epoch's content key and makes it current, as after a removal.
+  fn alice_rotates_to_epoch_key(&mut self) -> ContentKey {
+    let key = self.alice_group.epoch_content_key(&self.alice.provider).unwrap();
+    let id = key.id();
+    self.alice_ring.insert(key.duplicate()).unwrap();
+    self.alice_ring.set_current(id).unwrap();
+    key
+  }
+
+  fn alice_key(&self) -> crate::identity::DeviceSigningPublicKey {
+    self.alice.user.device.public_keys().signing_key
+  }
+
   fn alice_context(&self) -> MessageContext {
     MessageContext {
       conversation_id: CONVERSATION,
@@ -671,7 +906,14 @@ impl World {
   }
 
   fn alice_message(&self, plaintext: &[u8]) -> crate::message::EncryptedMessage {
-    encrypt_message(&self.alice_ring, &self.alice_context(), plaintext, &mut OsRng).unwrap()
+    encrypt_message(
+      &self.alice_ring,
+      &self.alice_context(),
+      plaintext,
+      &self.alice.user.device,
+      &mut OsRng,
+    )
+    .unwrap()
   }
 }
 
@@ -731,7 +973,8 @@ fn group_survives_reload_from_storage() {
   let applied: Vec<ChangeId> = world.alice_group.applied_changes().copied().collect();
   assert!(!world.alice_group.has_pending_commit());
 
-  let reloaded = ConversationGroup::load(&world.alice.provider, CONVERSATION, applied)
+  let history = ChangeHistory::from_bytes(&world.alice_group.change_history().to_bytes().unwrap()).unwrap();
+  let reloaded = ConversationGroup::load(&world.alice.provider, CONVERSATION, applied, history)
     .unwrap()
     .unwrap();
   assert_eq!(reloaded.epoch(), world.alice_group.epoch());
@@ -742,9 +985,14 @@ fn group_survives_reload_from_storage() {
       .any(|id| *id == change.unverified().change_id())
   );
   assert!(
-    ConversationGroup::load(&world.alice.provider, ConversationId::new(99), [])
-      .unwrap()
-      .is_none()
+    ConversationGroup::load(
+      &world.alice.provider,
+      ConversationId::new(99),
+      [],
+      ChangeHistory::default()
+    )
+    .unwrap()
+    .is_none()
   );
 }
 
@@ -769,9 +1017,14 @@ fn last_resort_key_package_can_be_used_twice() {
     ConversationId::new(77),
   )
   .unwrap();
-  let change = MembershipChange::new(ConversationId::new(77), add(BOB, HistoryShare::Full), &mut OsRng)
-    .sign(&world.alice.user.device, world.alice.user.certificate.clone())
-    .unwrap();
+  let change = MembershipChange::new(
+    ConversationId::new(77),
+    0,
+    add(BOB, HistoryShare::Full),
+    &mut OsRng,
+  )
+  .sign(&world.alice.user.device, world.alice.user.certificate.clone())
+  .unwrap();
   let output = other
     .commit_membership_change(
       &world.alice.provider,

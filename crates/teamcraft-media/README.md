@@ -53,7 +53,7 @@ the hardware fails mid-call. Where none can be built, OpenH264 is used from the 
 
 | Platform | Encoder                                         | Build                                          |
 |----------|-------------------------------------------------|------------------------------------------------|
-| Linux    | `vah264enc` (VA-API) through GStreamer          | feature `gstreamer`; GStreamer dev packages    |
+| Linux    | `vah264enc` (VA-API), then `v4l2h264enc` (ARM)  | feature `gstreamer`; GStreamer dev packages    |
 | macOS    | `vtenc_h264` (VideoToolbox) through GStreamer   | feature `gstreamer`; compiles, untested        |
 | Windows  | `mfh264enc` (Media Foundation) through GStreamer| feature `gstreamer`; GStreamer MSVC runtime; compiles, untested |
 | Android  | MediaCodec through the NDK (`ndk` crate)        | always with `native`                           |

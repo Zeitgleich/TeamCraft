@@ -1,9 +1,12 @@
 //! OIDC attestation of the identity key (e2ee.md §3.1), Keycloak flavour.
 //!
-//! The client writes the identity key fingerprint into the user attribute `tc_identity_key` via the
+//! The client writes the attestation claim (`"<user id>:<fingerprint>"`,
+//! [`crate::PendingEnrollment::attestation_claim`]) into the user attribute `tc_identity_key` via the
 //! Keycloak account API, authenticated by the user's own access token. After the app refreshes its
-//! tokens, the ID token carries the fingerprint as claim `tc_identity_key`; that token is the
-//! attestation passed to enrollment ([`crate::EnrollmentOptions::maybe_attestation`]).
+//! tokens, the ID token carries it as claim `tc_identity_key`; that token is the attestation passed
+//! to enrollment ([`crate::EnrollmentOptions::maybe_attestation`]), and colleagues' clients verify
+//! it against the identity provider's keys before pinning (`ClientSettings::maybe_attestation`).
+//! The realm must sign ID tokens with ES256 or EdDSA.
 //!
 //! Optional by design: Keycloak only stores the attribute if the realm's user profile declares it
 //! (or allows unmanaged attributes). Without that, enrollment proceeds with trust on first use.
@@ -30,13 +33,13 @@ pub enum AttestationError {
   AttributeNotStored,
 }
 
-/// Writes `fingerprint` into the user's `tc_identity_key` attribute through the Keycloak account
-/// API of `issuer` (e.g. `https://id.example.com/realms/company`).
+/// Writes `claim` into the user's `tc_identity_key` attribute through the Keycloak account API of
+/// `issuer` (e.g. `https://id.example.com/realms/company`).
 pub async fn write_identity_attribute(
   http: &reqwest::Client,
   issuer: &str,
   access_token: &str,
-  fingerprint: &str,
+  claim: &str,
 ) -> Result<(), AttestationError> {
   let url = format!("{}/account", issuer.trim_end_matches('/'));
   let mut account = get_account(http, &url, access_token).await?;
@@ -48,7 +51,7 @@ pub async fn write_identity_attribute(
   if let Some(map) = attributes.as_object_mut() {
     map.insert(
       IDENTITY_KEY_ATTRIBUTE.into(),
-      Value::Array(vec![Value::String(fingerprint.into())]),
+      Value::Array(vec![Value::String(claim.into())]),
     );
   }
   let response = http
@@ -70,7 +73,7 @@ pub async fn write_identity_attribute(
   let is_stored = stored
     .pointer(&format!("/attributes/{IDENTITY_KEY_ATTRIBUTE}/0"))
     .and_then(Value::as_str)
-    .is_some_and(|value| value == fingerprint);
+    .is_some_and(|value| value == claim);
   if is_stored {
     Ok(())
   } else {

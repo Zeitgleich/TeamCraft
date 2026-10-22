@@ -733,11 +733,28 @@ mod email_replies {
     )
   }
 
+  /// A reply as the inbox handler would forward it: the sender is the attendee of the reply.
   async fn post_reply(app: &TestApp, maybe_token: Option<&str>, body: String) -> (StatusCode, Value) {
+    let sender = body
+      .split("mailto:")
+      .nth(1)
+      .and_then(|rest| rest.split(['\r', '\n']).next())
+      .unwrap_or("nobody@example.org")
+      .to_owned();
+    post_reply_from(app, maybe_token, &sender, body).await
+  }
+
+  async fn post_reply_from(
+    app: &TestApp,
+    maybe_token: Option<&str>,
+    sender: &str,
+    body: String,
+  ) -> (StatusCode, Value) {
     let mut request = app
       .http
       .post(format!("{}/api/internal/v1/meetings/replies", app.base_url))
       .header("content-type", "text/calendar")
+      .header("x-envelope-sender", sender)
       .body(body);
     if let Some(token) = maybe_token {
       request = request.bearer_auth(token);
@@ -745,6 +762,59 @@ mod email_replies {
     let response = request.send().await.unwrap();
     let status = response.status();
     (status, response.json().await.unwrap_or(Value::Null))
+  }
+
+  #[tokio::test]
+  async fn only_the_attendee_can_answer_for_themselves_and_only_for_themselves() {
+    let (app, _) = app!();
+    let alice = owner();
+    let id = schedule(
+      &app,
+      &alice,
+      json!([{"kind": "external", "email": "gus@example.org"}, {"kind": "external", "email": "hana@example.org"}]),
+    )
+    .await
+    .id();
+    let uid = format!("{id}@chat.example.com");
+    let reply = reply_for(&uid, "gus@example.org", "DECLINED");
+
+    // Mail from somebody else, or without a sender, changes nothing.
+    let (status, _) = post_reply_from(&app, Some(INBOX_TOKEN), "mallory@example.org", reply.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let response = app
+      .http
+      .post(format!("{}/api/internal/v1/meetings/replies", app.base_url))
+      .bearer_auth(INBOX_TOKEN)
+      .header("content-type", "text/calendar")
+      .body(reply.clone())
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // A reply with two attendees is refused whoever sends it.
+    let two = reply.replace(
+      "END:VEVENT",
+      "ATTENDEE;PARTSTAT=DECLINED:mailto:hana@example.org\r\nEND:VEVENT",
+    );
+    assert_eq!(
+      post_reply_from(&app, Some(INBOX_TOKEN), "gus@example.org", two)
+        .await
+        .0,
+      StatusCode::BAD_REQUEST
+    );
+    let meeting = app.get(&alice, &format!("/meetings/{id}")).await;
+    assert!(
+      meeting.body["attendees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["rsvp"] != "declined")
+    );
+
+    // The sender may be written as a header value with a display name.
+    let (status, body) = post_reply_from(&app, Some(INBOX_TOKEN), "Gus Guest <Gus@Example.org>", reply).await;
+    assert_eq!((status, body["applied"].as_u64()), (StatusCode::OK, Some(1)));
+    app.stop().await;
   }
 
   #[tokio::test]

@@ -4,7 +4,7 @@
 use rand_core::OsRng;
 use teamcraft_crypto::key_bag::KeyBag;
 use teamcraft_crypto::message::{
-  EncryptedMessage, MessageContext, MessageError, decrypt_message, encrypt_message,
+  EncryptedMessage, MessageContext, MessageError, decrypt_message, decrypt_unsigned_message, encrypt_message,
 };
 use teamcraft_proto::{
   Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, MessageResponse, SendMessageRequest,
@@ -28,6 +28,10 @@ pub struct FlushReport {
   /// Rejected by the server; kept with the error for the UI to offer "retry" or "delete".
   pub failed: usize,
 }
+
+/// Messages a removed device sent shortly before its removal reached this device can carry a
+/// slightly later server time; they still count.
+const REMOVED_SENDER_GRACE_MS: i64 = 5 * 60 * 1000;
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes a text message to the store and the outbox, then tries to send it. Works offline: the
@@ -249,8 +253,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Already known (own message echoed back, or a duplicate delivery).
       return Ok(());
     }
+    if self.sent_after_leaving(&message)? {
+      // Signed by a device that had left the conversation when this was sent (security review A10).
+      tracing::warn!(conversation_id = %conversation, message_id = %message.id, "dropped a message from a removed device");
+      return Ok(());
+    }
     match self.decrypt(&message) {
-      Ok(content) => {
+      Ok(mut content) => {
+        if let MessageContent::Text { meta, .. } = &mut content
+          && let Some(head) = meta.maybe_workspace_head.take()
+        {
+          self.note_workspace_head(&head)?;
+        }
         self.store.upsert_message(&StoredMessage {
           conversation_id: conversation,
           client_message_id: message.client_message_id,
@@ -275,14 +289,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .delete(Table::Undecrypted, &undecrypted_key(&message))?;
         Ok(())
       },
-      Err(CoreError::Message(MessageError::UnknownKey(_))) | Err(CoreError::NoContentKey(_)) => {
-        records::put_json(
-          &self.store,
-          Table::Undecrypted,
-          &undecrypted_key(&message),
-          &message,
-        )
-      },
+      Err(CoreError::Message(MessageError::UnknownKey(_)))
+      | Err(CoreError::NoContentKey(_))
+      | Err(CoreError::UnknownSender { .. }) => records::put_json(
+        &self.store,
+        Table::Undecrypted,
+        &undecrypted_key(&message),
+        &message,
+      ),
       Err(error) => {
         // Tampered or wrongly attributed ciphertext: never shown (e2ee.md §4.4).
         tracing::warn!(conversation_id = %conversation, message_id = %message.id, %error, "dropped undecryptable message");
@@ -342,11 +356,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     else {
       return Ok(false);
     };
-    let plaintext = Zeroizing::new(
-      serde_json::to_vec(&stored.content).map_err(|error| CoreError::Corrupt(error.to_string()))?,
-    );
+    let mut content = stored.content.clone();
+    if let MessageContent::Text { meta, .. } = &mut content {
+      meta.maybe_workspace_head = Some(Box::new(self.workspace()?.head()));
+    }
+    let plaintext =
+      Zeroizing::new(serde_json::to_vec(&content).map_err(|error| CoreError::Corrupt(error.to_string()))?);
     let context = self.message_context(entry.conversation_id, entry.client_message_id);
-    let encrypted = encrypt_message(ring, &context, &plaintext, &mut OsRng)?;
+    let encrypted = encrypt_message(ring, &context, &plaintext, &self.account.device, &mut OsRng)?;
     let request = SendMessageRequest {
       client_message_id: entry.client_message_id,
       device_id: self.account.device_id,
@@ -369,7 +386,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn decrypt(&self, message: &MessageResponse) -> Result<MessageContent, CoreError> {
-    decrypt_content(&self.account.key_bag, message)
+    let maybe_sender_key = if message.sender_device_id == self.account.device_id {
+      Some(self.account.device.public_keys().signing_key)
+    } else {
+      records::device_signing_key(&self.store, message.sender_user_id, message.sender_device_id)?
+    };
+    decrypt_content(
+      &self.account.key_bag,
+      message,
+      maybe_sender_key.as_ref(),
+      self.settings.accept_unsigned_messages,
+    )
+  }
+
+  /// Whether the message's device had left the conversation before the message's time.
+  fn sent_after_leaving(&self, message: &MessageResponse) -> Result<bool, CoreError> {
+    let key = format!(
+      "{}/{}/{}",
+      message.conversation_id, message.sender_user_id, message.sender_device_id
+    );
+    let maybe_left_at: Option<i64> = records::get_json(&self.store, Table::RemovedSenders, &key)?;
+    Ok(maybe_left_at.is_some_and(|left_at| {
+      message.id.snowflake().unix_millis() > left_at.saturating_add(REMOVED_SENDER_GRACE_MS)
+    }))
   }
 
   fn message_context(
@@ -394,11 +433,15 @@ fn undecrypted_key(message: &MessageResponse) -> String {
   )
 }
 
-/// Decrypts a message with the content keys in `key_bag`. Unknown content kinds (from newer
-/// clients) become [`MessageContent::Unknown`].
+/// Decrypts a message with the content keys in `key_bag`, checking the sender device's signature
+/// with `maybe_sender_key` (its verified signing key; without one a signed message waits). Unsigned
+/// messages from before signatures are opened only with `accept_unsigned`. Unknown content kinds
+/// (from newer clients) become [`MessageContent::Unknown`].
 pub(crate) fn decrypt_content(
   key_bag: &KeyBag,
   message: &MessageResponse,
+  maybe_sender_key: Option<&teamcraft_crypto::identity::DeviceSigningPublicKey>,
+  accept_unsigned: bool,
 ) -> Result<MessageContent, CoreError> {
   let ring = key_bag
     .ring(convert::conversation(message.conversation_id))
@@ -410,7 +453,17 @@ pub(crate) fn decrypt_content(
     sender_device_id: convert::device(message.sender_device_id),
     client_message_id: convert::client_message(message.client_message_id),
   };
-  let plaintext = decrypt_message(ring, &context, &encrypted)?;
+  let plaintext = if encrypted.is_signed() {
+    let sender_key = maybe_sender_key.ok_or(CoreError::UnknownSender {
+      user: message.sender_user_id,
+      device: message.sender_device_id,
+    })?;
+    decrypt_message(ring, &context, &encrypted, sender_key)?
+  } else if accept_unsigned {
+    decrypt_unsigned_message(ring, &context, &encrypted)?
+  } else {
+    return Err(CoreError::Message(MessageError::InvalidSignature));
+  };
   Ok(serde_json::from_slice(plaintext.expose_secret()).unwrap_or(MessageContent::Unknown))
 }
 

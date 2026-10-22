@@ -7,7 +7,9 @@
 mod account;
 mod actions;
 mod attachments;
+mod attested;
 mod calls;
+mod devices;
 mod enroll;
 pub mod files;
 mod gateway;
@@ -34,8 +36,9 @@ pub use account::stored_account_data;
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
 pub use attachments::OutgoingFile;
+pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner};
-pub use enroll::{EnrollmentOptions, OrgRecoveryUnlock, PendingEnrollment};
+pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::GatewayOutcome;
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use messaging::FlushReport;
@@ -44,10 +47,10 @@ pub(crate) use messaging::apply_control;
 pub(crate) use messaging::decrypt_content;
 pub use notifications::TYPING_TIMEOUT_MS;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-pub use org_recovery::SealedShare;
+pub use org_recovery::{SealedShare, recovery_request};
 use teamcraft_crypto::membership::ChangeId;
-use teamcraft_crypto::mls::ConversationGroup;
-use teamcraft_proto::{ConversationId, ConversationResponse, UserId};
+use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup};
+use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, UserId};
 
 use crate::api::ServerApi;
 use crate::clock::Clock;
@@ -81,6 +84,15 @@ pub struct ClientSettings {
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
   /// long a new device waits when the first-ranked members are away (presence isn't per device).
   pub device_add_max_rank: u32,
+  /// How old the newest signed roster may get before admins lose their authority on this client
+  /// (a server holding back a demotion gets at most this long, security review A6). Owners'
+  /// clients re-sign the roster after half of it.
+  pub workspace_max_age: std::time::Duration,
+  /// The identity provider that attests identity keys; `None`: trust on first use.
+  pub maybe_attestation: Option<AttestationSettings>,
+  /// Show messages from before senders signed them (their sender is only "some member"). Off by
+  /// default: a removed member could otherwise keep writing in anyone's name (security review A10).
+  pub accept_unsigned_messages: bool,
 }
 
 pub struct Client<A, S> {
@@ -95,6 +107,7 @@ pub struct Client<A, S> {
   typing: notifications::TypingState,
   maybe_call_sink: Option<CallEventSink>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
+  maybe_jwks_source: Option<Box<dyn JwksSource>>,
 }
 
 impl Default for ClientSettings {
@@ -110,6 +123,9 @@ impl Default for ClientSettings {
       maybe_download_dir: None,
       link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
+      workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      maybe_attestation: None,
+      accept_unsigned_messages: false,
     }
   }
 }
@@ -130,6 +146,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
     let sync = records::load_sync_state(&store)?;
     let maybe_preview_fetcher = previews::default_fetcher(&settings.link_previews);
+    let maybe_jwks_source = attested::default_jwks_source(settings.maybe_attestation.as_ref());
     Ok(Some(Self {
       api,
       store,
@@ -142,6 +159,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       typing: Default::default(),
       maybe_call_sink: None,
       maybe_preview_fetcher,
+      maybe_jwks_source,
     }))
   }
 
@@ -191,10 +209,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.groups.contains_key(&conversation) {
       let applied: Vec<[u8; 16]> =
         records::get_json(&self.store, Table::AppliedChanges, &conversation.to_string())?.unwrap_or_default();
+      let history = match records::get_json::<Base64Bytes>(
+        &self.store,
+        Table::AppliedChanges,
+        &history_key(conversation),
+      )? {
+        Some(bytes) => ChangeHistory::from_bytes(bytes.as_slice())?,
+        None => ChangeHistory::default(),
+      };
       let maybe_group = ConversationGroup::load(
         &self.provider,
         convert::conversation(conversation),
         applied.into_iter().map(ChangeId::from_bytes),
+        history,
       )?;
       match maybe_group {
         Some(group) => {
@@ -223,6 +250,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &conversation.to_string())?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &history_key(conversation))?;
     records::save_mls_storage(&self.store, &self.provider)
   }
 
@@ -236,6 +266,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Table::AppliedChanges,
         &conversation.to_string(),
         &applied,
+      )?;
+      records::put_json(
+        &self.store,
+        Table::AppliedChanges,
+        &history_key(conversation),
+        &Base64Bytes::new(group.change_history().to_bytes()?),
       )?;
     }
     Ok(())
@@ -258,13 +294,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &self,
     users: impl IntoIterator<Item = UserId>,
   ) -> Result<PinnedDirectory, CoreError> {
+    let users: Vec<UserId> = users.into_iter().collect();
     let mut pinned = records::pinned_identities(&self.store)?;
-    for user in users {
+    // Pins another device of the user made travel in the account data (security review A2).
+    let shared = self.account_data();
+    for user in users.iter().copied() {
+      if let std::collections::btree_map::Entry::Vacant(slot) = pinned.entry(user)
+        && let Some(public_key) = shared.pinned_key(user)
+      {
+        let entry = PinnedIdentity {
+          public_key,
+          maybe_changed_to: None,
+          // Checked (or not) by the device that pinned it.
+          is_attested: false,
+        };
+        records::pin_identity(&self.store, user, &entry)?;
+        slot.insert(entry);
+      }
+    }
+    for user in users.iter().copied() {
       if user == self.account.user_id {
         if let std::collections::btree_map::Entry::Vacant(slot) = pinned.entry(user) {
           let own = PinnedIdentity {
             public_key: *self.account.identity_public_key().as_bytes(),
             maybe_changed_to: None,
+            is_attested: true,
           };
           records::pin_identity(&self.store, user, &own)?;
           slot.insert(own);
@@ -285,32 +339,39 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       let public_key = <[u8; 32]>::try_from(response.public_key.as_slice())
         .map_err(|_| CoreError::Corrupt(format!("identity key of {user} has the wrong size")))?;
-      // TODO(attestation): verify `response.maybe_attestation` (ID token with claim
-      // tc_identity_key) against the identity provider's JWKS before pinning (e2ee.md §3.1).
       let entry = match pinned.get(&user) {
-        None => PinnedIdentity {
-          public_key,
-          maybe_changed_to: None,
+        None => {
+          // A first pin: checked against the identity provider's attestation (security review A1).
+          let check = self
+            .check_attestation(user, &public_key, response.maybe_attestation.as_deref())
+            .await;
+          if check == attested::PinCheck::Refused {
+            continue;
+          }
+          PinnedIdentity {
+            public_key,
+            maybe_changed_to: None,
+            is_attested: check == attested::PinCheck::Attested,
+          }
         },
         Some(existing) if existing.public_key == public_key => PinnedIdentity {
-          public_key,
           maybe_changed_to: None,
+          ..existing.clone()
         },
         Some(existing) => {
           tracing::warn!(user_id = %user, "identity key changed on the server; keeping the pinned key");
           PinnedIdentity {
-            public_key: existing.public_key,
             maybe_changed_to: Some(public_key),
+            ..existing.clone()
           }
         },
       };
       records::pin_identity(&self.store, user, &entry)?;
       pinned.insert(user, entry);
     }
-    Ok(PinnedDirectory::new(
-      &pinned,
-      &self.workspace()?.roster_identities(),
-    ))
+    let directory = PinnedDirectory::new(&pinned, &self.workspace()?.roster_identities());
+    let lists = self.stored_device_lists(&directory, &users);
+    Ok(directory.with_device_lists(lists))
   }
 
   fn cached_conversations(&self) -> Result<BTreeMap<ConversationId, ConversationResponse>, CoreError> {
@@ -334,4 +395,9 @@ impl<A, S> std::fmt::Debug for Client<A, S> {
       .field("account", &self.account)
       .finish_non_exhaustive()
   }
+}
+
+/// Where a group's change history (security review A3) is kept next to its applied change IDs.
+fn history_key(conversation: ConversationId) -> String {
+  format!("history/{conversation}")
 }

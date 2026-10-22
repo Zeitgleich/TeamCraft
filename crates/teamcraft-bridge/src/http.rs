@@ -18,7 +18,7 @@ use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use subtle::ConstantTimeEq;
 use teamcraft_proto::ConversationId;
 use tokio::sync::mpsc;
@@ -47,7 +47,7 @@ pub enum Submission {
 /// A producer as the endpoints see it.
 pub struct Source {
   pub name: String,
-  token: String,
+  token: SecretString,
   pub conversation: ConversationId,
   rules: LogRules,
   danger_is_alert: bool,
@@ -64,7 +64,7 @@ impl Source {
   pub fn from_config(config: &crate::config::SourceConfig) -> Self {
     Self {
       name: config.name.clone(),
-      token: config.token.expose_secret().to_owned(),
+      token: config.token.clone(),
       conversation: config.conversation_id,
       rules: config.log_rules(),
       danger_is_alert: config.danger_is_alert,
@@ -92,7 +92,7 @@ impl HttpState {
   fn find(&self, token: &str) -> Option<usize> {
     let mut found = None;
     for (index, source) in self.sources.iter().enumerate() {
-      if bool::from(source.token.as_bytes().ct_eq(token.as_bytes())) {
+      if bool::from(source.token.expose_secret().as_bytes().ct_eq(token.as_bytes())) {
         found = Some(index);
       }
     }

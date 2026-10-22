@@ -10,7 +10,7 @@ use super::crypto::{PushCryptoError, seal_wakeup};
 use crate::auth::BoxFuture;
 
 /// Where a push goes: one registered device.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PushTarget {
   pub user: UserId,
   pub device: DeviceId,
@@ -19,6 +19,27 @@ pub struct PushTarget {
   pub token: String,
   /// The 256-bit key shared with the device; seals the payload.
   pub push_key: Vec<u8>,
+}
+
+// The token and the push key are secrets: never printed, wiped from memory when the target goes.
+impl std::fmt::Debug for PushTarget {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("PushTarget")
+      .field("user", &self.user)
+      .field("device", &self.device)
+      .field("provider", &self.provider)
+      .field("token", &"[redacted]")
+      .field("push_key", &"[redacted]")
+      .finish()
+  }
+}
+
+impl Drop for PushTarget {
+  fn drop(&mut self) {
+    use zeroize::Zeroize as _;
+    self.token.zeroize();
+    self.push_key.zeroize();
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +182,19 @@ mod tests {
   use teamcraft_proto::{ConversationId, Id, PushKind, Snowflake};
 
   use super::*;
+
+  #[test]
+  fn a_push_target_prints_no_secrets() {
+    let mut secret = target(PushProvider::Fcm);
+    secret.token = "device-token-SECRET".into();
+    secret.push_key = vec![0xAB; 32];
+    let text = format!("{secret:?}");
+    assert!(
+      !text.contains("SECRET") && !text.contains("171") && !text.contains("ab"),
+      "{text}"
+    );
+    assert!(text.contains("[redacted]"));
+  }
 
   fn target(provider: PushProvider) -> PushTarget {
     PushTarget {

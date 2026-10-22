@@ -192,6 +192,18 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 15. **Workspace:** no endpoint to move a channel between spaces; `membership_add` has no
     `added_by`, so "added by" comes from the encrypted system message only.
 
+16. **Device lists** (security review A4): no `GET /users/{id}/device-list` / `PUT /me/device-list`
+    yet (opaque signed blob, compare-and-swap on `sequence`). Clients publish and check lists when
+    the endpoints exist and fall back to certificates only while they return 404.
+17. **Removals** (security review A8): clients no longer sign removals the server reports. Deactivating
+    a user has to go through admins' clients (`admin_remove_member` per conversation), so the admin
+    API needs the list of a user's conversations; until then a deactivated user stays in the MLS
+    groups (the server stops delivering to them).
+
+18. **Org recovery** (security review B3, B4): the recovery request endpoints should carry the request
+    ID, user and request key (`RecoveryRequest`); the approval log should tell owners' clients that a
+    recovery finished, so they rotate the org key automatically (`rotate_org_recovery`).
+
 ## Mobile
 
 `crates/teamcraft-ffi` wraps the core for the mobile apps (UniFFI); Android builds with the

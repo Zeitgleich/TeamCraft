@@ -7,11 +7,11 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{Peer, clock, options, settings, settle};
+use common::{Peer, clock, linked_options, settings, settle};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::store::MemoryStore;
-use teamcraft_core::{LinkOffer, PendingEnrollment};
+use teamcraft_core::{CoreError, LinkOffer, PendingEnrollment};
 
 #[tokio::test]
 async fn new_laptop_is_linked_by_scanning_its_code() {
@@ -49,8 +49,7 @@ async fn new_laptop_is_linked_by_scanning_its_code() {
   // The user confirmed the codes on the phone.
   alice.client.complete_link_approval(phone_side).await.unwrap();
   let secrets = laptop_side.receive_secrets().await.unwrap();
-  let mut link_options = options("no passphrase needed");
-  link_options.maybe_linked = Some(secrets);
+  let link_options = linked_options(secrets);
   let mut laptop = PendingEnrollment::new()
     .complete(
       laptop_api,
@@ -68,6 +67,39 @@ async fn new_laptop_is_linked_by_scanning_its_code() {
   laptop.load_older_messages(channel).await.unwrap();
   assert!(laptop.has_group(channel).unwrap());
   assert_eq!(laptop.undecrypted_count().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn linked_device_refuses_to_create_an_identity() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let laptop_api = alice.api.clone();
+  let offer = LinkOffer::generate();
+  let code = offer.to_code();
+  let (laptop_side, phone_side) = tokio::join!(
+    NewDeviceLink::connect(&laptop_api, &offer),
+    alice.client.start_link_approval(&code)
+  );
+  alice
+    .client
+    .complete_link_approval(phone_side.unwrap())
+    .await
+    .unwrap();
+  let secrets = laptop_side.unwrap().receive_secrets().await.unwrap();
+
+  // The server claims the account has no identity: a new one wrapped with a passphrase the
+  // server could guess must not be created (security review B1).
+  server.forget_identity_key(alice.client.user_id());
+  let result = PendingEnrollment::new()
+    .complete(
+      laptop_api,
+      Arc::new(MemoryStore::new()),
+      clock(),
+      settings(),
+      linked_options(secrets),
+    )
+    .await;
+  assert!(matches!(result, Err(CoreError::IdentityMissing)));
 }
 
 #[tokio::test]

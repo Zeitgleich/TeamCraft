@@ -6,6 +6,7 @@
 //! identity key without asking the server. Which identity keys count as owners is the caller's
 //! decision (the roster chain, rooted in the first owner pinned on first use).
 
+use sha2::{Digest, Sha256};
 use tls_codec::{
   DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize, VLByteSlice,
 };
@@ -36,6 +37,15 @@ struct SigningInput<'a> {
   log: WorkspaceLog,
   version: u64,
   payload: VLByteSlice<'a>,
+}
+
+/// Input of [`log_entry_hash`].
+#[derive(TlsSerialize, TlsSize)]
+struct HashInput<'a> {
+  log: WorkspaceLog,
+  version: u64,
+  payload: VLByteSlice<'a>,
+  signature: VLByteSlice<'a>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +113,25 @@ pub fn verify_log_entry(
     .verify_labeled(domain::WORKSPACE_LOG, &input, &entry.signature)
     .map_err(|_| WorkspaceLogError::InvalidSignature)?;
   Ok(device)
+}
+
+/// The hash of a whole log entry (signature included). The next entry's signed document names it,
+/// so the entries form a chain: a server that shows two clients different entries for one version
+/// can be caught by comparing heads (security review A6).
+pub fn log_entry_hash(
+  log: WorkspaceLog,
+  version: u64,
+  payload: &[u8],
+  signature: &[u8],
+) -> Result<[u8; 32], WorkspaceLogError> {
+  let input = HashInput {
+    log,
+    version,
+    payload: VLByteSlice(payload),
+    signature: VLByteSlice(signature),
+  }
+  .tls_serialize_detached()?;
+  Ok(Sha256::digest(domain::labeled(domain::WORKSPACE_LOG_HASH, &input)).into())
 }
 
 #[cfg(test)]

@@ -73,6 +73,7 @@ pub async fn list_conversations(
       maybe_max_members: query.maybe_max_members,
       maybe_is_orphaned: query.maybe_is_orphaned,
       maybe_after: query.maybe_after,
+      maybe_member: query.maybe_user_id,
       limit: i64::from(limit),
     })
     .await?;
@@ -161,9 +162,7 @@ pub async fn deactivate_user_as_admin(
       "admins can't deactivate themselves".into(),
     ));
   }
-  if state.database.get_user(user).await?.is_none() {
-    return Err(ApiError::user_not_found());
-  }
+  ensure_may_act_on(state, caller, user).await?;
   let note = request.maybe_note.unwrap_or_default();
   if note.chars().count() > state.settings.limits.max_text_length {
     return Err(ApiError::InvalidRequest("note is too long".into()));
@@ -177,6 +176,35 @@ pub async fn deactivate_user_as_admin(
   )
   .await?;
   Ok(())
+}
+
+/// Admins manage members, guests and bots; owners also manage admins and other owners. Without
+/// this an admin could lock every owner (the only signers of roster and policy) out of the
+/// workspace.
+async fn ensure_may_act_on(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  target: UserId,
+) -> Result<(), ApiError> {
+  let target_role = state
+    .database
+    .get_user_oidc_role(target)
+    .await?
+    .ok_or_else(ApiError::user_not_found)?;
+  let rank = |role: Option<&str>| match role {
+    Some("owner") => 3,
+    Some("admin") => 2,
+    _ => 1,
+  };
+  let caller_rank = rank(Some(caller.role.as_str()));
+  let target_rank = rank(target_role.as_deref());
+  if caller_rank > target_rank || (caller_rank == 3 && target_rank == 3) {
+    Ok(())
+  } else {
+    Err(ApiError::Forbidden(
+      "only owners can manage admins and owners".into(),
+    ))
+  }
 }
 
 /// Deactivates the account everywhere (used by admins and by the OIDC sync): devices are flagged
@@ -195,6 +223,9 @@ pub async fn deactivate_user(
   }
 
   state.hub.revoke_user(user);
+  for (conversation, _) in &effects.conversations {
+    super::calls::evict_from_call(state, *conversation, user).await;
+  }
   for (conversation, remaining) in &effects.conversations {
     state.hub.publish(
       remaining.iter().copied(),
@@ -239,6 +270,7 @@ pub async fn reactivate_user(
   user: UserId,
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
+  ensure_may_act_on(state, caller, user).await?;
   if !state.database.reactivate_user(user).await? {
     return Err(ApiError::user_not_found());
   }
@@ -261,6 +293,7 @@ pub async fn revoke_user_device(
   device: DeviceId,
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
+  ensure_may_act_on(state, caller, user).await?;
   super::devices::revoke_and_announce(state, caller.user.id, user, device, "admin").await
 }
 

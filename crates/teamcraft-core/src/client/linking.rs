@@ -9,6 +9,7 @@
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::key_bag::KeyBagBinding;
 use teamcraft_crypto::rendezvous::{Initiator, RendezvousChannel, RendezvousKey, Responder};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{Base64Bytes, RendezvousClientMessage, RendezvousServerMessage};
@@ -34,6 +35,8 @@ pub struct LinkedSecrets {
   pub(crate) backup_secret: SymmetricKey,
   pub(crate) encrypted_key_bag: Vec<u8>,
   pub(crate) key_bag_version: u64,
+  /// The wrapped backup keys the bag is bound to.
+  pub(crate) wrapped_keys: Vec<u8>,
 }
 
 /// The new device's side after the handshake.
@@ -53,6 +56,7 @@ struct TransferPayload {
   backup_key: Base64Bytes,
   encrypted_key_bag: Base64Bytes,
   key_bag_version: u64,
+  wrapped_backup_keys: Base64Bytes,
 }
 
 impl LinkOffer {
@@ -104,7 +108,7 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
     let mut connection = join(api, offer).await?;
     let initiator = Initiator::new(&offer.key, &mut OsRng);
     let hello = next_binary(&mut connection).await?;
-    let (awaiting, auth_hello) = initiator.receive_hello(&hello).map_err(link_error)?;
+    let (awaiting, auth_hello) = initiator.receive_hello(&hello, &mut OsRng).map_err(link_error)?;
     connection.send_binary(auth_hello).await?;
     let auth = next_binary(&mut connection).await?;
     let channel = awaiting.receive_auth(&auth).map_err(link_error)?;
@@ -128,6 +132,7 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
       backup_secret,
       encrypted_key_bag: payload.encrypted_key_bag.into_vec(),
       key_bag_version: payload.key_bag_version,
+      wrapped_keys: payload.wrapped_backup_keys.into_vec(),
     })
   }
 }
@@ -146,7 +151,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let (responder, hello) = Responder::new(&offer.key, &mut OsRng).map_err(link_error)?;
     connection.send_binary(hello).await?;
     let auth_hello = next_binary(&mut connection).await?;
-    let (channel, auth) = responder.receive_auth_hello(&auth_hello).map_err(link_error)?;
+    let (channel, auth) = responder
+      .receive_auth_hello(&auth_hello, &mut OsRng)
+      .map_err(link_error)?;
     connection.send_binary(auth).await?;
     Ok(LinkApproval { connection, channel })
   }
@@ -162,14 +169,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.sync.is_key_bag_dirty {
       self.upload_key_bag().await?;
     }
-    let encrypted = self
-      .account
-      .key_bag
-      .encrypt(&self.account.backup_key(), &mut OsRng)?;
+    let wrapped_keys = self.wrapped_keys_blob().await?;
+    let encrypted = self.account.key_bag.encrypt(
+      &self.account.backup_key(),
+      KeyBagBinding {
+        sequence: self.sync.key_bag_sequence,
+        wrapped_keys: &wrapped_keys,
+      },
+      &mut OsRng,
+    )?;
     let payload = TransferPayload {
       backup_key: Base64Bytes::new(self.account.backup_secret.expose_secret().to_vec()),
       encrypted_key_bag: Base64Bytes::new(encrypted.to_bytes()?),
       key_bag_version: self.sync.key_bag_version,
+      wrapped_backup_keys: Base64Bytes::new(wrapped_keys),
     };
     let plaintext =
       Zeroizing::new(serde_json::to_vec(&payload).map_err(|error| CoreError::Corrupt(error.to_string()))?);

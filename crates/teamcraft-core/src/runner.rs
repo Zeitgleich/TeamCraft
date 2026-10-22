@@ -208,6 +208,17 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         Ok(()) => self.changed(),
         Err(error) => tracing::debug!(%error, "account data not synced yet"),
       }
+      // Owners keep the signed roster fresh (a no-op for everyone else and while it is).
+      if let Err(error) = self.client.refresh_workspace_signatures().await {
+        tracing::debug!(%error, "roster not re-signed yet");
+      }
+      if let Err(error) = self.client.check_workspace_head().await {
+        tracing::debug!(%error, "workspace head not checked yet");
+      }
+      // A rotated org recovery key: wrap the backup key to the new one (security review B4).
+      if let Err(error) = self.client.rewrap_for_current_org_key().await {
+        tracing::debug!(%error, "backup key not wrapped to the new org key yet");
+      }
     }
     // Staggered commits (a colleague's new device) come due without a gateway event.
     if let Err(error) = self.client.apply_pending_changes().await {

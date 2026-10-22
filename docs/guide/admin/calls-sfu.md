@@ -42,7 +42,9 @@ Without `[calls]` the join-token endpoint answers 503 and clients cannot call.
 | `TEAMCRAFT_SFU_HEALTH_BIND`           | Health endpoint, default `[::]:8081` (orchestrator only)           |
 
 Without a certificate the SFU makes a short-lived self-signed one: only for tests. Do **not** set
-`TEAMCRAFT_SFU_DEV_HTTP` in production: dev mode accepts unsigned tokens when no public key is set.
+`TEAMCRAFT_SFU_DEV_HTTP` or `TEAMCRAFT_SFU_INSECURE_DEV_TOKENS` in production: unsigned dev tokens are
+accepted only with `TEAMCRAFT_SFU_INSECURE_DEV_TOKENS=1`, no public key, and loopback
+`TEAMCRAFT_SFU_BIND` and `TEAMCRAFT_SFU_DEV_HTTP`; otherwise all joins are rejected.
 
 Network: open `4433/udp` from clients (IPv4 and IPv6). The SFU holds no state; scale by running more
 and pointing `sfu_url` at one (single SFU per instance today).

@@ -34,7 +34,9 @@ other conversation (e2ee.md). Guests get an ephemeral device and show up as "Gue
 3. **Answer**: invitees answer in the app (`PUT /meetings/{id}/rsvp`) or by e-mail. The e-mail path
    is `POST /api/internal/v1/meetings/replies` with the iMIP REPLY as `text/calendar`, called by the
    inbox handler that receives the mail (or by CalCraft) with the `inbox_token`. That caller vouches
-   for the sender; the server does not authenticate mail itself.
+   for the sender by passing the authenticated envelope sender in `X-Envelope-Sender`; the server does
+   not authenticate mail itself, but accepts a reply only for exactly that address. A reply answers
+   for one attendee (RFC 5546) and is short; anything else is refused.
 4. **Guests**: the personal link is `<base>/meeting/<id>#invite=<token>`; the token is in the
    fragment, which browsers never send to servers. The web client sends it to
    `POST /meetings/join` (no authentication) together with a display name and receives a guest

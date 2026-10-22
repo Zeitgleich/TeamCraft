@@ -3,17 +3,23 @@
 //! The new device (initiator) draws a 32-byte authentication key `AK` and shows it in a QR code.
 //! The existing device (responder) scans it. Both run, over the server's opaque relay:
 //!
-//! 1. responder → initiator `hello`: its challenge and ephemeral X25519 key, sealed with the
-//!    responder authentication key derived from `AK`;
+//! 1. responder → initiator `hello`: its challenge and a *commitment* to its ephemeral X25519 key
+//!    (a hash), sealed with the responder authentication key derived from `AK`;
 //! 2. initiator → responder `auth_hello`: the responder's challenge back, its own challenge and
 //!    ephemeral key, sealed with the initiator authentication key;
-//! 3. responder → initiator `auth`: the initiator's challenge back.
+//! 3. responder → initiator `auth`: the initiator's challenge back and the committed key, which the
+//!    initiator checks against the commitment.
 //!
-//! Both then derive per-direction transport keys and a *path hash* from `AK` and the X25519 shared
-//! secret (HKDF-SHA256). Frames are ChaCha20-Poly1305 with a per-direction counter as nonce, so
-//! reordering, replay and dropped frames fail. The short code shown on both screens comes from the
-//! path hash: when `AK` travelled through the server (approval prompt instead of QR), a server that
-//! ran two handshakes in the middle ends up with different codes, which the user notices.
+//! Both then derive per-direction transport keys and a *path hash* from `AK`, the X25519 shared
+//! secret and the transcript (both ephemeral keys). Frames are ChaCha20-Poly1305 with a
+//! per-direction counter as nonce, so reordering, replay and dropped frames fail. Handshake messages
+//! carry a random nonce, so a code scanned twice never reuses one (security review B10).
+//!
+//! The 6-digit short code shown on both screens comes from the path hash. It matters when `AK`
+//! travelled through the server (approval prompt instead of QR): a server in the middle has to fix
+//! its key towards each side before it sees that side's key (the responder commits first, the
+//! initiator sends before the reveal), so it can't search for a key that makes the codes match, and
+//! low-order keys that would force a known shared secret are refused (security review B2).
 
 use std::fmt;
 
@@ -21,9 +27,9 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
 use rand_core::CryptoRngCore;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
+use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, SharedSecret};
 use zeroize::Zeroizing;
 
 use crate::domain;
@@ -31,8 +37,10 @@ use crate::secret::{SYMMETRIC_KEY_LEN, SecretBytes, SymmetricKey};
 
 const CHALLENGE_LEN: usize = 16;
 const PUBLIC_KEY_LEN: usize = 32;
-/// Digits of the short code compared by the user.
-const SHORT_CODE_DIGITS: u32 = 4;
+const COMMITMENT_LEN: usize = 32;
+const NONCE_LEN: usize = 12;
+/// Digits of the short code compared by the user (about 20 bits).
+const SHORT_CODE_DIGITS: u32 = 6;
 
 /// The authentication key `AK` (QR code content, together with the relay's rendezvous ID).
 pub struct RendezvousKey(SymmetricKey);
@@ -47,8 +55,9 @@ pub struct Initiator {
 /// Initiator after sending `auth_hello`, waiting for `auth`.
 pub struct InitiatorAwaitingAuth {
   keys: AuthKeys,
+  ephemeral: EphemeralSecret,
   challenge: [u8; CHALLENGE_LEN],
-  shared: Zeroizing<[u8; 32]>,
+  responder_commitment: [u8; COMMITMENT_LEN],
 }
 
 /// Responder after sending `hello`, waiting for `auth_hello`.
@@ -85,6 +94,10 @@ pub enum RendezvousError {
   BadHandshake,
   #[error("the peer did not answer the challenge correctly")]
   ChallengeMismatch,
+  #[error("the peer's key doesn't match its commitment")]
+  CommitmentMismatch,
+  #[error("the peer's key is a low-order point")]
+  NonContributory,
   #[error("frame could not be opened (tampered, replayed, reordered or wrong key)")]
   BadFrame,
   #[error("too many frames on this channel")]
@@ -121,25 +134,29 @@ impl Initiator {
   }
 
   /// Opens the responder's `hello` and answers with `auth_hello`.
-  pub fn receive_hello(self, hello: &[u8]) -> Result<(InitiatorAwaitingAuth, Vec<u8>), RendezvousError> {
-    let opened = open_handshake(&self.keys.responder, 0, hello)?;
-    let (responder_challenge, responder_key) = split_hello(opened.expose_secret())?;
-    let own_public = X25519PublicKey::from(&self.ephemeral).to_bytes();
-    let shared = Zeroizing::new(
-      self
-        .ephemeral
-        .diffie_hellman(&X25519PublicKey::from(responder_key))
-        .to_bytes(),
-    );
-    let mut body = responder_challenge.to_vec();
-    body.extend_from_slice(&self.challenge);
-    body.extend_from_slice(&own_public);
-    let auth_hello = seal_handshake(&self.keys.initiator, 0, &body)?;
+  pub fn receive_hello(
+    self,
+    hello: &[u8],
+    rng: &mut impl CryptoRngCore,
+  ) -> Result<(InitiatorAwaitingAuth, Vec<u8>), RendezvousError> {
+    let opened = open_handshake(&self.keys.responder, hello)?;
+    let body = opened.expose_secret();
+    if body.len() != CHALLENGE_LEN + COMMITMENT_LEN {
+      return Err(RendezvousError::BadHandshake);
+    }
+    let (responder_challenge, commitment) = body.split_at(CHALLENGE_LEN);
+    let responder_commitment =
+      <[u8; COMMITMENT_LEN]>::try_from(commitment).map_err(|_| RendezvousError::BadHandshake)?;
+    let mut reply = responder_challenge.to_vec();
+    reply.extend_from_slice(&self.challenge);
+    reply.extend_from_slice(X25519PublicKey::from(&self.ephemeral).as_bytes());
+    let auth_hello = seal_handshake(&self.keys.initiator, &reply, rng)?;
     Ok((
       InitiatorAwaitingAuth {
         keys: self.keys,
+        ephemeral: self.ephemeral,
         challenge: self.challenge,
-        shared,
+        responder_commitment,
       },
       auth_hello,
     ))
@@ -147,15 +164,36 @@ impl Initiator {
 }
 
 impl InitiatorAwaitingAuth {
-  /// Opens the responder's `auth`; the channel is ready afterwards.
+  /// Opens the responder's `auth`, checks its key against the commitment; the channel is ready
+  /// afterwards.
   pub fn receive_auth(self, auth: &[u8]) -> Result<RendezvousChannel, RendezvousError> {
-    let opened = open_handshake(&self.keys.responder, 1, auth)?;
-    if !bool::from(opened.expose_secret().ct_eq(&self.challenge)) {
+    let opened = open_handshake(&self.keys.responder, auth)?;
+    let body = opened.expose_secret();
+    if body.len() != CHALLENGE_LEN + PUBLIC_KEY_LEN {
+      return Err(RendezvousError::BadHandshake);
+    }
+    let (response, responder_key) = body.split_at(CHALLENGE_LEN);
+    if !bool::from(response.ct_eq(&self.challenge)) {
       return Err(RendezvousError::ChallengeMismatch);
     }
+    let responder_key =
+      <[u8; PUBLIC_KEY_LEN]>::try_from(responder_key).map_err(|_| RendezvousError::BadHandshake)?;
+    if !bool::from(commitment(&responder_key).ct_eq(&self.responder_commitment)) {
+      return Err(RendezvousError::CommitmentMismatch);
+    }
+    let own_key = X25519PublicKey::from(&self.ephemeral).to_bytes();
+    let shared = contributory(
+      self
+        .ephemeral
+        .diffie_hellman(&X25519PublicKey::from(responder_key)),
+    )?;
     Ok(RendezvousChannel::derive(
       &self.keys.ak,
-      &self.shared,
+      &shared,
+      &Transcript {
+        initiator_key: own_key,
+        responder_key,
+      },
       Role::Initiator,
     ))
   }
@@ -168,8 +206,8 @@ impl Responder {
     let ephemeral = EphemeralSecret::random_from_rng(&mut *rng);
     let challenge = challenge(rng);
     let mut body = challenge.to_vec();
-    body.extend_from_slice(&X25519PublicKey::from(&ephemeral).to_bytes());
-    let hello = seal_handshake(&keys.responder, 0, &body)?;
+    body.extend_from_slice(&commitment(X25519PublicKey::from(&ephemeral).as_bytes()));
+    let hello = seal_handshake(&keys.responder, &body, rng)?;
     Ok((
       Self {
         keys,
@@ -180,12 +218,14 @@ impl Responder {
     ))
   }
 
-  /// Opens `auth_hello`, checks the answer to its challenge and returns `auth` plus the channel.
+  /// Opens `auth_hello`, checks the answer to its challenge and returns `auth` (revealing the
+  /// committed key) plus the channel.
   pub fn receive_auth_hello(
     self,
     auth_hello: &[u8],
+    rng: &mut impl CryptoRngCore,
   ) -> Result<(RendezvousChannel, Vec<u8>), RendezvousError> {
-    let opened = open_handshake(&self.keys.initiator, 0, auth_hello)?;
+    let opened = open_handshake(&self.keys.initiator, auth_hello)?;
     let body = opened.expose_secret();
     if body.len() != 2 * CHALLENGE_LEN + PUBLIC_KEY_LEN {
       return Err(RendezvousError::BadHandshake);
@@ -197,18 +237,30 @@ impl Responder {
     }
     let initiator_key =
       <[u8; PUBLIC_KEY_LEN]>::try_from(initiator_key).map_err(|_| RendezvousError::BadHandshake)?;
-    let shared = Zeroizing::new(
+    let own_key = X25519PublicKey::from(&self.ephemeral).to_bytes();
+    let shared = contributory(
       self
         .ephemeral
-        .diffie_hellman(&X25519PublicKey::from(initiator_key))
-        .to_bytes(),
-    );
-    let auth = seal_handshake(&self.keys.responder, 1, initiator_challenge)?;
+        .diffie_hellman(&X25519PublicKey::from(initiator_key)),
+    )?;
+    let mut reply = initiator_challenge.to_vec();
+    reply.extend_from_slice(&own_key);
+    let auth = seal_handshake(&self.keys.responder, &reply, rng)?;
+    let transcript = Transcript {
+      initiator_key,
+      responder_key: own_key,
+    };
     Ok((
-      RendezvousChannel::derive(&self.keys.ak, &shared, Role::Responder),
+      RendezvousChannel::derive(&self.keys.ak, &shared, &transcript, Role::Responder),
       auth,
     ))
   }
+}
+
+/// Both ephemeral keys, which the path hash and transport keys are bound to.
+struct Transcript {
+  initiator_key: [u8; PUBLIC_KEY_LEN],
+  responder_key: [u8; PUBLIC_KEY_LEN],
 }
 
 impl RendezvousChannel {
@@ -256,10 +308,13 @@ impl RendezvousChannel {
     )
   }
 
-  fn derive(ak: &SymmetricKey, shared: &[u8; 32], role: Role) -> Self {
+  fn derive(ak: &SymmetricKey, shared: &[u8; 32], transcript: &Transcript, role: Role) -> Self {
     let mut ikm = Zeroizing::new(ak.expose_secret().to_vec());
     ikm.extend_from_slice(shared);
-    let hkdf = Hkdf::<Sha256>::new(None, &ikm);
+    let mut salt = Vec::with_capacity(2 * PUBLIC_KEY_LEN);
+    salt.extend_from_slice(&transcript.initiator_key);
+    salt.extend_from_slice(&transcript.responder_key);
+    let hkdf = Hkdf::<Sha256>::new(Some(&salt), &ikm);
     let initiator_to_responder = expand(&hkdf, domain::RENDEZVOUS_INITIATOR_TRANSPORT);
     let responder_to_initiator = expand(&hkdf, domain::RENDEZVOUS_RESPONDER_TRANSPORT);
     let path_hash = *expand(&hkdf, domain::RENDEZVOUS_PATH_HASH).expose_secret();
@@ -311,31 +366,49 @@ fn challenge(rng: &mut impl CryptoRngCore) -> [u8; CHALLENGE_LEN] {
   challenge
 }
 
-fn split_hello(body: &[u8]) -> Result<(&[u8], [u8; PUBLIC_KEY_LEN]), RendezvousError> {
-  if body.len() != CHALLENGE_LEN + PUBLIC_KEY_LEN {
-    return Err(RendezvousError::BadHandshake);
+/// The responder's commitment to its ephemeral key.
+fn commitment(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; COMMITMENT_LEN] {
+  Sha256::new()
+    .chain_update(domain::RENDEZVOUS_COMMITMENT.as_bytes())
+    .chain_update(public_key)
+    .finalize()
+    .into()
+}
+
+/// Refuses a shared secret a low-order peer key forced to a known value.
+fn contributory(shared: SharedSecret) -> Result<Zeroizing<[u8; 32]>, RendezvousError> {
+  if !shared.was_contributory() {
+    return Err(RendezvousError::NonContributory);
   }
-  let (challenge, key) = body.split_at(CHALLENGE_LEN);
-  Ok((
-    challenge,
-    <[u8; PUBLIC_KEY_LEN]>::try_from(key).map_err(|_| RendezvousError::BadHandshake)?,
-  ))
+  Ok(Zeroizing::new(shared.to_bytes()))
 }
 
-/// Handshake messages use fixed nonces under single-purpose keys (each key seals at most two
-/// messages, with nonces 0 and 1).
-fn seal_handshake(key: &SymmetricKey, nonce: u64, body: &[u8]) -> Result<Vec<u8>, RendezvousError> {
-  ChaCha20Poly1305::new(key.expose_secret().into())
-    .encrypt(&counter_nonce(nonce), Payload { msg: body, aad: &[] })
-    .map_err(|_| RendezvousError::BadHandshake)
+/// Handshake messages are `nonce ‖ ciphertext` with a random nonce: a code used twice gets fresh
+/// nonces under the same AK-derived keys.
+fn seal_handshake(
+  key: &SymmetricKey,
+  body: &[u8],
+  rng: &mut impl CryptoRngCore,
+) -> Result<Vec<u8>, RendezvousError> {
+  let mut nonce = [0u8; NONCE_LEN];
+  rng.fill_bytes(&mut nonce);
+  let sealed = ChaCha20Poly1305::new(key.expose_secret().into())
+    .encrypt(&Nonce::from(nonce), Payload { msg: body, aad: &[] })
+    .map_err(|_| RendezvousError::BadHandshake)?;
+  let mut out = nonce.to_vec();
+  out.extend_from_slice(&sealed);
+  Ok(out)
 }
 
-fn open_handshake(key: &SymmetricKey, nonce: u64, sealed: &[u8]) -> Result<SecretBytes, RendezvousError> {
+fn open_handshake(key: &SymmetricKey, sealed: &[u8]) -> Result<SecretBytes, RendezvousError> {
+  let (nonce, ciphertext) = sealed
+    .split_first_chunk::<NONCE_LEN>()
+    .ok_or(RendezvousError::BadHandshake)?;
   ChaCha20Poly1305::new(key.expose_secret().into())
     .decrypt(
-      &counter_nonce(nonce),
+      &Nonce::from(*nonce),
       Payload {
-        msg: sealed,
+        msg: ciphertext,
         aad: &[],
       },
     )
@@ -360,7 +433,7 @@ mod tests {
     let key = RendezvousKey::generate(&mut OsRng);
     let (mut new_device, mut old_device) = handshake(&key, &key).unwrap();
     assert_eq!(new_device.short_code(), old_device.short_code());
-    assert_eq!(new_device.short_code().len(), 4);
+    assert_eq!(new_device.short_code().len(), 6);
 
     let frame = old_device.seal(b"identity key and key bag").unwrap();
     assert_eq!(
@@ -369,6 +442,14 @@ mod tests {
     );
     let answer = new_device.seal(b"thanks").unwrap();
     assert_eq!(old_device.open(&answer).unwrap().expose_secret(), b"thanks");
+  }
+
+  #[test]
+  fn a_code_used_twice_gets_fresh_handshake_nonces() {
+    let key = RendezvousKey::generate(&mut OsRng);
+    let (_, first) = Responder::new(&key, &mut OsRng).unwrap();
+    let (_, second) = Responder::new(&key, &mut OsRng).unwrap();
+    assert_ne!(first[..NONCE_LEN], second[..NONCE_LEN]);
   }
 
   mod rejection {
@@ -391,6 +472,43 @@ mod tests {
       let (new_device, _attacker_towards_new) = handshake(&key, &key).unwrap();
       let (_attacker_towards_old, old_device) = handshake(&key, &key).unwrap();
       assert_ne!(new_device.short_code(), old_device.short_code());
+    }
+
+    #[test]
+    fn low_order_keys_are_refused() {
+      // A server knowing AK answers with the identity point, which would force a zero secret.
+      let key = RendezvousKey::generate(&mut OsRng);
+      let keys = AuthKeys::derive(&key);
+      let (responder, _) = Responder::new(&key, &mut OsRng).unwrap();
+      let mut forged = responder.challenge.to_vec();
+      forged.extend_from_slice(&[7; CHALLENGE_LEN]);
+      forged.extend_from_slice(&[0; PUBLIC_KEY_LEN]);
+      let auth_hello = seal_handshake(&keys.initiator, &forged, &mut OsRng).unwrap();
+      assert!(matches!(
+        responder.receive_auth_hello(&auth_hello, &mut OsRng),
+        Err(RendezvousError::NonContributory)
+      ));
+    }
+
+    #[test]
+    fn a_key_other_than_the_committed_one_is_refused() {
+      // The server swaps the responder's revealed key for one it picked after seeing the
+      // initiator's key.
+      let key = RendezvousKey::generate(&mut OsRng);
+      let keys = AuthKeys::derive(&key);
+      let initiator = Initiator::new(&key, &mut OsRng);
+      let (responder, hello) = Responder::new(&key, &mut OsRng).unwrap();
+      let (initiator, auth_hello) = initiator.receive_hello(&hello, &mut OsRng).unwrap();
+      let (_, honest_auth) = responder.receive_auth_hello(&auth_hello, &mut OsRng).unwrap();
+      let opened = open_handshake(&keys.responder, &honest_auth).unwrap();
+      let mut swapped = opened.expose_secret()[..CHALLENGE_LEN].to_vec();
+      let other = EphemeralSecret::random_from_rng(OsRng);
+      swapped.extend_from_slice(X25519PublicKey::from(&other).as_bytes());
+      let forged = seal_handshake(&keys.responder, &swapped, &mut OsRng).unwrap();
+      assert!(matches!(
+        initiator.receive_auth(&forged),
+        Err(RendezvousError::CommitmentMismatch)
+      ));
     }
 
     #[test]
@@ -418,15 +536,17 @@ mod tests {
       let key = RendezvousKey::generate(&mut OsRng);
       let initiator = Initiator::new(&key, &mut OsRng);
       let (_, mut hello) = Responder::new(&key, &mut OsRng).unwrap();
-      hello[3] ^= 1;
+      hello[NONCE_LEN + 3] ^= 1;
       assert!(matches!(
-        initiator.receive_hello(&hello),
+        initiator.receive_hello(&hello, &mut OsRng),
         Err(RendezvousError::BadHandshake)
       ));
-      assert!(matches!(
-        Initiator::new(&key, &mut OsRng).receive_hello(&[1, 2, 3]),
-        Err(RendezvousError::BadHandshake)
-      ));
+      for short in [&[][..], &[1, 2, 3]] {
+        assert!(matches!(
+          Initiator::new(&key, &mut OsRng).receive_hello(short, &mut OsRng),
+          Err(RendezvousError::BadHandshake)
+        ));
+      }
     }
   }
 
@@ -437,8 +557,8 @@ mod tests {
   ) -> Result<(RendezvousChannel, RendezvousChannel), RendezvousError> {
     let initiator = Initiator::new(initiator_key, &mut OsRng);
     let (responder, hello) = Responder::new(responder_key, &mut OsRng)?;
-    let (initiator, auth_hello) = initiator.receive_hello(&hello)?;
-    let (responder_channel, auth) = responder.receive_auth_hello(&auth_hello)?;
+    let (initiator, auth_hello) = initiator.receive_hello(&hello, &mut OsRng)?;
+    let (responder_channel, auth) = responder.receive_auth_hello(&auth_hello, &mut OsRng)?;
     let initiator_channel = initiator.receive_auth(&auth)?;
     Ok((initiator_channel, responder_channel))
   }

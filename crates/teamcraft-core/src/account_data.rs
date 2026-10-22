@@ -1,6 +1,7 @@
 //! The user's personal data that follows them across devices (e2ee.md §6.4): saved items, drafts
-//! and saved searches. It travels inside the encrypted key bag, so the server sees neither content
-//! nor count.
+//! and saved searches, and the trust decisions (pinned identity keys and the workspace root of
+//! trust, security review A2), so a new or linked device doesn't trust the server on first use
+//! again. It travels inside the encrypted key bag, so the server sees neither content nor count.
 //!
 //! Devices change it independently and upload whole key bags, so every entry carries the time of
 //! its last change and removals stay as tombstones; merging keeps the newer side per entry. Clocks
@@ -9,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId};
+use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
 
 /// Tombstones older than this are dropped when merging (every device has synced by then).
 pub const TOMBSTONE_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
@@ -29,6 +30,19 @@ pub struct AccountData {
   /// only moves forward, so the mark is the user's own).
   #[serde(default)]
   pub marked_unread: BTreeMap<String, Stamped<UnreadMark>>,
+  /// Identity keys the user's devices pinned, keyed by user ID; an accepted key change is a newer
+  /// entry.
+  #[serde(default)]
+  pub pins: BTreeMap<String, Stamped<PinnedKey>>,
+  /// The workspace's first owner, as the first of the user's devices verified it.
+  #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_workspace_root: Option<PinnedKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedKey {
+  pub user_id: UserId,
+  pub public_key: Base64Bytes,
 }
 
 /// A value with the time of its last change; `is_removed` marks a deletion.
@@ -87,6 +101,11 @@ impl AccountData {
     merge_map(&mut self.drafts, &other.drafts);
     merge_map(&mut self.saved_searches, &other.saved_searches);
     merge_map(&mut self.marked_unread, &other.marked_unread);
+    merge_map(&mut self.pins, &other.pins);
+    // The root never changes; the first one a device of the user verified stays.
+    if self.maybe_workspace_root.is_none() {
+      self.maybe_workspace_root = other.maybe_workspace_root.clone();
+    }
     self.forget_tombstones(now_ms);
   }
 
@@ -106,6 +125,34 @@ impl AccountData {
     self
       .marked_unread
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+  }
+
+  /// The identity key the user's devices pinned for `user`.
+  pub fn pinned_key(&self, user: UserId) -> Option<[u8; 32]> {
+    self
+      .pins
+      .get(&user.to_string())
+      .filter(|entry| !entry.is_removed)
+      .and_then(|entry| <[u8; 32]>::try_from(entry.value.public_key.as_slice()).ok())
+  }
+
+  /// Records a pin; returns whether it changed anything.
+  pub fn pin(&mut self, user: UserId, public_key: [u8; 32], now_ms: i64) -> bool {
+    if self.pinned_key(user) == Some(public_key) {
+      return false;
+    }
+    self.pins.insert(
+      user.to_string(),
+      Stamped {
+        value: PinnedKey {
+          user_id: user,
+          public_key: Base64Bytes::new(public_key.to_vec()),
+        },
+        updated_at_ms: now_ms,
+        is_removed: false,
+      },
+    );
+    true
   }
 
   /// Where the user marked the conversation unread, if they did and haven't read it since.

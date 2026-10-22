@@ -18,7 +18,9 @@ use teamcraft_core::push_preview::push_preview;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{SealedSqliteStore, StaticKeySource};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
-use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, LinkOffer, PendingEnrollment};
+use teamcraft_core::{
+  Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
+};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{ConversationId, Id, ThreadId};
@@ -40,8 +42,6 @@ pub(crate) type Job = Box<dyn for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, 
 
 /// Outbox messages get IDs with this bit set in the UI view model (teamcraft-core ui_backend).
 const PENDING_ID_BIT: i64 = 1 << 62;
-/// Linked devices get the backup key from the other device; the passphrase isn't used.
-const LINKED_DEVICE_PASSPHRASE: &str = "unused: keys come from the linked device";
 
 type Api = HttpServerApi<ForeignTokens>;
 type Store = Arc<SealedSqliteStore>;
@@ -186,7 +186,10 @@ impl Engine {
     device_name: String,
     passphrase: String,
   ) -> Result<AccountState, TeamCraftError> {
-    let options = enrollment_options(device_name, passphrase);
+    let options = enrollment_options(
+      device_name,
+      EnrollmentSecret::Passphrase(SecretBytes::new(passphrase.into_bytes())),
+    );
     self.complete_enrollment(options).await
   }
 
@@ -218,8 +221,10 @@ impl Engine {
       .take()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
     self.maybe_link_offer = None;
-    let mut options = enrollment_options(device_name, LINKED_DEVICE_PASSPHRASE.into());
-    options.maybe_linked = Some(link.receive_secrets().await?);
+    let options = enrollment_options(
+      device_name,
+      EnrollmentSecret::Linked(link.receive_secrets().await?),
+    );
     self.complete_enrollment(options).await
   }
 
@@ -576,14 +581,12 @@ async fn run_offline_tolerant(client: &mut CoreClient, command: CoreCommand) -> 
   }
 }
 
-fn enrollment_options(device_name: String, passphrase: String) -> EnrollmentOptions {
+fn enrollment_options(device_name: String, secret: EnrollmentSecret) -> EnrollmentOptions {
   EnrollmentOptions {
     device_name,
-    passphrase: SecretBytes::new(passphrase.into_bytes()),
+    secret,
     argon2: Argon2Settings::default(),
     maybe_attestation: None,
-    maybe_org_recovery: None,
-    maybe_linked: None,
   }
 }
 

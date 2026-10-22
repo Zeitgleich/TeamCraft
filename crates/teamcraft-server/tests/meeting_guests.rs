@@ -348,30 +348,20 @@ mod lobby {
     assert_eq!(denied.status, StatusCode::NO_CONTENT, "{}", denied.body);
     let decision = events_of(&ws::events(&mut guest_socket, QUIET).await, "lobby_decision");
     assert_eq!(decision[0]["state"], "denied");
-    assert_eq!(
-      rig
-        .request(
-          Some(&guest_token),
-          Method::GET,
-          &format!("/conversations/{chat}"),
-          None
-        )
-        .await
-        .0,
-      StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-      rig
-        .request(
-          Some(&guest_token),
-          Method::GET,
-          &format!("/meetings/{meeting}/lobby/me"),
-          None
-        )
-        .await
-        .1["state"],
-      "denied"
-    );
+    // The decision reached the guest; their session is over for good (D8), not just their connection.
+    for path in [
+      format!("/conversations/{chat}"),
+      format!("/meetings/{meeting}/lobby/me"),
+      "/me".to_owned(),
+    ] {
+      assert_eq!(
+        rig.request(Some(&guest_token), Method::GET, &path, None).await.0,
+        StatusCode::FORBIDDEN,
+        "{path}"
+      );
+    }
+    let audit = app.get(&admin(), "/admin/audit").await;
+    assert!(audit.body.to_string().contains("user_deactivated"));
     let late = app
       .post(
         &alice,

@@ -15,7 +15,7 @@ use teamcraft_bridge::worker::Worker;
 use teamcraft_core::api::{HttpGateway, HttpServerApi, StaticToken};
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
-use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
+use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{ConversationId, UserId};
@@ -40,11 +40,9 @@ async fn enroll(app: &TestApp, token: String, device: &str) -> (TestClient, Arc<
   let api = HttpServerApi::new(app.base_url.clone(), StaticToken(token));
   let options = EnrollmentOptions {
     device_name: device.into(),
-    passphrase: SecretBytes::new(PASSPHRASE.as_bytes().to_vec()),
+    secret: EnrollmentSecret::Passphrase(SecretBytes::new(PASSPHRASE.as_bytes().to_vec())),
     argon2: weak_argon2(),
     maybe_attestation: None,
-    maybe_org_recovery: None,
-    maybe_linked: None,
   };
   let client = PendingEnrollment::new()
     .complete(

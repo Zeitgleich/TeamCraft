@@ -142,11 +142,21 @@ pub enum ReplyError {
   MissingUid,
   #[error("the reply names no attendee with a valid answer")]
   NoAnswer,
+  #[error("a reply carries the answer of exactly one attendee")]
+  TooManyAttendees,
+  #[error("the calendar object is too long")]
+  TooLong,
 }
+
+/// An iMIP REPLY is short: one event, one attendee (RFC 5546 §3.2.3).
+const MAX_REPLY_LINES: usize = 200;
 
 /// Parses an iMIP REPLY: `METHOD:REPLY`, the event's `UID` and its `ATTENDEE` lines with `PARTSTAT`.
 pub fn parse_reply(text: &str) -> Result<Reply, ReplyError> {
   let lines = unfold(text);
+  if lines.len() > MAX_REPLY_LINES {
+    return Err(ReplyError::TooLong);
+  }
   if !lines
     .iter()
     .any(|line| line.eq_ignore_ascii_case("BEGIN:VCALENDAR"))
@@ -160,6 +170,7 @@ pub fn parse_reply(text: &str) -> Result<Reply, ReplyError> {
   let mut in_event = false;
   let mut maybe_uid = None;
   let mut entries = Vec::new();
+  let mut attendee_lines = 0;
   for line in &lines {
     if line.eq_ignore_ascii_case("BEGIN:VEVENT") {
       in_event = true;
@@ -172,6 +183,7 @@ pub fn parse_reply(text: &str) -> Result<Reply, ReplyError> {
       if name.eq_ignore_ascii_case("UID") {
         maybe_uid = Some(value.trim().to_owned());
       } else if name.eq_ignore_ascii_case("ATTENDEE") {
+        attendee_lines += 1;
         let status = parts
           .filter_map(|param| param.split_once('='))
           .find(|(key, _)| key.eq_ignore_ascii_case("PARTSTAT"))
@@ -189,6 +201,9 @@ pub fn parse_reply(text: &str) -> Result<Reply, ReplyError> {
   let uid = maybe_uid
     .filter(|uid| !uid.is_empty())
     .ok_or(ReplyError::MissingUid)?;
+  if attendee_lines > 1 {
+    return Err(ReplyError::TooManyAttendees);
+  }
   if entries.is_empty() {
     return Err(ReplyError::NoAnswer);
   }
@@ -434,6 +449,20 @@ mod tests {
         parse_reply(&folded).unwrap().entries[0].rsvp,
         RsvpStatus::Declined
       );
+    }
+
+    #[test]
+    fn a_reply_answers_for_one_attendee_and_is_short() {
+      let two = REPLY.replace(
+        "END:VEVENT",
+        "ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.org\r\nEND:VEVENT",
+      );
+      assert_eq!(parse_reply(&two), Err(ReplyError::TooManyAttendees));
+      let flood = REPLY.replace(
+        "END:VEVENT",
+        &"ATTENDEE;PARTSTAT=DECLINED:mailto:x@example.org\r\n".repeat(5000),
+      );
+      assert_eq!(parse_reply(&flood), Err(ReplyError::TooLong));
     }
 
     #[test]

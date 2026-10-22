@@ -7,7 +7,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use super::MlsError;
 use crate::content_key::{ContentKey, ContentKeyError, ContentKeyId, ContentKeyRing, ContentKeyWire};
 use crate::ids::ConversationId;
-use crate::membership::HistoryShare;
 use crate::secret::SecretBytes;
 
 const BUNDLE_VERSION: u8 = 1;
@@ -32,35 +31,16 @@ struct BundleWire {
 }
 
 impl ContentKeyBundle {
-  /// Rotates the ring and bundles only the new key: after a removal (e2ee.md §4.2) or on schedule.
-  pub fn rotate(ring: &mut ContentKeyRing, rng: &mut impl CryptoRngCore) -> Self {
-    let key = ring.rotate(rng).duplicate();
+  /// Every key of the ring for a member added with full history (e2ee.md §4.3). With history
+  /// from the join on, the new member gets only the epoch key ([`Self::epoch_key`]).
+  pub fn full_history(ring: &mut ContentKeyRing, rng: &mut impl CryptoRngCore) -> Self {
+    if ring.current().is_none() {
+      ring.rotate(rng);
+    }
     Self {
       conversation_id: ring.conversation_id(),
-      maybe_current: Some(key.id()),
-      keys: vec![key],
-    }
-  }
-
-  /// Keys for a newly added member according to the "Share history" choice (e2ee.md §4.3).
-  /// `FromJoin` rotates first, so the new member can't read anything sent before it joined.
-  pub fn for_new_member(
-    ring: &mut ContentKeyRing,
-    history: HistoryShare,
-    rng: &mut impl CryptoRngCore,
-  ) -> Self {
-    match history {
-      HistoryShare::FromJoin => Self::rotate(ring, rng),
-      HistoryShare::Full => {
-        if ring.current().is_none() {
-          ring.rotate(rng);
-        }
-        Self {
-          conversation_id: ring.conversation_id(),
-          maybe_current: ring.current().map(ContentKey::id),
-          keys: ring.keys().iter().map(ContentKey::duplicate).collect(),
-        }
-      },
+      maybe_current: ring.current().map(ContentKey::id),
+      keys: ring.keys().iter().map(ContentKey::duplicate).collect(),
     }
   }
 
@@ -76,15 +56,30 @@ impl ContentKeyBundle {
     self.maybe_current
   }
 
-  /// Adds the keys to the ring and switches to the bundle's current key, if any.
+  /// Adds the keys to the ring. The bundle's current key is taken only by a ring that has none
+  /// yet (a new member): a member's current key changes only with the epoch (see
+  /// [`super::ConversationGroup::epoch_content_key`]), so an old or delayed bundle can't move it
+  /// back to a key a removed member knows (security review A5).
   pub fn apply_to(self, ring: &mut ContentKeyRing) -> Result<(), ContentKeyError> {
     for key in self.keys {
       ring.insert(key)?;
     }
-    if let Some(current) = self.maybe_current {
+    if let Some(current) = self.maybe_current
+      && ring.current().is_none()
+    {
       ring.set_current(current)?;
     }
     Ok(())
+  }
+
+  /// Hands a new member the epoch's key as current (history from its join on, e2ee.md §4.3); the
+  /// existing members derived the same key themselves.
+  pub fn epoch_key(conversation_id: ConversationId, key: ContentKey) -> Self {
+    Self {
+      conversation_id,
+      maybe_current: Some(key.id()),
+      keys: vec![key],
+    }
   }
 
   pub(super) fn to_bytes(&self) -> Result<SecretBytes, MlsError> {
@@ -136,14 +131,23 @@ mod tests {
   const CONVERSATION: ConversationId = ConversationId::new(9);
 
   #[test]
-  fn from_join_rotates_and_shares_only_new_key() {
-    let mut ring = ContentKeyRing::new(CONVERSATION);
-    let old = ring.rotate(&mut OsRng).id();
-    let bundle = ContentKeyBundle::for_new_member(&mut ring, HistoryShare::FromJoin, &mut OsRng);
+  fn a_bundle_cannot_move_the_current_key_back() {
+    // Security review A5: a delayed full-history bundle names an older key as current.
+    let mut sender = ContentKeyRing::new(CONVERSATION);
+    let old = sender.rotate(&mut OsRng).id();
+    let stale = ContentKeyBundle::full_history(&mut sender, &mut OsRng);
+    let mut member = ContentKeyRing::new(CONVERSATION);
+    ContentKeyBundle::full_history(&mut sender, &mut OsRng)
+      .apply_to(&mut member)
+      .unwrap();
+    let newer = ContentKey::generate(&mut OsRng);
+    let newer_id = newer.id();
+    member.insert(newer).unwrap();
+    member.set_current(newer_id).unwrap();
 
-    assert_eq!(bundle.keys().len(), 1);
-    assert_ne!(bundle.keys()[0].id(), old);
-    assert_eq!(bundle.current(), ring.current().map(ContentKey::id));
+    stale.apply_to(&mut member).unwrap();
+    assert_eq!(member.current().map(ContentKey::id), Some(newer_id));
+    assert!(member.get(old).is_some(), "the keys themselves are still added");
   }
 
   #[test]
@@ -151,7 +155,7 @@ mod tests {
     let mut ring = ContentKeyRing::new(CONVERSATION);
     ring.rotate(&mut OsRng);
     ring.rotate(&mut OsRng);
-    let bundle = ContentKeyBundle::for_new_member(&mut ring, HistoryShare::Full, &mut OsRng);
+    let bundle = ContentKeyBundle::full_history(&mut ring, &mut OsRng);
     assert_eq!(bundle.keys().len(), 2);
 
     let decoded = ContentKeyBundle::from_bytes(bundle.to_bytes().unwrap().expose_secret()).unwrap();

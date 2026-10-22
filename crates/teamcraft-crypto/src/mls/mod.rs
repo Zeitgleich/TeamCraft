@@ -19,7 +19,9 @@ use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as _, Serialize as _};
 
 pub use content_keys::ContentKeyBundle;
-pub use group::{CommitOutput, ConversationGroup, GroupEvent, MembershipUpdate};
+pub use group::{
+  ChangeHistory, CommitOutput, ConversationGroup, GroupEvent, MAX_CHANGE_AGE_EPOCHS, MembershipUpdate,
+};
 
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};
@@ -33,7 +35,19 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20PO
 pub type DefaultMlsProvider = openmls_rust_crypto::OpenMlsRustCrypto;
 
 /// A member device of a group, as identified by its verified credential.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+  Clone,
+  Copy,
+  Debug,
+  PartialEq,
+  Eq,
+  Hash,
+  PartialOrd,
+  Ord,
+  tls_codec::TlsSerialize,
+  tls_codec::TlsDeserializeBytes,
+  tls_codec::TlsSize,
+)]
 pub struct GroupMember {
   pub user_id: UserId,
   pub device_id: DeviceId,
@@ -59,10 +73,16 @@ pub enum MlsError {
   InvalidCredential(IdentityError),
   #[error("membership change rejected: {0}")]
   Membership(#[from] MembershipError),
+  #[error("device {0} isn't in its user's signed device list")]
+  InactiveDevice(DeviceId),
+  #[error("device {0} was removed from this group and can't come back")]
+  RemovedDevice(DeviceId),
   #[error("commit adds or removes members without a signed membership change")]
   MissingSignedChange,
   #[error("membership change {0:?} was already applied")]
   ReplayedChange(ChangeId),
+  #[error("membership change signed in epoch {signed_epoch} is stale in epoch {current_epoch}")]
+  StaleChange { signed_epoch: u64, current_epoch: u64 },
   #[error("commit does not match its signed membership change")]
   ChangeDoesNotMatchCommit,
   #[error("commit contains a proposal type TeamCraft does not use")]
@@ -135,6 +155,9 @@ pub(crate) fn validate_key_package(
   }
   let leaf = key_package.leaf_node();
   let device = credential::verify(leaf.credential(), leaf.signature_key().as_slice(), directory)?;
+  if !directory.is_active_device(&device) {
+    return Err(MlsError::InactiveDevice(device.device_id()));
+  }
   Ok((key_package, device))
 }
 

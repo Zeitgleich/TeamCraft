@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT t.id AS \"id!\", t.space_id, t.name, t.visibility AS \"visibility!\", t.is_archived AS \"is_archived!\",\n                t.created_at AS \"created_at!\", t.member_count AS \"member_count!\", t.guest_count AS \"guest_count!\",\n                t.message_count AS \"message_count!\", t.last_message_id\n         FROM (\n           SELECT c.id, c.space_id, c.name, c.visibility, c.archived_at IS NOT NULL AS is_archived, c.created_at,\n                  (SELECT count(*) FROM memberships m WHERE m.conversation_id = c.id) AS member_count,\n                  (SELECT count(*) FROM memberships m JOIN users u ON u.id = m.user_id\n                    WHERE m.conversation_id = c.id AND u.kind = 'guest') AS guest_count,\n                  (SELECT count(*) FROM messages x WHERE x.conversation_id = c.id) AS message_count,\n                  (SELECT max(x.id) FROM messages x WHERE x.conversation_id = c.id) AS last_message_id\n           FROM conversations c\n           WHERE c.kind = 'channel'\n             AND ($1::bigint IS NULL OR c.space_id = $1)\n             AND ($2::text IS NULL OR c.visibility = $2)\n             AND ($3::bigint IS NULL OR c.id > $3)\n         ) t\n         WHERE ($4::boolean IS NULL OR (t.guest_count > 0) = $4)\n           AND ($5::bigint IS NULL OR t.member_count >= $5)\n           AND ($6::bigint IS NULL OR t.member_count <= $6)\n           AND ($7::int IS NULL OR COALESCE(t.last_message_id, tc_snowflake_floor(t.created_at))\n                                   < tc_snowflake_floor(now() - make_interval(days => $7)))\n           AND ($8::boolean IS NULL OR (NOT EXISTS (\n                 SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id\n                  WHERE m.conversation_id = t.id AND m.role = 'admin' AND u.deactivated_at IS NULL)) = $8)\n         ORDER BY t.id LIMIT $9",
+  "query": "SELECT t.id AS \"id!\", t.space_id, t.name, t.visibility AS \"visibility!\", t.is_archived AS \"is_archived!\",\n                t.created_at AS \"created_at!\", t.member_count AS \"member_count!\", t.guest_count AS \"guest_count!\",\n                t.message_count AS \"message_count!\", t.last_message_id\n         FROM (\n           SELECT c.id, c.space_id, c.name, c.visibility, c.archived_at IS NOT NULL AS is_archived, c.created_at,\n                  (SELECT count(*) FROM memberships m WHERE m.conversation_id = c.id) AS member_count,\n                  (SELECT count(*) FROM memberships m JOIN users u ON u.id = m.user_id\n                    WHERE m.conversation_id = c.id AND u.kind = 'guest') AS guest_count,\n                  (SELECT count(*) FROM messages x WHERE x.conversation_id = c.id) AS message_count,\n                  (SELECT max(x.id) FROM messages x WHERE x.conversation_id = c.id) AS last_message_id\n           FROM conversations c\n           WHERE c.kind = 'channel'\n             AND ($1::bigint IS NULL OR c.space_id = $1)\n             AND ($2::text IS NULL OR c.visibility = $2)\n             AND ($3::bigint IS NULL OR c.id > $3)\n             AND ($10::bigint IS NULL OR EXISTS (\n                   SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = $10))\n         ) t\n         WHERE ($4::boolean IS NULL OR (t.guest_count > 0) = $4)\n           AND ($5::bigint IS NULL OR t.member_count >= $5)\n           AND ($6::bigint IS NULL OR t.member_count <= $6)\n           AND ($7::int IS NULL OR COALESCE(t.last_message_id, tc_snowflake_floor(t.created_at))\n                                   < tc_snowflake_floor(now() - make_interval(days => $7)))\n           AND ($8::boolean IS NULL OR (NOT EXISTS (\n                 SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id\n                  WHERE m.conversation_id = t.id AND m.role = 'admin' AND u.deactivated_at IS NULL)) = $8)\n         ORDER BY t.id LIMIT $9",
   "describe": {
     "columns": [
       {
@@ -99,6 +99,7 @@
         "Int8",
         "Int4",
         "Bool",
+        "Int8",
         "Int8"
       ]
     },
@@ -115,5 +116,5 @@
       null
     ]
   },
-  "hash": "0b0810344ffc202a48548e1759641bd0f3f1defa112fe2a70574993355ac4bcf"
+  "hash": "5ea60088aba9dd80a65b3cf3c1a613884af0dab24c5e32e9be76cc86ecc4fdb9"
 }

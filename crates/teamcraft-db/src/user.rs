@@ -114,6 +114,15 @@ impl Database {
     self.upsert_oidc_user(identity, new_id).await
   }
 
+  /// The role the identity provider gave the user at their last sign-in (`None`: no such user;
+  /// `Some(None)`: a user without a role, e.g. a local guest).
+  pub async fn get_user_oidc_role(&self, id: UserId) -> Result<Option<Option<String>>, DbError> {
+    let row = sqlx::query!("SELECT oidc_role FROM users WHERE id = $1", to_db(id))
+      .fetch_optional(self.pool())
+      .await?;
+    Ok(row.map(|row| row.oidc_role))
+  }
+
   pub async fn get_user(&self, id: UserId) -> Result<Option<User>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS "is_deactivated!"

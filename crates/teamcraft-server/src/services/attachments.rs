@@ -37,6 +37,18 @@ pub async fn create_attachment(
     )));
   }
 
+  let limits = &state.settings.limits;
+  let (pending, stored_bytes) = state.database.attachment_usage_of(caller.user.id).await?;
+  if pending >= limits.max_pending_attachments_per_user as u64 {
+    return Err(ApiError::Conflict(
+      "too many unfinished uploads; finish or wait for them first".into(),
+    ));
+  }
+  if stored_bytes.saturating_add(request.size_bytes) > limits.max_attachment_bytes_per_user {
+    return Err(ApiError::PayloadTooLarge(
+      "your attachment storage is full".into(),
+    ));
+  }
   let id: AttachmentId = state.next_id()?;
   let key = object_key(id);
   state

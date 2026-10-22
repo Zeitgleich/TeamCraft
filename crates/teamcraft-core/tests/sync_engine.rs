@@ -11,7 +11,7 @@ use common::{Peer, clock, options, settings, settle};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::{Client, GatewayOutcome, PendingEnrollment};
-use teamcraft_proto::{Id, ThreadId};
+use teamcraft_proto::{HistoryPolicy, Id, ThreadId};
 
 #[tokio::test]
 async fn members_exchange_encrypted_messages() {
@@ -74,7 +74,7 @@ async fn new_member_reads_shared_history() {
   alice.client.send_text(channel, None, "before Bob").await.unwrap();
   alice
     .client
-    .add_member(channel, bob.client.user_id())
+    .add_member_with_history(channel, bob.client.user_id(), Some(HistoryPolicy::Full))
     .await
     .unwrap();
   settle(&mut [&mut alice, &mut bob]).await;

@@ -325,8 +325,22 @@ pub fn authenticate_inbox(state: &AppState, maybe_presented: Option<&str>) -> Re
 
 /// Applies the answers of an iMIP REPLY (RFC 6047) received by e-mail. Answers for unknown
 /// meetings or people are ignored; a malformed object is rejected.
-pub async fn receive_reply(state: &AppState, ics: &str) -> Result<MeetingReplyResponse, ApiError> {
+///
+/// `sender` is the authenticated envelope sender the inbox handler saw. A reply is only accepted
+/// from the attendee it answers for: anybody who knows the meeting UID and the invitees' addresses
+/// (they are in every invitation) could otherwise change everybody's answer.
+pub async fn receive_reply(
+  state: &AppState,
+  ics: &str,
+  sender: &str,
+) -> Result<MeetingReplyResponse, ApiError> {
   let reply = ical::parse_reply(ics).map_err(|error| ApiError::InvalidRequest(error.to_string()))?;
+  let sender = address_of(sender);
+  if reply.entries.iter().any(|entry| entry.email != sender) {
+    return Err(ApiError::Forbidden(
+      "the sender is not the attendee the reply answers for".into(),
+    ));
+  }
   let mut applied = 0;
   for entry in &reply.entries {
     if apply_email_rsvp(state, &reply.uid, &entry.email, &entry.rsvp).await? {
@@ -334,6 +348,15 @@ pub async fn receive_reply(state: &AppState, ics: &str) -> Result<MeetingReplyRe
     }
   }
   Ok(MeetingReplyResponse { applied })
+}
+
+/// The bare, lower-cased address of `Name <user@example.org>` or `user@example.org`.
+fn address_of(sender: &str) -> String {
+  let inner = match (sender.rfind('<'), sender.rfind('>')) {
+    (Some(start), Some(end)) if start < end => &sender[start + 1..end],
+    _ => sender,
+  };
+  inner.trim().to_lowercase()
 }
 
 /// Applies an answer received by e-mail (an iMIP REPLY). Unknown meetings and people are ignored
@@ -507,6 +530,31 @@ async fn send_invitations(
     .await?
     .map_or_else(String::new, |user| user.display_name);
   let mut undelivered = Vec::new();
+  // The instance's mail identity is not for bulk mail: an organizer has an hourly budget. What
+  // exceeds it counts as undelivered (the invitees still see the meeting in the app).
+  let mailable: Vec<&StoredAttendee> = recipients
+    .iter()
+    .filter(|attendee| {
+      attendee.maybe_email.is_some() || attendee.maybe_user.is_some_and(|user| emails.contains_key(&user))
+    })
+    .collect();
+  let budget = state.settings.limits.max_meeting_mails_per_user_per_hour;
+  let is_within_budget = u32::try_from(mailable.len())
+    .is_ok_and(|count| state.rate_limits.spend_mails(meeting.organizer, count, budget));
+  if !is_within_budget {
+    warn!(meeting_id = %meeting.id, "the organizer's hourly e-mail budget is used up");
+    return Ok(
+      mailable
+        .iter()
+        .filter_map(|attendee| {
+          attendee
+            .maybe_email
+            .clone()
+            .or_else(|| attendee.maybe_user.and_then(|user| emails.get(&user).cloned()))
+        })
+        .collect(),
+    );
+  }
   for attendee in recipients {
     let Some(address) = attendee
       .maybe_email

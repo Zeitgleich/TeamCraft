@@ -133,22 +133,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await?;
-    let policy = match maybe_history {
-      Some(choice) => Some(choice),
-      None => self
-        .cached_conversations()?
-        .get(&conversation)
-        .map(|c| c.history_policy.clone()),
-    };
-    let history = match policy {
+    let requested = match maybe_history {
       Some(HistoryPolicy::FromJoin) => HistoryShare::FromJoin,
       Some(HistoryPolicy::Full) => HistoryShare::Full,
-      // Unknown to this client: fall back to the signed workspace default (admin.md §2.4).
-      _ => match self.workspace()?.policy.history_default {
-        HistoryPolicy::FromJoin => HistoryShare::FromJoin,
-        _ => HistoryShare::Full,
-      },
+      // No choice made: the signed default, not the server's word for the channel (A9).
+      _ => self.implicit_history(user)?,
     };
+    let history = self.effective_history(user, requested).await?;
     self
       .commit_change(
         conversation,
@@ -196,7 +187,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn add_missing_devices(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
     let members = self.api.list_members(conversation).await?;
     let directory = self
-      .pin_identities(members.members.iter().map(|member| member.user.id))
+      .trusted_directory(members.members.iter().map(|member| member.user.id))
       .await?;
     let group_devices = self.group_device_ids(conversation)?;
     let mut key_packages = Vec::new();
@@ -238,6 +229,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         reason: "another commit won the epoch".into(),
       });
     }
+    self.remember_member_keys(conversation, &directory)?;
     Ok(recipients.len())
   }
 
@@ -321,15 +313,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
 
     let members = self.api.list_members(conversation).await?;
-    let directory = self
-      .pin_identities(members.members.iter().map(|member| member.user.id))
-      .await?;
+    let users = members.members.iter().map(|member| member.user.id);
+    // A commit may add devices: check them against the newest device lists.
+    let directory = if message.kind == MlsMessageKind::Commit {
+      self.trusted_directory(users).await?
+    } else {
+      self.pin_identities(users).await?
+    };
     let authority = self.group_authority(conversation)?;
     let group = self
       .groups
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
-    match group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority) {
+    let result = group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
+    if result.is_ok() {
+      self.remember_member_keys(conversation, &directory)?;
+    }
+    match result {
       Ok(GroupEvent::ContentKeys { bundle, .. }) => {
         bundle.apply_to(self.account.key_bag.ring_mut(convert::conversation(conversation)))?;
         self.persist_keys()?;
@@ -339,6 +339,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if update.is_self_removed {
           self.drop_group(conversation)?;
           return Ok(MlsProgress::Done);
+        }
+        let is_from_join_add = matches!(
+          update.maybe_change.as_ref().map(MembershipChange::action),
+          Some(MembershipAction::AddUser {
+            history: HistoryShare::FromJoin,
+            ..
+          })
+        );
+        self.note_removed_senders(conversation, &update.removed)?;
+        if !update.removed.is_empty() || is_from_join_add {
+          self.rotate_to_epoch_key(conversation)?;
         }
       },
       Err(error) => {
@@ -375,10 +386,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     source: ChangeSource,
   ) -> Result<(), CoreError> {
+    let source = match source {
+      // The history choice is settled before signing: every member rotates (or not) by it.
+      ChangeSource::Own(MembershipAction::AddUser { user_id, history }) => {
+        let history = self
+          .effective_history(convert::user_from_crypto(user_id)?, history)
+          .await?;
+        ChangeSource::Own(MembershipAction::AddUser { user_id, history })
+      },
+      other => other,
+    };
     let action = match &source {
       ChangeSource::Own(action) => *action,
       ChangeSource::Delegated(signed) => *signed.unverified().action(),
     };
+    if let MembershipAction::AddUser { user_id, history } = action
+      && history
+        != self
+          .effective_history(convert::user_from_crypto(user_id)?, history)
+          .await?
+    {
+      // An admin signed full history for a guest; that isn't shared (e2ee.md §4.3).
+      tracing::warn!(conversation_id = %conversation, "refused to add a guest with full history");
+      return Ok(());
+    }
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
       if !self.has_group(conversation)? {
@@ -390,7 +421,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if let ChangeSource::Delegated(signed) = &source {
         users.push(convert::user_from_crypto(signed.signer_user())?);
       }
-      let directory = self.pin_identities(users).await?;
+      let directory = self.trusted_directory(users).await?;
 
       let (key_packages, recipients) = match action {
         MembershipAction::AddUser { user_id, .. } => {
@@ -408,7 +439,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       let signed = match &source {
         ChangeSource::Own(action) => {
-          MembershipChange::new(convert::conversation(conversation), *action, &mut OsRng)
+          let epoch = self.group_or_error(conversation)?.epoch();
+          MembershipChange::new(convert::conversation(conversation), epoch, *action, &mut OsRng)
             .sign(&self.account.device, self.account.certificate.clone())?
         },
         ChangeSource::Delegated(signed) => (**signed).clone(),
@@ -434,29 +466,53 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ) => {
           return Ok(());
         },
+        // Another commit about the user came first; the signer has to decide again.
+        Err(error @ teamcraft_crypto::mls::MlsError::StaleChange { .. }) => {
+          tracing::warn!(conversation_id = %conversation, %error, "dropped a stale membership change");
+          return Ok(());
+        },
         Err(error) => return Err(error.into()),
       };
       let is_founding_commit = group.epoch() == 0;
-      if self.post_commit(conversation, output, &recipients).await? {
-        let bundle = match action {
-          MembershipAction::AddUser { user_id, history } => {
-            let history = self
-              .effective_history(convert::user_from_crypto(user_id)?, history)
-              .await?;
-            ContentKeyBundle::for_new_member(
-              self.account.key_bag.ring_mut(convert::conversation(conversation)),
-              history,
-              &mut OsRng,
-            )
+      let removed: Vec<_> = group
+        .members()?
+        .into_iter()
+        .filter(|member| match action {
+          MembershipAction::RemoveUser { user_id } => member.user_id == user_id,
+          MembershipAction::RemoveDevice { user_id, device_id } => {
+            member.user_id == user_id && member.device_id == device_id
           },
-          MembershipAction::RemoveUser { .. } | MembershipAction::RemoveDevice { .. } => {
-            ContentKeyBundle::rotate(
+          MembershipAction::AddUser { .. } => false,
+        })
+        .collect();
+      if self.post_commit(conversation, output, &recipients).await? {
+        self.note_removed_senders(conversation, &removed)?;
+        self.remember_member_keys(conversation, &directory)?;
+        let bundle = match action {
+          MembershipAction::AddUser {
+            history: HistoryShare::Full,
+            ..
+          } => {
+            let bundle = ContentKeyBundle::full_history(
               self.account.key_bag.ring_mut(convert::conversation(conversation)),
               &mut OsRng,
-            )
+            );
+            self.persist_keys()?;
+            bundle
+          },
+          MembershipAction::AddUser {
+            history: HistoryShare::FromJoin,
+            ..
+          } => {
+            let key = self.rotate_to_epoch_key(conversation)?;
+            ContentKeyBundle::epoch_key(convert::conversation(conversation), key)
+          },
+          // Every remaining member derives the new key from the removal commit (e2ee.md §4.2).
+          MembershipAction::RemoveUser { .. } | MembershipAction::RemoveDevice { .. } => {
+            self.rotate_to_epoch_key(conversation)?;
+            return Ok(());
           },
         };
-        self.persist_keys()?;
         return self.send_bundle(conversation, &bundle).await;
       }
       if is_founding_commit {
@@ -518,6 +574,73 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// Records the verified signing keys of the group's devices, which message signatures are
+  /// checked against (security review A10), and retries messages that waited for them.
+  fn remember_member_keys(
+    &mut self,
+    conversation: ConversationId,
+    directory: &PinnedDirectory,
+  ) -> Result<(), CoreError> {
+    let Some(group) = self.groups.get(&conversation) else {
+      return Ok(());
+    };
+    let mut is_new = false;
+    for device in group.verified_members(directory)? {
+      let user = convert::user_from_crypto(device.user_id())?;
+      let device_id = convert::device_from_crypto(device.device_id())?;
+      // A member again (added back): its new messages count.
+      self.store.delete(
+        Table::RemovedSenders,
+        &format!("{conversation}/{user}/{device_id}"),
+      )?;
+      if records::device_signing_key(&self.store, user, device_id)?.as_ref() != Some(device.signing_key()) {
+        records::put_device_signing_key(&self.store, user, device_id, device.signing_key())?;
+        is_new = true;
+      }
+    }
+    if is_new {
+      self.retry_undecrypted(conversation)?;
+    }
+    Ok(())
+  }
+
+  /// Notes when devices left the conversation: messages they sign for a later time are refused.
+  fn note_removed_senders(
+    &mut self,
+    conversation: ConversationId,
+    removed: &[teamcraft_crypto::mls::GroupMember],
+  ) -> Result<(), CoreError> {
+    let now = self.now_ms();
+    for member in removed {
+      let key = format!(
+        "{conversation}/{}/{}",
+        convert::user_from_crypto(member.user_id)?,
+        convert::device_from_crypto(member.device_id)?
+      );
+      records::put_json(&self.store, Table::RemovedSenders, &key, &now)?;
+    }
+    Ok(())
+  }
+
+  /// Switches to the content key of the group's current epoch (after a removal or a "from join"
+  /// addition, security review A5).
+  fn rotate_to_epoch_key(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_crypto::content_key::ContentKey, CoreError> {
+    self.group_or_error(conversation)?;
+    let key = self
+      .groups
+      .get(&conversation)
+      .ok_or(CoreError::NoGroup(conversation))?
+      .epoch_content_key(&self.provider)?;
+    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    ring.insert(key.duplicate())?;
+    ring.set_current(key.id())?;
+    self.persist_keys()?;
+    Ok(key)
+  }
+
   /// Sends content keys to the group as an MLS application message.
   async fn send_bundle(
     &mut self,
@@ -572,8 +695,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &directory,
     ) {
       Ok(group) => {
+        // The joining epoch's key: the members switched to it if they shared history from the
+        // join on; the committer's bundle says which key is current.
+        let key = group.epoch_content_key(&self.provider)?;
+        self
+          .account
+          .key_bag
+          .ring_mut(convert::conversation(conversation))
+          .insert(key)?;
+        self.persist_keys()?;
         self.groups.insert(conversation, group);
         self.persist_group(conversation)?;
+        self.remember_member_keys(conversation, &directory)?;
         // Everything up to the welcome belongs to epochs before we joined.
         self.advance_cursor(conversation, welcome)?;
         if let Ok(response) = self.api.conversation(conversation).await {
@@ -651,14 +784,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         && response.visibility == teamcraft_proto::ConversationVisibility::Public
         && !response.is_archived
     });
+    // A roster too old to trust (an owner's re-signing is overdue) grants no admin authority.
+    let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    let admins: Vec<UserId> = if workspace.is_roster_fresh(self.now_ms(), max_age_ms) {
+      workspace.admins().collect()
+    } else {
+      tracing::warn!("the signed roster is stale; admins have no authority until an owner re-signs it");
+      Vec::new()
+    };
     Ok(
-      WorkspaceAuthority::new(
-        members,
-        workspace.admins().collect::<Vec<_>>(),
-        workspace.policy.admin_self_join.clone(),
-      )
-      .for_public_channel(is_public_channel),
+      WorkspaceAuthority::new(members, admins, workspace.policy.admin_self_join.clone())
+        .for_public_channel(is_public_channel),
     )
+  }
+
+  /// The history to share when nobody chose: the signed workspace default, but full history only
+  /// for users the signed roster lists. The server's per-channel policy and its "not a guest" are
+  /// unsigned, so a user this client can't vouch for gets history from the join on (security
+  /// review A9).
+  pub(crate) fn implicit_history(&self, user: UserId) -> Result<HistoryShare, CoreError> {
+    let workspace = self.workspace()?;
+    let is_vouched = workspace
+      .roster
+      .members
+      .iter()
+      .any(|member| member.user_id == user);
+    Ok(match workspace.policy.history_default {
+      HistoryPolicy::Full if is_vouched => HistoryShare::Full,
+      _ => HistoryShare::FromJoin,
+    })
   }
 
   /// Guests only ever see history from their join on (e2ee.md §4.3), whatever was asked for.

@@ -1,50 +1,108 @@
-# Flatpak manifest (draft). The binary is built by the release workflow (build only, no publishing)
-# and consumed here, so the manifest needs no Rust toolchain and no network at build time.
+# Flatpak manifest: the primary Linux package. Builds from source inside the GNOME SDK, so the
+# binary links against exactly the WebKitGTK, GStreamer and PipeWire the runtime ships.
 #
-#   cargo tauri build --no-bundle            # in apps/desktop, produces target/release/teamcraft-desktop
-#   flatpak-builder --user --install --force-clean build-dir apps/desktop/packaging/linux/org.teamcraft.desktop.yml
+#   apps/desktop/packaging/linux/build-flatpak.sh            # build (and optionally bundle/run)
 #
-# The GNOME runtime ships WebKitGTK 4.1, which Tauri 2 uses.
+# The web UI (crates/teamcraft-ui/dist, wasm32) is an input, built beforehand by build-ui.sh: the
+# SDK's Rust extension has no wasm32 target, and the bundle is the same on every platform.
+# Local builds fetch crates from the network (`--share=network` below); Flathub builds are
+# offline, see README.md ("Flathub submission") for the vendored variant.
 app-id: org.teamcraft.desktop
 runtime: org.gnome.Platform
-runtime-version: "48"
+# GNOME 51 = freedesktop-sdk 26.08: WebKitGTK 4.1, GStreamer 1.28 with the VA-API plugin,
+# PipeWire; the GPU drivers (Mesa, incl. VA-API) come from the GL extension.
+runtime-version: "51"
 sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang for bindgen (the PipeWire bindings).
+  - org.freedesktop.Sdk.Extension.llvm22
 command: teamcraft-desktop
 
 finish-args:
-  - --share=network          # server connection and the loopback listener of the OIDC login
+  # Server connection, and the loopback listener the OIDC login redirects to.
+  - --share=network
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
-  - --device=dri             # GPU for rendering and video effects
-  - --device=all             # camera (V4L2); narrower once the camera portal is used
-  - --socket=pulseaudio      # microphone and speakers
-  - --talk-name=org.freedesktop.secrets        # refresh token in the system keyring
-  - --talk-name=org.freedesktop.Notifications  # desktop notifications
+  # GPU: WebKit rendering, the effects shaders (wgpu) and VA-API video encoding.
+  - --device=dri
+  # Microphone and speakers (PulseAudio protocol, served by PipeWire on current desktops).
+  - --socket=pulseaudio
+  # Refresh token in the desktop's keyring (GNOME Keyring, KWallet/ksecretd).
+  - --talk-name=org.freedesktop.secrets
+  # Mention and direct-message notifications.
+  - --talk-name=org.freedesktop.Notifications
+  # Nothing else: no home directory, no devices besides the GPU. Screen sharing (ScreenCast),
+  # the camera (Camera), push-to-talk on Wayland (GlobalShortcuts), opening the login page
+  # (OpenURI) and file dialogs (FileChooser) all go through portals, which need no permission
+  # here; the desktop asks the user.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/teamcraft-desktop/cargo
+    CARGO_TARGET_DIR: /run/build/teamcraft-desktop/target
+    LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
+    # libclang outside its install prefix doesn't find its own headers (stdbool.h).
+    BINDGEN_EXTRA_CLANG_ARGS: -I/usr/lib/sdk/llvm22/lib/clang/22/include
+    # Echo cancellation: WebRTC's audio processing, built from source (meson and ninja are in
+    # the SDK); see crates/teamcraft-media/README.md.
+    # `-L /app/lib` first: the C++17 Abseil below must win over the SDK's when linking.
+    RUSTFLAGS: --cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled -L native=/app/lib
 
 modules:
+  # WebRTC's audio processing (echo cancellation) is C++17, and its Rust bindings are generated
+  # with -std=c++17; the SDK's Abseil headers require C++20. A C++17 build of the Abseil release
+  # it expects (the one in its meson wrap file) goes first in /app.
+  - name: abseil-cpp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_CXX_STANDARD=17
+      - -DABSL_PROPAGATE_CXX_STD=ON
+      - -DBUILD_SHARED_LIBS=ON
+      - -DABSL_BUILD_TESTING=OFF
+    cleanup:
+      - /include
+      - /lib/cmake
+      - /lib/pkgconfig
+    sources:
+      - type: archive
+        url: https://github.com/abseil/abseil-cpp/releases/download/20240722.0/abseil-cpp-20240722.0.tar.gz
+        sha256: f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3
+
   - name: teamcraft-desktop
     buildsystem: simple
+    build-options:
+      # Local builds only: crates.io. Flathub forbids this.
+      build-args:
+        - --share=network
     build-commands:
-      - install -Dm755 teamcraft-desktop /app/bin/teamcraft-desktop
-      - install -Dm644 org.teamcraft.desktop.desktop /app/share/applications/org.teamcraft.desktop.desktop
-      - install -Dm644 org.teamcraft.desktop.metainfo.xml /app/share/metainfo/org.teamcraft.desktop.metainfo.xml
-      - install -Dm644 icon-128.png /app/share/icons/hicolor/128x128/apps/org.teamcraft.desktop.png
-      - install -Dm644 icon-256.png /app/share/icons/hicolor/256x256/apps/org.teamcraft.desktop.png
-      - install -Dm644 icon-512.png /app/share/icons/hicolor/512x512/apps/org.teamcraft.desktop.png
+      # The shell, with the prebuilt UI embedded (the custom-protocol feature, as `cargo tauri
+      # build` sets it).
+      - test -f crates/teamcraft-ui/dist/index.html
+      - cargo build --release --locked -p teamcraft-desktop --features custom-protocol
+      - install -Dm755 "$CARGO_TARGET_DIR/release/teamcraft-desktop" /app/bin/teamcraft-desktop
+      # Tauri's resource directory for an executable in /app/bin is /app/lib/<productName>.
+      - install -Dm644 selfie_segmentation_landscape.onnx /app/lib/TeamCraft/models/selfie_segmentation_landscape.onnx
+      - install -Dm644 apps/desktop/packaging/linux/org.teamcraft.desktop.desktop /app/share/applications/org.teamcraft.desktop.desktop
+      - install -Dm644 apps/desktop/packaging/linux/org.teamcraft.desktop.metainfo.xml /app/share/metainfo/org.teamcraft.desktop.metainfo.xml
+      - install -Dm644 apps/desktop/icons/128x128.png /app/share/icons/hicolor/128x128/apps/org.teamcraft.desktop.png
+      - install -Dm644 apps/desktop/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/org.teamcraft.desktop.png
+      - install -Dm644 apps/desktop/icons/icon.png /app/share/icons/hicolor/512x512/apps/org.teamcraft.desktop.png
     sources:
+      - type: dir
+        path: ../../../..
+        skip:
+          - target
+          - .git
+          - .claude
+          - apps/android
+          - crates/teamcraft-media/models/selfie_segmentation_landscape.onnx
+      # The background-effects model (crates/teamcraft-media/models/NOTICE.md), pinned like
+      # models/fetch.sh does.
       - type: file
-        path: ../../../../target/release/teamcraft-desktop
-      - type: file
-        path: org.teamcraft.desktop.desktop
-      - type: file
-        path: org.teamcraft.desktop.metainfo.xml
-      - type: file
-        path: ../../icons/128x128.png
-        dest-filename: icon-128.png
-      - type: file
-        path: ../../icons/128x128@2x.png
-        dest-filename: icon-256.png
-      - type: file
-        path: ../../icons/icon.png
-        dest-filename: icon-512.png
+        url: https://huggingface.co/onnx-community/mediapipe_selfie_segmentation_landscape/resolve/2497d5bec26c626c7b3c4edc6e1fefc21b64f6c3/onnx/model.onnx
+        sha256: 7a0adcfdb1715d3b0ff0f61486d8a181c33f4a208343a5abfccbc6540e872d24
+        dest-filename: selfie_segmentation_landscape.onnx

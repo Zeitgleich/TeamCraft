@@ -12,8 +12,9 @@
 //!   `teamcraft-server` (its `[calls] sfu_registration_token`), which starts calls and rings DMs;
 //!   the token also authenticates the server's meeting host controls
 //!   (`POST /internal/v1/calls/control` on the health listener)
-//! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test pages; unsigned
-//!   dev tokens when no public key is configured)
+//! - `TEAMCRAFT_SFU_DEV_HTTP`: e.g. `[::1]:8080` (dual-stack); enables dev mode (test pages)
+//! - `TEAMCRAFT_SFU_INSECURE_DEV_TOKENS=1`: accept unsigned dev tokens when no public key is
+//!   configured; only honoured if `TEAMCRAFT_SFU_BIND` and the dev HTTP address are loopback
 //! - `TEAMCRAFT_SFU_DEV_ENGINE_DIR`: in dev mode, the `wasm-bindgen` output of `teamcraft-media`'s
 //!   `web_call` example, served for the `/engine` test page
 //! - `TEAMCRAFT_SFU_CERT` / `TEAMCRAFT_SFU_KEY`: PEM files; without them a self-signed
@@ -143,12 +144,37 @@ fn load_verifier(config: &SfuConfig) -> anyhow::Result<Arc<dyn JoinTokenVerifier
     info!("verifying join tokens signed by the server");
     return Ok(Arc::new(verifier));
   }
-  if config.maybe_dev_http_addr.is_some() {
-    warn!("development mode: unsigned dev tokens are accepted");
-    return Ok(Arc::new(DevTokenVerifier));
+  let wants_dev_tokens = std::env::var("TEAMCRAFT_SFU_INSECURE_DEV_TOKENS").as_deref() == Ok("1");
+  match dev_tokens_allowed(config.bind_addr, config.maybe_dev_http_addr, wants_dev_tokens) {
+    Ok(true) => {
+      warn!("development mode: unsigned dev tokens are accepted");
+      return Ok(Arc::new(DevTokenVerifier));
+    },
+    Ok(false) => {},
+    Err(reason) => warn!(%reason, "unsigned dev tokens refused"),
   }
   warn!("no join token public key configured; all joins are rejected");
   Ok(Arc::new(RejectAllVerifier))
+}
+
+/// Unsigned dev tokens let anyone join any call, so they need an explicit opt-in and a listener
+/// that only the local machine can reach (C10). `Ok(false)`: not requested.
+fn dev_tokens_allowed(
+  bind: SocketAddr,
+  maybe_dev_http: Option<SocketAddr>,
+  is_requested: bool,
+) -> Result<bool, String> {
+  if !is_requested {
+    return Ok(false);
+  }
+  if !bind.ip().is_loopback() {
+    return Err(format!("TEAMCRAFT_SFU_BIND {bind} is not a loopback address"));
+  }
+  match maybe_dev_http {
+    Some(addr) if addr.ip().is_loopback() => Ok(true),
+    Some(addr) => Err(format!("TEAMCRAFT_SFU_DEV_HTTP {addr} is not a loopback address")),
+    None => Err("TEAMCRAFT_SFU_DEV_HTTP is not set".into()),
+  }
 }
 
 async fn load_identity() -> anyhow::Result<Identity> {
@@ -178,5 +204,24 @@ fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {
         .with_context(|| format!("{name} is not a socket address"))?,
     )),
     Err(_) => Ok(None),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn addr(text: &str) -> SocketAddr {
+    text.parse().unwrap()
+  }
+
+  #[test]
+  fn dev_tokens_need_the_flag_and_loopback_listeners() {
+    let dev = Some(addr("[::1]:8080"));
+    assert_eq!(dev_tokens_allowed(addr("[::1]:4433"), dev, false), Ok(false));
+    assert_eq!(dev_tokens_allowed(addr("127.0.0.1:4433"), dev, true), Ok(true));
+    assert!(dev_tokens_allowed(addr("[::]:4433"), dev, true).is_err());
+    assert!(dev_tokens_allowed(addr("127.0.0.1:4433"), Some(addr("[::]:8080")), true).is_err());
+    assert!(dev_tokens_allowed(addr("127.0.0.1:4433"), None, true).is_err());
   }
 }

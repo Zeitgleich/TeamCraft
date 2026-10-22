@@ -31,6 +31,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -147,6 +148,20 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn identity_key(&self, user: UserId) -> Result<IdentityKeyResponse, ApiError> {
     self.get(&format!("/users/{user}/identity-key")).await
+  }
+
+  async fn device_list(&self, user: UserId) -> Result<DeviceListResponse, ApiError> {
+    self.get(&format!("/users/{user}/device-list")).await
+  }
+
+  async fn put_device_list(&self, request: &PutDeviceListRequest) -> Result<DeviceListResponse, ApiError> {
+    self.send_json(Method::PUT, "/me/device-list", request).await
+  }
+
+  async fn revoke_device(&self, device: DeviceId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/devices/{device}"), None)
+      .await
   }
 
   async fn upload_key_packages(

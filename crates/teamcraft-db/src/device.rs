@@ -88,6 +88,17 @@ impl Database {
   }
 
   /// `true` if the device exists, is not revoked and belongs to `user`.
+  /// Devices of the user that are not revoked.
+  pub async fn count_active_devices(&self, user: UserId) -> Result<u64, DbError> {
+    let count = sqlx::query_scalar!(
+      r#"SELECT count(*) AS "count!" FROM devices WHERE user_id = $1 AND revoked_at IS NULL"#,
+      to_db(user)
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+  }
+
   pub async fn is_active_device_of(&self, user: UserId, device: DeviceId) -> Result<bool, DbError> {
     let found = sqlx::query_scalar!(
       r#"SELECT EXISTS (SELECT 1 FROM devices WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL) AS "found!""#,

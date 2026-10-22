@@ -112,6 +112,15 @@ max_mls_payload_bytes = 1048576
 max_welcomes_per_commit = 500
 # Encrypted key bag and wrapped backup keys of one user.
 max_key_bag_bytes = 1048576
+# One signed device list.
+max_device_list_bytes = 65536
+# Active devices per user.
+max_devices_per_user = 20
+# Attachments per user that are announced but not uploaded yet, and the bytes of all of a user's attachments.
+max_pending_attachments_per_user = 20
+max_attachment_bytes_per_user = 21474836480
+# Meeting e-mails per organizer and hour (the rest of the invitees are told in the app only).
+max_meeting_mails_per_user_per_hour = 200
 
 # WebSocket gateway at /api/v1/gateway.
 [gateway]
@@ -199,7 +208,9 @@ max_request_body_bytes = 4194304
 # Send Strict-Transport-Security; enable when a TLS-terminating proxy serves the API.
 hsts = false
 # Behind a reverse proxy that sets X-Forwarded-For: count clients by its last entry. Leave off when
-# clients connect directly, since anybody could forge the header.
+# clients connect directly, since anybody could forge the header. IMPORTANT behind a proxy: with this
+# off every client has the proxy's address, shares one rate limit, and bad tokens from anybody block
+# everybody (the server warns once when it sees X-Forwarded-For from a private address).
 trust_forwarded_for = false
 
 # Per-minute token buckets (burst = the same number), in memory per instance. A first line against
@@ -221,7 +232,11 @@ auth_failures_per_minute = 30
 # no-referrer. Without static_dir only the API is served.
 [web]
 # static_dir = "/srv/teamcraft/web"
-# content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; ..."
+# content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; ...; connect-src {connect_src}; ..."
+# {connect_src} becomes 'self' plus the origins of the identity provider, the SFU and the storage (taken
+# from their sections) and connect_origins; the web client cannot send data anywhere else. For a
+# stricter policy add e.g. "require-trusted-types-for 'script'" after testing the web client with it.
+# connect_origins = ["https://other.example.com"]
 # The small static download page of share links (/f/<id>): download.html plus the files it uses, served
 # under /f-assets/. {{sri:<file>}} in download.html becomes that file's Subresource Integrity value.
 # Without it /f/<id> serves the app shell.

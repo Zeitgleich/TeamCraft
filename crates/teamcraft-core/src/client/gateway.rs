@@ -173,7 +173,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.store.delete(Table::Members, &conversation_id.to_string())?;
           Ok(())
         } else {
-          self.queue_user_removal(conversation_id, user_id)?;
+          // Only a hint: the server's word doesn't make this device sign a removal (security
+          // review A8). The remover's client, or an admin's signed change, removes them from the
+          // group.
           self.refresh_conversation(conversation_id).await
         }
       },
@@ -184,7 +186,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
       GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace().await,
-      GatewayEvent::DeviceRemove { user_id, device_id } => self.queue_device_removal(user_id, device_id),
+      // The user's own device that revoked it signs the removal (`Client::revoke_device`).
+      GatewayEvent::DeviceRemove { user_id, device_id } => {
+        if device_id == self.account.device_id {
+          tracing::warn!("this device was revoked; it will no longer receive messages");
+        }
+        tracing::debug!(user_id = %user_id, "device revoked on the server");
+        Ok(())
+      },
       GatewayEvent::TypingStart {
         conversation_id,
         user_id,
@@ -210,6 +219,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::GuestExpired { .. }
       | GatewayEvent::ProfileUpdate { .. }
       | GatewayEvent::AnnouncementUpdate
+      | GatewayEvent::KeyBagUpdate { .. }
       | GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }

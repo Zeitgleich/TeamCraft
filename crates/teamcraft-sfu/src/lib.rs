@@ -13,6 +13,7 @@ pub mod health;
 pub mod ids;
 pub mod layers;
 pub mod net;
+pub mod prejoin;
 pub mod reporting;
 pub mod room;
 pub mod server;

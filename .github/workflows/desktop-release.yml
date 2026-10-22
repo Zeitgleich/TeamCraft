@@ -18,15 +18,26 @@ env:
 
 jobs:
   linux:
-    name: Linux (deb, rpm, AppImage)
-    runs-on: ubuntu-latest
-    # Built on Debian Trixie, the same image as CI and local container builds.
+    name: Linux ${{ matrix.arch }} (deb, rpm, AppImage)
+    # x86_64 and aarch64, each on a native runner (no emulation), in the multi-arch Debian Trixie
+    # image that CI and local container builds use.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     container: rust:1.99.1-trixie
     steps:
       - uses: actions/checkout@v5
       - name: Rust target
         run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
       - name: System packages
         run: >
           apt-get update && apt-get install -y --no-install-recommends cmake file
@@ -50,39 +61,50 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-packages
+          name: linux-packages-${{ matrix.arch }}
           path: |
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
-      - name: Keep the plain binary for the Flatpak job
+      # The UI bundle is wasm32, the same for both architectures: keep one.
+      - name: Keep the web UI bundle for the Flatpak job
+        if: matrix.arch == 'x86_64'
         uses: actions/upload-artifact@v4
         with:
-          name: linux-binary
-          path: target/release/teamcraft-desktop
+          name: ui-dist
+          path: crates/teamcraft-ui/dist
           if-no-files-found: error
 
   flatpak:
-    name: Flatpak bundle (build only)
+    name: Flatpak ${{ matrix.arch }} (build only)
     needs: linux
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
       - uses: actions/checkout@v5
+      # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
+      # SDK's Rust lacks) comes from the Linux job.
       - uses: actions/download-artifact@v4
         with:
-          name: linux-binary
-          path: target/release
-      - name: Make the binary executable
-        run: chmod +x target/release/teamcraft-desktop
+          name: ui-dist
+          path: crates/teamcraft-ui/dist
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
-          bundle: teamcraft-desktop.flatpak
+          bundle: teamcraft-desktop-${{ matrix.arch }}.flatpak
           manifest-path: apps/desktop/packaging/linux/org.teamcraft.desktop.yml
-          cache-key: flatpak-builder-${{ github.sha }}
+          arch: ${{ matrix.arch }}
+          cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
 
   macos:
     name: macOS (universal dmg)

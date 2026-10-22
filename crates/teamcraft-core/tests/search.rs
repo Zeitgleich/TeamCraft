@@ -9,6 +9,7 @@ use common::{Peer, settle};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::search::{SearchQuery, SearchService};
 use teamcraft_core::store::LocalStore;
+use teamcraft_proto::HistoryPolicy;
 
 #[tokio::test]
 async fn a_new_member_searches_history_through_published_segments() {
@@ -42,10 +43,11 @@ async fn a_new_member_searches_history_through_published_segments() {
     );
   }
 
-  // Carol joins with full history but has no messages locally yet, only the announcement.
+  // Carol joins with full history (chosen in the add dialog) but has no messages locally yet,
+  // only the announcement.
   alice
     .client
-    .add_member(channel, carol.client.user_id())
+    .add_member_with_history(channel, carol.client.user_id(), Some(HistoryPolicy::Full))
     .await
     .unwrap();
   settle(&mut [&mut alice, &mut carol]).await;

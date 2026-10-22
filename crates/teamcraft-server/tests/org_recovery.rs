@@ -15,8 +15,8 @@ use teamcraft_crypto::backup::{BackupKey, BackupKeyWrapper, WrappedBackupKey};
 use teamcraft_crypto::identity::DeviceKeyPair;
 use teamcraft_crypto::ids::{DeviceId as CryptoDeviceId, UserId as CryptoUserId};
 use teamcraft_crypto::org_recovery::{
-  OrgRecoveryPublicKey, OrgRecoverySetup, OrgRecoveryShare, OrgRecoveryWrapper, RecoveryRequestKey,
-  RecoveryRequestPublicKey, combine_shares, create_org_recovery,
+  OrgRecoveryPublicKey, OrgRecoverySetup, OrgRecoveryShare, OrgRecoveryWrapper, RecoveryRequest,
+  RecoveryRequestKey, RecoveryRequestPublicKey, combine_shares, create_org_recovery,
 };
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_server::testing::{Reply, TestApp, TestUser};
@@ -135,6 +135,12 @@ async fn request_recovery(app: &TestApp, person: &Person) -> (Reply, RecoveryReq
   (reply, key)
 }
 
+/// The request as a client builds it from the server's request ID.
+fn recovery_request(request: &str, person: &Person, key: RecoveryRequestPublicKey) -> RecoveryRequest {
+  let server_id: i64 = request.parse().unwrap();
+  RecoveryRequest::for_server_id(server_id.unsigned_abs(), crypto_user(&person.id), key)
+}
+
 async fn approve(app: &TestApp, admin: &Person, request: &str) -> Reply {
   app
     .post(
@@ -173,13 +179,20 @@ mod recovery {
     assert_eq!(second.body["combining_admin_id"], s.carl.id.as_str());
     assert_eq!(second.body["combining_device_id"], s.carl.device_id.as_str());
 
-    // Bob opens his share and seals it to Carl's device.
+    // Both admins' clients build the request from the server's answer; it binds the request ID,
+    // the user and the key. Dana reads the code her device shows to Carl, who enters it.
+    let request_on_dana = recovery_request(&request, &s.dana, request_key.public_key());
+    let key_from_server =
+      RecoveryRequestPublicKey::from_bytes(unb64(&second.body["request_public_key"]).try_into().unwrap());
+    let request_on_admins = recovery_request(&request, &s.dana, key_from_server);
+
+    // Bob opens his share and seals it to Carl's device, for this request only.
     let mine = s.app.get(&s.bob.user, "/org-recovery/shares/mine").await;
     assert_eq!(mine.body["key_version"], 1);
     let bobs_share =
       OrgRecoveryShare::open_on_device(&s.bob.keys, &unb64(&mine.body["shares"][0]["sealed"])).unwrap();
     let for_carl = bobs_share
-      .seal_for_device(crypto_user(&s.carl.id), &s.carl.keys.public_keys().agreement_key)
+      .seal_for_request(&s.carl.keys.public_keys().agreement_key, &request_on_admins)
       .unwrap();
     // Carl has not got the other share yet.
     assert_eq!(
@@ -217,7 +230,10 @@ mod recovery {
     ];
     for share in material.body["shares"].as_array().unwrap() {
       assert_eq!(share["from_admin_id"], s.bob.id.as_str());
-      shares.push(OrgRecoveryShare::open_on_device(&s.carl.keys, &unb64(&share["sealed"])).unwrap());
+      shares.push(
+        OrgRecoveryShare::open_for_request(&s.carl.keys, &request_on_admins, &unb64(&share["sealed"]))
+          .unwrap(),
+      );
     }
     let secret = combine_shares(&shares).unwrap();
     let wrapped = WrappedBackupKey::from_bytes(&unb64(&material.body["wrapped_backup_keys"])).unwrap();
@@ -225,11 +241,10 @@ mod recovery {
       .unwrap()
       .unwrap_key(crypto_user(&s.dana.id), &wrapped)
       .unwrap();
-    let requester_key =
-      RecoveryRequestPublicKey::from_bytes(unb64(&second.body["request_public_key"]).try_into().unwrap());
-    let sealed = requester_key
-      .seal_backup_key(crypto_user(&s.dana.id), &recovered)
+    let confirmed = request_on_admins
+      .confirm(&request_on_dana.verification_code())
       .unwrap();
+    let sealed = confirmed.seal_backup_key(&recovered).unwrap();
     let done = s
       .app
       .put(
@@ -247,7 +262,7 @@ mod recovery {
       .await;
     assert_eq!(result.status, StatusCode::OK, "{}", result.body);
     let received = request_key
-      .open_backup_key(crypto_user(&s.dana.id), &unb64(&result.body["sealed_backup_key"]))
+      .open_backup_key(&request_on_dana, &unb64(&result.body["sealed_backup_key"]))
       .unwrap();
     assert_eq!(received.into_key().expose_secret(), &s.backup_bytes);
     assert_eq!(

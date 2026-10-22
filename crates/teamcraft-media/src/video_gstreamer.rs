@@ -1,5 +1,6 @@
 //! Hardware H.264 encoding through GStreamer: VA-API (`vah264enc`) on Linux, VideoToolbox
-//! (`vtenc_h264`) on macOS, Media Foundation (`mfh264enc`) on Windows.
+//! (`vtenc_h264`) on macOS, Media Foundation (`mfh264enc`) on Windows; V4L2 encoders
+//! (`v4l2h264enc`) on ARM boards.
 //!
 //! GStreamer is LGPL and linked dynamically from the system; the Rust bindings are safe. One
 //! pipeline per layer: `appsrc` (NV12 frames) → hardware encoder → Constrained Baseline caps →
@@ -39,35 +40,36 @@ struct HardwareElement {
 }
 
 impl GstreamerEncoder {
-  /// `None` when GStreamer, the encoder element or the hardware isn't available.
+  /// The first of the platform's hardware encoders that works for `layer`; `None` when GStreamer,
+  /// the elements or the hardware aren't available.
   pub fn new(layer: &VideoLayerInfo, content: VideoContent) -> Option<Self> {
-    let element = hardware_element()?;
+    if HARDWARE_ELEMENTS.is_empty() {
+      return None;
+    }
     if let Err(error) = gst::init() {
       info!(%error, "GStreamer is not available; encoding in software");
       return None;
     }
-    if gst::ElementFactory::find(element.name).is_none() {
-      info!(
-        element = element.name,
-        "no hardware H.264 encoder element; encoding in software"
-      );
-      return None;
-    }
     let bitrate_kbps = (layer.max_bitrate_bps / 1000).max(1);
-    let description = format!(
-      "appsrc name=source is-live=true format=time ! {} {} ! \
-       video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au ! \
-       h264parse config-interval=-1 ! appsink name=sink sync=false",
-      element.name,
-      (element.properties)(bitrate_kbps),
-    );
-    match Self::build(&description, layer, content) {
-      Ok(encoder) => Some(encoder),
-      Err(error) => {
-        info!(%error, element = element.name, "hardware encoder unusable; encoding in software");
-        None
-      },
+    for element in HARDWARE_ELEMENTS {
+      if gst::ElementFactory::find(element.name).is_none() {
+        debug!(element = element.name, "hardware encoder element not installed");
+        continue;
+      }
+      let description = format!(
+        "appsrc name=source is-live=true format=time ! {} {} ! \
+         video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au ! \
+         h264parse config-interval=-1 ! appsink name=sink sync=false",
+        element.name,
+        (element.properties)(bitrate_kbps),
+      );
+      match Self::build(&description, layer, content) {
+        Ok(encoder) => return Some(encoder),
+        Err(error) => info!(%error, element = element.name, "hardware encoder unusable"),
+      }
     }
+    info!("no usable hardware H.264 encoder; encoding in software");
+    None
   }
 
   fn build(
@@ -177,9 +179,11 @@ impl Drop for GstreamerEncoder {
   }
 }
 
+/// Linux: VA-API (AMD and Intel GPUs, mostly x86_64), then V4L2 memory-to-memory encoders (the
+/// hardware encoders of ARM boards and SoCs, e.g. Raspberry Pi 4, Rockchip).
 #[cfg(target_os = "linux")]
-fn hardware_element() -> Option<HardwareElement> {
-  Some(HardwareElement {
+const HARDWARE_ELEMENTS: &[HardwareElement] = &[
+  HardwareElement {
     name: "vah264enc",
     properties: |bitrate_kbps| {
       format!(
@@ -187,41 +191,44 @@ fn hardware_element() -> Option<HardwareElement> {
          ref-frames=1 cabac=false"
       )
     },
-  })
-}
+  },
+  HardwareElement {
+    name: "v4l2h264enc",
+    properties: |bitrate_kbps| {
+      let bitrate_bps = u64::from(bitrate_kbps) * 1000;
+      format!(
+        "extra-controls=\"controls,video_bitrate={bitrate_bps},h264_i_frame_period={KEYFRAME_INTERVAL_FRAMES}\""
+      )
+    },
+  },
+];
 
 // Compiles for macOS; untested (no Mac in development so far).
 #[cfg(target_os = "macos")]
-fn hardware_element() -> Option<HardwareElement> {
-  Some(HardwareElement {
-    name: "vtenc_h264",
-    properties: |bitrate_kbps| {
-      format!(
-        "bitrate={bitrate_kbps} realtime=true allow-frame-reordering=false \
-         max-keyframe-interval={KEYFRAME_INTERVAL_FRAMES}"
-      )
-    },
-  })
-}
+const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
+  name: "vtenc_h264",
+  properties: |bitrate_kbps| {
+    format!(
+      "bitrate={bitrate_kbps} realtime=true allow-frame-reordering=false \
+       max-keyframe-interval={KEYFRAME_INTERVAL_FRAMES}"
+    )
+  },
+}];
 
 // Media Foundation's H.264 encoder MFT (NVIDIA, AMD and Intel hardware, else Microsoft's software
 // MFT); needs GStreamer's MSVC runtime. Compiles, untested (no Windows machine in development).
 #[cfg(target_os = "windows")]
-fn hardware_element() -> Option<HardwareElement> {
-  Some(HardwareElement {
-    name: "mfh264enc",
-    properties: |bitrate_kbps| {
-      format!(
-        "bitrate={bitrate_kbps} rc-mode=cbr low-latency=true bframes=0 gop-size={KEYFRAME_INTERVAL_FRAMES}"
-      )
-    },
-  })
-}
+const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
+  name: "mfh264enc",
+  properties: |bitrate_kbps| {
+    format!(
+      "bitrate={bitrate_kbps} rc-mode=cbr low-latency=true bframes=0 gop-size={KEYFRAME_INTERVAL_FRAMES}"
+    )
+  },
+}];
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn hardware_element() -> Option<HardwareElement> {
-  None
-}
+const HARDWARE_ELEMENTS: &[HardwareElement] = &[];
 
 fn gstreamer_error(error: impl std::fmt::Debug) -> VideoCodecError {
   VideoCodecError::Codec(format!("GStreamer: {error:?}"))

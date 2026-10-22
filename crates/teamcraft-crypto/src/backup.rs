@@ -25,6 +25,10 @@ const PASSPHRASE_SALT_LEN: usize = 16;
 pub const MAX_ARGON2_MEMORY_KIB: u32 = 1024 * 1024;
 pub const MAX_ARGON2_ITERATIONS: u32 = 16;
 pub const MAX_ARGON2_PARALLELISM: u32 = 8;
+/// Shortest passphrase that may wrap a backup key. Unwrapping accepts any length, so accounts set
+/// up before the limit still recover. An empty or fixed "passphrase" let the server unwrap with one
+/// Argon2 call (security review B1); apps can demand more.
+pub const MIN_PASSPHRASE_BYTES: usize = 8;
 
 /// The random 256-bit key that encrypts the key bag.
 #[derive(Debug)]
@@ -120,6 +124,8 @@ pub enum BackupError {
   InvalidArgon2Settings(Argon2Settings),
   #[error("key derivation failed")]
   KeyDerivation,
+  #[error("the passphrase must be at least {MIN_PASSPHRASE_BYTES} bytes long")]
+  PassphraseTooShort,
   #[error("passkey PRF output must be at least 32 bytes")]
   PrfOutputTooShort,
   #[error("encryption failed")]
@@ -164,7 +170,8 @@ impl WrappedBackupKey {
     }
   }
 
-  pub(crate) fn parameters(&self) -> &[u8] {
+  /// The wrap's public parameters (for the org wrap: the org public key it was made for).
+  pub fn parameters(&self) -> &[u8] {
     &self.parameters
   }
 
@@ -236,6 +243,9 @@ impl BackupKeyWrapper for PassphraseWrapper {
     backup_key: &BackupKey,
     rng: &mut dyn CryptoRngCore,
   ) -> Result<WrappedBackupKey, BackupError> {
+    if self.passphrase.expose_secret().len() < MIN_PASSPHRASE_BYTES {
+      return Err(BackupError::PassphraseTooShort);
+    }
     let mut salt = [0u8; PASSPHRASE_SALT_LEN];
     rng.fill_bytes(&mut salt);
     let key_encryption_key = self.derive_key(&self.settings, &salt)?;
@@ -478,7 +488,7 @@ mod tests {
 
   #[test]
   fn debug_hides_passphrase() {
-    let wrapper = passphrase_wrapper("hunter2");
+    let wrapper = passphrase_wrapper("hunter2 hunter2");
     assert!(!format!("{wrapper:?}").contains("hunter2"));
   }
 
@@ -488,7 +498,7 @@ mod tests {
     #[test]
     fn rejects_wrong_passphrase() {
       let backup_key = BackupKey::generate(&mut OsRng);
-      let wrapped = passphrase_wrapper("right")
+      let wrapped = passphrase_wrapper("the right one")
         .wrap_key(ALICE, &backup_key, &mut OsRng)
         .unwrap();
       assert!(matches!(
@@ -519,7 +529,7 @@ mod tests {
     #[test]
     fn rejects_tampered_parameters_and_ciphertext() {
       let backup_key = BackupKey::generate(&mut OsRng);
-      let wrapper = passphrase_wrapper("pass");
+      let wrapper = passphrase_wrapper("passphrase");
       let wrapped = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
 
       // Changing the salt (last parameter bytes) changes the derived key and the AAD.
@@ -548,7 +558,7 @@ mod tests {
     #[test]
     fn rejects_hostile_argon2_settings_from_server() {
       let backup_key = BackupKey::generate(&mut OsRng);
-      let wrapper = passphrase_wrapper("pass");
+      let wrapper = passphrase_wrapper("passphrase");
       let mut wrapped = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
       let mut parameters = PassphraseParameters::tls_deserialize_exact_bytes(&wrapped.parameters).unwrap();
       parameters.settings.memory_kib = u32::MAX;
@@ -577,6 +587,22 @@ mod tests {
         SymmetricKeyWrapper::passkey_prf(&SecretBytes::new(vec![1; 16])),
         Err(BackupError::PrfOutputTooShort)
       ));
+    }
+
+    #[test]
+    fn refuses_to_wrap_with_short_passphrases() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      for short in ["", "1234567"] {
+        assert!(matches!(
+          passphrase_wrapper(short).wrap_key(ALICE, &backup_key, &mut OsRng),
+          Err(BackupError::PassphraseTooShort)
+        ));
+      }
+      assert!(
+        passphrase_wrapper("12345678")
+          .wrap_key(ALICE, &backup_key, &mut OsRng)
+          .is_ok()
+      );
     }
 
     #[test]

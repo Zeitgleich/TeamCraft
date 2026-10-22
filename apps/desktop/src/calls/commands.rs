@@ -88,7 +88,7 @@ pub async fn call_action(
       let shortcut = maybe_shortcut.unwrap_or(current.shortcut.clone());
       let maybe_previous = current.is_global.then_some(current.shortcut.as_str());
       let maybe_new = is_enabled.then_some(shortcut.as_str());
-      let is_global = push_to_talk::register(&app, &calls, maybe_previous, maybe_new);
+      let is_global = push_to_talk::register(&app, &calls, maybe_previous, maybe_new).await;
       calls.set_push_to_talk(is_enabled, shortcut, is_global).await;
     },
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,

@@ -14,7 +14,7 @@ const CLOSE_NORMAL: u16 = 1000;
 const ID_HEX_CHARS: usize = 32;
 
 /// Runs one device's side of a rendezvous: join, relay binary frames, end.
-pub async fn run(state: AppState, mut socket: WebSocket) {
+pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
   let config = state.settings.rendezvous.clone();
   let first = timeout(
     Duration::from_secs(config.join_timeout_secs),
@@ -37,6 +37,9 @@ pub async fn run(state: AppState, mut socket: WebSocket) {
   let user = match authenticate(&state, &token).await {
     Ok(user) => user,
     Err(body) => {
+      state
+        .rate_limits
+        .record_auth_failure(&ip, std::time::Instant::now());
       fail_with(&mut socket, body).await;
       return;
     },
@@ -123,7 +126,7 @@ async fn authenticate(state: &AppState, token: &str) -> Result<teamcraft_proto::
   .await;
   result
     .map(|caller| caller.user.id)
-    .map_err(|error| ErrorBody::new(error.error_code(), error.to_string()))
+    .map_err(|error| ErrorBody::new(error.error_code(), error.public_message()))
 }
 
 fn is_valid_id(id: &str) -> bool {

@@ -36,6 +36,8 @@ reqwest.workspace = true
 rusty-s3.workspace = true
 secrecy.workspace = true
 subtle = "2.6.1"
+# Wipes push tokens and keys from memory when a push target is dropped (already in the tree).
+zeroize = "1.9.1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

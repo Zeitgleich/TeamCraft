@@ -3,7 +3,10 @@
 use teamcraft_crypto::key_bag::EncryptedKeyBag;
 
 use super::Client;
-use crate::account_data::AccountData;
+use super::enroll::WrapsOnMerge;
+use teamcraft_proto::{Base64Bytes, UserId};
+
+use crate::account_data::{AccountData, PinnedKey};
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
@@ -46,19 +49,95 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn sync_account_data(&mut self) -> Result<(), CoreError> {
     let remote = self.api.key_bag().await?;
     if remote.version > self.sync.key_bag_version {
-      self.merge_key_bag(&remote.encrypted_key_bag.into_vec(), remote.version)?;
+      self.merge_key_bag(
+        remote.encrypted_key_bag.as_slice(),
+        remote.version,
+        remote.wrapped_backup_keys.as_slice(),
+        WrapsOnMerge::Adopt,
+      )?;
     }
+    self.share_trust_decisions()?;
     if self.sync.is_key_bag_dirty {
       self.upload_key_bag().await?;
     }
     Ok(())
   }
 
+  /// Accepts a changed identity key the server reported for `user` (after the user compared it):
+  /// this device and, through the account data, the user's other devices use it from now on.
+  pub fn accept_identity_change(&mut self, user: UserId) -> Result<(), CoreError> {
+    let mut pinned = records::pinned_identities(&self.store)?;
+    let Some(entry) = pinned.get_mut(&user) else {
+      return Ok(());
+    };
+    let Some(new_key) = entry.maybe_changed_to.take() else {
+      return Ok(());
+    };
+    entry.public_key = new_key;
+    records::pin_identity(&self.store, user, entry)?;
+    self.update_account_data(|data, now| data.pin(user, new_key, now))
+  }
+
+  /// Brings this device's pins and the account data's into line: decisions from the user's other
+  /// devices win (they are the user's own), this device's new pins are added for the others.
+  fn share_trust_decisions(&mut self) -> Result<(), CoreError> {
+    let shared = self.account_data();
+    let mut local = records::pinned_identities(&self.store)?;
+    for (user, entry) in &mut local {
+      if let Some(key) = shared.pinned_key(*user)
+        && key != entry.public_key
+      {
+        entry.public_key = key;
+        entry.maybe_changed_to = None;
+        records::pin_identity(&self.store, *user, entry)?;
+      }
+    }
+    let workspace_root = self.workspace()?.maybe_root;
+    self.update_account_data(|data, now| {
+      let mut is_changed = false;
+      for (user, entry) in &local {
+        if data.pinned_key(*user).is_none() && entry.maybe_changed_to.is_none() {
+          is_changed |= data.pin(*user, entry.public_key, now);
+        }
+      }
+      if data.maybe_workspace_root.is_none()
+        && let Some(root) = &workspace_root
+      {
+        data.maybe_workspace_root = Some(PinnedKey {
+          user_id: root.user_id,
+          public_key: Base64Bytes::new(root.identity_key.to_vec()),
+        });
+        is_changed = true;
+      }
+      is_changed
+    })
+  }
+
   /// Merges another device's key bag: content keys are added, account data entries take the newer
-  /// side.
-  pub(crate) fn merge_key_bag(&mut self, encrypted: &[u8], version: u64) -> Result<(), CoreError> {
-    let decrypted = EncryptedKeyBag::from_bytes(encrypted)?
-      .decrypt(convert::user(self.account.user_id), &self.account.backup_key())?;
+  /// side. A bag older than one this device saw is refused (security review B11).
+  pub(crate) fn merge_key_bag(
+    &mut self,
+    encrypted: &[u8],
+    version: u64,
+    wrapped_keys: &[u8],
+    wraps: WrapsOnMerge,
+  ) -> Result<(), CoreError> {
+    let encrypted = EncryptedKeyBag::from_bytes(encrypted)?;
+    if encrypted.sequence() < self.sync.key_bag_sequence {
+      return Err(CoreError::KeyBagRollback {
+        seen: self.sync.key_bag_sequence,
+        offered: encrypted.sequence(),
+      });
+    }
+    let decrypted = encrypted.decrypt(
+      convert::user(self.account.user_id),
+      &self.account.backup_key(),
+      wrapped_keys,
+    )?;
+    self.sync.key_bag_sequence = encrypted.sequence();
+    if wraps == WrapsOnMerge::Adopt {
+      self.store_wrapped_keys_blob(wrapped_keys)?;
+    }
     for ring in decrypted.conversations() {
       let local = self.account.key_bag.ring_mut(ring.conversation_id());
       for key in ring.keys() {

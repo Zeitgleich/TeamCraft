@@ -51,6 +51,9 @@ url = "2"
 # GStreamer's VA-API encoder.
 [target.'cfg(target_os = "linux")'.dependencies]
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire", "v4l2", "gstreamer"] }
+# Push-to-talk on Wayland through the GlobalShortcuts portal (MIT; already in the tree for capture).
+ashpd = { version = "0.13.13", features = ["global_shortcuts"] }
+futures-util = "0.3"
 
 # macOS cameras (AVFoundation); untested. teamcraft-media's `gstreamer` feature also builds the
 # VideoToolbox encoder (`vtenc_h264`), but the dmg would then need GStreamer.framework bundled

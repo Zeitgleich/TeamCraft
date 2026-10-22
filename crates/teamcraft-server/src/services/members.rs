@@ -75,6 +75,18 @@ pub async fn add_member(
   let access = load_conversation(state, caller, id).await?;
   ensure_open_channel(&access)?;
   require(state, caller, Permission::ManageMembers, &access.target())?;
+  // Admins manage private channels without being members, but the signed policy decides whether
+  // they may add themselves (admin.md §2.4). Members' clients enforce it for the encryption; the
+  // server does not hand out the membership rows (member list, read positions, call roster) either.
+  if request.user_id == caller.user.id
+    && !access.is_member()
+    && access.view.conversation.visibility == ConversationVisibility::Private
+    && state.policy.get().admin_self_join != teamcraft_proto::AdminSelfJoin::Visible
+  {
+    return Err(ApiError::Forbidden(
+      "the workspace policy does not let admins join private channels on their own".into(),
+    ));
+  }
   let role = request.maybe_role.unwrap_or(ChannelRole::Member);
   if matches!(role, ChannelRole::Unknown(_)) {
     return Err(ApiError::InvalidRequest("unknown channel role".into()));
@@ -183,6 +195,7 @@ pub async fn remove_member(
     SystemEventKind::MemberRemoved
   };
   system_events::emit(state, id, kind, Some(caller.user.id), Some(user_id)).await;
+  super::calls::evict_from_call(state, id, user_id).await;
   Ok(())
 }
 

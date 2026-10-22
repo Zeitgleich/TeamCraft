@@ -46,6 +46,9 @@ struct Bucket {
 pub struct RateLimits {
   config: RateLimitConfig,
   buckets: Mutex<HashMap<(Kind, String), Bucket>>,
+  /// E-mails the meetings of one organizer may still send, refilled over an hour. A quota, not a
+  /// rate limit: it applies even when rate limits are switched off.
+  mail_budgets: Mutex<HashMap<UserId, Bucket>>,
 }
 
 impl RateLimits {
@@ -53,6 +56,29 @@ impl RateLimits {
     Self {
       config: config.clone(),
       buckets: Mutex::new(HashMap::new()),
+      mail_budgets: Mutex::new(HashMap::new()),
+    }
+  }
+
+  /// Spends `count` e-mails of the user's hourly budget of `per_hour`. `false` (and nothing spent)
+  /// if the budget does not cover them all.
+  pub fn spend_mails(&self, user: UserId, count: u32, per_hour: u32) -> bool {
+    let capacity = f64::from(per_hour);
+    let now = Instant::now();
+    let mut budgets = self.mail_budgets.lock().unwrap_or_else(PoisonError::into_inner);
+    let bucket = budgets.entry(user).or_insert(Bucket {
+      tokens: capacity,
+      updated_at: now,
+    });
+    let elapsed = now.saturating_duration_since(bucket.updated_at).as_secs_f64();
+    bucket.tokens = (bucket.tokens + elapsed * capacity / 3600.0).min(capacity);
+    bucket.updated_at = now;
+    let needed = f64::from(count);
+    if bucket.tokens >= needed {
+      bucket.tokens -= needed;
+      true
+    } else {
+      false
     }
   }
 
@@ -90,7 +116,7 @@ impl RateLimits {
     }
   }
 
-  fn record_auth_failure(&self, ip: &str, now: Instant) {
+  pub fn record_auth_failure(&self, ip: &str, now: Instant) {
     if !self.config.is_enabled {
       return;
     }
@@ -164,6 +190,11 @@ fn retry_after(tokens: f64, per_minute: f64) -> ApiError {
   }
 }
 
+/// The address a request counts for, put into the request by [`guard`] so that long-lived
+/// connections (gateway, rendezvous) can count failed authentications against it.
+#[derive(Debug, Clone)]
+pub struct ClientIp(pub String);
+
 /// The middleware around every route: rate limits, then the response headers.
 pub async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
   let path = request.uri().path().to_owned();
@@ -174,6 +205,9 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
   }
   let settings = &state.settings.security;
   let ip = client_ip(&request, settings.trust_forwarded_for);
+  let mut request = request;
+  warn_once_if_behind_an_unconfigured_proxy(&request, settings.trust_forwarded_for);
+  request.extensions_mut().insert(ClientIp(ip.clone()));
   let now = Instant::now();
   let limits = &state.rate_limits;
   let refusal = limits
@@ -223,6 +257,47 @@ fn add_headers(headers: &mut HeaderMap, hsts: bool) {
   }
 }
 
+/// Behind a reverse proxy without `trust_forwarded_for`, every client has the proxy's address: they
+/// share one rate limit and bad tokens from anybody block everybody. A request that comes from a
+/// private address and carries `X-Forwarded-For` gives it away; say so once.
+fn warn_once_if_behind_an_unconfigured_proxy(request: &Request, trust_forwarded_for: bool) {
+  static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+  let peer = request
+    .extensions()
+    .get::<ConnectInfo<SocketAddr>>()
+    .map(|info| info.0.ip());
+  if looks_like_an_unconfigured_proxy(request.headers(), peer, trust_forwarded_for)
+    && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+  {
+    tracing::warn!(
+      "requests arrive from a private address with X-Forwarded-For: if a reverse proxy sits in front \
+       of the server, set security.trust_forwarded_for = true, or all clients share one rate limit"
+    );
+  }
+}
+
+fn looks_like_an_unconfigured_proxy(
+  headers: &HeaderMap,
+  peer: Option<IpAddr>,
+  trust_forwarded_for: bool,
+) -> bool {
+  if trust_forwarded_for || !headers.contains_key("x-forwarded-for") {
+    return false;
+  }
+  peer.is_some_and(|ip| match normalize_ip(ip) {
+    IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+    IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+  })
+}
+
+/// An IPv4-mapped IPv6 address as the IPv4 address it stands for.
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+  match ip {
+    IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+    other => other,
+  }
+}
+
 /// The address a request counts for: the connection's, or with a trusted proxy the last entry of
 /// `X-Forwarded-For` (the client as the proxy saw it; earlier entries are client-supplied).
 fn client_ip(request: &Request, trust_forwarded_for: bool) -> String {
@@ -264,7 +339,42 @@ fn normalize(ip: IpAddr) -> String {
 mod tests {
   use std::time::Duration;
 
+  use axum::http::HeaderValue;
+
   use super::*;
+
+  #[test]
+  fn a_private_peer_with_forwarded_for_looks_like_an_unconfigured_proxy() {
+    let with = |value: Option<&str>| {
+      let mut headers = HeaderMap::new();
+      if let Some(value) = value {
+        headers.insert("x-forwarded-for", HeaderValue::from_str(value).unwrap());
+      }
+      headers
+    };
+    let proxy: Option<IpAddr> = Some("10.0.0.2".parse().unwrap());
+    let xff = with(Some("203.0.113.9"));
+    assert!(looks_like_an_unconfigured_proxy(&xff, proxy, false));
+    assert!(looks_like_an_unconfigured_proxy(
+      &xff,
+      Some("::ffff:172.16.0.1".parse().unwrap()),
+      false
+    ));
+    assert!(looks_like_an_unconfigured_proxy(
+      &xff,
+      Some("127.0.0.1".parse().unwrap()),
+      false
+    ));
+    // Configured, direct clients, public peers and unknown peers do not trigger it.
+    assert!(!looks_like_an_unconfigured_proxy(&xff, proxy, true));
+    assert!(!looks_like_an_unconfigured_proxy(&with(None), proxy, false));
+    assert!(!looks_like_an_unconfigured_proxy(
+      &xff,
+      Some("198.51.100.4".parse().unwrap()),
+      false
+    ));
+    assert!(!looks_like_an_unconfigured_proxy(&xff, None, false));
+  }
 
   fn limits(edit: impl FnOnce(&mut RateLimitConfig)) -> RateLimits {
     let mut config = RateLimitConfig::default();

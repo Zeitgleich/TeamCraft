@@ -9,9 +9,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::backup::BackupKey;
 use teamcraft_crypto::identity::{DeviceKeyPair, IdentityPublicKey, SignedDeviceCertificate};
-use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBag};
+use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBag, KeyBagBinding};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{ClientMessageId, ConversationId, DeviceId, MlsMessageId, ThreadId, UserId};
+use teamcraft_proto::{
+  Base64Bytes, ClientMessageId, ConversationId, DeviceId, MlsMessageId, ThreadId, UserId,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::convert;
@@ -49,6 +51,9 @@ pub struct SyncState {
   /// Content keys changed since the last key bag upload.
   #[serde(default)]
   pub is_key_bag_dirty: bool,
+  /// Highest key bag sequence this device uploaded or accepted; older bags are refused (B11).
+  #[serde(default)]
+  pub key_bag_sequence: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +80,9 @@ pub struct PinnedIdentity {
   pub public_key: [u8; 32],
   #[serde(rename = "changed_to", default, skip_serializing_if = "Option::is_none")]
   pub maybe_changed_to: Option<[u8; 32]>,
+  /// The identity provider attested the key when it was pinned (otherwise trust on first use).
+  #[serde(default)]
+  pub is_attested: bool,
 }
 
 /// Secret part of [`Account`] as stored (SQLCipher protects it at rest).
@@ -123,12 +131,17 @@ pub fn save_account(store: &impl LocalStore, account: &Account) -> Result<(), Co
   save_key_bag(store, account)
 }
 
-/// The key bag (identity key and all content keys) is stored encrypted with the backup key, the same
-/// bytes that are uploaded to the server.
+/// The local copy is never uploaded, so it isn't bound to a sequence or the wrapped keys.
+const LOCAL_BINDING: KeyBagBinding<'static> = KeyBagBinding {
+  sequence: 0,
+  wrapped_keys: &[],
+};
+
+/// The key bag (identity key and all content keys) is stored encrypted with the backup key.
 pub fn save_key_bag(store: &impl LocalStore, account: &Account) -> Result<(), CoreError> {
   let encrypted = account
     .key_bag
-    .encrypt(&account.backup_key(), &mut rand_core::OsRng)?;
+    .encrypt(&account.backup_key(), LOCAL_BINDING, &mut rand_core::OsRng)?;
   store.put(Table::Account, KEY_BAG_KEY, &encrypted.to_bytes()?)?;
   Ok(())
 }
@@ -144,6 +157,7 @@ pub fn load_account(store: &impl LocalStore) -> Result<Option<Account>, CoreErro
   let key_bag = EncryptedKeyBag::from_bytes(&key_bag_bytes)?.decrypt(
     convert::user(record.user_id),
     &BackupKey::from_key(backup_secret.duplicate()),
+    LOCAL_BINDING.wrapped_keys,
   )?;
   let device = DeviceKeyPair::from_secrets(
     convert::user(record.user_id),
@@ -332,6 +346,34 @@ fn take_chunk(rest: &mut &[u8]) -> Result<Vec<u8>, CoreError> {
   let chunk = tail.get(..length).ok_or_else(corrupt)?;
   *rest = &tail[length..];
   Ok(chunk.to_vec())
+}
+
+/// The verified signing key of a device, as recorded from its certificate (security review A10).
+pub fn device_signing_key(
+  store: &impl LocalStore,
+  user: UserId,
+  device: DeviceId,
+) -> Result<Option<teamcraft_crypto::identity::DeviceSigningPublicKey>, CoreError> {
+  let maybe: Option<Base64Bytes> = get_json(store, Table::DeviceKeys, &format!("{user}/{device}"))?;
+  Ok(
+    maybe
+      .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+      .map(teamcraft_crypto::identity::DeviceSigningPublicKey::from_bytes),
+  )
+}
+
+pub fn put_device_signing_key(
+  store: &impl LocalStore,
+  user: UserId,
+  device: DeviceId,
+  key: &teamcraft_crypto::identity::DeviceSigningPublicKey,
+) -> Result<(), CoreError> {
+  put_json(
+    store,
+    Table::DeviceKeys,
+    &format!("{user}/{device}"),
+    &Base64Bytes::new(key.as_bytes().to_vec()),
+  )
 }
 
 #[cfg(test)]

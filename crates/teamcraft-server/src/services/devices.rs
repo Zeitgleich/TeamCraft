@@ -33,6 +33,12 @@ pub async fn register_device(
     ));
   }
 
+  let limit = state.settings.limits.max_devices_per_user;
+  if state.database.count_active_devices(caller.user.id).await? >= limit as u64 {
+    return Err(ApiError::Conflict(format!(
+      "at most {limit} devices per user; remove one first"
+    )));
+  }
   let device = state
     .database
     .register_device(&NewDevice {

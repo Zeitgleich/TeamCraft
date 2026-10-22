@@ -137,6 +137,7 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     .post(format!("{}/api/internal/v1/meetings/replies", app.base_url))
     .bearer_auth("inbox-token-SECRET")
     .header("content-type", "text/calendar")
+    .header("x-envelope-sender", "someone@example.org")
     .body("garbage")
     .send()
     .await

@@ -17,13 +17,13 @@ pub use http::{AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, St
 use teamcraft_proto::{
   AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
   ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest, DeviceId,
-  DeviceResponse, ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage, GetMeResponse,
-  IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
-  ListConversationsResponse, ListDevicesResponse, ListMessagesQuery, ListMessagesResponse,
-  ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
-  UserId, UserSummary,
+  DeviceListResponse, DeviceResponse, ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage,
+  GetMeResponse, IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse,
+  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
+  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpacesResponse, MessageResponse,
+  MlsMessageResponse, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest, SpaceId,
+  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -61,6 +61,14 @@ pub trait ServerApi {
     request: &UploadIdentityKeyRequest,
   ) -> impl Future<Output = Result<IdentityKeyResponse, ApiError>>;
   fn identity_key(&self, user: UserId) -> impl Future<Output = Result<IdentityKeyResponse, ApiError>>;
+  /// The user's signed device list (security review A4); not found if they never published one.
+  fn device_list(&self, user: UserId) -> impl Future<Output = Result<DeviceListResponse, ApiError>>;
+  fn put_device_list(
+    &self,
+    request: &PutDeviceListRequest,
+  ) -> impl Future<Output = Result<DeviceListResponse, ApiError>>;
+  /// Revokes one of the caller's own devices (it can't log in any more).
+  fn revoke_device(&self, device: DeviceId) -> impl Future<Output = Result<(), ApiError>>;
 
   fn upload_key_packages(
     &self,

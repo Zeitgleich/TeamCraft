@@ -127,6 +127,11 @@ pub enum GatewayEvent {
   OrgRecoveryUpdate {
     request_id: RecoveryRequestId,
   },
+  /// The user's key bag changed (new version). Sent to the user's own devices, which fetch it so
+  /// pins and the workspace root stay in sync (security-review A2).
+  KeyBagUpdate {
+    version: u64,
+  },
   /// The announcement banner changed or ended. Clients fetch it again.
   AnnouncementUpdate,
   /// Something happened to a conversation (a member joined, the channel was archived, ...). Sent
