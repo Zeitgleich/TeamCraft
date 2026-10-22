@@ -25,15 +25,14 @@ page lists what each scenario proves for the v1 sections of [PLAN.md](../PLAN.md
 
 What the suite does **not** prove today, and why:
 
-| Gap                                                          | Why                                                                                                         |
-|--------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
-| Browser sends a message that a second client receives        | Ignored test `web::a_message_written_in_the_web_client_reaches_a_second_client`: the web build is read-only |
-| Push delivery (Web Push, APNs, FCM) and the content mode     | Only registration is exercised; dispatch is covered by the server's own tests with fakes                    |
-| Keyword notifications, activity feed, "also send to channel" | Client-side features of the UI, not reachable through the core API                                          |
-| Search from shared index segments for a new member           | Segments are published for closed months; the real clock can't close one inside a test                      |
-| "In a meeting" status from CalCraft free/busy                | Needs the CalCraft container (heavy build), not part of the default dev stack run                           |
-| Urgent messages, read receipts                               | Covered by the server's integration tests, no e2e scenario yet                                              |
-| Telephony and the AI hotline (§10)                           | Not v1                                                                                                      |
+| Gap                                                          | Why                                                                                      |
+|--------------------------------------------------------------|------------------------------------------------------------------------------------------|
+| Push delivery (Web Push, APNs, FCM) and the content mode     | Only registration is exercised; dispatch is covered by the server's own tests with fakes |
+| Keyword notifications, activity feed, "also send to channel" | Client-side features of the UI, not reachable through the core API                       |
+| Search from shared index segments for a new member           | Segments are published for closed months; the real clock can't close one inside a test   |
+| "In a meeting" status from CalCraft free/busy                | Needs the CalCraft container (heavy build), not part of the default dev stack run        |
+| Urgent messages, read receipts                               | Covered by the server's integration tests, no e2e scenario yet                           |
+| Telephony and the AI hotline (§10)                           | Not v1                                                                                   |
 
 ## Bugs the suite found
 
