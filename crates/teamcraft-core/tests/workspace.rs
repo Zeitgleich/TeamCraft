@@ -55,6 +55,50 @@ async fn roster_and_policy_are_verified_and_forgeries_ignored() {
 }
 
 #[tokio::test]
+async fn a_policy_edited_from_something_unverified_is_not_signed() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let alice_id = alice.client.user_id();
+  alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner)])
+    .await
+    .unwrap();
+  alice
+    .client
+    .publish_policy(policy(AdminSelfJoin::Disabled))
+    .await
+    .unwrap();
+  let verified = alice.client.workspace().unwrap().policy;
+
+  // The console showed a policy the server altered (self-join visible); the owner edits something else.
+  let mut shown = verified.clone();
+  shown.admin_self_join = AdminSelfJoin::Visible;
+  let mut edited = shown.clone();
+  edited.history_default = HistoryPolicy::FromJoin;
+  let refused = alice.client.publish_policy_based_on(&shown, edited).await;
+  assert!(matches!(
+    refused,
+    Err(teamcraft_core::CoreError::PolicyBaseMismatch)
+  ));
+  assert_eq!(
+    alice.client.workspace().unwrap().policy_version,
+    1,
+    "nothing was signed"
+  );
+
+  // Edited from what the core verified: signed.
+  let mut edited = verified.clone();
+  edited.history_default = HistoryPolicy::FromJoin;
+  alice
+    .client
+    .publish_policy_based_on(&verified, edited)
+    .await
+    .unwrap();
+  assert_eq!(alice.client.workspace().unwrap().policy_version, 2);
+}
+
+#[tokio::test]
 async fn admins_cannot_sign_policy() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;

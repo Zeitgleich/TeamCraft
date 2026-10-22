@@ -821,10 +821,11 @@ impl Core {
         return Ok(());
       },
       ChatAction::PublishPolicy {
+        base,
         policy,
         owners,
         admins,
-      } => return publish_policy(client, policy.clone(), owners, admins).await,
+      } => return publish_policy(client, base, policy.clone(), owners, admins).await,
       ChatAction::AdminJoinChannel { conversation } => {
         let me = client.user_id();
         return client.admin_add_member(*conversation, me).await.map_err(describe);
@@ -1031,6 +1032,7 @@ fn describe(error: CoreError) -> String {
 /// the signer as owner (the root of trust, e2ee.md §11); later policy changes only append.
 async fn publish_policy(
   client: &mut Client<Api, Store>,
+  base: &WorkspacePolicy,
   policy: WorkspacePolicy,
   owners: &[UserId],
   admins: &[UserId],
@@ -1053,7 +1055,10 @@ async fn publish_policy(
     );
     client.publish_roster(&roles).await.map_err(describe)?;
   }
-  client.publish_policy(policy).await.map_err(describe)
+  client
+    .publish_policy_based_on(base, policy)
+    .await
+    .map_err(describe)
 }
 
 /// Waits for the existing device to answer, shows the short code, then waits for the keys.

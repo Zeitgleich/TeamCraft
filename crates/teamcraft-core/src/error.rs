@@ -53,6 +53,10 @@ pub enum CoreError {
   KeyBagRollback { seen: u64, offered: u64 },
   #[error("no verified key yet for device {device} of user {user}")]
   UnknownSender { user: UserId, device: DeviceId },
+  /// The policy an admin edited is not the one this device verified: the server showed something
+  /// else, or a newer policy arrived. Nothing is signed.
+  #[error("the policy shown differs from the policy this device verified; reload the console and review it")]
+  PolicyBaseMismatch,
   #[error("user {0} isn't an admin in the signed roster")]
   NotAnAdmin(UserId),
   #[error("user {0} has no identity key yet (never enrolled)")]

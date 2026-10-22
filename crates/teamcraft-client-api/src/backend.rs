@@ -90,6 +90,7 @@ pub trait ChatBackend {
   /// and `admins` become the first one. Needs [`Self::can_sign_workspace`].
   fn publish_policy(
     &self,
+    _base: teamcraft_proto::WorkspacePolicy,
     _policy: teamcraft_proto::WorkspacePolicy,
     _owners: Vec<UserId>,
     _admins: Vec<UserId>,

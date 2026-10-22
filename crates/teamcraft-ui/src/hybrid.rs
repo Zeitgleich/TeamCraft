@@ -657,7 +657,9 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
       return;
     };
     let (owners, admins) = admin.roster_candidates();
-    self.chat.publish_policy(policy, owners, admins);
+    // The editor started from what the server showed; the core signs only if that is also what it
+    // verified itself (a compromised server could show altered fields).
+    self.chat.publish_policy(admin.policy(), policy, owners, admins);
     admin.queue_refresh_after_publish();
   }
 

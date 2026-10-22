@@ -624,11 +624,13 @@ impl ChatBackend for RemoteChat {
 
   fn publish_policy(
     &self,
+    base: teamcraft_proto::WorkspacePolicy,
     policy: teamcraft_proto::WorkspacePolicy,
     owners: Vec<UserId>,
     admins: Vec<UserId>,
   ) {
     self.act(ChatAction::PublishPolicy {
+      base,
       policy,
       owners,
       admins,
