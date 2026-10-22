@@ -90,3 +90,11 @@ figment = { version = "0.10", features = ["toml", "env"] }
 # without the libcrux advisories of the openmls 0.8 stack. See crates/vendor/davey/VENDORED.md.
 [patch.crates-io]
 davey = { path = "crates/vendor/davey" }
+
+# Keep target/ small: several worktrees build in parallel on one disk. Line tables are enough
+# for backtraces; dependencies carry no debug info.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
