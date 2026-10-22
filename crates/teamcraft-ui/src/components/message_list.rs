@@ -11,7 +11,7 @@ use wasm_bindgen::JsCast;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, ConversationKind, Message};
+use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::state::use_app_state;
 
 /// Extra pixels rendered above and below the viewport.
@@ -88,7 +88,12 @@ pub fn compute_window(heights: &[f32], scroll_top: f64, viewport: f64) -> Window
 }
 
 #[component]
-pub fn MessageList(conversation: ConversationId) -> impl IntoView {
+pub fn MessageList(
+  conversation: ConversationId,
+  /// Show an integration channel as plain chat messages instead of log lines.
+  #[prop(default = false)]
+  is_chat: bool,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let list_id = NEXT_LIST.get();
@@ -104,7 +109,8 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
 
   let is_log = state
     .read(|backend| backend.conversation(conversation))
-    .is_some_and(|conv| conv.kind == ConversationKind::Integration);
+    .is_some_and(|conv| conv.kind == ConversationKind::Integration)
+    && !is_chat;
   let estimate = if is_log {
     ESTIMATED_LOG_HEIGHT
   } else {
@@ -303,7 +309,7 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
         <div class="rows" node_ref=rows>
           <For each=indices key=|index| *index let:index>
-            <RowSlot conversation=conversation index=index />
+            <RowSlot conversation=conversation index=index is_chat=is_chat />
           </For>
         </div>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
@@ -326,11 +332,14 @@ pub fn MessageList(conversation: ConversationId) -> impl IntoView {
 
 /// Wrapper that carries the row index for measuring and re-renders only when its own data changes.
 #[component]
-fn RowSlot(conversation: ConversationId, index: usize) -> impl IntoView {
+fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl IntoView {
   let state = use_app_state();
   let data = Memo::new(move |_| -> Option<(Message, Option<Message>)> {
     let start = index.saturating_sub(1);
     let mut messages = state.read(|backend| backend.messages(conversation, start, 2));
+    if is_chat {
+      messages.iter_mut().for_each(as_chat_message);
+    }
     if index == 0 {
       let message = messages.into_iter().next()?;
       return Some((message, None));

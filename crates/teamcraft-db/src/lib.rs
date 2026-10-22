@@ -90,6 +90,6 @@ pub use status::StoredStatus;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};
 pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};
 pub use urgent::{Acknowledgement, DueReminder};
-pub use user::{OidcIdentity, OidcUserRow, PresencePreference, User, UserSearch};
+pub use user::{OidcIdentity, OidcUserRow, PresencePreference, SyncedUser, User, UserSearch};
 pub use user_group::{GroupCreateOutcome, NewUserGroup, UserGroup};
 pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};

@@ -180,6 +180,16 @@ pub enum CoreCommand {
     channels: Vec<ConversationId>,
     maybe_expires_at: Option<i64>,
   },
+  /// "Jump to date": load the history from `at_ms` on and note that the request is answered.
+  LoadHistoryAt {
+    conversation: ConversationId,
+    at_ms: i64,
+  },
+}
+
+/// Where the engine notes (in the sync state) which "jump to date" request it answered last.
+pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
+  format!("history-jump/{conversation}")
 }
 
 /// Text that must not show up in logs (a share link password); `Debug` prints `[redacted]`.
@@ -828,6 +838,19 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn browse_channels(&self, space: SpaceId) -> Vec<BrowsableChannel> {
     self.ui_browse_channels(space)
+  }
+
+  fn request_history_at(&self, conversation: ConversationId, at: i64) {
+    self.command(CoreCommand::LoadHistoryAt {
+      conversation,
+      at_ms: at,
+    });
+  }
+
+  fn is_history_loaded(&self, conversation: ConversationId, at: i64) -> bool {
+    let key = history_jump_key(conversation);
+    let answered: Option<i64> = self.read(records::get_json(&self.store, Table::SyncState, &key));
+    answered == Some(at)
   }
 
   fn join_channel(&self, conversation: ConversationId) {

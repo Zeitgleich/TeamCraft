@@ -925,6 +925,15 @@ notif-browser-denied = Notifications are blocked. Allow them in the browser's si
 notif-browser-allow = Allow notifications
 notif-browser-background = Notifications also arrive when TeamCraft is closed.
 
+log-toolbar-label = Log view options
+log-mode-log = Log
+log-mode-chat = Chat
+log-filter-level = Minimum level
+log-filter-text = Filter log text
+log-follow = Follow
+log-filter-none = No log entries match the filter.
+log-filter-truncated = Showing the newest { $count } matching entries.
+
 # Profiles, people and groups (v1 REST UI)
 profile-edit-title = Edit profile
 profile-unavailable = Profiles are not available here.

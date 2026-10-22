@@ -108,7 +108,7 @@ remaining members. The admin doesn't need to be a member for that.
 | Retention per space/channel: last N days and/or last N messages; admin defaults and maximums, owners choose within them     | v1    |
 | Integration channels: who may create them, register bridges, default retention; allow server-readable mode (off by default) | v1    |
 | Delete a channel completely (all ciphertext + attachments)                                                                  | v1    |
-| Default spaces/channels for new users                                                                                       | v1    |
+| Default spaces/channels for new users (`policy.default_spaces` / `default_channels`, applied once at first sign-in)         | v1    |
 | Space templates                                                                                                             | later |
 
 ### 3.2 Users and guests

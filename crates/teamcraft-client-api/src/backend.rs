@@ -218,6 +218,14 @@ pub trait ChatBackend {
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
+  /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
+  /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
+  fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}
+  /// Whether the request for `at` was answered (also when it failed or found nothing). Backends
+  /// that hold the whole history always say yes.
+  fn is_history_loaded(&self, _conversation: ConversationId, _at: i64) -> bool {
+    true
+  }
   /// The conversation includes people from outside the organization (the "external" badge).
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false
