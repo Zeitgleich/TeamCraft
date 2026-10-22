@@ -92,6 +92,9 @@ max_page_size = 200
 max_directory_results = 50
 # Largest avatar image in bytes (PNG, JPEG or WebP).
 max_avatar_bytes = 1048576
+# A user's own call background pictures: largest picture, and how many one user may keep.
+max_background_bytes = 8388608
+max_backgrounds_per_user = 24
 # How long a request for organization recovery waits for admin approvals.
 org_recovery_request_ttl_secs = 86400
 # Largest sealed share or sealed backup key the server stores for a recovery.
