@@ -15,7 +15,7 @@ use subtle::ConstantTimeEq;
 use teamcraft_proto::{
   CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
   CallStateResponse, ConversationId, ConversationKind, CreateCallJoinTokenRequest, DeviceId, GatewayEvent,
-  SfuParticipantReport, UnixMillis, UserId,
+  SfuControlAction, SfuControlRequest, SfuParticipantReport, UnixMillis, UserId,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -29,25 +29,6 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// What the server asks of the SFU for a meeting host.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct SfuControlRequest {
-  pub call_id: CallId,
-  pub by_user_id: UserId,
-  #[serde(flatten)]
-  pub action: SfuControlAction,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum SfuControlAction {
-  MuteAll,
-  RemoveParticipant { user_id: UserId },
-  Lock,
-  Unlock,
-  End,
-}
 
 /// Signs join tokens and tracks the active call of each conversation.
 pub struct CallService {
