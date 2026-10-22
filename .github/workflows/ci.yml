@@ -7,6 +7,7 @@ on:
       - "docs/**"
       - "**/*.md"
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths-ignore:
       - "docs/**"
       - "**/*.md"
@@ -18,6 +19,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # arm64 runs on pushes to main and on pull requests labelled `arm`; the runner budget is limited.
 
 # Jobs run on GitHub's hosted runner, inside our Debian Trixie CI image (containers/ci.Containerfile,
 # built by ci-image.yml; pinned by digest, update it with scripts/pin-ci-image.sh). The image has
@@ -35,11 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
@@ -87,11 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
