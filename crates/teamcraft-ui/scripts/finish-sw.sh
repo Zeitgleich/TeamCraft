@@ -7,10 +7,17 @@
 # scripts/sign-web-release.sh lists its hash. The standalone glue file is then not needed.
 set -eu
 dist="${TRUNK_STAGING_DIR:?run this as a Trunk hook}"
+# Git Bash on Windows gets the dist directory as \\?\D:\...; use the mixed form (D:/...) that awk,
+# python and the shell all accept.
+case "$dist" in
+  [A-Za-z]:*|'\\'*) dist=$(cygpath -m "${dist#'\\?\'}") ;;
+esac
+
 glue="$dist/teamcraft-web-sw.js"
 wasm="teamcraft-web-sw_bg.wasm"
 [ -f "$glue" ] && [ -f "$dist/$wasm" ] || { echo "finish-sw: no service worker build in $dist" >&2; exit 1; }
-python3 - "$dist/sw.js" "$glue" "$wasm" <<'PY'
+python="$(command -v python3 || command -v python)"
+"$python" - "$dist/sw.js" "$glue" "$wasm" <<'PY'
 import sys
 sw_path, glue_path, wasm = sys.argv[1:4]
 sw = open(sw_path).read()
