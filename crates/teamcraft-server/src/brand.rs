@@ -207,7 +207,7 @@ impl BrandRegistry {
     self
       .brands
       .iter()
-      .find(|brand| brand.email_domains.iter().any(|d| *d == domain))
+      .find(|brand| brand.email_domains.contains(&domain))
   }
 
   /// The home brand of an e-mail address: the brand that lists its domain, else the default.
