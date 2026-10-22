@@ -327,15 +327,20 @@ fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
       })
     });
     for notification in notifications {
+      let is_generic = notification.title == NotificationTitle::Generic;
       let title = match &notification.title {
+        NotificationTitle::Generic => i18n.t("notify-new-message"),
         NotificationTitle::Sender(name) => name.clone(),
         NotificationTitle::InChannel { sender, channel } => {
           i18n.t_with("notify-in-channel", &[("name", sender), ("channel", channel)])
         },
         NotificationTitle::ThreadReply { sender } => i18n.t_with("notify-thread-reply", &[("name", sender)]),
       };
-      let body = notification.body.unwrap_or_else(|| i18n.t("notify-new-message"));
-      leptos::task::spawn_local(async move { tauri::notify(&title, Some(&body)).await });
+      // A generic notification is only its title; otherwise the fallback body says what happened.
+      let body = notification
+        .body
+        .or_else(|| (!is_generic).then(|| i18n.t("notify-new-message")));
+      leptos::task::spawn_local(async move { tauri::notify(&title, body.as_deref()).await });
     }
   });
 }

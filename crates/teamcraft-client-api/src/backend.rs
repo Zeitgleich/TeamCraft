@@ -98,6 +98,11 @@ pub trait ChatBackend {
   }
   /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
   fn admin_add_self(&self, _conversation: ConversationId) {}
+  /// What desktop and browser notifications may show (the verified workspace policy). A backend
+  /// that does not know the policy answers with the strictest mode.
+  fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
+    teamcraft_proto::PushContentMode::Generic
+  }
   /// Identity keys this device knows (empty when the backend has no encryption keys).
   fn security_keys(&self) -> crate::remote::SecuritySnapshot {
     crate::remote::SecuritySnapshot::default()

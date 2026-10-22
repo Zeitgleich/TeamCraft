@@ -9,6 +9,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::clock::now_ms;
+use teamcraft_proto::PushContentMode;
+
 use crate::model::{
   Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, ThreadId, User, UserId,
 };
@@ -167,6 +169,8 @@ pub struct Notification {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotificationTitle {
+  /// The workspace policy allows no names: "New message".
+  Generic,
   /// A direct message: just the sender.
   Sender(String),
   InChannel {
@@ -297,6 +301,7 @@ pub fn notifications_for(
 ) -> Vec<Notification> {
   let me = backend.me();
   let now = now_ms();
+  let mode = backend.push_content_mode();
   found
     .into_iter()
     .filter_map(|item| {
@@ -331,12 +336,62 @@ pub fn notifications_for(
         body: prefs.show_preview.then(|| preview(&item.message.body)),
       })
     })
+    .map(|notification| limited_to(notification, &mode))
     .collect()
+}
+
+/// Cuts a notification down to what the verified workspace policy allows on a lock screen, whatever
+/// the person's own "show message text" choice (the policy only ever takes away). An unknown mode
+/// counts as the strictest.
+pub fn limited_to(mut notification: Notification, mode: &PushContentMode) -> Notification {
+  match mode {
+    PushContentMode::Full => {},
+    PushContentMode::Sender => notification.body = None,
+    PushContentMode::Generic | PushContentMode::Unknown(_) => {
+      notification.body = None;
+      notification.title = NotificationTitle::Generic;
+    },
+  }
+  notification
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn shown() -> Notification {
+    Notification {
+      conversation: id_from_raw(1),
+      title: NotificationTitle::InChannel {
+        sender: "Alice".into(),
+        channel: "planning".into(),
+      },
+      body: Some("lunch at noon?".into()),
+    }
+  }
+
+  #[test]
+  fn a_backend_without_a_verified_policy_allows_only_generic_notifications() {
+    let backend = crate::mock::MockBackend::new(NOW);
+    assert_eq!(
+      crate::backend::ChatBackend::push_content_mode(&backend),
+      PushContentMode::Generic
+    );
+  }
+
+  #[test]
+  fn the_policy_limits_what_a_desktop_notification_shows() {
+    assert_eq!(limited_to(shown(), &PushContentMode::Full), shown());
+    let sender = limited_to(shown(), &PushContentMode::Sender);
+    assert_eq!(sender.body, None);
+    assert_eq!(sender.title, shown().title);
+    for mode in [PushContentMode::Generic, PushContentMode::Unknown("x".into())] {
+      let generic = limited_to(shown(), &mode);
+      assert_eq!(generic.body, None);
+      assert_eq!(generic.title, NotificationTitle::Generic);
+    }
+  }
+
   use crate::model::{SidebarCategory, id_from_raw};
   use crate::prefs::{ConversationNotify, DndSchedule, MuteFor};
 

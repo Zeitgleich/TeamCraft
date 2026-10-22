@@ -616,6 +616,17 @@ impl ChatBackend for RemoteChat {
     self.mirror.borrow().snapshot.security.clone()
   }
 
+  fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .maybe_push_content
+      .clone()
+      .unwrap_or(teamcraft_proto::PushContentMode::Generic)
+  }
+
   fn accept_key_change(&self, user: UserId) {
     self.act(ChatAction::AcceptKeyChange { user });
     // The pin changed in the core; read it back right away so the banner goes.

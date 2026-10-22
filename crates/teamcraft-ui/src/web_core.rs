@@ -771,6 +771,7 @@ impl Core {
     Ok(SecuritySnapshot {
       my_fingerprint: client.identity_fingerprint(),
       contacts,
+      maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
     })
   }
 

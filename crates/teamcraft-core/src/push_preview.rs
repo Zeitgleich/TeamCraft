@@ -106,14 +106,18 @@ pub async fn push_preview<A: ServerApi>(
   Ok(preview.limited_to(&push_content_mode(store)))
 }
 
-/// What the workspace policy lets notifications show; everything while no policy was verified.
-fn push_content_mode(store: &impl LocalStore) -> PushContentMode {
-  records::get_json::<crate::workspace::WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
-    .ok()
-    .flatten()
-    .map_or(PushContentMode::Full, |state| {
-      state.policy.notifications.push_content
-    })
+/// What the verified workspace policy lets notifications show. Fails closed: with no verified
+/// workspace state on this device yet, or one that cannot be read, a notification shows nothing
+/// but "New message".
+pub fn push_content_mode(store: &impl LocalStore) -> PushContentMode {
+  match records::get_json::<crate::workspace::WorkspaceState>(
+    store,
+    Table::Workspace,
+    crate::client::WORKSPACE_KEY,
+  ) {
+    Ok(Some(state)) => state.policy.notifications.push_content,
+    Ok(None) | Err(_) => PushContentMode::Generic,
+  }
 }
 
 impl PushPreview {
@@ -271,6 +275,25 @@ mod tests {
     assert_eq!(cut.chars().count(), MAX_PREVIEW_CHARS + 1);
     assert!(cut.ends_with('…'));
     assert_eq!(truncate("short"), "short");
+  }
+
+  #[test]
+  fn a_missing_or_unreadable_policy_fails_closed() {
+    let store = crate::store::MemoryStore::new();
+    assert_eq!(push_content_mode(&store), PushContentMode::Generic);
+    records::put_json(
+      &store,
+      Table::Workspace,
+      crate::client::WORKSPACE_KEY,
+      &serde_json::json!({"policy": "not a policy"}),
+    )
+    .unwrap();
+    assert_eq!(push_content_mode(&store), PushContentMode::Generic);
+
+    let mut state = crate::workspace::WorkspaceState::default();
+    state.policy.notifications.push_content = PushContentMode::Sender;
+    records::put_json(&store, Table::Workspace, crate::client::WORKSPACE_KEY, &state).unwrap();
+    assert_eq!(push_content_mode(&store), PushContentMode::Sender);
   }
 
   #[test]

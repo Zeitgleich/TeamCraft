@@ -11,7 +11,7 @@ use teamcraft_core::push_preview::{PreviewContent, push_preview};
 use teamcraft_core::store::{LocalStore, MessageFilter};
 use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{ConversationId, MessageId, PushKind, PushProvider, PushWakeUp};
+use teamcraft_proto::{ConversationId, MessageId, PushContentMode, PushKind, PushProvider, PushWakeUp};
 
 #[tokio::test]
 async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
@@ -70,6 +70,31 @@ async fn a_payload_sealed_with_another_key_is_rejected() {
       .await
       .is_err()
   );
+  settle(&mut [&mut bob]).await;
+}
+
+#[tokio::test]
+async fn the_signed_policy_decides_what_a_notification_shows() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_id, _bob_id) = (alice.client.user_id(), bob.client.user_id());
+  alice
+    .client
+    .publish_roster(&[(alice_id, teamcraft_core::workspace::RosterRole::Owner)])
+    .await
+    .unwrap();
+  let mut policy = teamcraft_proto::WorkspacePolicy::default();
+  policy.notifications.push_content = PushContentMode::Sender;
+  alice.client.publish_policy(policy).await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  let message = alice_says(&mut alice, channel, "salary talk").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  // Names stay, the text is withheld.
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
   settle(&mut [&mut bob]).await;
 }
 

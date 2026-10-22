@@ -438,6 +438,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     live.mark_thread_read(conversation, thread, latest);
   }
 
+  fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
+    self.chat.push_content_mode()
+  }
+
   fn current_announcement(&self) -> Option<AnnouncementResponse> {
     match &self.maybe_live {
       Some(live) => live.announcement(),
