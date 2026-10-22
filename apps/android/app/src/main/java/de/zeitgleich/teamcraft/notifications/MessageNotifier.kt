@@ -25,6 +25,11 @@ class MessageNotifier(private val context: Context) {
   private val manager = NotificationManagerCompat.from(context)
   /** Recent lines per conversation, so a notification shows the conversation, not one message. */
   private val history = mutableMapOf<String, ArrayDeque<NotificationCompat.MessagingStyle.Message>>()
+  /**
+   * Conversations whose latest notification is known to belong to them (core-verified): only those
+   * offer reply and mark-read, since a wake-up's conversation alone is the server's word.
+   */
+  private val verified = mutableSetOf<String>()
 
   init {
     createChannels()
@@ -49,6 +54,11 @@ class MessageNotifier(private val context: Context) {
     lines.addLast(NotificationCompat.MessagingStyle.Message(text.text, System.currentTimeMillis(), sender))
     while (lines.size > MAX_LINES) lines.removeFirst()
     val channel = if (notification.isDirect || notification.isMention) CHANNEL_MENTIONS else CHANNEL_MESSAGES
+    if (notification.isConversationVerified) {
+      verified.add(notification.conversationId)
+    } else {
+      verified.remove(notification.conversationId)
+    }
     post(notification.conversationId, text.maybeConversationTitle, channel, isSilent = notification.isSilent)
   }
 
@@ -61,7 +71,15 @@ class MessageNotifier(private val context: Context) {
 
   fun dismiss(conversationId: String) {
     history.remove(conversationId)
+    verified.remove(conversationId)
     manager.cancel(notificationId(conversationId))
+  }
+
+  /** Removes every notification and what they remembered (sign-out). */
+  fun clearAll() {
+    history.clear()
+    verified.clear()
+    manager.cancelAll()
   }
 
   private fun post(conversationId: String, maybeTitle: String?, channel: String, isSilent: Boolean = false) {
@@ -79,10 +97,21 @@ class MessageNotifier(private val context: Context) {
       .setOnlyAlertOnce(isSilent)
       .setSilent(isSilent)
       .setContentIntent(openIntent(conversationId))
-      .addAction(replyAction(conversationId))
-      .addAction(markReadAction(conversationId))
+      // The lock screen shows only "New message" unless the user unlocks.
+      .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+      .setPublicVersion(publicVersion(channel))
+    if (conversationId in verified) {
+      builder.addAction(replyAction(conversationId)).addAction(markReadAction(conversationId))
+    }
     manager.notify(notificationId(conversationId), builder.build())
   }
+
+  private fun publicVersion(channel: String) = NotificationCompat.Builder(context, channel)
+    .setSmallIcon(R.drawable.ic_notification)
+    .setContentTitle(context.getString(R.string.app_name))
+    .setContentText(context.getString(R.string.notification_new_message))
+    .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+    .build()
 
   private fun replyAction(conversationId: String): NotificationCompat.Action {
     val input = RemoteInput.Builder(NotificationActionReceiver.KEY_REPLY)
@@ -101,6 +130,8 @@ class MessageNotifier(private val context: Context) {
       .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
       .setShowsUserInterface(false)
       .setAllowGeneratedReplies(true)
+      // Not from the lock screen without unlocking (Android 12+; Android Auto is unaffected).
+      .setAuthenticationRequired(true)
       .build()
   }
 
@@ -115,12 +146,14 @@ class MessageNotifier(private val context: Context) {
     return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(R.string.notification_mark_read), pending)
       .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
       .setShowsUserInterface(false)
+      .setAuthenticationRequired(true)
       .build()
   }
 
   private fun openIntent(conversationId: String): PendingIntent {
     val intent = Intent(context, MainActivity::class.java)
       .putExtra(MainActivity.EXTRA_CONVERSATION_ID, conversationId)
+      .putExtra(MainActivity.EXTRA_LAUNCH_TOKEN, LaunchToken.of(context))
       .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
     return PendingIntent.getActivity(
       context,

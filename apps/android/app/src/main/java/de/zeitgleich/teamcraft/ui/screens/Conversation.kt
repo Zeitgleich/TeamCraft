@@ -1,7 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import android.content.ActivityNotFoundException
-import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -95,6 +94,8 @@ import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Mentions
+import de.zeitgleich.teamcraft.ui.sensitiveClip
+import uniffi.teamcraft_ffi.isOpenableLink
 import uniffi.teamcraft_ffi.needsChannelConfirmation
 
 /** Quick reactions in the action sheet. */
@@ -384,11 +385,15 @@ private fun BookmarkRow(bookmark: Bookmark, onClick: () -> Unit) {
   }
 }
 
+/** Opens a bookmark: web links only (the shared rule), since any member can set bookmarks. */
 private fun openLink(context: Context, url: String) {
+  if (!isOpenableLink(url)) return
   try {
     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
   } catch (failure: ActivityNotFoundException) {
-    // No app handles the link (or it is malformed); nothing sensible to open, so leave it.
+    // No app handles the link; nothing sensible to open, so leave it.
+  } catch (failure: SecurityException) {
+    // The handling app refused to be started from here; leave it.
   }
 }
 
@@ -686,14 +691,14 @@ private fun MessageActions(
         scope.launch {
           viewModel.readChat { query(ChatQueries.permalink(conversationId, message.id)).maybeLink }?.let { link ->
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("TeamCraft", link))
+            clipboard.setPrimaryClip(sensitiveClip(link))
           }
           onDismiss()
         }
       }
       SheetItem(R.string.action_copy_text) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("TeamCraft", message.body))
+        clipboard.setPrimaryClip(sensitiveClip(message.body))
         onDismiss()
       }
       SheetItem(R.string.action_mark_unread) {

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="link_copy_code">Code kopieren</string>
+  <string name="secure_screen">Bildschirmfotos und Vorschauen von Chats und Anrufen verhindern</string>
+</resources>

@@ -1,10 +1,16 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import android.app.Activity
+import android.view.WindowManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -15,32 +21,33 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.width
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.remember
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import kotlinx.coroutines.launch
+import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.CustomStatus
-import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.security.ScreenPrefs
 import de.zeitgleich.teamcraft.ui.AppState
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import uniffi.teamcraft_ffi.Presence
@@ -108,6 +115,9 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
       ChangePassphrase(viewModel)
 
       HorizontalDivider()
+      SecureScreenSetting()
+
+      HorizontalDivider()
       OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {
         Text(stringResource(R.string.sign_out))
       }
@@ -119,8 +129,9 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
 @Composable
 private fun ApproveDevice(viewModel: MainViewModel) {
   val scope = rememberCoroutineScope()
-  var code by rememberSaveable { mutableStateOf("") }
-  var maybeShortCode by rememberSaveable { mutableStateOf<String?>(null) }
+  // Not saveable: a restored screen must never confirm an approval the user left.
+  var code by remember { mutableStateOf("") }
+  var maybeShortCode by remember { mutableStateOf<String?>(null) }
   var isDone by rememberSaveable { mutableStateOf(false) }
   var hasFailed by rememberSaveable { mutableStateOf(false) }
   var isScanning by rememberSaveable { mutableStateOf(false) }
@@ -144,17 +155,28 @@ private fun ApproveDevice(viewModel: MainViewModel) {
       }
     }
   }
+  val isComparing = maybeShortCode != null && !isDone
+  // Leaving the comparison unconfirmed drops the approval, so syncing resumes.
+  DisposableEffect(isComparing) {
+    onDispose { if (isComparing) viewModel.cancelLinkApproval() }
+  }
   Heading(R.string.approve_title)
   when {
     isDone -> Text(stringResource(R.string.approve_done))
     maybeShortCode != null -> {
       Text(stringResource(R.string.approve_compare))
       Text(maybeShortCode.orEmpty(), style = MaterialTheme.typography.displaySmall, fontFamily = FontFamily.Monospace)
-      Button(onClick = {
-        scope.launch {
-          viewModel.confirmLink().onSuccess { isDone = true }.onFailure { hasFailed = true }
-        }
-      }) { Text(stringResource(R.string.approve_confirm)) }
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = {
+          scope.launch {
+            viewModel.confirmLink().onSuccess { isDone = true }.onFailure { hasFailed = true }
+          }
+        }) { Text(stringResource(R.string.approve_confirm)) }
+        OutlinedButton(onClick = {
+          maybeShortCode = null
+          code = ""
+        }) { Text(stringResource(R.string.cancel)) }
+      }
     }
     else -> {
       Text(stringResource(R.string.approve_hint), style = MaterialTheme.typography.bodySmall)
@@ -223,7 +245,7 @@ private fun KeyChanges(viewModel: MainViewModel) {
 
 @Composable
 private fun ChangePassphrase(viewModel: MainViewModel) {
-  var passphrase by rememberSaveable { mutableStateOf("") }
+  var passphrase by remember { mutableStateOf("") }
   var isDone by rememberSaveable { mutableStateOf(false) }
   Heading(R.string.change_passphrase_title)
   OutlinedTextField(
@@ -235,6 +257,7 @@ private fun ChangePassphrase(viewModel: MainViewModel) {
     label = { Text(stringResource(R.string.passphrase)) },
     singleLine = true,
     visualTransformation = PasswordVisualTransformation(),
+    keyboardOptions = PASSPHRASE_KEYBOARD,
     modifier = Modifier.fillMaxWidth(),
   )
   Button(
@@ -262,3 +285,25 @@ private val PRESENCE_CHOICES = listOf(
 
 /** Same floor as the enrollment screen. */
 private const val MIN_PASSPHRASE_LENGTH = 12
+
+/** No screenshots or app-switcher thumbnails; applies the next time a screen opens. */
+@Composable
+private fun SecureScreenSetting() {
+  val context = LocalContext.current
+  val prefs = remember { ScreenPrefs.prefs(context) }
+  var isSecure by remember { mutableStateOf(prefs.isSecureScreen) }
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    Switch(checked = isSecure, onCheckedChange = {
+      isSecure = it
+      prefs.setSecureScreen(it)
+      (context as? Activity)?.let { activity ->
+        if (it) {
+          activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+          activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+      }
+    })
+    Text(stringResource(R.string.secure_screen), modifier = Modifier.padding(start = 8.dp))
+  }
+}

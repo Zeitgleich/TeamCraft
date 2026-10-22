@@ -4,12 +4,15 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.mutableStateOf
+import de.zeitgleich.teamcraft.notifications.LaunchToken
+import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 
 class MainActivity : ComponentActivity() {
@@ -26,7 +29,8 @@ class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
-    openConversation.value = intent.getStringExtra(EXTRA_CONVERSATION_ID)
+    if (prefs(this).isSecureScreen) window.setFlags(FLAG_SECURE, FLAG_SECURE)
+    openConversation.value = conversationToOpen(intent)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
@@ -44,10 +48,17 @@ class MainActivity : ComponentActivity() {
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
-    intent.getStringExtra(EXTRA_CONVERSATION_ID)?.let { openConversation.value = it }
+    conversationToOpen(intent)?.let { openConversation.value = it }
+  }
+
+  /** The conversation of one of the app's own notifications, or nothing (other apps' intents). */
+  private fun conversationToOpen(intent: Intent): String? {
+    if (!LaunchToken.isValid(this, intent.getStringExtra(EXTRA_LAUNCH_TOKEN))) return null
+    return intent.getStringExtra(EXTRA_CONVERSATION_ID)?.takeIf(LaunchToken::isConversationId)
   }
 
   companion object {
     const val EXTRA_CONVERSATION_ID = "conversation_id"
+    const val EXTRA_LAUNCH_TOKEN = "launch_token"
   }
 }

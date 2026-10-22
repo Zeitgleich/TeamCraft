@@ -29,6 +29,16 @@ class PushManager(
     backends.firstOrNull { it.isAvailable(context) }?.register(context)
   }
 
+  /**
+   * Sign-out: removes the registration on the server (and with it the push key on this device) and
+   * with the push services. Best effort; a wake-up that still arrives can't be opened.
+   */
+  suspend fun unregister() {
+    runCatching { core.core().unregisterPush() }
+      .onFailure { Log.w(TAG, "push unregistration failed: ${it.javaClass.simpleName}") }
+    backends.forEach { runCatching { it.unregister(context) } }
+  }
+
   fun onToken(service: PushService, token: String) {
     scope.launch {
       runCatching { core.core().registerPush(service, token) }

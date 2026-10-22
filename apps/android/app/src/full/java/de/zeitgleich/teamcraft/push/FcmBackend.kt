@@ -26,6 +26,13 @@ object FcmBackend : PushBackend {
     }
   }
 
+  override fun unregister(context: Context) {
+    if (!isAvailable(context)) return
+    ensureInitialized(context)
+    FirebaseMessaging.getInstance().isAutoInitEnabled = false
+    FirebaseMessaging.getInstance().deleteToken()
+  }
+
   fun ensureInitialized(context: Context) {
     if (FirebaseApp.getApps(context).isNotEmpty()) return
     val options = FirebaseOptions.Builder()
