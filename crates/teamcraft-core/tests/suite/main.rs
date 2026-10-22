@@ -2,12 +2,12 @@
 //! Each module keeps its own `cfg` gates (features, target), so a module that does not apply
 //! here is empty.
 
-#[path = "../common/mod.rs"]
-mod common;
-
 mod account_data;
+mod backgrounds;
 mod calls;
 mod chat_actions;
+#[path = "../common/mod.rs"]
+mod common;
 mod dev_stack;
 mod devices;
 mod files;

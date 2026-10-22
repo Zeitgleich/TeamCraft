@@ -4,7 +4,7 @@
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
-mod common;
+use crate::common;
 
 use common::{Peer, link_device};
 use teamcraft_core::api::fake::FakeServer;
