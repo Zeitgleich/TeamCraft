@@ -2,7 +2,12 @@ package org.teamcraft.android.ui
 
 import android.app.Application
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -11,6 +16,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.teamcraft.android.R
 import org.teamcraft.android.TeamCraftApplication
+import org.teamcraft.android.core.ChatClient
+import org.teamcraft.android.core.PickedFile
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.MessageItem
@@ -25,6 +32,7 @@ sealed interface AppState {
   data class SignedOut(@StringRes val maybeError: Int? = null) : AppState
   data class NeedsEnrollment(val hasExistingIdentity: Boolean, @StringRes val maybeError: Int? = null) : AppState
   data class LinkingThisDevice(val code: String, val maybeShortCode: String? = null) : AppState
+  data class RecoveringThroughOrganization(val code: String, @StringRes val maybeError: Int? = null) : AppState
   data class Ready(val userId: String, val displayName: String, val identityFingerprint: String) : AppState
   data class Failed(@StringRes val error: Int) : AppState
 }
@@ -38,6 +46,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val isBusy: StateFlow<Boolean> = busy
   /** Increments on every store change; screens re-read when it changes. */
   val changeCount: StateFlow<Long> = graph.core.changeCount
+
+  /** The chat features over the core's JSON bridge. */
+  val chat = ChatClient { graph.core.core() }
+  private val failures = MutableStateFlow<Int?>(null)
+
+  /** The last action that failed, as a message to show once. */
+  val lastFailure: StateFlow<Int?> = failures
 
   init {
     refresh()
@@ -80,6 +95,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /** Asks the organization's admins to recover the account; shows the code to read to one. */
+  fun recoverThroughOrganization() = launchBusy {
+    state.value = try {
+      AppState.RecoveringThroughOrganization(graph.core.core().startOrgRecovery().verificationCode)
+    } catch (failure: TeamCraftException) {
+      AppState.NeedsEnrollment(hasExistingIdentity = true, maybeError = errorText(failure))
+    }
+  }
+
+  /** After the admins approved: enrolls with the recovered keys and the new passphrase. */
+  fun finishOrgRecovery(newPassphrase: String) = launchBusy {
+    val current = state.value as? AppState.RecoveringThroughOrganization ?: return@launchBusy
+    state.value = try {
+      ready(graph.core.core().finishOrgRecovery(deviceName(), newPassphrase))
+    } catch (failure: TeamCraftException.RecoveryPending) {
+      current.copy(maybeError = R.string.org_recovery_pending)
+    } catch (failure: TeamCraftException) {
+      current.copy(maybeError = errorText(failure))
+    }
+  }
+
   fun cancelLinking() {
     state.value = AppState.NeedsEnrollment(hasExistingIdentity = true)
   }
@@ -113,6 +149,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun setPresence(presence: Presence) = viewModelScope.launch {
     runCatching { graph.core.core().setPresence(presence) }
   }
+
+  /** Runs a `ChatAction` built with [ChatActions]; failures show as [lastFailure]. */
+  fun act(action: String) = viewModelScope.launch {
+    try {
+      chat.act(action)
+    } catch (failure: TeamCraftException) {
+      failures.value = errorText(failure)
+    }
+  }
+
+  fun failureShown() {
+    failures.value = null
+  }
+
+  /** Runs a read; `null` when the core can't answer (not enrolled, gone). */
+  suspend fun <T> readChat(block: suspend ChatClient.() -> T): T? =
+    try {
+      chat.block()
+    } catch (failure: TeamCraftException) {
+      null
+    } catch (failure: kotlinx.serialization.SerializationException) {
+      null
+    }
+
+  /** Copies a picked document into the app's cache so the core can read and encrypt it. */
+  suspend fun importFile(uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
+    val resolver = getApplication<Application>().contentResolver
+    val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) cursor.getString(0) else null
+    } ?: "file"
+    val type = resolver.getType(uri) ?: "application/octet-stream"
+    val directory = File(getApplication<Application>().cacheDir, "outgoing").apply { mkdirs() }
+    val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
+    runCatching {
+      resolver.openInputStream(uri)?.use { input -> target.outputStream().use { input.copyTo(it) } }
+        ?: return@withContext null
+      PickedFile(fileName = name, mediaType = type, path = target.absolutePath)
+    }.getOrNull()
+  }
+
+  /** Joins (or starts) a conversation's call, e.g. a meeting's. */
+  fun startCall(conversationId: String, displayName: String) = graph.calls.startCall(conversationId, displayName)
 
   fun pushService(): PushService? = graph.push.activeService()
 

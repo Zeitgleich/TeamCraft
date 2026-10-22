@@ -27,7 +27,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import kotlinx.coroutines.launch
+import org.teamcraft.android.core.ChatActions
+import org.teamcraft.android.core.ChatSnapshot
+import org.teamcraft.android.core.CustomStatus
 import org.teamcraft.android.R
 import org.teamcraft.android.ui.AppState
 import org.teamcraft.android.ui.MainViewModel
@@ -59,8 +68,11 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
         }
       }
 
+      CustomStatusSection(viewModel)
+
       HorizontalDivider()
       Heading(R.string.push_title)
+      NotificationSettingsSection(viewModel)
       val service = viewModel.pushService()
       Text(
         stringResource(
@@ -77,8 +89,13 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
       Text(account.identityFingerprint, fontFamily = FontFamily.Monospace)
       Text(stringResource(R.string.fingerprint_hint), style = MaterialTheme.typography.bodySmall)
 
+      KeyChanges(viewModel)
+
       HorizontalDivider()
       ApproveDevice(viewModel)
+
+      HorizontalDivider()
+      ChangePassphrase(viewModel)
 
       HorizontalDivider()
       OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {
@@ -130,6 +147,80 @@ private fun ApproveDevice(viewModel: MainViewModel) {
   if (hasFailed) Text(stringResource(R.string.error_generic), color = MaterialTheme.colorScheme.error)
 }
 
+/** An emoji and text shown next to the user's name, cleared after the chosen time. */
+@Composable
+private fun CustomStatusSection(viewModel: MainViewModel) {
+  var emoji by rememberSaveable { mutableStateOf("💬") }
+  var text by rememberSaveable { mutableStateOf("") }
+  Heading(R.string.custom_status_title)
+  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    OutlinedTextField(value = emoji, onValueChange = { emoji = it.take(4) }, singleLine = true, modifier = Modifier.width(72.dp))
+    OutlinedTextField(
+      value = text,
+      onValueChange = { text = it },
+      singleLine = true,
+      placeholder = { Text(stringResource(R.string.custom_status_hint)) },
+      modifier = Modifier.weight(1f),
+    )
+  }
+  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Button(
+      onClick = { viewModel.act(ChatActions.setCustomStatus(CustomStatus(emoji, text.trim(), "Today"))) },
+      enabled = text.isNotBlank(),
+    ) { Text(stringResource(R.string.custom_status_set)) }
+    OutlinedButton(onClick = {
+      text = ""
+      viewModel.act(ChatActions.setCustomStatus(null))
+    }) { Text(stringResource(R.string.custom_status_clear)) }
+  }
+}
+
+/** Contacts whose identity key the server now shows differently: compare, then accept. */
+@Composable
+private fun KeyChanges(viewModel: MainViewModel) {
+  val changes by viewModel.changeCount.collectAsState()
+  var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
+  LaunchedEffect(changes) { snapshot = viewModel.readChat { snapshot() } }
+  val changed = snapshot?.security?.contacts.orEmpty().filter { it.maybeNewFingerprint != null }
+  if (changed.isEmpty()) return
+  HorizontalDivider()
+  Heading(R.string.key_changes_title)
+  for (contact in changed) {
+    Text(snapshot?.name(contact.user).orEmpty(), style = MaterialTheme.typography.titleSmall)
+    Text(stringResource(R.string.key_changes_new, contact.maybeNewFingerprint.orEmpty()), fontFamily = FontFamily.Monospace)
+    OutlinedButton(onClick = { viewModel.act(ChatActions.acceptKeyChange(contact.user)) }) {
+      Text(stringResource(R.string.key_changes_accept))
+    }
+  }
+}
+
+@Composable
+private fun ChangePassphrase(viewModel: MainViewModel) {
+  var passphrase by rememberSaveable { mutableStateOf("") }
+  var isDone by rememberSaveable { mutableStateOf(false) }
+  Heading(R.string.change_passphrase_title)
+  OutlinedTextField(
+    value = passphrase,
+    onValueChange = {
+      passphrase = it
+      isDone = false
+    },
+    label = { Text(stringResource(R.string.passphrase)) },
+    singleLine = true,
+    visualTransformation = PasswordVisualTransformation(),
+    modifier = Modifier.fillMaxWidth(),
+  )
+  Button(
+    onClick = {
+      viewModel.act(ChatActions.changePassphrase(passphrase))
+      passphrase = ""
+      isDone = true
+    },
+    enabled = passphrase.length >= MIN_PASSPHRASE_LENGTH,
+  ) { Text(stringResource(R.string.change_passphrase_button)) }
+  if (isDone) Text(stringResource(R.string.change_passphrase_done), style = MaterialTheme.typography.bodySmall)
+}
+
 @Composable
 private fun Heading(text: Int) {
   Text(stringResource(text), style = MaterialTheme.typography.titleMedium)
@@ -141,3 +232,6 @@ private val PRESENCE_CHOICES = listOf(
   Presence.DO_NOT_DISTURB to R.string.presence_dnd,
   Presence.OFFLINE to R.string.presence_offline,
 )
+
+/** Same floor as the enrollment screen. */
+private const val MIN_PASSPHRASE_LENGTH = 12

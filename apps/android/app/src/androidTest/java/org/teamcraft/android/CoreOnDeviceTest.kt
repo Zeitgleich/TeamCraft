@@ -11,6 +11,8 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.teamcraft.android.core.ChatActions
+import org.teamcraft.android.core.ChatQueries
 import org.teamcraft.android.security.KeystoreBox
 import org.teamcraft.android.security.SealedFile
 import uniffi.teamcraft_ffi.AppConfig
@@ -54,6 +56,30 @@ class CoreOnDeviceTest {
     }
     val code = core.startDeviceLink()
     assertTrue(code.startsWith("tclink1:"))
+    core.close()
+  }
+
+  @Test
+  fun chatBridgeParsesTheAppsMessages() = runBlocking {
+    val core = TeamCraft(config(), Tokens("token"), Listener)
+    // Well-formed actions and queries reach the engine, which isn't enrolled yet.
+    for (call in listOf<suspend () -> Unit>(
+      { core.snapshot() },
+      { core.act(ChatActions.react("7", "9", "👍")) },
+      { core.query(ChatQueries.followedThreads()) },
+    )) {
+      try {
+        call()
+        fail("not enrolled yet")
+      } catch (expected: TeamCraftException.NotEnrolled) {
+      }
+    }
+    // Malformed ones are refused before that.
+    try {
+      core.act("""{"action":"no_such_action"}""")
+      fail("unknown action")
+    } catch (expected: TeamCraftException.InvalidInput) {
+    }
     core.close()
   }
 

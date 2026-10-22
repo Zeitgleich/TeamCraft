@@ -65,6 +65,7 @@ fun EnrollScreen(
   isBusy: Boolean,
   onEnroll: (String) -> Unit,
   onLink: () -> Unit,
+  onOrgRecovery: () -> Unit,
 ) {
   var passphrase by rememberSaveable { mutableStateOf("") }
   var repeated by rememberSaveable { mutableStateOf("") }
@@ -110,6 +111,9 @@ fun EnrollScreen(
       OutlinedButton(onClick = onLink, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) {
         Text(stringResource(R.string.link_instead))
       }
+      OutlinedButton(onClick = onOrgRecovery, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) {
+        Text(stringResource(R.string.org_recovery_instead))
+      }
     }
     if (isBusy) CircularProgressIndicator()
   }
@@ -133,6 +137,50 @@ fun LinkThisDeviceScreen(code: String, maybeShortCode: String?, onCancel: () -> 
       Text(stringResource(R.string.link_confirm_on_other))
     }
     OutlinedButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
+  }
+}
+
+/** Recovery by the organization's admins: read the code to an admin, then choose a new passphrase. */
+@Composable
+fun OrgRecoveryScreen(
+  code: String,
+  @StringRes maybeError: Int?,
+  isBusy: Boolean,
+  onFinish: (String) -> Unit,
+  onCancel: () -> Unit,
+) {
+  var passphrase by rememberSaveable { mutableStateOf("") }
+  var repeated by rememberSaveable { mutableStateOf("") }
+  val isValid = passphrase.length >= MIN_PASSPHRASE_LENGTH && passphrase == repeated
+  Centered {
+    Text(stringResource(R.string.org_recovery_title), style = MaterialTheme.typography.headlineSmall)
+    Text(stringResource(R.string.org_recovery_hint), style = MaterialTheme.typography.bodyMedium)
+    SelectionContainer {
+      Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.titleMedium)
+    }
+    Text(stringResource(R.string.org_recovery_new_passphrase), style = MaterialTheme.typography.bodyMedium)
+    OutlinedTextField(
+      value = passphrase,
+      onValueChange = { passphrase = it },
+      label = { Text(stringResource(R.string.passphrase)) },
+      visualTransformation = PasswordVisualTransformation(),
+      singleLine = true,
+      modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+      value = repeated,
+      onValueChange = { repeated = it },
+      label = { Text(stringResource(R.string.passphrase_repeat)) },
+      visualTransformation = PasswordVisualTransformation(),
+      singleLine = true,
+      modifier = Modifier.fillMaxWidth(),
+    )
+    maybeError?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
+    Button(onClick = { onFinish(passphrase) }, enabled = !isBusy && isValid, modifier = Modifier.fillMaxWidth()) {
+      Text(stringResource(R.string.org_recovery_finish))
+    }
+    OutlinedButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
+    if (isBusy) CircularProgressIndicator()
   }
 }
 

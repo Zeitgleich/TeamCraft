@@ -45,6 +45,7 @@ fun ChatListScreen(
   onOpen: (String) -> Unit,
   onSearch: () -> Unit,
   onSettings: () -> Unit,
+  onNavigate: (String) -> Unit,
 ) {
   val changes by viewModel.changeCount.collectAsState()
   var conversations by remember { mutableStateOf<List<ConversationItem>?>(null) }
@@ -63,7 +64,19 @@ fun ChatListScreen(
         },
       )
     },
-  ) { padding ->
+  ) { outer ->
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize().padding(outer)) {
+    androidx.compose.foundation.lazy.LazyRow(
+      Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+      horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+    ) {
+      for ((route, label) in QUICK_ROUTES) {
+        item(key = route) {
+          androidx.compose.material3.AssistChip(onClick = { onNavigate(route) }, label = { Text(stringResource(label)) })
+        }
+      }
+    }
+    val padding = androidx.compose.foundation.layout.PaddingValues(0.dp)
     val loaded = conversations
     when {
       loaded == null -> LoadingScreen()
@@ -78,6 +91,7 @@ fun ChatListScreen(
           }
         }
       }
+    }
     }
   }
 }
@@ -147,3 +161,11 @@ private fun prefix(kind: ConversationKind): String = when (kind) {
   ConversationKind.GROUP -> "@"
   ConversationKind.INTEGRATION -> "⚙"
 }
+
+/** Entry points above the conversation list. */
+private val QUICK_ROUTES = listOf(
+  "threads" to R.string.threads_title,
+  "saved" to R.string.saved_title,
+  "browse" to R.string.browse_title,
+  "meetings" to R.string.meetings_title,
+)

@@ -12,13 +12,19 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import kotlinx.coroutines.launch
+import org.teamcraft.android.ui.screens.BrowseScreen
 import org.teamcraft.android.ui.screens.ChatListScreen
+import org.teamcraft.android.ui.screens.FilesScreen
+import org.teamcraft.android.ui.screens.MeetingsScreen
+import org.teamcraft.android.ui.screens.SavedScreen
+import org.teamcraft.android.ui.screens.ThreadsScreen
 import org.teamcraft.android.ui.screens.ConversationScreen
 import org.teamcraft.android.ui.screens.EnrollScreen
 import org.teamcraft.android.ui.screens.LinkThisDeviceScreen
 import org.teamcraft.android.ui.screens.LoadingScreen
 import org.teamcraft.android.ui.screens.LoginScreen
 import org.teamcraft.android.ui.screens.MessageScreen
+import org.teamcraft.android.ui.screens.OrgRecoveryScreen
 import org.teamcraft.android.ui.screens.SearchScreen
 import org.teamcraft.android.ui.screens.SettingsScreen
 import org.teamcraft.android.ui.screens.ThreadScreen
@@ -46,6 +52,14 @@ fun AppRoot(
       isBusy = isBusy,
       onEnroll = viewModel::enroll,
       onLink = viewModel::linkThisDevice,
+      onOrgRecovery = viewModel::recoverThroughOrganization,
+    )
+    is AppState.RecoveringThroughOrganization -> OrgRecoveryScreen(
+      code = current.code,
+      maybeError = current.maybeError,
+      isBusy = isBusy,
+      onFinish = viewModel::finishOrgRecovery,
+      onCancel = viewModel::cancelLinking,
     )
     is AppState.LinkingThisDevice -> LinkThisDeviceScreen(
       code = current.code,
@@ -78,6 +92,7 @@ private fun ReadyNavigation(
         onOpen = { navigation.navigate("conversation/$it") },
         onSearch = { navigation.navigate("search") },
         onSettings = { navigation.navigate("settings") },
+        onNavigate = { route -> navigation.navigate(route) },
       )
     }
     composable(
@@ -89,6 +104,7 @@ private fun ReadyNavigation(
         viewModel = viewModel,
         conversationId = conversationId,
         onOpenThread = { threadId -> navigation.navigate("thread/$conversationId/$threadId") },
+        onOpenFiles = { navigation.navigate("files/$conversationId") },
         onBack = { navigation.popBackStack() },
       )
     }
@@ -110,6 +126,29 @@ private fun ReadyNavigation(
       SearchScreen(
         viewModel = viewModel,
         onOpen = { navigation.navigate("conversation/$it") },
+        onBack = { navigation.popBackStack() },
+      )
+    }
+    composable("threads") {
+      ThreadsScreen(
+        viewModel = viewModel,
+        onOpenThread = { conversation, thread -> navigation.navigate("thread/$conversation/$thread") },
+        onBack = { navigation.popBackStack() },
+      )
+    }
+    composable("saved") {
+      SavedScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
+    }
+    composable("browse") {
+      BrowseScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
+    }
+    composable("meetings") {
+      MeetingsScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
+    }
+    composable("files/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
+      FilesScreen(
+        viewModel = viewModel,
+        conversationId = entry.arguments?.getString("id").orEmpty(),
         onBack = { navigation.popBackStack() },
       )
     }

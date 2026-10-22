@@ -2,6 +2,8 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.android)
   alias(libs.plugins.kotlin.compose)
+  // The core's chat messages are client-api JSON; the app mirrors the view models as data classes.
+  alias(libs.plugins.kotlin.serialization)
 }
 
 fun setting(name: String): String = (findProperty("teamcraft.$name") as String?).orEmpty()
@@ -102,6 +104,7 @@ dependencies {
   implementation(libs.compose.material.icons)
   implementation(libs.compose.ui.tooling.preview)
   implementation(libs.kotlinx.coroutines.android)
+  implementation(libs.kotlinx.serialization.json)
   implementation(libs.appauth)
   implementation(libs.unifiedpush.connector)
   // Calls: Telecom integration and Android Auto calling.

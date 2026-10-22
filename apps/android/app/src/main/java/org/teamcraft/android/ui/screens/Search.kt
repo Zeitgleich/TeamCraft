@@ -57,7 +57,12 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
               color = MaterialTheme.colorScheme.primary,
               modifier = Modifier.padding(start = 16.dp, top = 8.dp),
             )
-            MessageRow(hit.message, onOpenThread = null)
+            Text(
+              hit.message.authorName,
+              style = MaterialTheme.typography.labelLarge,
+              modifier = Modifier.padding(start = 16.dp, top = 2.dp),
+            )
+            Text(hit.message.body, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp))
           }
         }
       }
