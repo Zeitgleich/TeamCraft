@@ -838,10 +838,8 @@ type NativeSocket =
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
-  #[cfg(target_os = "android")]
+  // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
-  #[cfg(not(target_os = "android"))]
-  let maybe_connector = None;
   let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector)
     .await
     .map_err(|error| ApiError::Network(error.to_string()))?;
