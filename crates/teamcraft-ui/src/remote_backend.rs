@@ -10,8 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
-use teamcraft_client_api::calls::{BackgroundImageInfo, OrgBackgroundRule, OrgBackgrounds};
-use teamcraft_proto::{BackgroundId, OrgBackgroundId};
+use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_proto::OrgBackgroundId;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
@@ -438,31 +438,6 @@ impl ChatBackend for RemoteChat {
     match self.ask(ChatQuery::SavedItems) {
       Some(ChatAnswer::SavedItems { items }) => items,
       _ => Vec::new(),
-    }
-  }
-
-  fn background_images(&self) -> Vec<BackgroundImageInfo> {
-    match self.ask(ChatQuery::BackgroundImages) {
-      Some(ChatAnswer::BackgroundImages { images }) => images,
-      _ => Vec::new(),
-    }
-  }
-
-  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
-    self.act(ChatAction::AddBackgroundImage {
-      name: name.to_string(),
-      picture: picture.into(),
-    });
-  }
-
-  fn delete_background_image(&self, id: BackgroundId) {
-    self.act(ChatAction::DeleteBackgroundImage { id });
-  }
-
-  fn org_backgrounds(&self) -> OrgBackgrounds {
-    match self.ask(ChatQuery::OrgBackgrounds) {
-      Some(ChatAnswer::OrgBackgrounds { backgrounds }) => backgrounds,
-      _ => OrgBackgrounds::default(),
     }
   }
 

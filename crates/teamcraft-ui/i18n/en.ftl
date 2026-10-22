@@ -236,8 +236,6 @@ effect-office = Office
 effect-bookshelf = Bookshelf
 effect-sunrise = Sunrise
 effect-forest = Forest
-effect-org-section = From your organization
-call-background-required = Your organization requires one of its backgrounds when the camera is on.
 effect-upload = Upload image
 effect-upload-soon = Own backgrounds are not available yet
 

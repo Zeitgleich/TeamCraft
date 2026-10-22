@@ -6,8 +6,8 @@
 //! comes from the account, so admins see the console (with demo data).
 
 use std::rc::Rc;
-use teamcraft_client_api::calls::{BackgroundImageInfo, OrgBackgroundRule, OrgBackgrounds};
-use teamcraft_proto::{BackgroundId, OrgBackgroundId};
+use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::Role;
 
@@ -295,22 +295,6 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 
   fn saved_items(&self) -> Vec<SavedItem> {
     self.chat.saved_items()
-  }
-
-  fn background_images(&self) -> Vec<BackgroundImageInfo> {
-    self.chat.background_images()
-  }
-
-  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
-    self.chat.add_background_image(name, picture);
-  }
-
-  fn delete_background_image(&self, id: BackgroundId) {
-    self.chat.delete_background_image(id);
-  }
-
-  fn org_backgrounds(&self) -> OrgBackgrounds {
-    self.chat.org_backgrounds()
   }
 
   fn add_org_background(&self, name: &str, picture: Vec<u8>) {

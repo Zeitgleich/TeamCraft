@@ -236,8 +236,6 @@ effect-office = Büro
 effect-bookshelf = Bücherregal
 effect-sunrise = Sonnenaufgang
 effect-forest = Wald
-effect-org-section = Von deiner Organisation
-call-background-required = Deine Organisation schreibt bei eingeschalteter Kamera einen ihrer Hintergründe vor.
 effect-upload = Bild hochladen
 effect-upload-soon = Eigene Hintergründe sind noch nicht verfügbar
 
