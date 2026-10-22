@@ -105,10 +105,24 @@ pub(crate) fn spawn(
         },
       };
       LocalSet::new().block_on(&runtime, async move {
-        let mut engine = match Engine::open(config, ForeignTokens(tokens), listener) {
-          Ok(engine) => engine,
-          Err(error) => {
+        // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
+        // goes nowhere on Android.
+        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+          Engine::open(config, ForeignTokens(tokens), listener)
+        }));
+        let mut engine = match opened {
+          Ok(Ok(engine)) => engine,
+          Ok(Err(error)) => {
             let _ = ready.send(Err(error));
+            return;
+          },
+          Err(panic) => {
+            let message = panic
+              .downcast_ref::<String>()
+              .cloned()
+              .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_string()))
+              .unwrap_or_default();
+            let _ = ready.send(Err(TeamCraftError::Core(format!("opening the engine panicked: {message}"))));
             return;
           },
         };
