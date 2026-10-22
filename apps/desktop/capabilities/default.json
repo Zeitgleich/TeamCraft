@@ -32,6 +32,8 @@
     "allow-call-snapshot",
     "allow-call-media-devices",
     "allow-call-action",
-    "allow-notify-user"
+    "allow-notify-user",
+    "allow-autostart-get",
+    "allow-autostart-set"
   ]
 }

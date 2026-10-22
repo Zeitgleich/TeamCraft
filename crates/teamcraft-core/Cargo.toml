@@ -78,6 +78,11 @@ rustls-native-certs = "0.8.5"
 # extra features on iOS and the app's shared keychain group covers it anyway).
 keyring = "4"
 
+# Windows has no system libcrypto for SQLCipher: OpenSSL is built from source (needs Perl and NASM at
+# build time, see apps/desktop/packaging/windows/README.md).
+[target.'cfg(windows)'.dependencies]
+rusqlite = { version = "0.39", optional = true, features = ["bundled-sqlcipher-vendored-openssl"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Browser bindings: gateway WebSocket, timers, IndexedDB, Web Crypto and Web Push. Same versions as
 # teamcraft-ui already pulls in.

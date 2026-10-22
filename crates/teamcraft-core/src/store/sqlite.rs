@@ -287,6 +287,8 @@ mod tests {
       reopened.get(Table::Users, "1").unwrap(),
       Some(b"very recognizable plaintext".to_vec())
     );
+    // Windows can't delete a database file that is still open.
+    drop(reopened);
     std::fs::remove_dir_all(&directory).unwrap();
   }
 }

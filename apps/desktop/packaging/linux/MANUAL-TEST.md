@@ -43,8 +43,8 @@ Mark each line with pass/fail and a note. "Dialog" is what the desktop should sh
 |----|---------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
 | C1 | Turn the camera on (first time)             | Dialog: "Allow TeamCraft to use the camera?" (GNOME); KDE asks through its permission dialog. Inside the Flatpak this is the only way in |
 | C2 | Allow                                       | Self-view and the other participant see the camera within about 2 s                                                             |
-| C3 | Turn it off and on again                    | No second dialog (the permission is remembered); `flatpak permission-show org.teamcraft.desktop` lists `camera`                  |
-| C4 | Deny (reset first: `flatpak permission-reset org.teamcraft.desktop`) | The app reports that camera access was denied; the call continues                                    |
+| C3 | Turn it off and on again                    | No second dialog (the permission is remembered); `flatpak permission-show de.zeitgleich.teamcraft` lists `camera`                  |
+| C4 | Deny (reset first: `flatpak permission-reset de.zeitgleich.teamcraft`) | The app reports that camera access was denied; the call continues                                    |
 | C5 | Background blur on                          | Blur applies; CPU usage stays reasonable (note it)                                                                              |
 | C6 | Unplug the camera during a call (USB)        | The camera stops; no crash                                                                                                      |
 
@@ -65,5 +65,5 @@ Mark each line with pass/fail and a note. "Dialog" is what the desktop should sh
 | R2 | Quit and restart                        | Still signed in (refresh token in GNOME Keyring / KWallet)                                             |
 | R3 | Mention notification with the app in the background | A desktop notification appears                                                            |
 | R4 | Attach a file                           | The file dialog is the desktop's (FileChooser portal); only the chosen file is visible to the app      |
-| R5 | First video use                         | OpenH264 is downloaded once (`~/.var/app/org.teamcraft.desktop/data/org.teamcraft.desktop/codecs/`)    |
-| R6 | Hardware encoding (AMD/Intel)           | `flatpak run --env=GST_DEBUG=va*:3 org.teamcraft.desktop` shows the VA encoder in use; else software    |
+| R5 | First video use                         | OpenH264 is downloaded once (`~/.var/app/de.zeitgleich.teamcraft/data/de.zeitgleich.teamcraft/codecs/`)    |
+| R6 | Hardware encoding (AMD/Intel)           | `flatpak run --env=GST_DEBUG=va*:3 de.zeitgleich.teamcraft` shows the VA encoder in use; else software    |

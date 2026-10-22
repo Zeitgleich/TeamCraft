@@ -1,0 +1,35 @@
+{
+  "build": {
+    "beforeBuildCommand": {
+      "script": "set CARGO_PROFILE_RELEASE_OPT_LEVEL=s&& set CARGO_PROFILE_RELEASE_LTO=true&& trunk build --release",
+      "cwd": "../../crates/teamcraft-ui"
+    }
+  },
+  "bundle": {
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "both",
+        "displayLanguageSelector": true,
+        "languages": [
+          "English",
+          "German"
+        ]
+      },
+      "wix": {
+        "version": "1.0.0.1"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "teamcraft"
+        ]
+      }
+    }
+  }
+}

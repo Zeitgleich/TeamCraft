@@ -84,7 +84,7 @@ which ask the user and need no static permission.
   `org.freedesktop.Platform.GL.default` (Mesa: AMD, and Intel through `iHD`/`i965` where the
   runtime provides them). `--device=dri` gives access to the render node. Without a usable
   encoder the app encodes with OpenH264.
-- **OpenH264:** downloaded from Cisco into `~/.var/app/org.teamcraft.desktop/data/org.teamcraft.desktop/codecs/`
+- **OpenH264:** downloaded from Cisco into `~/.var/app/de.zeitgleich.teamcraft/data/de.zeitgleich.teamcraft/codecs/`
   and checked against Cisco's hashes. (The runtime's `org.freedesktop.Platform.openh264`
   extension is not used: its version is not one the `openh264` crate verifies.)
 - **Segmentation model:** bundled at `/app/lib/TeamCraft/models/` (Tauri's resource directory for
@@ -99,11 +99,9 @@ which ask the user and need no static permission.
 
 ### Flathub submission (not submitted)
 
-- [ ] **App id.** Flathub requires an id under a domain or code host the project controls, e.g.
-      `io.github.Zeitgleich.TeamCraft`, or `org.teamcraft.desktop` only if `teamcraft.org` is ours.
-      Rename the manifest, `.desktop`, metainfo and icon files together. The linter currently
-      reports exactly this: `appid-url-not-reachable` and `appid-ends-with-lowercase-desktop`
-      (an id must not end in `.desktop`).
+- [x] **App id.** `de.zeitgleich.teamcraft` (Flathub wants an id under a domain the project controls).
+      Re-run the linter and confirm `appid-url-not-reachable` and `appid-ends-with-lowercase-desktop`
+      are gone.
 - [ ] **Offline build.** Remove `build-args: --share=network`; generate `cargo-sources.json` with
       `flatpak-builder-tools/cargo/flatpak-cargo-generator.py Cargo.lock` and add it to `sources`,
       with `CARGO_NET_OFFLINE=true` and `cargo --offline`.

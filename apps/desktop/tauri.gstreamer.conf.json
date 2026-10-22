@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "macOS": {
+      "frameworks": [
+        "../../target/gstreamer-framework/GStreamer.framework"
+      ]
+    }
+  }
+}

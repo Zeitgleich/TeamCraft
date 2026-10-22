@@ -178,6 +178,8 @@ fn platform_suffix() -> Option<&'static str> {
     "mac-x64.dylib"
   } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
     "win64.dll"
+  } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+    "win-arm64.dll"
   } else {
     return None;
   };

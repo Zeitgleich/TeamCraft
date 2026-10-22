@@ -29,6 +29,8 @@ const COMMANDS: &[&str] = &[
   "call_media_devices",
   "call_action",
   "notify_user",
+  "autostart_get",
+  "autostart_set",
 ];
 
 fn main() {

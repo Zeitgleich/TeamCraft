@@ -1,0 +1,19 @@
+PackageIdentifier: TeamCraft.TeamCraft
+PackageVersion: 0.0.0
+InstallerLocale: en-US
+InstallerType: nullsoft
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+ElevationRequirement: elevatesSelf
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Zeitgleich/TeamCraft/releases/download/v0.0.0/TeamCraft_0.0.0_x64-setup.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Zeitgleich/TeamCraft/releases/download/v0.0.0/TeamCraft_0.0.0_arm64-setup.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.9.0

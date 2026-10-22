@@ -71,10 +71,12 @@ multiple-versions = "warn"
 wildcards = "deny"
 # Workspace path dependencies carry no version.
 allow-wildcard-paths = true
-# One implementation per concern: OpenSSL is not used (rustls everywhere).
+# One implementation per concern: OpenSSL is not used (rustls everywhere). The one exception is
+# SQLCipher's crypto backend on Windows, which has no system libcrypto: libsqlite3-sys builds OpenSSL
+# from source through openssl-sys/openssl-src there (only libsqlite3-sys may depend on it; no TLS).
 deny = [
   { name = "openssl" },
-  { name = "openssl-sys" },
+  { name = "openssl-sys", wrappers = ["libsqlite3-sys"] },
   { name = "native-tls" },
 ]
 

@@ -23,7 +23,9 @@ platforms Opus, audio devices, echo cancellation and the WebTransport call drive
 | `native`          | no      | Opus, audio devices, the WebTransport driver and the `teamcraft-call` binary |
 | `web`             | no      | Browser driver: WebTransport, WebCodecs Opus, AudioWorklet (wasm32)          |
 | `openh264-source` | no      | OpenH264 built from source into the binary: development and tests only       |
-| `gstreamer`       | no      | Hardware H.264 through GStreamer: VA-API (Linux), VideoToolbox (macOS)       |
+| `gstreamer`       | no      | Hardware H.264 through GStreamer: VA-API (Linux), VideoToolbox (macOS), Media Foundation (Windows) |
+| `mediafoundation` | no      | Cameras on Windows through Media Foundation (nokhwa)                         |
+| `graphics-capture`| no      | Screen and window capture on Windows (Windows Graphics Capture)              |
 
 `native` builds libopus with cmake and uses cpal for audio devices, which needs the ALSA headers on
 Linux (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora).
@@ -53,6 +55,7 @@ the hardware fails mid-call. Where none can be built, OpenH264 is used from the 
 |----------|-------------------------------------------------|------------------------------------------------|
 | Linux    | `vah264enc` (VA-API), then `v4l2h264enc` (ARM)  | feature `gstreamer`; GStreamer dev packages    |
 | macOS    | `vtenc_h264` (VideoToolbox) through GStreamer   | feature `gstreamer`; compiles, untested        |
+| Windows  | `mfh264enc` (Media Foundation) through GStreamer| feature `gstreamer`; GStreamer MSVC runtime; compiles, untested |
 | Android  | MediaCodec through the NDK (`ndk` crate)        | always with `native`                           |
 
 GStreamer (LGPL-2.1-or-later) is linked dynamically from the system: Fedora `gstreamer1-devel

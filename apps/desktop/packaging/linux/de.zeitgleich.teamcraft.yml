@@ -7,7 +7,7 @@
 # SDK's Rust extension has no wasm32 target, and the bundle is the same on every platform.
 # Local builds fetch crates from the network (`--share=network` below); Flathub builds are
 # offline, see README.md ("Flathub submission") for the vendored variant.
-app-id: org.teamcraft.desktop
+app-id: de.zeitgleich.teamcraft
 runtime: org.gnome.Platform
 # GNOME 51 = freedesktop-sdk 26.08: WebKitGTK 4.1, GStreamer 1.28 with the VA-API plugin,
 # PipeWire; the GPU drivers (Mesa, incl. VA-API) come from the GL extension.
@@ -86,11 +86,11 @@ modules:
       - install -Dm755 "$CARGO_TARGET_DIR/release/teamcraft-desktop" /app/bin/teamcraft-desktop
       # Tauri's resource directory for an executable in /app/bin is /app/lib/<productName>.
       - install -Dm644 selfie_segmentation_landscape.onnx /app/lib/TeamCraft/models/selfie_segmentation_landscape.onnx
-      - install -Dm644 apps/desktop/packaging/linux/org.teamcraft.desktop.desktop /app/share/applications/org.teamcraft.desktop.desktop
-      - install -Dm644 apps/desktop/packaging/linux/org.teamcraft.desktop.metainfo.xml /app/share/metainfo/org.teamcraft.desktop.metainfo.xml
-      - install -Dm644 apps/desktop/icons/128x128.png /app/share/icons/hicolor/128x128/apps/org.teamcraft.desktop.png
-      - install -Dm644 apps/desktop/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/org.teamcraft.desktop.png
-      - install -Dm644 apps/desktop/icons/icon.png /app/share/icons/hicolor/512x512/apps/org.teamcraft.desktop.png
+      - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.desktop /app/share/applications/de.zeitgleich.teamcraft.desktop
+      - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.metainfo.xml /app/share/metainfo/de.zeitgleich.teamcraft.metainfo.xml
+      - install -Dm644 apps/desktop/icons/128x128.png /app/share/icons/hicolor/128x128/apps/de.zeitgleich.teamcraft.png
+      - install -Dm644 apps/desktop/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/de.zeitgleich.teamcraft.png
+      - install -Dm644 apps/desktop/icons/icon.png /app/share/icons/hicolor/512x512/apps/de.zeitgleich.teamcraft.png
     sources:
       - type: dir
         path: ../../../..

@@ -6,9 +6,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod autostart;
 mod calls;
 mod core;
 mod notifications;
+#[cfg(windows)]
+mod windows_shell;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +40,11 @@ fn main() -> anyhow::Result<()> {
   let tokens = TokenCache::default();
   keep_tokens_fresh(service.clone(), tokens.clone());
 
-  tauri::Builder::default()
+  let builder = tauri::Builder::default();
+  // Registered first: the single-instance plugin must see a second launch before anything else.
+  #[cfg(windows)]
+  let builder = windows_shell::plugins(builder);
+  builder
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
@@ -57,6 +64,8 @@ fn main() -> anyhow::Result<()> {
       };
       app.manage(Arc::new(CallHost::new(notify, files)));
       create_main_window(app)?;
+      #[cfg(windows)]
+      windows_shell::forward_deep_links(app.handle());
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -88,6 +97,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,
       notifications::notify_user,
+      autostart::autostart_get,
+      autostart::autostart_set,
     ])
     .run(tauri::generate_context!())
     .context("failed to run the TeamCraft desktop shell")

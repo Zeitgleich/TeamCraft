@@ -4,11 +4,10 @@ What the build produces and how to build it. Nothing here publishes anything.
 
 | Platform | Formats                            | Where it is configured                                              |
 |----------|------------------------------------|---------------------------------------------------------------------|
-| Linux    | Flatpak (primary)                  | `linux/org.teamcraft.desktop.yml`, `.desktop` file, AppStream data  |
+| Linux    | Flatpak (primary)                  | `linux/de.zeitgleich.teamcraft.yml`, `.desktop` file, AppStream data  |
 | Linux    | `.deb`, `.rpm`, AppImage           | `bundle.linux` in `tauri.conf.json`                                 |
 | macOS    | `.dmg` (arm64 and x86_64)          | `bundle.macOS`, `Info.plist`, `macos/Entitlements.plist`            |
-
-Windows is not planned (see PLAN.md, platform table).
+| Windows  | NSIS `.exe` and `.msi` (x64, arm64) | `tauri.windows.conf.json`, [`windows/README.md`](windows/README.md) |
 
 ## Build locally
 
@@ -20,6 +19,7 @@ packages (see the README of `teamcraft-ui`). The `beforeBuildCommand` builds the
 cd apps/desktop
 cargo tauri build --bundles deb,rpm,appimage      # Linux; results in target/release/bundle/
 cargo tauri build --bundles dmg                   # macOS only
+cargo tauri build --bundles nsis,msi              # Windows only (see windows/README.md)
 cargo tauri build --no-bundle                     # just target/release/teamcraft-desktop
 ```
 
@@ -45,6 +45,13 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
 - `Info.plist` adds the camera and microphone usage descriptions; the bundler merges it into the app.
 - `macos/Entitlements.plist` grants camera, microphone and network access under the hardened runtime
   (`hardenedRuntime` is on). The listener entitlement covers the loopback redirect of the login.
+- The dmg is one universal build (arm64 and x86_64). Hardware H.264 uses GStreamer's VideoToolbox encoder:
+  the release workflow installs the official universal GStreamer framework, links against it, and
+  `macos/bundle-gstreamer.sh` copies it, rewrites its install names to the app's `Frameworks` directory,
+  re-signs ad hoc and verifies that every reference resolves (`tauri.gstreamer.conf.json` adds the copy to
+  the bundle). Compile- and link-checked in CI only; whether the relocated framework finds its plugins at
+  runtime needs a real Mac, and without it video falls back to OpenH264. The disable-library-validation
+  entitlement is for the bundled framework.
 - Signing and notarization are not configured. The release workflow builds an unsigned dmg; the
   `APPLE_*` secrets it would need are listed in the workflow file.
 
@@ -52,6 +59,7 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
 
 `.github/workflows/desktop-release.yml` runs on manual dispatch, or is called by `release.yml` when a tag
 like `v1.0.0` is pushed. It builds the Linux packages, a Flatpak bundle (from source inside the Flatpak
-builder container, with the web UI from the Linux job) and the macOS dmg for both architectures, and keeps
-them as workflow artifacts. `release.yml` attaches them to the draft GitHub release
-([docs/release.md](../../../docs/release.md)); nothing is published to any store.
+builder container, with the web UI from the Linux job), the macOS dmg (one universal build for both
+architectures) and the Windows installers (x64, arm64), and keeps them as workflow artifacts.
+`release.yml` attaches them to the draft GitHub release ([docs/release.md](../../../docs/release.md));
+nothing is published to any store.

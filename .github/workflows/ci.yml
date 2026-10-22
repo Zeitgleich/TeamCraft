@@ -149,6 +149,38 @@ jobs:
       - name: Doctests
         run: cargo test -p teamcraft-media --features native --doc
 
+  # The Windows desktop client: the Tauri shell and the call media with Media Foundation cameras and
+  # Windows Graphics Capture. Not --all-features: the `gstreamer` feature needs GStreamer's MSVC
+  # runtime and `pipewire`/`v4l2` are Linux-only. WebRTC audio processing is not built on Windows
+  # (see apps/desktop/packaging/windows/README.md).
+  windows:
+    runs-on: windows-latest
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # OpenH264 (tests) and OpenSSL for SQLCipher (built from source) need NASM; Perl comes with the image.
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
+      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
+        shell: bash
+        run: mkdir -p crates/teamcraft-ui/dist
+      # The desktop crate enables the Windows capture features of teamcraft-media itself.
+      - name: Clippy (desktop shell and core)
+        run: cargo clippy -p teamcraft-desktop -p teamcraft-core --all-targets -- -D warnings
+      - name: Clippy (call media)
+        run: cargo clippy -p teamcraft-media --all-targets --features native,mediafoundation,graphics-capture,effects,segmentation,openh264-source -- -D warnings
+      - name: Test (desktop shell and core)
+        run: cargo test -p teamcraft-desktop -p teamcraft-core
+      - name: Test (call media)
+        run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,effects,segmentation,openh264-source
+      - name: Check (ARM64, cross-compiled)
+        run: cargo check --target aarch64-pc-windows-msvc -p teamcraft-desktop
+
   deny:
     runs-on: ubuntu-latest
     steps:

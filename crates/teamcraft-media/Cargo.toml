@@ -46,6 +46,10 @@ web = [
 pipewire = ["native", "dep:pipewire", "dep:ashpd"]
 # Cameras on macOS through AVFoundation (via nokhwa). Untested: no Mac in development so far.
 avfoundation = ["native", "dep:nokhwa"]
+# Cameras on Windows through Media Foundation (via nokhwa). Compile-checked only so far.
+mediafoundation = ["native", "dep:nokhwa"]
+# Screen and window capture on Windows through Windows Graphics Capture (safe wrapper crate).
+graphics-capture = ["native", "dep:windows-capture"]
 # Cameras through V4L2 directly (Linux fallback when the camera portal is unavailable).
 v4l2 = ["native", "dep:v4l"]
 
@@ -144,6 +148,12 @@ pipewire = { version = "0.10.1", optional = true }
 # (C code) is off; capture_convert decodes MJPEG.
 [target.'cfg(target_os = "macos")'.dependencies]
 nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-avfoundation"] }
+
+# Camera capture on Windows: Media Foundation behind nokhwa's safe API (Apache-2.0).
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-msmf"] }
+# Screen and window capture: Windows Graphics Capture (MIT), D3D11 readback inside the crate.
+windows-capture = { version = "2.0.1", optional = true }
 
 # WebRTC's audio processing module (AEC3, noise suppression, AGC2; the only WebRTC component used,
 # ARCHITECTURE.md §6.1) is a C++ library, so it is opt-in at build time instead of a feature (which

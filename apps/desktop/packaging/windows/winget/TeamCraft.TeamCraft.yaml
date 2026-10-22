@@ -1,0 +1,8 @@
+# Draft winget version manifest (singleton files are not accepted for new packages: this is the
+# three-file layout winget-pkgs expects). Replace the version, URLs and hashes at release time and
+# validate with `winget validate --manifest .` on Windows.
+PackageIdentifier: TeamCraft.TeamCraft
+PackageVersion: 0.0.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.9.0

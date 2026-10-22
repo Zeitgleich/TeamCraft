@@ -46,7 +46,7 @@ Google Play needs a strictly increasing integer:
 2. **Branch** `release/vX.Y.Z` (or do it on the feature branch that finishes the release) and set the
    version in the three places above. `cargo update --workspace --offline` updates `Cargo.lock`. Set the
    Android `versionCode` from the table. Update `<releases>` in
-   `apps/desktop/packaging/linux/org.teamcraft.desktop.metainfo.xml`.
+   `apps/desktop/packaging/linux/de.zeitgleich.teamcraft.metainfo.xml`.
 3. **Changelog.** Move the entries under `## [Unreleased]` in `CHANGELOG.md` to
    `## [X.Y.Z] - YYYY-MM-DD` and update the compare links at the bottom. The section becomes the
    release notes.

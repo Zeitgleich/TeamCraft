@@ -83,7 +83,7 @@ pub async fn core_start(
         argon2: Argon2Settings::default(),
       };
       let key = KeyChoice::Keyring {
-        service: "org.teamcraft.desktop.db".to_owned(),
+        service: "de.zeitgleich.teamcraft.db".to_owned(),
         account: format!("{}|{user}", config.keystore_scope),
       };
       let emitter = app.clone();

@@ -1,6 +1,6 @@
-# Desktop release build: builds the Linux and macOS packages and keeps them as workflow artifacts.
-# It publishes nothing itself (no Flathub, no notarization upload). release.yml calls it for a tag
-# `v*` and attaches the packages to the draft GitHub release; run it by hand (Actions > Desktop
+# Desktop release build: builds the Linux, macOS and Windows packages and keeps them as workflow
+# artifacts. It publishes nothing itself (no Flathub, no notarization upload). release.yml calls it for
+# a tag `v*` and attaches the packages to the draft GitHub release; run it by hand (Actions > Desktop
 # release > Run workflow) to get the packages of a branch without a release.
 name: Desktop release
 
@@ -37,8 +37,8 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release-linux-${{ matrix.arch }}
           cache-bin: "false"
@@ -50,7 +50,7 @@ jobs:
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-packages-${{ matrix.arch }}
           path: |
@@ -61,7 +61,7 @@ jobs:
       # The UI bundle is wasm32, the same for both architectures: keep one.
       - name: Keep the web UI bundle for the Flatpak job
         if: matrix.arch == 'x86_64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ui-dist
           path: crates/teamcraft-ui/dist
@@ -83,58 +83,139 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
       # SDK's Rust lacks) comes from the Linux job.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ui-dist
           path: crates/teamcraft-ui/dist
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6
         with:
           bundle: teamcraft-desktop-${{ matrix.arch }}.flatpak
-          manifest-path: apps/desktop/packaging/linux/org.teamcraft.desktop.yml
+          manifest-path: apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml
           arch: ${{ matrix.arch }}
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
 
   macos:
-    name: macOS (${{ matrix.target }}, dmg)
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-          - runner: macos-13
-            target: x86_64-apple-darwin
+    name: macOS (universal dmg)
+    # One dmg with both slices (arm64 + x86_64), built on an Apple silicon runner; Rust cross-compiles
+    # the x86_64 slice and `cargo tauri build --target universal-apple-darwin` joins them with lipo.
+    # Each slice is compiled for its own architecture, so the OpenH264 download picks the matching
+    # Cisco library at runtime (openh264_library.rs).
+    runs-on: macos-14
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: wasm32-unknown-unknown,${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+          targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: ${{ matrix.target }}
+          key: universal-apple-darwin
       - name: Meson and ninja (build WebRTC audio processing)
-        run: brew install meson ninja
+        run: brew install meson ninja pkg-config
+      # The official universal GStreamer (both slices): development files to link against, and the
+      # runtime that is bundled into the app for VideoToolbox hardware encoding.
+      # (The Homebrew casks are disabled, so the packages come from gstreamer.freedesktop.org, pinned by hash.)
+      - name: GStreamer framework
+        env:
+          GSTREAMER_VERSION: "1.28.8"
+        run: |
+          set -euo pipefail
+          base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
+          for package in gstreamer-1.0 gstreamer-1.0-devel; do
+            file="$package-$GSTREAMER_VERSION-universal.pkg"
+            curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" "$base/$file"
+          done
+          cd "$RUNNER_TEMP"
+          echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
+          echo "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7  gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
+          sudo installer -pkg "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" -target /
       - name: Trunk (builds the UI bundle)
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: trunk
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
+      # WebRTC audio processing is built with Meson for the host architecture only, so only the arm64
+      # slice gets echo cancellation; the x86_64 slice is built without it (a per-target flag, which
+      # the workflow-wide RUSTFLAGS would override, hence the unset).
+      - name: Build the universal executable
+        working-directory: apps/desktop
+        run: |
+          unset RUSTFLAGS
+          export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
+          cargo tauri build --config tauri.models.conf.json --target universal-apple-darwin --no-bundle
+        env:
+          PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
+          PKG_CONFIG_ALLOW_CROSS: "1"
+      - name: Bundle GStreamer into the app
+        run: apps/desktop/packaging/macos/bundle-gstreamer.sh patch target/universal-apple-darwin/release/teamcraft-desktop
       - name: Build dmg
         working-directory: apps/desktop
-        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles dmg
+        run: >
+          cargo tauri bundle --config tauri.models.conf.json --config tauri.gstreamer.conf.json
+          --target universal-apple-darwin --bundles dmg
         # Signing and notarization are left out on purpose (the dmg is unsigned). To enable them,
         # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
         #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
         #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: macos-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          name: macos-universal
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows (${{ matrix.target }}, msi, nsis)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          # Cross-built on the x64 runner: hosted arm64 runners are not free for private repositories.
+          # Required, like x64 (the build fails the workflow); the OpenSSL, Opus and OpenH264 C code
+          # builds for ARM64 with the MSVC cross tools that windows-latest ships.
+          - target: aarch64-pc-windows-msvc
+    # Overrides the workflow-wide flags: WebRTC echo cancellation is not part of the Windows build
+    # yet (the experimental CI job tries it), so calls run without it.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown,${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
+      # OpenSSL for SQLCipher is built from source and needs NASM; Perl comes with the image.
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
+      # Direct download: install-action's bash startup fails on the Windows image.
+      - name: Trunk (builds the UI bundle)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-pc-windows-msvc.zip -OutFile "$env:RUNNER_TEMP\trunk.zip"
+          Expand-Archive "$env:RUNNER_TEMP\trunk.zip" -DestinationPath "$env:RUNNER_TEMP\trunk"
+          "$env:RUNNER_TEMP\trunk" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Segmentation model (background effects; not in git)
+        shell: bash
+        run: crates/teamcraft-media/models/fetch.sh
+      - name: Build installers
+        working-directory: apps/desktop
+        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles nsis,msi
+        # Signing is left out on purpose (the installers are unsigned). To enable it, see
+        # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            target/${{ matrix.target }}/release/bundle/msi/*.msi
           if-no-files-found: error

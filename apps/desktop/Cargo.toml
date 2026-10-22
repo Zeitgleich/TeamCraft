@@ -1,7 +1,7 @@
 [package]
 publish = false
 name = "teamcraft-desktop"
-description = "Tauri 2 shell for the TeamCraft desktop client (macOS and Linux)"
+description = "Tauri 2 shell for the TeamCraft desktop client (Linux, macOS and Windows)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -55,11 +55,25 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire
 ashpd = { version = "0.13.13", features = ["global_shortcuts"] }
 futures-util = "0.3"
 
-# macOS cameras (AVFoundation); untested. teamcraft-media's `gstreamer` feature also builds the
-# VideoToolbox encoder (`vtenc_h264`), but the dmg would then need GStreamer.framework bundled
-# (macOS has no system GStreamer), so it stays off here until that packaging exists.
+# macOS cameras (AVFoundation) and hardware H.264 through GStreamer's VideoToolbox encoder
+# (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);
+# building needs the framework's development files installed. If an encoder or GStreamer itself is
+# missing at runtime, video falls back to OpenH264.
 [target.'cfg(target_os = "macos")'.dependencies]
-teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfoundation"] }
+teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfoundation", "gstreamer"] }
+
+# Windows: Media Foundation cameras and Windows Graphics Capture for screens and windows.
+# teamcraft-media's `gstreamer` feature would build the Media Foundation encoder element
+# (`mfh264enc`), but needs the GStreamer MSVC runtime installed, so it stays off like on macOS.
+[target.'cfg(target_os = "windows")'.dependencies]
+teamcraft-media = { path = "../../crates/teamcraft-media", features = ["mediafoundation", "graphics-capture"] }
+
+# Windows shell integration: the `teamcraft://` links (registered by the installer), one running
+# instance that receives them, and the "start at login" option (a registry Run entry).
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-autostart = "2"
 
 [features]
 # Serve the embedded `dist` instead of the dev server URL. `cargo tauri build` enables it.
