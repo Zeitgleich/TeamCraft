@@ -6,6 +6,7 @@ name: CI image
 # command).
 on:
   push:
+    branches: [main]
     paths:
       - containers/ci.Containerfile
       - .github/workflows/ci-image.yml
@@ -80,13 +81,15 @@ jobs:
       - name: Create the manifest list
         working-directory: /tmp/digests
         run: |
-          tags="-t $IMAGE:sha-${GITHUB_SHA}"
+          tag="$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          tags="-t $IMAGE:$tag"
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then tags="$tags -t $IMAGE:latest"; fi
           # shellcheck disable=SC2046,SC2086
           docker buildx imagetools create $tags $(printf "$IMAGE@sha256:%s " *)
       - name: Digest for the workflows
         run: |
-          digest=$(docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA}" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          digest=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
           {
             echo "### CI image"
             echo
