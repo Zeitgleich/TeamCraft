@@ -15,6 +15,8 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServe
 use teamcraft_core::client::LinkApproval;
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::clock::SystemClock;
+use teamcraft_core::notify_rules::{load_mention_rules, save_mention_rules};
+use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_preview::push_preview;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{SealedSqliteStore, StaticKeySource};
@@ -31,8 +33,8 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MessageItem, Presence, PushNotification,
-  PushService, SearchHitItem,
+  AccountState, AppConfig, ConversationItem, ConversationKind, MentionRulesItem, MessageItem, Presence,
+  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -450,6 +452,44 @@ impl Engine {
       self.start().await?;
     }
     result
+  }
+
+  pub(crate) fn mention_rules(&self) -> Result<MentionRulesItem, TeamCraftError> {
+    Ok(load_mention_rules(self.store.as_ref())?.into())
+  }
+
+  pub(crate) fn set_mention_rules(&self, rules: MentionRulesItem) -> Result<(), TeamCraftError> {
+    Ok(save_mention_rules(self.store.as_ref(), &rules.into())?)
+  }
+
+  pub(crate) fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
+    Ok(load_segment_prefetch(self.store.as_ref())?.into())
+  }
+
+  pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
+    Ok(save_segment_prefetch(self.store.as_ref(), mode.into())?)
+  }
+
+  /// Fetches the missing index segments if the setting allows it on this network.
+  pub(crate) async fn prefetch_segments(&mut self, is_network_metered: bool) -> Result<u32, TeamCraftError> {
+    if !load_segment_prefetch(self.store.as_ref())?.allows(is_network_metered) {
+      return Ok(0);
+    }
+    let fetched = Arc::new(Mutex::new(0usize));
+    let result = fetched.clone();
+    self
+      .with_client(move |client| {
+        Box::pin(async move {
+          let count = client.fetch_index_segments().await?;
+          if let Ok(mut total) = result.lock() {
+            *total = count;
+          }
+          Ok(())
+        })
+      })
+      .await?;
+    let count = fetched.lock().map(|total| *total).unwrap_or(0);
+    Ok(u32::try_from(count).unwrap_or(u32::MAX))
   }
 
   pub(crate) fn calls(&self) -> &CallHub {

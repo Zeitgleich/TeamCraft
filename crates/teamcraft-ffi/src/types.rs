@@ -2,6 +2,8 @@
 //! 64-bit unsigned type that matches, and the app only passes them back.
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
+use teamcraft_core::notify_rules::MentionRules;
+use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_preview::{PreviewContent, PushPreview};
 use teamcraft_proto::{PushKind, PushProvider};
 
@@ -178,7 +180,7 @@ impl From<PushPreview> for PushNotification {
       maybe_text,
       maybe_file_name,
       is_direct: preview.is_direct,
-      is_mention: preview.wake_up.kind == PushKind::Mention,
+      is_mention: preview.wake_up.kind == PushKind::Mention || preview.is_rule_match,
       is_urgent: preview.wake_up.is_urgent,
       is_call: preview.wake_up.kind == PushKind::Call,
       is_silent: preview.is_silent,
@@ -212,4 +214,61 @@ impl From<Presence> for PresenceStatus {
 pub struct OrgRecoveryStart {
   pub request_id: String,
   pub verification_code: String,
+}
+
+/// The user's rules for what counts as a mention besides `@username` (docs/notifications.md).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MentionRulesItem {
+  pub first_name_is_mention: bool,
+  pub channel_mentions_notify: bool,
+  pub keywords: Vec<String>,
+}
+
+impl From<MentionRules> for MentionRulesItem {
+  fn from(rules: MentionRules) -> Self {
+    Self {
+      first_name_is_mention: rules.first_name_is_mention,
+      channel_mentions_notify: rules.channel_mentions_notify,
+      keywords: rules.keywords,
+    }
+  }
+}
+
+impl From<MentionRulesItem> for MentionRules {
+  fn from(item: MentionRulesItem) -> Self {
+    Self {
+      first_name_is_mention: item.first_name_is_mention,
+      channel_mentions_notify: item.channel_mentions_notify,
+      keywords: item.keywords,
+    }
+  }
+}
+
+/// When the app downloads shared search index segments ahead of time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SegmentPrefetchMode {
+  Off,
+  /// Only on networks that aren't metered.
+  UnmeteredOnly,
+  Always,
+}
+
+impl From<SegmentPrefetch> for SegmentPrefetchMode {
+  fn from(mode: SegmentPrefetch) -> Self {
+    match mode {
+      SegmentPrefetch::Off => Self::Off,
+      SegmentPrefetch::UnmeteredOnly => Self::UnmeteredOnly,
+      SegmentPrefetch::Always => Self::Always,
+    }
+  }
+}
+
+impl From<SegmentPrefetchMode> for SegmentPrefetch {
+  fn from(mode: SegmentPrefetchMode) -> Self {
+    match mode {
+      SegmentPrefetchMode::Off => Self::Off,
+      SegmentPrefetchMode::UnmeteredOnly => Self::UnmeteredOnly,
+      SegmentPrefetchMode::Always => Self::Always,
+    }
+  }
 }
