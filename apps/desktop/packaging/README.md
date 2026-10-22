@@ -45,6 +45,13 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
 - `Info.plist` adds the camera and microphone usage descriptions; the bundler merges it into the app.
 - `macos/Entitlements.plist` grants camera, microphone and network access under the hardened runtime
   (`hardenedRuntime` is on). The listener entitlement covers the loopback redirect of the login.
+- The dmg is one universal build (arm64 and x86_64). Hardware H.264 uses GStreamer's VideoToolbox encoder:
+  the release workflow installs the official universal GStreamer framework, links against it, and
+  `macos/bundle-gstreamer.sh` copies it, rewrites its install names to the app's `Frameworks` directory,
+  re-signs ad hoc and verifies that every reference resolves (`tauri.gstreamer.conf.json` adds the copy to
+  the bundle). Compile- and link-checked in CI only; whether the relocated framework finds its plugins at
+  runtime needs a real Mac, and without it video falls back to OpenH264. The disable-library-validation
+  entitlement is for the bundled framework.
 - Signing and notarization are not configured. The release workflow builds an unsigned dmg; the
   `APPLE_*` secrets it would need are listed in the workflow file.
 

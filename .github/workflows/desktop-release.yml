@@ -122,7 +122,11 @@ jobs:
         with:
           key: universal-apple-darwin
       - name: Meson and ninja (build WebRTC audio processing)
-        run: brew install meson ninja
+        run: brew install meson ninja pkg-config
+      # The official universal GStreamer (both slices): development files to link against, and the
+      # runtime that is bundled into the app for VideoToolbox hardware encoding.
+      - name: GStreamer framework
+        run: brew install --cask gstreamer-runtime gstreamer-development
       - name: Trunk (builds the UI bundle)
         uses: taiki-e/install-action@v2
         with:
@@ -131,9 +135,19 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
+      - name: Build the universal executable
+        working-directory: apps/desktop
+        run: cargo tauri build --config tauri.models.conf.json --target universal-apple-darwin --no-bundle
+        env:
+          PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
+          PKG_CONFIG_ALLOW_CROSS: "1"
+      - name: Bundle GStreamer into the app
+        run: apps/desktop/packaging/macos/bundle-gstreamer.sh patch target/universal-apple-darwin/release/teamcraft-desktop
       - name: Build dmg
         working-directory: apps/desktop
-        run: cargo tauri build --config tauri.models.conf.json --target universal-apple-darwin --bundles dmg
+        run: >
+          cargo tauri bundle --config tauri.models.conf.json --config tauri.gstreamer.conf.json
+          --target universal-apple-darwin --bundles dmg
         # Signing and notarization are left out on purpose (the dmg is unsigned). To enable them,
         # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
         #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,

@@ -55,11 +55,12 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire
 ashpd = { version = "0.13.13", features = ["global_shortcuts"] }
 futures-util = "0.3"
 
-# macOS cameras (AVFoundation); untested. teamcraft-media's `gstreamer` feature also builds the
-# VideoToolbox encoder (`vtenc_h264`), but the dmg would then need GStreamer.framework bundled
-# (macOS has no system GStreamer), so it stays off here until that packaging exists.
+# macOS cameras (AVFoundation) and hardware H.264 through GStreamer's VideoToolbox encoder
+# (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);
+# building needs the framework's development files installed. If an encoder or GStreamer itself is
+# missing at runtime, video falls back to OpenH264.
 [target.'cfg(target_os = "macos")'.dependencies]
-teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfoundation"] }
+teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfoundation", "gstreamer"] }
 
 # Windows: Media Foundation cameras and Windows Graphics Capture for screens and windows.
 # teamcraft-media's `gstreamer` feature would build the Media Foundation encoder element
