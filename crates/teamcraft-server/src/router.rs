@@ -58,6 +58,10 @@ use crate::handlers::{
   update_conversation_member_handler, update_meeting_handler, update_space_handler,
   update_space_member_handler, update_user_group_handler, upload_key_packages_handler,
 };
+use crate::handlers::{
+  complete_org_background_upload_handler, create_org_background_upload_handler,
+  delete_org_background_handler, download_org_background_handler,
+};
 use crate::openapi::openapi_json_handler;
 use crate::security;
 use crate::state::AppState;
@@ -158,6 +162,19 @@ pub fn router(state: AppState) -> Router {
     )
     .route("/me/avatar/complete", post(complete_avatar_upload_handler))
     .route("/me/backgrounds", post(create_background_upload_handler))
+    .route("/admin/backgrounds", post(create_org_background_upload_handler))
+    .route(
+      "/admin/backgrounds/{background_id}",
+      delete(delete_org_background_handler),
+    )
+    .route(
+      "/admin/backgrounds/{background_id}/complete",
+      post(complete_org_background_upload_handler),
+    )
+    .route(
+      "/org-backgrounds/{background_id}/download",
+      get(download_org_background_handler),
+    )
     .route(
       "/me/backgrounds/{background_id}",
       delete(delete_background_handler),

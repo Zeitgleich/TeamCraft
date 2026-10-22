@@ -25,6 +25,7 @@ mod meeting;
 mod message;
 mod mls;
 mod notification;
+mod org_background;
 mod org_recovery;
 mod permission_override;
 mod profile;
@@ -73,6 +74,7 @@ pub use meeting::{
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 pub use notification::{ReceiptRow, StoredUserSettings};
+pub use org_background::OrgBackgroundObject;
 pub use org_recovery::{
   ApprovalOutcome, NewRecoveryRequest, ShareOutcome, StoredApproval, StoredRecoveryRequest, StoredShare,
 };

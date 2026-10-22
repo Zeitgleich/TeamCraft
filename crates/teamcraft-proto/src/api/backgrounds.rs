@@ -34,7 +34,9 @@ pub struct BackgroundDownloadResponse {
 /// each one with its SHA-256, which clients check (e2ee.md §11.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CreateOrgBackgroundUploadRequest {
-  /// Size of the picture (a JPEG); the upload URL only accepts exactly this size.
+  /// Size of the picture (a JPEG); the upload URL only accepts exactly this size. (Defaulted so
+  /// an empty body reaches the permission check and gets 403, not 400, for non-admins.)
+  #[serde(default)]
   pub size_bytes: u64,
 }
 

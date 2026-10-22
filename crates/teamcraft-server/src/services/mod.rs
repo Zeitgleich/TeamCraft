@@ -29,6 +29,7 @@ pub mod messages;
 pub mod mls;
 pub mod notifications;
 pub mod oidc;
+pub mod org_backgrounds;
 pub mod org_recovery;
 pub mod permission_scheme;
 pub mod presence;
