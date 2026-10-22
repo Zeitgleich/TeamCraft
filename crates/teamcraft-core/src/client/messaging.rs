@@ -7,7 +7,7 @@ use teamcraft_crypto::message::{
 };
 use teamcraft_proto::{
   Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, MessageResponse, SendMessageRequest,
-  ThreadId,
+  ThreadId, UserId,
 };
 use zeroize::Zeroizing;
 
@@ -37,12 +37,66 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     maybe_thread: Option<ThreadId>,
     body: &str,
   ) -> Result<ClientMessageId, CoreError> {
+    self
+      .send_text_mentioning(conversation, maybe_thread, body, Vec::new())
+      .await
+  }
+
+  /// Like [`Self::send_text`], notifying `mentions` (their IDs are visible to the server).
+  pub async fn send_text_mentioning(
+    &mut self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    body: &str,
+    mentions: Vec<UserId>,
+  ) -> Result<ClientMessageId, CoreError> {
+    let content = MessageContent::Text {
+      body: body.to_string(),
+      mentions,
+    };
+    let id = self.enqueue(conversation, maybe_thread, content)?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Replaces the text of one of the user's own messages.
+  pub async fn edit_message(
+    &mut self,
+    conversation: ConversationId,
+    target: ClientMessageId,
+    body: &str,
+  ) -> Result<ClientMessageId, CoreError> {
     let id = self.enqueue(
       conversation,
-      maybe_thread,
-      MessageContent::Text {
+      None,
+      MessageContent::Edit {
+        target,
         body: body.to_string(),
       },
+    )?;
+    self.apply_control(
+      conversation,
+      self.account.user_id,
+      &MessageContent::Edit {
+        target,
+        body: body.to_string(),
+      },
+    )?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Withdraws one of the user's own messages.
+  pub async fn delete_message(
+    &mut self,
+    conversation: ConversationId,
+    target: ClientMessageId,
+  ) -> Result<ClientMessageId, CoreError> {
+    let id = self.enqueue(conversation, None, MessageContent::Delete { target })?;
+    self.apply_control(
+      conversation,
+      self.account.user_id,
+      &MessageContent::Delete { target },
     )?;
     self.flush_outbox().await?;
     Ok(id)
@@ -193,8 +247,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           sender_user_id: message.sender_user_id,
           maybe_thread_id: message.maybe_thread_id,
           sent_at_ms: message.id.snowflake().unix_millis(),
-          content,
+          content: content.clone(),
+          is_edited: false,
         })?;
+        self.apply_control(conversation, message.sender_user_id, &content)?;
         self
           .store
           .delete(Table::Undecrypted, &undecrypted_key(&message))?;
@@ -216,6 +272,49 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// Applies an edit or delete to its target. Only the target's author may change it; others' edits
+  /// and deletes are ignored (moderator deletion is a server-side feature, PLAN.md).
+  fn apply_control(
+    &self,
+    conversation: ConversationId,
+    sender: UserId,
+    content: &MessageContent,
+  ) -> Result<(), CoreError> {
+    let (target, replacement) = match content {
+      MessageContent::Edit { target, body } => (
+        *target,
+        MessageContent::Text {
+          body: body.clone(),
+          mentions: Vec::new(),
+        },
+      ),
+      MessageContent::Delete { target } => (*target, MessageContent::Deleted),
+      _ => return Ok(()),
+    };
+    let Some(mut stored) = self.store.message(conversation, target)? else {
+      // TODO(ordering): an edit that arrives before its target is kept but not applied later.
+      return Ok(());
+    };
+    if stored.sender_user_id != sender || matches!(stored.content, MessageContent::Deleted) {
+      return Ok(());
+    }
+    if let (MessageContent::Text { mentions, .. }, MessageContent::Text { body, .. }) =
+      (&stored.content, &replacement)
+    {
+      stored.content = MessageContent::Text {
+        body: body.clone(),
+        mentions: mentions.clone(),
+      };
+      stored.is_edited = true;
+    } else if matches!(replacement, MessageContent::Deleted) {
+      stored.content = MessageContent::Deleted;
+    } else {
+      return Ok(());
+    }
+    self.store.upsert_message(&stored)?;
+    Ok(())
+  }
+
   /// Tries the parked messages of a conversation again (after new content keys arrived).
   pub(crate) fn retry_undecrypted(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let parked: Vec<MessageResponse> = records::list_json(&self.store, Table::Undecrypted)?;
@@ -233,7 +332,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.store.list(Table::Undecrypted)?.len())
   }
 
-  fn enqueue(
+  pub(crate) fn enqueue(
     &mut self,
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
@@ -276,7 +375,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       content_key_id: Base64Bytes::new(encrypted.content_key_id().as_bytes().to_vec()),
       ciphertext: Base64Bytes::new(encrypted.to_bytes()?),
       maybe_thread_id: entry.maybe_thread_id,
-      mentioned_user_ids: Vec::new(),
+      mentioned_user_ids: match &stored.content {
+        MessageContent::Text { mentions, .. } => mentions.clone(),
+        _ => Vec::new(),
+      },
       is_urgent: false,
     };
     let response = self.api.send_message(entry.conversation_id, &request).await?;

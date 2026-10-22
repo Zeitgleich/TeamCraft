@@ -8,9 +8,12 @@
 use std::collections::HashMap;
 
 use rand_core::OsRng;
-use teamcraft_crypto::backup::{Argon2Settings, BackupKeyWrapper, PassphraseWrapper, WrappedBackupKey};
+use teamcraft_crypto::backup::{
+  Argon2Settings, BackupKey, BackupKeyWrapper, PassphraseWrapper, WrappedBackupKey,
+};
 use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair};
 use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBag};
+use teamcraft_crypto::org_recovery::RecoveryRequestKey;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{Base64Bytes, PutKeyBagRequest, RegisterDeviceRequest, UploadIdentityKeyRequest};
 
@@ -36,6 +39,18 @@ pub struct EnrollmentOptions {
   /// The ID token carrying the identity key fingerprint as claim `tc_identity_key`, if the
   /// identity provider supports it.
   pub maybe_attestation: Option<String>,
+  /// Recovering through the organization (e2ee.md §6.3.1) instead of the passphrase.
+  pub maybe_org_recovery: Option<OrgRecoveryUnlock>,
+  /// Secrets received from an existing device by linking (e2ee.md §5).
+  pub maybe_linked: Option<super::LinkedSecrets>,
+}
+
+/// What a recovering device received from the combining admin.
+pub struct OrgRecoveryUnlock {
+  /// The one-time key whose public part the admins sealed to.
+  pub request: RecoveryRequestKey,
+  /// The user's backup key, sealed to the request key.
+  pub sealed_backup_key: Vec<u8>,
 }
 
 /// Identity material created (or recovered) before the device is registered.
@@ -110,7 +125,13 @@ impl PendingEnrollment {
           maybe_attestation: options.maybe_attestation.clone(),
           replace: false,
         })
-        .await?;
+        .await
+        .map_err(|error| match error.error_code() {
+          // Another device of this user enrolled first, between our check and now: the caller
+          // enrolls again, which then recovers that identity.
+          Some(teamcraft_proto::ErrorCode::Conflict) => CoreError::AlreadyEnrolled,
+          _ => CoreError::from(error),
+        })?;
     }
     records::save_account(&store, &account)?;
     let sync = SyncState {
@@ -127,6 +148,7 @@ impl PendingEnrollment {
       account,
       groups: HashMap::new(),
       sync,
+      typing: Default::default(),
     };
     if is_new_identity {
       client
@@ -257,19 +279,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-const WRAPPED_KEYS_KEY: &str = "wrapped_backup_keys";
+pub(crate) const WRAPPED_KEYS_KEY: &str = "wrapped_backup_keys";
 
 async fn recover_key_bag(
   api: &impl ServerApi,
   user: teamcraft_proto::UserId,
   options: &EnrollmentOptions,
 ) -> Result<(KeyBag, SymmetricKey, u64), CoreError> {
+  let crypto_user = convert::user(user);
+  if let Some(linked) = &options.maybe_linked {
+    let backup_key = BackupKey::from_key(linked.backup_secret.duplicate());
+    let key_bag =
+      EncryptedKeyBag::from_bytes(&linked.encrypted_key_bag)?.decrypt(crypto_user, &backup_key)?;
+    return Ok((key_bag, backup_key.into_key(), linked.key_bag_version));
+  }
   let stored = api.key_bag().await?;
+  if let Some(unlock) = &options.maybe_org_recovery {
+    let backup_key = unlock
+      .request
+      .open_backup_key(crypto_user, &unlock.sealed_backup_key)
+      .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    let key_bag =
+      EncryptedKeyBag::from_bytes(stored.encrypted_key_bag.as_slice())?.decrypt(crypto_user, &backup_key)?;
+    return Ok((key_bag, backup_key.into_key(), stored.version));
+  }
   let wrapper = PassphraseWrapper::new(
     SecretBytes::new(options.passphrase.expose_secret().to_vec()),
     options.argon2,
   )?;
-  let crypto_user = convert::user(user);
   let mut last_error = None;
   for wrapped in decode_wrapped_keys(stored.wrapped_backup_keys.as_slice())? {
     if wrapped.method() != wrapper.method() {
@@ -326,7 +363,7 @@ async fn register_device(
 }
 
 /// The server stores one opaque blob of wrapped backup keys; it holds a list (one per method).
-fn encode_wrapped_keys(wrapped: &[WrappedBackupKey]) -> Result<Vec<u8>, CoreError> {
+pub(crate) fn encode_wrapped_keys(wrapped: &[WrappedBackupKey]) -> Result<Vec<u8>, CoreError> {
   let mut out =
     vec![u8::try_from(wrapped.len()).map_err(|_| CoreError::Corrupt("too many wrapped keys".into()))?];
   for key in wrapped {
@@ -339,7 +376,7 @@ fn encode_wrapped_keys(wrapped: &[WrappedBackupKey]) -> Result<Vec<u8>, CoreErro
   Ok(out)
 }
 
-fn decode_wrapped_keys(bytes: &[u8]) -> Result<Vec<WrappedBackupKey>, CoreError> {
+pub(crate) fn decode_wrapped_keys(bytes: &[u8]) -> Result<Vec<WrappedBackupKey>, CoreError> {
   let corrupt = || CoreError::Corrupt("malformed wrapped backup keys".into());
   let (&count, mut rest) = bytes.split_first().ok_or_else(corrupt)?;
   let mut keys = Vec::with_capacity(usize::from(count));

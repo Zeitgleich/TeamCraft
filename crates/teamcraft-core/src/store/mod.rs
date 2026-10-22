@@ -45,6 +45,14 @@ pub enum Table {
   Undecrypted,
   /// Last known presence per user (gateway `presence_update`).
   Presence,
+  /// The verified admin roster and workspace policy.
+  Workspace,
+  /// Membership changes waiting for this device to commit them.
+  PendingChanges,
+  /// Decrypted shared search index segments, keyed `conversation/month`.
+  SearchSegments,
+  /// The user's saved searches.
+  SavedSearches,
 }
 
 /// A decrypted (or own, not yet sent) message.
@@ -60,6 +68,8 @@ pub struct StoredMessage {
   pub maybe_thread_id: Option<ThreadId>,
   pub sent_at_ms: i64,
   pub content: MessageContent,
+  #[serde(default)]
+  pub is_edited: bool,
 }
 
 /// Plaintext inside a message ciphertext. Serialized as JSON before encryption, so new kinds can
@@ -69,6 +79,25 @@ pub struct StoredMessage {
 pub enum MessageContent {
   Text {
     body: String,
+    /// Users the message mentions; their IDs also go to the server in plaintext for notifications
+    /// (e2ee.md §4.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<UserId>,
+  },
+  /// An encrypted attachment in object storage (e2ee.md §4.5).
+  File { attachment: AttachmentRef },
+  /// Replaces the text of the sender's own earlier message.
+  Edit { target: ClientMessageId, body: String },
+  /// Withdraws the sender's own earlier message.
+  Delete { target: ClientMessageId },
+  /// What a deleted message turns into locally.
+  Deleted,
+  /// A published search index segment of this conversation and month (e2ee.md §10.1), encrypted
+  /// and stored like an attachment.
+  IndexSegment {
+    month: String,
+    segment: AttachmentRef,
+    message_count: u32,
   },
   /// Adds or removes the sender's reaction to another message (e2ee.md §4.4: reactions are
   /// encrypted messages, so the server can't count them).
@@ -79,6 +108,19 @@ pub enum MessageContent {
   },
   #[serde(other)]
   Unknown,
+}
+
+/// Everything needed to fetch and decrypt an attachment; travels inside the encrypted message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentRef {
+  pub attachment_id: teamcraft_proto::AttachmentId,
+  /// The per-file key (e2ee.md §4.5); only inside encrypted messages and the encrypted store.
+  pub key: teamcraft_proto::Base64Bytes,
+  /// SHA-256 of the encrypted blob, checked before decrypting.
+  pub ciphertext_sha256: teamcraft_proto::Base64Bytes,
+  pub file_name: String,
+  pub media_type: String,
+  pub size_bytes: u64,
 }
 
 /// Which messages of a conversation to list.
@@ -184,11 +226,22 @@ impl StoredMessage {
     matches!(self.content, MessageContent::Reaction { .. })
   }
 
+  /// Reactions, edits and deletes act on other messages and aren't listed themselves.
+  pub fn is_hidden(&self) -> bool {
+    matches!(
+      self.content,
+      MessageContent::Reaction { .. }
+        | MessageContent::Edit { .. }
+        | MessageContent::Delete { .. }
+        | MessageContent::IndexSegment { .. }
+    )
+  }
+
   fn matches(&self, filter: MessageFilter) -> bool {
     match filter {
       MessageFilter::All => true,
-      MessageFilter::TopLevel => !self.is_reaction() && self.maybe_thread_id.is_none(),
-      MessageFilter::Thread(thread) => !self.is_reaction() && self.maybe_thread_id == Some(thread),
+      MessageFilter::TopLevel => !self.is_hidden() && self.maybe_thread_id.is_none(),
+      MessageFilter::Thread(thread) => !self.is_hidden() && self.maybe_thread_id == Some(thread),
     }
   }
 }
@@ -210,6 +263,10 @@ impl Table {
       Self::PinnedIdentities => "pinned_identities",
       Self::Undecrypted => "undecrypted",
       Self::Presence => "presence",
+      Self::Workspace => "workspace",
+      Self::PendingChanges => "pending_changes",
+      Self::SearchSegments => "search_segments",
+      Self::SavedSearches => "saved_searches",
     }
   }
 }
@@ -325,7 +382,9 @@ pub(crate) mod tests {
       sent_at_ms,
       content: MessageContent::Text {
         body: format!("message {client}"),
+        mentions: Vec::new(),
       },
+      is_edited: false,
     }
   }
 

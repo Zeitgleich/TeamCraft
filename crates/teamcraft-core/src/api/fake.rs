@@ -25,8 +25,17 @@ use teamcraft_proto::{
   SpaceRole, UnixMillis, UpdateConversationMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
   UserId, UserKind, UserSummary,
 };
+use teamcraft_proto::{
+  AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
+  WorkspaceLogKind,
+};
+use teamcraft_proto::{
+  AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
+  CreateAttachmentResponse, RegisterPushRequest,
+};
+use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 
-use super::{ApiError, GatewayConnection, ServerApi};
+use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
 
 const PAGE_SIZE: usize = 50;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
@@ -65,6 +74,37 @@ struct State {
   sessions: HashMap<String, Session>,
   offline_users: HashSet<UserId>,
   next_connection: u64,
+  /// Users with workspace admin rights (permission checks only; trust comes from the roster).
+  admins: HashSet<UserId>,
+  attachments: HashMap<AttachmentId, FakeAttachment>,
+  push_registrations: HashMap<DeviceId, RegisterPushRequest>,
+  relays: HashMap<String, Relay>,
+  roster_log: Vec<WorkspaceLogEntryResponse>,
+  policy_log: Vec<WorkspaceLogEntryResponse>,
+}
+
+/// A device-linking relay: at most two endpoints of one user, frames held for an absent peer.
+#[derive(Default)]
+struct Relay {
+  endpoints: Vec<(u64, UserId, UnboundedSender<RendezvousFrame>)>,
+  held: Vec<(u64, Vec<u8>)>,
+}
+
+/// One device's end of a fake relay.
+pub struct FakeRendezvous {
+  server: FakeServer,
+  user: UserId,
+  connection: u64,
+  maybe_rendezvous_id: Option<String>,
+  sender: UnboundedSender<RendezvousFrame>,
+  receiver: UnboundedReceiver<RendezvousFrame>,
+}
+
+struct FakeAttachment {
+  conversation: ConversationId,
+  size_bytes: u64,
+  maybe_blob: Option<Vec<u8>>,
+  is_complete: bool,
 }
 
 struct Device {
@@ -143,6 +183,117 @@ impl FakeServer {
     }
   }
 
+  /// Grants a user the server-side admin permissions (adding people to channels they're not in,
+  /// posting admin proposals).
+  pub fn set_admin(&self, user: UserId) {
+    self.lock().admins.insert(user);
+  }
+
+  /// Revokes a device, as the device list or an admin would, and announces it like the server.
+  pub fn revoke_device(&self, user: UserId, device: DeviceId) {
+    let mut state = self.lock();
+    state.devices.remove(&device);
+    state.key_packages.remove(&device);
+    let mut audience: HashSet<UserId> = state
+      .conversations
+      .values()
+      .filter(|conversation| conversation.members.contains_key(&user))
+      .flat_map(|conversation| conversation.members.keys().copied())
+      .collect();
+    audience.insert(user);
+    state.publish(
+      audience,
+      &GatewayEvent::DeviceRemove {
+        user_id: user,
+        device_id: device,
+      },
+    );
+  }
+
+  /// Removes a member on the server's own authority (admin action, deactivation).
+  pub fn remove_member_as_admin(&self, conversation: ConversationId, user: UserId) {
+    let mut state = self.lock();
+    let Some(entry) = state.conversations.get_mut(&conversation) else {
+      return;
+    };
+    entry.members.remove(&user);
+    let mut audience: Vec<UserId> = entry.members.keys().copied().collect();
+    audience.push(user);
+    state.publish(
+      audience,
+      &GatewayEvent::MembershipRemove {
+        conversation_id: conversation,
+        user_id: user,
+      },
+    );
+  }
+
+  /// Appends a log entry without any checks, as a compromised server could.
+  pub fn inject_workspace_entry(&self, kind: WorkspaceLogKind, payload: Vec<u8>, signature: Vec<u8>) {
+    let mut state = self.lock();
+    let log = state.log_mut(&kind);
+    let version = log.len() as u64 + 1;
+    log.push(WorkspaceLogEntryResponse {
+      kind: kind.clone(),
+      version,
+      payload: Base64Bytes::new(payload),
+      signature: Base64Bytes::new(signature),
+      maybe_signer_device_id: None,
+      created_at: UnixMillis(i64::try_from(version).unwrap_or(0)),
+    });
+    let everyone: Vec<UserId> = state.users.keys().copied().collect();
+    state.publish(everyone, &GatewayEvent::WorkspaceUpdate { kind, version });
+  }
+
+  /// A user's wrapped backup keys, as the (still missing) recovery endpoint would hand them to the
+  /// approving admins.
+  pub fn wrapped_backup_keys_of(&self, user: UserId) -> Option<Vec<u8>> {
+    self
+      .lock()
+      .key_bags
+      .get(&user)
+      .map(|bag| bag.wrapped_backup_keys.as_slice().to_vec())
+  }
+
+  /// The push registration of a device (to seal wake-ups in tests).
+  pub fn push_registration(&self, device: DeviceId) -> Option<RegisterPushRequest> {
+    self.lock().push_registrations.get(&device).cloned()
+  }
+
+  /// Flips a byte in every stored blob, as a malicious storage backend could.
+  pub fn tamper_blobs(&self) {
+    for attachment in self.lock().attachments.values_mut() {
+      if let Some(byte) = attachment.maybe_blob.as_mut().and_then(|blob| blob.last_mut()) {
+        *byte ^= 1;
+      }
+    }
+  }
+
+  /// The mention lists the server stored (plaintext metadata, e2ee.md §4.4).
+  pub fn stored_mentions(&self) -> Vec<Vec<UserId>> {
+    let state = self.lock();
+    state
+      .conversations
+      .values()
+      .flat_map(|conversation| {
+        conversation
+          .messages
+          .iter()
+          .map(|message| message.mentioned_user_ids.clone())
+      })
+      .collect()
+  }
+
+  /// Every blob in object storage, to check that nothing readable is uploaded.
+  pub fn stored_blobs(&self) -> Vec<Vec<u8>> {
+    self
+      .lock()
+      .attachments
+      .values()
+      .filter_map(|attachment| attachment.maybe_blob.clone())
+      .collect()
+  }
+
   /// Forgets all sessions, so resuming fails with `session_invalid` (e.g. after a server restart).
   pub fn expire_sessions(&self) {
     self.lock().sessions.clear();
@@ -190,6 +341,7 @@ impl FakeServerApi {
 
 impl ServerApi for FakeServerApi {
   type Gateway = FakeGateway;
+  type Rendezvous = FakeRendezvous;
 
   async fn me(&self) -> Result<GetMeResponse, ApiError> {
     self.with(|state, me| {
@@ -468,7 +620,7 @@ impl ServerApi for FakeServerApi {
     self.with(|state, me| {
       let floor = state.peek_id();
       let user = state.user(request.user_id)?.clone();
-      let entry = state.member_conversation_mut(conversation, me)?;
+      let entry = state.actor_conversation_mut(conversation, me)?;
       let role = request.maybe_role.clone().unwrap_or(ChannelRole::Member);
       entry.members.insert(user.id, (role.clone(), floor));
       let members: Vec<UserId> = entry.members.keys().copied().collect();
@@ -700,7 +852,16 @@ impl ServerApi for FakeServerApi {
   ) -> Result<MlsMessageResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, request.device_id)?;
-      let current_epoch = state.member_conversation(conversation, me)?.epoch;
+      // Non-members may only post proposals, and only with admin rights (admin.md §2.2).
+      let is_member = state.member_conversation(conversation, me).is_ok();
+      if !is_member && !(request.kind == MlsMessageKind::Proposal && state.admins.contains(&me)) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "only members can post",
+        ));
+      }
+      let current_epoch = state.conversation(conversation)?.epoch;
       if request.epoch != current_epoch {
         return Err(ApiError::status(
           409,
@@ -717,7 +878,7 @@ impl ServerApi for FakeServerApi {
         maybe_recipient_device_id: None,
         payload: request.payload.clone(),
       };
-      let entry = state.member_conversation_mut(conversation, me)?;
+      let entry = state.actor_conversation_mut(conversation, me)?;
       entry.mls.push(message.clone());
       let members: Vec<UserId> = entry.members.keys().copied().collect();
       state.publish(
@@ -791,6 +952,167 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn list_workspace_log(
+    &self,
+    kind: &WorkspaceLogKind,
+    query: &ListWorkspaceLogQuery,
+  ) -> Result<ListWorkspaceLogResponse, ApiError> {
+    self.with(|state, _| {
+      let after = query.maybe_after.unwrap_or(0);
+      let limit = query
+        .maybe_limit
+        .map_or(PAGE_SIZE, |limit| limit as usize)
+        .clamp(1, PAGE_SIZE);
+      let mut entries: Vec<WorkspaceLogEntryResponse> = state
+        .log_mut(kind)
+        .iter()
+        .filter(|entry| entry.version > after)
+        .cloned()
+        .collect();
+      let has_more = entries.len() > limit;
+      entries.truncate(limit);
+      Ok(ListWorkspaceLogResponse { entries, has_more })
+    })
+  }
+
+  async fn append_workspace_log(
+    &self,
+    kind: &WorkspaceLogKind,
+    request: &AppendWorkspaceLogRequest,
+  ) -> Result<WorkspaceLogEntryResponse, ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, request.signer_device_id)?;
+      let created_at = UnixMillis(state.next_id::<UserId>().snowflake().get());
+      let log = state.log_mut(kind);
+      let current = log.len() as u64;
+      if request.expected_version != current {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::VersionConflict,
+          format!("stored version is {current}"),
+        ));
+      }
+      let entry = WorkspaceLogEntryResponse {
+        kind: kind.clone(),
+        version: current + 1,
+        payload: request.payload.clone(),
+        signature: request.signature.clone(),
+        maybe_signer_device_id: Some(request.signer_device_id),
+        created_at,
+      };
+      log.push(entry.clone());
+      let everyone: Vec<UserId> = state.users.keys().copied().collect();
+      state.publish(
+        everyone,
+        &GatewayEvent::WorkspaceUpdate {
+          kind: kind.clone(),
+          version: entry.version,
+        },
+      );
+      Ok(entry)
+    })
+  }
+
+  async fn create_attachment(
+    &self,
+    request: &CreateAttachmentRequest,
+  ) -> Result<CreateAttachmentResponse, ApiError> {
+    self.with(|state, me| {
+      state.member_conversation(request.conversation_id, me)?;
+      let id: AttachmentId = state.next_id();
+      state.attachments.insert(
+        id,
+        FakeAttachment {
+          conversation: request.conversation_id,
+          size_bytes: request.size_bytes,
+          maybe_blob: None,
+          is_complete: false,
+        },
+      );
+      Ok(CreateAttachmentResponse {
+        id,
+        upload_url: format!("{BLOB_SCHEME}{id}"),
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn complete_attachment(&self, attachment: AttachmentId) -> Result<AttachmentResponse, ApiError> {
+    self.with(|state, _| {
+      let entry = state
+        .attachments
+        .get_mut(&attachment)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::AttachmentNotFound, "unknown"))?;
+      if entry.maybe_blob.as_ref().map(|blob| blob.len() as u64) != Some(entry.size_bytes) {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "upload missing or of the wrong size",
+        ));
+      }
+      entry.is_complete = true;
+      Ok(AttachmentResponse {
+        id: attachment,
+        conversation_id: entry.conversation,
+        size_bytes: entry.size_bytes,
+        is_complete: true,
+      })
+    })
+  }
+
+  async fn download_attachment(
+    &self,
+    attachment: AttachmentId,
+  ) -> Result<AttachmentDownloadResponse, ApiError> {
+    self.with(|state, me| {
+      let entry = state
+        .attachments
+        .get(&attachment)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::AttachmentNotFound, "unknown"))?;
+      let size_bytes = entry.size_bytes;
+      state.member_conversation(entry.conversation, me)?;
+      Ok(AttachmentDownloadResponse {
+        download_url: format!("{BLOB_SCHEME}{attachment}"),
+        size_bytes,
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      let entry = blob_entry(state, url)?;
+      if bytes.len() as u64 != entry.size_bytes || entry.is_complete {
+        return Err(ApiError::Status {
+          status: 403,
+          maybe_body: None,
+        });
+      }
+      entry.maybe_blob = Some(bytes);
+      Ok(())
+    })
+  }
+
+  async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+    self.with(|state, _| {
+      blob_entry(state, url)?
+        .maybe_blob
+        .clone()
+        .ok_or(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+        })
+    })
+  }
+
+  async fn register_push(&self, device: DeviceId, request: &RegisterPushRequest) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, device)?;
+      state.push_registrations.insert(device, request.clone());
+      Ok(())
+    })
+  }
+
   async fn connect_gateway(&self) -> Result<FakeGateway, ApiError> {
     let (sender, receiver) = unbounded();
     let connection = self.with(|state, _| {
@@ -817,6 +1139,22 @@ impl ServerApi for FakeServerApi {
       heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
     });
     Ok(gateway)
+  }
+
+  async fn connect_rendezvous(&self) -> Result<FakeRendezvous, ApiError> {
+    let connection = self.with(|state, _| {
+      state.next_connection += 1;
+      Ok(state.next_connection)
+    })?;
+    let (sender, receiver) = unbounded();
+    Ok(FakeRendezvous {
+      server: self.server.clone(),
+      user: self.user,
+      connection,
+      maybe_rendezvous_id: None,
+      sender,
+      receiver,
+    })
   }
 
   fn gateway_token(&self) -> Result<String, ApiError> {
@@ -881,14 +1219,99 @@ impl GatewayConnection for FakeGateway {
       GatewayClientMessage::Heartbeat => {
         let _ = sender.unbounded_send(GatewayServerMessage::HeartbeatAck);
       },
-      GatewayClientMessage::Typing { .. }
-      | GatewayClientMessage::SetActivity { .. }
-      | GatewayClientMessage::Unknown => {},
+      GatewayClientMessage::Typing { conversation_id } => {
+        // Members only, like the server; the typist doesn't get their own event.
+        let others: Vec<UserId> = state
+          .conversations
+          .get(conversation_id)
+          .filter(|conversation| conversation.members.contains_key(&self.user))
+          .map(|conversation| {
+            conversation
+              .members
+              .keys()
+              .copied()
+              .filter(|member| *member != self.user)
+              .collect()
+          })
+          .unwrap_or_default();
+        state.publish(
+          others,
+          &GatewayEvent::TypingStart {
+            conversation_id: *conversation_id,
+            user_id: self.user,
+          },
+        );
+      },
+      GatewayClientMessage::SetActivity { .. } | GatewayClientMessage::Unknown => {},
     }
     Ok(())
   }
 
   async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
+    self.receiver.next().await.map(Ok)
+  }
+}
+
+impl RendezvousConnection for FakeRendezvous {
+  async fn send_control(&mut self, message: &RendezvousClientMessage) -> Result<(), ApiError> {
+    let RendezvousClientMessage::Join { rendezvous_id, .. } = message else {
+      return Ok(());
+    };
+    let mut state = self.server.lock();
+    let relay = state.relays.entry(rendezvous_id.clone()).or_default();
+    // One user's two devices only, like the server.
+    if relay.endpoints.len() >= 2 || relay.endpoints.iter().any(|(_, user, _)| *user != self.user) {
+      let error = ErrorBody::new(ErrorCode::Forbidden, "relay is taken");
+      let _ = self
+        .sender
+        .unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::Error { error }));
+      return Ok(());
+    }
+    let is_peer_present = !relay.endpoints.is_empty();
+    for (_, _, peer) in &relay.endpoints {
+      let _ = peer.unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::PeerJoined));
+    }
+    relay
+      .endpoints
+      .push((self.connection, self.user, self.sender.clone()));
+    let _ = self
+      .sender
+      .unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::Joined {
+        peer_present: is_peer_present,
+      }));
+    let held = std::mem::take(&mut relay.held);
+    for (from, frame) in held {
+      if from == self.connection {
+        relay.held.push((from, frame));
+      } else {
+        let _ = self.sender.unbounded_send(RendezvousFrame::Binary(frame));
+      }
+    }
+    self.maybe_rendezvous_id = Some(rendezvous_id.clone());
+    Ok(())
+  }
+
+  async fn send_binary(&mut self, frame: Vec<u8>) -> Result<(), ApiError> {
+    let id = self
+      .maybe_rendezvous_id
+      .clone()
+      .ok_or_else(|| ApiError::Gateway("join first".into()))?;
+    let mut state = self.server.lock();
+    let relay = state.relays.entry(id).or_default();
+    match relay
+      .endpoints
+      .iter()
+      .find(|(connection, _, _)| *connection != self.connection)
+    {
+      Some((_, _, peer)) => {
+        let _ = peer.unbounded_send(RendezvousFrame::Binary(frame));
+      },
+      None => relay.held.push((self.connection, frame)),
+    }
+    Ok(())
+  }
+
+  async fn receive(&mut self) -> Option<Result<RendezvousFrame, ApiError>> {
     self.receiver.next().await.map(Ok)
   }
 }
@@ -961,6 +1384,26 @@ impl State {
     match self.conversations.get_mut(&conversation) {
       Some(found) if found.members.contains_key(&me) => Ok(found),
       _ => Err(ApiError::status(404, ErrorCode::ChannelNotFound, "not a member")),
+    }
+  }
+
+  /// The conversation if `me` is a member or a workspace admin (who may manage every channel).
+  fn actor_conversation_mut(
+    &mut self,
+    conversation: ConversationId,
+    me: UserId,
+  ) -> Result<&mut Conversation, ApiError> {
+    let is_admin = self.admins.contains(&me);
+    match self.conversations.get_mut(&conversation) {
+      Some(found) if found.members.contains_key(&me) || is_admin => Ok(found),
+      _ => Err(ApiError::status(404, ErrorCode::ChannelNotFound, "not a member")),
+    }
+  }
+
+  fn log_mut(&mut self, kind: &WorkspaceLogKind) -> &mut Vec<WorkspaceLogEntryResponse> {
+    match kind {
+      WorkspaceLogKind::Policy => &mut self.policy_log,
+      _ => &mut self.roster_log,
     }
   }
 
@@ -1065,6 +1508,24 @@ impl KeyPackages {
 }
 
 const PENDING_PREFIX: &str = "pending-";
+const BLOB_SCHEME: &str = "fake-blob://";
+
+/// The attachment behind a fake presigned URL.
+fn blob_entry<'a>(state: &'a mut State, url: &str) -> Result<&'a mut FakeAttachment, ApiError> {
+  let id = url
+    .strip_prefix(BLOB_SCHEME)
+    .and_then(|raw| raw.parse::<i64>().ok())
+    .and_then(|raw| Snowflake::new(raw).ok())
+    .map(AttachmentId::from_snowflake)
+    .ok_or(ApiError::Status {
+      status: 404,
+      maybe_body: None,
+    })?;
+  state.attachments.get_mut(&id).ok_or(ApiError::Status {
+    status: 404,
+    maybe_body: None,
+  })
+}
 
 fn pending_session(connection: u64) -> String {
   format!("{PENDING_PREFIX}{connection}")

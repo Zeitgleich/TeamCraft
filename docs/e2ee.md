@@ -203,6 +203,22 @@ the same setup we use). Since TeamCraft is AGPL as well, we can reuse or port it
   encrypted with ChaCha20-Poly1305, relayed by the server, which only sees ciphertext.
 - In the code variant, the short code is checked by the user, so a server injecting itself is detected.
 
+Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
+
+- The new device draws `AK` and a relay ID and shows both (`tclink1:<id>:<AK>`). It is the
+  *initiator*; the existing device that scans is the *responder*.
+- `hello` (responder → initiator): challenge + ephemeral X25519 key, sealed with
+  `HKDF(AK, "…rendezvous responder auth")`; `auth_hello` (initiator → responder): the challenge back,
+  its own challenge and ephemeral key, sealed with the initiator auth key; `auth`: the challenge back.
+- Transport keys per direction and a 32-byte path hash come from `HKDF(AK ‖ X25519 shared secret)`;
+  frames are ChaCha20-Poly1305 with a per-direction counter nonce. The 4-digit short code is the path
+  hash mod 10⁴.
+- Not a port of libthreema's `d2d_rendezvous`: its path nomination isn't needed with one relay, and
+  the construction above uses only primitives already in the crate. It still needs the security
+  review security.md asks for.
+- The transfer carries the backup key and the encrypted key bag; the new device then registers and an
+  existing member adds it to the groups.
+
 ## 6. Backup and recovery
 
 The **key bag** (identity key, all content keys, settings) is encrypted with a random backup key and
@@ -240,6 +256,35 @@ their phone and passkey. Optional organization recovery:
 
 This means company admins could technically read a user's chats if two of them collude. That's a
 policy decision, not a technical one, and it has to be documented for employees.
+
+#### 6.3.1 Construction
+
+All primitives come from audited crates (`hpke-rs`, as used by openmls; `vsss-rs` for secret
+sharing); nothing below is a new primitive.
+
+- **Org key.** An owner's client draws a random 32-byte secret `s` and derives the org key pair with
+  HPKE `DeriveKeyPair(s)` (RFC 9180 §7.1.3) for DHKEM(X25519, HKDF-SHA256). The public key goes into
+  the signed admin roster (`org_recovery_key`, admin.md §2.3), so the server can't swap it.
+- **Shares.** `s` is split with Shamir's secret sharing over GF(2⁸) (byte-wise, `vsss-rs`), threshold
+  `t` = the policy's `org_recovery.admins_required` (default 2), one share per admin (at most 255).
+  Each share is sealed with HPKE (base mode, ChaCha20-Poly1305) to the X25519 agreement key of every
+  device of that admin; `s` is wiped afterwards. Admin devices keep their opened share in their
+  encrypted local store.
+- **Wrapping.** Each member's client seals its backup key with HPKE to the org public key. Info and
+  AAD bind the user ID and the wrap method; the org public key is stored next to the ciphertext so a
+  later key rotation can tell old wraps apart. The result is one more entry in the user's wrapped
+  backup keys (§6), uploaded with the key bag.
+- **Recovery.** The recovering device creates a one-time X25519 *recovery request key* and shows its
+  fingerprint. `t` admins approve (server-side approval and audit log, shown to the user). Each
+  approving admin seals their share to the last approver's device; that device combines the shares
+  into `s`, derives the org private key, opens the user's org-wrapped backup key, seals the backup key
+  to the recovery request key and wipes `s` and the org key. The recovering device opens it, decrypts
+  the key bag and continues like any recovered device.
+- **Consequences.** The combining admin's device holds `s` for the duration of one recovery, so the
+  owner should rotate the org key (new `s`, new shares, members re-wrap) after each recovery. Two
+  colluding admins can recover anyone, as stated above; one admin alone cannot.
+- **Server endpoints needed** (not yet there): storing sealed shares per admin device, a recovery
+  request with approvals, and handing the user's wrapped backup keys to the approving admins.
 
 ## 7. Push notifications (Threema model, extended)
 
@@ -322,6 +367,21 @@ member has the content keys (§4.1).
 
 What the server sees: segment sizes and upload times per conversation, and which segments a device
 downloads. Not words, not queries, not which messages match.
+
+Implemented (`teamcraft-core::search`, first version):
+
+- Instead of a separate index key per conversation, every segment gets a fresh random key and is
+  encrypted and uploaded exactly like an attachment (§4.5). The key, hash and month travel in an
+  encrypted, hidden `index_segment` message of the conversation. Access then follows the history
+  policy automatically: whoever can read the announcement can read the segment, and a `from_join`
+  member never sees announcements from before they joined.
+- A segment is a tantivy index (English and German stemming, ASCII folding) exported as a bundle of
+  its files. The client publishes closed months it has messages for; when two clients publish the
+  same month, readers use the earliest announcement.
+- The local index is built in memory from the encrypted store when searching and never written to
+  disk. The browser has no tantivy (it doesn't target wasm32) and scans the store instead.
+- Server gap: segments use the attachment endpoints; a dedicated segment listing would let devices
+  find segments without reading the conversation's messages first.
 
 ### 10.2 Optional: vault node for compliance and file contents
 

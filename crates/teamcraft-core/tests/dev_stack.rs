@@ -12,14 +12,20 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use teamcraft_core::LinkOffer;
 use teamcraft_core::api::{HttpGateway, HttpServerApi, StaticToken};
 use teamcraft_core::attestation::{AttestationError, write_identity_attribute};
+use teamcraft_core::client::{NewDeviceLink, OutgoingFile};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_proto::{ConversationId, CreateSpaceRequest, JoinPolicy, SpaceId, SpaceResponse};
+use teamcraft_proto::{
+  AdminSelfJoin, ConversationId, CreateSpaceRequest, JoinPolicy, PushProvider, SpaceId, SpaceResponse,
+  WorkspacePolicy,
+};
 
 const ISSUER: &str = "http://127.0.0.1:8080/realms/teamcraft-dev";
 /// The dev database keeps identities between runs; later runs recover them with this passphrase.
@@ -72,6 +78,125 @@ async fn two_dev_users_exchange_encrypted_messages() {
 }
 
 #[tokio::test]
+async fn owner_signed_policy_reaches_other_clients() {
+  if server_url().is_none() {
+    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    return;
+  }
+  let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
+  let (mut alice, _) = enroll("alice", &alice_token).await;
+  let (mut bob, _) = enroll("bob", &bob_token).await;
+  let roles = [
+    (alice.user_id(), RosterRole::Owner),
+    (bob.user_id(), RosterRole::Admin),
+  ];
+  alice.publish_roster(&roles).await.unwrap();
+  let policy = WorkspacePolicy {
+    admin_self_join: AdminSelfJoin::OwnerApproval,
+    ..WorkspacePolicy::default()
+  };
+  alice.publish_policy(policy).await.unwrap();
+
+  bob.sync_workspace().await.unwrap();
+  let workspace = bob.workspace().unwrap();
+  assert_eq!(workspace.maybe_rejection, None);
+  assert!(workspace.is_admin(bob.user_id()));
+  assert_eq!(workspace.policy.admin_self_join, AdminSelfJoin::OwnerApproval);
+}
+
+#[tokio::test]
+async fn files_and_push_registration_work_against_the_server() {
+  if server_url().is_none() {
+    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    return;
+  }
+  let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
+  let (mut alice, _) = enroll("alice", &alice_token).await;
+  let (mut bob, _) = enroll("bob", &bob_token).await;
+  let (mut bob_gateway, _) = bob.connect_gateway().await.unwrap();
+  let space = create_open_space(&alice_token, &bob_token).await;
+  let channel = alice.create_channel(space, "core-files").await.unwrap();
+  alice.add_member(channel, bob.user_id()).await.unwrap();
+  pump_until("Bob joins the channel", &mut bob, &mut bob_gateway, |client| {
+    client.has_group(channel).unwrap()
+  })
+  .await;
+
+  let content = format!("integration file {}", SystemClock.now_ms()).into_bytes();
+  let file = OutgoingFile {
+    file_name: "notes.txt".into(),
+    media_type: "text/plain".into(),
+    content: content.clone(),
+  };
+  let message = alice.send_file(channel, None, file).await.unwrap();
+  pump_until(
+    "Bob receives the file message",
+    &mut bob,
+    &mut bob_gateway,
+    |client| {
+      LocalStore::message(client.store().as_ref(), channel, message)
+        .unwrap()
+        .is_some()
+    },
+  )
+  .await;
+  assert_eq!(
+    bob.fetch_file(channel, message).await.unwrap().expose_secret(),
+    content.as_slice()
+  );
+
+  alice
+    .register_push(PushProvider::Fcm, "integration-test-token")
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_second_device_is_linked_through_the_relay() {
+  if server_url().is_none() {
+    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    return;
+  }
+  let alice_token = dev_token("alice");
+  let (mut phone, _) = enroll("alice", &alice_token).await;
+  let laptop_api = HttpServerApi::new(required_server_url(), StaticToken(alice_token.clone()));
+  let offer = LinkOffer::generate();
+  let code = offer.to_code();
+  let (laptop_side, phone_side) = tokio::join!(
+    NewDeviceLink::connect(&laptop_api, &offer),
+    phone.start_link_approval(&code)
+  );
+  let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
+  assert_eq!(laptop_side.short_code(), phone_side.short_code());
+  phone.complete_link_approval(phone_side).await.unwrap();
+  let secrets = laptop_side.receive_secrets().await.unwrap();
+
+  let options = EnrollmentOptions {
+    device_name: "alice linked laptop".into(),
+    passphrase: SecretBytes::new(b"unused".to_vec()),
+    argon2: Argon2Settings {
+      memory_kib: 1024,
+      iterations: 1,
+      parallelism: 1,
+    },
+    maybe_attestation: None,
+    maybe_org_recovery: None,
+    maybe_linked: Some(secrets),
+  };
+  let laptop = PendingEnrollment::new()
+    .complete(
+      laptop_api,
+      Arc::new(MemoryStore::new()),
+      Box::new(SystemClock),
+      ClientSettings::default(),
+      options,
+    )
+    .await
+    .unwrap();
+  assert_eq!(laptop.identity_fingerprint(), phone.identity_fingerprint());
+}
+
+#[tokio::test]
 async fn identity_attribute_can_be_attested_or_reports_why_not() {
   if server_url().is_none() {
     eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
@@ -89,6 +214,13 @@ async fn identity_attribute_can_be_attested_or_reports_why_not() {
 }
 
 async fn enroll(user: &str, token: &str) -> (DevClient, Arc<MemoryStore>) {
+  // Tests run in parallel; the first enrollment of a dev user must finish before the next one
+  // starts, or both race to publish an identity key (the loser gets `AlreadyEnrolled`).
+  static ENROLLMENT: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+  let _turn = ENROLLMENT
+    .get_or_init(|| tokio::sync::Mutex::new(()))
+    .lock()
+    .await;
   let api = HttpServerApi::new(required_server_url(), StaticToken(token.to_string()));
   let store = Arc::new(MemoryStore::new());
   let options = EnrollmentOptions {
@@ -100,6 +232,8 @@ async fn enroll(user: &str, token: &str) -> (DevClient, Arc<MemoryStore>) {
       parallelism: 1,
     },
     maybe_attestation: None,
+    maybe_org_recovery: None,
+    maybe_linked: None,
   };
   let client = PendingEnrollment::new()
     .complete(
@@ -181,7 +315,7 @@ fn texts(store: &MemoryStore, conversation: ConversationId) -> Vec<String> {
     .unwrap()
     .into_iter()
     .filter_map(|message| match message.content {
-      MessageContent::Text { body } => Some(body),
+      MessageContent::Text { body, .. } => Some(body),
       _ => None,
     })
     .collect()

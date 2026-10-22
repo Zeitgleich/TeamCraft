@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 
 use rand_core::OsRng;
-use teamcraft_crypto::membership::{HistoryShare, MembershipAction, MembershipChange};
+use teamcraft_crypto::membership::{
+  HistoryShare, MembershipAction, MembershipChange, SignedMembershipChange,
+};
 use teamcraft_crypto::mls::{CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent};
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
@@ -13,12 +15,26 @@ use teamcraft_proto::{
 };
 
 use super::Client;
+use super::workspace::PendingChange;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
-use crate::trust::{GroupMemberAuthority, PinnedDirectory};
+use crate::trust::{PinnedDirectory, WorkspaceAuthority};
+
+/// Who signs a membership change this device commits.
+#[derive(Clone, Debug)]
+pub(crate) enum ChangeSource {
+  /// This device signs the change itself.
+  Own(MembershipAction),
+  /// Another user (a workspace admin who isn't a member) signed it; this device commits it on
+  /// their behalf (admin.md §2.2).
+  Delegated(Box<SignedMembershipChange>),
+}
+
+/// Marks an MLS "proposal" entry that carries a signed admin change instead of an MLS proposal.
+pub(crate) const ADMIN_CHANGE_MAGIC: &[u8] = b"TCAC";
 
 /// What processing one MLS queue entry led to.
 #[derive(Debug, PartialEq, Eq)]
@@ -75,10 +91,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .commit_change(
         id,
-        MembershipAction::AddUser {
+        ChangeSource::Own(MembershipAction::AddUser {
           user_id: convert::user(user),
           history: HistoryShare::Full,
-        },
+        }),
       )
       .await?;
     Ok(id)
@@ -103,15 +119,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|c| c.history_policy.clone())
     {
       Some(HistoryPolicy::FromJoin) => HistoryShare::FromJoin,
-      _ => HistoryShare::Full,
+      Some(HistoryPolicy::Full) => HistoryShare::Full,
+      // Unknown to this client: fall back to the signed workspace default (admin.md §2.4).
+      _ => match self.workspace()?.policy.history_default {
+        HistoryPolicy::FromJoin => HistoryShare::FromJoin,
+        _ => HistoryShare::Full,
+      },
     };
     self
       .commit_change(
         conversation,
-        MembershipAction::AddUser {
+        ChangeSource::Own(MembershipAction::AddUser {
           user_id: convert::user(user),
           history,
-        },
+        }),
       )
       .await
   }
@@ -123,9 +144,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .commit_change(
         conversation,
-        MembershipAction::RemoveUser {
+        ChangeSource::Own(MembershipAction::RemoveUser {
           user_id: convert::user(user),
-        },
+        }),
       )
       .await
   }
@@ -226,6 +247,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if message.kind == MlsMessageKind::Welcome {
       return Ok(MlsProgress::Done);
     }
+    if message.kind == MlsMessageKind::Proposal {
+      // An admin's signed change for this group; queued and verified when it is committed.
+      if let Some(signed) = message.payload.as_slice().strip_prefix(ADMIN_CHANGE_MAGIC) {
+        self.queue_pending(PendingChange::Delegated {
+          conversation_id: conversation,
+          change: Base64Bytes::new(signed.to_vec()),
+        })?;
+      }
+      self.advance_cursor(conversation, message)?;
+      return Ok(MlsProgress::Done);
+    }
     if self
       .sync
       .mls_cursors
@@ -298,11 +330,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Signs and commits a membership change; on an epoch conflict, catches up and tries again.
-  async fn commit_change(
+  pub(crate) async fn commit_change(
     &mut self,
     conversation: ConversationId,
-    action: MembershipAction,
+    source: ChangeSource,
   ) -> Result<(), CoreError> {
+    let action = match &source {
+      ChangeSource::Own(action) => *action,
+      ChangeSource::Delegated(signed) => *signed.unverified().action(),
+    };
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
       if !self.has_group(conversation)? {
@@ -311,6 +347,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let members = self.api.list_members(conversation).await?;
       let mut users: Vec<UserId> = members.members.iter().map(|member| member.user.id).collect();
       users.push(convert::user_from_crypto(action.target_user())?);
+      if let ChangeSource::Delegated(signed) = &source {
+        users.push(convert::user_from_crypto(signed.signer_user())?);
+      }
       let directory = self.pin_identities(users).await?;
 
       let (key_packages, recipients) = match action {
@@ -327,8 +366,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // Every device is in the group already (or the user has none yet).
         return Ok(());
       }
-      let signed = MembershipChange::new(convert::conversation(conversation), action, &mut OsRng)
-        .sign(&self.account.device, self.account.certificate.clone())?;
+      let signed = match &source {
+        ChangeSource::Own(action) => {
+          MembershipChange::new(convert::conversation(conversation), *action, &mut OsRng)
+            .sign(&self.account.device, self.account.certificate.clone())?
+        },
+        ChangeSource::Delegated(signed) => (**signed).clone(),
+      };
       let authority = self.group_authority(conversation)?;
       let group = self
         .groups
@@ -343,18 +387,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &authority,
       ) {
         Ok(output) => output,
-        // E.g. the user is already gone from the group: nothing left to do.
-        Err(teamcraft_crypto::mls::MlsError::ChangeDoesNotMatchCommit) => return Ok(()),
+        // The user is already gone from the group, or another member committed this change.
+        Err(
+          teamcraft_crypto::mls::MlsError::ChangeDoesNotMatchCommit
+          | teamcraft_crypto::mls::MlsError::ReplayedChange(_),
+        ) => {
+          return Ok(());
+        },
         Err(error) => return Err(error.into()),
       };
       let is_founding_commit = group.epoch() == 0;
       if self.post_commit(conversation, output, &recipients).await? {
         let bundle = match action {
-          MembershipAction::AddUser { history, .. } => ContentKeyBundle::for_new_member(
-            self.account.key_bag.ring_mut(convert::conversation(conversation)),
-            history,
-            &mut OsRng,
-          ),
+          MembershipAction::AddUser { user_id, history } => {
+            let history = self
+              .effective_history(convert::user_from_crypto(user_id)?, history)
+              .await?;
+            ContentKeyBundle::for_new_member(
+              self.account.key_bag.ring_mut(convert::conversation(conversation)),
+              history,
+              &mut OsRng,
+            )
+          },
           MembershipAction::RemoveUser { .. } | MembershipAction::RemoveDevice { .. } => {
             ContentKeyBundle::rotate(
               self.account.key_bag.ring_mut(convert::conversation(conversation)),
@@ -530,7 +584,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok((key_packages, recipients))
   }
 
-  fn group_device_ids(
+  pub(crate) fn group_device_ids(
     &mut self,
     conversation: ConversationId,
   ) -> Result<BTreeSet<teamcraft_proto::DeviceId>, CoreError> {
@@ -542,11 +596,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .collect()
   }
 
-  fn group_authority(&mut self, conversation: ConversationId) -> Result<GroupMemberAuthority, CoreError> {
+  fn group_authority(&mut self, conversation: ConversationId) -> Result<WorkspaceAuthority, CoreError> {
+    let workspace = self.workspace()?;
     let group = self.group_or_error(conversation)?;
-    Ok(GroupMemberAuthority::new(
+    Ok(WorkspaceAuthority::new(
       group.members()?.into_iter().map(|member| member.user_id),
+      workspace.admins().collect::<Vec<_>>(),
+      workspace.policy.admin_self_join.clone(),
     ))
+  }
+
+  /// Guests only ever see history from their join on (e2ee.md §4.3), whatever was asked for.
+  async fn effective_history(
+    &mut self,
+    user: UserId,
+    requested: HistoryShare,
+  ) -> Result<HistoryShare, CoreError> {
+    let summary = match records::get_json::<teamcraft_proto::UserSummary>(
+      &self.store,
+      Table::Users,
+      &user.to_string(),
+    )? {
+      Some(summary) => summary,
+      None => self.api.user(user).await?,
+    };
+    Ok(if summary.kind == teamcraft_proto::UserKind::Guest {
+      HistoryShare::FromJoin
+    } else {
+      requested
+    })
   }
 
   fn advance_cursor(

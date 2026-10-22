@@ -61,6 +61,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             .await?,
         )
       },
+      #[cfg(not(target_arch = "wasm32"))]
+      CoreCommand::FetchSearchHits { hits } => self.fetch_search_hits(&hits).await.map(|_| ()),
       CoreCommand::SetCustomStatus { .. } => {
         // The server has no custom status yet (crate README: server gaps).
         tracing::debug!("custom status is not stored on the server yet");

@@ -4,20 +4,31 @@
 //! [`ServerApi`] and keeps the store current. UIs read the store (see [`crate::view`]); every
 //! network-facing operation is an `async` method here.
 
+mod attachments;
 mod enroll;
 mod gateway;
 mod groups;
+mod linking;
 mod messaging;
+mod notifications;
+mod org_recovery;
+#[cfg(not(target_arch = "wasm32"))]
+mod segments;
 mod sync;
 #[cfg(feature = "ui")]
 mod ui_commands;
+mod workspace;
 
 use std::collections::{BTreeMap, HashMap};
 
-pub use enroll::{EnrollmentOptions, PendingEnrollment};
+pub use attachments::OutgoingFile;
+pub use enroll::{EnrollmentOptions, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::GatewayOutcome;
+pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use messaging::FlushReport;
+pub use notifications::TYPING_TIMEOUT_MS;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+pub use org_recovery::SealedShare;
 use teamcraft_crypto::membership::ChangeId;
 use teamcraft_crypto::mls::ConversationGroup;
 use teamcraft_proto::{ConversationId, ConversationResponse, UserId};
@@ -52,6 +63,7 @@ pub struct Client<A, S> {
   account: Account,
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
+  typing: notifications::TypingState,
 }
 
 impl Default for ClientSettings {
@@ -87,6 +99,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       account,
       groups: HashMap::new(),
       sync,
+      typing: Default::default(),
     }))
   }
 
@@ -146,7 +159,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.groups.get_mut(&conversation))
   }
 
-  fn group_or_error(&mut self, conversation: ConversationId) -> Result<&mut ConversationGroup, CoreError> {
+  pub(crate) fn group_or_error(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<&mut ConversationGroup, CoreError> {
     self.group(conversation)?.ok_or(CoreError::NoGroup(conversation))
   }
 
@@ -198,11 +214,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mut pinned = records::pinned_identities(&self.store)?;
     for user in users {
       if user == self.account.user_id {
-        let public_key = *self.account.identity_public_key().as_bytes();
-        pinned.entry(user).or_insert(PinnedIdentity {
-          public_key,
-          maybe_changed_to: None,
-        });
+        if let std::collections::btree_map::Entry::Vacant(slot) = pinned.entry(user) {
+          let own = PinnedIdentity {
+            public_key: *self.account.identity_public_key().as_bytes(),
+            maybe_changed_to: None,
+          };
+          records::pin_identity(&self.store, user, &own)?;
+          slot.insert(own);
+        }
         continue;
       }
       if pinned
@@ -241,7 +260,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       records::pin_identity(&self.store, user, &entry)?;
       pinned.insert(user, entry);
     }
-    Ok(PinnedDirectory::new(&pinned))
+    Ok(PinnedDirectory::new(
+      &pinned,
+      &self.workspace()?.roster_identities(),
+    ))
   }
 
   fn cached_conversations(&self) -> Result<BTreeMap<ConversationId, ConversationResponse>, CoreError> {

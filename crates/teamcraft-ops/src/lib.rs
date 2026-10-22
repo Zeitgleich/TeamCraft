@@ -78,11 +78,9 @@ pub fn probe(addr: SocketAddr, path: &str, timeout: Duration) -> Result<(), Prob
     TcpStream::connect_timeout(&addr, timeout).map_err(|source| ProbeError::Connect { addr, source })?;
   stream.set_read_timeout(Some(timeout)).map_err(io_error)?;
   stream.set_write_timeout(Some(timeout)).map_err(io_error)?;
-  write!(
-    stream,
-    "GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-  )
-  .map_err(io_error)?;
+  // One write: `write!` on the stream would send the request in several segments.
+  let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+  stream.write_all(request.as_bytes()).map_err(io_error)?;
 
   let mut buffer = [0_u8; MAX_RESPONSE_BYTES];
   let mut filled = 0;
@@ -162,10 +160,12 @@ mod tests {
         probe(garbage, "/", TIMEOUT),
         Err(ProbeError::MalformedResponse { .. })
       ));
+      // A peer that closes without answering may surface as an empty response or, when the close
+      // races our request, as a reset; both must fail the probe.
       let silent = serve("", Ipv4Addr::LOCALHOST.into());
       assert!(matches!(
         probe(silent, "/", TIMEOUT),
-        Err(ProbeError::MalformedResponse { .. })
+        Err(ProbeError::MalformedResponse { .. } | ProbeError::Io { .. })
       ));
       let closed = {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

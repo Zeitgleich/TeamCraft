@@ -47,6 +47,11 @@ pub enum CoreCommand {
   SetCustomStatus {
     maybe_status: Option<CustomStatus>,
   },
+  /// Messages a search found only in shared index segments: fetch and decrypt them.
+  #[cfg(not(target_arch = "wasm32"))]
+  FetchSearchHits {
+    hits: Vec<crate::search::SearchMatch>,
+  },
 }
 
 pub struct CoreChatBackend<S> {
@@ -54,6 +59,8 @@ pub struct CoreChatBackend<S> {
   me: UserId,
   clock: Box<dyn Clock>,
   commands: Rc<RefCell<Vec<CoreCommand>>>,
+  #[cfg(not(target_arch = "wasm32"))]
+  pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -64,12 +71,27 @@ impl<S: LocalStore> CoreChatBackend<S> {
       me,
       clock,
       commands: Rc::new(RefCell::new(Vec::new())),
+      #[cfg(not(target_arch = "wasm32"))]
+      search: RefCell::new(Default::default()),
     }
   }
 
   /// Takes the queued commands (the sync task runs them).
   pub fn drain_commands(&self) -> Vec<CoreCommand> {
     std::mem::take(&mut *self.commands.borrow_mut())
+  }
+
+  pub(crate) fn store_ref(&self) -> &S {
+    &self.store
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  pub(crate) fn queue_command(&self, command: CoreCommand) {
+    self.command(command);
+  }
+
+  pub(crate) fn message_view(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
+    self.to_message(stored, all)
   }
 
   fn command(&self, command: CoreCommand) {
@@ -201,14 +223,23 @@ impl<S: LocalStore> CoreChatBackend<S> {
   fn to_message(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
     let id = ui_message_id(stored);
     let body = match &stored.content {
-      MessageContent::Text { body } => body.clone(),
-      MessageContent::Reaction { .. } | MessageContent::Unknown => String::new(),
+      MessageContent::Text { body, .. } => body.clone(),
+      // The UI recognizes files by their name in the body (search filter `has:file`).
+      MessageContent::File { attachment } => format!("📎 {}", attachment.file_name),
+      MessageContent::Reaction { .. }
+      | MessageContent::Edit { .. }
+      | MessageContent::Delete { .. }
+      | MessageContent::Deleted
+      | MessageContent::IndexSegment { .. }
+      | MessageContent::Unknown => String::new(),
     };
     let reply_count = stored.maybe_server_id.map_or(0, |server_id| {
       let thread = ThreadId::from_snowflake(server_id.snowflake());
       all
         .iter()
-        .filter(|message| message.maybe_thread_id == Some(thread) && !message.is_reaction())
+        .filter(|message| {
+          message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
+        })
         .count()
     });
     Message {
@@ -218,7 +249,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       kind: MessageKind::User,
       sent_at: stored.sent_at_ms,
       body,
-      is_edited: false,
+      is_edited: stored.is_edited,
       reactions: reactions_of(stored.client_message_id, all, self.me),
       reply_count: u32::try_from(reply_count).unwrap_or(u32::MAX),
       maybe_thread: stored.maybe_thread_id,
@@ -232,6 +263,29 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .messages(conversation, MessageFilter::All)
         .map_err(CoreError::from),
     )
+  }
+
+  /// `@username` mentions of conversation members in a message body.
+  fn mentions_in(&self, conversation: ConversationId, body: &str) -> Vec<UserId> {
+    let users = self.summaries();
+    let members = self.members(conversation);
+    let mut mentions: Vec<UserId> = body
+      .split(|character: char| {
+        character.is_whitespace() || matches!(character, ',' | '.' | ':' | ';' | '!' | '?')
+      })
+      .filter_map(|word| word.strip_prefix('@'))
+      .filter_map(|name| {
+        members.iter().copied().find(|member| {
+          users
+            .get(member)
+            .and_then(|summary| summary.maybe_username.as_deref())
+            .is_some_and(|username| username.eq_ignore_ascii_case(name))
+        })
+      })
+      .collect();
+    mentions.sort();
+    mentions.dedup();
+    mentions
   }
 
   fn enqueue(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, content: MessageContent) {
@@ -334,14 +388,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
           .messages(conversation, MessageFilter::TopLevel)
           .map_err(CoreError::from),
       )
-      .len()
+      .iter()
+      .filter(|message| !is_deleted(message))
+      .count()
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
     let all = self.all_messages(conversation);
     let top_level: Vec<&StoredMessage> = all
       .iter()
-      .filter(|message| message.maybe_thread_id.is_none() && !message.is_reaction())
+      .filter(|message| message.maybe_thread_id.is_none() && !message.is_hidden() && !is_deleted(message))
       .collect();
     let end = start.saturating_add(len).min(top_level.len());
     let start = start.min(end);
@@ -357,9 +413,9 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     let root = all
       .iter()
       .filter(|message| message.maybe_server_id == Some(root_id));
-    let replies = all
-      .iter()
-      .filter(|message| message.maybe_thread_id == Some(thread) && !message.is_reaction());
+    let replies = all.iter().filter(|message| {
+      message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
+    });
     root
       .chain(replies)
       .map(|message| self.to_message(message, &all))
@@ -372,11 +428,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    let mentions = self.mentions_in(conversation, body);
     self.enqueue(
       conversation,
       maybe_thread,
       MessageContent::Text {
         body: body.to_string(),
+        mentions,
       },
     );
   }
@@ -415,6 +473,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.command(CoreCommand::SetCustomStatus { maybe_status });
   }
+}
+
+fn is_deleted(message: &StoredMessage) -> bool {
+  matches!(message.content, MessageContent::Deleted)
 }
 
 /// Aggregates reaction messages: the latest add/remove per (user, emoji) wins.
@@ -542,6 +604,8 @@ mod tests {
         parallelism: 1,
       },
       maybe_attestation: None,
+      maybe_org_recovery: None,
+      maybe_linked: None,
     };
     let mut client = crate::PendingEnrollment::new()
       .complete(

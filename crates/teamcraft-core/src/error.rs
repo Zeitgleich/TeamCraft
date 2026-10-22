@@ -30,6 +30,10 @@ pub enum CoreError {
   KeyBag(#[from] KeyBagError),
   #[error("content keys: {0}")]
   ContentKey(#[from] ContentKeyError),
+  #[error("attachment: {0}")]
+  Attachment(#[from] teamcraft_crypto::attachment::AttachmentError),
+  #[error("workspace log: {0}")]
+  WorkspaceLog(#[from] teamcraft_crypto::workspace::WorkspaceLogError),
   #[error("membership change: {0}")]
   Membership(#[from] MembershipError),
   #[error("this device is not enrolled yet")]

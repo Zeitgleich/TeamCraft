@@ -6,6 +6,7 @@ use std::fmt;
 use reqwest::{Method, RequestBuilder, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
   AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
   ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest, DeviceId,
@@ -16,9 +17,17 @@ use teamcraft_proto::{
   PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest,
   SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
+use teamcraft_proto::{
+  AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
+  WorkspaceLogKind,
+};
+use teamcraft_proto::{
+  AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
+  CreateAttachmentResponse, RegisterPushRequest,
+};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
-use super::{ApiError, GatewayConnection, ServerApi};
+use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
 
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
 pub trait AccessTokenSource {
@@ -81,6 +90,10 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
   }
 
   fn gateway_url(&self) -> String {
+    self.websocket_url("/api/v1/gateway")
+  }
+
+  fn websocket_url(&self, path: &str) -> String {
     let websocket_base = if let Some(rest) = self.base_url.strip_prefix("https://") {
       format!("wss://{rest}")
     } else if let Some(rest) = self.base_url.strip_prefix("http://") {
@@ -88,12 +101,13 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     } else {
       self.base_url.clone()
     };
-    format!("{websocket_base}/api/v1/gateway")
+    format!("{websocket_base}{path}")
   }
 }
 
 impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   type Gateway = HttpGateway;
+  type Rendezvous = HttpRendezvous;
 
   async fn me(&self) -> Result<GetMeResponse, ApiError> {
     self.get("/me").await
@@ -321,8 +335,74 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/me/key-bag").await
   }
 
+  async fn list_workspace_log(
+    &self,
+    kind: &WorkspaceLogKind,
+    query: &ListWorkspaceLogQuery,
+  ) -> Result<ListWorkspaceLogResponse, ApiError> {
+    let parameters = query_string(&[
+      ("after", query.maybe_after.map(|version| version.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self
+      .get(&format!("{}{parameters}", workspace_log_path(kind, false)))
+      .await
+  }
+
+  async fn append_workspace_log(
+    &self,
+    kind: &WorkspaceLogKind,
+    request: &AppendWorkspaceLogRequest,
+  ) -> Result<WorkspaceLogEntryResponse, ApiError> {
+    self
+      .send_json(Method::POST, workspace_log_path(kind, true), request)
+      .await
+  }
+
+  async fn create_attachment(
+    &self,
+    request: &CreateAttachmentRequest,
+  ) -> Result<CreateAttachmentResponse, ApiError> {
+    self.send_json(Method::POST, "/attachments", request).await
+  }
+
+  async fn complete_attachment(&self, attachment: AttachmentId) -> Result<AttachmentResponse, ApiError> {
+    decode(send(self.request(Method::POST, &format!("/attachments/{attachment}/complete"))?).await?).await
+  }
+
+  async fn download_attachment(
+    &self,
+    attachment: AttachmentId,
+  ) -> Result<AttachmentDownloadResponse, ApiError> {
+    self.get(&format!("/attachments/{attachment}/download")).await
+  }
+
+  async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
+    // Presigned: the URL carries the authorization, so no bearer token goes to object storage.
+    send(self.client.put(url).body(bytes)).await.map(|_| ())
+  }
+
+  async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+    let response = send(self.client.get(url)).await?;
+    response
+      .bytes()
+      .await
+      .map(|bytes| bytes.to_vec())
+      .map_err(|error| ApiError::Network(error.to_string()))
+  }
+
+  async fn register_push(&self, device: DeviceId, request: &RegisterPushRequest) -> Result<(), ApiError> {
+    self
+      .send_without_response(Method::PUT, &format!("/devices/{device}/push"), Some(request))
+      .await
+  }
+
   async fn connect_gateway(&self) -> Result<HttpGateway, ApiError> {
     HttpGateway::connect(&self.gateway_url()).await
+  }
+
+  async fn connect_rendezvous(&self) -> Result<HttpRendezvous, ApiError> {
+    HttpRendezvous::connect(&self.websocket_url("/api/v1/rendezvous")).await
   }
 
   fn gateway_token(&self) -> Result<String, ApiError> {
@@ -428,6 +508,96 @@ impl fmt::Debug for HttpGateway {
   }
 }
 
+/// The device-linking relay on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct HttpRendezvous {
+  socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+}
+
+/// Browser relay: not implemented yet (web-sys WebSocket), like the gateway.
+#[cfg(target_arch = "wasm32")]
+pub struct HttpRendezvous;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HttpRendezvous {
+  async fn connect(url: &str) -> Result<Self, ApiError> {
+    let (socket, _) = tokio_tungstenite::connect_async(url)
+      .await
+      .map_err(|error| ApiError::Network(error.to_string()))?;
+    Ok(Self { socket })
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RendezvousConnection for HttpRendezvous {
+  async fn send_control(&mut self, message: &RendezvousClientMessage) -> Result<(), ApiError> {
+    use futures_util::SinkExt;
+    let text = serde_json::to_string(message).map_err(|error| ApiError::Decode(error.to_string()))?;
+    self
+      .socket
+      .send(tokio_tungstenite::tungstenite::Message::text(text))
+      .await
+      .map_err(|error| ApiError::Network(error.to_string()))
+  }
+
+  async fn send_binary(&mut self, frame: Vec<u8>) -> Result<(), ApiError> {
+    use futures_util::SinkExt;
+    self
+      .socket
+      .send(tokio_tungstenite::tungstenite::Message::binary(frame))
+      .await
+      .map_err(|error| ApiError::Network(error.to_string()))
+  }
+
+  async fn receive(&mut self) -> Option<Result<RendezvousFrame, ApiError>> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+      match self.socket.next().await? {
+        Ok(Message::Text(text)) => {
+          return Some(
+            serde_json::from_str(text.as_str())
+              .map(RendezvousFrame::Control)
+              .map_err(|error| ApiError::Decode(error.to_string())),
+          );
+        },
+        Ok(Message::Binary(bytes)) => return Some(Ok(RendezvousFrame::Binary(bytes.to_vec()))),
+        Ok(Message::Close(_)) => return None,
+        Ok(_) => {},
+        Err(error) => return Some(Err(ApiError::Network(error.to_string()))),
+      }
+    }
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl HttpRendezvous {
+  async fn connect(_url: &str) -> Result<Self, ApiError> {
+    Err(ApiError::Unsupported("device-linking relay in the browser"))
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl RendezvousConnection for HttpRendezvous {
+  async fn send_control(&mut self, _message: &RendezvousClientMessage) -> Result<(), ApiError> {
+    Err(ApiError::Unsupported("device-linking relay in the browser"))
+  }
+
+  async fn send_binary(&mut self, _frame: Vec<u8>) -> Result<(), ApiError> {
+    Err(ApiError::Unsupported("device-linking relay in the browser"))
+  }
+
+  async fn receive(&mut self) -> Option<Result<RendezvousFrame, ApiError>> {
+    None
+  }
+}
+
+impl fmt::Debug for HttpRendezvous {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("HttpRendezvous")
+  }
+}
+
 async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   let response = request
     .send()
@@ -449,6 +619,16 @@ async fn decode<R: DeserializeOwned>(response: Response) -> Result<R, ApiError> 
     .json()
     .await
     .map_err(|error| ApiError::Decode(error.to_string()))
+}
+
+/// The roster log is read and appended at one path; the policy log is appended at
+/// `/workspace/policy` and listed at `/workspace/policy/log`.
+fn workspace_log_path(kind: &WorkspaceLogKind, is_append: bool) -> &'static str {
+  match (kind, is_append) {
+    (WorkspaceLogKind::Policy, true) => "/workspace/policy",
+    (WorkspaceLogKind::Policy, false) => "/workspace/policy/log",
+    _ => "/workspace/roster",
+  }
 }
 
 fn mls_query(query: &ListMlsMessagesQuery) -> String {

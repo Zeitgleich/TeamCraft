@@ -5,7 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
+# tantivy 0.27 needs a newer compiler than the workspace baseline (like teamcraft-ui).
+rust-version = "1.88"
 publish.workspace = true
 
 [lints]
@@ -48,6 +49,9 @@ keyring = "4"
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 # Gateway WebSocket on native targets.
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+# Full-text search over decrypted messages and shared index segments (e2ee.md §10.1). Native only:
+# tantivy doesn't target wasm32; the browser falls back to scanning the local store.
+tantivy = { version = "0.27.0", default-features = false, features = ["lz4-compression", "stemmer"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }

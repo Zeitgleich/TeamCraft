@@ -8,12 +8,20 @@ pub mod client;
 pub mod clock;
 pub mod error;
 pub mod records;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod search;
 pub mod store;
 #[cfg(feature = "ui")]
 pub mod ui_backend;
+#[cfg(feature = "ui")]
+mod ui_search;
+pub mod workspace;
 
 mod convert;
 mod trust;
 
-pub use client::{Client, ClientSettings, EnrollmentOptions, FlushReport, GatewayOutcome, PendingEnrollment};
+pub use client::{
+  Client, ClientSettings, EnrollmentOptions, FlushReport, GatewayOutcome, LinkOffer, OrgRecoveryUnlock,
+  PendingEnrollment,
+};
 pub use error::CoreError;

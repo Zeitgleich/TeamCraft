@@ -5,20 +5,23 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 
 ## Modules
 
-| Module           | What                                                                       | Design                           |
-|------------------|----------------------------------------------------------------------------|----------------------------------|
-| `secret`         | `SymmetricKey`, `SecretBytes`: zeroized on drop, redacted `Debug`          | security.md                      |
-| `ids`            | Local ID newtypes; `ClientMessageId` (random 128 bit, bound in the AEAD)   | –                                |
-| `identity`       | Identity key, device keys (Ed25519 + X25519), device certificates          | e2ee.md §2, §3                   |
-| `content_key`    | Content key ring per conversation, random key IDs, rotation policy         | e2ee.md §4.1–§4.3                |
-| `message`        | XChaCha20-Poly1305 message encryption bound to the plaintext metadata      | e2ee.md §4.1, §4.4               |
-| `attachment`     | Per-file key, chunked STREAM encryption (XChaCha20-Poly1305, BE32)         | e2ee.md §4.5                     |
-| `key_bag`        | Identity key + all content keys, serialized and encrypted with backup key  | e2ee.md §2, §6                   |
-| `backup`         | Backup key, `BackupKeyWrapper` trait, passphrase (Argon2id), keystore, PRF | e2ee.md §6.1–§6.3                |
-| `membership`     | Signed membership changes, `IdentityDirectory`, `MembershipAuthority`      | e2ee.md §4.6, admin.md §2.2–§2.3 |
-| `mls`            | `openmls` groups, key packages, content key bundles, commit authorization  | e2ee.md §4.1, §4.6               |
-| `push`           | Push wake-up sealed with the device push key; Web Push (RFC 8291) + VAPID  | e2ee.md §7                       |
-| `aead`, `domain` | Internal: AEAD helper with random nonces; domain separation labels         | –                                |
+| Module           | What                                                                        | Design                           |
+|------------------|-----------------------------------------------------------------------------|----------------------------------|
+| `secret`         | `SymmetricKey`, `SecretBytes`: zeroized on drop, redacted `Debug`           | security.md                      |
+| `ids`            | Local ID newtypes; `ClientMessageId` (random 128 bit, bound in the AEAD)    | –                                |
+| `identity`       | Identity key, device keys (Ed25519 + X25519), device certificates           | e2ee.md §2, §3                   |
+| `content_key`    | Content key ring per conversation, random key IDs, rotation policy          | e2ee.md §4.1–§4.3                |
+| `message`        | XChaCha20-Poly1305 message encryption bound to the plaintext metadata       | e2ee.md §4.1, §4.4               |
+| `attachment`     | Per-file key, chunked STREAM encryption (XChaCha20-Poly1305, BE32)          | e2ee.md §4.5                     |
+| `key_bag`        | Identity key + all content keys, serialized and encrypted with backup key   | e2ee.md §2, §6                   |
+| `backup`         | Backup key, `BackupKeyWrapper` trait, passphrase (Argon2id), keystore, PRF  | e2ee.md §6.1–§6.3                |
+| `membership`     | Signed membership changes, `IdentityDirectory`, `MembershipAuthority`       | e2ee.md §4.6, admin.md §2.2–§2.3 |
+| `mls`            | `openmls` groups, key packages, content key bundles, commit authorization   | e2ee.md §4.1, §4.6               |
+| `push`           | Push wake-up sealed with the device push key; Web Push (RFC 8291) + VAPID   | e2ee.md §7                       |
+| `workspace`      | Owner signatures on the admin roster and policy log entries                 | admin.md §2.3, e2ee.md §11       |
+| `org_recovery`   | Org key (HPKE DeriveKeyPair), Shamir shares (vsss-rs GF(2⁸)), HPKE wrapping | e2ee.md §6.3.1                   |
+| `rendezvous`     | Device linking handshake (AK auth keys, X25519, counter-nonce channel)      | e2ee.md §5                       |
+| `aead`, `domain` | Internal: AEAD helper with random nonces; domain separation labels          | –                                |
 
 Dependencies are audited RustCrypto / dalek crates plus `openmls` with `openmls_rust_crypto`.
 Versions follow what `openmls_rust_crypto` already pulls in, so the stack isn't duplicated more
@@ -74,12 +77,12 @@ certificate-based credential.
 - **Failed joins consume the key package.** openmls deletes the key package's private key while
   processing a welcome, even if our credential check then rejects it. Clients need enough key
   packages (and a last-resort one) uploaded.
-- **Organization recovery (e2ee.md §6.3)** is not implemented: it needs a decision on the public-key
-  scheme (HPKE to the org key) and the Shamir secret sharing crate. The `BackupKeyWrapper` trait
-  and `WrapMethod::OrgRecovery` are in place.
-- **Not yet implemented:** rendezvous device transfer (§5), share link password wrapping
-  (§4.5.1), index keys in the key bag (§10.1), OIDC attestation of identity keys (§3.1), push key
-  encryption (§7), the signed admin roster behind `MembershipAuthority`.
+- **Organization recovery** follows e2ee.md §6.3.1; the server endpoints for shares and recovery
+  requests are still missing (see teamcraft-core's README).
+- **Not yet implemented:** share link password wrapping (§4.5.1), OIDC attestation verification
+  (§3.1).
+- **Review needed:** the rendezvous handshake (§5) and org recovery (§6.3.1) combine primitives in
+  new ways; security.md asks for a review before relying on them.
 - **Argon2id cost.** Default 128 MiB, 3 iterations, 1 lane (configurable). "~1 s" (§6.2) still needs
   measuring on phones and in the browser (single-threaded wasm).
 - **IDs.** `ids` holds local newtypes; switch to `teamcraft-proto`'s IDs once this crate may depend

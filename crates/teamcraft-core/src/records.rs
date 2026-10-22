@@ -209,6 +209,7 @@ pub fn enqueue_message(
     maybe_thread_id: draft.maybe_thread_id,
     sent_at_ms: now_ms,
     content: draft.content,
+    is_edited: false,
   })?;
   let entry = OutboxEntry {
     conversation_id: draft.conversation_id,

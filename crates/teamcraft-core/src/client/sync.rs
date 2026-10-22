@@ -14,6 +14,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// conversations and members, welcomes, MLS backlogs, new messages, then the outbox, key
   /// packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
+    self.sync_workspace().await?;
     self.refresh_spaces().await?;
     let conversations = self.api.list_conversations().await?.conversations;
     let known: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
@@ -40,6 +41,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.catch_up_messages(conversation.id).await?;
       self.retry_undecrypted(conversation.id)?;
     }
+    self.apply_pending_changes().await?;
     self.flush_outbox().await?;
     self.top_up_key_packages().await?;
     if self.sync.is_key_bag_dirty {

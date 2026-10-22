@@ -43,6 +43,14 @@ tls_codec = { version = "0.5.0", features = ["derive", "std"] }
 # Device key agreement (rendezvous, key transfer).
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
+# Organization recovery (e2ee.md §6.3): HPKE (RFC 9180) to the org key, same hpke-rs as openmls uses.
+hpke-rs = "0.7.0"
+hpke-rs-crypto = "0.7.0"
+hpke-rs-rust-crypto = "0.7.0"
+# Shamir secret sharing of the org key secret, byte-wise over GF(2^8) (audits funded per its README).
+vsss-rs = { version = "6.0.1", default-features = false, features = ["std", "zeroize"] }
+# vsss-rs draws randomness through rand_core 0.10; seeded from the OS RNG.
+rand_chacha_010 = { package = "rand_chacha", version = "0.10.0" }
 
 # Browser builds: route all RNG backends to WebCrypto.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

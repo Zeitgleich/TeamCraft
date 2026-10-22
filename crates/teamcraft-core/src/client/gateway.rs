@@ -97,6 +97,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match frame {
       GatewayServerMessage::Event { seq, event } => {
         self.handle_event(event).await?;
+        self.apply_pending_changes().await?;
         if let Some(session) = &mut self.sync.maybe_gateway_session {
           session.last_seq = session.last_seq.max(seq);
         }
@@ -132,7 +133,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   async fn handle_event(&mut self, event: GatewayEvent) -> Result<(), CoreError> {
     match event {
-      GatewayEvent::MessageCreate { message } => self.receive_message(message),
+      GatewayEvent::MessageCreate { message } => {
+        self.clear_typing(message.conversation_id, message.sender_user_id);
+        self.receive_message(message)
+      },
       GatewayEvent::MlsMessage { message } => {
         if message.kind == MlsMessageKind::Welcome {
           if message.maybe_recipient_device_id == Some(self.account.device_id) {
@@ -162,6 +166,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.store.delete(Table::Members, &conversation_id.to_string())?;
           Ok(())
         } else {
+          self.queue_user_removal(conversation_id, user_id)?;
           self.refresh_conversation(conversation_id).await
         }
       },
@@ -171,11 +176,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::SpaceUpdate { .. }
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
-      // Not handled yet: verifying and applying roster/policy log entries, committing the removal of
-      // a removed device and the addition of a new one (`add_missing_devices`) in shared groups.
-      GatewayEvent::WorkspaceUpdate { .. }
-      | GatewayEvent::DeviceRemove { .. }
-      | GatewayEvent::DeviceAdd { .. }
+      GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace().await,
+      GatewayEvent::DeviceRemove { user_id, device_id } => self.queue_device_removal(user_id, device_id),
+      GatewayEvent::TypingStart {
+        conversation_id,
+        user_id,
+      } => {
+        self.note_typing(conversation_id, user_id);
+        Ok(())
+      },
+      // Not handled yet: adding a colleague's new device to shared groups (`add_missing_devices`).
+      GatewayEvent::DeviceAdd { .. }
       // Thread follows and unread counts come from the server; the shell does not show them yet.
       | GatewayEvent::ThreadUpdate { .. }
       | GatewayEvent::ReadReceipt { .. }
@@ -189,7 +200,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::CallUpdate { .. }
       | GatewayEvent::CallEnd { .. }
       | GatewayEvent::CallRing { .. } => Ok(()),
-      GatewayEvent::TypingStart { .. } | GatewayEvent::Unknown => Ok(()),
+      GatewayEvent::Unknown => Ok(()),
     }
   }
 }

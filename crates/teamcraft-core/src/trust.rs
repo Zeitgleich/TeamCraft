@@ -6,28 +6,33 @@ use std::collections::{BTreeMap, HashSet};
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::ids as crypto;
 use teamcraft_crypto::membership::{IdentityDirectory, MembershipAction, MembershipAuthority};
-use teamcraft_proto::UserId;
+use teamcraft_proto::{AdminSelfJoin, UserId};
 
 use crate::convert;
 use crate::records::PinnedIdentity;
 
-/// Identity keys this device pinned (trust on first use, e2ee.md §3). A key the server changed later
-/// is *not* used until the user accepts the change.
+/// Identity keys this device trusts: pinned on first use (e2ee.md §3), overridden by the keys the
+/// verified admin roster vouches for. A key the server changed later is *not* used until the user
+/// accepts the change.
 pub(crate) struct PinnedDirectory {
   keys: BTreeMap<crypto::UserId, IdentityPublicKey>,
 }
 
-/// Interim rule until the signed admin roster exists (admin.md §2.3): a membership change is
-/// authorized if its signer is a current member of the MLS group. Members can't be added by the
-/// server (their key packages must carry pinned certificates), but any member may add or remove
-/// others; the server's permission check is the only finer-grained control for now.
-pub(crate) struct GroupMemberAuthority {
+/// Who may change a group's membership (e2ee.md §4.6, admin.md §2.3):
+///
+/// - current members of the MLS group (the signed per-channel roles aren't in the roster yet, so
+///   every member counts as allowed to manage members),
+/// - workspace owners and admins from the verified roster, for any change except adding
+///   themselves, which follows the policy's `admin_self_join` (admin.md §2.4).
+pub(crate) struct WorkspaceAuthority {
   members: HashSet<crypto::UserId>,
+  admins: HashSet<crypto::UserId>,
+  self_join: AdminSelfJoin,
 }
 
 impl PinnedDirectory {
-  pub(crate) fn new(pinned: &BTreeMap<UserId, PinnedIdentity>) -> Self {
-    let keys = pinned
+  pub(crate) fn new(pinned: &BTreeMap<UserId, PinnedIdentity>, roster: &BTreeMap<UserId, [u8; 32]>) -> Self {
+    let mut keys: BTreeMap<crypto::UserId, IdentityPublicKey> = pinned
       .iter()
       .map(|(user, identity)| {
         (
@@ -36,6 +41,9 @@ impl PinnedDirectory {
         )
       })
       .collect();
+    for (user, key) in roster {
+      keys.insert(convert::user(*user), IdentityPublicKey::from_bytes(*key));
+    }
     Self { keys }
   }
 }
@@ -46,21 +54,75 @@ impl IdentityDirectory for PinnedDirectory {
   }
 }
 
-impl GroupMemberAuthority {
-  pub(crate) fn new(members: impl IntoIterator<Item = crypto::UserId>) -> Self {
+impl WorkspaceAuthority {
+  pub(crate) fn new(
+    members: impl IntoIterator<Item = crypto::UserId>,
+    admins: impl IntoIterator<Item = UserId>,
+    self_join: AdminSelfJoin,
+  ) -> Self {
     Self {
       members: members.into_iter().collect(),
+      admins: admins.into_iter().map(convert::user).collect(),
+      self_join,
     }
   }
 }
 
-impl MembershipAuthority for GroupMemberAuthority {
+impl MembershipAuthority for WorkspaceAuthority {
   fn is_authorized(
     &self,
     actor: crypto::UserId,
     _conversation_id: crypto::ConversationId,
-    _action: &MembershipAction,
+    action: &MembershipAction,
   ) -> bool {
-    self.members.contains(&actor)
+    if self.members.contains(&actor) {
+      return true;
+    }
+    if !self.admins.contains(&actor) {
+      return false;
+    }
+    match action {
+      MembershipAction::AddUser { user_id, .. } if *user_id == actor => match self.self_join {
+        AdminSelfJoin::Visible => true,
+        // No approval flow yet: without an owner's approval the join is refused.
+        AdminSelfJoin::OwnerApproval | AdminSelfJoin::Disabled | AdminSelfJoin::Unknown(_) => false,
+      },
+      _ => true,
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_crypto::membership::HistoryShare;
+  use teamcraft_proto::{Id, Snowflake};
+
+  use super::*;
+
+  #[test]
+  fn members_and_admins_may_change_membership_but_self_join_follows_policy() {
+    let member = crypto::UserId::new(1);
+    let admin = UserId::from_snowflake(Snowflake::new(2).unwrap());
+    let stranger = crypto::UserId::new(3);
+    let conversation = crypto::ConversationId::new(9);
+    let add = |user| MembershipAction::AddUser {
+      user_id: user,
+      history: HistoryShare::Full,
+    };
+
+    for (self_join, may_self_join) in [
+      (AdminSelfJoin::Visible, true),
+      (AdminSelfJoin::OwnerApproval, false),
+      (AdminSelfJoin::Disabled, false),
+    ] {
+      let authority = WorkspaceAuthority::new([member], [admin], self_join);
+      assert!(authority.is_authorized(member, conversation, &add(stranger)));
+      assert!(authority.is_authorized(convert::user(admin), conversation, &add(stranger)));
+      assert_eq!(
+        authority.is_authorized(convert::user(admin), conversation, &add(convert::user(admin))),
+        may_self_join
+      );
+      assert!(!authority.is_authorized(stranger, conversation, &add(stranger)));
+    }
   }
 }

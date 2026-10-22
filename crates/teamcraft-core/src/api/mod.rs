@@ -9,7 +9,7 @@ mod http;
 
 use std::future::Future;
 
-pub use http::{AccessTokenSource, HttpGateway, HttpServerApi, StaticToken};
+pub use http::{AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken};
 use teamcraft_proto::{
   AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
   ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest, DeviceId,
@@ -21,11 +21,21 @@ use teamcraft_proto::{
   RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
   UserId, UserSummary,
 };
+use teamcraft_proto::{
+  AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
+  WorkspaceLogKind,
+};
+use teamcraft_proto::{
+  AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
+  CreateAttachmentResponse, RegisterPushRequest,
+};
+use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
 /// Everything the sync engine needs from the server.
 pub trait ServerApi {
   type Gateway: GatewayConnection;
+  type Rendezvous: RendezvousConnection;
 
   fn me(&self) -> impl Future<Output = Result<GetMeResponse, ApiError>>;
   fn user(&self, user: UserId) -> impl Future<Output = Result<UserSummary, ApiError>>;
@@ -135,8 +145,46 @@ pub trait ServerApi {
   -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
   fn key_bag(&self) -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
 
+  /// Entries of the roster or policy log after `query.maybe_after`, oldest first.
+  fn list_workspace_log(
+    &self,
+    kind: &WorkspaceLogKind,
+    query: &ListWorkspaceLogQuery,
+  ) -> impl Future<Output = Result<ListWorkspaceLogResponse, ApiError>>;
+  /// Appends an owner-signed entry (owners only).
+  fn append_workspace_log(
+    &self,
+    kind: &WorkspaceLogKind,
+    request: &AppendWorkspaceLogRequest,
+  ) -> impl Future<Output = Result<WorkspaceLogEntryResponse, ApiError>>;
+
+  /// Announces an attachment upload; returns the presigned upload URL.
+  fn create_attachment(
+    &self,
+    request: &CreateAttachmentRequest,
+  ) -> impl Future<Output = Result<CreateAttachmentResponse, ApiError>>;
+  fn complete_attachment(
+    &self,
+    attachment: AttachmentId,
+  ) -> impl Future<Output = Result<AttachmentResponse, ApiError>>;
+  fn download_attachment(
+    &self,
+    attachment: AttachmentId,
+  ) -> impl Future<Output = Result<AttachmentDownloadResponse, ApiError>>;
+  /// Uploads an encrypted blob to a presigned URL (object storage, not the API).
+  fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
+  /// Downloads an encrypted blob from a presigned URL.
+  fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
+  fn register_push(
+    &self,
+    device: DeviceId,
+    request: &RegisterPushRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+
   /// Opens the gateway WebSocket. The caller runs the hello/identify handshake.
   fn connect_gateway(&self) -> impl Future<Output = Result<Self::Gateway, ApiError>>;
+  /// Opens the device-linking relay (`/api/v1/rendezvous`). The caller sends `join` first.
+  fn connect_rendezvous(&self) -> impl Future<Output = Result<Self::Rendezvous, ApiError>>;
   /// The token for the gateway's `identify`/`resume` frame.
   fn gateway_token(&self) -> Result<String, ApiError>;
 }
@@ -146,6 +194,24 @@ pub trait GatewayConnection {
   fn send(&mut self, message: &GatewayClientMessage) -> impl Future<Output = Result<(), ApiError>>;
   /// The next frame; `None` once the connection is closed.
   fn receive(&mut self) -> impl Future<Output = Option<Result<GatewayServerMessage, ApiError>>>;
+}
+
+/// One open device-linking relay connection (docs/gateway.md, "Device-linking relay").
+pub trait RendezvousConnection {
+  /// A text control frame (`join`).
+  fn send_control(&mut self, message: &RendezvousClientMessage)
+  -> impl Future<Output = Result<(), ApiError>>;
+  /// A binary frame, relayed verbatim to the other device.
+  fn send_binary(&mut self, frame: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
+  /// The next frame; `None` once the connection is closed.
+  fn receive(&mut self) -> impl Future<Output = Option<Result<RendezvousFrame, ApiError>>>;
+}
+
+/// What arrives on the relay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RendezvousFrame {
+  Control(RendezvousServerMessage),
+  Binary(Vec<u8>),
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -13,8 +13,11 @@ pub mod key_bag;
 pub mod membership;
 pub mod message;
 pub mod mls;
+pub mod org_recovery;
 pub mod push;
+pub mod rendezvous;
 pub mod secret;
+pub mod workspace;
 
 mod aead;
 mod domain;

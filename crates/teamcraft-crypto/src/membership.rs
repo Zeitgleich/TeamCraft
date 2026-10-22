@@ -213,6 +213,11 @@ impl SignedMembershipChange {
     &self.change
   }
 
+  /// The claimed, unverified signer: whose identity key to look up before [`Self::verify`].
+  pub fn signer_user(&self) -> UserId {
+    self.signer.unverified().user_id
+  }
+
   /// Checks the signer's certificate against its pinned identity key, the device signature over
   /// the change and the signer's authorization for the action.
   pub fn verify(

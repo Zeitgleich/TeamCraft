@@ -23,7 +23,7 @@ const SCHEMA: &str = "
     sort_group INTEGER NOT NULL,
     sort_value INTEGER NOT NULL,
     thread_id INTEGER,
-    is_reaction INTEGER NOT NULL,
+    is_hidden INTEGER NOT NULL,
     record BLOB NOT NULL,
     PRIMARY KEY (conversation_id, client_message_id)
   );
@@ -133,18 +133,18 @@ impl LocalStore for SqlCipherStore {
       .lock()
       .execute(
         "INSERT INTO messages
-           (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_reaction, record)
+           (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, record)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT (conversation_id, client_message_id) DO UPDATE SET
            sort_group = excluded.sort_group, sort_value = excluded.sort_value,
-           thread_id = excluded.thread_id, is_reaction = excluded.is_reaction, record = excluded.record",
+           thread_id = excluded.thread_id, is_hidden = excluded.is_hidden, record = excluded.record",
         params![
           message.conversation_id.snowflake().get(),
           message.client_message_id.as_bytes().as_slice(),
           sort_group,
           sort_value,
           message.maybe_thread_id.map(|thread| thread.snowflake().get()),
-          message.is_reaction(),
+          message.is_hidden(),
           record,
         ],
       )
@@ -180,9 +180,9 @@ impl LocalStore for SqlCipherStore {
     let connection = self.lock();
     let (condition, maybe_thread) = match filter {
       MessageFilter::All => ("", None),
-      MessageFilter::TopLevel => ("AND thread_id IS NULL AND is_reaction = 0", None),
+      MessageFilter::TopLevel => ("AND thread_id IS NULL AND is_hidden = 0", None),
       MessageFilter::Thread(thread) => (
-        "AND thread_id = ?2 AND is_reaction = 0",
+        "AND thread_id = ?2 AND is_hidden = 0",
         Some(thread.snowflake().get()),
       ),
     };

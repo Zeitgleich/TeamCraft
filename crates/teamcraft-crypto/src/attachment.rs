@@ -105,6 +105,13 @@ pub fn encrypt_attachment(
   })
 }
 
+/// Whether a downloaded blob is the one the message announced (SHA-256 from
+/// [`EncryptedAttachment::ciphertext_sha256`]). Checked before decrypting, so a swapped blob fails
+/// early with a clear error.
+pub fn ciphertext_matches(ciphertext: &[u8], expected_sha256: &[u8]) -> bool {
+  Sha256::digest(ciphertext).as_slice() == expected_sha256
+}
+
 /// Decrypts a whole file in memory. For large files use [`AttachmentDecryptor`].
 pub fn decrypt_attachment(key: &AttachmentKey, ciphertext: &[u8]) -> Result<SecretBytes, AttachmentError> {
   let header = ciphertext
@@ -340,6 +347,18 @@ mod tests {
       decrypt_attachment(&key, &blob).unwrap().expose_secret(),
       plaintext.as_slice()
     );
+  }
+
+  #[test]
+  fn ciphertext_matches_its_announced_hash_only() {
+    let encrypted = encrypt_attachment(b"report", CHUNK, &mut OsRng).unwrap();
+    assert!(ciphertext_matches(
+      &encrypted.ciphertext,
+      &encrypted.ciphertext_sha256
+    ));
+    let mut swapped = encrypted.ciphertext.clone();
+    swapped[HEADER_LEN] ^= 1;
+    assert!(!ciphertext_matches(&swapped, &encrypted.ciphertext_sha256));
   }
 
   #[test]

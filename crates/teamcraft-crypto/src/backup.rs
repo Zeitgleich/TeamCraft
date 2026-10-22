@@ -124,6 +124,8 @@ pub enum BackupError {
   PrfOutputTooShort,
   #[error("encryption failed")]
   EncryptionFailed,
+  #[error("this wrapper can only wrap; unwrapping needs the recovered org key")]
+  MissingPrivateKey,
   #[error("backup key could not be unwrapped (wrong factor or tampered)")]
   UnwrapFailed,
   #[error("encoding failed: {0}")]
@@ -150,6 +152,30 @@ impl BackupKey {
 }
 
 impl WrappedBackupKey {
+  /// For wrappers outside this module whose ciphertext carries its own nonce (HPKE): the nonce
+  /// field is all zeros and unused.
+  pub(crate) fn from_parts(method: WrapMethod, parameters: Vec<u8>, ciphertext: Vec<u8>) -> Self {
+    Self {
+      version: WRAPPED_BACKUP_KEY_VERSION,
+      method,
+      parameters,
+      nonce: [0; NONCE_LEN],
+      ciphertext,
+    }
+  }
+
+  pub(crate) fn parameters(&self) -> &[u8] {
+    &self.parameters
+  }
+
+  pub(crate) fn ciphertext(&self) -> &[u8] {
+    &self.ciphertext
+  }
+
+  pub(crate) fn version(&self) -> u8 {
+    self.version
+  }
+
   pub fn method(&self) -> WrapMethod {
     self.method
   }
@@ -366,7 +392,11 @@ fn ensure_method(expected: WrapMethod, wrapped: &WrappedBackupKey) -> Result<(),
   }
 }
 
-fn wrap_aad(user_id: UserId, method: WrapMethod, parameters: &[u8]) -> Result<Vec<u8>, BackupError> {
+pub(crate) fn wrap_aad(
+  user_id: UserId,
+  method: WrapMethod,
+  parameters: &[u8],
+) -> Result<Vec<u8>, BackupError> {
   let aad = WrapAad {
     version: WRAPPED_BACKUP_KEY_VERSION,
     user_id,
