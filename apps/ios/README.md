@@ -10,22 +10,22 @@ device yet. Use the [manual test checklist](#manual-test-checklist) for the firs
 
 ## Layout
 
-| Path                    | What                                                                               |
-|-------------------------|------------------------------------------------------------------------------------|
-| `project.yml`           | XcodeGen project: app, notification extension, unit tests                          |
-| `Config/Base.xcconfig`  | Server, OIDC client, App Group and keychain group; local overrides in `Local.xcconfig` |
-| `scripts/`              | `build-xcframework.sh` (Rust core + Swift bindings), `check-strings.py`             |
-| `TeamCraft/App`         | `@main`, `AppDelegate` (APNs token, notification taps and actions)                  |
-| `TeamCraft/Auth`        | OIDC login: `ASWebAuthenticationSession`, PKCE                                      |
-| `TeamCraft/Model`       | `AppModel` (state, the one entry to the core), conversation sections, chat actions  |
-| `TeamCraft/Calls`       | `CallManager`: CallKit provider, PushKit forward, mute / hold / hang up             |
-| `TeamCraft/UI`          | SwiftUI screens                                                                     |
-| `TeamCraft/Design`      | Design tokens (same values as the desktop UI and the Android theme)                 |
-| `TeamCraft/Resources`   | String Catalogs (en, de), asset catalog (placeholder icon)                          |
-| `Shared/`               | Compiled into the app **and** the extension: keychain, App Group, process lock, OIDC session, core factory, notification content |
-| `NotificationService/`  | The Notification Service Extension                                                  |
-| `TeamCraftTests/`       | Unit tests (PKCE, OIDC URLs, push payload, lock, notification text, sections)       |
-| `Generated/`            | `TeamCraftFFI.xcframework` and `Swift/teamcraft_ffi.swift` (not in git)              |
+| Path                   | What                                                                                                                             |
+|------------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| `project.yml`          | XcodeGen project: app, notification extension, unit tests                                                                        |
+| `Config/Base.xcconfig` | Server, OIDC client, App Group and keychain group; local overrides in `Local.xcconfig`                                           |
+| `scripts/`             | `build-xcframework.sh` (Rust core + Swift bindings), `check-strings.py`                                                          |
+| `TeamCraft/App`        | `@main`, `AppDelegate` (APNs token, notification taps and actions)                                                               |
+| `TeamCraft/Auth`       | OIDC login: `ASWebAuthenticationSession`, PKCE                                                                                   |
+| `TeamCraft/Model`      | `AppModel` (state, the one entry to the core), conversation sections, chat actions                                               |
+| `TeamCraft/Calls`      | `CallManager`: CallKit provider, PushKit forward, mute / hold / hang up                                                          |
+| `TeamCraft/UI`         | SwiftUI screens                                                                                                                  |
+| `TeamCraft/Design`     | Design tokens (same values as the desktop UI and the Android theme)                                                              |
+| `TeamCraft/Resources`  | String Catalogs (en, de), asset catalog (placeholder icon)                                                                       |
+| `Shared/`              | Compiled into the app **and** the extension: keychain, App Group, process lock, OIDC session, core factory, notification content |
+| `NotificationService/` | The Notification Service Extension                                                                                               |
+| `TeamCraftTests/`      | Unit tests (PKCE, OIDC URLs, push payload, lock, notification text, sections)                                                    |
+| `Generated/`           | `TeamCraftFFI.xcframework` and `Swift/teamcraft_ffi.swift` (not in git)                                                          |
 
 ## Build
 
@@ -53,14 +53,14 @@ the extension (each links the static library; they are separate processes).
 `Config/Base.xcconfig` has the development defaults; put your own in `Config/Local.xcconfig`
 (untracked), which it includes:
 
-| Setting                          | Meaning                                                                  |
-|----------------------------------|--------------------------------------------------------------------------|
-| `TEAMCRAFT_SERVER_URL`           | TeamCraft server                                                         |
-| `TEAMCRAFT_OIDC_ISSUER`          | OIDC issuer (Keycloak realm URL)                                         |
-| `TEAMCRAFT_OIDC_CLIENT_ID`       | Public OIDC client with PKCE                                             |
-| `TEAMCRAFT_OIDC_REDIRECT_SCHEME` | Redirect URI is `<scheme>:/oauth/callback`; the client must allow it     |
-| `DEVELOPMENT_TEAM`               | Your Apple team (signed builds)                                          |
-| `APP_GROUP_ID`                   | App Group shared by app and extension (change it with your bundle IDs)   |
+| Setting                          | Meaning                                                                                                       |
+|----------------------------------|---------------------------------------------------------------------------------------------------------------|
+| `TEAMCRAFT_SERVER_URL`           | TeamCraft server                                                                                              |
+| `TEAMCRAFT_OIDC_ISSUER`          | OIDC issuer (Keycloak realm URL)                                                                              |
+| `TEAMCRAFT_OIDC_CLIENT_ID`       | Public OIDC client with PKCE                                                                                  |
+| `TEAMCRAFT_OIDC_REDIRECT_SCHEME` | Redirect URI is `<scheme>:/oauth/callback`; the client must allow it                                          |
+| `DEVELOPMENT_TEAM`               | Your Apple team (signed builds)                                                                               |
+| `APP_GROUP_ID`                   | App Group shared by app and extension (change it with your bundle IDs)                                        |
 | `NSE_ENTITLEMENTS`               | `NotificationService/NotificationService.Filtering.entitlements` once Apple granted the filtering entitlement |
 
 Bundle IDs are `com.example.teamcraft` (app), `com.example.teamcraft.NotificationService`,
