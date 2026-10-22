@@ -31,7 +31,7 @@ pub use error::{ErrorBody, ErrorCode};
 pub use gateway::{GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId, Id,
-  IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId,
+  IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId,
   RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId,
   SystemEventId, ThreadId, UserGroupId, UserId,
 };

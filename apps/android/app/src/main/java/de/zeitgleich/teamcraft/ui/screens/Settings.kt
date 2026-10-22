@@ -79,7 +79,8 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
           when (service) {
             PushService.FCM -> R.string.push_fcm
             PushService.UNIFIED_PUSH -> R.string.push_unifiedpush
-            null -> R.string.push_none
+            // APNs is the iOS app's service; Android never registers with it.
+            PushService.APNS, null -> R.string.push_none
           },
         ),
       )

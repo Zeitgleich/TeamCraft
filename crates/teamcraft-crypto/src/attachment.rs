@@ -105,6 +105,12 @@ pub fn encrypt_attachment(
   })
 }
 
+/// SHA-256 of a public object whose hash a signed document vouches for (e.g. an organization
+/// background in the workspace policy).
+pub fn content_sha256(content: &[u8]) -> [u8; 32] {
+  Sha256::digest(content).into()
+}
+
 /// Whether a downloaded blob is the one the message announced (SHA-256 from
 /// [`EncryptedAttachment::ciphertext_sha256`]). Checked before decrypting, so a swapped blob fails
 /// early with a clear error.

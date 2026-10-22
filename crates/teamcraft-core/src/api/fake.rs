@@ -35,6 +35,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+  CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
+  OrgBackgroundId,
 };
 use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
@@ -99,6 +101,7 @@ struct State {
   maybe_max_attachment_bytes: Option<u64>,
   share_links: HashMap<String, AttachmentId>,
   backgrounds: HashMap<BackgroundId, FakeBackground>,
+  org_backgrounds: HashMap<OrgBackgroundId, FakeBackground>,
   /// Spaces besides the default one, and changes to the default one.
   spaces: BTreeMap<SpaceId, SpaceResponse>,
   categories: BTreeMap<CategoryId, CategoryResponse>,
@@ -244,6 +247,14 @@ impl FakeServer {
 
   pub fn device_list_of(&self, user: UserId) -> Option<DeviceListResponse> {
     self.lock().device_lists.get(&user).cloned()
+  }
+
+  /// Replaces a stored organization background, as a compromised server could.
+  pub fn swap_org_background(&self, id: OrgBackgroundId, picture: Vec<u8>) {
+    if let Some(entry) = self.lock().org_backgrounds.get_mut(&id) {
+      entry.size_bytes = picture.len() as u64;
+      entry.maybe_blob = Some(picture);
+    }
   }
 
   /// Sends an event as the server would (for events whose endpoints the fake doesn't have, like
@@ -1653,7 +1664,89 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn create_org_background_upload(
+    &self,
+    request: &CreateOrgBackgroundUploadRequest,
+  ) -> Result<CreateOrgBackgroundUploadResponse, ApiError> {
+    self.with(|state, me| {
+      let id: OrgBackgroundId = state.next_id();
+      state.org_backgrounds.insert(
+        id,
+        FakeBackground {
+          owner: me,
+          size_bytes: request.size_bytes,
+          maybe_blob: None,
+          is_complete: false,
+        },
+      );
+      Ok(CreateOrgBackgroundUploadResponse {
+        id,
+        upload_url: format!("{ORG_BACKGROUND_SCHEME}{id}"),
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn complete_org_background_upload(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      let entry = state
+        .org_backgrounds
+        .get_mut(&background)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::BackgroundNotFound, "unknown"))?;
+      if entry.maybe_blob.as_ref().map(|blob| blob.len() as u64) != Some(entry.size_bytes) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "upload missing or of the wrong size",
+        ));
+      }
+      entry.is_complete = true;
+      Ok(())
+    })
+  }
+
+  async fn download_org_background(
+    &self,
+    background: OrgBackgroundId,
+  ) -> Result<OrgBackgroundDownloadResponse, ApiError> {
+    self.with(|state, _| {
+      let entry = state
+        .org_backgrounds
+        .get(&background)
+        .filter(|entry| entry.is_complete)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::BackgroundNotFound, "unknown"))?;
+      Ok(OrgBackgroundDownloadResponse {
+        download_url: format!("{ORG_BACKGROUND_SCHEME}{background}"),
+        size_bytes: entry.size_bytes,
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn delete_org_background(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      state
+        .org_backgrounds
+        .remove(&background)
+        .map(drop)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::BackgroundNotFound, "unknown"))
+    })
+  }
+
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
+    if let Some(raw) = url.strip_prefix(ORG_BACKGROUND_SCHEME) {
+      return self.with(|state, _| {
+        let entry = org_background_blob(state, raw)?;
+        if bytes.len() as u64 != entry.size_bytes || entry.is_complete {
+          return Err(ApiError::Status {
+            status: 403,
+            maybe_body: None,
+          });
+        }
+        entry.maybe_blob = Some(bytes);
+        Ok(())
+      });
+    }
     if let Some(raw) = url.strip_prefix(BACKGROUND_SCHEME) {
       return self.with(|state, _| {
         let entry = background_blob(state, raw)?;
@@ -1680,7 +1773,26 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+    let blob = self.get_blob(url).await?;
+    if blob.len() as u64 > max_bytes {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    Ok(blob)
+  }
+
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+    if let Some(raw) = url.strip_prefix(ORG_BACKGROUND_SCHEME) {
+      return self.with(|state, _| {
+        org_background_blob(state, raw)?
+          .maybe_blob
+          .clone()
+          .ok_or(ApiError::Status {
+            status: 404,
+            maybe_body: None,
+          })
+      });
+    }
     if let Some(raw) = url.strip_prefix(BACKGROUND_SCHEME) {
       return self.with(|state, _| {
         background_blob(state, raw)?
@@ -2177,6 +2289,20 @@ impl KeyPackages {
 const PENDING_PREFIX: &str = "pending-";
 const BLOB_SCHEME: &str = "fake-blob://";
 const BACKGROUND_SCHEME: &str = "fake-background://";
+const ORG_BACKGROUND_SCHEME: &str = "fake-org-background://";
+
+fn org_background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut FakeBackground, ApiError> {
+  raw
+    .parse::<i64>()
+    .ok()
+    .and_then(|raw| Snowflake::new(raw).ok())
+    .map(OrgBackgroundId::from_snowflake)
+    .and_then(|id| state.org_backgrounds.get_mut(&id))
+    .ok_or(ApiError::Status {
+      status: 404,
+      maybe_body: None,
+    })
+}
 
 /// The caller's own background; others' look missing, like on the server.
 fn own_background(

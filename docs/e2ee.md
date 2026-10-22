@@ -537,6 +537,28 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
+### 8.1 Call backgrounds
+
+Backgrounds are composited on the sending device before encoding, so the SFU and other participants
+only ever see the result. The pictures themselves:
+
+- **Own pictures** (per user): encrypted like attachments (§4.5), with a fresh key each, and stored at
+  `/me/backgrounds`. The key, hash, name and size are account data in the key bag (§6.4), so only the
+  user's devices can open them, and they sync to those devices; a `key_bag_update` gateway event makes
+  the other devices sync right away. Before upload the app re-encodes the picture as a JPEG, which drops
+  metadata such as the place a photo was taken.
+- **Organization pictures** (admin.md §3.5): stored unencrypted, because they aren't secret from the
+  people who would see them in calls, and an organization-wide key would need its own distribution and
+  rotation for no gain. Integrity is what matters: the owner-signed workspace policy (§11, admin.md
+  §2.3) lists each picture with its SHA-256, and clients use a picture only after its hash matches the
+  policy they verified, so a compromised server can't swap a picture for another. The server checks
+  that listed pictures exist with the stated size, so owners can't publish one nobody can fetch.
+- **Built-in pictures** are drawn by code (`teamcraft-media`), so they need neither files nor downloads.
+
+Old owner clients that re-sign the policy (after a roster change) without knowing `call_backgrounds`
+drop the section, which means `free` until an up-to-date owner client signs again; update owner devices
+before using organization backgrounds.
+
 ## 9. Local storage
 
 - Local database: SQLite with SQLCipher; key in the OS keystore (desktop).

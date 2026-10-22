@@ -224,6 +224,10 @@ define_id!(
   AttachmentId
 );
 define_id!(
+  /// A call background picture an admin uploaded for the organization.
+  OrgBackgroundId
+);
+define_id!(
   /// A user's own call background picture (encrypted, synced across the user's devices).
   BackgroundId
 );

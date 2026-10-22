@@ -99,6 +99,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }),
       CoreCommand::AddBackground { name, picture } => self.add_background(name, picture).await.map(|_| ()),
       CoreCommand::DeleteBackground { id } => self.delete_background(id).await,
+      CoreCommand::AddOrgBackground { name, picture } => {
+        self.add_org_background(name, picture).await.map(|_| ())
+      },
+      CoreCommand::DeleteOrgBackground { id } => self.delete_org_background(id).await,
+      CoreCommand::SetOrgBackgroundRule { rule } => {
+        self
+          .set_org_background_rule(rule.mode, rule.maybe_default, rule.guests_exempt, rule.order)
+          .await
+      },
       CoreCommand::SetServerPin {
         conversation,
         target,

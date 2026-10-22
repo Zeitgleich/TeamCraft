@@ -2,6 +2,7 @@
 
 pub mod admin_announcement;
 pub mod admin_audit;
+pub mod admin_backgrounds;
 pub mod admin_channels;
 pub mod admin_console;
 pub mod admin_instance;

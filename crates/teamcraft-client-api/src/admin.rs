@@ -221,11 +221,12 @@ pub enum AdminSection {
   Retention,
   /// Media server, push providers, storage and telephony.
   Instance,
+  Backgrounds,
   Audit,
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 9] = [
+  pub const ALL: [AdminSection; 10] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -234,6 +235,7 @@ impl AdminSection {
     Self::Announcement,
     Self::Retention,
     Self::Instance,
+    Self::Backgrounds,
     Self::Audit,
   ];
 
@@ -247,6 +249,7 @@ impl AdminSection {
       Self::Announcement => "announcement",
       Self::Retention => "retention",
       Self::Instance => "instance",
+      Self::Backgrounds => "backgrounds",
       Self::Audit => "audit",
     }
   }

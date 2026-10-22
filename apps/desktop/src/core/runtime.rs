@@ -29,7 +29,7 @@ use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
   BackgroundId, CallJoinTokenResponse, ConversationId, DeviceActivity, DeviceId, GatewayClientMessage,
-  GatewayEvent, UserId, WorkspacePolicy,
+  GatewayEvent, OrgBackgroundId, UserId, WorkspacePolicy,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -135,6 +135,7 @@ enum Request {
   Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
   BackgroundPicture(BackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
+  OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
   LinkStart {
     device_name: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -299,6 +300,14 @@ impl CoreRuntime {
   pub async fn background_picture(&self, id: BackgroundId) -> Result<Vec<u8>, String> {
     self
       .ask(|reply| Request::BackgroundPicture(id, reply))
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// An organization background, checked against the hash in the verified workspace policy.
+  pub async fn org_background_picture(&self, id: OrgBackgroundId) -> Result<Vec<u8>, String> {
+    self
+      .ask(|reply| Request::OrgBackgroundPicture(id, reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -549,6 +558,7 @@ impl Core {
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
       Request::BackgroundPicture(id, reply) => drop(reply.send(self.background_picture(id).await)),
+      Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
     }
   }
 
@@ -556,6 +566,11 @@ impl Core {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
     let picture = client.background_picture(id).await.map_err(describe)?;
     Ok(picture.expose_secret().to_vec())
+  }
+
+  async fn org_background_picture(&mut self, id: OrgBackgroundId) -> Result<Vec<u8>, String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    client.org_background_picture(id).await.map_err(describe)
   }
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {
