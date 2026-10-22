@@ -9,14 +9,14 @@ plugins {
 fun setting(name: String): String = (findProperty("teamcraft.$name") as String?).orEmpty()
 
 android {
-  namespace = "org.teamcraft.android"
+  namespace = "de.zeitgleich.teamcraft"
   compileSdk = 35
   // Same NDK as scripts/build.sh; AGP uses it to strip the Rust library when packaging (UniFFI's
   // binding generator needs the symbols, so the library is built unstripped).
   ndkVersion = "27.2.12479018"
 
   defaultConfig {
-    applicationId = "org.teamcraft.android"
+    applicationId = "de.zeitgleich.teamcraft"
     minSdk = 26
     targetSdk = 35
     versionCode = 1

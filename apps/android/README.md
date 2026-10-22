@@ -210,7 +210,7 @@ key (a lost upload key can be reset; a lost app signing key can't).
 
 ## Google Play closed testing
 
-1. Create the app in the Play Console with the deployment's application ID (`org.teamcraft.android`
+1. Create the app in the Play Console with the deployment's application ID (`de.zeitgleich.teamcraft`
    by default; change `applicationId` for your organization).
 2. Build `bundleFullRelease` (an AAB) with the upload key and the production server/issuer
    properties, and upload it to the **Closed testing** track.
