@@ -1,18 +1,21 @@
 # Getting started
 
-How to sign in and set up your first device. Where a step is marked *coming soon*, the design
-exists (see [docs/e2ee.md](../../e2ee.md)) but the current build does not do it yet.
+How to sign in and set up your first device. Pages say which features come with later releases
+(*coming soon*); everything else works in the current build.
 
 ## Which app
 
-| Client  | Status                                                                                     |
-|---------|--------------------------------------------------------------------------------------------|
-| Desktop | Linux, macOS (Tauri). The most complete client: encrypted chat, calls, meetings, settings  |
-| Android | Chat list, conversations, threads, composer, push notifications. No calls yet              |
-| Web     | Served by your server at its address. Currently read-only chat; guests use it for meetings |
-| iOS     | Coming soon                                                                                |
+| Client  | Status                                                                                            |
+|---------|---------------------------------------------------------------------------------------------------|
+| Desktop | Linux (deb, rpm, AppImage, Flatpak), macOS. The most complete client, including calls and effects |
+| Windows | In preparation                                                                                    |
+| Android | Chat, threads, files, search, meetings, calls, push; admin screens stay on desktop and web        |
+| iOS     | In preparation                                                                                    |
+| Web     | Served by your server. Runs the same encrypted client in the page; push works with the tab closed |
 
-Your admin gives you the server address and tells you which client to install.
+Your admin gives you the server address and tells you which client to install. The web app checks
+a signed release before it updates itself; the desktop and mobile apps carry their own code, which
+is the stronger protection (see [Security basics](security-basics.md)).
 
 ## Sign in
 
@@ -22,6 +25,10 @@ Your admin gives you the server address and tells you which client to install.
    role yet. Ask an admin to assign one, then sign in again.
 
 TeamCraft never sees your company password; the login is handled by your company's identity provider.
+
+**Guest account with its own password?** Choose **Sign in with a guest account**, enter your e-mail
+address and password and, if your account uses one, the code from your authenticator app. You get
+the activation link by e-mail first; see [Guests](guests.md).
 
 ## Set up your first device
 
@@ -38,6 +45,8 @@ a new device.
 > **Write the passphrase down and keep it safe.** TeamCraft cannot recover it for you. If you lose
 > the passphrase *and* all your devices, only an organization recovery by two admins can help,
 > and only if your admin turned it on (see [Security basics](security-basics.md)).
+
+You can change the passphrase later under **Settings**; the old one stops working.
 
 ## Passkey (coming soon)
 
