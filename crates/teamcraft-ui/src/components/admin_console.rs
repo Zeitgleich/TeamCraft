@@ -56,8 +56,8 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Security, IconName::Key)}
           {nav_item(AdminSection::People, IconName::User)}
           {nav_item(AdminSection::Announcement, IconName::Bell)}
-          {nav_item(AdminSection::Retention, IconName::Clock)}
           {nav_item(AdminSection::Backgrounds, IconName::Image)}
+          {nav_item(AdminSection::Retention, IconName::Clock)}
           {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
@@ -79,9 +79,9 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Security => view! { <SecuritySection /> }.into_any(),
           AdminSection::People => view! { <PeopleSection /> }.into_any(),
           AdminSection::Announcement => view! { <AnnouncementSection /> }.into_any(),
+          AdminSection::Backgrounds => view! { <BackgroundsSection /> }.into_any(),
           AdminSection::Instance => view! { <InstanceSection /> }.into_any(),
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
-          AdminSection::Backgrounds => view! { <BackgroundsSection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),
         }}
       </div>
