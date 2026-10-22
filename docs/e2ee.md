@@ -648,6 +648,14 @@ needs the device. No user authentication is required for the key, so push wake-u
 the store while the screen is locked; the wrapped key is excluded from backups, so a restored
 backup can't be opened elsewhere.
 
+Plaintext outside the sealed store, and how long it lives:
+
+- Files the user opens are decrypted to a folder per account (`downloads/<account>`), so another
+  app can open them; they are deleted at sign-out (a file that is gone is shown as not downloaded).
+- Files to send are copied out of the picking app into `outgoing/<account>`; the core deletes each
+  copy once its upload finished or failed for good, and the folder is wiped at sign-out.
+- Notifications show what the workspace policy allows (§7) and are removed at sign-out.
+
 ### 9.3 Web client integrity (implemented)
 
 The server serves the web client's code, so a compromised server could serve a client that leaks

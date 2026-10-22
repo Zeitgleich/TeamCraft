@@ -39,6 +39,11 @@ use crate::types::{
 };
 use crate::{EventListener, TokenProvider};
 
+/// Decrypted downloads, one folder per account below it.
+const DOWNLOADS_DIR: &str = "downloads";
+/// Plaintext copies of files waiting to be uploaded, one folder per account below it.
+const UPLOAD_STAGING_DIR: &str = "outgoing";
+
 /// A boxed future that stays on the engine thread.
 pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// Work for the engine thread.
@@ -55,6 +60,8 @@ pub(crate) struct Engine {
   server_url: String,
   /// Where downloaded files are decrypted to (inside the app's private storage).
   download_dir: PathBuf,
+  /// Where the app copies files to upload; the core deletes each copy once it went up.
+  upload_staging_dir: PathBuf,
   tokens: ForeignTokens,
   listener: Arc<dyn EventListener>,
   pub(crate) store: Store,
@@ -169,6 +176,7 @@ impl Engine {
     }
     let directory = PathBuf::from(&config.data_dir);
     std::fs::create_dir_all(&directory).map_err(|error| TeamCraftError::Storage(error.to_string()))?;
+    remove_shared_downloads(&directory.join(DOWNLOADS_DIR));
     let path = directory.join(format!("{}.teamcraft.db", config.account));
     let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
     // A broken record only costs the preferences, not the store.
@@ -178,7 +186,8 @@ impl Engine {
     let mut engine = Self {
       server_url: config.server_url,
       // Per account, so another account signed in on this device never sees these files.
-      download_dir: directory.join("downloads").join(&config.account),
+      download_dir: directory.join(DOWNLOADS_DIR).join(&config.account),
+      upload_staging_dir: directory.join(UPLOAD_STAGING_DIR).join(&config.account),
       tokens,
       listener,
       store,
@@ -669,6 +678,26 @@ impl Engine {
     Ok(())
   }
 
+  /// Where the app puts copies of files to upload (created if missing).
+  pub(crate) fn upload_staging_dir(&self) -> Result<String, TeamCraftError> {
+    std::fs::create_dir_all(&self.upload_staging_dir)
+      .map_err(|error| TeamCraftError::Storage(error.to_string()))?;
+    Ok(self.upload_staging_dir.display().to_string())
+  }
+
+  /// Deletes this account's plaintext files: decrypted downloads and staged upload copies (at
+  /// sign-out; the sealed store stays).
+  pub(crate) fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {
+    for directory in [&self.download_dir, &self.upload_staging_dir] {
+      match std::fs::remove_dir_all(directory) {
+        Ok(()) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(TeamCraftError::Storage(error.to_string())),
+      }
+    }
+    Ok(())
+  }
+
   pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
     self.maybe_backend.as_ref().ok_or(TeamCraftError::NotEnrolled)
   }
@@ -692,6 +721,7 @@ impl Engine {
   fn client_settings(&self) -> ClientSettings {
     ClientSettings {
       maybe_download_dir: Some(self.download_dir.clone()),
+      maybe_upload_staging_dir: Some(self.upload_staging_dir.clone()),
       ..ClientSettings::default()
     }
   }
@@ -748,4 +778,19 @@ pub(crate) fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamC
   text
     .parse()
     .map_err(|_| TeamCraftError::InvalidInput(format!("not an ID: {text}")))
+}
+
+/// Downloads of older versions lay directly in the shared folder, visible to every account of
+/// the device; they are plaintext caches and are dropped (the files can be downloaded again).
+fn remove_shared_downloads(directory: &std::path::Path) {
+  let Ok(entries) = std::fs::read_dir(directory) else {
+    return;
+  };
+  for entry in entries.flatten() {
+    if entry.file_type().is_ok_and(|kind| kind.is_file())
+      && let Err(error) = std::fs::remove_file(entry.path())
+    {
+      tracing::debug!(%error, "an old shared download could not be deleted");
+    }
+  }
 }

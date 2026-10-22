@@ -121,6 +121,22 @@ impl TeamCraft {
       .await
   }
 
+  /// Where the app copies a picked file before sending it; the core deletes the copy once the
+  /// upload finished (or failed for good).
+  pub async fn upload_staging_dir(&self) -> Result<String, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.upload_staging_dir() }))
+      .await
+  }
+
+  /// Deletes this account's plaintext files on the device (decrypted downloads, staged uploads);
+  /// for sign-out. The sealed store stays.
+  pub async fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.delete_plaintext_files() }))
+      .await
+  }
+
   /// Starts syncing (gateway, outbox, membership changes). Call when the app is in the foreground.
   pub async fn start(&self) -> Result<(), TeamCraftError> {
     self.call(|engine| Box::pin(engine.start())).await

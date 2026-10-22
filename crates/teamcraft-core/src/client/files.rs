@@ -156,6 +156,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         save_pending_upload(&self.store, &upload)?;
       }
       self.complete_upload(&upload)?;
+      self.remove_staged_copies(&upload);
     }
     Ok(uploaded)
   }
@@ -268,13 +269,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// Deletes the app's staged plaintext copies of a finished upload (see
+  /// [`super::ClientSettings::maybe_upload_staging_dir`]).
+  fn remove_staged_copies(&self, upload: &PendingUpload) {
+    let Some(staging) = &self.settings.maybe_upload_staging_dir else {
+      return;
+    };
+    if !is_finished(upload) {
+      return;
+    }
+    for file in &upload.files {
+      remove_staged(staging, &file.source);
+    }
+  }
+
   /// Puts the uploaded files into the waiting message, which the outbox then sends.
   fn complete_upload(&mut self, upload: &PendingUpload) -> Result<(), CoreError> {
-    if upload
-      .files
-      .iter()
-      .any(|file| file.maybe_done.is_none() && file.maybe_failure.is_none())
-    {
+    if !is_finished(upload) {
       return Ok(());
     }
     let key = records::outbox_key(upload.conversation_id, upload.client_message_id);
@@ -422,6 +433,33 @@ fn find_attachment(
   )
 }
 
+/// Every file of the upload went up or failed for good.
+fn is_finished(upload: &PendingUpload) -> bool {
+  upload
+    .files
+    .iter()
+    .all(|file| file.maybe_done.is_some() || file.maybe_failure.is_some())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn remove_staged(staging: &std::path::Path, source: &UploadSource) {
+  let UploadSource::Path { path } = source else {
+    return;
+  };
+  let path = std::path::Path::new(path);
+  // Only the app's own copies; `..` can't lead out of the staging directory.
+  let is_staged = path.starts_with(staging)
+    && !path
+      .components()
+      .any(|part| part == std::path::Component::ParentDir);
+  if is_staged && let Err(error) = std::fs::remove_file(path) {
+    tracing::debug!(%error, "a staged upload copy could not be deleted");
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn remove_staged(_staging: &std::path::Path, _source: &UploadSource) {}
+
 fn read_source(source: &UploadSource) -> Result<Vec<u8>, ()> {
   match source {
     UploadSource::Bytes { bytes } => Ok(bytes.as_slice().to_vec()),
@@ -496,5 +534,31 @@ mod tests {
     std::fs::write(directory.join("a.txt"), b"x").unwrap();
     assert_eq!(unique_path(&directory, "a.txt").file_name().unwrap(), "a (2).txt");
     std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn only_staged_copies_are_deleted() {
+    let root = std::env::temp_dir().join(format!(
+      "teamcraft-staging-{}",
+      rand_core::RngCore::next_u64(&mut OsRng)
+    ));
+    let staging = root.join("outgoing");
+    std::fs::create_dir_all(&staging).unwrap();
+    let staged = staging.join("copy.pdf");
+    let original = root.join("original.pdf");
+    std::fs::write(&staged, b"x").unwrap();
+    std::fs::write(&original, b"x").unwrap();
+    let escaping = format!("{}/../original.pdf", staging.display());
+
+    for path in [
+      &staged.display().to_string(),
+      &original.display().to_string(),
+      &escaping,
+    ] {
+      remove_staged(&staging, &UploadSource::Path { path: path.clone() });
+    }
+    assert!(!staged.exists());
+    assert!(original.exists());
+    std::fs::remove_dir_all(&root).unwrap();
   }
 }

@@ -81,6 +81,10 @@ pub struct ClientSettings {
   pub max_upload_bytes: u64,
   /// Where downloaded files are written (native apps); `None` disables downloads to disk.
   pub maybe_download_dir: Option<std::path::PathBuf>,
+  /// Where the app stages plaintext copies of files to upload (a phone copies picked documents
+  /// out of other apps first); a copy there is deleted once its upload finished or failed for
+  /// good. Files elsewhere (a desktop user's own documents) are never deleted.
+  pub maybe_upload_staging_dir: Option<std::path::PathBuf>,
   pub link_previews: previews::LinkPreviewSettings,
   /// Checks before giving up on adding a new device that never uploads key packages.
   pub device_add_attempts: u32,
@@ -124,6 +128,7 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
+      maybe_upload_staging_dir: None,
       link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
       workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
