@@ -4,6 +4,7 @@ use leptos::ev;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::backend::Backend;
 use crate::calls::CallPhase;
 use crate::clock::now_ms;
 use crate::components::admin_console::AdminConsole;
@@ -11,6 +12,7 @@ use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::channel_view::ChannelView;
 use crate::components::incoming_call::IncomingCallDialog;
+use crate::components::login::SessionGate;
 use crate::components::members_panel::MembersPanel;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
@@ -23,13 +25,9 @@ use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::mock::MockBackend;
-use crate::model::id_from_raw;
-use crate::settings::{Settings, Theme};
+use crate::model::{ConversationId, SpaceId};
+use crate::settings::{BackendMode, Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
-
-/// Conversation opened at start (`#engineering` in the demo data).
-const START_SPACE_RAW: u64 = 1;
-const START_CONVERSATION_RAW: u64 = 12;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -37,19 +35,28 @@ pub fn App() -> impl IntoView {
   let i18n = provide_i18n(settings.locale.get_untracked());
   // The settings signal is the source of truth; mirror it into the translator.
   Effect::new(move |_| i18n.set_locale(settings.locale.get()));
-
-  let backend = Rc::new(MockBackend::new(now_ms()));
-  let state = AppState::new(
-    backend,
-    settings,
-    id_from_raw(START_SPACE_RAW),
-    id_from_raw(START_CONVERSATION_RAW),
-  );
-  provide_context(state);
-  state.open_conversation(id_from_raw(START_CONVERSATION_RAW));
-
   apply_theme(settings.theme);
   apply_language_attribute();
+
+  match BackendMode::load() {
+    BackendMode::Mock => {
+      let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(now_ms()));
+      view! { <Shell backend=backend settings=settings /> }.into_any()
+    },
+    BackendMode::Server => view! { <SessionGate settings=settings /> }.into_any(),
+  }
+}
+
+/// Everything after sign-in: the chat shell on top of a backend.
+#[component]
+pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
+  let i18n = use_i18n();
+  let start = initial_location(backend.as_ref());
+  let state = AppState::new(backend, settings, start);
+  provide_context(state);
+  if let Some((_, conversation)) = start {
+    state.open_conversation(conversation);
+  }
 
   let _ = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
 
@@ -198,4 +205,11 @@ fn apply_language_attribute() {
       let _ = root.dyn_ref::<web_sys::HtmlElement>();
     }
   });
+}
+
+/// First space and conversation to show, if the backend has any.
+fn initial_location(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> {
+  let space = backend.spaces().into_iter().next()?;
+  let conversation = backend.space_conversations(space.id).into_iter().next()?;
+  Some((space.id, conversation.id))
 }

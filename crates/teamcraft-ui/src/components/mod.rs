@@ -16,6 +16,7 @@ pub mod composer;
 pub mod huddle_bar;
 pub mod icons;
 pub mod incoming_call;
+pub mod login;
 pub mod members_panel;
 pub mod message_list;
 pub mod message_row;

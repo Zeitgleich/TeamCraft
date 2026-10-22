@@ -25,6 +25,11 @@ ignore = [
   # build time, never data from the network. No newer plist release yet; revisit on Tauri updates.
   { id = "RUSTSEC-2026-0194", reason = "quick-xml via tauri plist, build-time trusted input only" },
   { id = "RUSTSEC-2026-0195", reason = "quick-xml via tauri plist, build-time trusted input only" },
+  # zvariant, zvariant_derive, zbus_names: merged into zbus 6 (released 2026-10-16), no vulnerability.
+  # Pulled in via zbus 5 by keyring (Secret Service) and tauri-plugin-opener; revisit when they move.
+  { id = "RUSTSEC-2026-0370", reason = "merged into zbus 6; via keyring/tauri zbus 5" },
+  { id = "RUSTSEC-2026-0371", reason = "merged into zbus 6; via keyring/tauri zbus 5" },
+  { id = "RUSTSEC-2026-0372", reason = "merged into zbus 6; via keyring/tauri zbus 5" },
 ]
 
 [licenses]

@@ -10,6 +10,7 @@ const KEY_LOCALE: &str = "teamcraft.locale";
 const KEY_SEND_MODE: &str = "teamcraft.send_mode";
 const KEY_UNREADS_GROUP: &str = "teamcraft.unreads_group";
 const KEY_SHOW_JOIN_LEAVE: &str = "teamcraft.show_join_leave";
+const KEY_BACKEND: &str = "teamcraft.backend";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
@@ -55,6 +56,55 @@ impl SendMode {
 
   pub fn from_slug(slug: &str) -> Option<Self> {
     Self::ALL.into_iter().find(|mode| mode.slug() == slug)
+  }
+}
+
+/// Where the data comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendMode {
+  /// Built-in demo data, no sign-in. The default.
+  Mock,
+  /// Sign in with OIDC and read spaces, channels and members from `teamcraft-server`.
+  Server,
+}
+
+impl BackendMode {
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mock => "mock",
+      Self::Server => "server",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    match slug {
+      "mock" => Some(Self::Mock),
+      "server" => Some(Self::Server),
+      _ => None,
+    }
+  }
+
+  /// The mode for this page load: `?backend=server|mock` wins (and is remembered), then the stored
+  /// choice, then the demo data.
+  pub fn load() -> Self {
+    let from_query = web_sys::window()
+      .and_then(|window| window.location().search().ok())
+      .and_then(|search| {
+        search
+          .trim_start_matches('?')
+          .split('&')
+          .find_map(|pair| pair.strip_prefix("backend=").and_then(Self::from_slug))
+      });
+    if let Some(mode) = from_query {
+      store_string(KEY_BACKEND, mode.slug());
+      return mode;
+    }
+    load(KEY_BACKEND, Self::from_slug).unwrap_or(Self::Mock)
+  }
+
+  /// Remembers the choice; the caller reloads the page.
+  pub fn save(self) {
+    store_string(KEY_BACKEND, self.slug());
   }
 }
 
@@ -117,6 +167,24 @@ fn persist<T: Copy + Send + Sync + 'static>(key: &'static str, signal: RwSignal<
 fn load<T>(key: &str, decode: fn(&str) -> Option<T>) -> Option<T> {
   let value = local_storage()?.get_item(key).ok().flatten()?;
   decode(&value)
+}
+
+/// Reads a raw string setting from `localStorage` (used for connection settings).
+pub fn load_string(key: &str) -> Option<String> {
+  local_storage()?
+    .get_item(key)
+    .ok()
+    .flatten()
+    .filter(|value| !value.is_empty())
+}
+
+/// Writes a raw string setting to `localStorage`; failures only mean it will not persist.
+pub fn store_string(key: &str, value: &str) {
+  if let Some(storage) = local_storage()
+    && storage.set_item(key, value).is_err()
+  {
+    tracing::debug!(key, "could not persist value");
+  }
 }
 
 fn local_storage() -> Option<web_sys::Storage> {

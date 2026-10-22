@@ -100,13 +100,54 @@ rustup) and [Trunk](https://trunkrs.dev) (`cargo install trunk --locked`, or a r
 
 ```sh
 cd crates/teamcraft-ui
-trunk serve            # http://127.0.0.1:1420, rebuilds on change
+trunk serve            # http://localhost:8082, rebuilds on change; proxies /api to 127.0.0.1:8081
 trunk build --release  # static files in crates/teamcraft-ui/dist
 ```
 
 Release builds are smaller with `CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=true`
 and `data-wasm-opt="s"` on the Rust link in `index.html` (Trunk downloads binaryen for that).
 Debug builds are slow in the browser; judge performance with `--release`.
+
+## Sign in and server mode
+
+The app starts on demo data. To use the real server, sign in with the dev Keycloak (README of the
+repository: realm `teamcraft-dev`, public client `teamcraft`, users `alice`, `bob`, … with password
+`<user>-dev-pass`):
+
+1. Start the dev stack and the server (`TEAMCRAFT_SERVER__LISTEN_ADDR="[::]:8081" cargo run -p teamcraft-server`).
+2. Web: `trunk serve`, then open `http://localhost:8082/?backend=server`. The choice is remembered
+   (Settings > Advanced > Data source). Port 8082 is the web origin and redirect URI registered for the
+   dev client; Trunk proxies `/api` to the server so no CORS is needed. Other origins: set
+   `localStorage` keys `teamcraft.server_url`, `teamcraft.oidc_issuer`, `teamcraft.oidc_client_id`.
+3. Desktop: `TEAMCRAFT_BACKEND=server cargo tauri dev` (or `cargo run -p teamcraft-desktop --features
+   custom-protocol`). Server and issuer: `TEAMCRAFT_SERVER_URL` (default `http://127.0.0.1:8081`),
+   `TEAMCRAFT_OIDC_ISSUER`, `TEAMCRAFT_OIDC_CLIENT_ID`.
+
+What happens:
+
+- **Web:** authorization code + PKCE redirect flow (`oauth2` crate, `fetch` as HTTP client). Tokens live
+  in memory only; the PKCE verifier and state survive the redirect in `sessionStorage`. After a reload
+  the page goes through the provider session again without a password prompt. Sign-out ends the
+  provider session with a direct request.
+- **Desktop:** the Rust side of the shell runs the flow (RFC 8252): a one-shot listener on
+  `127.0.0.1:<random port>`, the system browser through `tauri-plugin-opener`, and only the refresh
+  token in the OS keyring (Secret Service on Linux, Keychain on macOS). The webview calls commands
+  (`auth_restore`, `auth_login`, `auth_cancel`, `auth_logout`, `api_get`) and never sees a token;
+  `api_get` only accepts `/api/v1/` paths.
+- Both sit behind the `Authenticator` trait (`src/auth/mod.rs`), the seam `teamcraft-core` can take over.
+- **Screens:** login (with clear messages for `no_teamcraft_role` and an unreachable server), a first-device
+  welcome screen (the passkey step is a placeholder), the account menu (sign out; switch account is a
+  placeholder).
+- **Data:** `ServerBackend` reads `/me`, spaces, conversations, members and presence. Messages are not
+  available yet, so what you write stays in memory. Calls, administration and device security still use
+  the mock (the admin console shows demo data even for a real admin).
+
+Seeding some data for the dev stack (spaces, channels, a DM) is a few `curl` calls with a token from
+`dev/dev-token.py`; the API is in `docs/` and `/api/v1/openapi.json`.
+
+Tests against the running dev stack: `cargo test -p teamcraft-desktop --features integration`
+(full desktop flow with a fake browser, restore after restart, logout, an account without role, cancel,
+keyring). The browser flow was exercised with Playwright against `trunk serve`.
 
 ## Run the desktop build
 
@@ -142,7 +183,8 @@ compiler than the workspace baseline.
 
 ## Known gaps
 
-- Mock data only; sending, reactions, favorites and presence live in memory and reset on reload.
+- Demo data is the default; with the server, messages, reactions, threads and unread counts are still
+  missing (they need `teamcraft-core`), and sending, favorites and presence only live in memory.
 - No drafts per conversation, message editing, emoji picker, search results page or meetings.
 - Calls are mocked: no real media, reactions in calls, recording or captions; own backgrounds cannot be
   uploaded yet.

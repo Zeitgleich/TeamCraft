@@ -8,7 +8,7 @@ use crate::components::sidebar::shortcut_label;
 use crate::i18n::{Locale, use_i18n};
 use crate::model::{DeviceId, id_from_raw};
 use crate::security::DeviceApproval;
-use crate::settings::{SendMode, Theme};
+use crate::settings::{BackendMode, SendMode, Theme};
 use crate::state::{Overlay, use_app_state};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,6 +226,33 @@ fn AdvancedTab() -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <p class="muted-text">{move || i18n.t("settings-advanced-stub")}</p>
+    <div class="field">
+      <label for="setting-backend">{move || i18n.t("settings-backend")}</label>
+      <select
+        id="setting-backend"
+        class="input"
+        on:change=move |ev| {
+          if let Some(mode) = BackendMode::from_slug(&event_target_value(&ev)) {
+            mode.save();
+            if let Some(window) = web_sys::window() {
+              drop(window.location().reload());
+            }
+          }
+        }
+      >
+        {[BackendMode::Mock, BackendMode::Server]
+          .into_iter()
+          .map(|mode| {
+            view! {
+              <option value=mode.slug() selected=move || BackendMode::load() == mode>
+                {move || i18n.t(&format!("settings-backend-{}", mode.slug()))}
+              </option>
+            }
+          })
+          .collect_view()}
+      </select>
+      <p class="muted-text small">{move || i18n.t("settings-backend-hint")}</p>
+    </div>
     <h3 class="settings-heading">{move || i18n.t("settings-demo-title")}</h3>
     <p class="muted-text small">{move || i18n.t("settings-demo-hint")}</p>
     <div class="demo-actions">

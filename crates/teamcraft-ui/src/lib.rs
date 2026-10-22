@@ -5,6 +5,7 @@
 //! without a server.
 
 pub mod admin;
+pub mod auth;
 pub mod backend;
 pub mod calls;
 pub mod clock;
@@ -16,6 +17,8 @@ pub mod model;
 pub mod reactive;
 pub mod sections;
 pub mod security;
+pub mod server_backend;
+pub mod session;
 pub mod settings;
 pub mod state;
 

@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use crate::admin::AdminSection;
 use crate::backend::Backend;
 use crate::calls::CallState;
-use crate::model::{Conversation, ConversationId, SpaceId, ThreadId, User};
+use crate::model::{Conversation, ConversationId, SpaceId, ThreadId, User, id_from_raw};
 use crate::reactive::get_if_observed;
 use crate::sections::build_sections;
 use crate::security::DeviceApproval;
@@ -69,17 +69,17 @@ pub struct AppState {
 }
 
 impl AppState {
-  pub fn new(
-    backend: Rc<dyn Backend>,
-    settings: Settings,
-    first_space: SpaceId,
-    first: ConversationId,
-  ) -> Self {
+  /// `start` is the first space and conversation; without one the threads inbox opens.
+  pub fn new(backend: Rc<dyn Backend>, settings: Settings, start: Option<(SpaceId, ConversationId)>) -> Self {
+    let (space, view) = match start {
+      Some((space, conversation)) => (space, MainView::Conversation(conversation)),
+      None => (id_from_raw(0), MainView::Threads),
+    };
     Self {
       backend: StoredValue::new_local(backend),
       revision: RwSignal::new(0),
-      space: RwSignal::new(first_space),
-      view: RwSignal::new(MainView::Conversation(first)),
+      space: RwSignal::new(space),
+      view: RwSignal::new(view),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
       call: CallState::new(),

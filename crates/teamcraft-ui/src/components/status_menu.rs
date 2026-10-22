@@ -10,6 +10,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
 use crate::model::{CustomStatus, PresenceStatus, StatusExpiry};
+use crate::session::use_session;
 use crate::state::{Overlay, use_app_state};
 
 /// Presets an admin can configure later; the label is an i18n key.
@@ -26,6 +27,7 @@ pub fn StatusMenu() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let menu = NodeRef::<html::Div>::new();
+  let session = use_session();
   let me = Memo::new(move |_| state.me());
   let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));
 
@@ -142,7 +144,23 @@ pub fn StatusMenu() -> impl IntoView {
         <Icon name=IconName::Keyboard />
         <span class="menu-label">{move || i18n.t("shortcuts-title")}</span>
       </button>
-      <button class="menu-item" role="menuitem" tabindex="-1" disabled>
+      <button class="menu-item" role="menuitem" tabindex="-1" disabled title=move || i18n.t("admin-soon")>
+        <Icon name=IconName::Users />
+        <span class="menu-label">{move || i18n.t("menu-switch-account")}</span>
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        tabindex="-1"
+        disabled=session.is_none()
+        title=move || if session.is_none() { i18n.t("menu-log-out-demo") } else { String::new() }
+        on:click=move |_| {
+          if let Some(control) = session {
+            state.close_overlay();
+            control.sign_out();
+          }
+        }
+      >
         <Icon name=IconName::Close />
         <span class="menu-label">{move || i18n.t("menu-log-out")}</span>
       </button>

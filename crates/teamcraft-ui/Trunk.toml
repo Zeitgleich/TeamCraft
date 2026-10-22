@@ -3,9 +3,14 @@ target = "index.html"
 dist = "dist"
 
 [serve]
+# 8082 is registered as web origin and redirect URI of the dev Keycloak client (README).
 address = "127.0.0.1"
-port = 1420
+port = 8082
 open = false
+
+# The dev server has no CORS headers; proxying keeps the API on the page's origin.
+[[proxy]]
+backend = "http://127.0.0.1:8081/api/"
 
 [watch]
 ignore = ["dist"]
