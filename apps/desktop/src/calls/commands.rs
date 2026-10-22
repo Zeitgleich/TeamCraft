@@ -165,7 +165,7 @@ pub async fn call_action(
     },
     CallAction::SelectCamera { maybe_device } => calls.select_camera(maybe_device).await?,
     CallAction::SetBackgroundEffect { effect } => apply_background(&core, &calls, effect).await?,
-    CallAction::StartScreenShare => calls.start_screen_share().await?,
+    CallAction::StartScreenShare { has_sound } => calls.start_screen_share(has_sound).await?,
     CallAction::StopScreenShare => calls.stop_screen_share().await,
     CallAction::SetPushToTalk {
       is_enabled,

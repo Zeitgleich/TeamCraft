@@ -173,13 +173,29 @@ jobs:
       - name: Clippy (desktop shell and core)
         run: cargo clippy -p teamcraft-desktop -p teamcraft-core --all-targets -- -D warnings
       - name: Clippy (call media)
-        run: cargo clippy -p teamcraft-media --all-targets --features native,mediafoundation,graphics-capture,effects,segmentation,openh264-source -- -D warnings
+        run: cargo clippy -p teamcraft-media --all-targets --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source -- -D warnings
       - name: Test (desktop shell and core)
         run: cargo test -p teamcraft-desktop -p teamcraft-core
       - name: Test (call media)
-        run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,effects,segmentation,openh264-source
+        run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source
       - name: Check (ARM64, cross-compiled)
         run: cargo check --target aarch64-pc-windows-msvc -p teamcraft-desktop
+
+  # The macOS call media: AVFoundation cameras and ScreenCaptureKit screens and sound (its Swift
+  # bridge builds with the runner's Xcode). Without GStreamer, which only the release build bundles
+  # (desktop-release.yml builds the whole app).
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Clippy (call media)
+        run: cargo clippy -p teamcraft-media --all-targets --features native,avfoundation,screencapturekit,effects,openh264-source -- -D warnings
+      - name: Test (call media)
+        run: cargo test -p teamcraft-media --features native,avfoundation,screencapturekit,effects,openh264-source
 
   deny:
     runs-on: ubuntu-latest

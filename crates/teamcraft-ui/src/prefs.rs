@@ -273,6 +273,8 @@ pub struct CallPrefs {
   pub noise_suppression: bool,
   pub echo_cancellation: bool,
   pub push_to_talk: bool,
+  /// Screen shares include the computer's sound (off until the user turns it on).
+  pub share_sound: bool,
 }
 
 impl Default for CallPrefs {
@@ -288,6 +290,7 @@ impl Default for CallPrefs {
       noise_suppression: true,
       echo_cancellation: true,
       push_to_talk: false,
+      share_sound: false,
     }
   }
 }

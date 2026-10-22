@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect, CallRequest, IncomingCall, MediaDevice, MediaDevices, Participant,
-  RunningCall,
+  RunningCall, ScreenShareSound,
 };
 use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_proto::{ConversationId, UserId};
@@ -99,14 +99,20 @@ impl FakeCalls {
           active.background = effect;
         }
       },
-      CallAction::StartScreenShare => {
+      CallAction::StartScreenShare { has_sound } => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_sharing_screen = true;
+          active.screen_sound = if has_sound {
+            ScreenShareSound::Shared
+          } else {
+            ScreenShareSound::Off
+          };
         }
       },
       CallAction::StopScreenShare => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_sharing_screen = false;
+          active.screen_sound = ScreenShareSound::Off;
         }
       },
       CallAction::SelectMicrophone { .. }
@@ -132,6 +138,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     kind: request.kind,
     is_muted: false,
     maybe_muted_by_host: None,
+    screen_sound: ScreenShareSound::Off,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),

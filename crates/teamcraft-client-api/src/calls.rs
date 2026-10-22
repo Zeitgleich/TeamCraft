@@ -264,6 +264,23 @@ pub struct ActiveCall {
   /// The meeting host who last muted everyone (cleared when the user unmutes).
   #[serde(default)]
   pub maybe_muted_by_host: Option<UserId>,
+  /// Whether this device's screen share carries the computer's sound.
+  #[serde(default)]
+  pub screen_sound: ScreenShareSound,
+}
+
+/// The sound of a screen share (the computer's playback without the call itself).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenShareSound {
+  #[default]
+  Off,
+  Shared,
+  /// Asked for, but this system can't capture it (no permission, an older system, or the
+  /// Flatpak without PipeWire access); the picture is shared without it.
+  Unavailable,
+  #[serde(other)]
+  Unknown,
 }
 
 /// Why the last call ended other than by leaving.

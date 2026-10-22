@@ -59,6 +59,8 @@ pub mod capture_convert;
 pub mod capture_nokhwa;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 pub mod capture_portal;
+#[cfg(all(feature = "screencapturekit", target_os = "macos"))]
+pub mod capture_screencapturekit;
 #[cfg(all(feature = "v4l2", target_os = "linux"))]
 pub mod capture_v4l2;
 #[cfg(all(feature = "graphics-capture", target_os = "windows"))]
@@ -71,5 +73,7 @@ pub mod effects;
 pub mod system_audio;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 pub mod system_audio_pipewire;
+#[cfg(all(feature = "wasapi-loopback", target_os = "windows"))]
+pub mod system_audio_wasapi;
 #[cfg(feature = "web")]
 pub mod web_api;

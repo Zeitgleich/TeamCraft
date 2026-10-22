@@ -41,6 +41,11 @@ pub struct MonoResampler {
   previous: f32,
 }
 
+/// Platforms without a system audio capture: starting always fails with
+/// [`SystemAudioError::Unsupported`].
+#[derive(Debug, Default)]
+pub struct UnsupportedSystemAudio;
+
 /// A fake for tests: samples are pushed by hand.
 #[derive(Debug, Default)]
 pub struct ManualSystemAudio {
@@ -126,6 +131,14 @@ impl ManualSystemAudio {
   pub fn sender(&self) -> Option<SystemAudioSender> {
     self.maybe_samples.clone()
   }
+}
+
+impl SystemAudioCapture for UnsupportedSystemAudio {
+  fn start(&mut self, _samples: SystemAudioSender) -> Result<(), SystemAudioError> {
+    Err(SystemAudioError::Unsupported)
+  }
+
+  fn stop(&mut self) {}
 }
 
 impl SystemAudioCapture for ManualSystemAudio {
