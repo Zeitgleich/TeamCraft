@@ -174,7 +174,12 @@ themselves and the server can't relax it.
   metadata), delete, order, default, mode and guest exemption. Admins upload; publishing the list is a
   policy change, which needs an owner (`sign_workspace`). A picture the current policy lists can't be
   deleted on the server; removing it from the list first is one step in the UI.
-- **Limits:** 50 organization pictures, each up to `max_background_bytes` (8 MiB).
+- **Limits:** 50 organization pictures, each up to `max_background_bytes` (8 MiB). Clients also refuse
+  pictures over 8 MiB or 36 megapixels before decoding them.
+- **Deleting:** a presigned upload URL keeps working until it expires, so a deleted picture's row stays,
+  and counts towards the limits, until then; a sweeper (every 10 minutes) then deletes the object once
+  more and the row. Uploads announced but never completed are swept the same way. The same applies to
+  people's own backgrounds.
 
 ## 4. Audit log
 

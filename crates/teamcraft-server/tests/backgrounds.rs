@@ -138,3 +138,65 @@ async fn sizes_and_counts_are_limited() {
   );
   app.stop().await;
 }
+
+#[tokio::test]
+async fn an_upload_url_used_after_delete_is_swept_and_still_counted_until_then() {
+  let app = app!(|settings| settings.limits.max_backgrounds_per_user = 1);
+  let carol = member("carol");
+  let picture = b"opaque ciphertext".to_vec();
+  let announced = app
+    .post(&carol, "/me/backgrounds", json!({"size_bytes": picture.len()}))
+    .await;
+  let id = announced.body["id"].as_str().unwrap().to_owned();
+  let url = announced.body["upload_url"].as_str().unwrap().to_owned();
+  app.http.put(&url).body(picture.clone()).send().await.unwrap();
+  assert_eq!(
+    app
+      .post(&carol, &format!("/me/backgrounds/{id}/complete"), json!({}))
+      .await
+      .status,
+    StatusCode::NO_CONTENT
+  );
+  assert_eq!(
+    app.delete(&carol, &format!("/me/backgrounds/{id}")).await.status,
+    StatusCode::NO_CONTENT
+  );
+
+  // The URL still works until it expires, but the object it writes belongs to nothing, and the
+  // deleted background still counts towards the limit.
+  let reused = app.http.put(&url).body(picture.clone()).send().await.unwrap();
+  assert_eq!(reused.status(), StatusCode::OK);
+  assert_eq!(
+    app
+      .post(&carol, "/me/backgrounds", json!({"size_bytes": 10}))
+      .await
+      .status,
+    StatusCode::CONFLICT
+  );
+  assert_eq!(
+    app
+      .post(&carol, &format!("/me/backgrounds/{id}/complete"), json!({}))
+      .await
+      .status,
+    StatusCode::NOT_FOUND
+  );
+
+  // Once the URL has expired, the sweeper deletes the object again and frees the slot.
+  let store = app.state.maybe_blob_store.clone().unwrap();
+  let key = format!("backgrounds/{}/{id}", user_id(&app, &carol).await);
+  assert!(store.object_size(&key).await.unwrap().is_some());
+  let later = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+  let swept = teamcraft_server::services::backgrounds::sweep(&app.state, later)
+    .await
+    .unwrap();
+  assert!(swept >= 1);
+  assert!(store.object_size(&key).await.unwrap().is_none());
+  assert_eq!(
+    app
+      .post(&carol, "/me/backgrounds", json!({"size_bytes": 10}))
+      .await
+      .status,
+    StatusCode::CREATED
+  );
+  app.stop().await;
+}

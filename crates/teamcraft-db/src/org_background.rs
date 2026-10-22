@@ -1,5 +1,7 @@
 use teamcraft_proto::{OrgBackgroundId, UserId};
 
+use time::OffsetDateTime;
+
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, to_db};
@@ -47,7 +49,7 @@ impl Database {
   ) -> Result<Option<OrgBackgroundObject>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, s3_key, size_bytes, completed_at IS NOT NULL AS "is_complete!"
-         FROM org_backgrounds WHERE id = $1"#,
+         FROM org_backgrounds WHERE id = $1 AND deleted_at IS NULL"#,
       to_db(id),
     )
     .fetch_optional(self.pool())
@@ -74,14 +76,29 @@ impl Database {
     Ok(())
   }
 
-  /// Removes the row; returns its S3 key so the caller deletes the object.
+  /// Marks the background deleted; returns its S3 key so the caller deletes the object. The row
+  /// stays (and counts towards the limits) until [`Self::sweep_org_backgrounds`] removes it.
   pub async fn delete_org_background(&self, id: OrgBackgroundId) -> Result<Option<String>, DbError> {
     let key = sqlx::query_scalar!(
-      "DELETE FROM org_backgrounds WHERE id = $1 RETURNING s3_key",
+      "UPDATE org_backgrounds SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING s3_key",
       to_db(id),
     )
     .fetch_optional(self.pool())
     .await?;
     Ok(key)
+  }
+
+  /// Removes the rows deleted, or announced and never completed, before `before`; returns their
+  /// S3 keys so the caller deletes the objects (an expired upload URL can't recreate them).
+  pub async fn sweep_org_backgrounds(&self, before: OffsetDateTime) -> Result<Vec<String>, DbError> {
+    let keys = sqlx::query_scalar!(
+      "DELETE FROM org_backgrounds
+       WHERE deleted_at < $1 OR (completed_at IS NULL AND created_at < $1)
+       RETURNING s3_key",
+      before,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    Ok(keys)
   }
 }

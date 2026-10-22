@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, user_id, s3_key, size_bytes, completed_at IS NOT NULL AS \"is_complete!\"\n         FROM user_backgrounds WHERE id = $1",
+  "query": "SELECT id, user_id, s3_key, size_bytes, completed_at IS NOT NULL AS \"is_complete!\"\n         FROM user_backgrounds WHERE id = $1 AND deleted_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -67,5 +67,5 @@
       null
     ]
   },
-  "hash": "e87a58f3a8009e7e909ca6c6c08bed0f8b140678329c5fe6cb9098ce2757644a"
+  "hash": "a7d694d7dad6d542207dd817092e3c6a288ae0be8697d02c79c8142382b7fb2c"
 }
