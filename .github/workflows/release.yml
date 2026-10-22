@@ -34,7 +34,7 @@ jobs:
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
       image_owner: ${{ steps.version.outputs.image_owner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       # The tag must match the workspace version, so packages, images and the tag never disagree.
       - name: Tag matches the workspace version
         id: version
@@ -85,20 +85,20 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ needs.version.outputs.image_owner }}/${{ matrix.image }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
       # Pushed by digest only; the merge job puts both architectures under the version tags.
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: containers/${{ matrix.image }}.Containerfile
@@ -115,7 +115,7 @@ jobs:
         run: |
           mkdir -p "${RUNNER_TEMP}/digests"
           touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.image }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -136,13 +136,13 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ needs.version.outputs.image_owner }}/${{ matrix.image }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: digest-${{ matrix.image }}-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -150,7 +150,7 @@ jobs:
       # Semver tags: 1.2.3 and 1.2 for releases; prereleases (1.0.0-beta.1) only get their own tag.
       # No `latest`: deployments pin a version or a digest (docs/operations.md).
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           flavor: latest=false
@@ -181,7 +181,7 @@ jobs:
           output-file: out/${{ matrix.image }}-${{ needs.version.outputs.version }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-image-${{ matrix.image }}
           path: out/*
@@ -204,7 +204,7 @@ jobs:
       # we never use make room for them.
       - name: Free disk space on the runner
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - name: Build image
         run: docker build -t teamcraft-android-build:local apps/android/docker
       # Release builds are signed with the upload key when its secrets exist (README.md, "Signing"),
@@ -252,7 +252,7 @@ jobs:
           done
           rm -f apps/android/upload.keystore
           ls -l out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-android
           path: out/*.apk
@@ -268,8 +268,8 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Source SBOM (Cargo.lock and the Android/Gradle dependencies in the tree)

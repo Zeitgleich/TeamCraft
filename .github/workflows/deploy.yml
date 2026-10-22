@@ -34,7 +34,7 @@ jobs:
       run:
         working-directory: deploy
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -60,7 +60,7 @@ jobs:
     steps:
       - name: Free disk space on the runner
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: System packages

@@ -58,7 +58,7 @@ jobs:
         # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
         # the dependencies are fetched, and the build output only needs the space later.
         run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: check-${{ matrix.arch }}
@@ -106,7 +106,7 @@ jobs:
         # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
         # the dependencies are fetched, and the build output only needs the space later.
         run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.arch }}
@@ -131,7 +131,7 @@ jobs:
     env:
       RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: audio-processing
@@ -147,5 +147,5 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@v2
