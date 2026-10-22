@@ -1,0 +1,7 @@
+# Decrypted secrets never go into git
+*.dec.*
+*.plain.*
+*.retry
+.vault_pass
+# ansible-lint cache
+.ansible/

@@ -237,7 +237,9 @@ effect-bookshelf = Bookshelf
 effect-sunrise = Sunrise
 effect-forest = Forest
 effect-upload = Upload image
-effect-upload-soon = Own backgrounds are not available yet
+effect-upload-too-large = This picture is larger than { $limit }.
+effect-upload-unreadable = The picture could not be read.
+effect-delete = Delete background { $name }
 
 ## Incoming calls
 incoming-title = Incoming call
@@ -924,6 +926,15 @@ notif-browser-granted = Notifications are allowed in this browser.
 notif-browser-denied = Notifications are blocked. Allow them in the browser's site settings.
 notif-browser-allow = Allow notifications
 notif-browser-background = Notifications also arrive when TeamCraft is closed.
+
+log-toolbar-label = Log view options
+log-mode-log = Log
+log-mode-chat = Chat
+log-filter-level = Minimum level
+log-filter-text = Filter log text
+log-follow = Follow
+log-filter-none = No log entries match the filter.
+log-filter-truncated = Showing the newest { $count } matching entries.
 
 # Profiles, people and groups (v1 REST UI)
 profile-edit-title = Edit profile

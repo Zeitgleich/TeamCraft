@@ -6,7 +6,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use teamcraft_proto::BackgroundId;
+
 use crate::backend::ChatBackend;
+use crate::calls::BackgroundImageInfo;
 use crate::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, LogLevel, Message,
   MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
@@ -175,6 +178,9 @@ struct State {
   /// Thread replies per conversation, oldest first.
   replies: HashMap<ConversationId, Vec<Message>>,
   next_message_id: u64,
+  /// The user's own call backgrounds (only name and size; the mock keeps no pictures).
+  backgrounds: Vec<BackgroundImageInfo>,
+  next_background_id: u64,
 }
 
 impl MockBackend {
@@ -202,6 +208,8 @@ impl MockBackend {
       messages: HashMap::new(),
       replies: HashMap::new(),
       next_message_id: 1_000_000,
+      backgrounds: Vec::new(),
+      next_background_id: 1,
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -216,6 +224,25 @@ impl MockBackend {
 }
 
 impl ChatBackend for MockBackend {
+  fn background_images(&self) -> Vec<BackgroundImageInfo> {
+    self.state.borrow().backgrounds.clone()
+  }
+
+  fn add_background_image(&self, name: &str, picture: Vec<u8>) {
+    let mut state = self.state.borrow_mut();
+    let id = id_from_raw(state.next_background_id);
+    state.next_background_id += 1;
+    state.backgrounds.push(BackgroundImageInfo {
+      id,
+      name: name.to_owned(),
+      size_bytes: picture.len() as u64,
+    });
+  }
+
+  fn delete_background_image(&self, id: BackgroundId) {
+    self.state.borrow_mut().backgrounds.retain(|image| image.id != id);
+  }
+
   fn me(&self) -> User {
     self.state.borrow().users[0].clone()
   }

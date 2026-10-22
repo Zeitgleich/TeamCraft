@@ -10,6 +10,7 @@ pub mod actions;
 pub mod admin;
 pub mod backend;
 pub mod calls;
+pub mod log;
 pub mod model;
 pub mod remote;
 pub mod search;

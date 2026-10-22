@@ -1135,7 +1135,8 @@ select.input {
 }
 
 /* Compact log view for integration channels. Rows have a fixed height so the estimate is exact. */
-.msg-log {
+.msg-log,
+.log-entry {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1145,8 +1146,13 @@ select.input {
   white-space: nowrap;
 }
 
+.msg-log-batch {
+  padding: 0;
+}
+
 .msg-log:hover,
-.msg-log:focus {
+.msg-log:focus,
+.msg-log-batch:focus {
   background: var(--surface-2);
 }
 
@@ -1154,6 +1160,14 @@ select.input {
   flex: none;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.log-author {
+  flex: none;
+  max-width: 110px;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
 }
 
 .log-level {
@@ -3945,6 +3959,46 @@ select.input {
 .sidebar-head { display: flex; align-items: center; gap: .25rem; }
 .sidebar-head .space-name { flex: 1; }
 
+/* Toolbar of integration channels: Log/Chat switch, level and text filter, follow. */
+.log-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-mode {
+  display: flex;
+  gap: 4px;
+}
+
+.log-mode [aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.log-filter-text {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+
+.log-follow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.log-notice {
+  margin: 0;
+  padding: 4px 16px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
 /* Profiles and directory */
 .avatar-img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
 .profile-avatar-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; }
@@ -4006,3 +4060,34 @@ select.input {
 .history-versions h3 { font-size: .85em; color: var(--text-muted, #666); margin: .75rem 0 .15rem; }
 .diff-added { background: rgba(46, 160, 67, .25); border-radius: 2px; }
 .diff-removed { background: rgba(248, 81, 73, .25); text-decoration: line-through; border-radius: 2px; }
+/* Own background pictures: the delete button sits in the corner of the tile. */
+.effect-cell {
+  position: relative;
+  min-width: 0;
+}
+
+.effect-cell > .effect-tile {
+  width: 100%;
+}
+
+.effect-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 3px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  opacity: 0;
+}
+
+.effect-cell:hover .effect-delete,
+.effect-cell:focus-within .effect-delete {
+  opacity: 1;
+}
+
+.effect-custom .scene {
+  background: linear-gradient(135deg, #6b7a90, #2d3646);
+}

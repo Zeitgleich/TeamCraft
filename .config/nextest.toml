@@ -1,0 +1,15 @@
+# cargo-nextest settings (https://nexte.st). CI runs `cargo nextest run --profile ci`.
+
+[profile.default]
+# Tests that need a database or a dev stack skip themselves when it is missing; no retries hide
+# real flakiness.
+retries = 0
+slow-timeout = { period = "60s" }
+
+[profile.ci]
+retries = 0
+# Show every failure again at the end, so it is not buried in the log of a long run.
+failure-output = "immediate-final"
+status-level = "fail"
+final-status-level = "slow"
+slow-timeout = { period = "120s" }

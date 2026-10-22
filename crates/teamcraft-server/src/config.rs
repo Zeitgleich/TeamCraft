@@ -6,6 +6,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::Deserialize;
+use teamcraft_proto::{ConversationId, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
 /// `TEAMCRAFT_OIDC__ISSUER`, `TEAMCRAFT_OIDC__ROLES__GUEST`, `TEAMCRAFT_DATABASE__URL`.
@@ -174,6 +175,10 @@ pub struct PolicyConfig {
   pub guests_dm_only_with_shared_conversations: bool,
   /// Pending invites only apply to accounts whose identity provider verified the email address.
   pub invites_require_verified_email: bool,
+  /// Spaces (by ID) every new member joins on their first sign-in. Missing or archived ones are skipped.
+  pub default_spaces: Vec<SpaceId>,
+  /// Public channels (by ID) of the default spaces that new members join as well.
+  pub default_channels: Vec<ConversationId>,
 }
 
 /// Size limits of requests and results.
@@ -901,6 +906,8 @@ impl Default for PolicyConfig {
     Self {
       guests_dm_only_with_shared_conversations: true,
       invites_require_verified_email: true,
+      default_spaces: Vec::new(),
+      default_channels: Vec::new(),
     }
   }
 }
