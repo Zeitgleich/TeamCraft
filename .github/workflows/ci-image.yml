@@ -1,0 +1,100 @@
+name: CI image
+
+# Builds the image all CI jobs run in (containers/ci.Containerfile) for amd64 and arm64, each on a
+# native runner, and pushes it to ghcr.io. The jobs pin the image by digest: after a change, copy
+# the digest from the run summary into ci.yml and desktop-release.yml (the summary shows the
+# command).
+on:
+  push:
+    paths:
+      - containers/ci.Containerfile
+      - .github/workflows/ci-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/zeitgleich/teamcraft-ci
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: containers
+          file: containers/ci.Containerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # The cargo tools take a while to build; their layer is reused until a version changes.
+          cache-from: type=gha,scope=ci-image-${{ matrix.arch }}
+          cache-to: type=gha,scope=ci-image-${{ matrix.arch }},mode=max
+      - name: Keep the digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: multi-arch manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          tags="-t $IMAGE:sha-${GITHUB_SHA}"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then tags="$tags -t $IMAGE:latest"; fi
+          # shellcheck disable=SC2046,SC2086
+          docker buildx imagetools create $tags $(printf "$IMAGE@sha256:%s " *)
+      - name: Digest for the workflows
+        run: |
+          digest=$(docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA}" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          {
+            echo "### CI image"
+            echo
+            echo "\`$IMAGE@$digest\`"
+            echo
+            echo "Pin it in the workflows:"
+            echo
+            echo "\`\`\`sh"
+            echo "scripts/pin-ci-image.sh $digest"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
