@@ -7,16 +7,21 @@ use std::time::Duration;
 use anyhow::Context;
 use secrecy::ExposeSecret;
 use teamcraft_db::{Database, DatabaseOptions, SnowflakeGenerator};
+use teamcraft_proto::PermissionScheme;
 use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, RoleMapping, TokenValidator, ValidatorOptions,
 };
 use teamcraft_server::config::{CONFIG_PATH_ENV, Config};
+use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
 use teamcraft_server::router::router;
-use teamcraft_server::state::AppState;
+use teamcraft_server::services::presence::refresh_presence;
+use teamcraft_server::state::{AppState, Settings};
 use tokio::signal;
-use tracing::info;
+use tracing::{info, warn};
+
+const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -42,7 +47,18 @@ async fn main() -> anyhow::Result<()> {
     database,
     validator: Arc::new(build_validator(&config)?),
     ids: Arc::new(SnowflakeGenerator::new(config.server.worker_id).context("invalid server.worker_id")?),
+    hub: Arc::new(Hub::new(HubOptions {
+      resume_window: Duration::from_secs(config.gateway.resume_window_secs),
+      buffer_events: config.gateway.resume_buffer_events,
+    })),
+    scheme: Arc::new(PermissionScheme::default()),
+    settings: Arc::new(Settings {
+      policy: config.policy.clone(),
+      limits: config.limits.clone(),
+      gateway: config.gateway.clone(),
+    }),
   };
+  spawn_session_sweeper(state.clone());
 
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
@@ -52,6 +68,21 @@ async fn main() -> anyhow::Result<()> {
     .await?;
   info!("shut down");
   Ok(())
+}
+
+/// Drops gateway sessions nobody resumed within the window and updates presence for their users.
+fn spawn_session_sweeper(state: AppState) {
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(SESSION_SWEEP_INTERVAL);
+    loop {
+      interval.tick().await;
+      for user in state.hub.sweep_expired() {
+        if let Err(error) = refresh_presence(&state, user).await {
+          warn!(%error, "presence refresh failed");
+        }
+      }
+    }
+  });
 }
 
 fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {

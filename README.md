@@ -76,6 +76,13 @@ curl -H "Authorization: Bearer $(./dev/dev-token.py alice)" http://127.0.0.1:808
 access token. [teamcraft.example.toml](teamcraft.example.toml) documents every option; each can be
 overridden by a `TEAMCRAFT_<SECTION>__<KEY>` environment variable.
 
+### API
+
+REST under `/api/v1` (OpenAPI document at `/api/v1/openapi.json`, generated from the handlers) and the realtime
+WebSocket `/api/v1/gateway` ([docs/gateway.md](docs/gateway.md)). Messages are opaque ciphertext blobs the
+server stores and fans out; it never sees plaintext. Permissions are decided in one place,
+`teamcraft_proto::is_allowed` (PLAN.md §13).
+
 ### 3. Checks before committing
 
 ```sh
@@ -85,8 +92,9 @@ cargo test --workspace --all-features
 cargo deny check
 ```
 
-`--all-features` includes the `integration` tests of `teamcraft-db`, which create throwaway
-databases on the server named by `DATABASE_URL`:
+`--all-features` includes the `integration` tests of `teamcraft-db` and `teamcraft-server` (REST and gateway
+against the real router). They create throwaway databases on the server named by `DATABASE_URL` and skip
+without it:
 
 ```sh
 export DATABASE_URL=postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft
@@ -103,5 +111,5 @@ migration (migrations are forward-only and never edited after merge):
 ```sh
 export DATABASE_URL=postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft
 sqlx migrate run --source crates/teamcraft-db/migrations
-cargo sqlx prepare --workspace -- --all-targets
+cargo sqlx prepare --workspace -- -p teamcraft-db -p teamcraft-server --all-targets --all-features
 ```

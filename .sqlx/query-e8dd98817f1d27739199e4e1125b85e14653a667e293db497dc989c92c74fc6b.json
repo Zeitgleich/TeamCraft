@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO messages (id, conversation_id, thread_id, sender_device_id, sender_user_id, content_key_id,\n                               mentioned_user_ids, ciphertext, client_message_id, is_urgent)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bytea",
+        "Int8Array",
+        "Bytea",
+        "Bytea",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e8dd98817f1d27739199e4e1125b85e14653a667e293db497dc989c92c74fc6b"
+}

@@ -24,6 +24,12 @@ pub struct Config {
   pub oidc: OidcConfig,
   #[serde(default)]
   pub logging: LoggingConfig,
+  #[serde(default)]
+  pub policy: PolicyConfig,
+  #[serde(default)]
+  pub limits: LimitsConfig,
+  #[serde(default)]
+  pub gateway: GatewayConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +107,52 @@ pub struct LoggingConfig {
   pub format: LogFormat,
 }
 
+/// Instance policies with defaults (PLAN.md §12, §13). Later they move into signed, runtime-editable policy.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PolicyConfig {
+  /// Guests can only open DMs with people they share a conversation with.
+  pub guests_dm_only_with_shared_conversations: bool,
+  /// Pending invites only apply to accounts whose identity provider verified the email address.
+  pub invites_require_verified_email: bool,
+}
+
+/// Size limits of requests and results.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LimitsConfig {
+  pub max_ciphertext_bytes: usize,
+  pub max_mentions_per_message: usize,
+  pub max_group_dm_participants: usize,
+  pub max_name_length: usize,
+  pub max_text_length: usize,
+  pub default_page_size: u32,
+  pub max_page_size: u32,
+  pub max_directory_results: u32,
+}
+
+/// WebSocket gateway behaviour.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GatewayConfig {
+  /// Interval the client must heartbeat at.
+  pub heartbeat_interval_secs: u64,
+  /// A connection without any frame for this long is closed.
+  pub heartbeat_timeout_secs: u64,
+  /// How long a disconnected session can be resumed.
+  pub resume_window_secs: u64,
+  /// Events kept per session for resuming.
+  pub resume_buffer_events: usize,
+  /// Time a new connection has to identify.
+  pub identify_timeout_secs: u64,
+  /// Connections are closed after this long so that a fresh token is checked; clients resume.
+  pub connection_max_age_secs: u64,
+  /// A device that disconnected only counts as offline after this grace period (reconnects are common).
+  pub presence_offline_grace_secs: u64,
+  /// Largest accepted client frame.
+  pub max_frame_bytes: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
@@ -164,6 +216,45 @@ impl Default for RoleNames {
       admin: "admin".into(),
       member: "member".into(),
       guest: "guest".into(),
+    }
+  }
+}
+
+impl Default for PolicyConfig {
+  fn default() -> Self {
+    Self {
+      guests_dm_only_with_shared_conversations: true,
+      invites_require_verified_email: true,
+    }
+  }
+}
+
+impl Default for LimitsConfig {
+  fn default() -> Self {
+    Self {
+      max_ciphertext_bytes: 1024 * 1024,
+      max_mentions_per_message: 200,
+      max_group_dm_participants: 8,
+      max_name_length: 100,
+      max_text_length: 1000,
+      default_page_size: 50,
+      max_page_size: 200,
+      max_directory_results: 50,
+    }
+  }
+}
+
+impl Default for GatewayConfig {
+  fn default() -> Self {
+    Self {
+      heartbeat_interval_secs: 30,
+      heartbeat_timeout_secs: 90,
+      resume_window_secs: 120,
+      resume_buffer_events: 1000,
+      identify_timeout_secs: 10,
+      connection_max_age_secs: 3600,
+      presence_offline_grace_secs: 5,
+      max_frame_bytes: 64 * 1024,
     }
   }
 }
@@ -244,6 +335,26 @@ mod tests {
     assert_eq!(config.database.max_connections, 10);
     assert_eq!(config.logging.format, LogFormat::Pretty);
     assert!(config.oidc.maybe_jwks_uri.is_none());
+  }
+
+  #[test]
+  fn example_file_parses_and_matches_the_defaults() {
+    let text = include_str!("../../../teamcraft.example.toml");
+    let config = Config::from_toml(text).unwrap();
+    assert_eq!(config.limits.max_page_size, LimitsConfig::default().max_page_size);
+    assert_eq!(
+      config.gateway.resume_buffer_events,
+      GatewayConfig::default().resume_buffer_events
+    );
+    assert_eq!(
+      config.gateway.max_frame_bytes,
+      GatewayConfig::default().max_frame_bytes
+    );
+    assert_eq!(
+      config.policy.guests_dm_only_with_shared_conversations,
+      PolicyConfig::default().guests_dm_only_with_shared_conversations
+    );
+    assert_eq!(config.server.listen_addr, ServerConfig::default().listen_addr);
   }
 
   #[test]

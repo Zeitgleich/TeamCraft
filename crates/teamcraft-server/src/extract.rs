@@ -1,0 +1,50 @@
+//! Request extractors whose rejections are `ErrorBody` responses instead of plain text.
+
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{FromRequest, FromRequestParts, Request};
+use axum::http::request::Parts;
+use serde::de::DeserializeOwned;
+
+use crate::error::ApiError;
+
+/// JSON request body.
+pub struct ApiJson<T>(pub T);
+
+/// URL path parameters.
+pub struct ApiPath<T>(pub T);
+
+/// URL query string.
+pub struct ApiQuery<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
+  type Rejection = ApiError;
+
+  async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+    axum::Json::<T>::from_request(request, state)
+      .await
+      .map(|axum::Json(value)| Self(value))
+      .map_err(|rejection: JsonRejection| ApiError::InvalidRequest(rejection.body_text()))
+  }
+}
+
+impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for ApiPath<T> {
+  type Rejection = ApiError;
+
+  async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+    axum::extract::Path::<T>::from_request_parts(parts, state)
+      .await
+      .map(|axum::extract::Path(value)| Self(value))
+      .map_err(|rejection: PathRejection| ApiError::InvalidRequest(rejection.body_text()))
+  }
+}
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for ApiQuery<T> {
+  type Rejection = ApiError;
+
+  async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+    axum::extract::Query::<T>::from_request_parts(parts, state)
+      .await
+      .map(|axum::extract::Query(value)| Self(value))
+      .map_err(|rejection: QueryRejection| ApiError::InvalidRequest(rejection.body_text()))
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO memberships (conversation_id, user_id, role)\n           SELECT c.id, $2, 'member' FROM conversations c\n           WHERE c.id = ANY($1) AND c.space_id = $3 AND c.kind = 'channel'\n           ON CONFLICT DO NOTHING RETURNING conversation_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "conversation_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5587ad361aee9397dab75fa964d3d92008aa4c758a138f4844f50d1666187f80"
+}

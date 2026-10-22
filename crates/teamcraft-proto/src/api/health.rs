@@ -1,5 +1,3 @@
-//! Request and response bodies of the REST API (`/api/v1`).
-
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 

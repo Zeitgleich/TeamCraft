@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO memberships (conversation_id, user_id, role) VALUES ($1, $2, $3)\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b1ad06261a1c083cf2af61d7a1bf1f296d0132e897326a34dfa7b9b0c21040ac"
+}

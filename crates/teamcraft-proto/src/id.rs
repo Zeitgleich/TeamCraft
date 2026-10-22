@@ -180,6 +180,14 @@ define_id!(
   MessageId
 );
 define_id!(
+  /// An admin-defined category of channels inside a space.
+  CategoryId
+);
+define_id!(
+  /// A pending invitation.
+  InviteId
+);
+define_id!(
   /// A thread, identified by the ID of its root message.
   ThreadId
 );

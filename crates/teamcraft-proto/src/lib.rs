@@ -4,17 +4,26 @@
 //! older clients survive new server variants (api-conventions.md).
 
 mod api;
+mod bytes;
 mod conversation;
 mod error;
+mod gateway;
 mod id;
+mod permission;
 mod role;
 mod wire_enum;
 
-pub use api::{GetMeResponse, HealthResponse, HealthStatus};
+pub use api::*;
+pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, UnixMillis};
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};
+pub use gateway::{GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
-  ConversationId, DeviceId, Id, IdError, MessageId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS,
-  SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId, ThreadId, UserId,
+  CategoryId, ConversationId, DeviceId, Id, IdError, InviteId, MessageId, SNOWFLAKE_EPOCH_MS,
+  SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId, ThreadId, UserId,
+};
+pub use permission::{
+  ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,
+  PermissionScope, SchemeRole, SpaceContext, SpaceRole, Target, is_allowed,
 };
 pub use role::Role;

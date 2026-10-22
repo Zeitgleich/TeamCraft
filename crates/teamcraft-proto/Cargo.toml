@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true

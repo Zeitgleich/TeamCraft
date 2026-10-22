@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use teamcraft_db::DbError;
 use teamcraft_proto::{ErrorBody, ErrorCode};
@@ -14,16 +14,75 @@ pub enum ApiError {
   Auth(#[from] AuthError),
   #[error(transparent)]
   Database(#[from] DbError),
+  /// The thing doesn't exist or the caller may not know that it exists.
+  #[error("{what} not found")]
+  NotFound { code: ErrorCode, what: &'static str },
+  #[error("forbidden: {0}")]
+  Forbidden(String),
+  #[error("invalid request: {0}")]
+  InvalidRequest(String),
+  #[error("conflict: {0}")]
+  Conflict(String),
+  #[error("payload too large: {0}")]
+  PayloadTooLarge(String),
   #[error("internal error: {0}")]
   Internal(String),
 }
 
 impl ApiError {
+  pub fn space_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::SpaceNotFound,
+      what: "space",
+    }
+  }
+
+  pub fn conversation_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::ChannelNotFound,
+      what: "conversation",
+    }
+  }
+
+  pub fn user_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::UserNotFound,
+      what: "user",
+    }
+  }
+
+  pub fn device_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::DeviceNotFound,
+      what: "device",
+    }
+  }
+
+  pub fn category_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::CategoryNotFound,
+      what: "category",
+    }
+  }
+
+  pub fn invite_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::InviteNotFound,
+      what: "invite",
+    }
+  }
+
   pub fn status(&self) -> StatusCode {
     match self {
       Self::Auth(AuthError::MissingToken | AuthError::InvalidToken(_)) => StatusCode::UNAUTHORIZED,
-      Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated) => StatusCode::FORBIDDEN,
+      Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated) | Self::Forbidden(_) => {
+        StatusCode::FORBIDDEN
+      },
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
+      Self::NotFound { .. } => StatusCode::NOT_FOUND,
+      Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+      Self::Conflict(_) => StatusCode::CONFLICT,
+      Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
   }
@@ -33,8 +92,12 @@ impl ApiError {
       Self::Auth(AuthError::MissingToken) => ErrorCode::Unauthorized,
       Self::Auth(AuthError::InvalidToken(_)) => ErrorCode::InvalidToken,
       Self::Auth(AuthError::NoTeamcraftRole) => ErrorCode::NoTeamcraftRole,
-      Self::Auth(AuthError::AccountDeactivated) => ErrorCode::Forbidden,
+      Self::Auth(AuthError::AccountDeactivated) | Self::Forbidden(_) => ErrorCode::Forbidden,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
+      Self::NotFound { code, .. } => code.clone(),
+      Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
+      Self::Conflict(_) => ErrorCode::Conflict,
+      Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
       Self::Database(_) | Self::Internal(_) => ErrorCode::Internal,
     }
   }
@@ -44,7 +107,7 @@ impl ApiError {
     match self {
       Self::Auth(AuthError::KeysUnavailable(_)) => "authentication is temporarily unavailable".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
-      Self::Auth(other) => other.to_string(),
+      other => other.to_string(),
     }
   }
 }
@@ -60,10 +123,9 @@ impl IntoResponse for ApiError {
     let body = ErrorBody::new(self.error_code(), self.public_message());
     let mut response = (self.status(), Json(body)).into_response();
     if self.status() == StatusCode::UNAUTHORIZED {
-      response.headers_mut().insert(
-        axum::http::header::WWW_AUTHENTICATE,
-        axum::http::HeaderValue::from_static("Bearer"),
-      );
+      response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     }
     response
   }
@@ -105,6 +167,70 @@ mod tests {
     for (auth, status, code) in cases {
       let error = ApiError::from(auth);
       assert_eq!((error.status(), error.error_code()), (status, code));
+    }
+  }
+
+  #[test]
+  fn domain_errors_map_to_status_and_code() {
+    let cases = [
+      (
+        ApiError::space_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::SpaceNotFound,
+      ),
+      (
+        ApiError::conversation_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::ChannelNotFound,
+      ),
+      (
+        ApiError::user_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::UserNotFound,
+      ),
+      (
+        ApiError::device_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::DeviceNotFound,
+      ),
+      (
+        ApiError::category_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::CategoryNotFound,
+      ),
+      (
+        ApiError::invite_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::InviteNotFound,
+      ),
+      (
+        ApiError::Forbidden("x".into()),
+        StatusCode::FORBIDDEN,
+        ErrorCode::Forbidden,
+      ),
+      (
+        ApiError::InvalidRequest("x".into()),
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidRequest,
+      ),
+      (
+        ApiError::Conflict("x".into()),
+        StatusCode::CONFLICT,
+        ErrorCode::Conflict,
+      ),
+      (
+        ApiError::PayloadTooLarge("x".into()),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorCode::PayloadTooLarge,
+      ),
+      (
+        ApiError::Internal("x".into()),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::Internal,
+      ),
+    ];
+    for (error, status, code) in cases {
+      assert_eq!((error.status(), error.error_code()), (status, code), "{error}");
     }
   }
 

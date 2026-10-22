@@ -32,6 +32,9 @@ pub struct TokenIdentity {
   pub subject: String,
   pub maybe_username: Option<String>,
   pub display_name: String,
+  pub maybe_email: Option<String>,
+  /// The provider verified the email address (`email_verified` claim).
+  pub is_email_verified: bool,
   pub role: Role,
 }
 
@@ -46,6 +49,10 @@ struct AccessClaims {
   preferred_username: Option<String>,
   #[serde(default)]
   name: Option<String>,
+  #[serde(default)]
+  email: Option<String>,
+  #[serde(default)]
+  email_verified: bool,
   #[serde(default)]
   resource_access: HashMap<String, ClientAccess>,
 }
@@ -133,6 +140,8 @@ impl TokenValidator {
       subject: claims.sub,
       maybe_username: claims.preferred_username,
       display_name,
+      maybe_email: claims.email,
+      is_email_verified: claims.email_verified,
       role,
     })
   }
@@ -198,6 +207,22 @@ mod tests {
     assert_eq!(identity.subject, "user-1");
     assert_eq!(identity.display_name, "Alice Example");
     assert_eq!(identity.maybe_username.as_deref(), Some("alice"));
+    assert_eq!(identity.maybe_email.as_deref(), Some("alice@example.com"));
+    assert!(identity.is_email_verified);
+  }
+
+  #[test]
+  fn unverified_email_is_flagged() {
+    let token = sign(&claims(json!({"email_verified": false})));
+    assert!(
+      !validator()
+        .verify(&token, &public_key())
+        .unwrap()
+        .is_email_verified
+    );
+    let token = sign(&claims(json!({"email_verified": null, "email": null})));
+    let identity = validator().verify(&token, &public_key()).unwrap();
+    assert_eq!((identity.maybe_email, identity.is_email_verified), (None, false));
   }
 
   #[test]
@@ -401,6 +426,8 @@ mod tests {
       "exp": now() + 300,
       "preferred_username": "alice",
       "name": "Alice Example",
+      "email": "alice@example.com",
+      "email_verified": true,
       "resource_access": {CLIENT: {"roles": ["member"]}},
     });
     if let (Some(base), Some(extra)) = (claims.as_object_mut(), overrides.as_object()) {

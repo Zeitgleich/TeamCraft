@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM memberships x JOIN memberships y ON x.conversation_id = y.conversation_id\n                       WHERE x.user_id = $1 AND y.user_id = $2) AS \"found!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d3e9eb30c796f23449eff2022fe7cc74d67de93e96b776001dc1c1d3d5ccdc99"
+}

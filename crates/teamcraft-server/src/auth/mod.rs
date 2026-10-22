@@ -6,11 +6,11 @@ mod jwks;
 mod roles;
 mod validator;
 
-#[cfg(test)]
-mod test_keys;
+#[cfg(any(test, feature = "integration"))]
+pub mod test_keys;
 
 pub use error::AuthError;
 pub use extractor::AuthenticatedUser;
-pub use jwks::{HttpJwkSource, JwkSource, JwksCache, JwksCacheOptions};
+pub use jwks::{BoxFuture, HttpJwkSource, JwkSource, JwksCache, JwksCacheOptions};
 pub use roles::RoleMapping;
 pub use validator::{TokenIdentity, TokenValidator, ValidatorOptions};

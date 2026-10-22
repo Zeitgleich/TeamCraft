@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE invites SET accepted_at = now(), accepted_by = $2\n         WHERE lower(email) = lower($1) AND accepted_at IS NULL AND (expires_at IS NULL OR expires_at > now())\n         RETURNING space_id, space_role, channel_ids, sponsor_user_id, expires_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "space_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "invites",
+            "name": "space_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "space_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "invites",
+            "name": "space_role"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "channel_ids",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "invites",
+            "name": "channel_ids"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "sponsor_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "invites",
+            "name": "sponsor_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "invites",
+            "name": "expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "bf936cbb4264de487affe3b2c847afccb42e5e7b6cae80076e4c12a19d85ce95"
+}

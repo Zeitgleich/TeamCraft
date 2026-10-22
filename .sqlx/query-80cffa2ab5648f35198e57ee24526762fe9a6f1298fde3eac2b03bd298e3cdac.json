@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE memberships SET last_read_message_id = GREATEST(COALESCE(last_read_message_id, 0), $3)\n         WHERE conversation_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "80cffa2ab5648f35198e57ee24526762fe9a6f1298fde3eac2b03bd298e3cdac"
+}

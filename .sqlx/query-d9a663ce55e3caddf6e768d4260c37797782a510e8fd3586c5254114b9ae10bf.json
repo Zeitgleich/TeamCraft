@@ -1,0 +1,137 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, client_message_id, conversation_id, sender_user_id, sender_device_id, thread_id,\n                mentioned_user_ids, is_urgent, content_key_id, ciphertext AS \"ciphertext?\"\n         FROM messages WHERE id = $1 AND conversation_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "client_message_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "client_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "sender_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "sender_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "sender_device_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "sender_device_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "mentioned_user_ids",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "mentioned_user_ids"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "is_urgent",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "is_urgent"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "content_key_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "content_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "ciphertext?",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d9a663ce55e3caddf6e768d4260c37797782a510e8fd3586c5254114b9ae10bf"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT m.conversation_id AS \"id!\"\n         FROM memberships m JOIN users u ON u.id = m.user_id\n         WHERE m.conversation_id = ANY($1) AND u.kind = 'guest'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "conversation_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2c2e00660fb039bec54275656cf138173bd272930c5f61fae71e7486f2f80bd9"
+}

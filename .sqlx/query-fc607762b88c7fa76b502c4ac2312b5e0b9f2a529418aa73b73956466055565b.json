@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT b.user_id AS \"id!\"\n         FROM memberships a JOIN memberships b ON a.conversation_id = b.conversation_id\n         WHERE a.user_id = $1 AND b.user_id <> $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fc607762b88c7fa76b502c4ac2312b5e0b9f2a529418aa73b73956466055565b"
+}

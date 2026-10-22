@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channel_categories SET name = COALESCE($2, name), position = COALESCE($3, position) WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "699f6e825e8430fdda822b8fa8c932d5792f6557d6e820834e18d6eacadd90ea"
+}

@@ -1,11 +1,12 @@
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
-use teamcraft_db::{OidcIdentity, User, UserKind};
+use teamcraft_db::User;
 use teamcraft_proto::Role;
 
 use super::error::AuthError;
 use crate::error::ApiError;
+use crate::services::accounts;
 use crate::state::AppState;
 
 /// The caller of a request: a valid bearer token plus the matching user row.
@@ -25,35 +26,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
   async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
     let token = bearer_token(parts)?;
     let identity = state.validator.validate(token).await?;
-
-    let kind = match identity.role {
-      Role::Guest => UserKind::Guest,
-      _ => UserKind::Member,
-    };
-    let new_id = state
-      .ids
-      .next_id()
-      .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let user = state
-      .database
-      .sync_oidc_user(
-        &OidcIdentity {
-          issuer: &identity.issuer,
-          subject: &identity.subject,
-          maybe_username: identity.maybe_username.as_deref(),
-          display_name: &identity.display_name,
-          kind,
-        },
-        new_id,
-      )
-      .await?;
-    if user.is_deactivated {
-      return Err(AuthError::AccountDeactivated.into());
-    }
-    Ok(Self {
-      user,
-      role: identity.role,
-    })
+    accounts::authenticate(state, identity).await
   }
 }
 

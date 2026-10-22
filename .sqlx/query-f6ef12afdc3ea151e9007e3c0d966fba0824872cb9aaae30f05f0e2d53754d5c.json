@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, display_name, kind)\n         VALUES ($1, $2, $3, $4, $5, $6)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               display_name = EXCLUDED.display_name,\n               kind = EXCLUDED.kind\n         RETURNING id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS \"is_deactivated!\"",
+  "query": "SELECT id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users WHERE id = ANY($1) ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -67,12 +67,7 @@
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text"
+        "Int8Array"
       ]
     },
     "nullable": [
@@ -84,5 +79,5 @@
       null
     ]
   },
-  "hash": "37a02241c88f29b997e12cf5997ef7045ba9e6f7f5c58b22d7c89e398fb43371"
+  "hash": "f6ef12afdc3ea151e9007e3c0d966fba0824872cb9aaae30f05f0e2d53754d5c"
 }
