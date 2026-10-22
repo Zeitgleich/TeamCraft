@@ -18,6 +18,12 @@ example; do not use its credentials in production.
 | Service account roles                  | `realm-management`: `view-users`, `query-users`, `query-groups`, `view-realm`, `view-clients`, `query-clients`                                    |
 | Realm token lifespan                   | Short access tokens (the dev realm uses a few minutes); the gateway re-checks every hour                                                          |
 
+With [several brands](configuration.md#several-brands-on-one-server) every brand host name goes into the
+client's **valid redirect URIs**, **web origins** and **post logout redirect URIs** (for example
+`https://chat.brand-a.example.com/*`); one client serves all brands. To show people's **organization**, add
+a token mapper to the client (a user attribute or the group name, "Add to access token") and set
+`organization_claim` in `[oidc]` to its claim name.
+
 The server needs no secrets from the public client. The client names and role names are
 configurable ([Configuration](configuration.md)); the reference names above are the defaults.
 

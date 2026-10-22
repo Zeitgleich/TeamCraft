@@ -82,7 +82,7 @@ Validation at startup (the server refuses to start otherwise):
   IP literals are not allowed (a brand needs a name a certificate can cover); `localhost` is allowed;
 - colors are `#rgb` or `#rrggbb` hex values (nothing else is ever emitted into CSS, §4);
 - asset names are relative, without `..`, and the files exist and are regular files below
-  `assets_dir`; size limit per file (`[limits].max_brand_asset_bytes`, default 512 KiB);
+  `assets_dir`; size limit per file (`[branding].max_asset_bytes`, default 512 KiB);
 - URLs are `https://` (or `http://` for localhost);
 - `connect_origins` are origins as in `[web]`.
 
@@ -99,7 +99,8 @@ parameter, not a cookie, not a header other than `Host` (and `X-Forwarded-Host` 
 3. Match: that brand. No match: `unknown_host = "default"` serves the default brand but **marks the
    response so that nothing host-derived is reflected** (links use the default brand's first host name,
    never the received host); `unknown_host = "reject"` answers `421 Misdirected Request` with error code
-   `unknown_host` for every route except `/healthz` and `/readyz` (probes use IP or internal names).
+   `unknown_host` for every route except `/healthz`, `/readyz`, `/api/internal/*` and the back-channel
+   logout (probes and the identity provider reach the server by IP or internal names).
 
 The brand description sent to the client contains configured values only. The received host name is
 never copied into a response, a link, an e-mail or a redirect.
@@ -125,14 +126,17 @@ of the request host:
 - Asset URLs are relative; asset bytes come from `GET /api/v1/brand/assets/{slot}` (slot = `logo`, `logo_dark`,
   `icon`, `icon_dark`, `favicon`, `favicon_dark`) for the request brand. Slots are an enum, not file
   names: no path from the client ever reaches the file system. Content type from the extension
-  (svg, png, jpeg, webp, ico); SVG is served with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`,
-  `nosniff`, and only as an image (never navigated to inline scripts). Cache: `public, max-age=3600` plus an
-  `ETag`; `Vary: Host`.
+  (svg, png, jpeg, webp, ico); SVG is served with the API's `Content-Security-Policy: default-src 'none'` and `nosniff`,
+  so it cannot run script when opened as a page. Cache: `public, max-age=300` plus an `ETag`; `Vary: Host`.
 - `GET /api/v1/brand/theme.css` returns the brand's colors as CSS custom properties (light, dark by
   `prefers-color-scheme` and `[data-theme]` like `main.css`). It exists because the CSP forbids inline
   styles: the web shell links it before the first paint, so there is no flash of the default colors.
   Only hex colors that passed validation are written; the CSS contains no other configured text.
-- The unauthenticated response is the same for every caller of one host; `Vary: Host`.
+- The unauthenticated responses are the same for every caller of one host, `Vary: Host`, cacheable for
+  five minutes. They count against the per-address request limit but not against the stricter limit of
+  the credential-less endpoints, because one page load makes several of these requests.
+- `GET /api/v1/brands` (signed in) lists `id`, `display_name` and colors of all brands, default first,
+  without host names. It serves the space brand tag (§7).
 
 Color keys map to the UI tokens:
 
@@ -157,18 +161,22 @@ validated like the global one.
 
 ## 5. Clients
 
-- **Web**: served from the brand host. The shell links `/api/v1/brand/theme.css`, then fetches
-  `/api/v1/brand` (same origin) to render logo, title, login text and links; the result is cached in
-  `localStorage` keyed by origin so the next start paints immediately and refreshes in the background.
-- **Desktop, Android, iOS**: the user enters the server URL (any of the brand host names). The client
-  calls `GET <url>/api/v1/brand`, caches the result (per server URL, secure storage or settings), and
-  applies it. A cached brand is only used for that exact URL. Brand data comes from the server the
-  user chose; the app never swaps URLs based on brand data (`origin` is informational and must equal
-  the entered origin or the client ignores the response).
+- **Web**: served from the brand host. `index.html` links `/api/v1/brand/theme.css` after the app's own
+  stylesheet, then the app fetches `/api/v1/brand` (same origin) to render logo, title, login text and
+  links; the answer is cached in `localStorage` keyed by server URL, so the next start paints
+  immediately and refreshes in the background.
+- **Desktop, Android, iOS**: the app asks the server URL it is configured with (any host name of a
+  brand) for `GET <url>/api/v1/brand` without credentials (the desktop shell has a `public_get`
+  command for it), caches the answer per server URL and applies it. A cached brand is only used for that
+  exact URL. Brand data comes from the server the user chose; the app never changes the server URL
+  based on brand data. `origin` is informational: a brand may have several host names, so it is not
+  compared with the entered URL.
+- **Checking**: all platforms run the same checks (`teamcraft-client-api::brand`): only known color
+  keys with `#rgb`/`#rrggbb` values, only asset paths of the brand endpoint (made absolute on the
+  server URL), only https links (http for localhost), bounded text lengths.
 - **Applying**: CSS custom properties are set through the CSSOM (`style.setProperty`, allowed under the
-  CSP) from validated hex colors; images through `<img src>` of the asset URLs; the document title and
-  favicon follow the brand. Unknown color keys and non-hex values are ignored by the client as well.
-- Light/dark: the client uses the `*_dark` assets and the `dark` colors when the effective theme is dark.
+  CSP); images through `<img src>`; the document title and favicon follow the brand. The effective
+  theme (setting, else the system) picks the `*_dark` assets and the `dark` colors.
 
 ## 6. Things that use the brand of the recipient
 
@@ -177,45 +185,49 @@ exists (a user clicks something) the request brand is used instead.
 
 | Surface                        | Brand used                                    | Effect                                                  |
 |--------------------------------|-----------------------------------------------|---------------------------------------------------------|
-| Invitation / activation e-mail | Request brand of the inviter's request        | Sender name, optional From address, texts, link host    |
+| Invitation / activation e-mail | Recipient's domain brand, else request brand  | Sender name, optional From address, texts, link host    |
 | Meeting invitations (iMIP)     | Organizer's home brand                        | ORGANIZER CN, From name, join link host                 |
 | Push / notification text       | Recipient's home brand                        | Notification title/icon name (content stays encrypted)  |
 | E-mail digests                 | Recipient's home brand                        | Sender, footer, links                                   |
 | Share-link page                | Brand that created the link                   | Page title, logo; link only works on that brand's hosts |
 | Guest meeting links            | Brand of the meeting (organizer's home brand) | Join page branding, link host                           |
 
-Every generated link uses the first host name of the chosen brand, never the received host.
+Every generated link uses the first host name of the chosen brand, never the received host. Implemented
+today: invitation and activation e-mail, meeting invitations (iMIP, join links, CalDAV events) and share
+links; push texts and digests follow when those exist.
 
 ## 7. Spaces and brands
 
 A space can carry an optional brand tag (`brand_id`). It is a default theme hint: when a user opens a
-space tagged with a brand, the UI may show that brand's accent color on the space's rail icon and
-header. It does not restrict membership or visibility and never changes the signed-in brand. Admins
-set it in the space settings; an unknown id is rejected. The tag is server-visible metadata (like
-the space's existence), not secret.
+space tagged with a brand, the UI may show that brand's accent color (from `GET /api/v1/brands`) on the
+space's rail icon and header. It does not restrict membership or visibility and never changes the
+signed-in brand. Admins set it with `PATCH /api/v1/spaces/{id}` (`brand_id`; an unknown id is rejected,
+an empty string clears it). The tag is server-visible metadata (like the space's existence), not secret.
 
 ## 8. Share links
 
-A share link records the brand that created it. `GET /api/v1/shares/{id}` (info), `.../download` and
-the `/f/{id}` page answer `404 share_not_found` on a host that belongs to a different brand.
-Reason: the link text a recipient sees names a host; if the same path worked on every domain, a
-look-alike configuration or a mis-routed domain could present a file under another company's name.
-If the creating brand is later removed from the configuration, its links resolve under the default
-brand.
+A share link records the brand that created it. `GET /api/v1/shares/{id}` (info) and `.../download`
+answer `410 share_unavailable` (the same answer as for expired links) on a host that belongs to a
+different brand or on an unknown host. The app shell served at `/f/{id}` leaks nothing by itself: it asks
+the info endpoint and shows "not available". Reason: the link text a recipient sees names a host; if the
+same path worked on every domain, a look-alike configuration or a mis-routed domain could present a file
+under another company's name. The URL shown to the creator is `<brand origin>/f/<id>` (the brand's first
+host name, else `[shares].public_base_url`). If the creating brand is later removed from the
+configuration, its links belong to the default brand; links from before brands existed work on every host.
 
 ## 9. Organization
 
-An optional label per user, synchronized from the identity provider.
+An optional label per user, taken from the identity provider.
 
-- `[oidc.organization]`: `claim = "organization"` (a claim of the ID token) or `group_prefix`
-  (e.g. `/organizations/` for Keycloak group paths; first match wins). Both optional; default off.
-- Stored in `users.organization` (text, at most `[limits].max_profile_text_chars`), updated at login
-  and by the periodic OIDC sync. Not editable by the user (the provider is the source of truth).
-- Shown as a badge next to the name in the profile card, the member directory and the mention picker.
-  The directory filters by organization (`GET /api/v1/users/search?organization=...`; the list of
-  existing organizations comes from `GET /api/v1/organizations`). Guests do not see the directory, so
-  they do not see organizations of others except in conversations they are in, where the profile
-  already shows.
+- `[oidc] organization_claim = "organization"`: name of the access-token claim (a string, or a list whose
+  first entry counts; at most 100 characters, no control characters). Unset: nobody has an
+  organization. In Keycloak add a token mapper (user attribute, or group name) to the app client.
+- Stored in `users.organization`, updated at every sign-in where the claim is configured (a token
+  without the claim clears it). Not editable by the user: the provider is the source of truth.
+- Shown as a badge next to the name in the member list, the directory, the profile card and the mention
+  suggestions. The directory filters by organization (`GET /api/v1/users?organization=...`;
+  `GET /api/v1/organizations` lists the existing ones). Guests get an empty list and, like
+  everywhere, see only people they share a conversation with.
 - It is display data. No permission and no brand depends on it.
 
 ## 10. OIDC and Caddy
@@ -259,3 +271,12 @@ An optional label per user, synchronized from the identity provider.
 4. **Push notification branding** on iOS/Android depends on one app per store listing; per-brand apps are
    out of scope, only the in-app theme and the notification text name follow the brand.
 5. **Space brand tag** is a theming hint only; should it also limit who can be invited from which domain?
+
+## 13. What is not there yet
+
+- The space settings dialog has no brand picker; the tag is set through the API.
+- Notification texts (push) and e-mail digests do not exist yet; they will take the recipient's home brand
+  from `BrandRegistry::for_email` when they do.
+- Android and iOS shells call `GET /api/v1/brand` and run `teamcraft-client-api::brand` once they get a
+  server-URL screen; the server and the checks are ready.
+- One OIDC client for all brands (§10).
