@@ -106,6 +106,9 @@ jobs:
     # Each slice is compiled for its own architecture, so the OpenH264 download picks the matching
     # Cisco library at runtime (openh264_library.rs).
     runs-on: macos-15
+    env:
+      # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
