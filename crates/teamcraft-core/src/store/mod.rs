@@ -16,7 +16,7 @@ mod sqlite;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
 pub use memory::MemoryStore;
