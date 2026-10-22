@@ -10,6 +10,10 @@ use super::{BackgroundImage, EffectsError};
 /// A built-in photo background.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PhotoBackground {
+  MeetingRoom,
+  OpenPlanOffice,
+  HomeOffice,
+  MinimalOffice,
   LivingRoom,
   BrightRoom,
   LibraryShelves,
@@ -25,7 +29,11 @@ pub enum PhotoBackground {
 }
 
 impl PhotoBackground {
-  pub const ALL: [Self; 12] = [
+  pub const ALL: [Self; 16] = [
+    Self::MeetingRoom,
+    Self::OpenPlanOffice,
+    Self::HomeOffice,
+    Self::MinimalOffice,
     Self::LivingRoom,
     Self::BrightRoom,
     Self::LibraryShelves,
@@ -43,6 +51,10 @@ impl PhotoBackground {
   /// File name (without `.jpg`) in `assets/backgrounds/`, the same identifier the UI uses.
   pub fn slug(self) -> &'static str {
     match self {
+      Self::MeetingRoom => "meeting-room",
+      Self::OpenPlanOffice => "open-plan-office",
+      Self::HomeOffice => "home-office",
+      Self::MinimalOffice => "minimal-office",
       Self::LivingRoom => "living-room",
       Self::BrightRoom => "bright-room",
       Self::LibraryShelves => "library-shelves",
@@ -65,6 +77,10 @@ impl PhotoBackground {
   /// The compiled-in JPEG file (1920x1080).
   pub fn jpeg(self) -> &'static [u8] {
     match self {
+      Self::MeetingRoom => include_bytes!("../../../../assets/backgrounds/meeting-room.jpg"),
+      Self::OpenPlanOffice => include_bytes!("../../../../assets/backgrounds/open-plan-office.jpg"),
+      Self::HomeOffice => include_bytes!("../../../../assets/backgrounds/home-office.jpg"),
+      Self::MinimalOffice => include_bytes!("../../../../assets/backgrounds/minimal-office.jpg"),
       Self::LivingRoom => include_bytes!("../../../../assets/backgrounds/living-room.jpg"),
       Self::BrightRoom => include_bytes!("../../../../assets/backgrounds/bright-room.jpg"),
       Self::LibraryShelves => include_bytes!("../../../../assets/backgrounds/library-shelves.jpg"),

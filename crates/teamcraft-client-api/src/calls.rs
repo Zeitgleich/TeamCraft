@@ -165,6 +165,10 @@ pub struct BackgroundImageInfo {
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundPreset {
   // Photos.
+  MeetingRoom,
+  OpenPlanOffice,
+  HomeOffice,
+  MinimalOffice,
   LivingRoom,
   BrightRoom,
   LibraryShelves,
@@ -195,7 +199,11 @@ pub enum EffectGroup {
 }
 
 impl BackgroundPreset {
-  pub const PHOTOS: [BackgroundPreset; 12] = [
+  pub const PHOTOS: [BackgroundPreset; 16] = [
+    Self::MeetingRoom,
+    Self::OpenPlanOffice,
+    Self::HomeOffice,
+    Self::MinimalOffice,
     Self::LivingRoom,
     Self::BrightRoom,
     Self::LibraryShelves,
@@ -216,6 +224,10 @@ impl BackgroundPreset {
   /// (`assets/backgrounds/<slug>.jpg`) and part of its i18n key.
   pub fn slug(self) -> &'static str {
     match self {
+      Self::MeetingRoom => "meeting-room",
+      Self::OpenPlanOffice => "open-plan-office",
+      Self::HomeOffice => "home-office",
+      Self::MinimalOffice => "minimal-office",
       Self::LivingRoom => "living-room",
       Self::BrightRoom => "bright-room",
       Self::LibraryShelves => "library-shelves",
