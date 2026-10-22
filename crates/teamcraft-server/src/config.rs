@@ -729,7 +729,8 @@ pub struct EmailDigestConfig {
   /// The shortest interval a person may choose.
   pub min_interval_secs: u64,
   /// A mention counts as missed only when it is this old and still unread, so a message the person
-  /// is about to read doesn't cause a mail.
+  /// is about to read doesn't cause a mail. It also covers messages still being stored when a look
+  /// happens (the look never returns to mentions older than its cut-off), so keep it above a few seconds.
   pub grace_secs: u64,
   /// How often the scheduler looks for digests that are due.
   pub scheduler_interval_secs: u64,

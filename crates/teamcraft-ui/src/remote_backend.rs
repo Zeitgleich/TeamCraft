@@ -10,6 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
+use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_proto::OrgBackgroundId;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
@@ -454,8 +456,23 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn add_org_background(&self, name: &str, picture: Vec<u8>) {
+    self.act(ChatAction::AddOrgBackground {
+      name: name.to_string(),
+      picture: picture.into(),
+    });
+  }
+
   fn delete_background_image(&self, id: BackgroundId) {
     self.act(ChatAction::DeleteBackgroundImage { id });
+  }
+
+  fn delete_org_background(&self, id: OrgBackgroundId) {
+    self.act(ChatAction::DeleteOrgBackground { id });
+  }
+
+  fn set_org_background_rule(&self, rule: OrgBackgroundRule) {
+    self.act(ChatAction::SetOrgBackgroundRule { rule });
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {

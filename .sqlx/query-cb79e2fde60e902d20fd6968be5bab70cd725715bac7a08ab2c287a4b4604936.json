@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, user_id, s3_key, size_bytes, completed_at IS NOT NULL AS \"is_complete!\"\n         FROM user_backgrounds WHERE id = $1",
+  "query": "SELECT id, s3_key, size_bytes, completed_at IS NOT NULL AS \"is_complete!\"\n         FROM org_backgrounds WHERE id = $1 AND deleted_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -9,46 +9,35 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "user_backgrounds",
+            "table": "org_backgrounds",
             "name": "id"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "user_id",
-        "type_info": "Int8",
-        "origin": {
-          "Table": {
-            "table": "user_backgrounds",
-            "name": "user_id"
-          }
-        }
-      },
-      {
-        "ordinal": 2,
         "name": "s3_key",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "user_backgrounds",
+            "table": "org_backgrounds",
             "name": "s3_key"
           }
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 2,
         "name": "size_bytes",
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "user_backgrounds",
+            "table": "org_backgrounds",
             "name": "size_bytes"
           }
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "is_complete!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -63,9 +52,8 @@
       false,
       false,
       false,
-      false,
       null
     ]
   },
-  "hash": "e87a58f3a8009e7e909ca6c6c08bed0f8b140678329c5fe6cb9098ce2757644a"
+  "hash": "cb79e2fde60e902d20fd6968be5bab70cd725715bac7a08ab2c287a4b4604936"
 }

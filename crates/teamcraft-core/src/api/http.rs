@@ -27,6 +27,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+  CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
+  OrgBackgroundId,
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
@@ -620,6 +622,36 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn create_org_background_upload(
+    &self,
+    request: &CreateOrgBackgroundUploadRequest,
+  ) -> Result<CreateOrgBackgroundUploadResponse, ApiError> {
+    self.send_json(Method::POST, "/admin/backgrounds", request).await
+  }
+
+  async fn complete_org_background_upload(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/backgrounds/{background}/complete"),
+        None,
+      )
+      .await
+  }
+
+  async fn download_org_background(
+    &self,
+    background: OrgBackgroundId,
+  ) -> Result<OrgBackgroundDownloadResponse, ApiError> {
+    self.get(&format!("/org-backgrounds/{background}/download")).await
+  }
+
+  async fn delete_org_background(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/admin/backgrounds/{background}"), None)
+      .await
+  }
+
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     // Presigned: the URL carries the authorization, so no bearer token goes to object storage.
     send(self.client.put(url).body(bytes)).await.map(|_| ())
@@ -632,6 +664,14 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
       .map(|bytes| bytes.to_vec())
       .map_err(|error| ApiError::Network(error.to_string()))
+  }
+
+  async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+    let response = send(self.client.get(url)).await?;
+    if response.content_length().is_some_and(|length| length > max_bytes) {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    read_capped(response, max_bytes).await
   }
 
   async fn create_share_link(
@@ -699,6 +739,37 @@ impl fmt::Debug for StaticToken {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str("StaticToken([redacted])")
   }
+}
+
+/// Reads a body chunk by chunk and stops as soon as it passes `max_bytes`.
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+  let mut blob = Vec::new();
+  while let Some(chunk) = response
+    .chunk()
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?
+  {
+    if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    blob.extend_from_slice(&chunk);
+  }
+  Ok(blob)
+}
+
+/// The browser's fetch has no chunked reads in reqwest, so the body is read whole; the
+/// Content-Length check before it already refuses announced oversized bodies.
+#[cfg(target_arch = "wasm32")]
+async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+  let blob = response
+    .bytes()
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?;
+  if blob.len() as u64 > max_bytes {
+    return Err(ApiError::BlobTooLarge { max_bytes });
+  }
+  Ok(blob.to_vec())
 }
 
 /// The gateway WebSocket on native targets.
@@ -1018,6 +1089,48 @@ mod tests {
   #[test]
   fn token_is_redacted() {
     assert!(!format!("{:?}", StaticToken("secret".into())).contains("secret"));
+  }
+
+  /// Serves one HTTP response per connection: `body`, with or without a content length.
+  async fn blob_server(body: Vec<u8>, has_length: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+      while let Ok((mut socket, _)) = listener.accept().await {
+        let mut request = [0u8; 1024];
+        let _ = socket.read(&mut request).await;
+        let head = if has_length {
+          format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+          )
+        } else {
+          "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned()
+        };
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(&body).await;
+      }
+    });
+    format!("http://{address}/blob")
+  }
+
+  #[tokio::test]
+  async fn capped_downloads_stop_at_the_cap() {
+    let api = HttpServerApi::new("http://[::1]:1", StaticToken("t".into()));
+    let declared = blob_server(vec![7; 100], true).await;
+    assert!(matches!(
+      api.get_blob_capped(&declared, 50).await,
+      Err(ApiError::BlobTooLarge { max_bytes: 50 })
+    ));
+    assert_eq!(api.get_blob_capped(&declared, 100).await.unwrap().len(), 100);
+    // Without a content length the stream is counted as it arrives.
+    let undeclared = blob_server(vec![7; 100_000], false).await;
+    assert!(matches!(
+      api.get_blob_capped(&undeclared, 1000).await,
+      Err(ApiError::BlobTooLarge { .. })
+    ));
   }
 
   struct PanickingToken;

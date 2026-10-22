@@ -16,18 +16,20 @@ use teamcraft_client_api::actions::{
   FileInfo, MessageExtras, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::calls::BackgroundImageInfo;
+use teamcraft_client_api::calls::{
+  BackgroundImageInfo, OrgBackgroundInfo, OrgBackgroundRule, OrgBackgrounds,
+};
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind,
   PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User,
   UserId,
 };
-use teamcraft_proto::BackgroundId;
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, ListConversationMembersResponse, MessageId, NotificationLevel, PresenceState,
   Snowflake, SpaceResponse, UserKind, UserSummary,
 };
+use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
   CategoryId, CreateSpaceRequest, HistoryPolicy, UpdateConversationRequest, UpdateSpaceRequest,
 };
@@ -94,6 +96,17 @@ pub enum CoreCommand {
   },
   DeleteBackground {
     id: BackgroundId,
+  },
+  /// Organization backgrounds (owners; each change is a new signed policy version).
+  AddOrgBackground {
+    name: String,
+    picture: Vec<u8>,
+  },
+  DeleteOrgBackground {
+    id: OrgBackgroundId,
+  },
+  SetOrgBackgroundRule {
+    rule: OrgBackgroundRule,
   },
   /// The server's pin flag (the encrypted pin message is already in the outbox).
   SetServerPin {
@@ -736,6 +749,48 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn delete_background_image(&self, id: BackgroundId) {
     self.command(CoreCommand::DeleteBackground { id });
+  }
+
+  fn org_backgrounds(&self) -> OrgBackgrounds {
+    let state: crate::workspace::WorkspaceState = self.read(
+      crate::records::get_json(
+        &self.store,
+        crate::store::Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+      )
+      .map(Option::unwrap_or_default),
+    );
+    let policy = state.policy.call_backgrounds;
+    let is_guest = self.me().is_guest;
+    OrgBackgrounds {
+      applies_to_me: !(is_guest && policy.guests_exempt),
+      mode: policy.mode,
+      guests_exempt: policy.guests_exempt,
+      images: policy
+        .images
+        .into_iter()
+        .map(|image| OrgBackgroundInfo {
+          id: image.id,
+          name: image.name,
+        })
+        .collect(),
+      maybe_default: policy.maybe_default,
+    }
+  }
+
+  fn add_org_background(&self, name: &str, picture: Vec<u8>) {
+    self.command(CoreCommand::AddOrgBackground {
+      name: name.to_string(),
+      picture,
+    });
+  }
+
+  fn delete_org_background(&self, id: OrgBackgroundId) {
+    self.command(CoreCommand::DeleteOrgBackground { id });
+  }
+
+  fn set_org_background_rule(&self, rule: OrgBackgroundRule) {
+    self.command(CoreCommand::SetOrgBackgroundRule { rule });
   }
 
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {

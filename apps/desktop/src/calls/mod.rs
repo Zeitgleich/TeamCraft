@@ -78,8 +78,11 @@ struct CallState {
   speakers: AudioDeviceChoice,
   maybe_camera: Option<String>,
   background: UiBackgroundEffect,
-  /// The user's own picture when `background` is one ([`UiBackgroundEffect::Custom`]).
+  /// The picture when `background` is one ([`UiBackgroundEffect::Custom`] or
+  /// [`UiBackgroundEffect::Org`]).
   maybe_custom_background: Option<Arc<BackgroundImage>>,
+  /// The workspace policy requires an organization background behind the camera image.
+  is_background_required: bool,
   /// Changes the effect of the running camera without restarting it.
   maybe_effect_handle: Option<EffectHandle>,
   /// Lets the screen picker remember the last choice.
@@ -375,6 +378,10 @@ impl CallHost {
       lock(&self.state).maybe_effect_handle = None;
       return Ok(());
     }
+    let is_required = lock(&self.state).is_background_required;
+    if is_required && !matches!(lock(&self.state).background, UiBackgroundEffect::Org(_)) {
+      return Err("the organization requires one of its backgrounds for the camera".into());
+    }
     self.ensure_video_codec().await?;
     let (maybe_camera, background, maybe_custom) = {
       let state = lock(&self.state);
@@ -396,6 +403,13 @@ impl CallHost {
     .map_err(|error| error.to_string())??;
     let (maybe_filter, maybe_handle) = match maybe_effects {
       Some((filter, handle)) => (Some(filter), Some(handle)),
+      // Sending the room behind the person would break the organization's rule.
+      None if is_required => {
+        return Err(
+          "the organization requires a background, but background effects aren't available on this device"
+            .into(),
+        );
+      },
       None => (None, None),
     };
     let config = VideoSendConfig {
@@ -420,16 +434,20 @@ impl CallHost {
     Ok(())
   }
 
-  /// `maybe_custom`: the decoded picture for [`UiBackgroundEffect::Custom`]
-  /// ([`video::decode_background`]).
+  /// `maybe_custom`: the decoded picture for [`UiBackgroundEffect::Custom`] or
+  /// [`UiBackgroundEffect::Org`] ([`video::decode_background`]). `effect` already follows the
+  /// workspace rule ([`teamcraft_client_api::calls::OrgBackgrounds::effective`]); `is_required`
+  /// makes the camera refuse to send without an organization background.
   pub fn set_background_effect(
     &self,
     effect: UiBackgroundEffect,
     maybe_custom: Option<Arc<BackgroundImage>>,
+    is_required: bool,
   ) {
     let maybe_handle = {
       let mut state = lock(&self.state);
       state.background = effect;
+      state.is_background_required = is_required;
       state.maybe_custom_background = maybe_custom.clone();
       state.maybe_effect_handle.clone()
     };
@@ -441,6 +459,19 @@ impl CallHost {
       None => {},
     }
     self.update_active(|active| active.background = effect);
+  }
+
+  /// The organization requires a background but its picture can't be used: switches to strong
+  /// blur, which still hides the room, and turns the camera off where there are no effects to
+  /// apply it. The camera can't be turned on again until an organization picture loads.
+  pub async fn fail_closed_background(&self) {
+    tracing::warn!("required organization background unavailable; hiding the camera image");
+    self.set_background_effect(UiBackgroundEffect::BlurStrong, None, true);
+    let has_effects = lock(&self.state).maybe_effect_handle.is_some();
+    if self.is_camera_on() && !has_effects {
+      // Stopping only fails if the call is gone, and then nothing is sent anyway.
+      let _ = self.set_camera(false).await;
+    }
   }
 
   /// Shows the system's screen/window picker and shares the choice as its own stream.
@@ -1060,6 +1091,27 @@ mod tests {
     assert_eq!(push_to_talk.shortcut, "F8");
     host.set_talking(false).await;
     assert!(!host.snapshot().push_to_talk.is_talking);
+  }
+
+  #[tokio::test]
+  async fn an_unusable_required_picture_fails_closed() {
+    let host = host();
+    host.set_background_effect(UiBackgroundEffect::None, None, false);
+    host.fail_closed_background().await;
+    let snapshot_background = lock(&host.state).background;
+    assert_eq!(snapshot_background, UiBackgroundEffect::BlurStrong);
+    assert!(lock(&host.state).is_background_required);
+    // Blur alone doesn't satisfy the rule, so the camera stays off until a picture loads.
+    assert!(host.set_camera(true).await.is_err());
+  }
+
+  #[tokio::test]
+  async fn a_required_org_background_keeps_the_camera_off_without_one() {
+    let host = host();
+    host.set_background_effect(UiBackgroundEffect::BlurLight, None, true);
+    let error = host.set_camera(true).await.unwrap_err();
+    assert!(error.contains("requires one of its backgrounds"), "{error}");
+    assert!(!host.is_camera_on());
   }
 
   fn host() -> CallHost {
