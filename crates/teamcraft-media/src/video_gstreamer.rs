@@ -1,5 +1,5 @@
 //! Hardware H.264 encoding through GStreamer: VA-API (`vah264enc`) on Linux, VideoToolbox
-//! (`vtenc_h264`) on macOS.
+//! (`vtenc_h264`) on macOS, Media Foundation (`mfh264enc`) on Windows.
 //!
 //! GStreamer is LGPL and linked dynamically from the system; the Rust bindings are safe. One
 //! pipeline per layer: `appsrc` (NV12 frames) → hardware encoder → Constrained Baseline caps →
@@ -204,7 +204,21 @@ fn hardware_element() -> Option<HardwareElement> {
   })
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+// Media Foundation's H.264 encoder MFT (NVIDIA, AMD and Intel hardware, else Microsoft's software
+// MFT); needs GStreamer's MSVC runtime. Compiles, untested (no Windows machine in development).
+#[cfg(target_os = "windows")]
+fn hardware_element() -> Option<HardwareElement> {
+  Some(HardwareElement {
+    name: "mfh264enc",
+    properties: |bitrate_kbps| {
+      format!(
+        "bitrate={bitrate_kbps} rc-mode=cbr low-latency=true bframes=0 gop-size={KEYFRAME_INTERVAL_FRAMES}"
+      )
+    },
+  })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn hardware_element() -> Option<HardwareElement> {
   None
 }

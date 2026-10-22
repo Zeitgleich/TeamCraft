@@ -1,8 +1,10 @@
-//! Cameras on macOS through AVFoundation, via `nokhwa` (a safe wrapper; our crates have no
-//! `unsafe` for Objective-C calls). Behind the `avfoundation` feature, macOS only.
+//! Cameras on macOS (AVFoundation) and Windows (Media Foundation), via `nokhwa` (a safe wrapper;
+//! our crates have no `unsafe` for Objective-C or COM calls). Behind the `avfoundation` feature on
+//! macOS and the `mediafoundation` feature on Windows.
 //!
-//! Untested: written and type-checked on Linux against nokhwa's V4L2 backend, never run on a
-//! Mac. The app's Info.plist needs `NSCameraUsageDescription`, or macOS denies access silently.
+//! Untested: written and type-checked on Linux against nokhwa's V4L2 backend (macOS) and
+//! cross-checked with `cargo xwin` (Windows), never run on a Mac or a Windows machine. The macOS
+//! app's Info.plist needs `NSCameraUsageDescription`, or macOS denies access silently.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +21,7 @@ use tracing::warn;
 use crate::capture_convert::{PixelFormat, RawPicture};
 use crate::video_capture::{CameraInfo, CaptureError, CaptureFormat, FrameSender, VideoCapture};
 
-/// A camera opened through nokhwa (AVFoundation on macOS).
+/// A camera opened through nokhwa (AVFoundation on macOS, Media Foundation on Windows).
 pub struct NokhwaCamera {
   index: CameraIndex,
   format: CaptureFormat,
