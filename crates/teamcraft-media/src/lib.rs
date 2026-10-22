@@ -69,5 +69,7 @@ pub mod dave;
 pub mod effects;
 #[cfg(feature = "native")]
 pub mod system_audio;
+#[cfg(all(feature = "pipewire", target_os = "linux"))]
+pub mod system_audio_pipewire;
 #[cfg(feature = "web")]
 pub mod web_api;

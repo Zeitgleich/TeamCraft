@@ -186,6 +186,11 @@ required-features = ["openh264-source", "segmentation"]
 name = "portal_capture"
 required-features = ["pipewire"]
 
+# Captures the computer's sound through PipeWire and checks that our own playback is left out.
+[[example]]
+name = "system_audio_capture"
+required-features = ["pipewire"]
+
 # The browser driver as a JS module for the SFU's development page (see the example's docs).
 [[example]]
 name = "web_call"
