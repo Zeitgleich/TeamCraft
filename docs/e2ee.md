@@ -252,6 +252,32 @@ its own. See [admin.md](admin.md) §2.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
   external senders, or whose update changes a member's user or device are rejected.
 
+### 4.7 Converting a channel between private and public
+
+`PUT /api/v1/conversations/{id}/visibility` (permission `convert_channel_privacy`: channel owners, space
+admins and instance admins by default; PATCH with `visibility` does the same) turns a channel public or
+private. Public channels are listed in the channel browser and any space member (never a guest) may join
+them; private ones are invitation-only and invisible to non-members. What it means for the encryption:
+
+- **The MLS group does not change.** Conversion neither adds nor removes anybody and doesn't rotate keys;
+  everybody who is in stays in, in both directions. It only changes who the *server* lets join from now
+  on. The server still can't add a device to the group (§3): a member who joined a public channel is
+  brought into the group by an existing member's client, like any other addition (§4.3, §4.6), and reads
+  nothing until then.
+- **History is decided at conversion time, because everybody in the space may join afterwards.**
+  `history_policy` in the request sets what *future* joiners get (`from_join`: only what is sent after
+  they join; `full`: the past content keys as well). The default for new additions stays the signed
+  workspace policy (§4.3). Making a channel public with `full` therefore exposes its whole past to the
+  whole space; clients should say so before they send the request. Conversion never shares history with
+  existing members' devices more than they already had, and it can't take anything back from people who
+  already read it.
+- **Going private again** keeps everybody who joined while it was public. Removing them is an explicit
+  member removal, which rotates the keys (§4.2).
+- Guests stay what they were: they can't join public channels on their own and are always `from_join`.
+- Integration channels (bridge output) stay private; archived channels are converted after unarchiving.
+- Members get a `privacy_changed` system event, the audit log records `conversation_visibility_changed`
+  with the old and new value (metadata only).
+
 ## 5. Adding a device (Threema/WhatsApp style)
 
 Two ways, the user picks whichever is convenient:

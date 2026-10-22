@@ -23,6 +23,8 @@ wire_enum! {
     /// A call rang the person and they did not join. `actor` is the caller, `subject` the person.
     MissedCall => "missed_call",
     RetentionChanged => "retention_changed",
+    /// The channel became public or private.
+    PrivacyChanged => "privacy_changed",
   }
 }
 

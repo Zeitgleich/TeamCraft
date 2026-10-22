@@ -6,9 +6,10 @@ use teamcraft_db::{
   participants_key,
 };
 use teamcraft_proto::{
-  ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy, ListConversationsQuery,
-  ListConversationsResponse, Permission, SpaceId, SystemEventKind, Target, UpdateConversationRequest, UserId,
+  ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy,
+  ListConversationsQuery, ListConversationsResponse, Permission, SpaceId, SystemEventKind, Target,
+  UpdateConversationRequest, UserId,
 };
 
 use super::access::{
@@ -215,12 +216,19 @@ pub async fn update_conversation(
     }
   }
 
-  let kinds = visible_changes(
+  let mut kinds = visible_changes(
     &access.view.conversation,
     maybe_name.as_deref(),
     request.maybe_is_archived,
     request.maybe_moderation.as_ref(),
   );
+  if request
+    .maybe_visibility
+    .as_ref()
+    .is_some_and(|visibility| *visibility != access.view.conversation.visibility)
+  {
+    kinds.push(SystemEventKind::PrivacyChanged);
+  }
   state
     .database
     .update_conversation(
@@ -252,6 +260,71 @@ pub async fn update_conversation(
   .await?;
   for kind in kinds {
     system_events::emit(state, id, kind, Some(caller.user.id), None).await;
+  }
+  let members = state.database.conversation_member_ids(id).await?;
+  state
+    .hub
+    .publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
+  get_conversation(state, caller, id).await
+}
+
+/// Makes a channel public or private. Memberships stay as they are; what changes is who may join
+/// from now on and, with `history_policy`, what newcomers read (docs/e2ee.md §4.7).
+pub async fn convert_channel_privacy(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+  request: ConvertChannelRequest,
+) -> Result<ConversationResponse, ApiError> {
+  let access = load_conversation(state, caller, id).await?;
+  if access.view.conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::InvalidRequest("only channels can be converted".into()));
+  }
+  require(state, caller, Permission::ConvertChannelPrivacy, &access.target())?;
+  if matches!(request.visibility, ConversationVisibility::Unknown(_))
+    || matches!(request.maybe_history_policy, Some(HistoryPolicy::Unknown(_)))
+  {
+    return Err(ApiError::InvalidRequest(
+      "unknown visibility or history policy".into(),
+    ));
+  }
+  if access.view.conversation.is_archived {
+    return Err(ApiError::Conflict("unarchive the channel first".into()));
+  }
+  if access.view.conversation.is_integration && request.visibility == ConversationVisibility::Public {
+    return Err(ApiError::Conflict(
+      "integration channels carry machine output and stay private".into(),
+    ));
+  }
+  let before = access.view.conversation.visibility.clone();
+  state
+    .database
+    .update_conversation(
+      id,
+      &ConversationChanges {
+        maybe_visibility: Some(request.visibility.clone()),
+        maybe_history_policy: request.maybe_history_policy.clone(),
+        ..ConversationChanges::default()
+      },
+    )
+    .await?;
+  if before != request.visibility {
+    audit::record(
+      state,
+      Some(caller.user.id),
+      "conversation_visibility_changed",
+      Some(AuditTarget::new("conversation", id)),
+      &json!({"from": before.as_str(), "to": request.visibility.as_str()}),
+    )
+    .await?;
+    system_events::emit(
+      state,
+      id,
+      SystemEventKind::PrivacyChanged,
+      Some(caller.user.id),
+      None,
+    )
+    .await;
   }
   let members = state.database.conversation_member_ids(id).await?;
   state

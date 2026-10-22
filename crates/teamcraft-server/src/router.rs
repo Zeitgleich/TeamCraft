@@ -18,19 +18,19 @@ use crate::handlers::{
   append_policy_handler, append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
   cancel_meeting_handler, cancel_recovery_request_handler, change_local_password_handler,
   claim_key_packages_handler, clear_custom_status_handler, complete_attachment_handler,
-  complete_avatar_upload_handler, control_meeting_handler, create_attachment_handler,
-  create_avatar_upload_handler, create_call_join_token_handler, create_category_handler,
-  create_channel_handler, create_dm_handler, create_group_dm_handler, create_guest_link_handler,
-  create_instant_meeting_handler, create_invite_handler, create_local_guest_handler, create_meeting_handler,
-  create_recovery_request_handler, create_share_link_handler, create_space_handler,
-  create_user_group_handler, delete_category_handler, delete_invite_handler, delete_my_avatar_handler,
-  delete_user_group_handler, deny_guest_handler, deny_recovery_request_handler, dismiss_announcement_handler,
-  download_attachment_handler, download_share_handler, follow_thread_handler, gateway_handler,
-  get_announcement_handler, get_call_handler, get_conversation_handler,
-  get_conversation_notification_settings_handler, get_conversation_retention_handler,
-  get_identity_key_handler, get_key_bag_handler, get_me_handler, get_meeting_handler,
-  get_my_lobby_state_handler, get_my_org_recovery_shares_handler, get_my_profile_handler,
-  get_notification_settings_handler, get_policy_handler, get_read_receipts_handler,
+  complete_avatar_upload_handler, control_meeting_handler, convert_channel_privacy_handler,
+  create_attachment_handler, create_avatar_upload_handler, create_call_join_token_handler,
+  create_category_handler, create_channel_handler, create_dm_handler, create_group_dm_handler,
+  create_guest_link_handler, create_instant_meeting_handler, create_invite_handler,
+  create_local_guest_handler, create_meeting_handler, create_recovery_request_handler,
+  create_share_link_handler, create_space_handler, create_user_group_handler, delete_category_handler,
+  delete_invite_handler, delete_my_avatar_handler, delete_user_group_handler, deny_guest_handler,
+  deny_recovery_request_handler, dismiss_announcement_handler, download_attachment_handler,
+  download_share_handler, follow_thread_handler, gateway_handler, get_announcement_handler, get_call_handler,
+  get_conversation_handler, get_conversation_notification_settings_handler,
+  get_conversation_retention_handler, get_identity_key_handler, get_key_bag_handler, get_me_handler,
+  get_meeting_handler, get_my_lobby_state_handler, get_my_org_recovery_shares_handler,
+  get_my_profile_handler, get_notification_settings_handler, get_policy_handler, get_read_receipts_handler,
   get_recovery_material_handler, get_recovery_request_handler, get_recovery_result_handler,
   get_security_log_handler, get_share_info_handler, get_space_handler, get_space_retention_handler,
   get_unread_handler, get_user_avatar_handler, get_user_device_list_handler, get_user_group_handler,
@@ -224,6 +224,10 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/conversations/{conversation_id}",
       get(get_conversation_handler).patch(update_conversation_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/visibility",
+      put(convert_channel_privacy_handler),
     )
     .route("/spaces/{space_id}/channels", post(create_channel_handler))
     .route("/dms", post(create_dm_handler))

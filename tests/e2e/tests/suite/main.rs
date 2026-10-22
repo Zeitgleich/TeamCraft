@@ -8,6 +8,7 @@ mod accounts;
 mod admin;
 mod bridge;
 mod calls;
+mod conversion;
 mod devices;
 mod guests;
 mod meetings;

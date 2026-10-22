@@ -114,6 +114,17 @@ pub struct UpdateConversationRequest {
   pub maybe_moderation: Option<ChannelModeration>,
 }
 
+/// `PUT /api/v1/conversations/{id}/visibility`: makes a channel public or private (permission
+/// `convert_channel_privacy`). What it means for members, keys and history: docs/e2ee.md §4.7.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ConvertChannelRequest {
+  pub visibility: ConversationVisibility,
+  /// What people who join *after* the conversion get to read. Absent keeps the current policy;
+  /// converting to public is the moment to decide it, because everybody in the space may join.
+  #[serde(rename = "history_policy", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_history_policy: Option<HistoryPolicy>,
+}
+
 /// `POST /api/v1/dms`: opens (or returns the existing) DM with one person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CreateDmRequest {

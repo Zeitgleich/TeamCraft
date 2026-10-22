@@ -128,12 +128,12 @@ remaining members. The admin doesn't need to be a member for that.
 
 Admins can't read reported content unless a member shows it to them:
 
-| Feature                                                                                                                                           | Prio |
-|---------------------------------------------------------------------------------------------------------------------------------------------------|------|
-| **Report message**: a member sends the decrypted message + context to the admin team through an E2EE admin channel – the member's explicit choice | v1.x |
-| Delete a message by ID (from a report): server deletes ciphertext, clients honor a signed delete tombstone                                        | v1.x |
-| Channel moderators delete messages in their channels                                                                                              | v1   |
-| Mute/kick a user from a channel                                                                                                                   | v1   |
+| Feature                                                                                                                                                                                                                       | Prio |
+|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------|
+| **Report message**: a member sends the decrypted message + context to the admin team through an E2EE admin channel – the member's explicit choice                                                                             | v1.x |
+| Delete a message by ID (from a report): server deletes ciphertext, clients honor a signed delete tombstone                                                                                                                    | v1.x |
+| Channel moderators delete messages in their channels                                                                                                                                                                          | v1   |
+| Mute/kick a user from a channel (the **channel moderator** role: `moderator`, grants `manage_members`, `delete_others_posts`, `remove_others_reactions`; can't manage roles, properties, privacy or remove admins/moderators) | v1   |
 
 ### 3.4 Instance
 
