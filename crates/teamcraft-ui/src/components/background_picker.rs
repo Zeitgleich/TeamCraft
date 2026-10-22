@@ -39,18 +39,12 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
 
   let move_selection = move |ev: web_sys::KeyboardEvent| {
     let all = options.get_untracked();
-    let position = all
-      .iter()
-      .position(|candidate| *candidate == effect.get_untracked())
-      .unwrap_or(0);
-    let next = match ev.key().as_str() {
-      "ArrowRight" | "ArrowDown" => (position + 1) % all.len(),
-      "ArrowLeft" | "ArrowUp" => (position + all.len() - 1) % all.len(),
-      _ => return,
+    let Some(next) = next_effect(&all, effect.get_untracked(), &ev.key()) else {
+      return;
     };
     ev.prevent_default();
-    effect.set(all[next]);
-    focus_effect_tile(all[next]);
+    effect.set(next);
+    focus_effect_tile(next);
   };
 
   let on_file = move |_| {
@@ -209,6 +203,23 @@ pub fn effect_slug(effect: BackgroundEffect) -> String {
   }
 }
 
+/// The option an arrow key moves to, wrapping around. `None` for other keys and for an empty list.
+fn next_effect(all: &[BackgroundEffect], current: BackgroundEffect, key: &str) -> Option<BackgroundEffect> {
+  if all.is_empty() {
+    return None;
+  }
+  let position = all
+    .iter()
+    .position(|candidate| *candidate == current)
+    .unwrap_or(0);
+  let next = match key {
+    "ArrowRight" | "ArrowDown" => (position + 1) % all.len(),
+    "ArrowLeft" | "ArrowUp" => (position + all.len() - 1) % all.len(),
+    _ => return None,
+  };
+  all.get(next).copied()
+}
+
 /// Inverse of [`effect_slug`]; unknown values fall back to no effect.
 pub fn effect_from_slug(slug: &str) -> BackgroundEffect {
   if let Some(raw) = slug.strip_prefix(CUSTOM_SLUG_PREFIX) {
@@ -262,6 +273,22 @@ mod tests {
       options.last(),
       Some(&BackgroundEffect::Custom("3".parse().unwrap()))
     );
+  }
+
+  #[test]
+  fn arrow_keys_wrap_and_an_empty_list_is_safe() {
+    let all = [BackgroundEffect::None, BackgroundEffect::BlurLight];
+    assert_eq!(
+      next_effect(&all, BackgroundEffect::BlurLight, "ArrowRight"),
+      Some(BackgroundEffect::None)
+    );
+    assert_eq!(
+      next_effect(&all, BackgroundEffect::None, "ArrowUp"),
+      Some(BackgroundEffect::BlurLight)
+    );
+    assert_eq!(next_effect(&all, BackgroundEffect::None, "Enter"), None);
+    assert_eq!(next_effect(&[], BackgroundEffect::None, "ArrowRight"), None);
+    assert_eq!(next_effect(&[], BackgroundEffect::None, "ArrowLeft"), None);
   }
 
   fn image(raw: u64) -> BackgroundImageInfo {
