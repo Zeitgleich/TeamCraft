@@ -6,13 +6,18 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
-use teamcraft_proto::{CategoryId, HistoryPolicy, Role};
+use teamcraft_proto::{
+  AdminInstanceResponse, AnnouncementResponse, CategoryId, ChannelModeration, HistoryPolicy,
+  PermissionSchemeResponse, Role, SchemeChange, SetAnnouncementRequest, WorkspacePolicy,
+};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
-use crate::admin::{AdminChannel, AdminUser, AuditEntry, Retention, SecurityPolicy, SelfJoinOutcome};
+use crate::admin::{
+  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome,
+};
 use crate::calls::{
   ActiveCall, BackgroundEffect, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
 };
@@ -26,6 +31,13 @@ pub trait ChatBackend {
   /// Gives backends that load data in the background (over IPC or the network) a way to tell the UI
   /// that something changed and views should re-read. Backends whose reads are instant ignore it.
   fn set_change_notifier(&self, _notify: std::rc::Rc<dyn Fn()>) {}
+
+  /// The announcement banner to show above the app, unless this user dismissed it.
+  fn current_announcement(&self) -> Option<AnnouncementResponse> {
+    None
+  }
+
+  fn dismiss_announcement(&self, _id: teamcraft_proto::AnnouncementId) {}
 
   /// The signed-in user, including the presence and custom status they chose.
   fn me(&self) -> User;
@@ -253,9 +265,10 @@ pub trait AdminBackend {
   fn my_role(&self) -> Role;
   fn admin_channels(&self) -> Vec<AdminChannel>;
   fn admin_users(&self) -> Vec<AdminUser>;
-  fn security_policy(&self) -> SecurityPolicy;
-  /// Stores a new signed policy version.
-  fn set_security_policy(&self, policy: SecurityPolicy);
+  /// The signed workspace policy in force and its version (0: none was signed yet).
+  fn workspace_policy(&self) -> (u64, WorkspacePolicy);
+  /// Signs and stores a new policy version. Only owners with signing keys can.
+  fn set_workspace_policy(&self, policy: WorkspacePolicy);
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention);
   fn remove_device(&self, user: UserId, device: DeviceId);
   fn set_user_active(&self, user: UserId, is_active: bool);
@@ -266,10 +279,41 @@ pub trait AdminBackend {
 
   /// Called when the console opens: backends that read the server fetch fresh data now.
   fn admin_refresh(&self) {}
-  /// Whether the signed policy stores the field; the console disables the controls of others.
-  fn is_policy_field_stored(&self, _field: crate::admin::PolicyField) -> bool {
-    true
+
+  /// Spaces by name, for the permission scheme scopes.
+  fn admin_spaces(&self) -> Vec<AdminSpace> {
+    Vec::new()
   }
+  /// What each role may do at the scope (`None`: the whole instance) and the changes made there.
+  fn permission_scheme(&self, _maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
+    PermissionSchemeResponse { roles: Vec::new() }
+  }
+  fn change_permissions(&self, _maybe_space: Option<SpaceId>, _changes: Vec<SchemeChange>) {}
+  /// The permissions a channel takes away from its members and guests.
+  fn channel_moderation(&self, _channel: ConversationId) -> ChannelModeration {
+    ChannelModeration::default()
+  }
+  fn set_channel_moderation(&self, _channel: ConversationId, _moderation: ChannelModeration) {}
+  /// People who can become the owner of the channel (its members).
+  fn channel_member_candidates(&self, _channel: ConversationId) -> Vec<UserId> {
+    Vec::new()
+  }
+  fn assign_channel_owner(&self, _channel: ConversationId, _user: UserId) {}
+  /// The announcement banner in force, if any.
+  fn announcement(&self) -> Option<AnnouncementResponse> {
+    None
+  }
+  fn set_announcement(&self, _announcement: SetAnnouncementRequest) {}
+  fn clear_announcement(&self) {}
+  /// Media server, push providers and storage; `None` while unknown.
+  fn instance_status(&self) -> Option<AdminInstanceResponse> {
+    None
+  }
+  fn audit_filter(&self) -> AuditFilter {
+    AuditFilter::default()
+  }
+  /// Narrows the audit log; backends that read the server reload it.
+  fn set_audit_filter(&self, _filter: AuditFilter) {}
   /// Why the signed policy cannot be changed here (not an owner, no encryption keys on this device).
   fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
     None

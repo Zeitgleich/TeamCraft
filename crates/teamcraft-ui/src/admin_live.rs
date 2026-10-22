@@ -5,25 +5,23 @@
 //! owner's keys (the desktop core) can sign it, so it is handed to the chat backend.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
-  AdminConversationSummary, AdminDeviceResponse, AdminSelfJoin as AdminSelfJoinWire, AdminSpaceSummary,
-  AdminUserSummary, AuditEntryResponse, ConversationVisibility, HistoryPolicy,
+  AdminConversationSummary, AdminDeviceResponse, AdminInstanceResponse, AdminSpaceSummary, AdminUserSummary, AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse,
+  ChannelModeration, ConversationVisibility, GetAnnouncementResponse, HistoryPolicy,
   ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
   ListAuditResponse, ListConversationMembersResponse, ListSpaceMembersResponse, RetentionSetting,
-  RetentionStatusResponse, Role, SetRetentionRequest, SpaceId, UserKind, WorkspacePolicy,
-  WorkspacePolicyResponse,
+  PermissionSchemeResponse, RetentionStatusResponse, Role, SchemeChange, SetAnnouncementRequest,
+  SetChannelModerationRequest, SetRetentionRequest, SpaceId, UpdatePermissionSchemeRequest, UserKind,
+  WorkspacePolicy, WorkspacePolicyResponse,
 };
 
-use crate::admin::{
-  AdminChannel, AdminSelfJoin, AdminUser, AuditAction, AuditEntry, DeviceInfo, DmScope, Retention,
-  SecurityPolicy,
-};
+use crate::admin::{AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, Retention};
 use crate::auth::{ApiMethod, Authenticator};
 use crate::model::{
   ConversationId, ConversationKind, CustomStatus, PresenceStatus, User, UserId, id_from_raw, raw_id,
@@ -56,6 +54,16 @@ pub struct AdminData {
   audit: Vec<AuditEntry>,
   policy: WorkspacePolicy,
   policy_version: u64,
+  spaces: Vec<AdminSpace>,
+  announcement: Option<AnnouncementResponse>,
+  instance: Option<AdminInstanceResponse>,
+  audit_filter: AuditFilter,
+  /// Loaded on demand, when the console shows them; cleared when changed.
+  schemes: HashMap<Option<SpaceId>, PermissionSchemeResponse>,
+  moderation: HashMap<ConversationId, ChannelModeration>,
+  members: HashMap<ConversationId, Vec<UserId>>,
+  /// Requests for on-demand data that are under way.
+  loading: HashSet<String>,
   maybe_error: Option<String>,
 }
 
@@ -89,9 +97,122 @@ impl AdminLive {
     self.data.borrow().policy.clone()
   }
 
-  pub fn security_policy(&self) -> SecurityPolicy {
-    let data = self.data.borrow();
-    security_from_wire(data.policy_version, &data.policy)
+  pub fn policy_version(&self) -> u64 {
+    self.data.borrow().policy_version
+  }
+
+  pub fn spaces(&self) -> Vec<AdminSpace> {
+    self.data.borrow().spaces.clone()
+  }
+
+  pub fn announcement(&self) -> Option<AnnouncementResponse> {
+    self.data.borrow().announcement.clone()
+  }
+
+  pub fn instance(&self) -> Option<AdminInstanceResponse> {
+    self.data.borrow().instance.clone()
+  }
+
+  pub fn audit_filter(&self) -> AuditFilter {
+    self.data.borrow().audit_filter
+  }
+
+  pub fn set_audit_filter(&self, filter: AuditFilter) {
+    self.data.borrow_mut().audit_filter = filter;
+    self.queue_refresh();
+  }
+
+  /// The scheme at the scope; empty until the first request has answered.
+  pub fn permission_scheme(&self, maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
+    let cached = self.data.borrow().schemes.get(&maybe_space).cloned();
+    if let Some(scheme) = cached {
+      return scheme;
+    }
+    let path = match maybe_space {
+      Some(space) => format!("/api/v1/admin/spaces/{space}/permission-scheme"),
+      None => "/api/v1/admin/permission-scheme".to_owned(),
+    };
+    self.load(format!("scheme:{maybe_space:?}"), path, move |data, scheme| {
+      data.schemes.insert(maybe_space, scheme);
+    });
+    PermissionSchemeResponse { roles: Vec::new() }
+  }
+
+  pub fn change_permissions(&self, maybe_space: Option<SpaceId>, changes: Vec<SchemeChange>) {
+    let path = match maybe_space {
+      Some(space) => format!("/api/v1/admin/spaces/{space}/permission-scheme"),
+      None => "/api/v1/admin/permission-scheme".to_owned(),
+    };
+    if let Ok(body) = serde_json::to_string(&UpdatePermissionSchemeRequest { changes }) {
+      self.send(ApiMethod::Put, path, Some(body));
+    }
+  }
+
+  pub fn channel_moderation(&self, channel: ConversationId) -> ChannelModeration {
+    let cached = self.data.borrow().moderation.get(&channel).cloned();
+    if let Some(moderation) = cached {
+      return moderation;
+    }
+    self.load(
+      format!("moderation:{channel}"),
+      format!("/api/v1/admin/conversations/{channel}/moderation"),
+      move |data, moderation| {
+        data.moderation.insert(channel, moderation);
+      },
+    );
+    ChannelModeration::default()
+  }
+
+  pub fn set_channel_moderation(&self, channel: ConversationId, moderation: ChannelModeration) {
+    if let Ok(body) = serde_json::to_string(&SetChannelModerationRequest {
+      moderation: moderation.clone(),
+    }) {
+      // Show the new toggles at once; the next refresh confirms or corrects them.
+      self.data.borrow_mut().moderation.insert(channel, moderation);
+      self.changed();
+      self.send(
+        ApiMethod::Put,
+        format!("/api/v1/admin/conversations/{channel}/moderation"),
+        Some(body),
+      );
+    }
+  }
+
+  pub fn channel_member_candidates(&self, channel: ConversationId) -> Vec<UserId> {
+    let cached = self.data.borrow().members.get(&channel).cloned();
+    if let Some(members) = cached {
+      return members;
+    }
+    self.load(
+      format!("members:{channel}"),
+      format!("/api/v1/admin/conversations/{channel}/members"),
+      move |data, list: ListConversationMembersResponse| {
+        data
+          .members
+          .insert(channel, list.members.into_iter().map(|member| member.user.id).collect());
+      },
+    );
+    Vec::new()
+  }
+
+  pub fn assign_channel_owner(&self, channel: ConversationId, user: UserId) {
+    if let Ok(body) = serde_json::to_string(&AssignChannelOwnerRequest { user_id: user }) {
+      self.send(
+        ApiMethod::Post,
+        format!("/api/v1/admin/conversations/{channel}/owner"),
+        Some(body),
+      );
+    }
+  }
+
+  pub fn set_announcement(&self, announcement: SetAnnouncementRequest) {
+    if let Ok(body) = serde_json::to_string(&announcement) {
+      self.send(ApiMethod::Put, "/api/v1/admin/announcement".to_owned(), Some(body));
+    }
+  }
+
+  pub fn clear_announcement(&self) {
+    self.send(ApiMethod::Delete, "/api/v1/admin/announcement".to_owned(), None);
   }
 
   pub fn maybe_error(&self) -> Option<String> {
@@ -130,12 +251,19 @@ impl AdminLive {
         &mut errors,
       )
       .await;
-    let audit = self
-      .fetch::<ListAuditResponse>(&format!("/api/v1/admin/audit?limit={LIST_LIMIT}"), &mut errors)
-      .await;
+    let audit_path = audit_path(self.data.borrow().audit_filter);
+    let audit = self.fetch::<ListAuditResponse>(&audit_path, &mut errors).await;
     let policy = self
       .fetch::<WorkspacePolicyResponse>("/api/v1/workspace/policy", &mut errors)
       .await;
+    let announcement = self
+      .fetch::<GetAnnouncementResponse>("/api/v1/announcement", &mut errors)
+      .await;
+    let instance = self
+      .fetch::<AdminInstanceResponse>("/api/v1/admin/instance", &mut errors)
+      .await;
+
+    self.reload_cached(&mut errors).await;
 
     let space_names: HashMap<SpaceId, String> = spaces
       .as_ref()
@@ -192,6 +320,22 @@ impl AdminLive {
       if let Some(policy) = policy {
         data.policy = policy.policy;
         data.policy_version = policy.version;
+      }
+      if let Some(spaces) = &spaces {
+        data.spaces = spaces
+          .spaces
+          .iter()
+          .map(|space| AdminSpace {
+            id: space.id,
+            name: space.name.clone(),
+          })
+          .collect();
+      }
+      if let Some(announcement) = announcement {
+        data.announcement = announcement.maybe_announcement;
+      }
+      if instance.is_some() {
+        data.instance = instance;
       }
       if let Some(audit) = audit {
         let (channels, users) = (data.channels.clone(), data.users.clone());
@@ -320,6 +464,55 @@ impl AdminLive {
       .await
       .map(|list| list.devices)
       .unwrap_or_default()
+  }
+
+  /// Re-reads the on-demand data that is cached, so changes of other admins show up.
+  async fn reload_cached(&self, errors: &mut Vec<String>) {
+    let (scopes, channels): (Vec<Option<SpaceId>>, Vec<ConversationId>) = {
+      let data = self.data.borrow();
+      (data.schemes.keys().copied().collect(), data.moderation.keys().copied().collect())
+    };
+    for scope in scopes {
+      let path = match scope {
+        Some(space) => format!("/api/v1/admin/spaces/{space}/permission-scheme"),
+        None => "/api/v1/admin/permission-scheme".to_owned(),
+      };
+      if let Some(scheme) = self.fetch::<PermissionSchemeResponse>(&path, errors).await {
+        self.data.borrow_mut().schemes.insert(scope, scheme);
+      }
+    }
+    for channel in channels {
+      let path = format!("/api/v1/admin/conversations/{channel}/moderation");
+      if let Some(moderation) = self.fetch::<ChannelModeration>(&path, errors).await {
+        self.data.borrow_mut().moderation.insert(channel, moderation);
+      }
+    }
+  }
+
+  /// Fetches data the console shows on demand and stores it; one request per key at a time.
+  fn load<T: serde::de::DeserializeOwned + 'static>(
+    &self,
+    key: String,
+    path: String,
+    store: impl FnOnce(&mut AdminData, T) + 'static,
+  ) {
+    if !self.data.borrow_mut().loading.insert(key.clone()) {
+      return;
+    }
+    let live = self.clone();
+    spawn_local(async move {
+      let mut errors = Vec::new();
+      let value = live.fetch::<T>(&path, &mut errors).await;
+      {
+        let mut data = live.data.borrow_mut();
+        data.loading.remove(&key);
+        match value {
+          Some(value) => store(&mut data, value),
+          None => data.maybe_error = errors.into_iter().next(),
+        }
+      }
+      live.changed();
+    });
   }
 
   async fn fetch<T: serde::de::DeserializeOwned>(&self, path: &str, errors: &mut Vec<String>) -> Option<T> {
@@ -480,6 +673,10 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "space_created" => AuditAction::SpaceCreated,
     "space_updated" => AuditAction::SpaceUpdated,
     "oidc_backchannel_logout" => AuditAction::SessionEnded,
+    "permission_scheme_changed" => AuditAction::PermissionsChanged,
+    "channel_moderation_set" => AuditAction::ModerationChanged,
+    "announcement_set" | "announcement_cleared" => AuditAction::AnnouncementChanged,
+    "channel_owner_assigned" | "owner_assigned" => AuditAction::OwnerAssigned,
     _ => AuditAction::Other,
   }
 }
@@ -540,43 +737,19 @@ fn target_name(
   found.unwrap_or_else(|| format!("{kind} {number}"))
 }
 
-pub fn security_from_wire(version: u64, policy: &WorkspacePolicy) -> SecurityPolicy {
-  SecurityPolicy {
-    version: u32::try_from(version).unwrap_or(u32::MAX),
-    admin_self_join: match policy.admin_self_join {
-      AdminSelfJoinWire::Visible => AdminSelfJoin::Visible,
-      AdminSelfJoinWire::OwnerApproval => AdminSelfJoin::OwnerApproval,
-      // Unknown values are treated as the strictest one, so they never grant more than intended.
-      AdminSelfJoinWire::Disabled | AdminSelfJoinWire::Unknown(_) => AdminSelfJoin::Disabled,
-    },
-    org_recovery_for_members: policy.org_recovery.is_enabled_for_members,
-    org_recovery_for_guests: policy.org_recovery.is_enabled_for_guests,
-    recovery_approvals_required: policy.org_recovery.admins_required,
-    // Not part of the signed policy: sign-in rules live in the identity provider.
-    requires_mfa: false,
-    requires_mfa_for_guests: false,
-    guest_email_domains: String::new(),
-    session_days: 30,
-    idle_timeout_minutes: 120,
-    default_history: policy.history_default.clone(),
-    dm_scope: DmScope::Anyone,
+/// The audit request for the filter; the server filters by actor and time.
+fn audit_path(filter: AuditFilter) -> String {
+  let mut path = format!("/api/v1/admin/audit?limit={LIST_LIMIT}");
+  if let Some(actor) = filter.maybe_actor {
+    path.push_str(&format!("&actor={actor}"));
   }
-}
-
-/// The edited fields on top of the policy that is in force; everything the form does not edit
-/// (retention, link previews, compliance) stays as it is.
-pub fn policy_from_security(base: &WorkspacePolicy, edited: &SecurityPolicy) -> WorkspacePolicy {
-  let mut policy = base.clone();
-  policy.admin_self_join = match edited.admin_self_join {
-    AdminSelfJoin::Visible => AdminSelfJoinWire::Visible,
-    AdminSelfJoin::OwnerApproval => AdminSelfJoinWire::OwnerApproval,
-    AdminSelfJoin::Disabled => AdminSelfJoinWire::Disabled,
-  };
-  policy.org_recovery.is_enabled_for_members = edited.org_recovery_for_members;
-  policy.org_recovery.is_enabled_for_guests = edited.org_recovery_for_guests;
-  policy.org_recovery.admins_required = edited.recovery_approvals_required;
-  policy.history_default = edited.default_history.clone();
-  policy
+  if let Some(since) = filter.maybe_since {
+    path.push_str(&format!("&since={since}"));
+  }
+  if let Some(until) = filter.maybe_until {
+    path.push_str(&format!("&until={until}"));
+  }
+  path
 }
 
 #[cfg(test)]
@@ -585,33 +758,15 @@ mod tests {
   use teamcraft_proto::{DeactivationReason, UnixMillis};
 
   #[test]
-  fn the_policy_maps_both_ways_and_keeps_what_the_form_cannot_edit() {
-    let mut base = WorkspacePolicy::default();
-    base.retention.keep_pinned = false;
-    base.link_previews.domains = vec!["example.com".into()];
-    let mut edited = security_from_wire(3, &base);
-    assert_eq!(edited.version, 3);
-    edited.admin_self_join = AdminSelfJoin::Disabled;
-    edited.recovery_approvals_required = 3;
-    edited.default_history = HistoryPolicy::FromJoin;
-    let next = policy_from_security(&base, &edited);
-    assert_eq!(next.admin_self_join, AdminSelfJoinWire::Disabled);
-    assert_eq!(next.org_recovery.admins_required, 3);
-    assert_eq!(next.history_default, HistoryPolicy::FromJoin);
-    assert!(!next.retention.keep_pinned);
-    assert_eq!(next.link_previews.domains, vec!["example.com".to_owned()]);
-  }
-
-  #[test]
-  fn an_unknown_self_join_value_reads_as_the_strictest() {
-    let policy = WorkspacePolicy {
-      admin_self_join: AdminSelfJoinWire::Unknown("ask_twice".into()),
-      ..WorkspacePolicy::default()
+  fn the_audit_request_carries_the_filter() {
+    assert_eq!(audit_path(AuditFilter::default()), "/api/v1/admin/audit?limit=200");
+    let filter = AuditFilter {
+      maybe_actor: Some(id_from_raw(7)),
+      maybe_since: Some(1000),
+      maybe_until: Some(2000),
     };
-    assert_eq!(
-      security_from_wire(1, &policy).admin_self_join,
-      AdminSelfJoin::Disabled
-    );
+    let path = audit_path(filter);
+    assert!(path.contains("&actor=7") && path.contains("&since=1000") && path.contains("&until=2000"));
   }
 
   #[test]

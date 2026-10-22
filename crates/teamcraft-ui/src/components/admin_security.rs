@@ -1,55 +1,92 @@
 use leptos::prelude::*;
-use teamcraft_proto::HistoryPolicy;
+use teamcraft_proto::{AdminSelfJoin, HistoryPolicy};
 
-use crate::admin::{AdminSelfJoin, DmScope, PolicyBlocker, PolicyField, SecurityPolicy};
 use crate::components::admin_console::SectionHeader;
-use crate::components::icons::{Icon, IconName};
+use crate::components::admin_policy::{
+  CheckRow, PolicyBlockerNote, PolicyFooter, SelectRow, use_policy_draft,
+};
 use crate::i18n::use_i18n;
-use crate::state::use_app_state;
 
-const SESSION_DAYS: [u32; 4] = [1, 7, 30, 90];
-const IDLE_MINUTES: [u32; 4] = [15, 60, 120, 480];
+/// Session lengths offered, in hours; `0` stands for "no limit".
+const SESSION_HOURS: [u32; 5] = [24, 7 * 24, 30 * 24, 90 * 24, 0];
+const IDLE_MINUTES: [u32; 5] = [15, 60, 120, 480, 0];
+const PASSWORD_CHARS: [u32; 5] = [0, 10, 12, 14, 16];
+const GUEST_EXPIRY_DAYS: [u32; 6] = [u32::MAX, 7, 30, 90, 180, 0];
+const APPROVALS: [u8; 2] = [2, 3];
 
-/// Security policy: the signed settings that every member client enforces itself.
+/// Security policy: the signed settings that the server and every member client enforce.
 #[component]
 pub fn SecuritySection() -> impl IntoView {
-  let state = use_app_state();
   let i18n = use_i18n();
-  let stored = Memo::new(move |_| state.read(|backend| backend.security_policy()));
-  let draft = RwSignal::new(stored.get_untracked());
-  let saved_version = RwSignal::new(None::<u32>);
-  let is_dirty = move || draft.get() != stored.get();
-  let blocker = Memo::new(move |_| state.read(|backend| backend.policy_edit_blocker()));
-  // A field is locked when nobody here may sign the policy or the signed policy does not hold it.
-  let locked = move |field: PolicyField| {
-    blocker.get().is_some() || !state.read(|backend| backend.is_policy_field_stored(field))
-  };
-  let not_stored = move |field: PolicyField| !state.read(|backend| backend.is_policy_field_stored(field));
+  let policy = use_policy_draft();
+  let draft = policy.draft;
 
-  // A signed policy reaches the server a moment after "save"; until its version shows up the form
-  // keeps the edits instead of snapping back to the old values.
-  let pending_after = RwSignal::new(None::<u32>);
-  let save = move |ev: web_sys::SubmitEvent| {
-    ev.prevent_default();
-    let before = stored.get_untracked().version;
-    state.write(|backend| backend.set_security_policy(draft.get_untracked()));
-    let saved = stored.get_untracked();
-    if saved.version == before {
-      pending_after.set(Some(before));
-    } else {
-      saved_version.set(Some(saved.version));
-      draft.set(saved);
-    }
-  };
-  Effect::new(move |_| {
-    let current = stored.get();
-    if let Some(before) = pending_after.get_untracked()
-      && current.version > before
-    {
-      pending_after.set(None);
-      saved_version.set(Some(current.version));
-      draft.set(current);
-    }
+  let session_options = Signal::derive(move || {
+    SESSION_HOURS
+      .into_iter()
+      .map(|hours| {
+        let label = match hours {
+          0 => i18n.t("policy-no-limit"),
+          hours => i18n.t_count("policy-days", (hours / 24) as usize),
+        };
+        (hours.to_string(), label)
+      })
+      .collect()
+  });
+  let idle_options = Signal::derive(move || {
+    IDLE_MINUTES
+      .into_iter()
+      .map(|minutes| {
+        let label = match minutes {
+          0 => i18n.t("policy-no-limit"),
+          minutes => i18n.t_count("policy-minutes", minutes as usize),
+        };
+        (minutes.to_string(), label)
+      })
+      .collect()
+  });
+  let password_options = Signal::derive(move || {
+    PASSWORD_CHARS
+      .into_iter()
+      .map(|chars| {
+        let label = match chars {
+          0 => i18n.t("policy-server-default"),
+          chars => i18n.t_count("policy-chars", chars as usize),
+        };
+        (chars.to_string(), label)
+      })
+      .collect()
+  });
+  let expiry_options = Signal::derive(move || {
+    GUEST_EXPIRY_DAYS
+      .into_iter()
+      .map(|days| {
+        let label = match days {
+          u32::MAX => i18n.t("policy-server-default"),
+          0 => i18n.t("policy-guest-never"),
+          days => i18n.t_count("policy-days", days as usize),
+        };
+        (days.to_string(), label)
+      })
+      .collect()
+  });
+  let dm_options = Signal::derive(move || {
+    [("default", "policy-server-default"), ("shared", "policy-dm-shared_spaces"), ("anyone", "policy-dm-anyone")]
+      .into_iter()
+      .map(|(value, key)| (value.to_owned(), i18n.t(key)))
+      .collect()
+  });
+  let history_options = Signal::derive(move || {
+    [("from_join", "admin-history-from_join"), ("full", "admin-history-full")]
+      .into_iter()
+      .map(|(value, key)| (value.to_owned(), i18n.t(key)))
+      .collect()
+  });
+  let approval_options = Signal::derive(move || {
+    APPROVALS
+      .into_iter()
+      .map(|count| (count.to_string(), i18n.t_count("policy-admins", count as usize)))
+      .collect()
   });
 
   view! {
@@ -57,34 +94,36 @@ pub fn SecuritySection() -> impl IntoView {
       title=Signal::derive(move || i18n.t("admin-security-title"))
       subtitle=Signal::derive(move || i18n.t("admin-security-subtitle"))
     />
-    {move || {
-      blocker.get().map(|blocker| {
-        let key = match blocker {
-          PolicyBlocker::NotOwner => "policy-blocked-not-owner",
-          PolicyBlocker::NoSigningKeys => "policy-blocked-no-keys",
-        };
-        view! { <p class="auth-alert policy-blocked" role="status">{move || i18n.t(key)}</p> }
-      })
-    }}
-    <form class="policy-form" on:submit=save>
-      <fieldset class="policy-group" prop:disabled=move || locked(PolicyField::AdminSelfJoin)>
+    <PolicyBlockerNote policy=policy />
+    <form
+      class="policy-form"
+      on:submit=move |ev: web_sys::SubmitEvent| {
+        ev.prevent_default();
+        policy.save();
+      }
+    >
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-self-join")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-self-join-hint")}</p>
-        {AdminSelfJoin::ALL
+        {[AdminSelfJoin::Visible, AdminSelfJoin::OwnerApproval, AdminSelfJoin::Disabled]
           .into_iter()
           .map(|option| {
+            let slug = option.as_str().to_owned();
+            let hint_key = format!("policy-self-join-{slug}-hint");
+            let label_key = format!("policy-self-join-{slug}");
+            let checked_option = option.clone();
             view! {
               <label class="radio">
                 <input
                   type="radio"
                   name="admin_self_join"
-                  value=option.slug()
-                  prop:checked=move || draft.get().admin_self_join == option
-                  on:change=move |_| draft.update(|policy| policy.admin_self_join = option)
+                  value=slug
+                  prop:checked=move || draft.get().admin_self_join == checked_option
+                  on:change=move |_| policy.edit(|value| value.admin_self_join = option.clone())
                 />
                 <span>
-                  <strong>{move || i18n.t(&format!("policy-self-join-{}", option.slug()))}</strong>
-                  <span class="muted-text small">{move || i18n.t(&format!("policy-self-join-{}-hint", option.slug()))}</span>
+                  <strong>{move || i18n.t(&label_key)}</strong>
+                  <span class="muted-text small">{move || i18n.t(&hint_key)}</span>
                 </span>
               </label>
             }
@@ -92,222 +131,172 @@ pub fn SecuritySection() -> impl IntoView {
           .collect_view()}
       </fieldset>
 
-      <fieldset class="policy-group" prop:disabled=move || locked(PolicyField::OrgRecovery)>
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-recovery")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-recovery-hint")}</p>
-        <label class="checkbox">
-          <input
-            type="checkbox"
-            name="org_recovery_for_members"
-            prop:checked=move || draft.get().org_recovery_for_members
-            on:change=move |ev| {
-              let value = event_target_checked(&ev);
-              update_flag(draft, move |policy| policy.org_recovery_for_members = value);
-            }
-          />
-          <span>{move || i18n.t("policy-recovery-members")}</span>
-        </label>
-        <label class="checkbox">
-          <input
-            type="checkbox"
-            name="org_recovery_for_guests"
-            prop:checked=move || draft.get().org_recovery_for_guests
-            on:change=move |ev| {
-              let value = event_target_checked(&ev);
-              update_flag(draft, move |policy| policy.org_recovery_for_guests = value);
-            }
-          />
-          <span>{move || i18n.t("policy-recovery-guests")}</span>
-        </label>
-        <div class="field inline">
-          <label for="policy-approvals">{move || i18n.t("policy-recovery-approvals")}</label>
-          <select
-            id="policy-approvals"
-            class="input"
-            prop:disabled=move || !draft.get().org_recovery_for_members && !draft.get().org_recovery_for_guests
-            on:change=move |ev| {
-              let value = event_target_value(&ev).parse::<u8>().unwrap_or(2);
-              update_flag(draft, move |policy| policy.recovery_approvals_required = value);
-            }
-          >
-            {[2_u8, 3]
-              .into_iter()
-              .map(|count| {
-                view! {
-                  <option value=count.to_string() selected=move || draft.get().recovery_approvals_required == count>
-                    {move || i18n.t_count("policy-admins", count as usize)}
-                  </option>
-                }
-              })
-              .collect_view()}
-          </select>
-        </div>
+        <CheckRow
+          name="org_recovery_for_members"
+          label=Signal::derive(move || i18n.t("policy-recovery-members"))
+          checked=Signal::derive(move || draft.get().org_recovery.is_enabled_for_members)
+          on_change=move |value| policy.edit(|p| p.org_recovery.is_enabled_for_members = value)
+        />
+        <CheckRow
+          name="org_recovery_for_guests"
+          label=Signal::derive(move || i18n.t("policy-recovery-guests"))
+          checked=Signal::derive(move || draft.get().org_recovery.is_enabled_for_guests)
+          on_change=move |value| policy.edit(|p| p.org_recovery.is_enabled_for_guests = value)
+        />
+        <SelectRow
+          id="policy-approvals"
+          label=Signal::derive(move || i18n.t("policy-recovery-approvals"))
+          options=approval_options
+          selected=Signal::derive(move || draft.get().org_recovery.admins_required.to_string())
+          on_select=move |value: String| {
+            let count = value.parse::<u8>().unwrap_or(2);
+            policy.edit(|p| p.org_recovery.admins_required = count);
+          }
+          disabled=Signal::derive(move || {
+            let current = draft.get();
+            !current.org_recovery.is_enabled_for_members && !current.org_recovery.is_enabled_for_guests
+          })
+        />
       </fieldset>
 
-      <fieldset class="policy-group" prop:disabled=move || locked(PolicyField::SignIn)>
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-signin")}</legend>
-        <Show when=move || not_stored(PolicyField::SignIn) fallback=|| ()>
-          <p class="muted-text small">{move || i18n.t("policy-not-stored")}</p>
-        </Show>
-        <label class="checkbox">
-          <input
-            type="checkbox"
-            name="requires_mfa"
-            prop:checked=move || draft.get().requires_mfa
-            on:change=move |ev| {
-              let value = event_target_checked(&ev);
-              update_flag(draft, move |policy| policy.requires_mfa = value);
-            }
-          />
-          <span>{move || i18n.t("policy-mfa")}</span>
-        </label>
-        <label class="checkbox">
-          <input
-            type="checkbox"
-            name="requires_mfa_for_guests"
-            prop:checked=move || draft.get().requires_mfa_for_guests
-            on:change=move |ev| {
-              let value = event_target_checked(&ev);
-              update_flag(draft, move |policy| policy.requires_mfa_for_guests = value);
-            }
-          />
-          <span>{move || i18n.t("policy-mfa-guests")}</span>
-        </label>
-        <div class="field inline">
-          <label for="policy-session">{move || i18n.t("policy-session")}</label>
-          <select
-            id="policy-session"
-            class="input"
-            on:change=move |ev| {
-              let value = event_target_value(&ev).parse::<u32>().unwrap_or(30);
-              update_flag(draft, move |policy| policy.session_days = value);
-            }
-          >
-            {SESSION_DAYS
-              .into_iter()
-              .map(|days| {
-                view! {
-                  <option value=days.to_string() selected=move || draft.get().session_days == days>
-                    {move || i18n.t_count("policy-days", days as usize)}
-                  </option>
-                }
-              })
-              .collect_view()}
-          </select>
-        </div>
-        <div class="field inline">
-          <label for="policy-idle">{move || i18n.t("policy-idle")}</label>
-          <select
-            id="policy-idle"
-            class="input"
-            on:change=move |ev| {
-              let value = event_target_value(&ev).parse::<u32>().unwrap_or(120);
-              update_flag(draft, move |policy| policy.idle_timeout_minutes = value);
-            }
-          >
-            {IDLE_MINUTES
-              .into_iter()
-              .map(|minutes| {
-                view! {
-                  <option value=minutes.to_string() selected=move || draft.get().idle_timeout_minutes == minutes>
-                    {move || i18n.t_count("policy-minutes", minutes as usize)}
-                  </option>
-                }
-              })
-              .collect_view()}
-          </select>
-        </div>
+        <p class="muted-text small">{move || i18n.t("policy-signin-hint")}</p>
+        <CheckRow
+          name="requires_mfa"
+          label=Signal::derive(move || i18n.t("policy-mfa"))
+          hint=Signal::derive(move || i18n.t("policy-mfa-hint"))
+          checked=Signal::derive(move || draft.get().session.requires_mfa)
+          on_change=move |value| policy.edit(|p| p.session.requires_mfa = value)
+        />
+        <SelectRow
+          id="policy-session"
+          label=Signal::derive(move || i18n.t("policy-session"))
+          options=session_options
+          selected=Signal::derive(move || draft.get().session.maybe_max_age_hours.unwrap_or(0).to_string())
+          on_select=move |value: String| {
+            let hours = value.parse::<u32>().unwrap_or(0);
+            policy.edit(|p| p.session.maybe_max_age_hours = (hours > 0).then_some(hours));
+          }
+        />
+        <SelectRow
+          id="policy-idle"
+          label=Signal::derive(move || i18n.t("policy-idle"))
+          options=idle_options
+          selected=Signal::derive(move || draft.get().session.maybe_idle_timeout_minutes.unwrap_or(0).to_string())
+          on_select=move |value: String| {
+            let minutes = value.parse::<u32>().unwrap_or(0);
+            policy.edit(|p| p.session.maybe_idle_timeout_minutes = (minutes > 0).then_some(minutes));
+          }
+        />
+        <SelectRow
+          id="policy-password"
+          label=Signal::derive(move || i18n.t("policy-password"))
+          options=password_options
+          selected=Signal::derive(move || draft.get().passwords.maybe_min_chars.unwrap_or(0).to_string())
+          on_select=move |value: String| {
+            let chars = value.parse::<u32>().unwrap_or(0);
+            policy.edit(|p| p.passwords.maybe_min_chars = (chars > 0).then_some(chars));
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-password-hint")}</p>
       </fieldset>
 
-      <fieldset class="policy-group">
-        <legend>{move || i18n.t("policy-sharing")}</legend>
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-guests")}</legend>
         <div class="field">
           <label for="policy-domains">{move || i18n.t("policy-guest-domains")}</label>
           <input
             id="policy-domains"
             class="input"
             name="guest_email_domains"
-            prop:disabled=move || locked(PolicyField::GuestEmailDomains)
             autocomplete="off"
             spellcheck="false"
             placeholder="example.com, partner.example"
-            prop:value=move || draft.get().guest_email_domains
+            prop:value=move || draft.get().guests.allowed_email_domains.join(", ")
             on:input=move |ev| {
-              let value = event_target_value(&ev);
-              update_flag(draft, move |policy| policy.guest_email_domains = value.clone());
+              let domains = parse_domains(&event_target_value(&ev));
+              policy.edit(|p| p.guests.allowed_email_domains = domains);
             }
           />
+          <p class="muted-text small">{move || i18n.t("policy-guest-domains-hint")}</p>
         </div>
-        <div class="field inline">
-          <label for="policy-history">{move || i18n.t("policy-history")}</label>
-          <select
-            id="policy-history"
-            class="input"
-            prop:disabled=move || locked(PolicyField::DefaultHistory)
-            on:change=move |ev| {
-              let value = if event_target_value(&ev) == "full" { HistoryPolicy::Full } else { HistoryPolicy::FromJoin };
-              update_flag(draft, move |policy| policy.default_history = value.clone());
-            }
-          >
-            <option value="from_join" selected=move || draft.get().default_history == HistoryPolicy::FromJoin>
-              {move || i18n.t("admin-history-from_join")}
-            </option>
-            <option value="full" selected=move || draft.get().default_history == HistoryPolicy::Full>
-              {move || i18n.t("admin-history-full")}
-            </option>
-          </select>
-        </div>
-        <div class="field inline">
-          <label for="policy-dm">{move || i18n.t("policy-dm")}</label>
-          <select
-            id="policy-dm"
-            class="input"
-            prop:disabled=move || locked(PolicyField::DmScope)
-            on:change=move |ev| {
-              if let Some(scope) = DmScope::from_slug(&event_target_value(&ev)) {
-                update_flag(draft, move |policy| policy.dm_scope = scope);
-              }
-            }
-          >
-            {DmScope::ALL
-              .into_iter()
-              .map(|scope| {
-                view! {
-                  <option value=scope.slug() selected=move || draft.get().dm_scope == scope>
-                    {move || i18n.t(&format!("policy-dm-{}", scope.slug()))}
-                  </option>
-                }
-              })
-              .collect_view()}
-          </select>
-        </div>
+        <SelectRow
+          id="policy-dm"
+          label=Signal::derive(move || i18n.t("policy-guest-dm"))
+          options=dm_options
+          selected=Signal::derive(move || match draft.get().guests.maybe_dm_only_with_shared_conversations {
+            None => "default".to_owned(),
+            Some(true) => "shared".to_owned(),
+            Some(false) => "anyone".to_owned(),
+          })
+          on_select=move |value: String| {
+            policy.edit(|p| {
+              p.guests.maybe_dm_only_with_shared_conversations = match value.as_str() {
+                "shared" => Some(true),
+                "anyone" => Some(false),
+                _ => None,
+              };
+            });
+          }
+        />
+        <SelectRow
+          id="policy-guest-expiry"
+          label=Signal::derive(move || i18n.t("policy-guest-expiry"))
+          options=expiry_options
+          selected=Signal::derive(move || draft.get().guests.maybe_default_expiry_days.unwrap_or(u32::MAX).to_string())
+          on_select=move |value: String| {
+            let days = value.parse::<u32>().unwrap_or(u32::MAX);
+            policy.edit(|p| p.guests.maybe_default_expiry_days = (days != u32::MAX).then_some(days));
+          }
+        />
       </fieldset>
 
-      <footer class="policy-footer">
-        <p class="signing-note">
-          <Icon name=IconName::Key />
-          <span>{move || i18n.t_with("policy-signing", &[("version", &stored.get().version.to_string())])}</span>
-        </p>
-        <span class="status-line" role="status">
-          {move || {
-            if pending_after.get().is_some() {
-              Some(i18n.t("policy-saving"))
-            } else {
-              saved_version.get().map(|version| i18n.t_with("policy-saved", &[("version", &version.to_string())]))
-            }
-          }}
-        </span>
-        <button type="button" class="btn" disabled=move || !is_dirty() on:click=move |_| draft.set(stored.get_untracked())>
-          {move || i18n.t("policy-reset")}
-        </button>
-        <button type="submit" class="btn btn-primary" disabled=move || !is_dirty() || blocker.get().is_some()>
-          {move || i18n.t("policy-save")}
-        </button>
-      </footer>
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-sharing")}</legend>
+        <SelectRow
+          id="policy-history"
+          label=Signal::derive(move || i18n.t("policy-history"))
+          options=history_options
+          selected=Signal::derive(move || match draft.get().history_default {
+            HistoryPolicy::Full => "full".to_owned(),
+            _ => "from_join".to_owned(),
+          })
+          on_select=move |value: String| {
+            policy.edit(|p| {
+              p.history_default = if value == "full" { HistoryPolicy::Full } else { HistoryPolicy::FromJoin };
+            });
+          }
+        />
+      </fieldset>
+
+      <PolicyFooter policy=policy />
     </form>
   }
 }
 
-fn update_flag(draft: RwSignal<SecurityPolicy>, change: impl FnOnce(&mut SecurityPolicy)) {
-  draft.update(change);
+/// "a.example, B.example ; c.example" becomes lower-case host names without `@`.
+pub fn parse_domains(text: &str) -> Vec<String> {
+  text
+    .split([',', ';', ' ', '\n'])
+    .map(|part| part.trim().trim_start_matches('@').to_lowercase())
+    .filter(|part| !part.is_empty())
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn domains_are_split_cleaned_and_lowercased() {
+    assert_eq!(
+      parse_domains("Example.com, @partner.example ;  c.example\n"),
+      vec!["example.com", "partner.example", "c.example"]
+    );
+    assert!(parse_domains("  ,, ").is_empty());
+  }
 }
