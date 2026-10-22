@@ -36,13 +36,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: release-linux-${{ matrix.arch }}
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v5
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux-${{ matrix.arch }}
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
       - name: Build packages
