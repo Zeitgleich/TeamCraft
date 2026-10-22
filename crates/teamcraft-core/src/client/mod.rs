@@ -18,6 +18,7 @@ mod groups;
 mod linking;
 mod messaging;
 mod notifications;
+mod org_backgrounds;
 mod org_recovery;
 pub mod previews;
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,7 +28,6 @@ mod sync;
 mod ui_commands;
 mod workspace;
 pub mod workspace_admin;
-#[cfg(feature = "ui")]
 pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};

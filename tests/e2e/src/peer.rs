@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use teamcraft_core::api::{GatewayConnection, HttpGateway, HttpServerApi};
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_proto::{ConversationId, GatewayClientMessage, ThreadId, UserId};
+use teamcraft_proto::{ConversationId, GatewayClientMessage, ThreadId, UserId, WorkspacePolicy};
 
 use crate::stack::Stack;
 use crate::tokens::UserTokens;
@@ -47,7 +48,14 @@ impl Peer {
         enrollment_options(device_name),
       )
       .await
-      .unwrap_or_else(|error| panic!("enrolling {user}: {error}"));
+      .unwrap_or_else(|error| {
+        let log = stack.server_log();
+        let tail: Vec<&str> = log.lines().rev().take(25).collect();
+        panic!(
+          "enrolling {user}: {error}\nserver log (newest first):\n{}",
+          tail.join("\n")
+        )
+      });
     let (gateway, _) = client.connect_gateway().await.expect("gateway connects");
     Peer {
       name: user.to_owned(),
@@ -60,6 +68,40 @@ impl Peer {
 
   pub fn user_id(&self) -> UserId {
     self.client.user_id()
+  }
+
+  /// Owner: edits the signed workspace policy (founding the signed roster with this owner first
+  /// if there is none yet). The server enforces its parts from the moment the entry is stored.
+  pub async fn set_policy(&mut self, edit: impl FnOnce(&mut WorkspacePolicy)) {
+    self
+      .client
+      .sync_workspace()
+      .await
+      .expect("syncing the workspace log");
+    if self
+      .client
+      .workspace()
+      .expect("workspace state")
+      .maybe_root
+      .is_none()
+    {
+      let roles = [(self.user_id(), RosterRole::Owner)];
+      self
+        .client
+        .publish_roster(&roles)
+        .await
+        .expect("founding the roster");
+    }
+    let mut policy = self.client.workspace().expect("workspace state").policy;
+    edit(&mut policy);
+    // A policy that requires a second factor takes effect with its own request: the follow-up call
+    // already gets "MFA required" (the dev realm has no second factor).
+    if let Err(error) = self.client.publish_policy(policy).await {
+      assert!(
+        format!("{error:?}").contains("MfaRequired"),
+        "publishing the policy: {error}"
+      );
+    }
   }
 
   /// Applies the frames that are waiting on the gateway.

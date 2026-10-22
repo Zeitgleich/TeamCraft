@@ -1,0 +1,11 @@
+[Unit]
+Description=Dry run: the container's network is configured before boot
+Before=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+
+[Install]
+WantedBy=network-online.target

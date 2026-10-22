@@ -11,6 +11,7 @@ use crate::calls::CallEvent;
 use crate::calls::CallPhase;
 use crate::clock::now_ms;
 use crate::components::admin_console::AdminConsole;
+use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bookmarks::BookmarksDialog;
 use crate::components::bundle_banner::BundleBanner;
 use crate::components::call_prejoin::PreJoinScreen;
@@ -138,6 +139,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     </a>
     <div class="app">
       <BundleBanner />
+      <AnnouncementBanner />
       <TopBar />
       <div class="app-body">
         // The administration console takes the whole window, like a system console.
@@ -367,15 +369,20 @@ fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
       })
     });
     for notification in notifications {
+      let is_generic = notification.title == NotificationTitle::Generic;
       let title = match &notification.title {
+        NotificationTitle::Generic => i18n.t("notify-new-message"),
         NotificationTitle::Sender(name) => name.clone(),
         NotificationTitle::InChannel { sender, channel } => {
           i18n.t_with("notify-in-channel", &[("name", sender), ("channel", channel)])
         },
         NotificationTitle::ThreadReply { sender } => i18n.t_with("notify-thread-reply", &[("name", sender)]),
       };
-      let body = notification.body.unwrap_or_else(|| i18n.t("notify-new-message"));
-      leptos::task::spawn_local(async move { tauri::notify(&title, Some(&body)).await });
+      // A generic notification is only its title; otherwise the fallback body says what happened.
+      let body = notification
+        .body
+        .or_else(|| (!is_generic).then(|| i18n.t("notify-new-message")));
+      leptos::task::spawn_local(async move { tauri::notify(&title, body.as_deref()).await });
     }
   });
 }

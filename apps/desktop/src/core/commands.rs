@@ -196,6 +196,17 @@ pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Resul
         picture: picture.into(),
       }
     },
+    ChatAction::AddOrgBackground { name, picture } => {
+      let picture =
+        tauri::async_runtime::spawn_blocking(move || normalize_background_file(picture.as_slice()))
+          .await
+          .map_err(|error| error.to_string())?
+          .map_err(|error| error.to_string())?;
+      ChatAction::AddOrgBackground {
+        name,
+        picture: picture.into(),
+      }
+    },
     other => other,
   };
   Ok(host.current()?.action(action).await?)

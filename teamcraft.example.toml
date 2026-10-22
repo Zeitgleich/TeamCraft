@@ -80,6 +80,11 @@ format = "pretty"
 guests_dm_only_with_shared_conversations = true
 # Pending invites only apply to accounts whose provider verified the email address.
 invites_require_verified_email = true
+# IDs of spaces every new member joins on their first sign-in, and of public channels of those
+# spaces they join with them (IDs as shown in the admin console). Applied once per account;
+# guests and bots get none.
+default_spaces = []
+default_channels = []
 
 [limits]
 max_ciphertext_bytes = 1048576
@@ -188,6 +193,22 @@ urgent_scheduler_interval_secs = 15
 # While a desktop device of a user is active, pushes to their phones wait this long and are sent only
 # if the message is still unread; 0 pushes at once.
 mobile_push_delay_secs = 120
+
+# E-mail digest of missed mentions (PLAN.md §5): people who turn it on get one content-free mail per
+# interval ("3 new mentions") for mentions that are still unread. Needs [mail.smtp] and
+# [mail] public_base_url. Placeholders in the texts: {count} {url}.
+[notifications.email_digest]
+is_enabled = false
+default_interval_secs = 3600
+# The shortest interval a person may choose.
+min_interval_secs = 900
+# A mention counts as missed once it is this old and still unread.
+grace_secs = 300
+scheduler_interval_secs = 60
+subject_one = "1 new mention in TeamCraft"
+subject_many = "{count} new mentions in TeamCraft"
+body_one = "You were mentioned while you were away.\n\nOpen TeamCraft to read it: {url}\n"
+body_many = "You were mentioned {count} times while you were away.\n\nOpen TeamCraft to read them: {url}\n"
 
 # Integration channels (ARCHITECTURE.md §4.5): channels flagged `is_integration` receive machine output
 # (logs, monitoring, CI) from a bridge. They push only for @mentions and get this retention.

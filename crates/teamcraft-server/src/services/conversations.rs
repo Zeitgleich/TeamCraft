@@ -6,9 +6,10 @@ use teamcraft_db::{
   participants_key,
 };
 use teamcraft_proto::{
-  ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy, ListConversationsQuery,
-  ListConversationsResponse, Permission, SpaceId, SystemEventKind, Target, UpdateConversationRequest, UserId,
+  ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy,
+  ListConversationsQuery, ListConversationsResponse, Permission, SpaceId, SystemEventKind, Target,
+  UpdateConversationRequest, UserId,
 };
 
 use super::access::{
@@ -186,13 +187,23 @@ pub async fn update_conversation(
   }
   let target = access.target();
   require(state, caller, Permission::ManageChannelProperties, &target)?;
-  if let Some(visibility) = &request.maybe_visibility {
-    if matches!(visibility, ConversationVisibility::Unknown(_)) {
-      return Err(ApiError::InvalidRequest("unknown visibility".into()));
-    }
-    if *visibility != access.view.conversation.visibility {
-      require(state, caller, Permission::ConvertChannelPrivacy, &target)?;
-    }
+  // Making a channel public or private is a conversion with its own rules, audit record and system
+  // event, whichever endpoint asks for it.
+  if let Some(visibility) = request.maybe_visibility.clone()
+    && visibility != access.view.conversation.visibility
+  {
+    convert_channel_privacy(
+      state,
+      caller,
+      id,
+      ConvertChannelRequest {
+        visibility,
+        maybe_history_policy: None,
+      },
+    )
+    .await?;
+  } else if matches!(request.maybe_visibility, Some(ConversationVisibility::Unknown(_))) {
+    return Err(ApiError::InvalidRequest("unknown visibility".into()));
   }
 
   let limits = &state.settings.limits;
@@ -221,6 +232,7 @@ pub async fn update_conversation(
     request.maybe_is_archived,
     request.maybe_moderation.as_ref(),
   );
+
   state
     .database
     .update_conversation(
@@ -229,7 +241,7 @@ pub async fn update_conversation(
         maybe_name: maybe_name.as_deref(),
         maybe_topic: request.maybe_topic.as_deref(),
         maybe_description: request.maybe_description.as_deref(),
-        maybe_visibility: request.maybe_visibility,
+        maybe_visibility: None,
         maybe_category: request.maybe_category_id,
         clear_category: request.clear_category,
         maybe_history_policy: request.maybe_history_policy,
@@ -252,6 +264,71 @@ pub async fn update_conversation(
   .await?;
   for kind in kinds {
     system_events::emit(state, id, kind, Some(caller.user.id), None).await;
+  }
+  let members = state.database.conversation_member_ids(id).await?;
+  state
+    .hub
+    .publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
+  get_conversation(state, caller, id).await
+}
+
+/// Makes a channel public or private. Memberships stay as they are; what changes is who may join
+/// from now on and, with `history_policy`, what newcomers read (docs/e2ee.md §4.7).
+pub async fn convert_channel_privacy(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+  request: ConvertChannelRequest,
+) -> Result<ConversationResponse, ApiError> {
+  let access = load_conversation(state, caller, id).await?;
+  if access.view.conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::InvalidRequest("only channels can be converted".into()));
+  }
+  require(state, caller, Permission::ConvertChannelPrivacy, &access.target())?;
+  if matches!(request.visibility, ConversationVisibility::Unknown(_))
+    || matches!(request.maybe_history_policy, Some(HistoryPolicy::Unknown(_)))
+  {
+    return Err(ApiError::InvalidRequest(
+      "unknown visibility or history policy".into(),
+    ));
+  }
+  if access.view.conversation.is_archived {
+    return Err(ApiError::Conflict("unarchive the channel first".into()));
+  }
+  if access.view.conversation.is_integration && request.visibility == ConversationVisibility::Public {
+    return Err(ApiError::Conflict(
+      "integration channels carry machine output and stay private".into(),
+    ));
+  }
+  let before = access.view.conversation.visibility.clone();
+  state
+    .database
+    .update_conversation(
+      id,
+      &ConversationChanges {
+        maybe_visibility: Some(request.visibility.clone()),
+        maybe_history_policy: request.maybe_history_policy.clone(),
+        ..ConversationChanges::default()
+      },
+    )
+    .await?;
+  if before != request.visibility {
+    audit::record(
+      state,
+      Some(caller.user.id),
+      "conversation_visibility_changed",
+      Some(AuditTarget::new("conversation", id)),
+      &json!({"from": before.as_str(), "to": request.visibility.as_str()}),
+    )
+    .await?;
+    system_events::emit(
+      state,
+      id,
+      SystemEventKind::PrivacyChanged,
+      Some(caller.user.id),
+      None,
+    )
+    .await;
   }
   let members = state.database.conversation_member_ids(id).await?;
   state
@@ -337,20 +414,29 @@ async fn open_participants_conversation(
   kind: ConversationKind,
   others: Vec<UserId>,
 ) -> Result<Created<ConversationResponse>, ApiError> {
-  let sharing = if state.settings.policy.guests_dm_only_with_shared_conversations {
-    Some(state.database.users_sharing_conversation(caller.user.id).await?)
-  } else {
-    None
-  };
   let users = state.database.get_users(&others).await?;
   if users.len() != others.len() || users.iter().any(|user| user.is_deactivated) {
     return Err(ApiError::user_not_found());
   }
-  for user in &users {
-    // A DM involving a guest needs a conversation the two already share (PLAN.md §12).
-    let involves_guest = is_guest(caller) || user.kind == teamcraft_proto::UserKind::Guest;
-    if involves_guest && sharing.as_ref().is_some_and(|shared| !shared.contains(&user.id)) {
-      return Err(ApiError::user_not_found());
+  // A DM involving a guest needs a conversation the guest already shares with every other
+  // participant (PLAN.md §12): in a group DM, two members who both know the guest still must not
+  // meet a guest who knows only one of them.
+  if super::workspace::effective_guest_dm_restriction(state) {
+    let guests: Vec<UserId> = users
+      .iter()
+      .filter(|user| user.kind == teamcraft_proto::UserKind::Guest)
+      .map(|user| user.id)
+      .chain(is_guest(caller).then_some(caller.user.id))
+      .collect();
+    for guest in guests {
+      let known = state.database.users_sharing_conversation(guest).await?;
+      let everybody = others.iter().copied().chain([caller.user.id]);
+      if everybody
+        .filter(|participant| *participant != guest)
+        .any(|participant| !known.contains(&participant))
+      {
+        return Err(ApiError::user_not_found());
+      }
     }
   }
 

@@ -23,24 +23,35 @@ Docker. With the feature, a missing dev stack makes every test **skip** (a messa
 Each test starts its own server with a fresh Postgres database (`teamcraft_e2e_<random>` in the dev
 Postgres, dropped afterwards), so tests are independent and run in parallel (about 15 s for all).
 
-| File                 | Flow                                                                                                                                        |
-|----------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| `accounts.rs`        | Keycloak login for owner/admin/member/guest, a user without a TeamCraft role is refused, first device enrollment                            |
-| `messaging.rs`       | Space + channel, encrypted messages, threads, reactions, DMs; the server sees ciphertext only (also not in its log); outsiders can't read   |
-| `guests.rs`          | A guest sees only the conversations they were added to, can't join private channels, create channels, use the admin API or DM strangers     |
-| `membership.rs`      | Removing a member rotates the keys: the removed member can't read what is sent afterwards, history stays, their writes never arrive         |
-| `devices.rs`         | Device linking through the rendezvous relay, the linked device joins the channel and decrypts new messages                                  |
-| `admin.rs`           | Admin deactivation (token refused, devices revoked, gateway closed, audit log) and reactivation; retention job (`max_messages`)             |
-| `bridge.rs`          | `teamcraft-bridge` process: Slack-style webhook and log lines land decrypted in an integration channel, bad input is refused                |
-| `meetings.rs`        | Scheduling sends iMIP invitations (caught by Mailpit), RSVP, an external guest joins with the one-time link, lobby, admission, cancellation |
-| `calls.rs`           | 1:1 DM call through the server's join tokens and the SFU: device-bound DAVE keys, both sides decode audio, equal privacy codes              |
-| `web.rs` (`browser`) | The web client in headless Chromium: Keycloak login page, welcome screen, the channel list shows the account's channels                     |
+| File                  | Flow                                                                                                                                        |
+|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `accounts.rs`         | Keycloak login for owner/admin/member/guest, a user without a TeamCraft role is refused, first device enrollment                            |
+| `messaging.rs`        | Space + channel, encrypted messages, threads, reactions, DMs; the server sees ciphertext only (also not in its log); outsiders can't read   |
+| `guests.rs`           | A guest sees only the conversations they were added to, can't join private channels, create channels, use the admin API or DM strangers     |
+| `membership.rs`       | Removing a member rotates the keys: the removed member can't read what is sent afterwards, history stays, their writes never arrive         |
+| `devices.rs`          | Device linking through the rendezvous relay, the linked device joins the channel and decrypts new messages                                  |
+| `admin.rs`            | Admin deactivation (token refused, devices revoked, gateway closed, audit log) and reactivation; retention job (`max_messages`)             |
+| `bridge.rs`           | `teamcraft-bridge` process: Slack-style webhook and log lines land decrypted in an integration channel, bad input is refused                |
+| `meetings.rs`         | Scheduling sends iMIP invitations (caught by Mailpit), RSVP, an external guest joins with the one-time link, lobby, admission, cancellation |
+| `calls.rs`            | 1:1 DM call through the server's join tokens and the SFU: device-bound DAVE keys, both sides decode audio, equal privacy codes              |
+| `moderator.rs`        | Channel moderator role: removes members (keys rotate), can't manage roles, properties or the admin                                          |
+| `conversion.rs`       | Public/private conversion: who may, who can join afterwards, newcomers' history, system event, audit                                        |
+| `threads_policy.rs`   | Signed policy: auto-follow default for people who never chose, threaded view switch the server enforces                                     |
+| `guest_domains.rs`    | Guest e-mail domain restriction: invitations, meeting invitees, guest sign-in                                                               |
+| `mfa.rs`              | Require-MFA policy: local accounts need their TOTP code, IdP tokens without a second factor are refused                                     |
+| `retention_limits.rs` | Retention limit in the policy: channel/space settings stay within it, also after it is lowered                                              |
+| `display_names.rs`    | Directory policy (name format, full-name and e-mail privacy) in every response that names a person                                          |
+| `email_digest.rs`     | Content-free digest of missed mentions: opt-in, batched, skips what was read in time                                                        |
+| `web.rs` (`browser`)  | The web client in headless Chromium: Keycloak login page, welcome screen, the channel list shows the account's channels                     |
+
+The `acceptance_*` scenarios cover the v1 sections of PLAN.md one by one; what each proves, the known gaps
+and the bugs found are in [docs/acceptance.md](../../docs/acceptance.md).
 
 ### Ignored
 
-| Test                                                               | Why                                                                                                                                                                                                                                                                                                                 |
-|--------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `web::a_message_written_in_the_web_client_reaches_a_second_client` | The web build is read-only: it has no client core, so a message typed in the browser stays in memory and is never encrypted or sent (`crates/teamcraft-ui/src/server_backend.rs`). The test is complete (browser types, a second client waits) and runs with `--ignored` once the web client runs `teamcraft-core`. |
+| Test                                                            | Why                                                               |
+|-----------------------------------------------------------------|-------------------------------------------------------------------|
+| `acceptance_people::a_time_zone_that_does_not_exist_is_refused` | Bug: `PUT /me/profile` accepts time zones that are not IANA names |
 
 ## How it works
 

@@ -81,6 +81,11 @@ pub enum PushError {
 /// Sends one push through one provider. Implementations get the sealed wake-up and wrap it the way
 /// their service wants it.
 pub trait PushSender: Send + Sync {
+  /// False for placeholders that deliver nothing.
+  fn is_implemented(&self) -> bool {
+    true
+  }
+
   fn send<'a>(
     &'a self,
     target: &'a PushTarget,
@@ -109,6 +114,13 @@ impl PushDispatcher {
   pub fn with_web_public_key(mut self, public_key: String) -> Self {
     self.maybe_web_public_key = Some(public_key);
     self
+  }
+
+  /// Whether the provider has a sender, and whether that sender delivers anything.
+  pub fn sender_state(&self, provider: &PushProvider) -> Option<bool> {
+    known_name(provider)
+      .and_then(|name| self.senders.get(name))
+      .map(|sender| sender.is_implemented())
   }
 
   pub fn web_public_key(&self) -> Option<&str> {
@@ -172,6 +184,10 @@ pub struct UnifiedPushSender;
 macro_rules! stub_sender {
   ($sender:ty, $name:literal) => {
     impl PushSender for $sender {
+      fn is_implemented(&self) -> bool {
+        false
+      }
+
       fn send<'a>(
         &'a self,
         _target: &'a PushTarget,

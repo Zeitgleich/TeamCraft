@@ -66,6 +66,7 @@ wire_enum! {
     Owner => "owner",
     SpaceAdmin => "space_admin",
     ChannelAdmin => "channel_admin",
+    ChannelModerator => "channel_moderator",
   }
 }
 
@@ -79,9 +80,11 @@ wire_enum! {
 }
 
 wire_enum! {
-  /// Role inside a conversation (channel owner/moderator = `Admin`).
+  /// Role inside a conversation: `Admin` is the channel owner, `Moderator` keeps order (removes
+  /// members, deletes others' posts) without managing the channel itself.
   pub enum ChannelRole {
     Member => "member",
+    Moderator => "moderator",
     Admin => "admin",
   }
 }
@@ -256,6 +259,7 @@ impl Default for PermissionScheme {
       P::DeleteOthersPosts,
       P::RemoveOthersReactions,
     ];
+    let channel_moderator = [P::ManageMembers, P::DeleteOthersPosts, P::RemoveOthersReactions];
     let space_admin = [
       P::ManageSpaceProperties,
       P::ManageSpaceMembers,
@@ -268,6 +272,7 @@ impl Default for PermissionScheme {
     let guest_set: HashSet<_> = guest.iter().cloned().collect();
     let member_set: HashSet<_> = guest_set.iter().cloned().chain(member).collect();
     let channel_admin_set: HashSet<_> = channel_admin.into_iter().collect();
+    let channel_moderator_set: HashSet<_> = channel_moderator.into_iter().collect();
     let space_admin_set: HashSet<_> = channel_admin_set.iter().cloned().chain(space_admin).collect();
     let owner_set: HashSet<_> = everything.into_iter().collect();
     // Only owners sign the roster and the policy (admin.md §2.3).
@@ -282,6 +287,7 @@ impl Default for PermissionScheme {
       (SchemeRole::Member, member_set),
       (SchemeRole::SpaceAdmin, space_admin_set),
       (SchemeRole::ChannelAdmin, channel_admin_set),
+      (SchemeRole::ChannelModerator, channel_moderator_set),
       (SchemeRole::Admin, admin_set),
       (SchemeRole::Owner, owner_set),
     ]))
@@ -388,10 +394,14 @@ pub fn is_allowed(
   let is_space_admin = !is_guest && maybe_space.is_some_and(|s| s.maybe_role == Some(SpaceRole::SpaceAdmin));
   let is_channel_admin = !is_guest && maybe_channel.is_some_and(|c| c.maybe_role == Some(ChannelRole::Admin));
 
+  let is_channel_moderator =
+    !is_guest && maybe_channel.is_some_and(|c| c.maybe_role == Some(ChannelRole::Moderator));
+
   let effective_base = if is_guest { SchemeRole::Guest } else { base_role };
   let is_granted = scheme.grants(&effective_base, permission)
     || (is_space_admin && scheme.grants(&SchemeRole::SpaceAdmin, permission))
-    || (is_channel_admin && scheme.grants(&SchemeRole::ChannelAdmin, permission));
+    || (is_channel_admin && scheme.grants(&SchemeRole::ChannelAdmin, permission))
+    || (is_channel_moderator && scheme.grants(&SchemeRole::ChannelModerator, permission));
   if !is_granted {
     return false;
   }
@@ -415,7 +425,8 @@ pub fn is_allowed(
             || (is_space_admin && channel.visibility == ConversationVisibility::Public)
         },
       };
-      let is_exempt_from_moderation = is_instance_admin || is_space_admin || is_channel_admin;
+      let is_exempt_from_moderation =
+        is_instance_admin || is_space_admin || is_channel_admin || is_channel_moderator;
       let is_denied_by_channel = permission.is_channel_moderatable()
         && !is_exempt_from_moderation
         && if is_guest {
@@ -458,6 +469,65 @@ mod tests {
     Permission::UseSlashCommands,
     Permission::CreateShareLink,
   ];
+
+  mod channel_moderator {
+    use super::*;
+
+    fn channel(role: Option<ChannelRole>) -> Target {
+      Target::Channel(ChannelContext {
+        maybe_space: Some(SpaceContext {
+          maybe_role: Some(SpaceRole::Member),
+          maybe_space_id: None,
+        }),
+        visibility: ConversationVisibility::Private,
+        is_archived: false,
+        maybe_role: role,
+        moderation: ChannelModeration {
+          member_denied: HashSet::from([Permission::ManageMembers, Permission::CreatePost]),
+          guest_denied: HashSet::new(),
+        },
+      })
+    }
+
+    fn allowed(role: Option<ChannelRole>, permission: Permission) -> bool {
+      is_allowed(
+        &PermissionScheme::default(),
+        &Role::Member,
+        &permission,
+        &channel(role),
+      )
+    }
+
+    #[test]
+    fn a_moderator_removes_members_and_posts_but_does_not_manage_the_channel() {
+      let moderator = Some(ChannelRole::Moderator);
+      assert!(allowed(moderator.clone(), Permission::ManageMembers));
+      assert!(allowed(moderator.clone(), Permission::DeleteOthersPosts));
+      assert!(allowed(moderator.clone(), Permission::RemoveOthersReactions));
+      assert!(
+        allowed(moderator.clone(), Permission::CreatePost),
+        "not bound by the channel's limits"
+      );
+      for permission in [
+        Permission::ManageChannelRoles,
+        Permission::ManageChannelProperties,
+        Permission::ConvertChannelPrivacy,
+      ] {
+        assert!(!allowed(moderator.clone(), permission.clone()), "{permission:?}");
+      }
+    }
+
+    #[test]
+    fn plain_members_have_none_of_it_and_admins_have_all() {
+      assert!(!allowed(Some(ChannelRole::Member), Permission::DeleteOthersPosts));
+      assert!(!allowed(Some(ChannelRole::Member), Permission::ManageMembers));
+      assert!(allowed(
+        Some(ChannelRole::Admin),
+        Permission::ConvertChannelPrivacy
+      ));
+      assert!(!allowed(None, Permission::DeleteOthersPosts));
+    }
+  }
 
   mod scheme_changes {
     use super::*;

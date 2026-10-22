@@ -6,6 +6,7 @@
 //! the sync loop; every call posts a job to it and awaits the answer. The app supplies access
 //! tokens ([`TokenProvider`]) and is told when to re-read ([`EventListener`]).
 
+mod bridge;
 mod calls;
 mod engine;
 mod error;
@@ -17,8 +18,8 @@ pub use calls::{CallEndReason, CallListener, CallPhase, CallSession, CallStateIn
 pub use error::TeamCraftError;
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MessageItem, Presence, PushNotification,
-  PushService, ReactionItem, SearchHitItem,
+  AccountState, AppConfig, ConversationItem, ConversationKind, MessageItem, OrgRecoveryStart, Presence,
+  PushNotification, PushService, ReactionItem, SearchHitItem,
 };
 
 use crate::engine::{Engine, Job};
@@ -191,6 +192,75 @@ impl TeamCraft {
   pub async fn notification_for_push(&self, payload: Vec<u8>) -> Result<PushNotification, TeamCraftError> {
     self
       .call(move |engine| Box::pin(engine.notification_for_push(payload)))
+      .await
+  }
+
+  /// Everything the conversation list and headers show, as JSON (`ChatSnapshot` of
+  /// teamcraft-client-api: users, spaces, conversations with unread counts, message counts, keys).
+  pub async fn snapshot(&self) -> Result<String, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.snapshot_json() }))
+      .await
+  }
+
+  /// `len` messages of a conversation's feed from `start` on, oldest first, as JSON
+  /// (`MessageWindow`).
+  pub async fn message_window(
+    &self,
+    conversation_id: String,
+    start: u32,
+    len: u32,
+  ) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.window_json(&conversation_id, start, len) }))
+      .await
+  }
+
+  /// Runs a `ChatAction` (JSON, tagged by `action`): send with reply/priority/files, react, edit,
+  /// delete, forward, pin, save, mark (un)read, drafts, threads, presence and status, channels,
+  /// downloads and share links. Admin actions stay on desktop and web.
+  pub async fn act(&self, action_json: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.act(&action_json).await }))
+      .await
+  }
+
+  /// Answers a `ChatQuery` (JSON, tagged by `kind`) with a `ChatAnswer` (JSON, tagged by `answer`):
+  /// message extras, threads, pins, saved items, drafts, files, channel browser, search, mentions.
+  pub async fn query(&self, query_json: String) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.query_json(&query_json) }))
+      .await
+  }
+
+  /// An authenticated call to a plain server endpoint under `/api/v1` (notification settings,
+  /// meetings): `method` is the HTTP verb, `body` JSON; answers the response JSON.
+  pub async fn api_request(
+    &self,
+    method: String,
+    path: String,
+    maybe_body: Option<String>,
+  ) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.api_request(&method, &path, maybe_body).await }))
+      .await
+  }
+
+  /// New device without the passphrase: asks the organization's admins to recover the account
+  /// (e2ee.md §6.3.1). Show the code; the user reads it to an admin.
+  pub async fn start_org_recovery(&self) -> Result<OrgRecoveryStart, TeamCraftError> {
+    self.call(|engine| Box::pin(engine.start_org_recovery())).await
+  }
+
+  /// After the admins approved: enrolls with the recovered key and a new passphrase. Fails with
+  /// `RecoveryPending` while they haven't.
+  pub async fn finish_org_recovery(
+    &self,
+    device_name: String,
+    new_passphrase: String,
+  ) -> Result<AccountState, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.finish_org_recovery(device_name, new_passphrase)))
       .await
   }
 

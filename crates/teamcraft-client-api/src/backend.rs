@@ -6,17 +6,23 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
-use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, Role};
+use teamcraft_proto::{
+  AdminInstanceResponse, AnnouncementResponse, BackgroundId, CategoryId, ChannelModeration, HistoryPolicy,
+  OrgBackgroundId, PermissionSchemeResponse, Role, SchemeChange, SetAnnouncementRequest, WorkspacePolicy,
+};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
-use crate::admin::{AdminChannel, AdminUser, AuditEntry, Retention, SecurityPolicy, SelfJoinOutcome};
+use crate::admin::{
+  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome,
+};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
   Participant,
 };
+use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
   ThreadId, ThreadSummary, User, UserId,
@@ -27,6 +33,13 @@ pub trait ChatBackend {
   /// Gives backends that load data in the background (over IPC or the network) a way to tell the UI
   /// that something changed and views should re-read. Backends whose reads are instant ignore it.
   fn set_change_notifier(&self, _notify: std::rc::Rc<dyn Fn()>) {}
+
+  /// The announcement banner to show above the app, unless this user dismissed it.
+  fn current_announcement(&self) -> Option<AnnouncementResponse> {
+    None
+  }
+
+  fn dismiss_announcement(&self, _id: teamcraft_proto::AnnouncementId) {}
 
   /// The signed-in user, including the presence and custom status they chose.
   fn me(&self) -> User;
@@ -79,6 +92,7 @@ pub trait ChatBackend {
   /// and `admins` become the first one. Needs [`Self::can_sign_workspace`].
   fn publish_policy(
     &self,
+    _base: teamcraft_proto::WorkspacePolicy,
     _policy: teamcraft_proto::WorkspacePolicy,
     _owners: Vec<UserId>,
     _admins: Vec<UserId>,
@@ -86,6 +100,11 @@ pub trait ChatBackend {
   }
   /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
   fn admin_add_self(&self, _conversation: ConversationId) {}
+  /// What desktop and browser notifications may show (the verified workspace policy). A backend
+  /// that does not know the policy answers with the strictest mode.
+  fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
+    teamcraft_proto::PushContentMode::Generic
+  }
   /// Identity keys this device knows (empty when the backend has no encryption keys).
   fn security_keys(&self) -> crate::remote::SecuritySnapshot {
     crate::remote::SecuritySnapshot::default()
@@ -142,6 +161,17 @@ pub trait ChatBackend {
   /// uploaded and synced to the user's devices.
   fn add_background_image(&self, _name: &str, _picture: Vec<u8>) {}
   fn delete_background_image(&self, _id: BackgroundId) {}
+  /// The organization's call backgrounds and their rule, from the verified workspace policy.
+  fn org_backgrounds(&self) -> OrgBackgrounds {
+    OrgBackgrounds::default()
+  }
+  /// Owners: uploads a picture (the host normalizes it to a JPEG first) and adds it to the signed
+  /// policy.
+  fn add_org_background(&self, _name: &str, _picture: Vec<u8>) {}
+  /// Owners: removes a picture from the signed policy and deletes it.
+  fn delete_org_background(&self, _id: OrgBackgroundId) {}
+  /// Owners: the rule, the default and the order of the organization's backgrounds.
+  fn set_org_background_rule(&self, _rule: OrgBackgroundRule) {}
   /// A link to the message that only members of the conversation can open.
   fn permalink(&self, _conversation: ConversationId, _message: MessageId) -> Option<String> {
     None
@@ -218,6 +248,14 @@ pub trait ChatBackend {
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
+  /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
+  /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
+  fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}
+  /// Whether the request for `at` was answered (also when it failed or found nothing). Backends
+  /// that hold the whole history always say yes.
+  fn is_history_loaded(&self, _conversation: ConversationId, _at: i64) -> bool {
+    true
+  }
   /// The conversation includes people from outside the organization (the "external" badge).
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false
@@ -268,9 +306,10 @@ pub trait AdminBackend {
   fn my_role(&self) -> Role;
   fn admin_channels(&self) -> Vec<AdminChannel>;
   fn admin_users(&self) -> Vec<AdminUser>;
-  fn security_policy(&self) -> SecurityPolicy;
-  /// Stores a new signed policy version.
-  fn set_security_policy(&self, policy: SecurityPolicy);
+  /// The signed workspace policy in force and its version (0: none was signed yet).
+  fn workspace_policy(&self) -> (u64, WorkspacePolicy);
+  /// Signs and stores a new policy version. Only owners with signing keys can.
+  fn set_workspace_policy(&self, policy: WorkspacePolicy);
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention);
   fn remove_device(&self, user: UserId, device: DeviceId);
   fn set_user_active(&self, user: UserId, is_active: bool);
@@ -281,10 +320,41 @@ pub trait AdminBackend {
 
   /// Called when the console opens: backends that read the server fetch fresh data now.
   fn admin_refresh(&self) {}
-  /// Whether the signed policy stores the field; the console disables the controls of others.
-  fn is_policy_field_stored(&self, _field: crate::admin::PolicyField) -> bool {
-    true
+
+  /// Spaces by name, for the permission scheme scopes.
+  fn admin_spaces(&self) -> Vec<AdminSpace> {
+    Vec::new()
   }
+  /// What each role may do at the scope (`None`: the whole instance) and the changes made there.
+  fn permission_scheme(&self, _maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
+    PermissionSchemeResponse { roles: Vec::new() }
+  }
+  fn change_permissions(&self, _maybe_space: Option<SpaceId>, _changes: Vec<SchemeChange>) {}
+  /// The permissions a channel takes away from its members and guests.
+  fn channel_moderation(&self, _channel: ConversationId) -> ChannelModeration {
+    ChannelModeration::default()
+  }
+  fn set_channel_moderation(&self, _channel: ConversationId, _moderation: ChannelModeration) {}
+  /// People who can become the owner of the channel (its members).
+  fn channel_member_candidates(&self, _channel: ConversationId) -> Vec<UserId> {
+    Vec::new()
+  }
+  fn assign_channel_owner(&self, _channel: ConversationId, _user: UserId) {}
+  /// The announcement banner in force, if any.
+  fn announcement(&self) -> Option<AnnouncementResponse> {
+    None
+  }
+  fn set_announcement(&self, _announcement: SetAnnouncementRequest) {}
+  fn clear_announcement(&self) {}
+  /// Media server, push providers and storage; `None` while unknown.
+  fn instance_status(&self) -> Option<AdminInstanceResponse> {
+    None
+  }
+  fn audit_filter(&self) -> AuditFilter {
+    AuditFilter::default()
+  }
+  /// Narrows the audit log; backends that read the server reload it.
+  fn set_audit_filter(&self, _filter: AuditFilter) {}
   /// Why the signed policy cannot be changed here (not an owner, no encryption keys on this device).
   fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
     None

@@ -363,3 +363,57 @@ impl Database {
     Ok(result.rows_affected() > 0)
   }
 }
+
+/// Live devices per push provider (devices without a push channel are not counted).
+#[derive(Debug, Clone)]
+pub struct PushDeviceCount {
+  pub provider: String,
+  pub device_count: u64,
+}
+
+/// What attachments and search index segments take up in object storage.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StorageTotals {
+  pub attachment_count: u64,
+  pub attachment_bytes: u64,
+  pub index_segment_bytes: u64,
+}
+
+impl Database {
+  pub async fn admin_push_device_counts(&self) -> Result<Vec<PushDeviceCount>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT push_provider AS "provider!", count(*) AS "device_count!"
+         FROM devices WHERE revoked_at IS NULL AND push_provider IS NOT NULL
+         GROUP BY push_provider"#,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    Ok(
+      rows
+        .into_iter()
+        .map(|row| PushDeviceCount {
+          provider: row.provider,
+          device_count: u64::try_from(row.device_count).unwrap_or(0),
+        })
+        .collect(),
+    )
+  }
+
+  pub async fn admin_storage_totals(&self) -> Result<StorageTotals, DbError> {
+    let attachments = sqlx::query!(
+      r#"SELECT count(*) AS "count!", COALESCE(sum(size_bytes), 0)::bigint AS "bytes!"
+         FROM attachments WHERE completed_at IS NOT NULL"#,
+    )
+    .fetch_one(self.pool())
+    .await?;
+    let segments =
+      sqlx::query!(r#"SELECT COALESCE(sum(size_bytes), 0)::bigint AS "bytes!" FROM index_segments"#,)
+        .fetch_one(self.pool())
+        .await?;
+    Ok(StorageTotals {
+      attachment_count: u64::try_from(attachments.count).unwrap_or(0),
+      attachment_bytes: u64::try_from(attachments.bytes).unwrap_or(0),
+      index_segment_bytes: u64::try_from(segments.bytes).unwrap_or(0),
+    })
+  }
+}

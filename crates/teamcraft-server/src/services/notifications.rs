@@ -49,7 +49,7 @@ pub async fn put_settings(
     .transpose()
     .map_err(|error| ApiError::Internal(format!("serializing the DND schedule failed: {error}")))?;
   let stored = StoredUserSettings {
-    auto_follow_mentioned_threads: request.auto_follow_mentioned_threads,
+    maybe_auto_follow_mentioned_threads: Some(request.auto_follow_mentioned_threads),
     push_mode: request.push_mode.as_str().to_owned(),
     maybe_send_read_receipts: Some(request.send_read_receipts),
     maybe_dnd_schedule,
@@ -201,7 +201,9 @@ fn settings_response(
     .transpose()
     .map_err(|error| ApiError::Internal(format!("stored DND schedule is invalid: {error}")))?;
   Ok(NotificationSettings {
-    auto_follow_mentioned_threads: stored.auto_follow_mentioned_threads,
+    auto_follow_mentioned_threads: stored
+      .maybe_auto_follow_mentioned_threads
+      .unwrap_or(state.policy.get().threads.auto_follows_mentioned_threads),
     push_mode: PushMode::from(stored.push_mode.clone()),
     send_read_receipts: receipts_enabled(state, stored),
     maybe_dnd_schedule,

@@ -8,13 +8,25 @@ use teamcraft_proto::{
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-use crate::store::{LocalStore, MessageFilter};
-use crate::ui_backend::CoreCommand;
+use crate::records;
+use crate::store::{LocalStore, MessageFilter, Table};
+use crate::ui_backend::{CoreCommand, history_jump_key};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_ui_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
     match command {
       CoreCommand::FlushOutbox => self.flush_outbox().await.map(|_| ()),
+      CoreCommand::LoadHistoryAt { conversation, at_ms } => {
+        let loaded = self.load_messages_from(conversation, at_ms).await;
+        // Answered even when loading failed (offline): the UI then shows what is local.
+        records::put_json(
+          &self.store,
+          Table::SyncState,
+          &history_jump_key(conversation),
+          &at_ms,
+        )?;
+        loaded.map(|_| ())
+      },
       CoreCommand::MarkRead { conversation } => {
         self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
         let maybe_latest = self
@@ -87,6 +99,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }),
       CoreCommand::AddBackground { name, picture } => self.add_background(name, picture).await.map(|_| ()),
       CoreCommand::DeleteBackground { id } => self.delete_background(id).await,
+      CoreCommand::AddOrgBackground { name, picture } => {
+        self.add_org_background(name, picture).await.map(|_| ())
+      },
+      CoreCommand::DeleteOrgBackground { id } => self.delete_org_background(id).await,
+      CoreCommand::SetOrgBackgroundRule { rule } => {
+        self
+          .set_org_background_rule(rule.mode, rule.maybe_default, rule.guests_exempt, rule.order)
+          .await
+      },
       CoreCommand::SetServerPin {
         conversation,
         target,

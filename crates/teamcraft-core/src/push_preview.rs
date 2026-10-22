@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  Base64Bytes, ConversationResponse, Id, ListMessagesQuery, MessageId, PushWakeUp, Snowflake, UserSummary,
+  Base64Bytes, ConversationResponse, Id, ListMessagesQuery, MessageId, PushContentMode, PushWakeUp,
+  Snowflake, UserSummary,
 };
 
 use crate::api::ServerApi;
@@ -94,14 +95,47 @@ pub async fn push_preview<A: ServerApi>(
     Some(message_id) => preview_content(store, maybe_api, &wake_up, message_id).await,
     None => (PreviewContent::Unavailable, false),
   };
-  Ok(PushPreview {
+  let preview = PushPreview {
     wake_up,
     maybe_conversation_name,
     maybe_sender_name,
     content,
     is_direct,
     is_silent,
-  })
+  };
+  Ok(preview.limited_to(&push_content_mode(store)))
+}
+
+/// What the verified workspace policy lets notifications show. Fails closed: with no verified
+/// workspace state on this device yet, or one that cannot be read, a notification shows nothing
+/// but "New message".
+pub fn push_content_mode(store: &impl LocalStore) -> PushContentMode {
+  match records::get_json::<crate::workspace::WorkspaceState>(
+    store,
+    Table::Workspace,
+    crate::client::WORKSPACE_KEY,
+  ) {
+    Ok(Some(state)) => state.policy.notifications.push_content,
+    Ok(None) | Err(_) => PushContentMode::Generic,
+  }
+}
+
+impl PushPreview {
+  /// The preview cut down to what the policy allows on a lock screen (admins' "push content" setting).
+  /// An unknown mode from a newer server is treated as the strictest one.
+  #[must_use]
+  pub fn limited_to(mut self, mode: &PushContentMode) -> Self {
+    match mode {
+      PushContentMode::Full => {},
+      PushContentMode::Sender => self.content = PreviewContent::Unavailable,
+      PushContentMode::Generic | PushContentMode::Unknown(_) => {
+        self.content = PreviewContent::Unavailable;
+        self.maybe_conversation_name = None;
+        self.maybe_sender_name = None;
+      },
+    }
+    self
+  }
 }
 
 /// Stores the session a notification process may use (see [`PushSession`]).
@@ -232,6 +266,7 @@ fn truncate(text: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use teamcraft_proto::ConversationId;
 
   #[test]
   fn long_text_is_cut_at_a_character_boundary() {
@@ -240,6 +275,52 @@ mod tests {
     assert_eq!(cut.chars().count(), MAX_PREVIEW_CHARS + 1);
     assert!(cut.ends_with('…'));
     assert_eq!(truncate("short"), "short");
+  }
+
+  #[test]
+  fn a_missing_or_unreadable_policy_fails_closed() {
+    let store = crate::store::MemoryStore::new();
+    assert_eq!(push_content_mode(&store), PushContentMode::Generic);
+    records::put_json(
+      &store,
+      Table::Workspace,
+      crate::client::WORKSPACE_KEY,
+      &serde_json::json!({"policy": "not a policy"}),
+    )
+    .unwrap();
+    assert_eq!(push_content_mode(&store), PushContentMode::Generic);
+
+    let mut state = crate::workspace::WorkspaceState::default();
+    state.policy.notifications.push_content = PushContentMode::Sender;
+    records::put_json(&store, Table::Workspace, crate::client::WORKSPACE_KEY, &state).unwrap();
+    assert_eq!(push_content_mode(&store), PushContentMode::Sender);
+  }
+
+  #[test]
+  fn the_policy_mode_cuts_the_preview_down() {
+    let full = PushPreview {
+      wake_up: PushWakeUp {
+        kind: teamcraft_proto::PushKind::Message,
+        conversation_id: ConversationId::from_snowflake(Snowflake::new(1).unwrap()),
+        maybe_message_id: None,
+        maybe_sender_id: None,
+        is_urgent: false,
+      },
+      maybe_conversation_name: Some("planning".into()),
+      maybe_sender_name: Some("Alice".into()),
+      content: PreviewContent::Text("lunch?".into()),
+      is_direct: false,
+      is_silent: false,
+    };
+    assert_eq!(full.clone().limited_to(&PushContentMode::Full), full);
+    let sender = full.clone().limited_to(&PushContentMode::Sender);
+    assert_eq!(sender.content, PreviewContent::Unavailable);
+    assert_eq!(sender.maybe_sender_name.as_deref(), Some("Alice"));
+    for mode in [PushContentMode::Generic, PushContentMode::Unknown("x".into())] {
+      let generic = full.clone().limited_to(&mode);
+      assert!(generic.maybe_sender_name.is_none() && generic.maybe_conversation_name.is_none());
+      assert_eq!(generic.content, PreviewContent::Unavailable);
+    }
   }
 
   #[test]

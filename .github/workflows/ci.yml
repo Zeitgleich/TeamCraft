@@ -3,18 +3,35 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
 
 # A new push to the same branch or PR cancels the run still going for the previous one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: read the code and pull the CI image from ghcr.io; nothing is written.
+permissions:
+  contents: read
+  packages: read
+
 env:
   CARGO_TERM_COLOR: always
+  # arm64 runs on pushes to main and on pull requests labelled `arm`; the runner budget is limited.
 
-# Jobs run on GitHub's hosted runner, inside a Debian Trixie container with the same Rust image
-# we use locally, so builds and tests see Debian, not the runner's Ubuntu.
+# Jobs run on GitHub's hosted runner, inside our Debian Trixie CI image (containers/ci.Containerfile,
+# built by ci-image.yml; pinned by digest, update it with scripts/pin-ci-image.sh). The image has
+# Rust, every system package and cargo-nextest, so a job starts building at once.
+#
+# The build output is cached by Swatinem/rust-cache, one key per job and architecture. Only runs
+# on main save it; pull requests restore main's cache.
 
 jobs:
   check:
@@ -25,38 +42,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
-      image: rust:1.99.1-trixie
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # The hosted runner ships ~30 GB of tools we never use; mounted here so the first step can
-      # delete them, otherwise the workspace's test binaries fill the runner's disk.
+      # delete them, otherwise the workspace's build output fills the runner's disk.
       volumes:
         - /usr/share/dotnet:/host/dotnet
         - /usr/local/lib/android:/host/android
         - /opt/ghc:/host/ghc
         - /opt/hostedtoolcache:/host/toolcache
+    env:
+      SQLX_OFFLINE: "true"
     steps:
       - name: Free disk space on the runner
-        run: find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete || true
-      - uses: actions/checkout@v5
-      - name: Rust components
-        run: rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+        # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
+        # the dependencies are fetched, and the build output only needs the space later.
+        run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: ${{ matrix.arch }}
-      - name: System packages for the Tauri desktop shell, native call media and capture
-        # libpipewire/libspa + libclang: portal capture (bindgen); mesa-vulkan-drivers: lavapipe, a
-        # software GPU, so the effects' golden-image tests run instead of skipping.
-        run: >
-          apt-get update && apt-get install -y --no-install-recommends cmake
-          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev
-          libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev mesa-vulkan-drivers
-          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-bad
+          key: check-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Format
@@ -64,8 +76,6 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-        env:
-          SQLX_OFFLINE: "true"
       - name: Wasm build (browser crates)
         if: matrix.arch == 'x86_64'
         run: >
@@ -73,22 +83,20 @@ jobs:
           -p teamcraft-proto -p teamcraft-crypto -p teamcraft-media -p teamcraft-core -p teamcraft-ui
 
   # Tests in their own job: a fresh disk, and test binaries without debug info (every integration
-  # test binary links the whole dependency tree).
+  # test binary links the whole dependency tree). cargo-nextest runs every test in its own process
+  # and in parallel across binaries; it does not run doctests, so those run separately.
   test:
     name: test (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
-      image: rust:1.99.1-trixie
-      # The hosted runner ships ~30 GB of tools we never use; mounted here so the first step can
-      # delete them, otherwise the workspace's test binaries fill the runner's disk.
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /usr/share/dotnet:/host/dotnet
         - /usr/local/lib/android:/host/android
@@ -100,44 +108,46 @@ jobs:
       CARGO_PROFILE_DEV_STRIP: "debuginfo"
     steps:
       - name: Free disk space on the runner
-        run: find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete || true
-      - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
+        # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
+        # the dependencies are fetched, and the build output only needs the space later.
+        run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-${{ matrix.arch }}
-      - name: System packages for the Tauri desktop shell, native call media and capture
-        run: >
-          apt-get update && apt-get install -y --no-install-recommends cmake
-          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev
-          libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev mesa-vulkan-drivers
-          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-bad
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Test
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --profile ci
+      - name: Doctests
+        run: cargo test --workspace --doc
 
   # WebRTC audio processing (echo cancellation) is opt-in at build time, see
   # crates/teamcraft-media/README.md. Built from source here (version 2 isn't packaged).
   audio-processing:
     runs-on: ubuntu-latest
-    container: rust:1.99.1-trixie
+    container:
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     env:
       RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
     steps:
-      - uses: actions/checkout@v5
-      - name: Rust components
-        run: rustup component add clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: audio-processing
-      - name: System packages (ALSA, meson/ninja and libclang for the bundled build)
-        run: >
-          apt-get update && apt-get install -y --no-install-recommends cmake
-          libasound2-dev meson ninja-build libclang-dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
       - name: Clippy
         run: cargo clippy -p teamcraft-media --all-targets --features native -- -D warnings
       - name: Test
-        run: cargo test -p teamcraft-media --features native
+        run: cargo nextest run -p teamcraft-media --features native --profile ci
+      - name: Doctests
+        run: cargo test -p teamcraft-media --features native --doc
 
   # The Windows desktop client: the Tauri shell and the call media with Media Foundation cameras and
   # Windows Graphics Capture. Not --all-features: the `gstreamer` feature needs GStreamer's MSVC
@@ -148,14 +158,14 @@ jobs:
     env:
       SQLX_OFFLINE: "true"
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
           targets: aarch64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # OpenH264 (tests) and OpenSSL for SQLCipher (built from source) need NASM; Perl comes with the image.
-      - uses: ilammy/setup-nasm@v1
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         shell: bash
         run: mkdir -p crates/teamcraft-ui/dist
@@ -174,5 +184,5 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

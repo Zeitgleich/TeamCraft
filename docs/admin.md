@@ -108,7 +108,7 @@ remaining members. The admin doesn't need to be a member for that.
 | Retention per space/channel: last N days and/or last N messages; admin defaults and maximums, owners choose within them     | v1    |
 | Integration channels: who may create them, register bridges, default retention; allow server-readable mode (off by default) | v1    |
 | Delete a channel completely (all ciphertext + attachments)                                                                  | v1    |
-| Default spaces/channels for new users                                                                                       | v1    |
+| Default spaces/channels for new users (`policy.default_spaces` / `default_channels`, applied once at first sign-in)         | v1    |
 | Space templates                                                                                                             | later |
 
 ### 3.2 Users and guests
@@ -128,12 +128,12 @@ remaining members. The admin doesn't need to be a member for that.
 
 Admins can't read reported content unless a member shows it to them:
 
-| Feature                                                                                                                                           | Prio |
-|---------------------------------------------------------------------------------------------------------------------------------------------------|------|
-| **Report message**: a member sends the decrypted message + context to the admin team through an E2EE admin channel – the member's explicit choice | v1.x |
-| Delete a message by ID (from a report): server deletes ciphertext, clients honor a signed delete tombstone                                        | v1.x |
-| Channel moderators delete messages in their channels                                                                                              | v1   |
-| Mute/kick a user from a channel                                                                                                                   | v1   |
+| Feature                                                                                                                                                                                                                       | Prio |
+|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------|
+| **Report message**: a member sends the decrypted message + context to the admin team through an E2EE admin channel – the member's explicit choice                                                                             | v1.x |
+| Delete a message by ID (from a report): server deletes ciphertext, clients honor a signed delete tombstone                                                                                                                    | v1.x |
+| Channel moderators delete messages in their channels                                                                                                                                                                          | v1   |
+| Mute/kick a user from a channel (the **channel moderator** role: `moderator`, grants `manage_members`, `delete_others_posts`, `remove_others_reactions`; can't manage roles, properties, privacy or remove admins/moderators) | v1   |
 
 ### 3.4 Instance
 
@@ -147,6 +147,39 @@ Admins can't read reported content unless a member shows it to them:
 | Audit log (metadata only), exportable                                                                             | v1   |
 | Push setup (APNs, FCM, UnifiedPush)                                                                               | v1   |
 | Backups status                                                                                                    | v1.x |
+
+### 3.5 Call backgrounds
+
+Admins upload pictures for the organization's call backgrounds; owners decide how they are used. The
+rule is part of the signed workspace policy (`call_backgrounds`, §2.3), so member clients enforce it
+themselves and the server can't relax it.
+
+| Mode       | What people may use behind themselves                                                                      |
+|------------|------------------------------------------------------------------------------------------------------------|
+| `free`     | Anything; the organization's pictures are offered first, next to blur, built-in and own pictures (default) |
+| `org_only` | The organization's pictures, blur or nothing                                                               |
+| `required` | Always one of the organization's pictures while the camera is on; people pick which                        |
+
+- **Default picture:** optional; preselected, and used when a choice isn't allowed (or none was made
+  under `required`).
+- **Guests:** exempt by default (`guests_exempt`), so external participants aren't forced into the
+  organization's look; owners can include them.
+- **Enforcement:** the client applies the rule when a background is chosen and when the camera turns
+  on. Under `required`, a device that can't replace the background (no GPU or segmentation model) can't
+  turn the camera on, so the room behind the person is never sent. The browser and the mobile apps don't
+  send camera video yet; they get the same check when they do.
+- **Storage:** the pictures are stored unencrypted (every call participant sees them anyway); the policy
+  lists each one with its SHA-256, and clients refuse a picture whose hash doesn't match (e2ee.md §8.1).
+- **Admin UI:** Administration → Backgrounds: upload (JPEG or PNG; re-encoded as a Full HD JPEG without
+  metadata), delete, order, default, mode and guest exemption. Admins upload; publishing the list is a
+  policy change, which needs an owner (`sign_workspace`). A picture the current policy lists can't be
+  deleted on the server; removing it from the list first is one step in the UI.
+- **Limits:** 50 organization pictures, each up to `max_background_bytes` (8 MiB). Clients also refuse
+  pictures over 8 MiB or 36 megapixels before decoding them.
+- **Deleting:** a presigned upload URL keeps working until it expires, so a deleted picture's row stays,
+  and counts towards the limits, until then; a sweeper (every 10 minutes) then deletes the object once
+  more and the row. Uploads announced but never completed are swept the same way. The same applies to
+  people's own backgrounds.
 
 ## 4. Audit log
 
@@ -172,10 +205,16 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | User groups                              | `/user-groups` (create, edit and manage members need `create_user_group` / `manage_user_group_members`) |
 | Organization recovery                    | `/org-recovery/...`, see e2ee.md §6.3.1                                            |
 | Share links                              | `/shares` (members), public `/shares/{id}`; `[shares]` configuration               |
+| Call backgrounds                         | `POST /admin/backgrounds`, `POST /admin/backgrounds/{id}/complete`, `DELETE /admin/backgrounds/{id}`; everybody: `GET /org-backgrounds/{id}/download` |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
-timeout) are part of the signed workspace policy; the server enforces them. A permission scheme change
+timeout) the thread options (threaded view on/off, auto-follow default) and the allowed guest e-mail domains
+(`guests.allowed_email_domains`: invitations, meeting invitees and guest sign-in; added to the server's
+`[guests] allowed_email_domains`) are part of the signed workspace policy; the server enforces them. The display name format and the full name/e-mail privacy apply
+to every response that names a person (directory, member lists, `/me`, meeting attendees, gateway events)
+and to the names in e-mail the server sends (iCalendar organizer and attendees, `{inviter}`); only the
+admin console's user list shows the identity provider's name, because admins must recognise accounts. A permission scheme change
 cannot touch the owner role or `sign_workspace`, cannot give guests permissions beyond channel content
 and direct messages, and cannot change instance-wide permissions inside a space.
 

@@ -3,9 +3,8 @@
 
 use leptos::prelude::*;
 
-use crate::calls::BackgroundEffect;
 use crate::clock::{format_relative, now_ms};
-use crate::components::call_video::BackgroundPicker;
+use crate::components::background_picker::{BackgroundPicker, effect_from_slug, effect_slug};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{Locale, use_i18n};
 use crate::model::{Conversation, DeviceId, UserId};
@@ -827,15 +826,10 @@ pub fn CallsTab() -> impl IntoView {
       .map(|device| (device.id.clone(), device.label.clone()))
       .collect()
   };
-  let effect = RwSignal::new(
-    BackgroundEffect::ALL
-      .into_iter()
-      .find(|candidate| candidate.slug() == calls.get_untracked().background)
-      .unwrap_or(BackgroundEffect::None),
-  );
+  let effect = RwSignal::new(effect_from_slug(&calls.get_untracked().background));
   // Picker changes flow into the preferences.
   Effect::new(move |previous: Option<()>| {
-    let slug = effect.get().slug().to_owned();
+    let slug = effect_slug(effect.get());
     if previous.is_some() {
       prefs.update(|all| all.calls.background = slug);
     }
@@ -950,12 +944,7 @@ pub fn apply_call_prefs(call: crate::calls::CallState, calls: &CallPrefs) {
   call.is_mic_on.set(!calls.start_muted);
   call.is_camera_on.set(!calls.start_camera_off);
   call.mirror_self_view.set(calls.mirror_self_view);
-  call.effect.set(
-    BackgroundEffect::ALL
-      .into_iter()
-      .find(|candidate| candidate.slug() == calls.background)
-      .unwrap_or(BackgroundEffect::None),
-  );
+  call.effect.set(effect_from_slug(&calls.background));
   call.camera_id.set(calls.camera_id.clone());
   call.microphone_id.set(calls.microphone_id.clone());
   call.speaker_id.set(calls.speaker_id.clone());

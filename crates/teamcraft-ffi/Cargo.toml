@@ -28,6 +28,11 @@ teamcraft-crypto = { path = "../teamcraft-crypto" }
 # Calls: the native call driver (WebTransport, Opus, audio devices; AAudio on Android).
 teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
 teamcraft-proto.workspace = true
+# The chat bridge speaks the client-api JSON messages (as the desktop IPC does).
+serde.workspace = true
+serde_json.workspace = true
+# One-time recovery request keys.
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 thiserror.workspace = true
 tracing.workspace = true
 # The engine thread runs the (non-Send) core on a current-thread runtime; calls run on a

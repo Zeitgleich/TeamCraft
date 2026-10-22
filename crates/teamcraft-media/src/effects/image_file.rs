@@ -13,6 +13,11 @@ use super::{BackgroundImage, EffectsError};
 /// Largest picture accepted for decoding (width and height); larger ones are rejected before
 /// their pixels are allocated.
 pub const MAX_DECODED_DIMENSION: u32 = 8192;
+/// Largest pixel count accepted (36 MP, about 144 MB as RGBA): a narrow limit per side still
+/// allows 8192 x 8192.
+pub const MAX_DECODED_PIXELS: u64 = 36_000_000;
+/// Largest picture file accepted at all, wherever it comes from (the server's limit too).
+pub const MAX_BACKGROUND_FILE_BYTES: usize = 8 * 1024 * 1024;
 /// Uploaded backgrounds are scaled to fit this (Full HD; calls send at most 720p).
 pub const BACKGROUND_MAX_WIDTH: u32 = 1920;
 pub const BACKGROUND_MAX_HEIGHT: u32 = 1080;
@@ -21,6 +26,11 @@ const BACKGROUND_JPEG_QUALITY: u8 = 85;
 impl BackgroundImage {
   /// Decodes a JPEG or PNG file (detected by its signature) to RGBA.
   pub fn decode(file: &[u8]) -> Result<Self, EffectsError> {
+    if file.len() > MAX_BACKGROUND_FILE_BYTES {
+      return Err(EffectsError::UnsupportedImage(format!(
+        "larger than {MAX_BACKGROUND_FILE_BYTES} bytes"
+      )));
+    }
     let options = DecoderOptions::default()
       .set_max_width(MAX_DECODED_DIMENSION as usize)
       .set_max_height(MAX_DECODED_DIMENSION as usize)
@@ -29,11 +39,15 @@ impl BackgroundImage {
       .png_set_strip_to_8bit(true);
     let (pixels, width, height) = if file.starts_with(&[0xff, 0xd8, 0xff]) {
       let mut decoder = JpegDecoder::new_with_options(file, options);
+      decoder.decode_headers().map_err(file_error)?;
+      check_pixels(decoder.dimensions())?;
       let pixels = decoder.decode().map_err(file_error)?;
       let (width, height) = decoder.dimensions().ok_or_else(|| file_error("no dimensions"))?;
       (pixels, width, height)
     } else if file.starts_with(b"\x89PNG\r\n\x1a\n") {
       let mut decoder = PngDecoder::new_with_options(file, options);
+      decoder.decode_headers().map_err(file_error)?;
+      check_pixels(decoder.get_dimensions())?;
       let pixels = decoder.decode_raw().map_err(file_error)?;
       let (width, height) = decoder
         .get_dimensions()
@@ -85,6 +99,17 @@ pub fn normalize_background_file(file: &[u8]) -> Result<Vec<u8>, EffectsError> {
   BackgroundImage::decode(file)?
     .fit_within(BACKGROUND_MAX_WIDTH, BACKGROUND_MAX_HEIGHT)
     .to_jpeg(BACKGROUND_JPEG_QUALITY)
+}
+
+/// Refuses pictures with more than [`MAX_DECODED_PIXELS`] before their pixels are allocated.
+fn check_pixels(maybe_dimensions: Option<(usize, usize)>) -> Result<(), EffectsError> {
+  let (width, height) = maybe_dimensions.ok_or_else(|| file_error("no dimensions"))?;
+  if (width as u64).saturating_mul(height as u64) > MAX_DECODED_PIXELS {
+    return Err(EffectsError::UnsupportedImage(format!(
+      "{width} x {height} is more than {MAX_DECODED_PIXELS} pixels"
+    )));
+  }
+  Ok(())
 }
 
 /// Area-averaging downscale: each target pixel is the mean of the source pixels it covers.
@@ -192,6 +217,23 @@ mod tests {
     ));
     assert!(BackgroundImage::decode(&[0xff, 0xd8, 0xff, 0xe0, 0, 1]).is_err());
     assert!(BackgroundImage::decode(b"\x89PNG\r\n\x1a\ntruncated").is_err());
+  }
+
+  #[test]
+  fn too_many_pixels_or_bytes_are_rejected() {
+    // 8000 x 5000 = 40 MP: within 8192 per side, over the pixel limit.
+    let large = BackgroundImage::new(8000, 5000, vec![0; 8000 * 5000 * 4]).unwrap();
+    let jpeg = large.to_jpeg(10).unwrap();
+    assert!(matches!(
+      BackgroundImage::decode(&jpeg),
+      Err(EffectsError::UnsupportedImage(message)) if message.contains("pixels")
+    ));
+    let mut huge_file = vec![0xff, 0xd8, 0xff];
+    huge_file.resize(MAX_BACKGROUND_FILE_BYTES + 1, 0);
+    assert!(matches!(
+      normalize_background_file(&huge_file),
+      Err(EffectsError::UnsupportedImage(message)) if message.contains("bytes")
+    ));
   }
 
   #[test]

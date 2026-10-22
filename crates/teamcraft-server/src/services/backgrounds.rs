@@ -12,6 +12,9 @@ use time::OffsetDateTime;
 use tracing::warn;
 
 use super::convert::unix_millis;
+
+/// Extra time after an upload URL's expiry before a deleted background's row goes.
+const SWEEP_MARGIN: time::Duration = time::Duration::minutes(5);
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -95,6 +98,32 @@ pub async fn download_background(
     size_bytes: background.size_bytes,
     expires_at: expires_at(store),
   })
+}
+
+/// Removes deleted and abandoned backgrounds (own and organization ones) whose upload URLs have
+/// expired before `before`, deleting their objects once more: an upload URL handed out before a
+/// delete keeps working until it expires, so an object can reappear after the first deletion.
+pub async fn sweep(state: &AppState, before: OffsetDateTime) -> Result<usize, ApiError> {
+  let Some(store) = state.maybe_blob_store.as_ref() else {
+    return Ok(0);
+  };
+  let mut keys = state.database.sweep_user_backgrounds(before).await?;
+  keys.extend(state.database.sweep_org_backgrounds(before).await?);
+  for key in &keys {
+    if let Err(error) = store.delete_object(key).await {
+      warn!(%error, "deleting a swept background object failed");
+    }
+  }
+  Ok(keys.len())
+}
+
+/// The cut-off for [`sweep`] now: upload URLs issued before it have expired (with a margin).
+pub fn sweep_cutoff(state: &AppState, now: OffsetDateTime) -> OffsetDateTime {
+  let expiry = state
+    .maybe_blob_store
+    .as_ref()
+    .map_or(std::time::Duration::ZERO, |store| store.expiry());
+  now - expiry - SWEEP_MARGIN
 }
 
 pub async fn delete_background(

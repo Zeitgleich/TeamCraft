@@ -8,11 +8,14 @@ content stays encrypted; keyword notifications and the activity feed are built o
 
 - A reply follows the thread for the sender (again after an unfollow, since replying is explicit),
   the author of the root message and mentioned members (unless they turned off
-  `auto_follow_mentioned_threads`). Somebody who unfollowed by hand is not brought back by other
+  `auto_follow_mentioned_threads`; somebody who never chose follows the workspace default, signed policy
+  `threads.auto_follows_mentioned_threads`). Somebody who unfollowed by hand is not brought back by other
   people's replies.
 - `PUT` / `DELETE /conversations/{id}/threads/{thread_id}/follow` follow and unfollow manually
   (following starts "from now": existing replies count as read).
 - `PUT /conversations/{id}/threads/{thread_id}/read` moves the thread read position forward.
+- The signed policy can switch threads off (`threads.is_threaded_view_enabled`): the server then refuses
+  messages with a `thread_id` (403); existing threads stay readable.
 - `GET /threads` is the threads inbox: followed threads, newest activity first, with reply, unread and
   mention counts and the newest reply (ciphertext) for the preview; `unread_only=true` filters.
 - `thread_update` (gateway) tells the user's other devices that a follow or read position changed.
@@ -39,6 +42,26 @@ messages from before the user joined are not counted. The read position is
 The DND schedule is typed (weekdays, start/end minute, a fixed UTC offset the client keeps current,
 an allow list of senders) and stored as JSON text the database does not interpret. The server
 evaluates it in the push routing, so it needs no timezone database.
+
+## E-mail digest of missed mentions
+
+The only e-mail notification, **content-free** like everything the server can do here: it knows who is
+mentioned in which message and who has read what, so the mail says how many mentions wait ("3 new
+mentions") and links to the app, never where, from whom or what. Off by default.
+
+- Server: `[notifications.email_digest]` (`is_enabled`, default and minimum interval, grace period,
+  scheduler interval, texts) and `[mail.smtp]` with `[mail] public_base_url` (the mail goes through
+  lettre like the activation and invitation mail).
+- User: `GET`/`PUT /me/email-digest` (`is_enabled`, optional `interval_minutes` ≥ the instance minimum;
+  without it the instance default). Turning it on starts "from now"; it needs an e-mail address on the
+  account.
+- The scheduler looks at each user once per interval and counts mentions since the last look that are
+  at least `grace_secs` old and still unread (thread replies against the thread's read position),
+  in conversations that aren't muted, and not written by the user. A mention that was read in time is
+  never mailed; several mentions are one mail. A mail that can't be sent is tried again after five
+  minutes without losing the count.
+- Only the digest's count and the link leave the server; pushes for urgent messages and mentions are
+  separate (below).
 
 ## Push routing
 

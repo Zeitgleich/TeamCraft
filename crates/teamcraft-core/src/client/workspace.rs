@@ -163,6 +163,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.append_roster(document).await
   }
 
+  /// Signs `policy` only if it was edited from the policy this device itself verified. The console
+  /// shows what the server says; a compromised server could alter fields there, and signing that
+  /// draft would make the owner vouch for them. `base` is the policy the editor started from.
+  pub async fn publish_policy_based_on(
+    &mut self,
+    base: &WorkspacePolicy,
+    policy: WorkspacePolicy,
+  ) -> Result<(), CoreError> {
+    self.sync_workspace().await?;
+    if self.workspace()?.policy != *base {
+      return Err(CoreError::PolicyBaseMismatch);
+    }
+    self.publish_policy(policy).await
+  }
+
   /// Signs and publishes a new workspace policy (owners only).
   pub async fn publish_policy(&mut self, policy: WorkspacePolicy) -> Result<(), CoreError> {
     self.sync_workspace().await?;
@@ -234,7 +249,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await?;
-    let history = self.implicit_history(user)?;
+    let history = self.implicit_history_in(conversation, user).await?;
     self
       .post_admin_change(
         conversation,

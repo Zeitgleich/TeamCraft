@@ -3,7 +3,7 @@
 
 use teamcraft_proto::{HistoryPolicy, Role};
 
-use crate::model::{ConversationId, ConversationKind, DeviceId, TimestampMs, User, UserId};
+use crate::model::{ConversationId, ConversationKind, DeviceId, SpaceId, TimestampMs, User, UserId};
 
 /// Retention of one channel: whichever limit is stricter wins; `None` keeps everything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -83,46 +83,6 @@ impl AdminSelfJoin {
   }
 }
 
-/// Who may start direct messages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DmScope {
-  Anyone,
-  SharedSpaces,
-}
-
-impl DmScope {
-  pub const ALL: [DmScope; 2] = [Self::Anyone, Self::SharedSpaces];
-
-  pub fn slug(self) -> &'static str {
-    match self {
-      Self::Anyone => "anyone",
-      Self::SharedSpaces => "shared_spaces",
-    }
-  }
-
-  pub fn from_slug(slug: &str) -> Option<Self> {
-    Self::ALL.into_iter().find(|value| value.slug() == slug)
-  }
-}
-
-/// The signed workspace policy that member clients enforce themselves.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SecurityPolicy {
-  pub version: u32,
-  pub admin_self_join: AdminSelfJoin,
-  pub org_recovery_for_members: bool,
-  pub org_recovery_for_guests: bool,
-  /// Admins that must approve a recovery (e2ee.md §6.3).
-  pub recovery_approvals_required: u8,
-  pub requires_mfa: bool,
-  pub requires_mfa_for_guests: bool,
-  pub guest_email_domains: String,
-  pub session_days: u32,
-  pub idle_timeout_minutes: u32,
-  pub default_history: HistoryPolicy,
-  pub dm_scope: DmScope,
-}
-
 /// Outcome of an admin adding themselves to a private channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelfJoinOutcome {
@@ -152,12 +112,15 @@ pub enum AuditAction {
   SpaceCreated,
   SpaceUpdated,
   SessionEnded,
+  PermissionsChanged,
+  ModerationChanged,
+  AnnouncementChanged,
   /// Anything the console has no wording for yet; the detail carries the raw action name.
   Other,
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 18] = [
+  pub const ALL: [AuditAction; 21] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -175,6 +138,9 @@ impl AuditAction {
     Self::SpaceCreated,
     Self::SpaceUpdated,
     Self::SessionEnded,
+    Self::PermissionsChanged,
+    Self::ModerationChanged,
+    Self::AnnouncementChanged,
     Self::Other,
   ];
 
@@ -197,22 +163,12 @@ impl AuditAction {
       Self::SpaceCreated => "space-created",
       Self::SpaceUpdated => "space-updated",
       Self::SessionEnded => "session-ended",
+      Self::PermissionsChanged => "permissions-changed",
+      Self::ModerationChanged => "moderation-changed",
+      Self::AnnouncementChanged => "announcement-changed",
       Self::Other => "other",
     }
   }
-}
-
-/// The parts of the security policy that are stored in the signed workspace policy. The console
-/// disables the others when the backend cannot store them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PolicyField {
-  AdminSelfJoin,
-  OrgRecovery,
-  DefaultHistory,
-  /// Sign-in rules (MFA, session length, idle timeout).
-  SignIn,
-  GuestEmailDomains,
-  DmScope,
 }
 
 /// Why the policy form is read-only.
@@ -236,22 +192,50 @@ pub struct AuditEntry {
   pub detail: String,
 }
 
+/// A space as admins see it, for scoping a permission scheme.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminSpace {
+  pub id: SpaceId,
+  pub name: String,
+}
+
+/// Narrows the audit log; the server filters, so the list stays short.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AuditFilter {
+  pub maybe_actor: Option<UserId>,
+  pub maybe_since: Option<TimestampMs>,
+  pub maybe_until: Option<TimestampMs>,
+}
+
 /// Sections of the administration console.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdminSection {
   Channels,
   Users,
+  /// Roles and what they may do, per instance and space.
+  Permissions,
   Security,
+  /// Directory, statuses and notification defaults.
+  People,
+  Announcement,
   Retention,
+  /// Media server, push providers, storage and telephony.
+  Instance,
+  Backgrounds,
   Audit,
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 5] = [
+  pub const ALL: [AdminSection; 10] = [
     Self::Channels,
     Self::Users,
+    Self::Permissions,
     Self::Security,
+    Self::People,
+    Self::Announcement,
     Self::Retention,
+    Self::Instance,
+    Self::Backgrounds,
     Self::Audit,
   ];
 
@@ -259,8 +243,13 @@ impl AdminSection {
     match self {
       Self::Channels => "channels",
       Self::Users => "users",
+      Self::Permissions => "permissions",
       Self::Security => "security",
+      Self::People => "people",
+      Self::Announcement => "announcement",
       Self::Retention => "retention",
+      Self::Instance => "instance",
+      Self::Backgrounds => "backgrounds",
       Self::Audit => "audit",
     }
   }
@@ -290,9 +279,6 @@ mod tests {
   fn policy_values_round_trip_through_slugs() {
     for value in AdminSelfJoin::ALL {
       assert_eq!(AdminSelfJoin::from_slug(value.slug()), Some(value));
-    }
-    for value in DmScope::ALL {
-      assert_eq!(DmScope::from_slug(value.slug()), Some(value));
     }
     assert_eq!(AdminSelfJoin::from_slug("nope"), None);
   }

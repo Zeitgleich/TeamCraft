@@ -15,6 +15,9 @@ use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::store::LocalStore;
 
+/// Smallest download cap for a background (covers the encryption overhead of tiny pictures).
+const MIN_DOWNLOAD_CAP_BYTES: u64 = 64 * 1024;
+
 /// One of the user's backgrounds, as a picker lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackgroundSummary {
@@ -73,7 +76,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .background(id)
       .ok_or_else(|| CoreError::Corrupt("unknown background".into()))?;
     let download = self.api.download_background(id).await?;
-    let ciphertext = self.api.get_blob(&download.download_url).await?;
+    // Chunked encryption adds a little per chunk; the picture's own size bounds the download.
+    let max_bytes = entry.size_bytes.saturating_mul(2).max(MIN_DOWNLOAD_CAP_BYTES);
+    let ciphertext = self
+      .api
+      .get_blob_capped(&download.download_url, max_bytes)
+      .await?;
     if !ciphertext_matches(&ciphertext, entry.ciphertext_sha256.as_slice()) {
       return Err(CoreError::Corrupt(
         "background blob doesn't match its hash".into(),

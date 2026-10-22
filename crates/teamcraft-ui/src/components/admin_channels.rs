@@ -1,13 +1,13 @@
 use leptos::prelude::*;
 
-use teamcraft_proto::HistoryPolicy;
+use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 
 use crate::admin::{AdminChannel, SelfJoinOutcome, format_bytes};
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, ConversationKind};
+use crate::model::{ConversationId, ConversationKind, UserId};
 use crate::state::use_app_state;
 
 const INACTIVE_AFTER_DAYS: i64 = 30;
@@ -254,9 +254,10 @@ fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
           </button>
         }
       })}
-      {channel.maybe_owner.is_none().then(|| view! { <button class="btn" disabled title=move || i18n.t("admin-soon")>{move || i18n.t("admin-assign-owner")}</button> })}
       <button class="btn" disabled title=move || i18n.t("admin-soon")>{move || i18n.t("admin-archive")}</button>
     </div>
+    {channel.maybe_owner.is_none().then(|| view! { <OwnerAssign channel=id /> })}
+    <ModerationEditor channel=id />
     <p class="status-line" role="status">
       {move || {
         outcome
@@ -268,5 +269,191 @@ fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
           })
       }}
     </p>
+  }
+}
+
+/// Picks a new owner for a channel without one, from its members (admin.md §2.5).
+#[component]
+fn OwnerAssign(channel: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let candidates = Memo::new(move |_| state.read(|backend| backend.channel_member_candidates(channel)));
+  let chosen = RwSignal::new(None::<UserId>);
+  let assigned = RwSignal::new(false);
+
+  view! {
+    <section class="owner-assign" aria-labelledby="owner-assign-title">
+      <h4 id="owner-assign-title" class="detail-heading">{move || i18n.t("admin-assign-owner")}</h4>
+      <p class="muted-text small">{move || i18n.t("admin-assign-owner-hint")}</p>
+      <div class="field inline">
+        <label class="visually-hidden" for="owner-candidate">{move || i18n.t("admin-owner-candidate")}</label>
+        <select
+          id="owner-candidate"
+          class="input"
+          on:change=move |ev| {
+            let value = event_target_value(&ev);
+            chosen.set(candidates.get().into_iter().find(|user| user.to_string() == value));
+          }
+        >
+          <option value="">{move || i18n.t("admin-owner-choose")}</option>
+          <For each=move || candidates.get() key=|user: &UserId| *user let:user>
+            {
+              let name = state.read(|backend| backend.user(user)).map(|found| found.display_name).unwrap_or_default();
+              view! { <option value=user.to_string() translate="no">{name}</option> }
+            }
+          </For>
+        </select>
+        <button
+          class="btn btn-primary"
+          disabled=move || chosen.get().is_none()
+          on:click=move |_| assign_owner(state, channel, chosen.get_untracked(), assigned)
+        >
+          {move || i18n.t("admin-assign")}
+        </button>
+      </div>
+      <p class="status-line" role="status">{move || assigned.get().then(|| i18n.t("admin-owner-assigned"))}</p>
+    </section>
+  }
+}
+
+fn assign_owner(
+  state: crate::state::AppState,
+  channel: ConversationId,
+  maybe_user: Option<UserId>,
+  done: RwSignal<bool>,
+) {
+  if let Some(user) = maybe_user {
+    state.write(|backend| backend.assign_channel_owner(channel, user));
+    done.set(true);
+  }
+}
+
+/// What members and guests may not do in this channel. A channel can only take permissions away.
+#[component]
+fn ModerationEditor(channel: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let moderation = Memo::new(move |_| state.read(|backend| backend.channel_moderation(channel)));
+
+  view! {
+    <section class="moderation" aria-labelledby="moderation-title">
+      <h4 id="moderation-title" class="detail-heading">{move || i18n.t("admin-moderation")}</h4>
+      <p class="muted-text small">{move || i18n.t("admin-moderation-hint")}</p>
+      <table class="data-table moderation-table">
+        <caption class="visually-hidden">{move || i18n.t("admin-moderation")}</caption>
+        <thead>
+          <tr>
+            <th scope="col">{move || i18n.t("permissions-permission")}</th>
+            <th scope="col">{move || i18n.t("permissions-role-member")}</th>
+            <th scope="col">{move || i18n.t("permissions-role-guest")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {MODERATABLE
+            .into_iter()
+            .map(|permission| {
+              let key = format!("permission-{}", permission.as_str());
+              let (member_perm, guest_perm) = (permission.clone(), permission.clone());
+              let (member_set, guest_set) = (permission.clone(), permission);
+              view! {
+                <tr>
+                  <th scope="row">{move || i18n.t(&key)}</th>
+                  <td>
+                    <label class="checkbox">
+                      <input
+                        type="checkbox"
+                        prop:checked=move || !moderation.get().member_denied.contains(&member_perm)
+                        on:change=move |ev| set_allowed(state, channel, moderation.get_untracked(), Who::Members, member_set.clone(), event_target_checked(&ev))
+                      />
+                      <span class="visually-hidden">{move || i18n.t("admin-moderation-allowed")}</span>
+                    </label>
+                  </td>
+                  <td>
+                    <label class="checkbox">
+                      <input
+                        type="checkbox"
+                        prop:checked=move || !moderation.get().guest_denied.contains(&guest_perm)
+                        on:change=move |ev| set_allowed(state, channel, moderation.get_untracked(), Who::Guests, guest_set.clone(), event_target_checked(&ev))
+                      />
+                      <span class="visually-hidden">{move || i18n.t("admin-moderation-allowed")}</span>
+                    </label>
+                  </td>
+                </tr>
+              }
+            })
+            .collect_view()}
+        </tbody>
+      </table>
+    </section>
+  }
+}
+
+/// The permissions a channel may take away (`Permission::is_channel_moderatable`).
+const MODERATABLE: [Permission; 6] = [
+  Permission::CreatePost,
+  Permission::AddReaction,
+  Permission::UseChannelMentions,
+  Permission::UseGroupMentions,
+  Permission::ManageBookmarks,
+  Permission::ManageMembers,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Who {
+  Members,
+  Guests,
+}
+
+fn set_allowed(
+  state: crate::state::AppState,
+  channel: ConversationId,
+  current: ChannelModeration,
+  who: Who,
+  permission: Permission,
+  is_allowed: bool,
+) {
+  let next = with_allowed(current, who, permission, is_allowed);
+  state.write(|backend| backend.set_channel_moderation(channel, next));
+}
+
+fn with_allowed(
+  mut moderation: ChannelModeration,
+  who: Who,
+  permission: Permission,
+  is_allowed: bool,
+) -> ChannelModeration {
+  let denied = match who {
+    Who::Members => &mut moderation.member_denied,
+    Who::Guests => &mut moderation.guest_denied,
+  };
+  if is_allowed {
+    denied.remove(&permission);
+  } else {
+    denied.insert(permission);
+  }
+  moderation
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn toggles_add_and_remove_denials_per_audience() {
+    let denied = with_allowed(
+      ChannelModeration::default(),
+      Who::Guests,
+      Permission::CreatePost,
+      false,
+    );
+    assert!(denied.guest_denied.contains(&Permission::CreatePost));
+    assert!(denied.member_denied.is_empty());
+    let allowed = with_allowed(denied, Who::Guests, Permission::CreatePost, true);
+    assert!(allowed.guest_denied.is_empty());
+  }
+
+  #[test]
+  fn only_moderatable_permissions_are_offered() {
+    assert!(MODERATABLE.iter().all(Permission::is_channel_moderatable));
   }
 }

@@ -27,6 +27,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
+  CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
+  OrgBackgroundId,
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
@@ -53,6 +55,8 @@ pub struct StaticToken(pub String);
 pub struct HttpServerApi<T> {
   client: reqwest::Client,
   base_url: String,
+  /// Why `base_url` is refused, checked once in [`HttpServerApi::new`].
+  maybe_insecure: Option<String>,
   tokens: T,
 }
 
@@ -63,14 +67,17 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     let client = super::tls::http_client();
     #[cfg(not(target_os = "android"))]
     let client = reqwest::Client::new();
+    let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
-      base_url: base_url.into().trim_end_matches('/').to_string(),
+      maybe_insecure: insecure_reason(&base_url),
+      base_url,
       tokens,
     }
   }
 
   fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
+    self.require_secure_transport()?;
     let token = self.tokens.access_token()?;
     Ok(
       self
@@ -106,8 +113,43 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     send(request).await.map(|_| ())
   }
 
+  /// An authenticated request to `/api/v1{path}` with a JSON body, answered with the raw JSON
+  /// text (empty for no content): for shells that call plain server endpoints (notification
+  /// settings, meetings) without a typed method here. `method` is an HTTP verb.
+  pub async fn raw_request(
+    &self,
+    method: &str,
+    path: &str,
+    maybe_body: Option<String>,
+  ) -> Result<String, ApiError> {
+    if !path.starts_with('/') || path.contains("..") {
+      return Err(ApiError::Decode(format!("not an API path: {path}")));
+    }
+    let method =
+      Method::from_bytes(method.as_bytes()).map_err(|error| ApiError::Decode(error.to_string()))?;
+    let mut request = self.request(method, path)?;
+    if let Some(body) = maybe_body {
+      request = request
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body);
+    }
+    send(request)
+      .await?
+      .text()
+      .await
+      .map_err(|error| ApiError::Decode(error.to_string()))
+  }
+
   fn gateway_url(&self) -> String {
     self.websocket_url("/api/v1/gateway")
+  }
+
+  /// Tokens and key material only travel over TLS; plain http only to a loopback dev server.
+  fn require_secure_transport(&self) -> Result<(), ApiError> {
+    match &self.maybe_insecure {
+      Some(reason) => Err(ApiError::InsecureServerUrl(reason.clone())),
+      None => Ok(()),
+    }
   }
 
   fn websocket_url(&self, path: &str) -> String {
@@ -580,6 +622,36 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn create_org_background_upload(
+    &self,
+    request: &CreateOrgBackgroundUploadRequest,
+  ) -> Result<CreateOrgBackgroundUploadResponse, ApiError> {
+    self.send_json(Method::POST, "/admin/backgrounds", request).await
+  }
+
+  async fn complete_org_background_upload(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/backgrounds/{background}/complete"),
+        None,
+      )
+      .await
+  }
+
+  async fn download_org_background(
+    &self,
+    background: OrgBackgroundId,
+  ) -> Result<OrgBackgroundDownloadResponse, ApiError> {
+    self.get(&format!("/org-backgrounds/{background}/download")).await
+  }
+
+  async fn delete_org_background(&self, background: OrgBackgroundId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/admin/backgrounds/{background}"), None)
+      .await
+  }
+
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     // Presigned: the URL carries the authorization, so no bearer token goes to object storage.
     send(self.client.put(url).body(bytes)).await.map(|_| ())
@@ -592,6 +664,14 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
       .map(|bytes| bytes.to_vec())
       .map_err(|error| ApiError::Network(error.to_string()))
+  }
+
+  async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+    let response = send(self.client.get(url)).await?;
+    if response.content_length().is_some_and(|length| length > max_bytes) {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    read_capped(response, max_bytes).await
   }
 
   async fn create_share_link(
@@ -609,15 +689,35 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   async fn connect_gateway(&self) -> Result<HttpGateway, ApiError> {
+    self.require_secure_transport()?;
     HttpGateway::connect(&self.gateway_url()).await
   }
 
   async fn connect_rendezvous(&self) -> Result<HttpRendezvous, ApiError> {
+    self.require_secure_transport()?;
     HttpRendezvous::connect(&self.websocket_url("/api/v1/rendezvous")).await
   }
 
   fn gateway_token(&self) -> Result<String, ApiError> {
     self.tokens.access_token()
+  }
+}
+
+/// `None` if `base_url` may carry tokens: `https://`, or `http://` to a loopback address.
+fn insecure_reason(base_url: &str) -> Option<String> {
+  let Ok(url) = url::Url::parse(base_url) else {
+    return Some(format!("{base_url:?} is not a URL"));
+  };
+  let is_loopback = match url.host() {
+    Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+    Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+    Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+    None => false,
+  };
+  match url.scheme() {
+    "https" => None,
+    "http" if is_loopback => None,
+    scheme => Some(format!("{scheme}:// to {}", url.host_str().unwrap_or(""))),
   }
 }
 
@@ -639,6 +739,37 @@ impl fmt::Debug for StaticToken {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str("StaticToken([redacted])")
   }
+}
+
+/// Reads a body chunk by chunk and stops as soon as it passes `max_bytes`.
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+  let mut blob = Vec::new();
+  while let Some(chunk) = response
+    .chunk()
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?
+  {
+    if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    blob.extend_from_slice(&chunk);
+  }
+  Ok(blob)
+}
+
+/// The browser's fetch has no chunked reads in reqwest, so the body is read whole; the
+/// Content-Length check before it already refuses announced oversized bodies.
+#[cfg(target_arch = "wasm32")]
+async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+  let blob = response
+    .bytes()
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?;
+  if blob.len() as u64 > max_bytes {
+    return Err(ApiError::BlobTooLarge { max_bytes });
+  }
+  Ok(blob.to_vec())
 }
 
 /// The gateway WebSocket on native targets.
@@ -838,10 +969,8 @@ type NativeSocket =
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
-  #[cfg(target_os = "android")]
+  // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
-  #[cfg(not(target_os = "android"))]
-  let maybe_connector = None;
   let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector)
     .await
     .map_err(|error| ApiError::Network(error.to_string()))?;
@@ -923,7 +1052,92 @@ mod tests {
   }
 
   #[test]
+  fn only_https_or_loopback_http_carries_tokens() {
+    for allowed in [
+      "https://chat.example.com",
+      "http://127.0.0.1:8081",
+      "http://[::1]:8081",
+      "http://localhost:8080",
+    ] {
+      assert_eq!(insecure_reason(allowed), None, "{allowed}");
+    }
+    for refused in [
+      "http://chat.example.com",
+      "http://10.0.0.5",
+      "http://localhost.example.com",
+      "ftp://chat.example.com",
+      "chat.example.com",
+      "",
+    ] {
+      assert!(insecure_reason(refused).is_some(), "{refused}");
+    }
+  }
+
+  #[tokio::test]
+  async fn a_plain_http_server_gets_no_request_and_no_token() {
+    let api = HttpServerApi::new("http://chat.example.com", PanickingToken);
+    assert!(matches!(
+      api.get::<serde_json::Value>("/me").await,
+      Err(ApiError::InsecureServerUrl(_))
+    ));
+    assert!(matches!(
+      api.connect_gateway().await,
+      Err(ApiError::InsecureServerUrl(_))
+    ));
+  }
+
+  #[test]
   fn token_is_redacted() {
     assert!(!format!("{:?}", StaticToken("secret".into())).contains("secret"));
+  }
+
+  /// Serves one HTTP response per connection: `body`, with or without a content length.
+  async fn blob_server(body: Vec<u8>, has_length: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+      while let Ok((mut socket, _)) = listener.accept().await {
+        let mut request = [0u8; 1024];
+        let _ = socket.read(&mut request).await;
+        let head = if has_length {
+          format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+          )
+        } else {
+          "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned()
+        };
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(&body).await;
+      }
+    });
+    format!("http://{address}/blob")
+  }
+
+  #[tokio::test]
+  async fn capped_downloads_stop_at_the_cap() {
+    let api = HttpServerApi::new("http://[::1]:1", StaticToken("t".into()));
+    let declared = blob_server(vec![7; 100], true).await;
+    assert!(matches!(
+      api.get_blob_capped(&declared, 50).await,
+      Err(ApiError::BlobTooLarge { max_bytes: 50 })
+    ));
+    assert_eq!(api.get_blob_capped(&declared, 100).await.unwrap().len(), 100);
+    // Without a content length the stream is counted as it arrives.
+    let undeclared = blob_server(vec![7; 100_000], false).await;
+    assert!(matches!(
+      api.get_blob_capped(&undeclared, 1000).await,
+      Err(ApiError::BlobTooLarge { .. })
+    ));
+  }
+
+  struct PanickingToken;
+
+  impl AccessTokenSource for PanickingToken {
+    fn access_token(&self) -> Result<String, ApiError> {
+      panic!("no token may be read for an insecure server");
+    }
   }
 }

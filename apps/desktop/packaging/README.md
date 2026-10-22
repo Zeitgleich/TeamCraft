@@ -57,8 +57,9 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
 
 ## Release workflow
 
-`.github/workflows/desktop-release.yml` runs on manual dispatch or when a tag like `v0.1.0` is pushed. It
-builds the Linux packages, a Flatpak bundle (from source inside the Flatpak builder container, with the
-web UI from the Linux job), the macOS dmg (one universal build for both architectures) and the Windows
-installers (x64, arm64), and keeps them as workflow artifacts. It does not create a GitHub release and does not
-publish to any store.
+`.github/workflows/desktop-release.yml` runs on manual dispatch, or is called by `release.yml` when a tag
+like `v1.0.0` is pushed. It builds the Linux packages, a Flatpak bundle (from source inside the Flatpak
+builder container, with the web UI from the Linux job), the macOS dmg (one universal build for both
+architectures) and the Windows installers (x64, arm64), and keeps them as workflow artifacts.
+`release.yml` attaches them to the draft GitHub release ([docs/release.md](../../../docs/release.md));
+nothing is published to any store.

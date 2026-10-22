@@ -40,6 +40,8 @@ cargo tauri build --no-bundle                                           # just t
 ```
 
 `tauri.windows.conf.json` is merged automatically on Windows (installer options, the `teamcraft` scheme).
+MSI versions must be numeric, so `tauri.windows.conf.json` sets `bundle.windows.wix.version` (a four-part
+number); bump it with the app version (a pre-release suffix like `1.0.0-beta.1` is fine for NSIS only).
 The NSIS installer installs per user or per machine (the user chooses), in English or German; the MSI
 (WiX) is for managed deployments. Both are unsigned.
 

@@ -1,12 +1,12 @@
 //! Managing spaces and channels through the core: creating and editing them, the channel browser
 //! and joining, categories, invitations, and announcing changes as encrypted system messages.
 
-use teamcraft_crypto::membership::MembershipAction;
+use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
-  CategoryId, ConversationId, ConversationResponse, ConversationVisibility, CreateCategoryRequest,
-  CreateChannelRequest, CreateInviteRequest, CreateSpaceRequest, HistoryPolicy, ListCategoriesResponse,
-  ListConversationsResponse, SpaceId, SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest,
-  UpdateConversationRequest, UpdateSpaceRequest,
+  CategoryId, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility,
+  CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest, CreateSpaceRequest, HistoryPolicy,
+  ListCategoriesResponse, ListConversationsResponse, SpaceId, SpaceResponse, SpaceRole, UnixMillis,
+  UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
 };
 
 use super::Client;
@@ -110,7 +110,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &conversation.to_string(),
       &response,
     )?;
-    let history = self.implicit_history(self.account.user_id)?;
+    self.post_self_add(&response).await
+  }
+
+  /// Channels the server put this user into (the instance's default channels, an invitation) where
+  /// no member has added this device to the encryption group: posts the same signed self-add as
+  /// [`Self::join_channel`], once per channel. Returns how many were requested.
+  pub async fn join_missing_groups(&mut self) -> Result<usize, CoreError> {
+    let mut requested = 0;
+    for response in self.cached_conversations()?.into_values() {
+      let is_channel = response.maybe_space_id.is_some() && response.kind == ConversationKind::Channel;
+      let key = format!("self-add/{}", response.id);
+      if !is_channel
+        || response.maybe_my_membership.is_none()
+        || response.is_archived
+        || self.has_group(response.id)?
+        || records::get_json::<bool>(&self.store, Table::SyncState, &key)?.is_some()
+      {
+        continue;
+      }
+      // Marked first: a failed attempt is not repeated on every sync, and a member's own add wins.
+      records::put_json(&self.store, Table::SyncState, &key, &true)?;
+      self.post_self_add(&response).await?;
+      requested += 1;
+    }
+    Ok(requested)
+  }
+
+  async fn post_self_add(&mut self, response: &ConversationResponse) -> Result<(), CoreError> {
+    let conversation = response.id;
+    // Nobody chose to show the past to somebody joining on their own: history from the join on
+    // (e2ee.md §4.7). Members' clients refuse a self-add that says otherwise.
+    let history = HistoryShare::FromJoin;
     self
       .post_admin_change(
         conversation,

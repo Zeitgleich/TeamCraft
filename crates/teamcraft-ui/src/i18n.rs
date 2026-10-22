@@ -238,6 +238,59 @@ mod tests {
     assert_eq!(translate(Locale::De, "no-such-key", None), "no-such-key");
   }
 
+  /// Keys the admin console builds from permission, role and provider names must all exist.
+  #[test]
+  fn console_keys_built_from_names_exist() {
+    let mut keys = Vec::new();
+    for permission in teamcraft_proto::ALL_PERMISSIONS {
+      keys.push(format!("permission-{}", permission.as_str()));
+      keys.push(format!("permission-{}-hint", permission.as_str()));
+    }
+    for role in [
+      "guest",
+      "member",
+      "space_admin",
+      "channel_admin",
+      "admin",
+      "owner",
+    ] {
+      keys.push(format!("permissions-role-{role}"));
+    }
+    for group in ["content", "channel", "space", "instance"] {
+      keys.push(format!("permissions-group-{group}"));
+    }
+    for provider in ["webpush", "fcm", "unifiedpush", "apns"] {
+      keys.push(format!("instance-provider-{provider}"));
+    }
+    for state in ["active", "not-configured", "not-implemented", "unknown"] {
+      keys.push(format!("instance-push-{state}"));
+    }
+    for health in ["off", "unknown", "ok", "silent"] {
+      keys.push(format!("instance-sfu-{health}"));
+    }
+    for level in ["info", "warning", "critical"] {
+      keys.push(format!("announcement-level-{level}"));
+    }
+    for mode in ["generic", "sender", "full"] {
+      keys.push(format!("policy-push-{mode}"));
+      keys.push(format!("policy-push-{mode}-hint"));
+    }
+    for name in ["as_provided", "first_last", "last_first", "username"] {
+      keys.push(format!("policy-name-{name}"));
+    }
+    for action in teamcraft_client_api::admin::AuditAction::ALL {
+      keys.push(format!("audit-{}", action.slug()));
+    }
+    for section in teamcraft_client_api::admin::AdminSection::ALL {
+      keys.push(format!("admin-nav-{}", section.slug()));
+    }
+    for locale in [Locale::En, Locale::De] {
+      for key in &keys {
+        assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
+
   #[test]
   fn locale_tags_parse() {
     assert_eq!(Locale::from_tag("de-DE"), Some(Locale::De));
