@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.push.PushManager
 import uniffi.teamcraft_ffi.AccountState
@@ -22,6 +23,7 @@ class AppGraph(context: Context) {
   val auth = AuthRepository(context)
   val core = CoreRepository(context, auth)
   val notifier = MessageNotifier(context)
+  val mentionPrefs = MentionPrefs(context)
   val push = PushManager(context, core, notifier, scope)
   val calls = CallController(context, core, scope)
 }

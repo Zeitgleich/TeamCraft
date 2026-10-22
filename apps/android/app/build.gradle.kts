@@ -112,6 +112,14 @@ dependencies {
   // Calls: Telecom integration and Android Auto calling.
   implementation(libs.androidx.core.telecom)
   implementation(libs.androidx.car.app)
+  // Camera for video calls and the device-link QR scanner (CameraX, Apache-2.0).
+  implementation(libs.androidx.camera.camera2)
+  implementation(libs.androidx.camera.lifecycle)
+  implementation(libs.androidx.camera.view)
+  // QR codes for device linking, shown and scanned (pure Java, Apache-2.0; no Play services).
+  implementation(libs.zxing.core)
+  // Search segment prefetch on unmetered networks while charging.
+  implementation(libs.androidx.work.runtime)
   // UniFFI's Kotlin bindings call the Rust library through JNA.
   implementation("${libs.jna.get()}@aar")
   "fullImplementation"(libs.firebase.messaging)
