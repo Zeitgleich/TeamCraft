@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use teamcraft_proto::{DeviceId, PushProvider, PushWakeUp, UserId};
+use teamcraft_proto::{DeviceId, PushKind, PushProvider, PushWakeUp, UnixMillis, UserId};
 use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::crypto::{PushCryptoError, seal_wakeup};
+use super::status::{ProviderHealth, ProviderHealthTracker};
 use crate::auth::BoxFuture;
 
 /// Where a push goes: one registered device.
@@ -54,6 +55,8 @@ pub enum Urgency {
 pub struct PushMessage {
   /// `seal_wakeup` output: opaque to push services.
   pub sealed: Vec<u8>,
+  /// What the wake-up is for. Push services only need it to pick a channel (APNs: VoIP for calls).
+  pub kind: PushKind,
   pub urgency: Urgency,
   /// How long the push service may hold it if the device is offline.
   pub ttl: Duration,
@@ -70,8 +73,6 @@ pub enum PushError {
   Unavailable(String),
   #[error("this provider is not configured")]
   NotConfigured,
-  #[error("sending to {0} is not implemented yet")]
-  NotImplemented(&'static str),
   #[error("the registration is invalid: {0}")]
   Invalid(String),
   #[error(transparent)]
@@ -81,11 +82,6 @@ pub enum PushError {
 /// Sends one push through one provider. Implementations get the sealed wake-up and wrap it the way
 /// their service wants it.
 pub trait PushSender: Send + Sync {
-  /// False for placeholders that deliver nothing.
-  fn is_implemented(&self) -> bool {
-    true
-  }
-
   fn send<'a>(
     &'a self,
     target: &'a PushTarget,
@@ -97,6 +93,7 @@ pub trait PushSender: Send + Sync {
 pub struct PushDispatcher {
   senders: HashMap<&'static str, Arc<dyn PushSender>>,
   permits: Arc<Semaphore>,
+  health: ProviderHealthTracker,
   /// The VAPID public key browsers subscribe with (`applicationServerKey`), if Web Push is on.
   maybe_web_public_key: Option<String>,
 }
@@ -106,6 +103,7 @@ impl PushDispatcher {
     Self {
       senders: HashMap::new(),
       permits: Arc::new(Semaphore::new(max_concurrent_sends.max(1))),
+      health: ProviderHealthTracker::default(),
       maybe_web_public_key: None,
     }
   }
@@ -116,11 +114,16 @@ impl PushDispatcher {
     self
   }
 
-  /// Whether the provider has a sender, and whether that sender delivers anything.
-  pub fn sender_state(&self, provider: &PushProvider) -> Option<bool> {
+  /// Whether the provider has a sender.
+  pub fn is_configured(&self, provider: &PushProvider) -> bool {
+    known_name(provider).is_some_and(|name| self.senders.contains_key(name))
+  }
+
+  /// What this process has seen from the provider's push service since it started.
+  pub fn health(&self, provider: &PushProvider) -> ProviderHealth {
     known_name(provider)
-      .and_then(|name| self.senders.get(name))
-      .map(|sender| sender.is_implemented())
+      .map(|name| self.health.snapshot(name))
+      .unwrap_or_default()
   }
 
   pub fn web_public_key(&self) -> Option<&str> {
@@ -143,11 +146,11 @@ impl PushDispatcher {
     urgency: Urgency,
     ttl: Duration,
   ) -> Result<(), PushError> {
-    let sender = known_name(&target.provider)
-      .and_then(|name| self.senders.get(name))
-      .ok_or(PushError::NotConfigured)?;
+    let name = known_name(&target.provider).ok_or(PushError::NotConfigured)?;
+    let sender = self.senders.get(name).ok_or(PushError::NotConfigured)?;
     let message = PushMessage {
       sealed: seal_wakeup(&target.push_key, wake_up)?,
+      kind: wake_up.kind.clone(),
       urgency,
       ttl,
     };
@@ -158,7 +161,9 @@ impl PushDispatcher {
       .await
       .map_err(|_| PushError::Unavailable("shutting down".into()))?;
     debug!(provider = %target.provider, device_id = %target.device, "sending push");
-    sender.send(target, &message).await
+    let result = sender.send(target, &message).await;
+    self.health.record(name, &result, now_millis());
+    result
   }
 }
 
@@ -172,39 +177,12 @@ fn known_name(provider: &PushProvider) -> Option<&'static str> {
   }
 }
 
-/// APNs (HTTP/2 with a provider token or certificate): not implemented yet.
-pub struct ApnsSender;
-
-/// FCM (HTTP v1 with a service account): not implemented yet.
-pub struct FcmSender;
-
-/// UnifiedPush (a POST to the distributor's endpoint): not implemented yet.
-pub struct UnifiedPushSender;
-
-macro_rules! stub_sender {
-  ($sender:ty, $name:literal) => {
-    impl PushSender for $sender {
-      fn is_implemented(&self) -> bool {
-        false
-      }
-
-      fn send<'a>(
-        &'a self,
-        _target: &'a PushTarget,
-        _message: &'a PushMessage,
-      ) -> BoxFuture<'a, Result<(), PushError>> {
-        Box::pin(async {
-          warn!(provider = $name, "push provider is a stub, nothing was sent");
-          Err(PushError::NotImplemented($name))
-        })
-      }
-    }
-  };
+fn now_millis() -> UnixMillis {
+  let millis = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(0, |elapsed| elapsed.as_millis());
+  UnixMillis(i64::try_from(millis).unwrap_or(i64::MAX))
 }
-
-stub_sender!(ApnsSender, "apns");
-stub_sender!(FcmSender, "fcm");
-stub_sender!(UnifiedPushSender, "unifiedpush");
 
 #[cfg(test)]
 mod tests {
@@ -269,13 +247,18 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn the_stubs_report_that_they_are_not_implemented() {
+  async fn deliveries_are_counted_per_provider() {
     let dispatcher = PushDispatcher::new(4)
-      .with_sender(&PushProvider::Apns, Arc::new(ApnsSender))
-      .with_sender(&PushProvider::Fcm, Arc::new(FcmSender))
-      .with_sender(&PushProvider::UnifiedPush, Arc::new(UnifiedPushSender));
-    for provider in [PushProvider::Apns, PushProvider::Fcm, PushProvider::UnifiedPush] {
-      let result = dispatcher
+      .with_sender(&PushProvider::Fcm, Arc::new(Fixed(Ok(()))))
+      .with_sender(&PushProvider::Apns, Arc::new(Fixed(Err(503))))
+      .with_sender(&PushProvider::UnifiedPush, Arc::new(Fixed(Err(410))));
+    for provider in [
+      PushProvider::Fcm,
+      PushProvider::Fcm,
+      PushProvider::Apns,
+      PushProvider::UnifiedPush,
+    ] {
+      let _ = dispatcher
         .deliver(
           &target(provider),
           &wake_up(),
@@ -283,13 +266,36 @@ mod tests {
           Duration::from_secs(60),
         )
         .await;
-      assert!(matches!(result, Err(PushError::NotImplemented(_))));
+    }
+    let fcm = dispatcher.health(&PushProvider::Fcm);
+    assert_eq!((fcm.success_count, fcm.failure_count), (2, 0));
+    assert!(fcm.maybe_last_success_at.is_some() && !fcm.is_failing());
+    let apns = dispatcher.health(&PushProvider::Apns);
+    assert_eq!((apns.success_count, apns.failure_count), (0, 1));
+    assert!(apns.is_failing() && apns.maybe_last_error.is_some());
+    // A dead registration says nothing against the push service.
+    let unified = dispatcher.health(&PushProvider::UnifiedPush);
+    assert_eq!((unified.success_count, unified.failure_count), (1, 0));
+  }
+
+  /// Succeeds, or fails with the status (410 is a dead registration, the rest unavailable).
+  struct Fixed(Result<(), u16>);
+
+  impl PushSender for Fixed {
+    fn send<'a>(&'a self, _: &'a PushTarget, _: &'a PushMessage) -> BoxFuture<'a, Result<(), PushError>> {
+      Box::pin(async move {
+        match self.0 {
+          Ok(()) => Ok(()),
+          Err(410) => Err(PushError::Gone),
+          Err(status) => Err(PushError::Unavailable(format!("status {status}"))),
+        }
+      })
     }
   }
 
   #[tokio::test]
   async fn a_bad_push_key_fails_before_anything_is_sent() {
-    let dispatcher = PushDispatcher::new(4).with_sender(&PushProvider::Apns, Arc::new(ApnsSender));
+    let dispatcher = PushDispatcher::new(4).with_sender(&PushProvider::Apns, Arc::new(Fixed(Ok(()))));
     let mut bad = target(PushProvider::Apns);
     bad.push_key = vec![1, 2, 3];
     let result = dispatcher

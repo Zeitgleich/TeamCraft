@@ -299,8 +299,8 @@ pub struct StorageConfig {
   pub max_attachment_bytes: u64,
 }
 
-/// Push sending (e2ee.md §7). Web Push needs a VAPID key pair; APNs, FCM and UnifiedPush are not
-/// implemented yet.
+/// Push sending (e2ee.md §7). Each provider is on when its credentials are set: a VAPID key pair for
+/// Web Push, a `.p8` key for APNs, a service account for FCM. UnifiedPush needs none.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PushConfig {
@@ -314,8 +314,59 @@ pub struct PushConfig {
   pub request_timeout_secs: u64,
   /// Pushes sent in parallel.
   pub max_concurrent_sends: usize,
-  /// Accept Web Push endpoints on private addresses and plain http. For development only.
+  /// Accept Web Push and UnifiedPush endpoints on private addresses and plain http. For development only.
   pub allow_private_endpoints: bool,
+  pub apns: ApnsConfig,
+  pub fcm: FcmConfig,
+  pub unified_push: UnifiedPushConfig,
+}
+
+/// APNs with token authentication. On when the key, key ID, team ID and bundle ID are all set.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ApnsConfig {
+  /// Contents of the `.p8` key file.
+  #[serde(rename = "key")]
+  pub maybe_key: Option<SecretString>,
+  /// Path of the `.p8` key file; used when `key` is not set.
+  #[serde(rename = "key_path")]
+  pub maybe_key_path: Option<PathBuf>,
+  #[serde(rename = "key_id")]
+  pub maybe_key_id: Option<String>,
+  #[serde(rename = "team_id")]
+  pub maybe_team_id: Option<String>,
+  /// The iOS app's bundle ID, used as the APNs topic (`<bundle_id>.voip` for calls).
+  #[serde(rename = "bundle_id")]
+  pub maybe_bundle_id: Option<String>,
+  /// Use Apple's sandbox for development builds of the app instead of production.
+  pub use_sandbox: bool,
+  /// Visible text of the generic alert; the app's notification extension replaces it.
+  pub alert_text: String,
+  /// Overrides the APNs endpoint (tests, proxies).
+  #[serde(rename = "base_url")]
+  pub maybe_base_url: Option<String>,
+}
+
+/// FCM HTTP v1 with a Google service account. On when the key file or its contents are set.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FcmConfig {
+  /// Contents of the service account JSON key.
+  #[serde(rename = "service_account")]
+  pub maybe_service_account: Option<SecretString>,
+  /// Path of the service account JSON key; used when `service_account` is not set.
+  #[serde(rename = "service_account_path")]
+  pub maybe_service_account_path: Option<PathBuf>,
+  /// Overrides the FCM endpoint (tests, proxies).
+  #[serde(rename = "base_url")]
+  pub maybe_base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UnifiedPushConfig {
+  /// Send to the endpoints of UnifiedPush distributors.
+  pub is_enabled: bool,
 }
 
 /// The background job that enforces retention (deletes old ciphertext, attachments and index segments).
@@ -1133,7 +1184,31 @@ impl Default for PushConfig {
       request_timeout_secs: 10,
       max_concurrent_sends: 32,
       allow_private_endpoints: false,
+      apns: ApnsConfig::default(),
+      fcm: FcmConfig::default(),
+      unified_push: UnifiedPushConfig::default(),
     }
+  }
+}
+
+impl Default for ApnsConfig {
+  fn default() -> Self {
+    Self {
+      maybe_key: None,
+      maybe_key_path: None,
+      maybe_key_id: None,
+      maybe_team_id: None,
+      maybe_bundle_id: None,
+      use_sandbox: false,
+      alert_text: "New message".into(),
+      maybe_base_url: None,
+    }
+  }
+}
+
+impl Default for UnifiedPushConfig {
+  fn default() -> Self {
+    Self { is_enabled: true }
   }
 }
 

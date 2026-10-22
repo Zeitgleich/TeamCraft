@@ -318,7 +318,7 @@ fn spawn_delivery(state: AppState, user: UserId, device: PushDeviceRow, wake_up:
           warn!(%error, "clearing the push registration failed");
         }
       },
-      Err(PushError::NotConfigured | PushError::NotImplemented(_)) => {
+      Err(PushError::NotConfigured) => {
         debug!(provider = %target.provider, "push provider unavailable");
       },
       Err(error) => warn!(%error, device_id = %target.device, "push failed"),

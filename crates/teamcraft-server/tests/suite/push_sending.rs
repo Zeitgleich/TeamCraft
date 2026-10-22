@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, StatusCode as HttpStatus};
 use axum::routing::post;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use common::push_fakes;
 use common::*;
 use futures_util::{SinkExt, StreamExt};
 use p256::SecretKey;
@@ -1006,6 +1007,210 @@ mod web_push {
     send(&app, &alice, &channel, &alice_device, 1).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(service.requests.lock().unwrap().is_empty());
+    app.stop().await;
+  }
+}
+
+/// The real APNs, FCM and UnifiedPush senders against local fake push services, behind the whole
+/// server: message in, encrypted wake-up out.
+mod providers {
+  use std::time::Duration;
+
+  use teamcraft_server::push::{
+    ApnsSender, ApnsSettings, FcmSender, FcmSettings, ServiceAccount, UnifiedPushSender,
+  };
+
+  use super::*;
+
+  struct Services {
+    apns: push_fakes::Fake,
+    fcm: push_fakes::Fake,
+    unified: push_fakes::Fake,
+    unified_endpoint: String,
+  }
+
+  async fn start_providers() -> Option<(TestApp, Services)> {
+    let (apns, apns_url) = push_fakes::apns().await;
+    let (fcm, fcm_url) = push_fakes::fcm().await;
+    let (unified, unified_endpoint) = push_fakes::unified_push().await;
+    let timeout = Duration::from_secs(5);
+    let apns_sender = ApnsSender::new(ApnsSettings {
+      key_pem: push_fakes::APNS_KEY_PEM.to_owned().into(),
+      key_id: push_fakes::APNS_KEY_ID.into(),
+      team_id: push_fakes::APNS_TEAM_ID.into(),
+      bundle_id: push_fakes::APNS_BUNDLE_ID.into(),
+      base_url: apns_url,
+      alert_text: "New message".into(),
+      timeout,
+    })
+    .unwrap();
+    let fcm_sender = FcmSender::new(FcmSettings {
+      account: ServiceAccount::from_json(&push_fakes::fcm_service_account_json(&fcm_url)).unwrap(),
+      base_url: fcm_url,
+      timeout,
+    })
+    .unwrap();
+    let dispatcher = PushDispatcher::new(8)
+      .with_sender(&PushProvider::Apns, Arc::new(apns_sender))
+      .with_sender(&PushProvider::Fcm, Arc::new(fcm_sender))
+      .with_sender(
+        &PushProvider::UnifiedPush,
+        Arc::new(UnifiedPushSender::new(timeout, true).unwrap()),
+      );
+    let app = TestApp::start_with_push(
+      |settings| {
+        settings.push.allow_private_endpoints = true;
+        settings.notifications.mobile_push_delay_secs = 0;
+      },
+      dispatcher,
+    )
+    .await?;
+    Some((
+      app,
+      Services {
+        apns,
+        fcm,
+        unified,
+        unified_endpoint,
+      },
+    ))
+  }
+
+  async fn register(app: &TestApp, user: &TestUser, provider: &str, token: &str) -> String {
+    let device = register_device(app, user).await;
+    let reply = app
+      .put(
+        user,
+        &format!("/devices/{device}/push"),
+        json!({"provider": provider, "token": token, "push_key": push_key()}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    device
+  }
+
+  fn opened(sealed: &[u8]) -> PushWakeUp {
+    open_wakeup(&PUSH_KEY_BYTES, sealed).unwrap()
+  }
+
+  const APNS_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+  #[tokio::test]
+  async fn a_message_wakes_every_kind_of_phone_with_an_encrypted_wake_up() {
+    let Some((app, services)) = start_providers().await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let channel = channel_with(&app, &[&carol]).await;
+    let alice_device = register_device(&app, &alice).await;
+    set_level(&app, &carol, &channel, "all").await;
+    register(&app, &carol, "apns", APNS_TOKEN).await;
+    register(&app, &carol, "fcm", "fcm-registration-token").await;
+    register(&app, &carol, "unifiedpush", &services.unified_endpoint).await;
+
+    let message = send(&app, &alice, &channel, &alice_device, 1).await;
+
+    let expect = |wake_up: PushWakeUp| {
+      assert_eq!(wake_up.kind, PushKind::Message);
+      assert_eq!(wake_up.conversation_id.to_string(), channel);
+      assert_eq!(wake_up.maybe_message_id.unwrap().to_string(), message);
+    };
+    let apns = services.apns.wait_for(1).await;
+    assert_eq!(apns[0].header("apns-push-type"), "alert");
+    expect(opened(&push_fakes::sealed_from(
+      apns[0].json()["w"].as_str().unwrap(),
+    )));
+
+    let fcm = services.fcm.wait_for(1).await;
+    expect(opened(&push_fakes::sealed_from(
+      fcm[0].json()["message"]["data"]["w"].as_str().unwrap(),
+    )));
+
+    let unified = services.unified.wait_for(1).await;
+    expect(opened(&unified[0].body));
+
+    // The admin console reports what happened, from the real counters.
+    let status = app.get(&admin(), "/admin/instance").await;
+    let providers = status.body["push"].as_array().unwrap();
+    for name in ["apns", "fcm", "unifiedpush"] {
+      let entry = providers.iter().find(|entry| entry["provider"] == name).unwrap();
+      assert_eq!(entry["state"], "active", "{name}");
+      assert_eq!(entry["success_count"], 1, "{name}");
+      assert_eq!(entry["failure_count"], 0, "{name}");
+      assert!(entry["last_success_at"].is_number(), "{name}");
+    }
+    let web = providers
+      .iter()
+      .find(|entry| entry["provider"] == "webpush")
+      .unwrap();
+    assert_eq!(web["state"], "not_configured");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_active_desktop_gets_no_phone_push_but_an_idle_one_does() {
+    let Some((app, services)) = start_providers().await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let channel = channel_with(&app, &[&carol]).await;
+    let alice_device = register_device(&app, &alice).await;
+    set_level(&app, &carol, &channel, "all").await;
+    register(&app, &carol, "fcm", "fcm-registration-token").await;
+
+    // Carol is at her desktop: the phone stays quiet.
+    let desktop = register_device(&app, &carol).await;
+    let socket = ws::connect(&app, &carol, &desktop).await;
+    send(&app, &alice, &channel, &alice_device, 1).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(services.fcm.requests().is_empty(), "desktop is active");
+
+    // She leaves the desktop: the next message reaches the phone.
+    drop(socket);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    send(&app, &alice, &channel, &alice_device, 2).await;
+    assert_eq!(services.fcm.wait_for(1).await.len(), 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_failing_push_service_shows_up_in_the_admin_console() {
+    let Some((app, services)) = start_providers().await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let channel = channel_with(&app, &[&carol]).await;
+    let alice_device = register_device(&app, &alice).await;
+    set_level(&app, &carol, &channel, "all").await;
+    register(&app, &carol, "fcm", "fcm-registration-token").await;
+    services
+      .fcm
+      .set_reply(503, json!({"error": {"status": "UNAVAILABLE"}}));
+
+    send(&app, &alice, &channel, &alice_device, 1).await;
+    services.fcm.wait_for(1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let status = app.get(&admin(), "/admin/instance").await;
+    let fcm = status.body["push"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|entry| entry["provider"] == "fcm")
+      .unwrap()
+      .clone();
+    assert_eq!(fcm["state"], "failing");
+    assert_eq!(fcm["failure_count"], 1);
+    assert!(fcm["last_error"].as_str().unwrap().contains("503"));
+    // A temporary failure keeps the registration.
+    let devices = app.get(&carol, "/devices").await;
+    assert!(
+      devices.body["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|device| device["push_provider"] == "fcm")
+    );
     app.stop().await;
   }
 }

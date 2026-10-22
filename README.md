@@ -113,8 +113,8 @@ and `[oidc.sync]` polls the admin API with the service account (disabled users, 
 `TEAMCRAFT_OIDC__SYNC__IS_ENABLED=true TEAMCRAFT_OIDC__SYNC__CLIENT_SECRET=teamcraft-server-dev-secret`.
 
 Push: messages wake devices with an encrypted payload sealed with the device's push key (e2ee.md §7). Web Push
-(VAPID, RFC 8291) is implemented and needs `[push] vapid_private_key`; APNs, FCM and UnifiedPush are stubs behind
-the same trait. Routing honours mute, mentions, do-not-disturb and active devices.
+(VAPID, RFC 8291) needs `[push] vapid_private_key`; APNs (`[push.apns]`), FCM (`[push.fcm]`) and UnifiedPush are implemented
+behind the same trait and on once configured (docs/operations.md). Routing honours mute, mentions, do-not-disturb and active devices.
 
 ### Tests against the whole stack
 

@@ -340,10 +340,10 @@ impl AdminBackend for MockBackend {
         active_calls: 2,
       },
       push: vec![
-        push_status(PushProvider::WebPush, PushProviderState::Active, 14),
-        push_status(PushProvider::Fcm, PushProviderState::NotImplemented, 9),
-        push_status(PushProvider::UnifiedPush, PushProviderState::NotImplemented, 1),
-        push_status(PushProvider::Apns, PushProviderState::NotConfigured, 0),
+        push_status(PushProvider::WebPush, PushProviderState::Active, 14, self.now),
+        push_status(PushProvider::Fcm, PushProviderState::Active, 9, self.now),
+        push_status(PushProvider::UnifiedPush, PushProviderState::Active, 1, self.now),
+        push_status(PushProvider::Apns, PushProviderState::NotConfigured, 0, self.now),
       ],
       storage: StorageStatus {
         is_configured: true,
@@ -526,11 +526,27 @@ fn default_policy() -> WorkspacePolicy {
   }
 }
 
-fn push_status(provider: PushProvider, state: PushProviderState, device_count: u32) -> PushProviderStatus {
+/// Demo status: configured providers delivered a minute ago, the others never.
+fn push_status(
+  provider: PushProvider,
+  state: PushProviderState,
+  device_count: u32,
+  now: i64,
+) -> PushProviderStatus {
+  let is_active = state == PushProviderState::Active;
   PushProviderStatus {
     provider,
     state,
     device_count,
+    success_count: if is_active {
+      u64::from(device_count) * 40
+    } else {
+      0
+    },
+    failure_count: 0,
+    maybe_last_success_at: is_active.then_some(UnixMillis(now - 60_000)),
+    maybe_last_failure_at: None,
+    maybe_last_error: None,
   }
 }
 

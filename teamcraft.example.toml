@@ -380,7 +380,8 @@ max_asset_bytes = 524288
 # cancellation_body = "{organizer} cancelled \"{title}\" ({start}).\n"
 
 # Push notifications: encrypted wake-ups (the payload is sealed with the device's push key, e2ee.md §7).
-# Web Push works with a VAPID key pair; APNs, FCM and UnifiedPush are stubs for now.
+# Each provider is on when its credentials are set: Web Push (VAPID key), APNs (.p8 key), FCM (service
+# account). UnifiedPush needs none. docs/operations.md explains how to get the credentials.
 [push]
 # 32 random bytes as base64url, e.g. from `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`. Keep it
 # secret (prefer TEAMCRAFT_PUSH__VAPID_PRIVATE_KEY). Browsers subscribe with its public key, which the
@@ -390,8 +391,28 @@ vapid_subject = "mailto:admin@example.com"
 ttl_secs = 3600
 request_timeout_secs = 10
 max_concurrent_sends = 32
-# Development only: allow http and private addresses as Web Push endpoints.
+# Development only: allow http and private addresses as Web Push and UnifiedPush endpoints.
 allow_private_endpoints = false
+
+# iOS (APNs, token authentication). Give the .p8 key inline (prefer TEAMCRAFT_PUSH__APNS__KEY) or as a
+# file. All of key, key_id, team_id and bundle_id are needed; calls use the topic "<bundle_id>.voip".
+# [push.apns]
+# key_path = "/run/secrets/apns_key.p8"
+# key_id = "ABC123DEFG"
+# team_id = "DEF456GHIJ"
+# bundle_id = "com.example.teamcraft"
+# use_sandbox = false            # true for development builds of the app
+# alert_text = "New message"     # generic text; the app's notification extension replaces it
+
+# Android with Google services (FCM HTTP v1). The service account JSON key of the Firebase project,
+# inline (prefer TEAMCRAFT_PUSH__FCM__SERVICE_ACCOUNT) or as a file.
+# [push.fcm]
+# service_account_path = "/run/secrets/fcm_service_account.json"
+
+# Android without Google services (UnifiedPush distributors such as ntfy). On by default; it needs no
+# credentials because the app hands the server the distributor's endpoint.
+[push.unified_push]
+is_enabled = true
 
 # Calls through the SFU (ARCHITECTURE.md §6). Without this section the join-token endpoint answers
 # 503. The server signs short-lived join tokens; the SFU verifies them with the public key:
