@@ -11,23 +11,29 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import java.util.concurrent.TimeUnit
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.core.CoreRepository
 import uniffi.teamcraft_ffi.AccountState
+import uniffi.teamcraft_ffi.SegmentPrefetchMode
 
 /**
  * Downloads the shared search segments of older months (e2ee.md §10.1) so history the phone
  * doesn't keep stays searchable: only on unmetered networks while charging, up to a size cap the
- * user chooses. The core picks the segments (newest first) and enforces the cap.
+ * user chooses. The core keeps the mode (teamcraft-core `prefetch`), picks the segments (newest
+ * first) and enforces the cap; this device remembers the choice to plan the work without the core.
  */
-class SegmentPrefetch(private val context: Context) {
+class SegmentPrefetch(private val context: Context, private val core: CoreRepository) {
   private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
   val isEnabled: Boolean get() = prefs.getBoolean(KEY_ENABLED, true)
 
   val maxMegabytes: Int get() = prefs.getInt(KEY_MAX_MB, DEFAULT_MAX_MB)
 
-  fun update(isEnabled: Boolean, maxMegabytes: Int) {
+  suspend fun update(isEnabled: Boolean, maxMegabytes: Int) {
     prefs.edit().putBoolean(KEY_ENABLED, isEnabled).putInt(KEY_MAX_MB, maxMegabytes).apply()
     schedule()
+    val mode = if (isEnabled) SegmentPrefetchMode.UNMETERED_ONLY else SegmentPrefetchMode.OFF
+    runCatching { core.core().setSegmentPrefetch(mode) }
+      .onFailure { Log.w(TAG, "the prefetch setting was not saved: ${it.javaClass.simpleName}") }
   }
 
   /** (Re)plans the periodic prefetch, or cancels it when turned off. */
@@ -56,7 +62,8 @@ class SegmentPrefetch(private val context: Context) {
       return try {
         val core = graph.core.core()
         if (core.accountState() !is AccountState.Ready) return Result.success()
-        val result = core.prefetchSearchSegments(settings.maxMegabytes.toULong() * BYTES_PER_MEGABYTE)
+        // The work only runs on unmetered networks (its constraint).
+        val result = core.prefetchSearchSegments(false, settings.maxMegabytes.toULong() * BYTES_PER_MEGABYTE)
         Log.i(TAG, "search segments prefetched: ${result.fetched}, skipped for size: ${result.skipped}")
         Result.success()
       } catch (error: Exception) {

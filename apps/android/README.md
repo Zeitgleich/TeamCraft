@@ -49,7 +49,7 @@ token.
 | Channels and people      | Browse, join, create, archive and leave channels, bookmarks, direct messages, presence   |
 | Saved and mentions       | Saved items and recent mentions                                                          |
 | Status and notifications | Presence, custom status, push mode, read receipts, per-conversation level and mute       |
-| Mentions                 | Keywords, first name and `@channel` on the device (shared rules, client-api `notify`)    |
+| Mentions                 | Keywords, first name and `@channel` matched on the device (core `notify_rules`)          |
 | Search                   | Filters (from, in, date, has file/link, in thread); segment prefetch on Wi-Fi + charging |
 | Calls                    | Pre-join (camera, muted), mute, deafen, speaker, camera video both ways, privacy code    |
 | Meetings                 | Upcoming meetings, join the meeting's call                                               |

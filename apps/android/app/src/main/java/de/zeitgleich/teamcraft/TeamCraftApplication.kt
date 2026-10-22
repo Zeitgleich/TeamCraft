@@ -23,11 +23,11 @@ class AppGraph(context: Context) {
   val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
   val auth = AuthRepository(context)
   val core = CoreRepository(context, auth)
+  val mentionPrefs = MentionPrefs(context, core)
   val notifier = MessageNotifier(context)
-  val mentionPrefs = MentionPrefs(context)
-  val push = PushManager(context, core, notifier, mentionPrefs, scope)
+  val push = PushManager(context, core, notifier, scope)
   val calls = CallController(context, core, scope)
-  val segmentPrefetch = SegmentPrefetch(context)
+  val segmentPrefetch = SegmentPrefetch(context, core)
 }
 
 class TeamCraftApplication : Application() {

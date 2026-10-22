@@ -55,7 +55,7 @@ import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
-import uniffi.teamcraft_ffi.VideoTrackInfo
+import uniffi.teamcraft_ffi.RemoteVideoTrack
 
 private val SELF_VIEW_WIDTH = 120.dp
 private const val SELF_VIEW_ASPECT = 3f / 4f
@@ -162,7 +162,7 @@ private fun CallStatus(maybeState: CallStateInfo?) {
 }
 
 @Composable
-private fun VideoGrid(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, modifier: Modifier) {
+private fun VideoGrid(tracks: List<RemoteVideoTrack>, frames: Map<String, Bitmap>, modifier: Modifier) {
   val columns = if (tracks.size > 1) 2 else 1
   LazyVerticalGrid(
     columns = GridCells.Fixed(columns),
@@ -170,7 +170,7 @@ private fun VideoGrid(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, m
     horizontalArrangement = Arrangement.spacedBy(8.dp),
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
-    items(tracks, key = { it.streamId.toLong() }) { track ->
+    items(tracks, key = { it.streamId }) { track ->
       val maybeFrame = frames[track.streamId]
       Box(
         Modifier.fillMaxWidth().aspectRatio(VIDEO_ASPECT).background(Color.Black),

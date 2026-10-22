@@ -30,9 +30,9 @@ import uniffi.teamcraft_ffi.CallSession
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.CameraFrame
 import uniffi.teamcraft_ffi.IncomingCallInfo
+import uniffi.teamcraft_ffi.RemoteVideoTrack
 import uniffi.teamcraft_ffi.VideoFrameRgba
-import uniffi.teamcraft_ffi.VideoListener
-import uniffi.teamcraft_ffi.VideoTrackInfo
+import uniffi.teamcraft_ffi.RgbaVideoListener
 
 /**
  * Calls through Android's Telecom stack (Jetpack Core-Telecom): the system knows about the call,
@@ -48,8 +48,8 @@ class CallController(
   private val callsManager = CallsManager(context)
   private val state = MutableStateFlow<CallStateInfo?>(null)
   private val wantsCamera = MutableStateFlow(false)
-  private val tracks = MutableStateFlow<List<VideoTrackInfo>>(emptyList())
-  private val frames = MutableStateFlow<Map<UInt, Bitmap>>(emptyMap())
+  private val tracks = MutableStateFlow<List<RemoteVideoTrack>>(emptyList())
+  private val frames = MutableStateFlow<Map<String, Bitmap>>(emptyMap())
   private val speaker = MutableStateFlow(false)
   @Volatile private var maybeSession: CallSession? = null
   @Volatile private var maybeTelecomJob: Job? = null
@@ -67,10 +67,10 @@ class CallController(
   val isCameraWanted: StateFlow<Boolean> = wantsCamera
 
   /** Other devices' video tracks in the call. */
-  val videoTracks: StateFlow<List<VideoTrackInfo>> = tracks
+  val videoTracks: StateFlow<List<RemoteVideoTrack>> = tracks
 
   /** The newest decoded frame per video track (by stream id). */
-  val videoFrames: StateFlow<Map<UInt, Bitmap>> = frames
+  val videoFrames: StateFlow<Map<String, Bitmap>> = frames
 
   /** Audio goes to the loudspeaker. */
   val isSpeakerOn: StateFlow<Boolean> = speaker
@@ -209,7 +209,7 @@ class CallController(
       return false
     }
     maybeSession = session
-    session.setVideoListener(Video())
+    session.setRgbaVideoListener(Video())
     if (options.isMuted) session.setMuted(true)
     wantsCamera.value = options.isCameraOn
     options = CallOptions()
@@ -272,8 +272,8 @@ class CallController(
   }
 
   /** Other devices' video, on the call's and the decoders' threads. */
-  private inner class Video : VideoListener {
-    override fun onVideoTracks(tracks: List<VideoTrackInfo>) {
+  private inner class Video : RgbaVideoListener {
+    override fun onVideoTracks(tracks: List<RemoteVideoTrack>) {
       this@CallController.tracks.value = tracks
       val live = tracks.map { it.streamId }.toSet()
       frames.update { current -> current.filterKeys { it in live } }
