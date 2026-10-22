@@ -1,3 +1,4 @@
+use serde_json::json;
 use teamcraft_db::NewInvite;
 use teamcraft_proto::{
   ConversationKind, CreateInviteRequest, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId,
@@ -6,6 +7,7 @@ use teamcraft_proto::{
 use time::OffsetDateTime;
 
 use super::access::load_space;
+use super::audit::{self, Target as AuditTarget};
 use super::convert::{invite_response, offset_date_time};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
@@ -73,6 +75,14 @@ pub async fn create_invite(
       maybe_expires_at,
     })
     .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "invite_created",
+    Some(AuditTarget::new("space", space)),
+    &json!({"role": invite.role.as_str()}),
+  )
+  .await?;
   Ok(invite_response(&invite))
 }
 

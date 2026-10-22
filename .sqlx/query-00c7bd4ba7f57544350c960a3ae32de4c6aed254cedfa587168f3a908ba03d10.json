@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM messages WHERE conversation_id = $1 AND id < $2 AND NOT ($3 AND is_pinned)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "00c7bd4ba7f57544350c960a3ae32de4c6aed254cedfa587168f3a908ba03d10"
+}

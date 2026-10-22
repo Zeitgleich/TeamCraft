@@ -1,0 +1,90 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id, s.name, s.join_policy, s.archived_at IS NOT NULL AS \"is_archived!\", s.created_at,\n                (SELECT count(*) FROM space_members m WHERE m.space_id = s.id) AS \"member_count!\",\n                (SELECT count(*) FROM space_members m JOIN users u ON u.id = m.user_id\n                  WHERE m.space_id = s.id AND u.kind = 'guest') AS \"guest_count!\",\n                (SELECT count(*) FROM conversations c WHERE c.space_id = s.id) AS \"channel_count!\"\n         FROM spaces s ORDER BY s.name, s.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "join_policy",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "join_policy"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "is_archived!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "member_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "guest_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "channel_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "641336ec4dd3830004bf98d409b28302e8fa122d00f156daef4cf1f8bf9c3de9"
+}

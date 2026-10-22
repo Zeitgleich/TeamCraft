@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM message_client_ids c WHERE c.conversation_id = $1 AND c.message_id < $2\n         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = c.message_id AND m.conversation_id = c.conversation_id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7c26dace4e90a78707566582e95c26bdf32afafd9f90df13ed06adf2e6b4d6dc"
+}

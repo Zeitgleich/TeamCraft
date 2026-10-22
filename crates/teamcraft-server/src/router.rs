@@ -3,22 +3,28 @@ use axum::routing::{delete, get, patch, post, put};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-  add_conversation_member_handler, add_space_member_handler, claim_key_packages_handler,
+  add_conversation_member_handler, add_space_member_handler, admin_deactivate_user_handler,
+  admin_list_audit_handler, admin_list_conversation_members_handler, admin_list_conversations_handler,
+  admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
+  admin_list_users_handler, admin_reactivate_user_handler, admin_revoke_device_handler,
+  append_policy_handler, append_roster_handler, backchannel_logout_handler, claim_key_packages_handler,
   complete_attachment_handler, create_attachment_handler, create_category_handler, create_channel_handler,
   create_dm_handler, create_group_dm_handler, create_invite_handler, create_space_handler,
   delete_category_handler, delete_invite_handler, download_attachment_handler, gateway_handler,
-  get_conversation_handler, get_identity_key_handler, get_key_bag_handler, get_me_handler, get_space_handler,
-  get_user_handler, healthz_handler, join_conversation_handler, join_space_handler,
-  key_package_status_handler, list_categories_handler, list_conversation_members_handler,
+  get_conversation_handler, get_conversation_retention_handler, get_identity_key_handler,
+  get_key_bag_handler, get_me_handler, get_policy_handler, get_security_log_handler, get_space_handler,
+  get_space_retention_handler, get_user_handler, healthz_handler, join_conversation_handler,
+  join_space_handler, key_package_status_handler, list_categories_handler, list_conversation_members_handler,
   list_conversations_handler, list_devices_handler, list_invites_handler, list_messages_handler,
-  list_mls_messages_handler, list_presence_handler, list_space_members_handler, list_spaces_handler,
-  list_user_devices_handler, list_welcomes_handler, post_mls_commit_handler, post_mls_message_handler,
-  put_identity_key_handler, put_key_bag_handler, readyz_handler, register_device_handler,
-  register_push_handler, remove_conversation_member_handler, remove_space_member_handler, rendezvous_handler,
-  revoke_device_handler, search_users_handler, send_message_handler, set_presence_handler,
-  set_read_position_handler, unregister_push_handler, update_category_handler, update_conversation_handler,
-  update_conversation_member_handler, update_space_handler, update_space_member_handler,
-  upload_key_packages_handler,
+  list_mls_messages_handler, list_policy_log_handler, list_presence_handler, list_roster_handler,
+  list_space_members_handler, list_spaces_handler, list_user_devices_handler, list_welcomes_handler,
+  pin_message_handler, post_mls_commit_handler, post_mls_message_handler, put_identity_key_handler,
+  put_key_bag_handler, readyz_handler, register_device_handler, register_push_handler,
+  remove_conversation_member_handler, remove_space_member_handler, rendezvous_handler, revoke_device_handler,
+  search_users_handler, send_message_handler, set_conversation_retention_handler, set_presence_handler,
+  set_read_position_handler, set_space_retention_handler, unpin_message_handler, unregister_push_handler,
+  update_category_handler, update_conversation_handler, update_conversation_member_handler,
+  update_space_handler, update_space_member_handler, upload_key_packages_handler,
 };
 use crate::openapi::openapi_json_handler;
 use crate::state::AppState;
@@ -28,6 +34,7 @@ pub fn router(state: AppState) -> Router {
     .route("/me", get(get_me_handler))
     .route("/gateway", get(gateway_handler))
     .route("/rendezvous", get(rendezvous_handler))
+    .route("/auth/backchannel-logout", post(backchannel_logout_handler))
     .route("/openapi.json", get(openapi_json_handler))
     .route(
       "/devices",
@@ -133,6 +140,56 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/attachments/{attachment_id}/download",
       get(download_attachment_handler),
+    )
+    .route(
+      "/workspace/roster",
+      post(append_roster_handler).get(list_roster_handler),
+    )
+    .route(
+      "/workspace/policy",
+      post(append_policy_handler).get(get_policy_handler),
+    )
+    .route("/workspace/policy/log", get(list_policy_log_handler))
+    .route("/admin/spaces", get(admin_list_spaces_handler))
+    .route(
+      "/admin/spaces/{space_id}/members",
+      get(admin_list_space_members_handler),
+    )
+    .route("/admin/conversations", get(admin_list_conversations_handler))
+    .route(
+      "/admin/conversations/{conversation_id}/members",
+      get(admin_list_conversation_members_handler),
+    )
+    .route("/admin/users", get(admin_list_users_handler))
+    .route(
+      "/admin/users/{user_id}/devices",
+      get(admin_list_user_devices_handler),
+    )
+    .route(
+      "/admin/users/{user_id}/deactivate",
+      post(admin_deactivate_user_handler),
+    )
+    .route(
+      "/admin/users/{user_id}/reactivate",
+      post(admin_reactivate_user_handler),
+    )
+    .route(
+      "/admin/users/{user_id}/devices/{device_id}",
+      delete(admin_revoke_device_handler),
+    )
+    .route("/admin/audit", get(admin_list_audit_handler))
+    .route("/me/security-log", get(get_security_log_handler))
+    .route(
+      "/spaces/{space_id}/retention",
+      get(get_space_retention_handler).put(set_space_retention_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/retention",
+      get(get_conversation_retention_handler).put(set_conversation_retention_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/messages/{message_id}/pin",
+      put(pin_message_handler).delete(unpin_message_handler),
     );
 
   Router::new()

@@ -3,6 +3,7 @@
 mod error;
 mod extractor;
 mod jwks;
+mod revocations;
 mod roles;
 mod validator;
 
@@ -12,5 +13,6 @@ pub mod test_keys;
 pub use error::AuthError;
 pub use extractor::AuthenticatedUser;
 pub use jwks::{BoxFuture, HttpJwkSource, JwkSource, JwksCache, JwksCacheOptions};
+pub use revocations::Revocations;
 pub use roles::RoleMapping;
-pub use validator::{TokenIdentity, TokenValidator, ValidatorOptions};
+pub use validator::{LogoutIdentity, TokenIdentity, TokenValidator, ValidatorOptions};

@@ -111,6 +111,17 @@ pub async fn send_message(
         message: response.clone(),
       },
     );
+    tokio::spawn(crate::push::routing::notify_message(
+      state.clone(),
+      crate::push::routing::NewMessageEvent {
+        conversation,
+        kind: access.view.conversation.kind.clone(),
+        message: outcome.message.id,
+        sender: caller.user.id,
+        mentioned: outcome.message.mentioned_user_ids.clone(),
+        is_urgent: outcome.message.is_urgent,
+      },
+    ));
   }
   Ok(Sent {
     message: response,

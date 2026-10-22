@@ -1,3 +1,4 @@
+use serde_json::json;
 use teamcraft_db::{NewSpace, NewSpaceMember, SpaceChanges, SpaceListing};
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
@@ -7,6 +8,7 @@ use teamcraft_proto::{
 };
 
 use super::access::{is_guest, is_instance_admin, load_space, require};
+use super::audit::{self, Target as AuditTarget};
 use super::convert::{category_response, space_response, user_summary};
 use super::{validate_name, validate_text};
 use crate::auth::AuthenticatedUser;
@@ -69,6 +71,14 @@ pub async fn create_space(
       creator: caller.user.id,
     })
     .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "space_created",
+    Some(AuditTarget::new("space", id)),
+    &json!({}),
+  )
+  .await?;
   let access = load_space(state, caller, id).await?;
   Ok(space_response(&access.view))
 }
@@ -119,6 +129,14 @@ pub async fn update_space(
       },
     )
     .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "space_updated",
+    Some(AuditTarget::new("space", id)),
+    &json!({}),
+  )
+  .await?;
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
   get_space(state, caller, id).await
 }
@@ -204,6 +222,14 @@ pub async fn add_space_member(
       maybe_sponsor: Some(caller.user.id),
     })
     .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "space_member_added",
+    Some(AuditTarget::new("space", id)),
+    &json!({"user_id": user.id.to_string(), "role": request.role.as_str()}),
+  )
+  .await?;
   announce_member(state, id, user.id).await?;
   Ok(SpaceMemberResponse {
     user: user_summary(&user),
@@ -244,6 +270,14 @@ pub async fn update_space_member(
       maybe_sponsor: Some(caller.user.id),
     })
     .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "space_member_role_changed",
+    Some(AuditTarget::new("space", id)),
+    &json!({"user_id": user_id.to_string(), "role": request.role.as_str()}),
+  )
+  .await?;
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
   Ok(SpaceMemberResponse {
     user: user_summary(&user),
@@ -290,6 +324,14 @@ pub async fn remove_space_member(
       },
     );
   }
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "space_member_removed",
+    Some(AuditTarget::new("space", id)),
+    &json!({"user_id": user_id.to_string()}),
+  )
+  .await?;
   Ok(())
 }
 

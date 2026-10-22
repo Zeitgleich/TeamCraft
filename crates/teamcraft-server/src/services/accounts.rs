@@ -9,6 +9,13 @@ use crate::state::AppState;
 /// Turns a validated token into the user: creates or refreshes the account on first sight, applies
 /// pending invites for the verified email and rejects deactivated accounts.
 pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<AuthenticatedUser, ApiError> {
+  if state.revocations.is_revoked(
+    &identity.subject,
+    identity.maybe_session_id.as_deref(),
+    identity.issued_at,
+  ) {
+    return Err(AuthError::InvalidToken("the session has ended".into()).into());
+  }
   let kind = match identity.role {
     Role::Guest => UserKind::Guest,
     _ => UserKind::Member,
@@ -23,6 +30,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
         maybe_email: identity.maybe_email.as_deref(),
         display_name: &identity.display_name,
         kind,
+        maybe_oidc_role: Some(identity.role.as_str()),
       },
       state.next_id()?,
     )
@@ -38,6 +46,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   Ok(AuthenticatedUser {
     user,
     role: identity.role,
+    maybe_oidc_session: identity.maybe_session_id,
   })
 }
 

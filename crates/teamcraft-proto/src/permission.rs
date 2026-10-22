@@ -48,6 +48,12 @@ wire_enum! {
     CreateSpace => "create_space",
     ManageSpaceProperties => "manage_space_properties",
     ManageSpaceMembers => "manage_space_members",
+    /// Administration: all spaces and channels (metadata), users, devices, workspace policy (read).
+    ManageWorkspace => "manage_workspace",
+    /// Deactivate users, remove devices.
+    ManageUsers => "manage_users",
+    /// Append to the signed admin roster and workspace policy. Owners only.
+    SignWorkspace => "sign_workspace",
   }
 }
 
@@ -110,7 +116,10 @@ impl Permission {
       | P::UseSlashCommands
       | P::ReadAuditLog
       | P::ManageBranding
-      | P::CreateSpace => S::Instance,
+      | P::CreateSpace
+      | P::ManageWorkspace
+      | P::ManageUsers
+      | P::SignWorkspace => S::Instance,
       P::CreateChannel | P::InviteGuest | P::ManageSpaceProperties | P::ManageSpaceMembers => S::Space,
       P::CreatePost
       | P::AddReaction
@@ -192,21 +201,27 @@ impl Default for PermissionScheme {
     let member_set: HashSet<_> = guest_set.iter().cloned().chain(member).collect();
     let channel_admin_set: HashSet<_> = channel_admin.into_iter().collect();
     let space_admin_set: HashSet<_> = channel_admin_set.iter().cloned().chain(space_admin).collect();
-    let all_set: HashSet<_> = everything.into_iter().collect();
+    let owner_set: HashSet<_> = everything.into_iter().collect();
+    // Only owners sign the roster and the policy (admin.md §2.3).
+    let admin_set: HashSet<_> = owner_set
+      .iter()
+      .filter(|p| **p != P::SignWorkspace)
+      .cloned()
+      .collect();
 
     Self::new(HashMap::from([
       (SchemeRole::Guest, guest_set),
       (SchemeRole::Member, member_set),
       (SchemeRole::SpaceAdmin, space_admin_set),
       (SchemeRole::ChannelAdmin, channel_admin_set),
-      (SchemeRole::Admin, all_set.clone()),
-      (SchemeRole::Owner, all_set),
+      (SchemeRole::Admin, admin_set),
+      (SchemeRole::Owner, owner_set),
     ]))
   }
 }
 
 /// All permissions this version knows.
-pub const ALL_KNOWN: [Permission; 31] = [
+pub const ALL_KNOWN: [Permission; 34] = [
   Permission::CreatePost,
   Permission::AddReaction,
   Permission::RemoveOthersReactions,
@@ -238,6 +253,9 @@ pub const ALL_KNOWN: [Permission; 31] = [
   Permission::CreateSpace,
   Permission::ManageSpaceProperties,
   Permission::ManageSpaceMembers,
+  Permission::ManageWorkspace,
+  Permission::ManageUsers,
+  Permission::SignWorkspace,
 ];
 
 /// What a channel removes from its members and guests (set by channel admins, never grants).
@@ -388,11 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn admin_and_owner_get_everything() {
-      for role in [Role::Admin, Role::Owner] {
-        let allowed = allowed_for(&role, &member_channel(), Some(member_space()));
-        assert_eq!(allowed, set(&ALL_KNOWN), "{role}");
-      }
+    fn owners_get_everything_and_admins_everything_but_signing() {
+      let owner = allowed_for(&Role::Owner, &member_channel(), Some(member_space()));
+      assert_eq!(owner, set(&ALL_KNOWN));
+      let admin = allowed_for(&Role::Admin, &member_channel(), Some(member_space()));
+      let mut expected = set(&ALL_KNOWN);
+      expected.remove(&Permission::SignWorkspace);
+      assert_eq!(admin, expected);
     }
 
     #[test]

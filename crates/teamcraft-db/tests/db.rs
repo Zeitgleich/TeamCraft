@@ -273,5 +273,6 @@ fn identity<'a>(subject: &'a str, display_name: &'a str) -> OidcIdentity<'a> {
     maybe_email: None,
     display_name,
     kind: UserKind::Member,
+    maybe_oidc_role: None,
   }
 }

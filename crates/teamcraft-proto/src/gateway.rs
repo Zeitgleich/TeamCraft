@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   ConversationId, DeviceActivity, DeviceId, ErrorBody, MessageResponse, MlsMessageResponse, PresenceState,
-  SpaceId, UserId, UserSummary,
+  SpaceId, UserId, UserSummary, WorkspaceLogKind,
 };
 
 /// Frames sent by the client.
@@ -96,6 +96,16 @@ pub enum GatewayEvent {
   MembershipRemove {
     conversation_id: ConversationId,
     user_id: UserId,
+  },
+  /// The signed roster or policy log has a new entry; fetch entries after the known version.
+  WorkspaceUpdate {
+    kind: WorkspaceLogKind,
+    version: u64,
+  },
+  /// A device of a user was removed (lost phone, deactivation); members commit its removal from their groups.
+  DeviceRemove {
+    user_id: UserId,
+    device_id: DeviceId,
   },
   SpaceUpdate {
     space_id: SpaceId,

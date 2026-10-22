@@ -17,6 +17,7 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 | `backup`         | Backup key, `BackupKeyWrapper` trait, passphrase (Argon2id), keystore, PRF | e2ee.md §6.1–§6.3                |
 | `membership`     | Signed membership changes, `IdentityDirectory`, `MembershipAuthority`      | e2ee.md §4.6, admin.md §2.2–§2.3 |
 | `mls`            | `openmls` groups, key packages, content key bundles, commit authorization  | e2ee.md §4.1, §4.6               |
+| `push`           | Push wake-up sealed with the device push key; Web Push (RFC 8291) + VAPID  | e2ee.md §7                       |
 | `aead`, `domain` | Internal: AEAD helper with random nonces; domain separation labels         | –                                |
 
 Dependencies are audited RustCrypto / dalek crates plus `openmls` with `openmls_rust_crypto`.

@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id, c.retention_max_age_days, c.retention_max_messages,\n                s.retention_max_age_days AS \"space_age?\", s.retention_max_messages AS \"space_messages?\"\n         FROM conversations c LEFT JOIN spaces s ON s.id = c.space_id WHERE c.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "retention_max_age_days",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "retention_max_age_days"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "retention_max_messages",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "retention_max_messages"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "space_age?",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "retention_max_age_days"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "space_messages?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "retention_max_messages"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "3c01d128625e679dc0a6de410b4f240bc5e61d3792711ee020c73eb465590a27"
+}

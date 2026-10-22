@@ -15,6 +15,7 @@ pub(crate) const KEY_BAG_AAD: &str = "TeamCraft-v1 key bag";
 pub(crate) const BACKUP_KEY_WRAP_AAD: &str = "TeamCraft-v1 backup key wrap";
 pub(crate) const PASSKEY_PRF_KDF: &str = "TeamCraft-v1 passkey prf backup key wrap";
 pub(crate) const MEMBERSHIP_CHANGE: &str = "TeamCraft-v1 membership change";
+pub(crate) const PUSH_WAKEUP_AAD: &str = "TeamCraft-v1 push wake-up";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -31,7 +32,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 8] = [
+  const ALL_LABELS: [&str; 9] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -40,6 +41,7 @@ mod tests {
     BACKUP_KEY_WRAP_AAD,
     PASSKEY_PRF_KDF,
     MEMBERSHIP_CHANGE,
+    PUSH_WAKEUP_AAD,
   ];
 
   #[test]

@@ -108,3 +108,30 @@ pub struct IdentityKeyResponse {
   pub maybe_attestation: Option<String>,
   pub created_at: UnixMillis,
 }
+
+wire_enum! {
+  /// Why a device is woken up (e2ee.md §7).
+  pub enum PushKind {
+    /// A message in a conversation the user follows.
+    Message => "message",
+    /// A message that mentions the user, or arrives in a DM.
+    Mention => "mention",
+  }
+}
+
+/// The plaintext of a push payload. The server seals it with the device's push key
+/// (XChaCha20-Poly1305), so Apple, Google and push relays see only ciphertext. The app (or the iOS
+/// notification service extension) opens it, fetches the real message and decrypts that locally.
+/// It names the conversation and message but carries no content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PushWakeUp {
+  pub kind: PushKind,
+  pub conversation_id: crate::ConversationId,
+  #[serde(rename = "message_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_message_id: Option<crate::MessageId>,
+  #[serde(rename = "sender_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sender_id: Option<UserId>,
+  /// The sender marked the message urgent.
+  #[serde(default)]
+  pub is_urgent: bool,
+}

@@ -18,6 +18,9 @@ macro_rules! app {
   };
 }
 
+/// A browser subscription on a public host (the key is the RFC 8291 example key).
+const SUBSCRIPTION: &str = r#"{"endpoint":"https://push.example.com/send/abc","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#;
+
 /// 32 bytes, base64.
 const PUSH_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
@@ -27,11 +30,16 @@ async fn every_provider_can_be_registered_and_is_shown_without_secrets() {
   let carol = member("carol");
   let device = register_device(&app, &carol).await;
   for provider in ["apns", "fcm", "unifiedpush", "webpush"] {
+    let token = if provider == "webpush" {
+      SUBSCRIPTION
+    } else {
+      "device-token"
+    };
     let reply = app
       .put(
         &carol,
         &format!("/devices/{device}/push"),
-        json!({"provider": provider, "token": "device-token", "push_key": PUSH_KEY}),
+        json!({"provider": provider, "token": token, "push_key": PUSH_KEY}),
       )
       .await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT, "{provider}: {}", reply.body);
@@ -97,6 +105,30 @@ async fn invalid_registrations_are_rejected() {
       StatusCode::BAD_REQUEST,
       "{body}"
     );
+  }
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn web_push_subscriptions_are_checked_when_registered() {
+  let app = app!();
+  let carol = member("carol");
+  let device = register_device(&app, &carol).await;
+  let path = format!("/devices/{device}/push");
+  for token in [
+    "device-token",
+    r#"{"endpoint":"http://push.example.com/x","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#,
+    r#"{"endpoint":"https://169.254.169.254/x","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#,
+    r#"{"endpoint":"https://push.example.com/x","keys":{"p256dh":"AAAA","auth":"AAAA"}}"#,
+  ] {
+    let reply = app
+      .put(
+        &carol,
+        &path,
+        json!({"provider": "webpush", "token": token, "push_key": PUSH_KEY}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{token}");
   }
   app.stop().await;
 }

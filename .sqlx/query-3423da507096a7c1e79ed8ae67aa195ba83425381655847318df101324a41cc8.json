@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workspace_log (kind, version, payload, signature, signer_device_id)\n         SELECT $1, $2::bigint + 1, $3, $4, $5\n         WHERE COALESCE((SELECT max(version) FROM workspace_log WHERE kind = $1), 0) = $2\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Bytea",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3423da507096a7c1e79ed8ae67aa195ba83425381655847318df101324a41cc8"
+}

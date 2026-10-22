@@ -8,17 +8,21 @@ use anyhow::Context;
 use secrecy::ExposeSecret;
 use teamcraft_db::{Database, DatabaseOptions, SnowflakeGenerator};
 use teamcraft_proto::PermissionScheme;
+use teamcraft_proto::PushProvider;
 use teamcraft_server::auth::{
-  HttpJwkSource, JwksCache, JwksCacheOptions, RoleMapping, TokenValidator, ValidatorOptions,
+  HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
 use teamcraft_server::config::{CONFIG_PATH_ENV, Config};
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
+use teamcraft_server::push::crypto::VapidKey;
+use teamcraft_server::push::{ApnsSender, FcmSender, PushDispatcher, UnifiedPushSender, WebPushSender};
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
 use teamcraft_server::services::presence::refresh_presence;
-use teamcraft_server::state::{AppState, Settings};
+use teamcraft_server::services::{oidc, retention};
+use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, Settings};
 use teamcraft_server::storage::BlobStore;
 use tokio::signal;
 use tracing::{info, warn};
@@ -49,6 +53,8 @@ async fn main() -> anyhow::Result<()> {
     database,
     validator: Arc::new(build_validator(&config)?),
     ids: Arc::new(SnowflakeGenerator::new(config.server.worker_id).context("invalid server.worker_id")?),
+    push: Arc::new(build_push(&config)?),
+    revocations: Arc::new(Revocations::default()),
     hub: Arc::new(Hub::new(HubOptions {
       resume_window: Duration::from_secs(config.gateway.resume_window_secs),
       buffer_events: config.gateway.resume_buffer_events,
@@ -63,13 +69,29 @@ async fn main() -> anyhow::Result<()> {
       .map(Arc::new),
     scheme: Arc::new(PermissionScheme::default()),
     settings: Arc::new(Settings {
+      maybe_oidc_sync: build_oidc_sync(&config)?,
       policy: config.policy.clone(),
       limits: config.limits.clone(),
       gateway: config.gateway.clone(),
       rendezvous: config.rendezvous.clone(),
+      retention: config.retention.clone(),
+      push: PushSettings {
+        ttl: Duration::from_secs(config.push.ttl_secs),
+        allow_private_endpoints: config.push.allow_private_endpoints,
+      },
     }),
   };
   spawn_session_sweeper(state.clone());
+  if state.settings.maybe_oidc_sync.is_some() {
+    spawn_oidc_sync(
+      state.clone(),
+      Duration::from_secs(config.oidc.sync.initial_delay_secs),
+      Duration::from_secs(config.oidc.sync.interval_secs),
+    );
+  }
+  if config.retention.is_enabled {
+    spawn_retention_job(state.clone());
+  }
 
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
@@ -94,6 +116,88 @@ fn spawn_session_sweeper(state: AppState) {
       }
     }
   });
+}
+
+/// Runs the retention job periodically (deletes what is past retention, tops up partitions).
+fn spawn_retention_job(state: AppState) {
+  tokio::spawn(async move {
+    let settings = state.settings.retention.clone();
+    tokio::time::sleep(Duration::from_secs(settings.initial_delay_secs)).await;
+    let mut interval = tokio::time::interval(Duration::from_secs(settings.interval_secs.max(1)));
+    loop {
+      interval.tick().await;
+      if let Err(error) = retention::run_once(&state, time::OffsetDateTime::now_utc()).await {
+        warn!(%error, "retention run failed");
+      }
+    }
+  });
+}
+
+/// Settings of the OIDC sync, if enabled and complete.
+fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> {
+  let oidc = &config.oidc;
+  if !oidc.sync.is_enabled {
+    return Ok(None);
+  }
+  let secret = oidc
+    .sync
+    .maybe_client_secret
+    .clone()
+    .context("oidc.sync.client_secret is required")?;
+  let admin_url = match &oidc.sync.maybe_admin_url {
+    Some(url) => url.clone(),
+    None => teamcraft_server::services::oidc::admin_url_from_issuer(&oidc.issuer)
+      .context("oidc.sync.admin_url is required: the issuer is not <base>/realms/<realm>")?,
+  };
+  Ok(Some(OidcSyncSettings {
+    issuer: oidc.issuer.clone(),
+    token_url: format!(
+      "{}/protocol/openid-connect/token",
+      oidc.issuer.trim_end_matches('/')
+    ),
+    admin_url,
+    client_id: oidc.client_id.clone(),
+    server_client: oidc.server_client.clone(),
+    client_secret: secret,
+    roles: oidc.roles.clone(),
+    page_size: oidc.sync.page_size,
+  }))
+}
+
+/// Compares users with the identity provider periodically.
+fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration) {
+  tokio::spawn(async move {
+    tokio::time::sleep(initial_delay).await;
+    let mut ticker = tokio::time::interval(interval.max(Duration::from_secs(1)));
+    loop {
+      ticker.tick().await;
+      if let Err(error) = oidc::sync_once(&state).await {
+        warn!(%error, "oidc sync failed");
+      }
+    }
+  });
+}
+
+/// The push senders: Web Push if a VAPID key is configured, stubs for the other providers.
+fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
+  let push = &config.push;
+  let mut dispatcher = PushDispatcher::new(push.max_concurrent_sends)
+    .with_sender(&PushProvider::Apns, Arc::new(ApnsSender))
+    .with_sender(&PushProvider::Fcm, Arc::new(FcmSender))
+    .with_sender(&PushProvider::UnifiedPush, Arc::new(UnifiedPushSender));
+  if let Some(private_key) = &push.maybe_vapid_private_key {
+    let vapid = VapidKey::from_base64url(private_key.expose_secret()).context("push.vapid_private_key")?;
+    info!(public_key = %vapid.public_key_base64url(), "Web Push enabled (applicationServerKey)");
+    let sender = WebPushSender::new(
+      vapid,
+      push.vapid_subject.clone(),
+      Duration::from_secs(push.request_timeout_secs),
+      push.allow_private_endpoints,
+    )
+    .context("building the Web Push client")?;
+    dispatcher = dispatcher.with_sender(&PushProvider::WebPush, Arc::new(sender));
+  }
+  Ok(dispatcher)
 }
 
 fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {
@@ -121,6 +225,7 @@ fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {
       client_id: oidc.client_id.clone(),
       algorithms,
       leeway_secs: oidc.leeway_secs,
+      logout_audiences: vec![oidc.client_id.clone(), oidc.server_client.clone()],
     },
   ))
 }

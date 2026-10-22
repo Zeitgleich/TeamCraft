@@ -23,6 +23,8 @@ pub struct ValidatorOptions {
   pub client_id: String,
   pub algorithms: Vec<Algorithm>,
   pub leeway_secs: u64,
+  /// Clients a back-channel logout token may be addressed to (the app client and the server client).
+  pub logout_audiences: Vec<String>,
 }
 
 /// What a valid token tells us about the caller.
@@ -36,6 +38,17 @@ pub struct TokenIdentity {
   /// The provider verified the email address (`email_verified` claim).
   pub is_email_verified: bool,
   pub role: Role,
+  /// When the provider issued the token (Unix seconds); tokens older than a logout are refused.
+  pub issued_at: i64,
+  /// The provider's session ID (`sid` claim), if any.
+  pub maybe_session_id: Option<String>,
+}
+
+/// Who a back-channel logout token ends sessions of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogoutIdentity {
+  pub maybe_subject: Option<String>,
+  pub maybe_session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +67,29 @@ struct AccessClaims {
   #[serde(default)]
   email_verified: bool,
   #[serde(default)]
+  iat: i64,
+  #[serde(default)]
+  sid: Option<String>,
+  #[serde(default)]
   resource_access: HashMap<String, ClientAccess>,
+}
+
+const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
+
+#[derive(Deserialize)]
+struct LogoutClaims {
+  #[serde(default)]
+  sub: Option<String>,
+  #[serde(default)]
+  sid: Option<String>,
+  #[serde(default)]
+  iat: i64,
+  #[serde(default)]
+  jti: Option<String>,
+  #[serde(default)]
+  nonce: Option<String>,
+  #[serde(default)]
+  events: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -77,6 +112,11 @@ impl TokenValidator {
     Self { keys, roles, options }
   }
 
+  /// The issuer tokens must come from.
+  pub fn issuer(&self) -> &str {
+    &self.options.issuer
+  }
+
   /// Parses configured algorithm names such as `RS256`.
   pub fn parse_algorithms(names: &[String]) -> Result<Vec<Algorithm>, String> {
     if names.is_empty() {
@@ -95,6 +135,55 @@ impl TokenValidator {
       .ok_or_else(|| AuthError::InvalidToken("token has no key ID".into()))?;
     let key = self.keys.key(&key_id).await?;
     self.verify(token, &key)
+  }
+
+  /// Validates an OIDC back-channel logout token (OpenID Connect Back-Channel Logout 1.0 §2.4).
+  pub async fn validate_logout_token(&self, token: &str) -> Result<LogoutIdentity, AuthError> {
+    let header = decode_header(token).map_err(|e| invalid(&e))?;
+    let key_id = header
+      .kid
+      .ok_or_else(|| AuthError::InvalidToken("token has no key ID".into()))?;
+    let key = self.keys.key(&key_id).await?;
+    self.verify_logout(token, &key)
+  }
+
+  fn verify_logout(&self, token: &str, key: &DecodingKey) -> Result<LogoutIdentity, AuthError> {
+    let header = decode_header(token).map_err(|e| invalid(&e))?;
+    if !self.options.algorithms.contains(&header.alg) {
+      return Err(AuthError::InvalidToken(format!(
+        "algorithm {:?} is not accepted",
+        header.alg
+      )));
+    }
+    let mut validation = Validation::new(header.alg);
+    validation.leeway = self.options.leeway_secs;
+    validation.set_issuer(&[&self.options.issuer]);
+    validation.set_audience(&self.options.logout_audiences);
+    validation.set_required_spec_claims(&["iss", "aud"]);
+    let claims = decode::<LogoutClaims>(token, key, &validation)
+      .map_err(|e| invalid(&e))?
+      .claims;
+
+    if claims.iat == 0 || claims.jti.as_deref().is_none_or(str::is_empty) {
+      return Err(AuthError::InvalidToken("logout token needs iat and jti".into()));
+    }
+    if claims.nonce.is_some() {
+      return Err(AuthError::InvalidToken(
+        "a logout token must not carry a nonce".into(),
+      ));
+    }
+    if !claims.events.contains_key(BACKCHANNEL_LOGOUT_EVENT) {
+      return Err(AuthError::InvalidToken("not a back-channel logout token".into()));
+    }
+    if claims.sub.is_none() && claims.sid.is_none() {
+      return Err(AuthError::InvalidToken(
+        "logout token names neither sub nor sid".into(),
+      ));
+    }
+    Ok(LogoutIdentity {
+      maybe_subject: claims.sub,
+      maybe_session_id: claims.sid,
+    })
   }
 
   /// Everything except fetching the key; separate so it can be tested offline.
@@ -143,6 +232,8 @@ impl TokenValidator {
       maybe_email: claims.email,
       is_email_verified: claims.email_verified,
       role,
+      issued_at: claims.iat,
+      maybe_session_id: claims.sid,
     })
   }
 }
@@ -357,6 +448,85 @@ mod tests {
     ));
   }
 
+  fn logout_claims(overrides: Value) -> Value {
+    let mut claims = json!({
+      "iss": ISSUER,
+      "aud": CLIENT,
+      "iat": now(),
+      "jti": "logout-1",
+      "sub": "user-1",
+      "events": {"http://schemas.openid.net/event/backchannel-logout": {}},
+    });
+    if let (Some(base), Some(extra)) = (claims.as_object_mut(), overrides.as_object()) {
+      for (key, value) in extra {
+        if value.is_null() {
+          base.remove(key);
+        } else {
+          base.insert(key.clone(), value.clone());
+        }
+      }
+    }
+    claims
+  }
+
+  #[test]
+  fn accepts_a_valid_logout_token_for_a_subject_or_a_session() {
+    let by_sub = validator()
+      .verify_logout(&sign(&logout_claims(json!({}))), &public_key())
+      .unwrap();
+    assert_eq!(
+      by_sub,
+      LogoutIdentity {
+        maybe_subject: Some("user-1".into()),
+        maybe_session_id: None
+      }
+    );
+    let by_sid = sign(&logout_claims(
+      json!({"sub": null, "sid": "s-1", "aud": "teamcraft-server"}),
+    ));
+    let identity = validator().verify_logout(&by_sid, &public_key()).unwrap();
+    assert_eq!(
+      (identity.maybe_subject, identity.maybe_session_id.as_deref()),
+      (None, Some("s-1"))
+    );
+  }
+
+  #[test]
+  fn rejects_logout_tokens_that_break_the_spec() {
+    for overrides in [
+      json!({"nonce": "x"}),
+      json!({"events": {}}),
+      json!({"events": {"http://schemas.openid.net/event/other": {}}}),
+      json!({"sub": null}),
+      json!({"jti": null}),
+      json!({"iat": null}),
+      json!({"aud": "some-other-client"}),
+      json!({"iss": "https://evil.example.com/realms/company"}),
+    ] {
+      let token = sign(&logout_claims(overrides.clone()));
+      assert!(
+        validator().verify_logout(&token, &public_key()).is_err(),
+        "{overrides}"
+      );
+    }
+  }
+
+  #[test]
+  fn an_access_token_is_not_a_logout_token() {
+    let token = sign(&claims(json!({})));
+    assert!(validator().verify_logout(&token, &public_key()).is_err());
+  }
+
+  #[test]
+  fn access_tokens_carry_issue_time_and_session() {
+    let token = sign(&claims(json!({"iat": 1_800_000_000, "sid": "s-9"})));
+    let identity = validator().verify(&token, &public_key()).unwrap();
+    assert_eq!(
+      (identity.issued_at, identity.maybe_session_id.as_deref()),
+      (1_800_000_000, Some("s-9"))
+    );
+  }
+
   #[test]
   fn parses_algorithm_names() {
     assert_eq!(
@@ -382,6 +552,7 @@ mod tests {
       client_id: CLIENT.into(),
       algorithms: vec![Algorithm::RS256],
       leeway_secs: 30,
+      logout_audiences: vec![CLIENT.into(), "teamcraft-server".into()],
     }
   }
 

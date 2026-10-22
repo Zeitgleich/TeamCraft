@@ -19,6 +19,8 @@ name = "teamcraft-server"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
+teamcraft-crypto.workspace = true
 teamcraft-proto.workspace = true
 teamcraft-db.workspace = true
 anyhow.workspace = true
@@ -27,6 +29,7 @@ time.workspace = true
 axum.workspace = true
 figment.workspace = true
 jsonwebtoken.workspace = true
+rand_core.workspace = true
 reqwest.workspace = true
 rusty-s3.workspace = true
 secrecy.workspace = true
@@ -46,6 +49,7 @@ tracing-subscriber.workspace = true
 integration = ["teamcraft-db/integration"]
 
 [dev-dependencies]
+p256.workspace = true
 reqwest.workspace = true
 tokio-tungstenite = "0.30"
 futures-util = "0.3"

@@ -18,6 +18,8 @@ use crate::state::AppState;
 pub struct AuthenticatedUser {
   pub user: User,
   pub role: Role,
+  /// The identity provider's session the token belongs to, if it names one.
+  pub maybe_oidc_session: Option<String>,
 }
 
 impl FromRequestParts<AppState> for AuthenticatedUser {

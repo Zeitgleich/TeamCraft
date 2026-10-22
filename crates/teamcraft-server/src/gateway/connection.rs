@@ -79,6 +79,9 @@ async fn handshake(
     } => {
       let caller = authenticate(state, socket, &token, device_id).await?;
       let attached = state.hub.open_session(caller.user.id, device_id, activity);
+      if let Some(oidc_session) = &caller.maybe_oidc_session {
+        state.hub.set_oidc_session(&attached.session_id, oidc_session);
+      }
       let ready = GatewayServerMessage::Ready {
         session_id: attached.session_id.clone(),
         user: crate::services::convert::user_summary(&caller.user),

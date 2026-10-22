@@ -2,7 +2,9 @@
 
 pub mod access;
 pub mod accounts;
+pub mod admin;
 pub mod attachments;
+pub mod audit;
 pub mod conversations;
 pub mod convert;
 pub mod devices;
@@ -14,8 +16,11 @@ pub mod key_packages;
 pub mod members;
 pub mod messages;
 pub mod mls;
+pub mod oidc;
 pub mod presence;
+pub mod retention;
 pub mod spaces;
+pub mod workspace;
 
 use crate::error::ApiError;
 

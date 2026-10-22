@@ -12,10 +12,16 @@ workspace = true
 
 # Versions follow what openmls_rust_crypto already pulls in, so the RustCrypto stack is not duplicated.
 [dependencies]
+# Web Push payload encryption (RFC 8291, aes128gcm).
+aes-gcm = "0.10.3"
+# VAPID JWT and Web Push headers (base64url).
+base64 = "0.22.1"
 # Password-based key wrapping for the backup key (e2ee.md §6.2 fallback).
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 # Message, key bag and attachment encryption (XChaCha20-Poly1305, STREAM for chunks).
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc", "stream"] }
+# Web Push: ECDH and the VAPID ES256 signature (RFC 8291, RFC 8292).
+p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "std"] }
 # Identity and device signatures; same major version as openmls_basic_credential.
 ed25519-dalek = { version = "2.2.0", features = ["rand_core", "zeroize"] }
 # Key derivation for passkey PRF outputs and rendezvous.
@@ -26,6 +32,8 @@ openmls_rust_crypto = "0.6.0"
 openmls_traits = "0.6.0"
 # Randomness source shared with ed25519-dalek and openmls_rust_crypto.
 rand_core = { version = "0.6.4", features = ["getrandom"] }
+# VAPID JWT claims.
+serde_json = "1"
 sha2 = "0.11.0"
 # Constant-time comparisons of keys and fingerprints.
 subtle = "2.6.1"

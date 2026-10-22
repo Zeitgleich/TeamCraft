@@ -20,8 +20,9 @@ pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};
 pub use gateway::{GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
-  AttachmentId, CategoryId, ConversationId, DeviceId, Id, IdError, InviteId, MessageId, MlsMessageId,
-  SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId, ThreadId, UserId,
+  AttachmentId, AuditEntryId, CategoryId, ConversationId, DeviceId, Id, IdError, InviteId, MessageId,
+  MlsMessageId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId,
+  ThreadId, UserId,
 };
 pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,

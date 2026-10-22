@@ -43,7 +43,10 @@
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "+"
+        "post.logout.redirect.uris": "+",
+        "backchannel.logout.url": "http://host.docker.internal:8081/api/v1/auth/backchannel-logout",
+        "backchannel.logout.session.required": "true",
+        "backchannel.logout.revoke.offline.tokens": "false"
       },
       "defaultClientScopes": [
         "web-origins",
@@ -97,10 +100,7 @@
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "attributes": {
-        "backchannel.logout.url": "http://host.docker.internal:8081/api/v1/auth/backchannel-logout",
-        "backchannel.logout.session.required": "true"
-      }
+      "attributes": {}
     }
   ],
   "roles": {
@@ -249,7 +249,9 @@
           "view-users",
           "query-users",
           "query-groups",
-          "view-realm"
+          "view-realm",
+          "view-clients",
+          "query-clients"
         ]
       }
     }

@@ -1,0 +1,113 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.user_id, m.notification_level, u.presence_pref, u.dnd_until,\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "notification_level",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "notification_level"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "presence_pref",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "presence_pref"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "dnd_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "dnd_until"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "device_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "push_provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_provider"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "push_token!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_token"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "push_key!",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "77816d7954c03b076710d7a3641794b3c54f5d1279ab488df90c697e06d1df3c"
+}

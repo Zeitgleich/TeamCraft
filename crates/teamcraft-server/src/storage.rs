@@ -78,6 +78,20 @@ impl BlobStore {
       .sign(self.expiry)
   }
 
+  /// Deletes an object; a missing object counts as deleted.
+  pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
+    let url = self
+      .bucket
+      .delete_object(Some(&self.credentials), key)
+      .sign(self.expiry);
+    let response = self.http.delete(url).send().await?;
+    match response.status() {
+      StatusCode::NOT_FOUND => Ok(()),
+      status if status.is_success() => Ok(()),
+      status => Err(StorageError::Status(status)),
+    }
+  }
+
   /// The size of the stored object, `None` if it doesn't exist (yet).
   pub async fn object_size(&self, key: &str) -> Result<Option<u64>, StorageError> {
     let url = self

@@ -1,8 +1,10 @@
 use teamcraft_db::NewDevice;
 use teamcraft_proto::{
-  DeviceId, DeviceResponse, ListDevicesResponse, PushProvider, RegisterDeviceRequest, RegisterPushRequest,
+  DeviceId, DeviceResponse, GatewayEvent, ListDevicesResponse, PushProvider, RegisterDeviceRequest,
+  RegisterPushRequest, UserId,
 };
 
+use super::audit::{self, Target as AuditTarget};
 use super::convert::device_response;
 use super::validate_name;
 use crate::auth::AuthenticatedUser;
@@ -59,11 +61,39 @@ pub async fn revoke_device(
   caller: &AuthenticatedUser,
   device: DeviceId,
 ) -> Result<(), ApiError> {
-  if state.database.revoke_device(caller.user.id, device).await? {
-    Ok(())
-  } else {
-    Err(ApiError::device_not_found())
+  revoke_and_announce(state, caller.user.id, caller.user.id, device, "self").await
+}
+
+/// Revokes a device, ends its sessions, tells everyone who shares a conversation with the owner (so
+/// their clients commit the removal to the MLS groups) and logs it.
+pub async fn revoke_and_announce(
+  state: &AppState,
+  actor: UserId,
+  owner: UserId,
+  device: DeviceId,
+  by: &str,
+) -> Result<(), ApiError> {
+  if !state.database.revoke_device(owner, device).await? {
+    return Err(ApiError::device_not_found());
   }
+  state.hub.revoke_device(owner, device);
+  let mut audience = state.database.users_sharing_conversation(owner).await?;
+  audience.insert(owner);
+  state.hub.publish(
+    audience,
+    &GatewayEvent::DeviceRemove {
+      user_id: owner,
+      device_id: device,
+    },
+  );
+  audit::record(
+    state,
+    Some(actor),
+    "device_revoked",
+    Some(AuditTarget::new("user", owner)),
+    &serde_json::json!({"device_id": device.to_string(), "by": by}),
+  )
+  .await
 }
 
 const PUSH_KEY_BYTES: usize = 32;
@@ -86,6 +116,11 @@ pub async fn register_push(
     return Err(ApiError::InvalidRequest(format!(
       "push_key must be {PUSH_KEY_BYTES} bytes"
     )));
+  }
+  if request.provider == PushProvider::WebPush {
+    // The server will POST to this URL; check it now rather than at the first message.
+    crate::push::WebPushSubscription::parse(&request.token, state.settings.push.allow_private_endpoints)
+      .map_err(|error| ApiError::InvalidRequest(format!("invalid Web Push subscription: {error}")))?;
   }
   let stored = state
     .database

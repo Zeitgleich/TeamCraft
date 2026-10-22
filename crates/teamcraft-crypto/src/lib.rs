@@ -13,6 +13,7 @@ pub mod key_bag;
 pub mod membership;
 pub mod message;
 pub mod mls;
+pub mod push;
 pub mod secret;
 
 mod aead;

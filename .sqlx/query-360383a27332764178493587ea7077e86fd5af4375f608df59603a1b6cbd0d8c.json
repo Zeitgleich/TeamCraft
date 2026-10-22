@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT retention_max_age_days, retention_max_messages FROM spaces WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "retention_max_age_days",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "retention_max_age_days"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "retention_max_messages",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "retention_max_messages"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "360383a27332764178493587ea7077e86fd5af4375f608df59603a1b6cbd0d8c"
+}

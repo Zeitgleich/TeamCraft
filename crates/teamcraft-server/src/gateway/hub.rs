@@ -69,6 +69,8 @@ struct Session {
   buffer: VecDeque<(u64, GatewayEvent)>,
   maybe_sender: Option<mpsc::Sender<GatewayServerMessage>>,
   maybe_detached_at: Option<Instant>,
+  /// The identity provider's session the connection authenticated with.
+  maybe_oidc_session: Option<String>,
 }
 
 impl Hub {
@@ -90,6 +92,7 @@ impl Hub {
       buffer: VecDeque::new(),
       maybe_sender: Some(sender),
       maybe_detached_at: None,
+      maybe_oidc_session: None,
     };
     let mut inner = self.lock();
     inner.by_user.entry(user).or_default().insert(session_id.clone());
@@ -190,6 +193,83 @@ impl Hub {
         // Too slow or already closed: drop the connection; the client resumes from its last seq.
         session.maybe_sender = None;
         session.maybe_detached_at = Some(Instant::now());
+      }
+    }
+  }
+
+  /// Delivers the event to every known session (workspace-wide announcements).
+  pub fn publish_all(&self, event: &GatewayEvent) {
+    let users: Vec<UserId> = self.lock().by_user.keys().copied().collect();
+    self.publish(users, event);
+  }
+
+  /// Ends all sessions of a user (deactivation, logout): connections are dropped and cannot resume.
+  pub fn revoke_user(&self, user: UserId) {
+    let mut inner = self.lock();
+    if let Some(ids) = inner.by_user.remove(&user) {
+      for id in ids {
+        // Dropping the sender closes the connection's receiver, which ends the connection.
+        inner.sessions.remove(&id);
+      }
+    }
+    inner.last_presence.remove(&user);
+  }
+
+  /// `true` if the device has a live gateway connection (it gets events directly, no push needed).
+  pub fn is_device_connected(&self, user: UserId, device: DeviceId) -> bool {
+    let inner = self.lock();
+    inner.by_user.get(&user).into_iter().flatten().any(|id| {
+      inner
+        .sessions
+        .get(id)
+        .is_some_and(|session| session.device == device && session.maybe_sender.is_some())
+    })
+  }
+
+  /// Remembers which identity provider session a gateway session belongs to.
+  pub fn set_oidc_session(&self, session_id: &str, oidc_session: &str) {
+    if let Some(session) = self.lock().sessions.get_mut(session_id) {
+      session.maybe_oidc_session = Some(oidc_session.to_owned());
+    }
+  }
+
+  /// Ends the gateway sessions that authenticated with this identity provider session.
+  pub fn revoke_oidc_session(&self, oidc_session: &str) {
+    let mut inner = self.lock();
+    let ids: Vec<(String, UserId)> = inner
+      .sessions
+      .iter()
+      .filter(|(_, session)| session.maybe_oidc_session.as_deref() == Some(oidc_session))
+      .map(|(id, session)| (id.clone(), session.user))
+      .collect();
+    for (id, user) in ids {
+      inner.sessions.remove(&id);
+      if let Some(set) = inner.by_user.get_mut(&user) {
+        set.remove(&id);
+      }
+    }
+  }
+
+  /// Ends the sessions of one device.
+  pub fn revoke_device(&self, user: UserId, device: DeviceId) {
+    let mut inner = self.lock();
+    let ids: Vec<String> = inner
+      .by_user
+      .get(&user)
+      .into_iter()
+      .flatten()
+      .filter(|id| {
+        inner
+          .sessions
+          .get(*id)
+          .is_some_and(|session| session.device == device)
+      })
+      .cloned()
+      .collect();
+    for id in ids {
+      inner.sessions.remove(&id);
+      if let Some(set) = inner.by_user.get_mut(&user) {
+        set.remove(&id);
       }
     }
   }
@@ -420,6 +500,57 @@ mod tests {
       .resume_session(&id, user(1), device(1), CHANNEL_CAPACITY as u64)
       .unwrap();
     assert_eq!(resumed.replay.len(), 10);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn revoking_a_user_closes_connections_and_forbids_resuming() {
+    let hub = Hub::new(OPTIONS);
+    let mut a = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    let b = hub.open_session(user(2), device(2), DeviceActivity::Active);
+    hub.revoke_user(user(1));
+    assert!(
+      a.receiver.recv().await.is_none(),
+      "the connection's channel is closed"
+    );
+    assert_eq!(
+      hub.resume_session(&a.session_id, user(1), device(1), 0).err(),
+      Some(ResumeError::Unknown)
+    );
+    assert_eq!(hub.device_aggregate(user(2)), DeviceAggregate::Active);
+    drop(b);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn revoking_a_device_keeps_the_other_devices_of_the_user() {
+    let hub = Hub::new(OPTIONS);
+    let mut phone = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    let mut laptop = hub.open_session(user(1), device(2), DeviceActivity::Active);
+    hub.revoke_device(user(1), device(1));
+    assert!(phone.receiver.recv().await.is_none());
+    hub.publish([user(1)], &event(1));
+    assert_eq!(seqs(&mut laptop.receiver), vec![1]);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn revoking_a_provider_session_ends_only_its_connections() {
+    let hub = Hub::new(OPTIONS);
+    let mut a = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    let mut b = hub.open_session(user(1), device(2), DeviceActivity::Active);
+    hub.set_oidc_session(&a.session_id, "sid-a");
+    hub.set_oidc_session(&b.session_id, "sid-b");
+    hub.revoke_oidc_session("sid-a");
+    assert!(a.receiver.recv().await.is_none());
+    hub.publish([user(1)], &event(1));
+    assert_eq!(seqs(&mut b.receiver), vec![1]);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn publish_all_reaches_every_user() {
+    let hub = Hub::new(OPTIONS);
+    let mut a = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    let mut b = hub.open_session(user(2), device(2), DeviceActivity::Active);
+    hub.publish_all(&event(1));
+    assert_eq!((seqs(&mut a.receiver), seqs(&mut b.receiver)), (vec![1], vec![1]));
   }
 
   #[test]

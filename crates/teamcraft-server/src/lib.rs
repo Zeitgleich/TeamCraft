@@ -11,6 +11,7 @@ pub mod handlers;
 pub mod listener;
 pub mod logging;
 pub mod openapi;
+pub mod push;
 pub mod rendezvous;
 pub mod router;
 pub mod services;

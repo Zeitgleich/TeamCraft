@@ -1,3 +1,4 @@
+use serde_json::json;
 use teamcraft_db::MembershipChanges;
 use teamcraft_proto::{
   AddConversationMemberRequest, ChannelRole, ConversationId, ConversationMemberResponse,
@@ -6,6 +7,7 @@ use teamcraft_proto::{
 };
 
 use super::access::{ConversationAccess, is_guest, load_conversation, require};
+use super::audit::{self, Target as AuditTarget};
 use super::conversations::{can_list_members, ensure_open_channel};
 use super::convert::user_summary;
 use crate::auth::AuthenticatedUser;
@@ -107,6 +109,14 @@ pub async fn add_member(
     .database
     .add_conversation_member(id, user.id, role.clone())
     .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "conversation_member_added",
+    Some(AuditTarget::new("conversation", id)),
+    &json!({"user_id": user.id.to_string()}),
+  )
+  .await?;
   announce_added_user(state, id, &user).await?;
   Ok(ConversationMemberResponse {
     user: user_summary(&user),
@@ -140,6 +150,16 @@ pub async fn remove_member(
   }
 
   state.database.remove_conversation_member(id, user_id).await?;
+  if user_id != caller.user.id {
+    audit::record(
+      state,
+      Some(caller.user.id),
+      "conversation_member_removed",
+      Some(AuditTarget::new("conversation", id)),
+      &json!({"user_id": user_id.to_string()}),
+    )
+    .await?;
+  }
   state.hub.publish(
     members.iter().map(|m| m.user.id),
     &GatewayEvent::MembershipRemove {
@@ -159,6 +179,7 @@ pub async fn update_member(
   request: UpdateConversationMemberRequest,
 ) -> Result<(), ApiError> {
   let access = load_conversation(state, caller, id).await?;
+  let request_role = request.maybe_role.clone();
   let is_self = user_id == caller.user.id;
   let has_preferences = request.maybe_notification_level.is_some() || request.maybe_is_favorite.is_some();
   if has_preferences && !is_self {
@@ -208,6 +229,16 @@ pub async fn update_member(
       },
     )
     .await?;
+  if let Some(role) = &request_role {
+    audit::record(
+      state,
+      Some(caller.user.id),
+      "conversation_member_role_changed",
+      Some(AuditTarget::new("conversation", id)),
+      &json!({"user_id": user_id.to_string(), "role": role.as_str()}),
+    )
+    .await?;
+  }
   let members = state.database.conversation_member_ids(id).await?;
   state
     .hub

@@ -17,11 +17,13 @@ use tokio::task::JoinHandle;
 
 use crate::auth::test_keys::{TEST_KEY_ID, TEST_MODULUS_B64, TEST_PRIVATE_KEY_PEM};
 use crate::auth::{
-  AuthError, JwkSource, JwksCache, JwksCacheOptions, RoleMapping, TokenValidator, ValidatorOptions,
+  AuthError, JwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator,
+  ValidatorOptions,
 };
 use crate::config::{RoleNames, StorageConfig};
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
+use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
 use crate::router::router;
 use crate::state::{AppState, Settings};
@@ -47,6 +49,8 @@ pub struct TestUser {
   pub email: String,
   pub is_email_verified: bool,
   pub roles: Vec<String>,
+  /// The provider's session ID put into the `sid` claim.
+  pub maybe_session_id: Option<String>,
 }
 
 pub struct Reply {
@@ -62,7 +66,13 @@ impl TestUser {
       email: format!("{username}@example.com"),
       is_email_verified: true,
       roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+      maybe_session_id: None,
     }
+  }
+
+  pub fn with_session(mut self, session_id: &str) -> Self {
+    self.maybe_session_id = Some(session_id.to_owned());
+    self
   }
 
   pub fn with_email(mut self, email: &str, is_verified: bool) -> Self {
@@ -113,9 +123,25 @@ impl TestApp {
     Self::start_inner(customize, Some(storage)).await
   }
 
+  /// Like [`Self::start_with`] with the given push dispatcher (tests record or fake the senders).
+  pub async fn start_with_push(
+    customize: impl FnOnce(&mut Settings),
+    dispatcher: PushDispatcher,
+  ) -> Option<Self> {
+    Self::start_full(customize, None, Some(dispatcher)).await
+  }
+
   async fn start_inner(
     customize: impl FnOnce(&mut Settings),
     maybe_storage: Option<StorageConfig>,
+  ) -> Option<Self> {
+    Self::start_full(customize, maybe_storage, None).await
+  }
+
+  async fn start_full(
+    customize: impl FnOnce(&mut Settings),
+    maybe_storage: Option<StorageConfig>,
+    maybe_push: Option<PushDispatcher>,
   ) -> Option<Self> {
     let test_db = TestDatabase::create().await?;
     let mut settings = Settings::default();
@@ -137,6 +163,7 @@ impl TestApp {
         client_id: TEST_CLIENT.into(),
         algorithms: vec![Algorithm::RS256],
         leeway_secs: 30,
+        logout_audiences: vec![TEST_CLIENT.into(), "teamcraft-server".into()],
       },
     );
     let state = AppState {
@@ -144,6 +171,8 @@ impl TestApp {
       validator: Arc::new(validator),
       // Each app gets its own worker ID: parallel tests share the S3 bucket, and IDs name its objects.
       ids: Arc::new(SnowflakeGenerator::new(next_worker_id()).unwrap()),
+      push: Arc::new(maybe_push.unwrap_or_else(|| PushDispatcher::new(4))),
+      revocations: Arc::new(Revocations::default()),
       hub: Arc::new(Hub::new(HubOptions {
         resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
         buffer_events: settings.gateway.resume_buffer_events,
@@ -170,6 +199,11 @@ impl TestApp {
     })
   }
 
+  /// `true` if the table (e.g. a message partition) exists.
+  pub async fn table_exists(&self, name: &str) -> bool {
+    self.test_db.table_exists(name).await
+  }
+
   pub async fn stop(self) {
     self.server.abort();
     self.test_db.drop_database().await;
@@ -177,7 +211,17 @@ impl TestApp {
 
   /// A signed access token for the user, as Keycloak would issue it.
   pub fn token(&self, user: &TestUser) -> String {
+    self.token_issued_at(
+      user,
+      i64::try_from(jsonwebtoken::get_current_timestamp()).unwrap(),
+    )
+  }
+
+  /// Like [`Self::token`] with a chosen issue time.
+  pub fn token_issued_at(&self, user: &TestUser, issued_at: i64) -> String {
     let claims = json!({
+      "iat": issued_at,
+      "sid": user.maybe_session_id,
       "iss": TEST_ISSUER,
       "sub": user.subject,
       "azp": TEST_CLIENT,
@@ -188,6 +232,27 @@ impl TestApp {
       "email": user.email,
       "email_verified": user.is_email_verified,
       "resource_access": { TEST_CLIENT: { "roles": user.roles } },
+    });
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(TEST_KEY_ID.into());
+    encode(
+      &header,
+      &claims,
+      &EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY_PEM.as_bytes()).unwrap(),
+    )
+    .unwrap()
+  }
+
+  /// A signed back-channel logout token as the provider would send it.
+  pub fn logout_token(&self, maybe_subject: Option<&str>, maybe_session_id: Option<&str>) -> String {
+    let claims = json!({
+      "iss": TEST_ISSUER,
+      "aud": TEST_CLIENT,
+      "iat": jsonwebtoken::get_current_timestamp(),
+      "jti": "logout-token-1",
+      "sub": maybe_subject,
+      "sid": maybe_session_id,
+      "events": {"http://schemas.openid.net/event/backchannel-logout": {}},
     });
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(TEST_KEY_ID.into());

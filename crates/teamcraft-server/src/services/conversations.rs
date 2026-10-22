@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use serde_json::json;
 use teamcraft_db::{
   ConversationChanges, ConversationFilter, ConversationView, NewConversation, participants_key,
 };
@@ -12,6 +13,7 @@ use teamcraft_proto::{
 use super::access::{
   ConversationAccess, is_guest, is_instance_admin, load_conversation, load_space, require, space_target,
 };
+use super::audit::{self, Target as AuditTarget};
 use super::convert::{ConversationExtras, conversation_response};
 use super::{validate_name, validate_text};
 use crate::auth::AuthenticatedUser;
@@ -224,6 +226,14 @@ pub async fn update_conversation(
       },
     )
     .await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "conversation_updated",
+    Some(AuditTarget::new("conversation", id)),
+    &json!({}),
+  )
+  .await?;
   let members = state.database.conversation_member_ids(id).await?;
   state
     .hub

@@ -28,6 +28,9 @@ pub enum IdError {
 }
 
 impl Snowflake {
+  /// The smallest ID, older than anything the server generates.
+  pub const ZERO: Snowflake = Snowflake(0);
+
   pub fn new(raw: i64) -> Result<Self, IdError> {
     if raw < 0 {
       return Err(IdError::Negative(raw));
@@ -186,6 +189,10 @@ define_id!(
 define_id!(
   /// A pending invitation.
   InviteId
+);
+define_id!(
+  /// An audit log entry; IDs increase with time.
+  AuditEntryId
 );
 define_id!(
   /// An uploaded encrypted file.

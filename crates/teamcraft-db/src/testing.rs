@@ -56,6 +56,14 @@ impl TestDatabase {
     })
   }
 
+  pub async fn table_exists(&self, name: &str) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+      .bind(name)
+      .fetch_one(&self.pool)
+      .await
+      .unwrap()
+  }
+
   pub async fn drop_database(self) {
     self.pool.close().await;
     let mut admin = PgConnection::connect(&self.admin_url).await.unwrap();

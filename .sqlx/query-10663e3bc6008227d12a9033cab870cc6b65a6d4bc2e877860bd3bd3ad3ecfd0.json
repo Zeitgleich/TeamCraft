@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, email, display_name, kind, created_at, deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2",
+  "query": "SELECT id, oidc_subject AS \"subject!\", deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                deactivation_reason, oidc_role, kind\n         FROM users WHERE oidc_issuer = $1 AND oidc_subject IS NOT NULL ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -16,39 +16,45 @@
       },
       {
         "ordinal": 1,
-        "name": "username",
+        "name": "subject!",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "users",
-            "name": "username"
+            "name": "oidc_subject"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "email",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "users",
-            "name": "email"
-          }
-        }
+        "name": "is_deactivated!",
+        "type_info": "Bool",
+        "origin": "Expression"
       },
       {
         "ordinal": 3,
-        "name": "display_name",
+        "name": "deactivation_reason",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "users",
-            "name": "display_name"
+            "name": "deactivation_reason"
           }
         }
       },
       {
         "ordinal": 4,
+        "name": "oidc_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "oidc_role"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "kind",
         "type_info": "Text",
         "origin": {
@@ -57,40 +63,21 @@
             "name": "kind"
           }
         }
-      },
-      {
-        "ordinal": 5,
-        "name": "created_at",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "users",
-            "name": "created_at"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
-        "name": "is_deactivated!",
-        "type_info": "Bool",
-        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
         "Text"
       ]
     },
     "nullable": [
       false,
       true,
+      null,
       true,
-      false,
-      false,
-      false,
-      null
+      true,
+      false
     ]
   },
-  "hash": "f0fa7b08d3b12806b04abf4ac9f7bd742a064a54864794bf14a1d302c85cab0c"
+  "hash": "10663e3bc6008227d12a9033cab870cc6b65a6d4bc2e877860bd3bd3ad3ecfd0"
 }

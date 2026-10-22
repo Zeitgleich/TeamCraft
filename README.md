@@ -89,6 +89,15 @@ registration, the device-linking relay and presigned attachment upload/download.
 orders opaque bytes; it makes no trust decisions. Attachments need the `[storage]` section (the dev
 Garage from `./dev/init-garage.sh` works as configured in `teamcraft.example.toml`).
 
+Deprovisioning: Keycloak ends sessions through back-channel logout (`POST /api/v1/auth/backchannel-logout`,
+registered at the `teamcraft` client in the dev realm; Keycloak reaches the host as `host.docker.internal:8081`),
+and `[oidc.sync]` polls the admin API with the service account (disabled users, role changes). Enable it with
+`TEAMCRAFT_OIDC__SYNC__IS_ENABLED=true TEAMCRAFT_OIDC__SYNC__CLIENT_SECRET=teamcraft-server-dev-secret`.
+
+Push: messages wake devices with an encrypted payload sealed with the device's push key (e2ee.md §7). Web Push
+(VAPID, RFC 8291) is implemented and needs `[push] vapid_private_key`; APNs, FCM and UnifiedPush are stubs behind
+the same trait. Routing honours mute, mentions, do-not-disturb and active devices.
+
 ### 3. Checks before committing
 
 ```sh

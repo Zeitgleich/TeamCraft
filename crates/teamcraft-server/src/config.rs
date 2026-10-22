@@ -32,6 +32,10 @@ pub struct Config {
   pub gateway: GatewayConfig,
   #[serde(default)]
   pub rendezvous: RendezvousConfig,
+  #[serde(default)]
+  pub retention: RetentionJobConfig,
+  #[serde(default)]
+  pub push: PushConfig,
   /// Blob storage for attachments; without it the attachment endpoints answer 503.
   #[serde(default)]
   pub storage: Option<StorageConfig>,
@@ -92,6 +96,29 @@ pub struct OidcConfig {
   pub http_timeout_secs: u64,
   #[serde(default)]
   pub roles: RoleNames,
+  /// Periodic comparison with the provider's admin API (disabled users, role changes).
+  #[serde(default)]
+  pub sync: OidcSyncConfig,
+}
+
+/// Deprovisioning by polling the identity provider's admin API with the service account of
+/// `server_client` (ARCHITECTURE.md §5.1.1). Back-channel logout covers sessions; this covers
+/// disabled users and role changes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct OidcSyncConfig {
+  pub is_enabled: bool,
+  pub interval_secs: u64,
+  pub initial_delay_secs: u64,
+  /// Secret of `server_client`.
+  #[serde(rename = "client_secret")]
+  pub maybe_client_secret: Option<SecretString>,
+  /// Keycloak admin API of the realm, e.g. `https://auth.example.com/admin/realms/company`.
+  /// Derived from the issuer if the issuer looks like `<base>/realms/<realm>`.
+  #[serde(rename = "admin_url")]
+  pub maybe_admin_url: Option<String>,
+  /// Users fetched per request.
+  pub page_size: u32,
 }
 
 /// Names of the identity provider's client roles per TeamCraft role (ARCHITECTURE.md §5.1.1).
@@ -191,6 +218,38 @@ pub struct StorageConfig {
   pub max_attachment_bytes: u64,
 }
 
+/// Push sending (e2ee.md §7). Web Push needs a VAPID key pair; APNs, FCM and UnifiedPush are not
+/// implemented yet.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PushConfig {
+  /// The VAPID private key: 32 bytes, base64url. Without it Web Push devices get nothing.
+  #[serde(rename = "vapid_private_key")]
+  pub maybe_vapid_private_key: Option<SecretString>,
+  /// Contact for push services, `mailto:` or `https:` (RFC 8292).
+  pub vapid_subject: String,
+  /// How long push services may hold a wake-up for an offline device.
+  pub ttl_secs: u64,
+  pub request_timeout_secs: u64,
+  /// Pushes sent in parallel.
+  pub max_concurrent_sends: usize,
+  /// Accept Web Push endpoints on private addresses and plain http. For development only.
+  pub allow_private_endpoints: bool,
+}
+
+/// The background job that enforces retention (deletes old ciphertext, attachments and index segments).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RetentionJobConfig {
+  pub is_enabled: bool,
+  /// Time between runs.
+  pub interval_secs: u64,
+  /// Delay before the first run after startup.
+  pub initial_delay_secs: u64,
+  /// Months of message partitions kept ready ahead of time (the job tops them up).
+  pub partitions_ahead_months: u32,
+}
+
 /// Device-linking relay at /api/v1/rendezvous.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -265,6 +324,19 @@ impl Default for ServerConfig {
   }
 }
 
+impl Default for OidcSyncConfig {
+  fn default() -> Self {
+    Self {
+      is_enabled: false,
+      interval_secs: 300,
+      initial_delay_secs: 30,
+      maybe_client_secret: None,
+      maybe_admin_url: None,
+      page_size: 100,
+    }
+  }
+}
+
 impl Default for RoleNames {
   fn default() -> Self {
     Self {
@@ -317,6 +389,30 @@ impl Default for GatewayConfig {
       connection_max_age_secs: 3600,
       presence_offline_grace_secs: 5,
       max_frame_bytes: 64 * 1024,
+    }
+  }
+}
+
+impl Default for PushConfig {
+  fn default() -> Self {
+    Self {
+      maybe_vapid_private_key: None,
+      vapid_subject: "mailto:admin@example.com".into(),
+      ttl_secs: 3600,
+      request_timeout_secs: 10,
+      max_concurrent_sends: 32,
+      allow_private_endpoints: false,
+    }
+  }
+}
+
+impl Default for RetentionJobConfig {
+  fn default() -> Self {
+    Self {
+      is_enabled: true,
+      interval_secs: 3600,
+      initial_delay_secs: 60,
+      partitions_ahead_months: 3,
     }
   }
 }

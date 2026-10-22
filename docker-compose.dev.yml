@@ -29,6 +29,9 @@ services:
     # Dev mode keeps its H2 database inside the container; the realm is re-imported from dev/keycloak
     # whenever the container is recreated (`docker compose ... down` resets all Keycloak state).
     command: ["start-dev", "--import-realm"]
+    # Lets Keycloak call the server on the host for back-channel logout (dev server on port 8081).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin-dev-only

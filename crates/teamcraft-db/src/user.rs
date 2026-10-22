@@ -16,6 +16,8 @@ pub struct OidcIdentity<'a> {
   pub maybe_email: Option<&'a str>,
   pub display_name: &'a str,
   pub kind: UserKind,
+  /// The TeamCraft role the token granted (stored for the OIDC sync to compare against).
+  pub maybe_oidc_role: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,13 +52,14 @@ impl Database {
   /// `new_id` is only used when the user does not exist yet.
   pub async fn upsert_oidc_user(&self, identity: &OidcIdentity<'_>, new_id: UserId) -> Result<User, DbError> {
     let row = sqlx::query!(
-      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE
            SET username = EXCLUDED.username,
                email = EXCLUDED.email,
                display_name = EXCLUDED.display_name,
-               kind = EXCLUDED.kind
+               kind = EXCLUDED.kind,
+               oidc_role = EXCLUDED.oidc_role
          RETURNING id, username, display_name, kind, created_at, deactivated_at IS NOT NULL AS "is_deactivated!""#,
       to_db(new_id),
       identity.issuer,
@@ -65,6 +68,7 @@ impl Database {
       identity.maybe_email,
       identity.display_name,
       identity.kind.as_str(),
+      identity.maybe_oidc_role,
     )
     .fetch_one(self.pool())
     .await?;
@@ -82,7 +86,7 @@ impl Database {
   /// changed. Meant for the per-request authentication path, which must not write every time.
   pub async fn sync_oidc_user(&self, identity: &OidcIdentity<'_>, new_id: UserId) -> Result<User, DbError> {
     let existing = sqlx::query!(
-      r#"SELECT id, username, email, display_name, kind, created_at, deactivated_at IS NOT NULL AS "is_deactivated!"
+      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, deactivated_at IS NOT NULL AS "is_deactivated!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2"#,
       identity.issuer,
       identity.subject,
@@ -94,7 +98,8 @@ impl Database {
       let is_unchanged = row.username.as_deref() == identity.maybe_username
         && row.email.as_deref() == identity.maybe_email
         && row.display_name == identity.display_name
-        && row.kind == identity.kind.as_str();
+        && row.kind == identity.kind.as_str()
+        && row.oidc_role.as_deref() == identity.maybe_oidc_role;
       if is_unchanged {
         return user_from_parts(
           row.id,
@@ -280,5 +285,70 @@ mod tests {
   fn like_metacharacters_are_escaped() {
     assert_eq!(escape_like("100%_a\\b"), "100\\%\\_a\\\\b");
     assert_eq!(escape_like("alice"), "alice");
+  }
+}
+
+/// A user known to the OIDC sync.
+#[derive(Debug, Clone)]
+pub struct OidcUserRow {
+  pub id: UserId,
+  pub subject: String,
+  pub is_deactivated: bool,
+  pub maybe_deactivation_reason: Option<String>,
+  pub maybe_oidc_role: Option<String>,
+  pub kind: UserKind,
+}
+
+impl Database {
+  pub async fn find_user_by_oidc_subject(
+    &self,
+    issuer: &str,
+    subject: &str,
+  ) -> Result<Option<UserId>, DbError> {
+    let id = sqlx::query_scalar!(
+      "SELECT id FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2",
+      issuer,
+      subject,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    id.map(from_db).transpose()
+  }
+
+  pub async fn list_oidc_users(&self, issuer: &str) -> Result<Vec<OidcUserRow>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT id, oidc_subject AS "subject!", deactivated_at IS NOT NULL AS "is_deactivated!",
+                deactivation_reason, oidc_role, kind
+         FROM users WHERE oidc_issuer = $1 AND oidc_subject IS NOT NULL ORDER BY id"#,
+      issuer,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(OidcUserRow {
+          id: from_db(row.id)?,
+          subject: row.subject,
+          is_deactivated: row.is_deactivated,
+          maybe_deactivation_reason: row.deactivation_reason,
+          maybe_oidc_role: row.oidc_role,
+          kind: UserKind::from(row.kind),
+        })
+      })
+      .collect()
+  }
+
+  /// Records a role change seen by the OIDC sync.
+  pub async fn set_user_oidc_role(&self, user: UserId, role: &str, kind: &UserKind) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE users SET oidc_role = $2, kind = $3 WHERE id = $1",
+      to_db(user),
+      role,
+      kind.as_str(),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
   }
 }

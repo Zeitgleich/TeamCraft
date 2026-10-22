@@ -52,6 +52,20 @@ admin = "admin"
 member = "member"
 guest = "guest"
 
+# Deprovisioning (docs/admin.md §3.2): poll the provider's admin API with the service account of
+# `server_client` and deactivate users that were disabled, deleted or lost all TeamCraft roles.
+# Back-channel logout (POST /api/v1/auth/backchannel-logout) ends sessions immediately; register that
+# URL at the `client_id` client in the provider.
+[oidc.sync]
+is_enabled = false
+interval_secs = 300
+initial_delay_secs = 30
+# Secret of `server_client`. Prefer TEAMCRAFT_OIDC__SYNC__CLIENT_SECRET. The dev realm uses:
+# client_secret = "teamcraft-server-dev-secret"
+# Admin API of the realm; derived from the issuer when it looks like <base>/realms/<realm>.
+# admin_url = "http://127.0.0.1:8080/admin/realms/teamcraft-dev"
+page_size = 100
+
 [logging]
 # `tracing` filter, e.g. "info" or "teamcraft_server=debug,info". The RUST_LOG variable wins.
 filter = "info"
@@ -124,3 +138,27 @@ path_style = true
 presign_expiry_secs = 900
 # Largest attachment (as stored, i.e. ciphertext) a client may announce.
 max_attachment_bytes = 104857600
+
+# Background job that enforces retention: deletes ciphertext, attachments and index segments older
+# than a channel's retention and drops emptied month partitions. The policy (signed by owners) holds
+# the defaults and limits; channel and space settings are made through the API.
+[retention]
+is_enabled = true
+interval_secs = 3600
+initial_delay_secs = 60
+# Months of message partitions kept ready ahead of time; the job tops them up.
+partitions_ahead_months = 3
+
+# Push notifications: encrypted wake-ups (the payload is sealed with the device's push key, e2ee.md §7).
+# Web Push works with a VAPID key pair; APNs, FCM and UnifiedPush are stubs for now.
+[push]
+# 32 random bytes as base64url, e.g. from `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`. Keep it
+# secret (prefer TEAMCRAFT_PUSH__VAPID_PRIVATE_KEY). Browsers subscribe with its public key, which the
+# server logs at startup.
+# vapid_private_key = "..."
+vapid_subject = "mailto:admin@example.com"
+ttl_secs = 3600
+request_timeout_secs = 10
+max_concurrent_sends = 32
+# Development only: allow http and private addresses as Web Push endpoints.
+allow_private_endpoints = false
