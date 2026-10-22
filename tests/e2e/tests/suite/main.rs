@@ -6,6 +6,8 @@
 
 mod acceptance_calls;
 mod acceptance_files;
+#[cfg(feature = "browser")]
+mod acceptance_meetings_web;
 mod acceptance_notifications;
 mod acceptance_people;
 mod acceptance_presence;

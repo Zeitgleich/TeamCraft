@@ -44,6 +44,9 @@ Postgres, dropped afterwards), so tests are independent and run in parallel (abo
 | `email_digest.rs`     | Content-free digest of missed mentions: opt-in, batched, skips what was read in time                                                        |
 | `web.rs` (`browser`)  | The web client in headless Chromium: Keycloak login page, welcome screen, the channel list shows the account's channels                     |
 
+The `acceptance_*` scenarios cover the v1 sections of PLAN.md one by one; what each proves, the known gaps
+and the bugs found are in [docs/acceptance.md](../../docs/acceptance.md).
+
 ### Ignored
 
 | Test                                                               | Why                                                                                                                                                                                                                                                                                                                 |
