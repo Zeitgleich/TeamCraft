@@ -35,6 +35,7 @@ mod messages;
 mod mls;
 mod notification_settings;
 mod oidc;
+mod org_backgrounds;
 mod org_recovery;
 mod perf_gateway;
 mod perf_history;

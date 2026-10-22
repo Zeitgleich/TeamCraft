@@ -258,8 +258,8 @@ fn timestamp_us(frame: &ReceivedVideoFrame) -> u64 {
   u64::from(frame.timestamp.0) * 1_000_000 / 90_000
 }
 
-/// The UI's effect as the media layer's; `maybe_custom` is the user's picture for
-/// [`UiBackgroundEffect::Custom`], already fetched and decoded.
+/// The UI's effect as the media layer's; `maybe_custom` is the picture for
+/// [`UiBackgroundEffect::Custom`] or [`UiBackgroundEffect::Org`], already fetched and decoded.
 pub(super) fn media_effect(
   effect: UiBackgroundEffect,
   maybe_custom: Option<&Arc<BackgroundImage>>,
@@ -278,7 +278,7 @@ pub(super) fn media_effect(
         },
       }
     },
-    UiBackgroundEffect::Custom(_) => match maybe_custom {
+    UiBackgroundEffect::Custom(_) | UiBackgroundEffect::Org(_) => match maybe_custom {
       Some(image) => BackgroundEffect::Image(Arc::clone(image)),
       None => {
         warn!("own background picture not loaded; keeping the real background");
@@ -306,7 +306,7 @@ pub(crate) fn background_preview(
 ) -> Result<Vec<u8>, String> {
   let image = match (effect, maybe_custom) {
     (UiBackgroundEffect::Preset(preset), _) => preset_background(preset).render(width, height),
-    (UiBackgroundEffect::Custom(_), Some(picture)) => {
+    (UiBackgroundEffect::Custom(_) | UiBackgroundEffect::Org(_), Some(picture)) => {
       BackgroundImage::decode(picture).map(|image| image.fit_within(width, height))
     },
     _ => return Err("only presets and own pictures have a preview".into()),

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM user_backgrounds WHERE id = $1 RETURNING s3_key",
+  "query": "DELETE FROM org_backgrounds\n       WHERE deleted_at < $1 OR (completed_at IS NULL AND created_at < $1)\n       RETURNING s3_key",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "user_backgrounds",
+            "table": "org_backgrounds",
             "name": "s3_key"
           }
         }
@@ -17,12 +17,12 @@
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Timestamptz"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "6db703b9ae84a06be4624be0dc969e131dd63304bb85bb279c7bbf12aec5e319"
+  "hash": "66b6dddbc64b44b304c9df2fb5f57fafe71a8f4610a5813957eecc2cd90e13b9"
 }

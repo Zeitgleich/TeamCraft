@@ -2839,6 +2839,14 @@ select.input {
   transform: rotate(180deg);
 }
 
+.rotate-up {
+  transform: rotate(-90deg);
+}
+
+.rotate-down {
+  transform: rotate(90deg);
+}
+
 .admin-content {
   flex: 1;
   min-width: 0;
