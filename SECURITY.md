@@ -9,7 +9,7 @@ welcome.
 
 Please **do not** open a public issue. Report privately through GitHub's
 [private vulnerability reporting](../../security/advisories/new) ("Report a vulnerability" on the
-repository's Security tab).
+repository's Security tab), or by e-mail to opensource@zeitgleich.de.
 
 Include what you found, how to reproduce it, the affected version or commit, and the impact you
 expect. We confirm receipt within a few working days and keep you updated until a fix is released.
