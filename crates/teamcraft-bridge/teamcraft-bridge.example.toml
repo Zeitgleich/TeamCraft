@@ -1,0 +1,76 @@
+# TeamCraft integration bridge (ARCHITECTURE.md §4.5). Run it where the data comes from: next to the
+# service that writes logs, on a NAS, on the hotline host. Never on the VPS that runs the server.
+#
+#   teamcraft-bridge --config teamcraft-bridge.toml
+#
+# Any value can be overridden by an environment variable: prefix TEAMCRAFT_BRIDGE_, nesting
+# separated by a double underscore, e.g. TEAMCRAFT_BRIDGE_SERVER__BOT_TOKEN. The config file path
+# can also be given as TEAMCRAFT_BRIDGE_CONFIG.
+#
+# One-time setup:
+#   1. An admin registers the bridge:  POST /api/v1/admin/bots {"name": "NAS bridge"}  -> bot token
+#      (shown once) and the bot's user ID.
+#   2. An admin adds that user to the space and to each channel the bridge serves, and flags the
+#      channels `is_integration` (log retention, no push except @mentions).
+#   3. Start the bridge once with identity.passphrase set. It enrolls the bot's device, generates the
+#      keys and joins the channels through the welcomes the server holds for it.
+
+[server]
+url = "https://chat.example.com"
+# The bot token. Prefer the environment variable or a file over writing it here.
+# bot_token = "tcb_..."
+# bot_token_file = "/run/secrets/teamcraft-bridge-token"
+
+# The bridge's local database (SQLCipher) holds the bot's keys and the content keys of its channels.
+[store]
+path = "/var/lib/teamcraft-bridge/bridge.db"
+# 32 random bytes as base64: `openssl rand -base64 32`. Prefer TEAMCRAFT_BRIDGE_STORE__KEY or a file.
+# key = "..."
+key_file = "/run/secrets/teamcraft-bridge-db-key"
+
+[identity]
+device_name = "NAS bridge"
+# Recovery passphrase wrapping the bot's backup key on the server. Needed on the first run and when
+# the local database is lost; afterwards it is not read.
+# passphrase = "..."
+passphrase_file = "/run/secrets/teamcraft-bridge-passphrase"
+# Argon2id cost of the passphrase (defaults: 131072 KiB, 3 iterations).
+# argon2_memory_kib = 131072
+# argon2_iterations = 3
+
+# Where webhooks and logs are accepted. The default is loopback on IPv4 and IPv6. To accept
+# connections from other hosts use "[::]:8088" (dual stack) behind a firewall or TLS proxy: the
+# source token is the only credential and travels in the URL.
+[listen]
+addrs = ["127.0.0.1:8088", "[::1]:8088"]
+max_body_bytes = 1048576
+
+# Log lines are collected into one message per conversation.
+[batching]
+interval_ms = 1000
+max_bytes = 65536
+max_line_bytes = 8192
+
+# The bridge sees the plaintext of its channels, so it builds their search index segments (closed
+# months) instead of every member client doing it. 0 turns it off.
+[index]
+interval_secs = 3600
+
+# One [[sources]] block per producer. The token is part of the URL:
+#
+#   Slack/Mattermost-compatible webhook (JSON, or form with `payload=`):
+#     curl -d '{"text":"Deploy finished","username":"ci"}' http://127.0.0.1:8088/hooks/<token>
+#   Log lines (plain text; NDJSON with Content-Type application/x-ndjson):
+#     journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/ingest/<token>
+[[sources]]
+name = "nas-logs"
+token = "replace-with-24-or-more-random-characters"
+conversation_id = "123456789012345678"
+# Webhook requests / log lines per minute; more are refused (429) or dropped and reported.
+rate_limit_per_minute = 600
+# Log levels that make a line an alert, which mentions the people below.
+alert_levels = ["error", "fatal", "critical"]
+# Webhook attachments with color "danger" are alerts too.
+danger_is_alert = true
+# People mentioned by alerts (the mention reaches them even though integration channels push nothing else).
+mentions = [{ user_id = "123456789012345679", name = "alice" }]

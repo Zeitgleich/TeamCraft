@@ -135,6 +135,7 @@ pub async fn send_message(
         mentioned: outcome.message.mentioned_user_ids.clone(),
         maybe_thread: outcome.message.maybe_thread_id,
         is_urgent: outcome.message.is_urgent,
+        is_integration: access.view.conversation.is_integration,
       },
     ));
   }

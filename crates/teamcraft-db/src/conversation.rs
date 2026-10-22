@@ -25,6 +25,7 @@ pub struct Conversation {
   pub maybe_category_id: Option<CategoryId>,
   pub is_archived: bool,
   pub moderation: ChannelModeration,
+  pub is_integration: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,7 @@ pub struct NewConversation<'a> {
   pub maybe_category: Option<CategoryId>,
   /// Set for DMs and group DMs, see [`participants_key`].
   pub maybe_participants_key: Option<String>,
+  pub is_integration: bool,
 }
 
 /// Fields to change; `None` keeps the stored value. Empty strings clear topic and description.
@@ -83,6 +85,7 @@ pub struct ConversationChanges<'a> {
   pub maybe_history_policy: Option<HistoryPolicy>,
   pub maybe_is_archived: Option<bool>,
   pub maybe_moderation: Option<ChannelModeration>,
+  pub maybe_is_integration: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +165,7 @@ impl Database {
   ) -> Result<Vec<ConversationView>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,
-                c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.member_denied, c.guest_denied,
+                c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.is_integration, c.member_denied, c.guest_denied,
                 m.role AS "role?", m.notification_level AS "notification_level?",
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 tc_snowflake_floor(m.joined_at) AS "joined_floor?"
@@ -214,6 +217,7 @@ impl Database {
             history_policy: HistoryPolicy::from(row.history_policy),
             maybe_category_id: from_db_opt(row.category_id)?,
             is_archived: row.is_archived,
+            is_integration: row.is_integration,
             moderation: ChannelModeration {
               member_denied: permissions(row.member_denied),
               guest_denied: permissions(row.guest_denied),
@@ -249,7 +253,8 @@ impl Database {
            archived_at = CASE WHEN $9::boolean IS NULL THEN archived_at
                               WHEN $9 THEN COALESCE(archived_at, now()) ELSE NULL END,
            member_denied = COALESCE($10, member_denied),
-           guest_denied = COALESCE($11, guest_denied)
+           guest_denied = COALESCE($11, guest_denied),
+           is_integration = COALESCE($12, is_integration)
          WHERE id = $1"#,
       to_db(conversation),
       changes.maybe_name,
@@ -265,6 +270,7 @@ impl Database {
       changes.maybe_is_archived,
       member_denied.as_deref(),
       guest_denied.as_deref(),
+      changes.maybe_is_integration,
     )
     .execute(self.pool())
     .await?;
@@ -469,8 +475,9 @@ pub(crate) async fn insert_conversation(
 ) -> Result<(), DbError> {
   sqlx::query!(
     r#"INSERT INTO conversations
-         (id, space_id, kind, name, topic, description, visibility, history_policy, category_id, participants_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+         (id, space_id, kind, name, topic, description, visibility, history_policy, category_id, participants_key,
+          is_integration)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
     to_db(new.id),
     new.maybe_space.map(to_db),
     new.kind.as_str(),
@@ -481,6 +488,7 @@ pub(crate) async fn insert_conversation(
     new.history_policy.as_str(),
     new.maybe_category.map(to_db),
     new.maybe_participants_key,
+    new.is_integration,
   )
   .execute(tx)
   .await?;

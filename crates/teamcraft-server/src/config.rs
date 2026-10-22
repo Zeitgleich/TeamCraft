@@ -38,6 +38,10 @@ pub struct Config {
   pub push: PushConfig,
   #[serde(default)]
   pub notifications: NotificationsConfig,
+  #[serde(default)]
+  pub integration: IntegrationConfig,
+  #[serde(default)]
+  pub web: WebConfig,
   /// Blob storage for attachments; without it the attachment endpoints answer 503.
   #[serde(default)]
   pub storage: Option<StorageConfig>,
@@ -256,6 +260,47 @@ pub struct RetentionJobConfig {
   pub initial_delay_secs: u64,
   /// Months of message partitions kept ready ahead of time (the job tops them up).
   pub partitions_ahead_months: u32,
+}
+
+/// Serving the web client (the `trunk build` output of `teamcraft-ui`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WebConfig {
+  /// Directory with `index.html` and the hashed assets; without it the server only serves the API.
+  #[serde(rename = "static_dir")]
+  pub maybe_static_dir: Option<PathBuf>,
+  /// `Content-Security-Policy` of every page and asset. The default allows the app's own origin,
+  /// WebAssembly, WebSocket/WebTransport connections and `blob:`/`data:` images and media.
+  pub content_security_policy: String,
+}
+
+impl Default for WebConfig {
+  fn default() -> Self {
+    Self {
+      maybe_static_dir: None,
+      content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
+        img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self' wss: https:; \
+        worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        .into(),
+    }
+  }
+}
+
+/// Defaults of integration channels (ARCHITECTURE.md §4.5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IntegrationConfig {
+  /// Retention of a channel that becomes an integration channel, in days; `0` sets none. A
+  /// channel's own setting wins.
+  pub default_retention_days: u32,
+}
+
+impl Default for IntegrationConfig {
+  fn default() -> Self {
+    Self {
+      default_retention_days: 30,
+    }
+  }
 }
 
 /// Meetings (PLAN.md §9, ARCHITECTURE.md §6.4).

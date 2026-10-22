@@ -2,6 +2,7 @@
 
 mod admin;
 mod attachments;
+mod bots;
 mod calls;
 mod conversations;
 mod health;
@@ -18,6 +19,7 @@ mod workspace;
 
 pub use admin::*;
 pub use attachments::*;
+pub use bots::*;
 pub use calls::*;
 pub use conversations::*;
 pub use health::*;

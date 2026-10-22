@@ -37,7 +37,6 @@ rusty-s3.workspace = true
 secrecy.workspace = true
 subtle = "2.6.1"
 serde.workspace = true
-socket2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

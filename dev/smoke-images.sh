@@ -2,7 +2,7 @@
 # Builds the OCI images and smoke-tests them with rootless podman against the dev stack.
 #
 #   docker compose -f docker-compose.dev.yml up -d   # Postgres on 127.0.0.1:5432
-#   dev/smoke-images.sh [server|sfu]                  # default: both
+#   dev/smoke-images.sh [server|sfu|bridge]           # default: all
 #
 # Checks per image: starts non-root with a read-only root filesystem and all capabilities dropped,
 # becomes healthy (`healthcheck` subcommand), serves its endpoint and shuts down on SIGTERM.
@@ -101,9 +101,51 @@ smoke_sfu() {
   log "teamcraft-sfu OK"
 }
 
+smoke_bridge() {
+  log "building teamcraft-bridge"
+  "$engine" build --format docker -f containers/teamcraft-bridge.Containerfile -t localhost/teamcraft-bridge:dev .
+
+  # Without a server to enroll against, the bridge must start far enough to read its configuration,
+  # open its encrypted database in the volume directory and try to enroll: a missing library, a
+  # read-only volume or a bad entrypoint would fail earlier and differently.
+  local dir
+  dir=$(mktemp -d)
+  chmod 755 "$dir"
+  printf 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=' >"$dir/key"
+  cat >"$dir/bridge.toml" <<'TOML'
+[server]
+url = "http://127.0.0.1:1"
+bot_token = "tcb_unreachable"
+[store]
+path = "/var/lib/teamcraft-bridge/bridge.db"
+key_file = "/config/key"
+[identity]
+passphrase = "smoke"
+[[sources]]
+name = "smoke"
+token = "smoke-token-0123456789"
+conversation_id = "42"
+TOML
+  chmod 644 "$dir/key" "$dir/bridge.toml"
+  log "starting teamcraft-bridge (read-only rootfs, no capabilities)"
+  local output
+  output=$("$engine" run --rm --read-only --cap-drop all --security-opt no-new-privileges --network host \
+    -v "$dir:/config:ro,Z" localhost/teamcraft-bridge:dev --config /config/bridge.toml 2>&1 || true)
+  rm -rf "$dir"
+  case $output in
+    *"enrolling the bot's device"*"network error"*) ;;
+    *) fail "unexpected bridge output: $output" ;;
+  esac
+  local uid
+  uid=$("$engine" image inspect localhost/teamcraft-bridge:dev --format '{{.Config.User}}')
+  [ "$uid" = "65532:65532" ] || fail "runs as $uid, expected 65532:65532"
+  log "teamcraft-bridge OK (the full flow is covered by crates/teamcraft-bridge/tests/end_to_end.rs)"
+}
+
 case $which_images in
   server) smoke_server ;;
   sfu) smoke_sfu ;;
-  all) smoke_server; smoke_sfu ;;
-  *) fail "usage: $0 [server|sfu]" ;;
+  bridge) smoke_bridge ;;
+  all) smoke_server; smoke_sfu; smoke_bridge ;;
+  *) fail "usage: $0 [server|sfu|bridge]" ;;
 esac

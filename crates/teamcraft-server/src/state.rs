@@ -7,8 +7,8 @@ use crate::auth::{Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use crate::config::{
-  GatewayConfig, LimitsConfig, NotificationsConfig, PolicyConfig, RendezvousConfig, RetentionJobConfig,
-  RoleNames,
+  GatewayConfig, IntegrationConfig, LimitsConfig, NotificationsConfig, PolicyConfig, RendezvousConfig,
+  RetentionJobConfig, RoleNames, WebConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -50,6 +50,8 @@ pub struct Settings {
   pub rendezvous: RendezvousConfig,
   pub retention: RetentionJobConfig,
   pub notifications: NotificationsConfig,
+  pub integration: IntegrationConfig,
+  pub web: WebConfig,
   pub push: PushSettings,
 }
 

@@ -3,12 +3,33 @@
 //! - Container health checks: the images ship no `curl`, so `teamcraft-server healthcheck` and
 //!   `teamcraft-sfu healthcheck` probe their own health endpoint with a minimal blocking HTTP
 //!   probe (HTTP/1.0, status line only, `std` only).
+//! - [`bind_dual_stack`]: the one way HTTP listeners of the binaries are bound (IPv4 and IPv6).
 //! - [`shutdown_signal`]: resolves on SIGINT or SIGTERM. In a container the process is PID 1 and
 //!   the kernel ignores SIGTERM there unless a handler is installed, so every binary needs this.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::Duration;
+
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::net::TcpListener;
+
+const LISTEN_BACKLOG: i32 = 1024;
+
+/// Binds a TCP listener for an HTTP endpoint. An IPv6 address is bound with `IPV6_V6ONLY` off, so
+/// `[::]` accepts IPv4 (as IPv4-mapped addresses) and IPv6 regardless of the host's `bindv6only`
+/// default; this is how every listener of the server binaries faces the network (code-style.md).
+pub fn bind_dual_stack(addr: SocketAddr) -> io::Result<TcpListener> {
+  let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+  if addr.is_ipv6() {
+    socket.set_only_v6(false)?;
+  }
+  socket.set_reuse_address(true)?;
+  socket.set_nonblocking(true)?;
+  socket.bind(&addr.into())?;
+  socket.listen(LISTEN_BACKLOG)?;
+  TcpListener::from_std(socket.into())
+}
 
 /// Resolves when the process is asked to stop (Ctrl-C, or SIGTERM on Unix).
 pub async fn shutdown_signal() {
@@ -190,6 +211,22 @@ mod tests {
       });
       probe(addr, "/readyz", TIMEOUT).unwrap();
       assert!(server.join().unwrap().starts_with("GET /readyz HTTP/1.0\r\n"));
+    }
+  }
+
+  mod listening {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_dual_stack_listener_accepts_ipv4_and_ipv6() {
+      // Hosts without IPv6 cannot bind `[::]`; nothing to test there.
+      let Ok(listener) = bind_dual_stack((Ipv6Addr::UNSPECIFIED, 0).into()) else {
+        return;
+      };
+      let port = listener.local_addr().unwrap().port();
+      let v6 = tokio::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port)).await;
+      let v4 = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await;
+      assert!(v6.is_ok() && v4.is_ok(), "{v6:?} {v4:?}");
     }
   }
 

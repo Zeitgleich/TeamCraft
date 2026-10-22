@@ -178,6 +178,7 @@ async fn direct_messages_are_created_once_per_pair() {
     history_policy: HistoryPolicy::FromJoin,
     maybe_category: None,
     maybe_participants_key: Some(participants_key(&participants)),
+    is_integration: false,
   };
   let (first, created) = db
     .get_or_create_participants_conversation(&make(ids.next_id().unwrap()), &participants)
@@ -230,6 +231,7 @@ async fn sending_the_same_client_message_id_twice_stores_one_message() {
       history_policy: HistoryPolicy::FromJoin,
       maybe_category: None,
       maybe_participants_key: None,
+      is_integration: false,
     },
     alice.id,
   )

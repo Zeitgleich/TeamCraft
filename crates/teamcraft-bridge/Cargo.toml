@@ -1,0 +1,45 @@
+[package]
+name = "teamcraft-bridge"
+description = "Headless TeamCraft client that turns webhooks and log streams into end-to-end encrypted messages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Like teamcraft-core (tantivy).
+rust-version = "1.88"
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "teamcraft_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "teamcraft-bridge"
+path = "src/main.rs"
+
+[dependencies]
+teamcraft-core = { path = "../teamcraft-core" }
+teamcraft-crypto = { path = "../teamcraft-crypto" }
+teamcraft-ops.workspace = true
+teamcraft-proto.workspace = true
+anyhow.workspace = true
+axum = { workspace = true, features = ["tokio", "http1", "json"] }
+base64.workspace = true
+figment.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle = "2.6.1"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "signal", "net"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+teamcraft-server = { path = "../teamcraft-server", features = ["integration"] }
+reqwest.workspace = true
+figment = { workspace = true, features = ["test"] }

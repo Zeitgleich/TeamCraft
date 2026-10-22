@@ -6,6 +6,7 @@
 mod admin;
 mod attachment;
 mod audit;
+mod bot;
 mod conversation;
 mod database;
 mod device;
@@ -37,6 +38,7 @@ pub use admin::{
 };
 pub use attachment::{Attachment, NewAttachment};
 pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};
+pub use bot::{BOT_ISSUER, StoredBot};
 pub use conversation::{
   Conversation, ConversationChanges, ConversationFilter, ConversationMember, ConversationView, Membership,
   MembershipChanges, NewConversation, participants_key,

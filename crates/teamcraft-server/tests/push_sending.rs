@@ -226,6 +226,39 @@ mod routing {
   }
 
   #[tokio::test]
+  async fn integration_channels_push_only_for_mentions_even_at_level_all() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "all").await;
+    let carol_id = user_id(&app, &s.carol).await;
+    let flagged = app
+      .patch(
+        &s.alice,
+        &format!("/conversations/{}", s.channel),
+        json!({"is_integration": true}),
+      )
+      .await;
+    assert_eq!(flagged.status, StatusCode::OK, "{}", flagged.body);
+
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    assert!(
+      recorder.wait_for(0).await.is_empty(),
+      "plain log output doesn't push"
+    );
+
+    let mut alert = message_body(2, &s.alice_device);
+    alert["mentioned_user_ids"] = json!([carol_id]);
+    app
+      .post(&s.alice, &format!("/conversations/{}/messages", s.channel), alert)
+      .await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(pushes.len(), 1, "an alert that mentions carol does");
+    assert_eq!(pushes[0].wake_up.kind, PushKind::Mention);
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn direct_messages_push_like_mentions() {
     let recorder = Recorder::default();
     let Some(app) = start(&recorder).await else { return };

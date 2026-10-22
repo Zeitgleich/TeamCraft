@@ -20,3 +20,4 @@ pub mod state;
 pub mod storage;
 #[cfg(feature = "integration")]
 pub mod testing;
+pub mod web;

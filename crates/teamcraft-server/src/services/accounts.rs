@@ -1,7 +1,8 @@
-use teamcraft_db::OidcIdentity;
+use teamcraft_db::{BOT_ISSUER, OidcIdentity};
 use teamcraft_proto::{GatewayEvent, Role, UserKind};
 use tracing::info;
 
+use super::bots;
 use crate::auth::{AuthError, AuthenticatedUser, TokenIdentity};
 use crate::error::ApiError;
 use crate::meetings::guest;
@@ -10,6 +11,13 @@ use crate::state::AppState;
 /// Validates a bearer token: meeting guests carry tokens signed by this server, everybody else a
 /// token of the identity provider.
 pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdentity, AuthError> {
+  if token.starts_with(bots::TOKEN_PREFIX) {
+    let bot = bots::find_by_token(state, token)
+      .await
+      .map_err(|error| AuthError::KeysUnavailable(error.to_string()))?
+      .ok_or_else(|| AuthError::InvalidToken("unknown or revoked bot token".into()))?;
+    return Ok(bot_identity(&bot));
+  }
   if let Some(meetings) = &state.maybe_meetings
     && guest::is_guest_token_header(token)
   {
@@ -20,6 +28,21 @@ pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdenti
     return Ok(guest_identity(claims.sub, claims.name, claims.iat));
   }
   state.validator.validate(token).await
+}
+
+/// The identity of a bot: a guest-level account under the server's own bot issuer.
+fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
+  TokenIdentity {
+    issuer: BOT_ISSUER.to_owned(),
+    subject: bot.user.to_string(),
+    maybe_username: None,
+    display_name: bot.name.clone(),
+    maybe_email: None,
+    is_email_verified: false,
+    role: Role::Guest,
+    issued_at: 0,
+    maybe_session_id: None,
+  }
 }
 
 /// The identity of a meeting guest: an account under the server's own guest issuer, keyed by the
@@ -49,6 +72,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
     return Err(AuthError::InvalidToken("the session has ended".into()).into());
   }
   let kind = match identity.role {
+    _ if identity.issuer == BOT_ISSUER => UserKind::Bot,
     Role::Guest => UserKind::Guest,
     _ => UserKind::Member,
   };

@@ -137,6 +137,26 @@ pub async fn send_in(
   reply.id()
 }
 
+/// A request with an arbitrary bearer token (guest sessions, bot tokens); returns status and JSON.
+pub async fn call_with_token(
+  app: &TestApp,
+  token: &str,
+  method: reqwest::Method,
+  path: &str,
+  maybe_body: Option<Value>,
+) -> (StatusCode, Value) {
+  let mut request = app
+    .http
+    .request(method, format!("{}/api/v1{path}", app.base_url))
+    .bearer_auth(token);
+  if let Some(body) = maybe_body {
+    request = request.json(&body);
+  }
+  let response = request.send().await.unwrap();
+  let status = response.status();
+  (status, response.json().await.unwrap_or(Value::Null))
+}
+
 /// alice owns a space; carol and dave are members of its private channel (returned).
 pub async fn channel_with(app: &TestApp, members: &[&TestUser]) -> String {
   let alice = owner();

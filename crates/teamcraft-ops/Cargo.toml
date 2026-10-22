@@ -11,5 +11,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+socket2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "net"] }

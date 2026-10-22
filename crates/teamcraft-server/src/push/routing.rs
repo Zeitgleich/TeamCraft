@@ -24,6 +24,8 @@ pub struct NewMessageEvent {
   /// The thread the message replies in.
   pub maybe_thread: Option<ThreadId>,
   pub is_urgent: bool,
+  /// The conversation is an integration channel (logs, monitoring).
+  pub is_integration: bool,
 }
 
 /// Why a user is not pushed to.
@@ -35,6 +37,8 @@ pub enum Skip {
   Active,
   /// The channel only notifies on mentions and this one doesn't mention the user.
   NotMentioned,
+  /// Integration channels push only for mentions.
+  IntegrationChannel,
 }
 
 /// What the routing knows about one recipient.
@@ -45,6 +49,8 @@ pub struct RecipientState {
   pub is_mentioned: bool,
   /// DMs and group DMs notify like a mention.
   pub is_direct: bool,
+  /// Integration channel: only mentions notify.
+  pub is_integration: bool,
   pub is_dnd: bool,
   /// The user follows the thread the message replies in.
   pub is_followed_thread: bool,
@@ -74,6 +80,9 @@ pub fn decide(state: RecipientState) -> Result<PushKind, Skip> {
   }
   if state.is_mentioned || state.is_direct {
     return Ok(PushKind::Mention);
+  }
+  if state.is_integration {
+    return Err(Skip::IntegrationChannel);
   }
   if state.level_is_all || state.is_followed_thread {
     Ok(PushKind::Message)
@@ -126,6 +135,7 @@ pub async fn notify_reminder(
     mentioned: vec![reminder.user],
     maybe_thread: message.maybe_thread_id,
     is_urgent: true,
+    is_integration: false,
   };
   let recipients = state
     .database
@@ -157,6 +167,7 @@ fn push_to_recipient(
       || notifications::is_muted(recipient.maybe_muted_until, now),
     is_mentioned: event.mentioned.contains(&recipient.user),
     is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
+    is_integration: event.is_integration,
     is_dnd: is_dnd(recipient, now, unix_seconds, event.sender),
     is_followed_thread: recipient.is_following_thread,
     always_pushes: PushMode::from(recipient.push_mode.clone()) == PushMode::Always,
@@ -251,6 +262,7 @@ mod tests {
       level_is_none: false,
       is_mentioned: false,
       is_direct: false,
+      is_integration: false,
       is_dnd: false,
       is_followed_thread: false,
       always_pushes: false,

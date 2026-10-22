@@ -104,6 +104,7 @@ pub fn conversation_response(view: &ConversationView, extras: &ConversationExtra
     maybe_category_id: conversation.maybe_category_id,
     is_archived: conversation.is_archived,
     moderation: conversation.moderation.clone(),
+    is_integration: conversation.is_integration,
     contains_guests: extras.with_guests.contains(&conversation.id),
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras

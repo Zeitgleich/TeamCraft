@@ -9,6 +9,8 @@ wire_enum! {
   pub enum UserKind {
     Member => "member",
     Guest => "guest",
+    /// An automated account (integration bridge); authenticates with a bot token.
+    Bot => "bot",
   }
 }
 

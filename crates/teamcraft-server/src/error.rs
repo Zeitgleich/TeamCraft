@@ -97,6 +97,13 @@ impl ApiError {
     }
   }
 
+  pub fn bot_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::BotNotFound,
+      what: "bot",
+    }
+  }
+
   pub fn meeting_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::MeetingNotFound,

@@ -126,6 +126,8 @@ async fn run() -> anyhow::Result<()> {
       rendezvous: config.rendezvous.clone(),
       retention: config.retention.clone(),
       notifications: config.notifications.clone(),
+      integration: config.integration.clone(),
+      web: config.web.clone(),
       push: PushSettings {
         ttl: Duration::from_secs(config.push.ttl_secs),
         allow_private_endpoints: config.push.allow_private_endpoints,

@@ -51,6 +51,10 @@ pub struct ConversationResponse {
   pub maybe_category_id: Option<CategoryId>,
   pub is_archived: bool,
   pub moderation: ChannelModeration,
+  /// Receives machine output (logs, monitoring, CI): retention defaults for logs, no push unless
+  /// mentioned, compact log view in clients.
+  #[serde(default)]
+  pub is_integration: bool,
   /// Badge "contains external people".
   pub contains_guests: bool,
   /// Absent if the caller is not a member (public channels they could join).
@@ -78,12 +82,17 @@ pub struct CreateChannelRequest {
   pub maybe_topic: Option<String>,
   #[serde(rename = "description", default, skip_serializing_if = "Option::is_none")]
   pub maybe_description: Option<String>,
+  /// Marks the channel as integration channel (see `ConversationResponse::is_integration`).
+  #[serde(default)]
+  pub is_integration: bool,
 }
 
 /// `PATCH /api/v1/conversations/{id}`: only present fields change; an empty string clears topic and
 /// description. Changing `visibility` converts the channel (permission `convert_channel_privacy`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UpdateConversationRequest {
+  #[serde(rename = "is_integration", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_is_integration: Option<bool>,
   #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
   pub maybe_name: Option<String>,
   #[serde(rename = "topic", default, skip_serializing_if = "Option::is_none")]

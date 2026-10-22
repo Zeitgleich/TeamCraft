@@ -320,6 +320,7 @@ mod tests {
       maybe_category_id: None,
       is_archived: false,
       moderation: ChannelModeration::default(),
+      is_integration: false,
       contains_guests: false,
       maybe_my_membership: None,
       participants: Vec::new(),

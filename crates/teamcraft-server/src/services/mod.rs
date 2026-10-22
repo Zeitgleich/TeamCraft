@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod admin;
 pub mod attachments;
 pub mod audit;
+pub mod bots;
 pub mod calls;
 pub mod conversations;
 pub mod convert;

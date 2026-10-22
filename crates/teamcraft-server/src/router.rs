@@ -4,11 +4,12 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
   acknowledge_message_handler, add_conversation_member_handler, add_space_member_handler,
-  admin_deactivate_user_handler, admin_list_audit_handler, admin_list_conversation_members_handler,
-  admin_list_conversations_handler, admin_list_space_members_handler, admin_list_spaces_handler,
-  admin_list_user_devices_handler, admin_list_users_handler, admin_reactivate_user_handler,
-  admin_revoke_device_handler, admit_guest_handler, append_policy_handler, append_roster_handler,
-  backchannel_logout_handler, cancel_meeting_handler, claim_key_packages_handler,
+  admin_create_bot_handler, admin_deactivate_user_handler, admin_list_audit_handler, admin_list_bots_handler,
+  admin_list_conversation_members_handler, admin_list_conversations_handler,
+  admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
+  admin_list_users_handler, admin_reactivate_user_handler, admin_revoke_bot_handler,
+  admin_revoke_device_handler, admin_rotate_bot_token_handler, admit_guest_handler, append_policy_handler,
+  append_roster_handler, backchannel_logout_handler, cancel_meeting_handler, claim_key_packages_handler,
   clear_custom_status_handler, complete_attachment_handler, create_attachment_handler,
   create_call_join_token_handler, create_category_handler, create_channel_handler, create_dm_handler,
   create_group_dm_handler, create_guest_link_handler, create_instant_meeting_handler, create_invite_handler,
@@ -38,6 +39,7 @@ use crate::handlers::{
 };
 use crate::openapi::openapi_json_handler;
 use crate::state::AppState;
+use crate::web;
 
 pub fn router(state: AppState) -> Router {
   let api_v1 = Router::new()
@@ -270,7 +272,13 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/meetings/{meeting_id}/lobby/{user_id}/deny",
       post(deny_guest_handler),
-    );
+    )
+    .route(
+      "/admin/bots",
+      post(admin_create_bot_handler).get(admin_list_bots_handler),
+    )
+    .route("/admin/bots/{bot_id}/token", post(admin_rotate_bot_token_handler))
+    .route("/admin/bots/{bot_id}", delete(admin_revoke_bot_handler));
 
   let internal = Router::new()
     .route(
@@ -285,6 +293,7 @@ pub fn router(state: AppState) -> Router {
     .route("/readyz", get(readyz_handler))
     .nest("/api/v1", api_v1)
     .nest("/api/internal/v1", internal)
+    .fallback_service(web::router(&state.settings.web))
     .layer(TraceLayer::new_for_http())
     .with_state(state)
 }

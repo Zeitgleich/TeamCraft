@@ -1,23 +1,11 @@
 use std::io;
 use std::net::SocketAddr;
 
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 
-const LISTEN_BACKLOG: i32 = 1024;
-
-/// Binds the HTTP listener. An IPv6 address is bound with `IPV6_V6ONLY` off, so `[::]` accepts IPv4
-/// (as IPv4-mapped addresses) and IPv6 regardless of the host's `bindv6only` default.
+/// Binds the HTTP listener, dual stack for IPv6 addresses (see [`teamcraft_ops::bind_dual_stack`]).
 pub fn bind_listener(addr: SocketAddr) -> io::Result<TcpListener> {
-  let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
-  if addr.is_ipv6() {
-    socket.set_only_v6(false)?;
-  }
-  socket.set_reuse_address(true)?;
-  socket.set_nonblocking(true)?;
-  socket.bind(&addr.into())?;
-  socket.listen(LISTEN_BACKLOG)?;
-  TcpListener::from_std(socket.into())
+  teamcraft_ops::bind_dual_stack(addr)
 }
 
 #[cfg(test)]

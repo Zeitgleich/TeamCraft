@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use serde_json::json;
 use teamcraft_db::{
-  ConversationChanges, ConversationFilter, ConversationView, NewConversation, participants_key,
+  ConversationChanges, ConversationFilter, ConversationView, NewConversation, StoredRetention,
+  participants_key,
 };
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, CreateChannelRequest,
@@ -118,10 +119,14 @@ pub async fn create_channel(
         history_policy: request.maybe_history_policy.unwrap_or(HistoryPolicy::FromJoin),
         maybe_category: request.maybe_category_id,
         maybe_participants_key: None,
+        is_integration: request.is_integration,
       },
       caller.user.id,
     )
     .await?;
+  if request.is_integration {
+    apply_integration_defaults(state, id).await?;
+  }
   state.hub.publish(
     [caller.user.id],
     &GatewayEvent::ConversationUpdate { conversation_id: id },
@@ -223,9 +228,13 @@ pub async fn update_conversation(
         maybe_history_policy: request.maybe_history_policy,
         maybe_is_archived: request.maybe_is_archived,
         maybe_moderation: request.maybe_moderation,
+        maybe_is_integration: request.maybe_is_integration,
       },
     )
     .await?;
+  if request.maybe_is_integration == Some(true) && !access.view.conversation.is_integration {
+    apply_integration_defaults(state, id).await?;
+  }
   audit::record(
     state,
     Some(caller.user.id),
@@ -239,6 +248,28 @@ pub async fn update_conversation(
     .hub
     .publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
   get_conversation(state, caller, id).await
+}
+
+/// Retention suited to logs for a channel that just became an integration channel, unless the
+/// channel already has its own setting (ARCHITECTURE.md §4.5).
+async fn apply_integration_defaults(state: &AppState, id: ConversationId) -> Result<(), ApiError> {
+  let days = state.settings.integration.default_retention_days;
+  let Some(target) = state.database.get_conversation_retention(id).await? else {
+    return Ok(());
+  };
+  if days > 0 && target.own == StoredRetention::default() {
+    state
+      .database
+      .set_conversation_retention(
+        id,
+        StoredRetention {
+          maybe_max_age_days: Some(i32::try_from(days).unwrap_or(i32::MAX)),
+          maybe_max_messages: None,
+        },
+      )
+      .await?;
+  }
+  Ok(())
 }
 
 /// Builds the response of a conversation with participants and the guest badge.
@@ -307,6 +338,7 @@ async fn open_participants_conversation(
         history_policy: HistoryPolicy::FromJoin,
         maybe_category: None,
         maybe_participants_key: Some(participants_key(&participants)),
+        is_integration: false,
       },
       &participants,
     )

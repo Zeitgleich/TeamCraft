@@ -54,6 +54,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_history_policy: None,
       maybe_topic: None,
       maybe_description: None,
+      is_integration: false,
     };
     let conversation = self.api.create_channel(space, &request).await?;
     records::put_json(
