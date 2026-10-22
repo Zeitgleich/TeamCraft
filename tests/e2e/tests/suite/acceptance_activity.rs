@@ -57,7 +57,9 @@ async fn mentions_reactions_and_thread_replies_reach_the_activity_feed_of_the_pe
   let feed = alice_ui.activity();
   let has = |matching: fn(&ActivityKind) -> bool| feed.items.iter().any(|item| matching(&item.kind));
   assert!(has(|kind| *kind == ActivityKind::Mention), "{feed:?}");
-  assert!(has(|kind| matches!(kind, ActivityKind::Reaction { emoji } if emoji == "👍")));
+  assert!(has(
+    |kind| matches!(kind, ActivityKind::Reaction { emoji } if emoji == "👍")
+  ));
   assert!(has(|kind| *kind == ActivityKind::ThreadReply));
   assert_eq!(feed.unread_count, 3);
 
@@ -81,9 +83,10 @@ async fn last_seen_follows_the_privacy_choice_appearing_offline_and_the_admin_sw
   let carol = Peer::enroll(&stack, "carol").await;
   let carol_id = carol.user_id().to_string();
   let carol_tokens = carol.tokens.clone();
+  let alice_tokens = alice.tokens.clone();
   let presence_of_carol = || async {
     let reply = stack
-      .get(&alice.tokens, &format!("/presence?user_ids={carol_id}"))
+      .get(&alice_tokens, &format!("/presence?user_ids={carol_id}"))
       .await
       .expect(StatusCode::OK);
     reply.body["presences"][0].clone()

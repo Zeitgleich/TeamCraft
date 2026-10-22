@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Added
+
+- **Activity feed**: mentions, reactions to your messages and replies in your threads in one list with
+  an unread state and a jump to the message. Built by the client from decrypted messages; the read
+  mark follows you across devices.
+- **Last seen** in the profile card and the DM header. Each person can hide theirs (`PUT /me/privacy`),
+  appearing offline hides it too, and the admin can switch it off for the workspace
+  (`presence.is_last_seen_enabled` in the signed policy).
+- **Call history** list: missed, incoming and outgoing calls with a button to call back.
+
+### Fixed
+
+- `PUT /me/profile` accepted time zones that are not IANA names; it now checks the name.
+- Database overload (no free connection, too many connections, deadlock) answers `503` instead of
+  `500`; the dev Postgres and the e2e servers use connection limits that fit together.
+
 ## [1.0.0] - 2026-10-23
 
 First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the
