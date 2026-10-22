@@ -1,0 +1,162 @@
+//! A headless client: a real `teamcraft-core` client with its gateway connection, enrolled as a dev user.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use teamcraft_core::api::{HttpGateway, HttpServerApi};
+use teamcraft_core::clock::SystemClock;
+use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
+use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, PendingEnrollment};
+use teamcraft_crypto::backup::Argon2Settings;
+use teamcraft_crypto::secret::SecretBytes;
+use teamcraft_proto::{ConversationId, ThreadId, UserId};
+
+use crate::stack::Stack;
+use crate::tokens::UserTokens;
+
+pub type DevClient = Client<HttpServerApi<UserTokens>, Arc<MemoryStore>>;
+
+const PASSPHRASE: &str = "e2e recovery passphrase";
+const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub struct Peer {
+  pub name: String,
+  pub client: DevClient,
+  pub store: Arc<MemoryStore>,
+  pub gateway: HttpGateway,
+  pub tokens: UserTokens,
+}
+
+impl Peer {
+  /// Enrolls the dev user's first device and connects its gateway.
+  pub async fn enroll(stack: &Stack, user: &str) -> Peer {
+    Self::enroll_device(stack, user, &format!("{user} e2e device")).await
+  }
+
+  pub async fn enroll_device(stack: &Stack, user: &str, device_name: &str) -> Peer {
+    let tokens = stack.tokens(user);
+    let store = Arc::new(MemoryStore::new());
+    let api = HttpServerApi::new(stack.base_url.clone(), tokens.clone());
+    let mut client = PendingEnrollment::new()
+      .complete(
+        api,
+        store.clone(),
+        Box::new(SystemClock),
+        ClientSettings::default(),
+        enrollment_options(device_name),
+      )
+      .await
+      .unwrap_or_else(|error| panic!("enrolling {user}: {error}"));
+    let (gateway, _) = client.connect_gateway().await.expect("gateway connects");
+    Peer {
+      name: user.to_owned(),
+      client,
+      store,
+      gateway,
+      tokens,
+    }
+  }
+
+  pub fn user_id(&self) -> UserId {
+    self.client.user_id()
+  }
+
+  /// Applies the frames that are waiting on the gateway.
+  pub async fn pump(&mut self) {
+    self
+      .client
+      .pump(&mut self.gateway)
+      .await
+      .unwrap_or_else(|error| panic!("{} pumps its gateway: {error}", self.name));
+  }
+
+  /// Pumps the gateway until `done` holds; fails after 30 s.
+  pub async fn wait_until(&mut self, what: &str, mut done: impl FnMut(&mut Peer) -> bool) {
+    let deadline = Instant::now() + WAIT_TIMEOUT;
+    loop {
+      self.pump().await;
+      if done(self) {
+        return;
+      }
+      assert!(
+        Instant::now() < deadline,
+        "{}: timed out waiting until {what}",
+        self.name
+      );
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+  }
+
+  /// Waits until this peer is a member of the conversation's encrypted group (a welcome arrived).
+  pub async fn wait_joined(&mut self, conversation: ConversationId) {
+    self
+      .wait_until(&format!("joined {conversation}"), |peer| {
+        peer.client.has_group(conversation).unwrap()
+      })
+      .await;
+  }
+
+  /// Waits until a top-level text message with exactly this body is decrypted.
+  pub async fn wait_for_text(&mut self, conversation: ConversationId, body: &str) {
+    self
+      .wait_until(&format!("{body:?} arrives in {conversation}"), |peer| {
+        peer.texts(conversation).iter().any(|text| text == body)
+      })
+      .await;
+  }
+
+  /// Decrypted top-level texts of a conversation, oldest first.
+  pub fn texts(&self, conversation: ConversationId) -> Vec<String> {
+    self
+      .store
+      .messages(conversation, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .filter_map(|message| match message.content {
+        MessageContent::Text { body, .. } => Some(body),
+        _ => None,
+      })
+      .collect()
+  }
+
+  /// Decrypted replies of a thread, oldest first.
+  pub fn thread_texts(&self, conversation: ConversationId, thread: ThreadId) -> Vec<String> {
+    self
+      .store
+      .messages(conversation, MessageFilter::Thread(thread))
+      .unwrap()
+      .into_iter()
+      .filter_map(|message| match message.content {
+        MessageContent::Text { body, .. } => Some(body),
+        _ => None,
+      })
+      .collect()
+  }
+}
+
+/// Lets several peers exchange what is in flight: pumps each of them for `duration`.
+pub async fn settle(peers: &mut [&mut Peer], duration: Duration) {
+  let deadline = Instant::now() + duration;
+  while Instant::now() < deadline {
+    for peer in peers.iter_mut() {
+      peer.pump().await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+}
+
+pub fn enrollment_options(device_name: &str) -> EnrollmentOptions {
+  EnrollmentOptions {
+    device_name: device_name.into(),
+    passphrase: SecretBytes::new(PASSPHRASE.as_bytes().to_vec()),
+    // Cheap key stretching: the tests enroll many devices.
+    argon2: Argon2Settings {
+      memory_kib: 1024,
+      iterations: 1,
+      parallelism: 1,
+    },
+    maybe_attestation: None,
+    maybe_org_recovery: None,
+    maybe_linked: None,
+  }
+}

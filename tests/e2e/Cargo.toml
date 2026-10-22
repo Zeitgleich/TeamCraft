@@ -1,0 +1,46 @@
+[package]
+name = "teamcraft-e2e"
+description = "End-to-end tests: real server, SFU and bridge against the dev stack, driven by headless clients and a browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version = "1.88"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Without it the crate is empty, so `cargo test --workspace` neither builds nor runs anything here.
+e2e = [
+  "dep:teamcraft-core",
+  "dep:teamcraft-crypto",
+  "dep:teamcraft-media",
+  "dep:teamcraft-proto",
+  "dep:anyhow",
+  "dep:base64",
+  "dep:rand_core",
+  "dep:reqwest",
+  "dep:serde_json",
+  "dep:sqlx",
+  "dep:tokio",
+]
+# Drives the web client in headless Chromium (needs a trunk build of teamcraft-ui, see README.md).
+browser = ["e2e", "dep:chromiumoxide", "dep:futures-util"]
+
+[dependencies]
+teamcraft-core = { path = "../../crates/teamcraft-core", optional = true }
+teamcraft-crypto = { workspace = true, optional = true }
+teamcraft-media = { path = "../../crates/teamcraft-media", optional = true, features = ["native"] }
+teamcraft-proto = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+rand_core = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true, features = ["query"] }
+serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "process", "io-util", "fs", "net", "time", "macros", "sync"] }
+# Headless Chromium over the DevTools protocol: no driver binary, no Node, Rust like the rest of the tests.
+chromiumoxide = { version = "0.9", optional = true, default-features = false }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }

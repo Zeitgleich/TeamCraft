@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "apps/desktop"]
+members = ["crates/*", "apps/desktop", "tests/e2e"]
 # Third-party code, patched into the dependency graph (see crates/vendor/*/VENDORED.md); not ours to lint.
 exclude = ["crates/vendor", "fuzz"]
 
