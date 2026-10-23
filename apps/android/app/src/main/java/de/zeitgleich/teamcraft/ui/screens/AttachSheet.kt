@@ -71,8 +71,7 @@ fun rememberAttachmentPickers(viewModel: MainViewModel, onPicked: (List<PickedFi
       return@rememberLauncherForActivityResult
     }
     scope.launch {
-      val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", photo)
-      onPicked(listOfNotNull(viewModel.importFile(uri)))
+      onPicked(listOfNotNull(viewModel.importPhoto(photo)))
       // The staged copy is what gets sent; the camera's original is no longer needed.
       photo.delete()
     }
