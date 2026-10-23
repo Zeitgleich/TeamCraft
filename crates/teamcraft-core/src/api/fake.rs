@@ -47,6 +47,9 @@ use teamcraft_proto::{
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
+  GatewayInfoResponse, GatewayLimits, GatewayTokenKey, PushGatewayBinding, PushGatewayResponse, PushProvider,
+};
+use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
 };
 use teamcraft_proto::{NotificationSettings, PushMode, TestPushOutcome, TestPushResponse};
@@ -56,8 +59,12 @@ use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, 
 const PAGE_SIZE: usize = 50;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 
+/// The seed of the fake gateway's token key, to open what the client sealed (tests).
+pub const FAKE_GATEWAY_TOKEN_SEED: [u8; 32] = [0x42; 32];
+
 /// The shared server state. Clone it to hand the same server to several clients.
 #[derive(Clone, Default)]
+
 pub struct FakeServer {
   state: Arc<Mutex<State>>,
 }
@@ -96,6 +103,11 @@ struct State {
   attachments: HashMap<AttachmentId, FakeAttachment>,
   push_registrations: HashMap<DeviceId, RegisterPushRequest>,
   notification_settings: HashMap<UserId, NotificationSettings>,
+  /// What `GET /push/gateway` answers (`None`: the server sends to APNs and FCM itself).
+  push_gateway: Option<PushGatewayBinding>,
+  /// Sealed tokens that were revoked at the (fake) gateway.
+  revoked_gateway_tokens: Vec<Vec<u8>>,
+  revoked_gateway_urls: Vec<String>,
   relays: HashMap<String, Relay>,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
@@ -372,6 +384,27 @@ impl FakeServer {
   /// The push registration of a device (to seal wake-ups in tests).
   pub fn push_registration(&self, device: DeviceId) -> Option<RegisterPushRequest> {
     self.lock().push_registrations.get(&device).cloned()
+  }
+
+  /// Makes the server send through a push gateway (apps then seal their device tokens).
+  pub fn set_push_gateway(&self, maybe_binding: Option<PushGatewayBinding>) {
+    self.lock().push_gateway = maybe_binding;
+  }
+
+  /// The public key the fake gateway publishes (any fixed key; tests open sealed tokens with
+  /// [`FAKE_GATEWAY_TOKEN_SEED`]).
+  pub fn gateway_token_public_key() -> [u8; 32] {
+    teamcraft_crypto::push_gateway::token_public_key(&FAKE_GATEWAY_TOKEN_SEED).unwrap_or([0; 32])
+  }
+
+  /// The gateway URLs the revocations went to.
+  pub fn revoked_gateway_urls(&self) -> Vec<String> {
+    self.lock().revoked_gateway_urls.clone()
+  }
+
+  /// Sealed tokens revoked so far.
+  pub fn revoked_gateway_tokens(&self) -> Vec<Vec<u8>> {
+    self.lock().revoked_gateway_tokens.clone()
   }
 
   /// Flips a byte in every stored blob, as a malicious storage backend could.
@@ -1924,6 +1957,47 @@ impl ServerApi for FakeServerApi {
     self.with(|state, me| {
       state.ensure_own_device(me, device)?;
       state.push_registrations.insert(device, request.clone());
+      Ok(())
+    })
+  }
+
+  async fn push_gateway(&self) -> Result<PushGatewayResponse, ApiError> {
+    self.with(|state, _| {
+      Ok(PushGatewayResponse {
+        maybe_gateway: state.push_gateway.clone(),
+      })
+    })
+  }
+
+  async fn gateway_info(&self, _gateway_url: &str) -> Result<GatewayInfoResponse, ApiError> {
+    let public = FakeServer::gateway_token_public_key();
+    Ok(GatewayInfoResponse {
+      version: "1.0.0".into(),
+      providers: vec![PushProvider::Apns, PushProvider::Fcm],
+      is_registration_open: true,
+      limits: GatewayLimits {
+        pushes_per_second: 50,
+        burst: 200,
+        pushes_per_day: 200_000,
+        pushes_per_token_per_minute: 30,
+      },
+      token_key: GatewayTokenKey {
+        key_id: teamcraft_crypto::push_gateway::token_key_id(&public)
+          .iter()
+          .map(|byte| format!("{byte:02x}"))
+          .collect(),
+        algorithm: "hpke-x25519-hkdf-sha256-chacha20poly1305".into(),
+        public_key: Base64Bytes::new(public.to_vec()),
+      },
+      are_bound_tokens_required: true,
+      max_token_lifetime_secs: 90 * 24 * 3600,
+    })
+  }
+
+  async fn revoke_gateway_token(&self, gateway_url: &str, sealed_token: &[u8]) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      state.revoked_gateway_urls.push(gateway_url.to_owned());
+      state.revoked_gateway_tokens.push(sealed_token.to_vec());
       Ok(())
     })
   }

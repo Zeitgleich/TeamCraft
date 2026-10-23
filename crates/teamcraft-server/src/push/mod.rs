@@ -21,7 +21,7 @@ pub use fcm::{FCM_BASE_URL, FcmSender, FcmSettings, ServiceAccount};
 pub use gateway::{
   GatewayClient, GatewaySender, GatewaySettings, load_or_create_gateway_key, parse_gateway_key,
 };
-pub use sender::{PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency};
+pub use sender::{GatewayBinding, PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency};
 pub use status::ProviderHealth;
 pub use tracker::PushTracker;
 pub use unified_push::UnifiedPushSender;

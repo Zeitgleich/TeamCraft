@@ -547,12 +547,15 @@ exactly what Apple and Google handle: a device token and ciphertext. Threat mode
   ciphertext it makes up fails authentication and is discarded by the app), and does not learn user,
   device or conversation IDs. Messages are never lost by a gateway failure: apps catch up when they
   run or reconnect; only the prompt notification is.
-- A **malicious server** is bounded by gateway-side limits per server and per device token, a fixed
-  alert text and topic, and a block list. It is not limited to its own quota, though: an app
-  install has one token and gives it to every server it signs in to, so a hostile server (also one
-  the user left, while the token stays valid) can push generic "New message" alerts or call rings
-  to that device and use up the device's per-token budget it shares with honest servers. It still
-  learns nothing and can't make the app show content.
+- A **malicious server**, or an attacker with a copy of a server's database, **can't use a device token
+  through any other server's identity**: the app never gives a server the token, it seals it to a key of
+  the gateway together with the one server that may push to it and an expiry (**bound token**, HPKE,
+  push-gateway design.md §4). The gateway opens it and refuses it for any other server, after
+  expiry, or after the app revoked it (when the user leaves or removes the server). A server can only
+  push to the devices of its own users, bounded by gateway-side limits per server and per device
+  token, a fixed alert text and topic, and a block list; it learns nothing and can't make the app show
+  content. The app takes the gateway's key from the gateway itself, not through the server, and a
+  store app uses the gateway it was built for, so a server can't swap in a key of its own.
 - The server authenticates to the gateway with an Ed25519 key pair of its own (not related to any
   user, device or MLS key); that key authenticates the *server* only and protects no content.
 

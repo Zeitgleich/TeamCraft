@@ -1,7 +1,11 @@
-//! APNs over HTTP/2 with provider token authentication (a `.p8` key). Message pushes are alerts with
-//! `mutable-content`, so the iOS notification service extension can open the sealed wake-up; call
-//! pushes use the VoIP topic (e2ee.md §7); withdrawals are silent background pushes the app handles
-//! itself. The alert text is generic: Apple never sees content.
+//! APNs over HTTP/2 with provider token authentication (a `.p8` key). Message and call pushes are
+//! alerts with `mutable-content`, so the iOS notification service extension can open the sealed
+//! wake-up and hand a call to CallKit (e2ee.md §7); withdrawals are silent background pushes the app
+//! handles itself. The alert text is generic: Apple never sees content.
+//!
+//! Calls never use the VoIP topic here: a VoIP push needs the app's separate PushKit token, and sent
+//! to the alert token APNs answers `DeviceTokenNotForTopic`, which would cost the device its
+//! registration.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -23,16 +27,13 @@ pub const APNS_SANDBOX_URL: &str = "https://api.sandbox.push.apple.com";
 
 /// Apple wants a provider token refreshed at most every 20 minutes and rejects ones older than an hour.
 const TOKEN_LIFETIME_SECS: u64 = 40 * 60;
-/// Calls ring now or not at all. The sealed wake-up sits under the key `w` (same for FCM), which is
-/// what the apps read.
-const VOIP_EXPIRATION: &str = "0";
 
 /// Everything the APNs sender needs. The key is the contents of the `.p8` file.
 pub struct ApnsSettings {
   pub key_pem: SecretString,
   pub key_id: String,
   pub team_id: String,
-  /// The app's bundle ID; VoIP pushes go to `<bundle_id>.voip`.
+  /// The app's bundle ID (the APNs topic).
   pub bundle_id: String,
   /// `https://api.push.apple.com`, the sandbox, or a fake in tests. Plain `http://` uses HTTP/2
   /// without TLS (tests only).
@@ -82,12 +83,6 @@ struct Aps<'a> {
 #[derive(Serialize)]
 struct AlertBody<'a> {
   body: &'a str,
-}
-
-#[derive(Serialize)]
-struct VoipPayload<'a> {
-  #[serde(rename = "w")]
-  sealed: &'a str,
 }
 
 #[derive(Serialize)]
@@ -167,19 +162,13 @@ impl ApnsSender {
     Ok(jwt)
   }
 
-  /// Calls go through PushKit (VoIP topic, now or never); withdrawals are background pushes, which
-  /// Apple requires to have priority 5; everything else is a mutable alert for the extension.
+  /// Withdrawals are background pushes, which Apple requires to have priority 5; everything else
+  /// (calls included) is a mutable alert for the extension. The sealed wake-up sits under the key
+  /// `w` (same for FCM), which is what the apps read.
   fn request(&self, message: &PushMessage, now: u64) -> Result<ApnsRequest, PushError> {
     let sealed = URL_SAFE_NO_PAD.encode(&message.sealed);
     let until_ttl = now.saturating_add(message.ttl.as_secs()).to_string();
     let (push_type, topic, priority, expiration, body) = match message.kind {
-      PushKind::Call => (
-        "voip",
-        format!("{}.voip", self.bundle_id),
-        "10",
-        VOIP_EXPIRATION.to_owned(),
-        serde_json::to_vec(&VoipPayload { sealed: &sealed }),
-      ),
       PushKind::Dismiss => (
         "background",
         self.bundle_id.clone(),
@@ -190,7 +179,7 @@ impl ApnsSender {
           sealed: &sealed,
         }),
       ),
-      PushKind::Message | PushKind::Mention | PushKind::Test | PushKind::Unknown(_) => (
+      PushKind::Message | PushKind::Mention | PushKind::Call | PushKind::Test | PushKind::Unknown(_) => (
         "alert",
         self.bundle_id.clone(),
         match message.urgency {
@@ -322,7 +311,7 @@ dgo8LHX0AxF1j8QPNmXOWNMLAbz+fRtRJGmQiDQP92HZZ1d7Hu/IeczB
 ";
 
     #[test]
-    fn calls_go_through_pushkit_now_or_never() {
+    fn calls_are_alerts_for_the_extension_never_voip_pushes_to_the_alert_token() {
       let request = sender().request(&message(PushKind::Call), 1000).unwrap();
       assert_eq!(
         (
@@ -331,9 +320,10 @@ dgo8LHX0AxF1j8QPNmXOWNMLAbz+fRtRJGmQiDQP92HZZ1d7Hu/IeczB
           request.priority,
           request.expiration.as_str()
         ),
-        ("voip", "com.example.app.voip", "10", "0")
+        ("alert", "com.example.app", "10", "1060")
       );
-      assert!(!String::from_utf8(request.body).unwrap().contains("aps"));
+      let body = String::from_utf8(request.body).unwrap();
+      assert!(body.contains(r#""mutable-content":1"#), "{body}");
     }
 
     #[test]

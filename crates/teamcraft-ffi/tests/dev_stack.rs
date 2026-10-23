@@ -40,6 +40,7 @@ async fn mobile_client_receives_and_answers_a_message() {
       data_dir: directory.to_string_lossy().into_owned(),
       account: "bob".into(),
       database_key: vec![42; 32],
+      push_gateway_url: None,
     },
     Arc::new(Token(bob_token.clone())),
     changes.clone(),

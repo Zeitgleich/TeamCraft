@@ -70,8 +70,8 @@ TEAMCRAFT_ANDROID_CACHE=/path/on/a/big/disk apps/android/scripts/docker-build.sh
 | Piece        | Version                                                                           |
 |--------------|-----------------------------------------------------------------------------------|
 | Base image   | `rust:1.99.1-slim-trixie` + OpenJDK 21, `cargo-ndk` 4.1.2, cmdline-tools 11076708 |
-| Android SDK  | platform 35, build-tools 35.0.0, NDK 27.2.12479018 (installed into the cache)     |
-| Gradle / AGP | Gradle 8.11.1 (wrapper), Android Gradle Plugin 8.7.3, Kotlin 2.1.0                |
+| Android SDK  | platform 37.0, build-tools 36.0.0, NDK 28.2.13676358 (installed into the cache)   |
+| Gradle / AGP | Gradle 9.8.2 (wrapper), Android Gradle Plugin 9.4.0, Kotlin 2.4.21                |
 | Rust targets | `aarch64-linux-android` (phones), `x86_64-linux-android` (emulator)               |
 
 `TEAMCRAFT_ANDROID_CACHE` (default `~/.cache/teamcraft-android`) holds the SDK, NDK, Gradle and
@@ -109,6 +109,7 @@ Gradle properties (`gradle.properties` has the development defaults; override wi
 | Property                       | Meaning                                                              |
 |--------------------------------|----------------------------------------------------------------------|
 | `teamcraft.serverUrl`          | TeamCraft server                                                     |
+| `teamcraft.pushGatewayUrl`     | Push gateway the FCM token is sealed for (publisher builds); empty: the server's |
 | `teamcraft.oidcIssuer`         | OIDC issuer (Keycloak realm URL)                                     |
 | `teamcraft.oidcClientId`       | Public OIDC client with PKCE                                         |
 | `teamcraft.oidcRedirectScheme` | Redirect URI is `<scheme>:/oauth/callback`; the client must allow it |

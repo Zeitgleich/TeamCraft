@@ -96,7 +96,7 @@ mod apns {
   }
 
   #[tokio::test]
-  async fn calls_go_to_the_voip_topic_and_are_not_stored() {
+  async fn calls_are_mutable_alerts_on_the_app_topic() {
     let (fake, dispatcher) = apns_dispatcher().await;
     dispatcher
       .deliver(
@@ -109,12 +109,12 @@ mod apns {
       .unwrap();
 
     let request = &fake.requests()[0];
-    assert_eq!(request.header("apns-topic"), format!("{APNS_BUNDLE_ID}.voip"));
-    assert_eq!(request.header("apns-push-type"), "voip");
+    // A VoIP push to the alert token would be refused as `DeviceTokenNotForTopic`.
+    assert_eq!(request.header("apns-topic"), APNS_BUNDLE_ID);
+    assert_eq!(request.header("apns-push-type"), "alert");
     assert_eq!(request.header("apns-priority"), "10");
-    assert_eq!(request.header("apns-expiration"), "0");
     let body = request.json();
-    assert!(body.get("aps").is_none(), "{body}");
+    assert_eq!(body["aps"]["mutable-content"], 1, "{body}");
     let opened = open_wakeup(&PUSH_KEY, &sealed_from(body["w"].as_str().unwrap())).unwrap();
     assert_eq!(opened.kind, PushKind::Call);
   }
