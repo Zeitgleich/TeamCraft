@@ -28,6 +28,9 @@ pub struct SyncRunner<A: ServerApi, S> {
   maybe_gateway: Option<A::Gateway>,
   backoff: Duration,
   reconnect_at_ms: i64,
+  /// When the next tick is due. A deadline rather than a fresh sleep per wake-up, so a busy
+  /// connection (a frame every few seconds) can't postpone heartbeats until the server drops it.
+  next_tick_ms: i64,
   last_heartbeat_ms: i64,
   last_account_sync_ms: i64,
   /// When the user's typing was last announced, to send at most one per [`TYPING_INTERVAL_MS`].
@@ -107,6 +110,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       maybe_gateway: None,
       backoff,
       reconnect_at_ms: i64::MIN,
+      next_tick_ms: i64::MIN,
       last_heartbeat_ms: i64::MIN,
       last_account_sync_ms: i64::MIN,
       #[cfg(feature = "ui")]
@@ -132,10 +136,10 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   }
 
   async fn next_wake(&mut self) -> Wake {
+    let until_tick_ms = self.next_tick_ms.saturating_sub(self.client.now_ms()).max(0);
     let Self {
       commands,
       maybe_gateway,
-      settings,
       ..
     } = self;
     let frame = Box::pin(async {
@@ -144,7 +148,9 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         None => std::future::pending().await,
       }
     });
-    let tick = Box::pin(platform::sleep(settings.tick));
+    let tick = Box::pin(platform::sleep(Duration::from_millis(
+      until_tick_ms.unsigned_abs(),
+    )));
     match select(commands.next(), select(frame, tick)).await {
       Either::Left((maybe_command, _)) => Wake::Command(maybe_command),
       Either::Right((Either::Left((maybe_frame, _)), _)) => Wake::Frame(maybe_frame),
@@ -206,6 +212,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
 
   async fn on_tick(&mut self) {
     let now = self.client.now_ms();
+    self.next_tick_ms = now.saturating_add(millis(self.settings.tick));
     if let Some(connection) = self.maybe_gateway.as_mut()
       && now.saturating_sub(self.last_heartbeat_ms) >= millis(self.settings.heartbeat)
     {

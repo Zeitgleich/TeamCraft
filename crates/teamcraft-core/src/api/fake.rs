@@ -100,6 +100,8 @@ struct State {
   offline_users: HashSet<UserId>,
   /// Users whose REST calls fail while their gateway still connects.
   rest_failing_users: HashSet<UserId>,
+  /// Heartbeats received, to check that a busy client keeps sending them.
+  heartbeats: u64,
   next_connection: u64,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
@@ -226,6 +228,11 @@ impl FakeServer {
     } else {
       state.offline_users.remove(&user);
     }
+  }
+
+  /// How many gateway heartbeats arrived so far.
+  pub fn heartbeat_count(&self) -> u64 {
+    self.lock().heartbeats
   }
 
   /// While set, this user's REST calls fail but the gateway still connects (REST timing out
@@ -2207,6 +2214,7 @@ impl GatewayConnection for FakeGateway {
         }
       },
       GatewayClientMessage::Heartbeat => {
+        state.heartbeats += 1;
         let _ = sender.unbounded_send(GatewayServerMessage::HeartbeatAck);
       },
       GatewayClientMessage::Typing { conversation_id } => {

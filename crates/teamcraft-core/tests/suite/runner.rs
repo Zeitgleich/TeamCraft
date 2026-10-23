@@ -12,6 +12,7 @@ use common::{PASSPHRASE, clock, options, settings};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::clock::Clock;
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageFilter};
 
@@ -56,6 +57,40 @@ async fn runner_connects_flushes_and_returns_the_client_on_stop() {
   assert!(messages[0].maybe_server_id.is_some(), "the outbox was flushed");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_busy_runner_keeps_sending_heartbeats() {
+  let server = FakeServer::new();
+  let client = PendingEnrollment::new()
+    .complete(
+      server.add_user("Carol"),
+      Arc::new(MemoryStore::new()),
+      Box::new(TokioClock::new()),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  let settings = RunnerSettings::default();
+  let heartbeat = settings.heartbeat;
+  let (runner, handle) = SyncRunner::new(client, settings, Box::new(|| {}));
+  // Something wakes the runner every second, more often than its tick: a busy conversation.
+  let busy_for = heartbeat * 4;
+  let driver = async move {
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < busy_for {
+      tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+      assert!(handle.send(RunnerCommand::Flush));
+    }
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+  tokio::join!(runner.run(), driver);
+  assert!(
+    server.heartbeat_count() >= 3,
+    "heartbeats while busy: {}",
+    server.heartbeat_count()
+  );
+}
+
 #[tokio::test]
 async fn dropping_every_handle_stops_the_runner() {
   let server = FakeServer::new();
@@ -78,4 +113,23 @@ async fn dropping_every_handle_stops_the_runner() {
       .list(teamcraft_core::store::Table::Conversations)
       .is_ok()
   );
+}
+
+/// Wall-clock time that follows tokio's (paused) clock, so the runner's deadlines and its sleeps agree.
+struct TokioClock {
+  started: tokio::time::Instant,
+}
+
+impl TokioClock {
+  fn new() -> Self {
+    Self {
+      started: tokio::time::Instant::now(),
+    }
+  }
+}
+
+impl Clock for TokioClock {
+  fn now_ms(&self) -> i64 {
+    1_800_000_000_000 + i64::try_from(self.started.elapsed().as_millis()).unwrap()
+  }
 }
