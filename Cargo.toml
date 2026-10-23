@@ -74,7 +74,7 @@ time = "0.3"
 chrono-tz = { version = "0.10", default-features = false }
 
 # Encoding
-base64 = "0.22"
+base64 = "0.23"
 
 # Randomness (already in the tree through jsonwebtoken and reqwest)
 aws-lc-rs = "1"

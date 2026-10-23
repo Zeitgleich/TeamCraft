@@ -15,7 +15,7 @@ workspace = true
 # Web Push payload encryption (RFC 8291, aes128gcm).
 aes-gcm = "0.10.3"
 # VAPID JWT and Web Push headers (base64url).
-base64 = "0.22.1"
+base64 = "0.23.1"
 # Password-based key wrapping for the backup key (e2ee.md §6.2 fallback).
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 # Message, key bag and attachment encryption (XChaCha20-Poly1305, STREAM for chunks).
