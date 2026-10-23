@@ -9,7 +9,7 @@
 //!
 //! [1]: https://daveprotocol.com/#sender-key-derivation
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use openmls::prelude::{
   TlsSerialize, TlsSize, VLBytes,
   tls_codec::{self, Serialize},

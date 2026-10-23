@@ -1,5 +1,5 @@
 use crate::aes_gcm::{AesGcm, KeyInit, aead::AeadMutInPlace, aes::Aes128};
-use sha2::digest::{
+use crate::aes_gcm::aes::cipher::{
   InvalidLength,
   consts::{U8, U12},
 };

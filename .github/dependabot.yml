@@ -27,8 +27,9 @@ updates:
         update-types: [minor, patch]
     # teamcraft-crypto keeps the RustCrypto stack on the versions openmls_rust_crypto uses, so it
     # isn't built twice (crates/teamcraft-crypto/Cargo.toml). Lift these with the openmls upgrade
-    # that moves them. Only breaking bumps are ignored: for 0.x crates Dependabot calls 0.10 -> 0.11
-    # "minor", so those ignore minor too; patch releases (and security fixes) still come through.
+    # that moves them (#124 has the state of each). Only breaking bumps are ignored: for 0.x crates
+    # Dependabot calls 0.10 -> 0.11 "minor", so those ignore minor too; patch releases (and security
+    # fixes) still come through. x25519-dalek is not listed: hpke-rs links both 2 and 3 already.
     ignore:
       - dependency-name: aes-gcm
         update-types: [version-update:semver-major, version-update:semver-minor]
@@ -36,14 +37,22 @@ updates:
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: ed25519-dalek
         update-types: [version-update:semver-major]
-      - dependency-name: x25519-dalek
-        update-types: [version-update:semver-major]
       - dependency-name: p256
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: rand_core
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: "hpke-rs*"
         update-types: [version-update:semver-major, version-update:semver-minor]
+      # The vendored davey (reached through /fuzz) copies aes-gcm 0.10's AES-GCM onto aes 0.8 /
+      # cipher 0.4; it moves with aes-gcm above (crates/vendor/davey/VENDORED.md, change 6).
+      - dependency-name: aes
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: cipher
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      # ashpd, notify-rust, secret-service and the Tauri plugins are on zbus 5; a direct zbus 6
+      # would build both stacks. Lift when they move (deny.toml, RUSTSEC-2026-0370..0372).
+      - dependency-name: zbus
+        update-types: [version-update:semver-major]
       # oauth2 5 still draws from getrandom 0.2; teamcraft-ui only enables its wasm backend.
       - dependency-name: getrandom
         update-types: [version-update:semver-major, version-update:semver-minor]
