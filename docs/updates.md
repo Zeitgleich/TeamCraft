@@ -170,6 +170,7 @@ After a package update the running app is the old version; the banner then offer
 GitHub Pages site from the published releases, so the site never has state of its own:
 
 ```
+index.html, style.css, site.js    landing page with the downloads (scripts/package-site-page.py)
 updates/stable/latest.json        newest stable release
 updates/prerelease/latest.json    newest release of any kind
 apt/dists/{stable,prerelease}/    signed Release/InRelease, Packages for amd64 and arm64
@@ -210,12 +211,20 @@ sudo dnf install team-craft
 ```
 
 (openSUSE: put the same file into `/etc/zypp/repos.d/` and `zypper install team-craft`.) For release
-candidates use the suite or directory `prerelease`.
+candidates use the suite or directory `prerelease`, shown as "Beta" on the site and in the app; it
+also receives every stable release.
 
 - Candidate packages carry the release version (`1.0.0` for `v1.0.0-rc.2`), so the package manager
   doesn't move from a candidate to the release with the same number; reinstall in that case.
 - The rpms on the site are signed copies; their checksums differ from the release assets (the
   release's `SHA256SUMS` and attestations cover the unsigned originals).
+- The landing page is generated from what the run publishes: download buttons link the assets of
+  the newest stable release and the newest prerelease (only files that exist; the visitor's system is
+  preselected), setup snippets appear only for repositories that were built, and while there is no
+  stable release the page says so and shows the prerelease channel. It is self-contained (no external
+  fonts, scripts or trackers; strict CSP). The workflow fails when any page links a file of the site
+  that doesn't exist (`package-site-page.py check`).
+- Store listings appear once the repository variables `PLAY_STORE_URL` / `APP_STORE_URL` are set.
 - One-time setup: *Settings → Pages → Source: GitHub Actions*.
 - The deb/rpm "update available" notice reads the same `latest.json` as the self-updating installs, so
   it needs the updater key as well (§7).
