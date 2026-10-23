@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="sign_in_with">Sign in with %1$s</string>
+  <string name="sign_in_or">or</string>
+  <string name="sign_in_loading">Loading the ways to sign in</string>
+  <string name="sign_in_help_link">Help with signing in</string>
+  <string name="sign_in_e2ee_note">Messages are end-to-end encrypted: only your devices can read them.</string>
+  <string name="local_email">E-mail</string>
+  <string name="local_password">Password</string>
+  <string name="local_password_show">Show password</string>
+  <string name="local_password_hide">Hide password</string>
+  <string name="local_code">One-time code</string>
+  <string name="local_code_optional">One-time code (if you set one up)</string>
+  <string name="local_sign_in_rejected">Wrong e-mail, password or code.</string>
+  <string name="local_sign_in_disabled">Signing in with e-mail and password is not available on this server. Ask your admin.</string>
+  <string name="local_sign_in_rate_limited">Too many attempts. Wait a few minutes, then try again.</string>
+</resources>

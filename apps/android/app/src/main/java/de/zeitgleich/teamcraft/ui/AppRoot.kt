@@ -70,6 +70,8 @@ fun AppRoot(
   val brand by viewModel.loginBrand.collectAsState()
   val maybeServer by viewModel.server.collectAsState()
   val isServerLocked by viewModel.isServerLocked.collectAsState()
+  val maybeSignInPage by viewModel.signInPage.collectAsState()
+  val maybeSsoIcon by viewModel.ssoIcon.collectAsState()
   val isDark = isSystemInDarkTheme()
   val scope = rememberCoroutineScope()
   when (val current = state) {
@@ -96,10 +98,13 @@ fun AppRoot(
     is AppState.SignedOut -> LoginScreen(
       maybeBrand = brand,
       maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
+      maybePage = maybeSignInPage,
+      maybeSsoIcon = maybeSsoIcon,
       serverHost = maybeServer?.address?.host.orEmpty(),
       maybeError = current.maybeError,
       isBusy = isBusy,
-      onLogin = { scope.launch { viewModel.loginIntent()?.let(onLogin) } },
+      onSso = { scope.launch { viewModel.loginIntent()?.let(onLogin) } },
+      onLocal = viewModel::signInLocal,
       maybeOnChangeServer = if (isServerLocked) null else ({ viewModel.changeServer() }),
     )
     is AppState.NeedsEnrollment -> EnrollScreen(
