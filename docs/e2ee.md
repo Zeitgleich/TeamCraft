@@ -670,6 +670,12 @@ Details:
   with the server's VAPID key (`GET /api/v1/push/web-key`), registers the subscription with a fresh push
   key, keeps the access token in the `PushSession` fresh, and tells the worker which database to open;
   a click on a notification focuses an open window or opens `/?conversation_id=<id>`.
+  Browsers rotate or drop subscriptions on their own. The worker handles `pushsubscriptionchange`
+  (subscribing again with the old subscription's key where the browser did not) and tells open pages;
+  the page that owns the store (§9.4), at every start and on that message, compares
+  `pushManager.getSubscription()` with what it registered and registers a changed or new one under
+  the same push key (`Client::check_web_push`). Until a page opens, pushes to a rotated subscription
+  are lost: registering needs the device's keys, which only the owning page uses.
 - iOS caveat: an NSE must show every notification it receives, unless the app has Apple's
   `com.apple.developer.usernotifications.filtering` entitlement. Threema has it (its NSE entitlements
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,

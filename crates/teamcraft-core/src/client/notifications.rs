@@ -121,6 +121,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.register_push_with(provider, token, push_key).await
   }
 
+  /// The platform handed out a new device token (a browser rotated its Web Push subscription,
+  /// e2ee.md §7): registers it under the push key the server already has, so wake-ups in flight stay
+  /// readable. Does nothing when no push of `provider` is registered or the token is the registered
+  /// one. Returns whether the registration changed.
+  pub async fn renew_push_token(&mut self, provider: PushProvider, token: &str) -> Result<bool, CoreError> {
+    let Some(stored) =
+      records::get_json::<StoredPushRegistration>(&self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
+    else {
+      return Ok(false);
+    };
+    if stored.provider != provider || stored.raw_token == token {
+      return Ok(false);
+    }
+    let push_key = self
+      .stored_push_key()?
+      .unwrap_or_else(|| SymmetricKey::generate(&mut OsRng));
+    self.register_push_with(provider, token, push_key).await?;
+    Ok(true)
+  }
+
+  /// The push service this device registered with, if any.
+  pub fn registered_push_provider(&self) -> Result<Option<PushProvider>, CoreError> {
+    Ok(
+      records::get_json::<StoredPushRegistration>(&self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
+        .map(|stored| stored.provider),
+    )
+  }
+
   /// Seals the device token again when it is due (the gateway or the server changed, or the sealed
   /// token is getting old), so a gateway key rotation and the token's expiry cost nothing. Cheap
   /// when nothing is due: one request. Call it when the app starts or comes to the foreground.

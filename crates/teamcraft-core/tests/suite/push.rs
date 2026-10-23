@@ -38,6 +38,54 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
   settle(&mut [&mut bob]).await;
 }
 
+/// A browser rotates its Web Push subscription (`pushsubscriptionchange`, e2ee.md §7): the new one
+/// is registered under the same push key, so wake-ups sealed before still open; an unchanged one
+/// costs no request.
+#[tokio::test]
+async fn a_rotated_subscription_is_registered_under_the_same_push_key() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let device = bob.client.device_id();
+  let before = server.push_registration(device).unwrap();
+  assert_eq!(
+    bob.client.registered_push_provider().unwrap(),
+    Some(PushProvider::WebPush)
+  );
+
+  assert!(
+    !bob
+      .client
+      .renew_push_token(PushProvider::WebPush, "{}")
+      .await
+      .unwrap()
+  );
+  assert!(
+    !bob
+      .client
+      .renew_push_token(PushProvider::Fcm, "other")
+      .await
+      .unwrap()
+  );
+  let rotated = r#"{"endpoint":"https://push.example.com/rotated"}"#;
+  assert!(
+    bob
+      .client
+      .renew_push_token(PushProvider::WebPush, rotated)
+      .await
+      .unwrap()
+  );
+
+  let after = server.push_registration(device).unwrap();
+  assert_eq!(after.token, rotated);
+  assert_eq!(after.push_key.as_slice(), before.push_key.as_slice());
+  assert!(
+    !bob
+      .client
+      .renew_push_token(PushProvider::WebPush, rotated)
+      .await
+      .unwrap()
+  );
+}
+
 #[tokio::test]
 async fn without_a_session_only_names_are_shown_unless_the_store_has_the_message() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;

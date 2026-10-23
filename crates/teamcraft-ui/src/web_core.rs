@@ -69,6 +69,10 @@ const PUSH_SESSION_LIFETIME_MS: i64 = 4 * 60 * 1000;
 /// Local storage key (per user) remembering that this browser had the account set up, so a store
 /// the browser deleted is told apart from a first visit (e2ee.md §9.4).
 const STORE_READY_PREFIX: &str = "teamcraft.store_ready.";
+/// How long to wait before checking the push subscription again after the check failed (offline).
+const PUSH_CHECK_RETRY: Duration = Duration::from_secs(60);
+/// What the service worker posts when the browser changed the push subscription.
+const SUBSCRIPTION_CHANGED: &str = "push_subscription_changed";
 
 type Api = HttpServerApi<WebTokens>;
 type Store = Rc<IndexedDbStore>;
@@ -78,6 +82,7 @@ thread_local! {
   static SETUP: RefCell<Option<Setup>> = const { RefCell::new(None) };
   static RUNNING: RefCell<Option<Running>> = const { RefCell::new(None) };
   static LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
+  static IS_WATCHING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// What the page tells the core once: who signs the requests and where the server is.
@@ -318,6 +323,7 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
     };
     let connection = ConnectionStatus::new();
     let core = Core::new(server_url, user, tokens.clone(), connection.clone(), maybe_lock);
+    watch_worker();
     let generation = std::rc::Rc::new(());
     keep_token_fresh(auth, tokens, Rc::downgrade(&generation));
     wasm_bindgen_futures::spawn_local(async move {
@@ -447,6 +453,8 @@ fn notify_local() {
 enum Request {
   Status(oneshot::Sender<CoreStatus>),
   StoreHealth(oneshot::Sender<StoreHealth>),
+  /// The service worker saw the browser change the push subscription.
+  CheckPush,
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
   Messages {
@@ -520,6 +528,9 @@ struct Core {
   maybe_attention: Option<bool>,
   /// Whether IndexedDB keeps up with the cache, as of the last flush.
   store_health: StoreHealth,
+  /// When to compare the browser's push subscription with the registration next; `None` when
+  /// nothing is due (e2ee.md §7).
+  maybe_push_check_at_ms: Option<i64>,
 }
 
 /// A link in progress on this (new) device.
@@ -558,6 +569,7 @@ impl Core {
       approval_misses: 0,
       maybe_attention: None,
       store_health: StoreHealth::Saved,
+      maybe_push_check_at_ms: None,
     }
   }
 
@@ -573,7 +585,32 @@ impl Core {
         Wake::Tick => self.on_tick().await,
       }
       self.check_store().await;
+      self.check_push().await;
     }
+  }
+
+  /// Registers the browser's push subscription again when the browser rotated or dropped it.
+  async fn check_push(&mut self) {
+    let (Some(client), Some(due_at)) = (self.client.as_mut(), self.maybe_push_check_at_ms) else {
+      return;
+    };
+    if now_ms() < due_at {
+      return;
+    }
+    self.maybe_push_check_at_ms = match client.check_web_push().await {
+      Ok(is_renewed) => {
+        if is_renewed {
+          tracing::info!("the browser changed the push subscription; registered the new one");
+          self.last_session_token = None;
+          self.save_push_session();
+        }
+        None
+      },
+      Err(error) => {
+        tracing::warn!(%error, "could not check the push subscription");
+        Some(now_ms().saturating_add(millis(PUSH_CHECK_RETRY)))
+      },
+    };
   }
 
   /// Waits until IndexedDB has everything written so far, and tells the UI when that stops (or
@@ -698,6 +735,7 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.client = Some(client);
+    self.maybe_push_check_at_ms = Some(i64::MIN);
     store_string(&self.store_ready_key(), "1");
     status
   }
@@ -717,6 +755,7 @@ impl Core {
         drop(reply.send(self.status.clone()));
       },
       Request::StoreHealth(reply) => drop(reply.send(self.store_health.clone())),
+      Request::CheckPush => self.maybe_push_check_at_ms = Some(i64::MIN),
       Request::Enroll(request, reply) => {
         let result = self.enroll(request).await;
         if result.is_ok() {
@@ -1235,6 +1274,34 @@ async fn link_task(
   };
   notify_changed();
   link.receive_secrets().await.map_err(describe)
+}
+
+/// Passes the service worker's "subscription changed" on to the core (once per page).
+fn watch_worker() {
+  if IS_WATCHING_WORKER.with(|is_watching| is_watching.replace(true)) {
+    return;
+  }
+  let Some(window) = web_sys::window() else { return };
+  let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+    |event: web_sys::MessageEvent| {
+      let kind = js_sys::Reflect::get(&event.data(), &"type".into())
+        .ok()
+        .and_then(|kind| kind.as_string());
+      // Follower tabs get the message too; only the owner has a core to tell.
+      if kind.as_deref() == Some(SUBSCRIPTION_CHANGED) && current_follower().is_none() {
+        drop(send(Request::CheckPush));
+      }
+    },
+  );
+  if window
+    .navigator()
+    .service_worker()
+    .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
+    .is_ok()
+  {
+    // Lives as long as the page.
+    listener.forget();
+  }
 }
 
 /// Asks the browser not to delete the store under storage pressure (e2ee.md §9.4). Browsers decide
