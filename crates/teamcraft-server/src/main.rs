@@ -52,6 +52,8 @@ const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 const BACKGROUND_SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 /// `[storage].max_attachment_bytes` when there is no storage (attachments are off then anyway).
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
+/// Message partitions are created months ahead; checking twice a day is plenty.
+const PARTITION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(12 * 3600);
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -242,6 +244,7 @@ async fn run() -> anyhow::Result<()> {
   spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
   spawn_background_sweeper(state.clone());
+  spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
 
   let listener = bind_listener(config.server.listen_addr)
@@ -274,6 +277,23 @@ fn spawn_background_sweeper(state: AppState) {
         Ok(0) => {},
         Ok(swept) => info!(swept, "swept unfinished attachments"),
         Err(error) => warn!(%error, "sweeping unfinished attachments failed"),
+      }
+    }
+  });
+}
+
+/// Keeps message partitions created ahead, whether or not the retention job runs: a server that
+/// runs for longer than `months_ahead` would otherwise write messages into the default partition,
+/// and creating the partition for that month then fails, also on the next start.
+fn spawn_partition_maintenance(state: AppState, months_ahead: u32) {
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(PARTITION_MAINTENANCE_INTERVAL);
+    // The first tick fires at once; startup has just created the partitions.
+    interval.tick().await;
+    loop {
+      interval.tick().await;
+      if let Err(error) = state.database.ensure_partitions(months_ahead).await {
+        warn!(%error, "creating message partitions ahead failed");
       }
     }
   });
