@@ -110,7 +110,7 @@ pub async fn list(
   query: ListWorkspaceLogQuery,
 ) -> Result<ListWorkspaceLogResponse, ApiError> {
   // The logs are public to every signed-in user: clients must be able to verify them.
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let limit = query
     .maybe_limit
     .unwrap_or(limits.default_page_size)
@@ -135,7 +135,7 @@ pub fn effective_guest_expiry_days(state: &AppState) -> u32 {
     .get()
     .guests
     .maybe_default_expiry_days
-    .unwrap_or(state.settings.guests.default_expiry_days)
+    .unwrap_or(state.settings.get().guests.default_expiry_days)
 }
 
 /// Whether guests may only open DMs with people they share a conversation with.
@@ -145,7 +145,13 @@ pub fn effective_guest_dm_restriction(state: &AppState) -> bool {
     .get()
     .guests
     .maybe_dm_only_with_shared_conversations
-    .unwrap_or(state.settings.policy.guests_dm_only_with_shared_conversations)
+    .unwrap_or(
+      state
+        .settings
+        .get()
+        .policy
+        .guests_dm_only_with_shared_conversations,
+    )
 }
 
 /// Shortest password of a local account.
@@ -155,7 +161,7 @@ pub fn effective_min_password_chars(state: &AppState) -> usize {
     .get()
     .passwords
     .maybe_min_chars
-    .map_or(state.settings.local_accounts.min_password_chars, |chars| {
+    .map_or(state.settings.get().local_accounts.min_password_chars, |chars| {
       chars as usize
     })
 }

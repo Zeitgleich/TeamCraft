@@ -6,7 +6,7 @@ use std::time::Duration;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ConversationId, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
@@ -71,6 +71,21 @@ pub struct Config {
   /// Meetings (PLAN.md §9); without it the meeting endpoints answer 503.
   #[serde(default)]
   pub meetings: Option<MeetingsConfig>,
+  /// The key that encrypts passwords entered in the admin console (admin.md §6.2).
+  #[serde(default)]
+  pub secrets: SecretsConfig,
+}
+
+/// Where the settings key comes from: inline (base64, 32 bytes) or a file the server creates on
+/// first start. Without either, passwords can only be given in this file, not in the console.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SecretsConfig {
+  /// Prefer `TEAMCRAFT_SECRETS__KEY`.
+  #[serde(rename = "key")]
+  pub maybe_key: Option<SecretString>,
+  #[serde(rename = "key_path")]
+  pub maybe_key_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -702,11 +717,15 @@ pub struct BrandingConfig {
   pub trusted_proxies: Vec<IpAddr>,
   /// Largest brand image file.
   pub max_asset_bytes: u64,
+  /// Host names the reverse proxy and TLS layer serve for this server, besides those of
+  /// `[[brands]]`. Brands made in the admin console can only use these (docs/branding.md §2.1).
+  pub served_hostnames: Vec<String>,
 }
 
 impl Default for BrandingConfig {
   fn default() -> Self {
     Self {
+      served_hostnames: Vec::new(),
       maybe_assets_dir: None,
       unknown_host: UnknownHostPolicy::default(),
       trusted_proxies: Vec::new(),
@@ -729,8 +748,9 @@ pub enum UnknownHostPolicy {
   Reject,
 }
 
-/// One brand: the presentation of one or more host names.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// One brand: the presentation of one or more host names. Brands made in the admin console are
+/// stored in this shape too (without image file names).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BrandConfig {
   /// `[a-z0-9-]`, 1 to 32 characters, stable.
@@ -740,28 +760,31 @@ pub struct BrandConfig {
   /// Lower-case host names without port, exact match only.
   pub hostnames: Vec<String>,
   pub display_name: String,
+  /// The organization behind the brand, shown in the footer of the sign-in page.
+  #[serde(rename = "organization_name", skip_serializing_if = "Option::is_none")]
+  pub maybe_organization_name: Option<String>,
   /// Users with an e-mail address in one of these domains have this brand as home brand.
   pub email_domains: Vec<String>,
   /// Image files below `[branding].assets_dir`.
-  #[serde(rename = "logo")]
+  #[serde(rename = "logo", skip_serializing_if = "Option::is_none")]
   pub maybe_logo: Option<String>,
-  #[serde(rename = "logo_dark")]
+  #[serde(rename = "logo_dark", skip_serializing_if = "Option::is_none")]
   pub maybe_logo_dark: Option<String>,
-  #[serde(rename = "icon")]
+  #[serde(rename = "icon", skip_serializing_if = "Option::is_none")]
   pub maybe_icon: Option<String>,
-  #[serde(rename = "icon_dark")]
+  #[serde(rename = "icon_dark", skip_serializing_if = "Option::is_none")]
   pub maybe_icon_dark: Option<String>,
-  #[serde(rename = "favicon")]
+  #[serde(rename = "favicon", skip_serializing_if = "Option::is_none")]
   pub maybe_favicon: Option<String>,
-  #[serde(rename = "favicon_dark")]
+  #[serde(rename = "favicon_dark", skip_serializing_if = "Option::is_none")]
   pub maybe_favicon_dark: Option<String>,
-  #[serde(rename = "support_url")]
+  #[serde(rename = "support_url", skip_serializing_if = "Option::is_none")]
   pub maybe_support_url: Option<String>,
-  #[serde(rename = "privacy_url")]
+  #[serde(rename = "privacy_url", skip_serializing_if = "Option::is_none")]
   pub maybe_privacy_url: Option<String>,
-  #[serde(rename = "terms_url")]
+  #[serde(rename = "terms_url", skip_serializing_if = "Option::is_none")]
   pub maybe_terms_url: Option<String>,
-  #[serde(rename = "imprint_url")]
+  #[serde(rename = "imprint_url", skip_serializing_if = "Option::is_none")]
   pub maybe_imprint_url: Option<String>,
   /// Language code -> text; `en` is the fallback.
   pub login_title: BTreeMap<String, String>,
@@ -770,13 +793,13 @@ pub struct BrandConfig {
   /// Origins added to `connect-src` for this brand only.
   pub connect_origins: Vec<String>,
   /// Replaces `[web].content_security_policy` for this brand.
-  #[serde(rename = "content_security_policy")]
+  #[serde(rename = "content_security_policy", skip_serializing_if = "Option::is_none")]
   pub maybe_content_security_policy: Option<String>,
   pub mail: BrandMailConfig,
 }
 
 /// Color overrides by token key (`accent`, ...), as `#rgb` / `#rrggbb`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BrandColorsConfig {
   pub light: BTreeMap<String, String>,
@@ -784,25 +807,25 @@ pub struct BrandColorsConfig {
 }
 
 /// Mail identity of a brand. Unset values fall back to `[mail]` and `[meetings]`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BrandMailConfig {
   /// Display name of the `From` header.
-  #[serde(rename = "sender_name")]
+  #[serde(rename = "sender_name", skip_serializing_if = "Option::is_none")]
   pub maybe_sender_name: Option<String>,
   /// Address of the `From` header; must be one the mail server accepts.
-  #[serde(rename = "from_address")]
+  #[serde(rename = "from_address", skip_serializing_if = "Option::is_none")]
   pub maybe_from_address: Option<String>,
   /// `CN` of the `ORGANIZER` of meeting invitations.
-  #[serde(rename = "imip_organizer_name")]
+  #[serde(rename = "imip_organizer_name", skip_serializing_if = "Option::is_none")]
   pub maybe_imip_organizer_name: Option<String>,
-  #[serde(rename = "invite_subject")]
+  #[serde(rename = "invite_subject", skip_serializing_if = "Option::is_none")]
   pub maybe_invite_subject: Option<String>,
-  #[serde(rename = "invite_body")]
+  #[serde(rename = "invite_body", skip_serializing_if = "Option::is_none")]
   pub maybe_invite_body: Option<String>,
-  #[serde(rename = "activation_subject")]
+  #[serde(rename = "activation_subject", skip_serializing_if = "Option::is_none")]
   pub maybe_activation_subject: Option<String>,
-  #[serde(rename = "activation_body")]
+  #[serde(rename = "activation_body", skip_serializing_if = "Option::is_none")]
   pub maybe_activation_body: Option<String>,
 }
 

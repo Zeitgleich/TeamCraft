@@ -7,7 +7,9 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use teamcraft_client_api::remote::ApiMethod;
 
-use super::{ApiResponse, AuthError, AuthService, KeyringStore};
+use base64::Engine;
+
+use super::{ApiBytesResponse, ApiResponse, AuthError, AuthService, KeyringStore};
 
 pub type Service = AuthService<KeyringStore>;
 
@@ -71,4 +73,28 @@ pub async fn api_request(
   service: State<'_, Arc<Service>>,
 ) -> Result<ApiResponse, CommandError> {
   Ok(service.api_request(method, &path, body).await?)
+}
+
+/// Like `api_request` with a binary body (`content_type` and base64 `body_base64` together).
+#[tauri::command]
+pub async fn api_request_bytes(
+  method: ApiMethod,
+  path: String,
+  content_type: Option<String>,
+  body_base64: Option<String>,
+  service: State<'_, Arc<Service>>,
+) -> Result<ApiBytesResponse, CommandError> {
+  let maybe_body = match (content_type, body_base64) {
+    (Some(content_type), Some(encoded)) => {
+      let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| CommandError {
+          kind: "invalid_response",
+          message: "the body is not base64".to_owned(),
+        })?;
+      Some((content_type, bytes))
+    },
+    _ => None,
+  };
+  Ok(service.api_request_bytes(method, &path, maybe_body).await?)
 }

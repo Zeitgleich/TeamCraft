@@ -48,6 +48,7 @@ wire_enum! {
     /// The request arrived on a host name that is not configured (docs/branding.md §3).
     UnknownHost => "unknown_host",
     BrandAssetNotFound => "brand_asset_not_found",
+    BrandNotFound => "brand_not_found",
     Internal => "internal",
     Unavailable => "unavailable",
   }

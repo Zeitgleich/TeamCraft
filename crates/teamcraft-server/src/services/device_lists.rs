@@ -31,7 +31,7 @@ pub async fn put_device_list(
   caller: &AuthenticatedUser,
   request: PutDeviceListRequest,
 ) -> Result<DeviceListResponse, ApiError> {
-  let max = state.settings.limits.max_device_list_bytes;
+  let max = state.settings.get().limits.max_device_list_bytes;
   if request.signed_list.is_empty() {
     return Err(ApiError::InvalidRequest(
       "the device list must not be empty".into(),

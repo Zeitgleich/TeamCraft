@@ -10,6 +10,7 @@ const COMMANDS: &[&str] = &[
   "auth_logout",
   "api_get",
   "api_request",
+  "api_request_bytes",
   "public_get",
   "core_start",
   "core_status",

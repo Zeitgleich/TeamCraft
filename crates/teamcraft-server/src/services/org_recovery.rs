@@ -36,7 +36,7 @@ pub async fn put_shares(
   if request.key_version == 0 || request.shares.is_empty() || request.shares.len() > MAX_SHARES {
     return Err(ApiError::InvalidRequest("invalid shares".into()));
   }
-  let max = state.settings.limits.max_recovery_blob_bytes;
+  let max = state.settings.get().limits.max_recovery_blob_bytes;
   if request
     .shares
     .iter()
@@ -150,7 +150,7 @@ pub async fn create_request(
   state.database.expire_recovery_requests(now).await?;
   let id: RecoveryRequestId = state.next_id()?;
   let ttl = Duration::seconds(
-    i64::try_from(state.settings.limits.org_recovery_request_ttl_secs).unwrap_or(i64::MAX / 4),
+    i64::try_from(state.settings.get().limits.org_recovery_request_ttl_secs).unwrap_or(i64::MAX / 4),
   );
   let is_created = state
     .database
@@ -483,7 +483,7 @@ fn require_admin(caller: &AuthenticatedUser) -> Result<(), ApiError> {
 }
 
 fn check_blob(state: &AppState, blob: &Base64Bytes) -> Result<(), ApiError> {
-  if blob.is_empty() || blob.len() > state.settings.limits.max_recovery_blob_bytes {
+  if blob.is_empty() || blob.len() > state.settings.get().limits.max_recovery_blob_bytes {
     return Err(ApiError::InvalidRequest(
       "the sealed value has an invalid size".into(),
     ));

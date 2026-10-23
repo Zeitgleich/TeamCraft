@@ -4,12 +4,16 @@ use crate::admin::AdminSection;
 use crate::components::admin_announcement::AnnouncementSection;
 use crate::components::admin_audit::AuditSection;
 use crate::components::admin_backgrounds::BackgroundsSection;
+use crate::components::admin_brands::BrandsSection;
+use crate::components::admin_calendar::CalendarSection;
 use crate::components::admin_channels::ChannelsSection;
 use crate::components::admin_instance::InstanceSection;
+use crate::components::admin_mail::MailSection;
 use crate::components::admin_people::PeopleSection;
 use crate::components::admin_permissions::PermissionsSection;
 use crate::components::admin_retention::RetentionSection;
 use crate::components::admin_security::SecuritySection;
+use crate::components::admin_settings::SettingsSection;
 use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::icons::{Icon, IconName};
@@ -58,6 +62,10 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::People, IconName::User)}
           {nav_item(AdminSection::Announcement, IconName::Bell)}
           {nav_item(AdminSection::Backgrounds, IconName::Image)}
+          {nav_item(AdminSection::Brands, IconName::Spotlight)}
+          {nav_item(AdminSection::Mail, IconName::Send)}
+          {nav_item(AdminSection::Calendar, IconName::Calendar)}
+          {nav_item(AdminSection::Settings, IconName::Sliders)}
           {nav_item(AdminSection::Retention, IconName::Clock)}
           {nav_item(AdminSection::Updates, IconName::Download)}
           {nav_item(AdminSection::Instance, IconName::Monitor)}
@@ -82,6 +90,10 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::People => view! { <PeopleSection /> }.into_any(),
           AdminSection::Announcement => view! { <AnnouncementSection /> }.into_any(),
           AdminSection::Backgrounds => view! { <BackgroundsSection /> }.into_any(),
+          AdminSection::Brands => view! { <BrandsSection /> }.into_any(),
+          AdminSection::Mail => view! { <MailSection /> }.into_any(),
+          AdminSection::Calendar => view! { <CalendarSection /> }.into_any(),
+          AdminSection::Settings => view! { <SettingsSection /> }.into_any(),
           AdminSection::Instance => view! { <InstanceSection /> }.into_any(),
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
           AdminSection::Updates => view! { <UpdatesPolicySection /> }.into_any(),

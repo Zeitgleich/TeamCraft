@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO brand_assets (brand_id, slot, object_key, content_type, size_bytes, updated_at)\n         VALUES ($1, $2, $3, $4, $5, now())\n         ON CONFLICT (brand_id, slot) DO UPDATE\n         SET object_key = EXCLUDED.object_key, content_type = EXCLUDED.content_type,\n             size_bytes = EXCLUDED.size_bytes, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ffaa7b2f559267e21565265a05e602e9e4d04425a3f8ea2f3a24991f30c4884"
+}

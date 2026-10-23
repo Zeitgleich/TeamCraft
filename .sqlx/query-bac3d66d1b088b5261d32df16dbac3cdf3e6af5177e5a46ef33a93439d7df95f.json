@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT brand_id, slot, object_key, content_type, size_bytes FROM brand_assets ORDER BY brand_id, slot",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "brand_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "brand_assets",
+            "name": "brand_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "slot",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "brand_assets",
+            "name": "slot"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "object_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "brand_assets",
+            "name": "object_key"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "content_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "brand_assets",
+            "name": "content_type"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "size_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "brand_assets",
+            "name": "size_bytes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bac3d66d1b088b5261d32df16dbac3cdf3e6af5177e5a46ef33a93439d7df95f"
+}

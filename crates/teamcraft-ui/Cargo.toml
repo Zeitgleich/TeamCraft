@@ -33,6 +33,8 @@ qrcode = { version = "0.14", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Image previews of the brand editor are data: URLs (the page's CSP allows data: images).
+base64.workspace = true
 secrecy.workspace = true
 wasm-bindgen-futures = "0.4"
 # OIDC authorization code + PKCE for the browser flow. Only the protocol parts are used; HTTP goes

@@ -16,6 +16,7 @@ pub mod openapi;
 pub mod push;
 pub mod rendezvous;
 pub mod router;
+pub mod runtime;
 pub mod security;
 pub mod services;
 pub mod state;

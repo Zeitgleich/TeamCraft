@@ -99,6 +99,17 @@ pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
         }}
         {children()}
         <p class="auth-foot muted-text small">{move || i18n.t("login-footer")}</p>
+        {move || {
+          brand
+            .with(|view| view.maybe_organization_name.clone())
+            .map(|name| {
+              view! {
+                <p class="auth-organization muted-text small" translate="no">
+                  {i18n.t_with("login-organization", &[("name", &name)])}
+                </p>
+              }
+            })
+        }}
         <nav class="auth-links small" aria-label=move || i18n.t("login-brand-links")>
           <For each=links key=|(key, link)| (*key, link.clone()) let:item>
             <a href=item.1.clone() target="_blank" rel="noopener noreferrer">{move || i18n.t(item.0)}</a>

@@ -33,6 +33,7 @@ mod permission_override;
 mod profile;
 mod push;
 mod retention;
+mod server_settings;
 mod share_link;
 mod snowflake;
 mod space;
@@ -86,6 +87,7 @@ pub use permission_override::{OverrideEdit, StoredOverride};
 pub use profile::{StoredAvatar, StoredProfile, StoredWorkingHours};
 pub use push::{PushDeviceRow, PushRecipientRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};
+pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};
 pub use space::{

@@ -116,6 +116,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::auth_logout,
       auth::commands::api_get,
       auth::commands::api_request,
+      auth::commands::api_request_bytes,
       auth::commands::public_get,
       core::commands::core_start,
       core::commands::core_status,

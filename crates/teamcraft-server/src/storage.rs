@@ -1,5 +1,6 @@
 //! Presigned S3 URLs for attachments. The server signs, clients move the bytes; the server never
-//! sees the data or the keys (e2ee.md §4.5).
+//! sees the data or the keys (e2ee.md §4.5). The server itself only stores public objects this
+//! way: the brand images admins upload (docs/branding.md §2.1).
 
 use std::time::Duration;
 
@@ -18,6 +19,8 @@ pub enum StorageError {
   Request(#[from] reqwest::Error),
   #[error("storage answered with status {0}")]
   Status(StatusCode),
+  #[error("the stored object is larger than expected")]
+  TooLarge,
 }
 
 /// Signs requests against one bucket.
@@ -91,6 +94,41 @@ impl BlobStore {
       .bucket
       .get_object(Some(&self.credentials), key)
       .sign(self.expiry)
+  }
+
+  /// Stores an object the server itself writes (brand images).
+  pub async fn put_object(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> Result<(), StorageError> {
+    let url = self.presign_typed_upload(key, bytes.len() as u64, content_type);
+    let response = self
+      .http
+      .put(url)
+      .header(reqwest::header::CONTENT_TYPE, content_type)
+      .body(bytes)
+      .send()
+      .await?;
+    match response.status() {
+      status if status.is_success() => Ok(()),
+      status => Err(StorageError::Status(status)),
+    }
+  }
+
+  /// Reads an object the server wrote, if it exists and is at most `max_bytes` long.
+  pub async fn get_object(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, StorageError> {
+    let response = self.http.get(self.presign_download(key)).send().await?;
+    match response.status() {
+      StatusCode::NOT_FOUND => Ok(None),
+      status if status.is_success() => {
+        if response.content_length().is_some_and(|length| length > max_bytes) {
+          return Err(StorageError::TooLarge);
+        }
+        let bytes = response.bytes().await?;
+        if bytes.len() as u64 > max_bytes {
+          return Err(StorageError::TooLarge);
+        }
+        Ok(Some(bytes.to_vec()))
+      },
+      status => Err(StorageError::Status(status)),
+    }
   }
 
   /// Deletes an object; a missing object counts as deleted.

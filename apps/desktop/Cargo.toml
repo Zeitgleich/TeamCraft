@@ -51,6 +51,8 @@ reqwest = { workspace = true, features = ["form"] }
 # PKCE, state and token requests; HTTP goes through our own reqwest client.
 oauth2 = { version = "5", default-features = false }
 url = "2"
+# Binary API bodies (brand images in the admin console) cross the webview bridge as base64.
+base64.workspace = true
 
 # Linux capture: the desktop portal (cameras, screens) and V4L2 cameras; hardware encoding through
 # GStreamer's VA-API encoder.

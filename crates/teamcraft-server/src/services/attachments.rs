@@ -30,14 +30,15 @@ pub async fn create_attachment(
   if request.size_bytes == 0 {
     return Err(ApiError::InvalidRequest("size_bytes must be positive".into()));
   }
-  if request.size_bytes > store.max_attachment_bytes() {
+  let max_attachment_bytes = state.settings.get().max_attachment_bytes;
+  if request.size_bytes > max_attachment_bytes {
     return Err(ApiError::PayloadTooLarge(format!(
       "attachments are limited to {} bytes",
-      store.max_attachment_bytes()
+      max_attachment_bytes
     )));
   }
 
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let (pending, stored_bytes) = state.database.attachment_usage_of(caller.user.id).await?;
   if pending >= limits.max_pending_attachments_per_user as u64 {
     return Err(ApiError::Conflict(

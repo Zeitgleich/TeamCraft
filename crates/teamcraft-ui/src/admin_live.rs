@@ -9,23 +9,29 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
-  AdminConversationSummary, AdminDeviceResponse, AdminInstanceResponse, AdminSpaceSummary, AdminUserSummary,
-  AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, ChannelModeration,
-  ConversationVisibility, GetAnnouncementResponse, HistoryPolicy, ListAdminConversationsResponse,
-  ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse, ListAuditResponse,
-  ListConversationMembersResponse, ListSpaceMembersResponse, PermissionSchemeResponse, RetentionSetting,
-  RetentionStatusResponse, Role, SchemeChange, SetAnnouncementRequest, SetChannelModerationRequest,
-  SetRetentionRequest, SpaceId, UpdatePermissionSchemeRequest, UserKind, WorkspacePolicy,
-  WorkspacePolicyResponse,
+  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminConversationSummary, AdminDeviceResponse,
+  AdminInstanceResponse, AdminMailSettingsResponse, AdminSpaceSummary, AdminUserSummary,
+  AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration,
+  ConversationVisibility, CreateBrandRequest, GetAnnouncementResponse, HistoryPolicy,
+  ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
+  ListAuditResponse, ListConversationMembersResponse, ListSpaceMembersResponse, PermissionSchemeResponse,
+  RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
+  SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UpdateBrandRequest,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, UpdatePermissionSchemeRequest, UserKind,
+  WorkspacePolicy, WorkspacePolicyResponse,
 };
 
 use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, Retention,
+  SettingsTestKind,
 };
-use crate::auth::{ApiMethod, Authenticator};
+use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::model::{
   ConversationId, ConversationKind, CustomStatus, PresenceStatus, User, UserId, id_from_raw, raw_id,
 };
@@ -60,6 +66,13 @@ pub struct AdminData {
   spaces: Vec<AdminSpace>,
   announcement: Option<AnnouncementResponse>,
   instance: Option<AdminInstanceResponse>,
+  brands: Option<AdminBrandsResponse>,
+  mail: Option<AdminMailSettingsResponse>,
+  calendar: Option<AdminCalendarSettingsResponse>,
+  runtime: Option<RuntimeSettingsResponse>,
+  last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
+  /// `data:` URLs of brand images by `{brand}/{slot}`; loaded when the editor shows them.
+  brand_previews: HashMap<String, String>,
   audit_filter: AuditFilter,
   /// Loaded on demand, when the console shows them; cleared when changed.
   schemes: HashMap<Option<SpaceId>, PermissionSchemeResponse>,
@@ -118,6 +131,214 @@ impl AdminLive {
 
   pub fn audit_filter(&self) -> AuditFilter {
     self.data.borrow().audit_filter
+  }
+
+  pub fn brands(&self) -> Option<AdminBrandsResponse> {
+    self.data.borrow().brands.clone()
+  }
+
+  pub fn create_brand(&self, request: CreateBrandRequest) {
+    self.send_brands(ApiMethod::Post, "/api/v1/admin/brands".to_owned(), &request, None);
+  }
+
+  pub fn update_brand(&self, id: &str, request: UpdateBrandRequest) {
+    self.send_brands(
+      ApiMethod::Put,
+      format!("/api/v1/admin/brands/{id}"),
+      &request,
+      None,
+    );
+  }
+
+  pub fn delete_brand(&self, id: &str) {
+    let forgotten = id.to_owned();
+    self.send_stored(
+      ApiMethod::Delete,
+      format!("/api/v1/admin/brands/{id}"),
+      None,
+      move |data, brands: AdminBrandsResponse| {
+        data.brands = Some(brands);
+        forget_previews(data, &forgotten);
+      },
+    );
+  }
+
+  pub fn take_over_brand(&self, id: &str) {
+    self.send_stored(
+      ApiMethod::Post,
+      format!("/api/v1/admin/brands/{id}/take-over"),
+      Some("{}".to_owned()),
+      |data, brands: AdminBrandsResponse| data.brands = Some(brands),
+    );
+  }
+
+  /// The image as a `data:` URL once it is loaded; the first call starts the request.
+  pub fn brand_asset_preview(&self, id: &str, slot: &BrandAssetSlot) -> Option<String> {
+    let key = preview_key(id, slot);
+    if let Some(cached) = self.data.borrow().brand_previews.get(&key) {
+      return Some(cached.clone());
+    }
+    // A failed load is remembered as an empty entry, so a missing image is not asked for again.
+    if !self.data.borrow_mut().loading.insert(format!("preview:{key}")) {
+      return None;
+    }
+    let live = self.clone();
+    let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
+    spawn_local(async move {
+      let maybe_url = match live.auth.api_request_bytes(ApiMethod::Get, &path, None).await {
+        Ok(response) if response.status == 200 => {
+          preview_data_url(response.maybe_content_type.as_deref(), &response.body)
+        },
+        _ => None,
+      };
+      {
+        let mut data = live.data.borrow_mut();
+        // The loading entry stays, which is what keeps a failed image from being requested again.
+        if let Some(url) = maybe_url {
+          data.loading.remove(&format!("preview:{key}"));
+          data.brand_previews.insert(key, url);
+        }
+      }
+      live.changed();
+    });
+    None
+  }
+
+  pub fn upload_brand_asset(&self, id: &str, slot: &BrandAssetSlot, bytes: Vec<u8>, content_type: String) {
+    let live = self.clone();
+    let (id, slot) = (id.to_owned(), slot.clone());
+    spawn_local(async move {
+      let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
+      let body = BinaryBody { content_type, bytes };
+      let message = match live
+        .auth
+        .api_request_bytes(ApiMethod::Put, &path, Some(body))
+        .await
+      {
+        Ok(response) if response.status < 300 => {
+          let text = String::from_utf8_lossy(&response.body);
+          if let Ok(brands) = serde_json::from_str::<AdminBrandsResponse>(&text) {
+            live.data.borrow_mut().brands = Some(brands);
+          }
+          None
+        },
+        Ok(response) => Some(format!(
+          "{path}: {}",
+          refusal_of(&String::from_utf8_lossy(&response.body), response.status)
+        )),
+        Err(error) => Some(error.to_string()),
+      };
+      {
+        let mut data = live.data.borrow_mut();
+        data.maybe_error = message;
+        forget_previews(&mut data, &id);
+      }
+      live.changed();
+      live.queue_refresh();
+    });
+  }
+
+  pub fn delete_brand_asset(&self, id: &str, slot: &BrandAssetSlot) {
+    let forgotten = id.to_owned();
+    self.send_stored(
+      ApiMethod::Delete,
+      format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str()),
+      None,
+      move |data, brands: AdminBrandsResponse| {
+        data.brands = Some(brands);
+        forget_previews(data, &forgotten);
+      },
+    );
+  }
+
+  pub fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
+    self.data.borrow().mail.clone()
+  }
+
+  pub fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Put,
+        "/api/v1/admin/settings/mail".to_owned(),
+        Some(body),
+        |data, mail: AdminMailSettingsResponse| data.mail = Some(mail),
+      );
+    }
+  }
+
+  pub fn reset_mail_settings(&self) {
+    self.send_stored(
+      ApiMethod::Delete,
+      "/api/v1/admin/settings/mail".to_owned(),
+      None,
+      |data, mail: AdminMailSettingsResponse| data.mail = Some(mail),
+    );
+  }
+
+  pub fn send_test_mail(&self, request: SendTestMailRequest) {
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.run_settings_test(SettingsTestKind::Mail, "/api/v1/admin/settings/mail/test", body);
+    }
+  }
+
+  pub fn calendar_settings(&self) -> Option<AdminCalendarSettingsResponse> {
+    self.data.borrow().calendar.clone()
+  }
+
+  pub fn save_calendar_settings(&self, request: UpdateCalendarSettingsRequest) {
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Put,
+        "/api/v1/admin/settings/calendar".to_owned(),
+        Some(body),
+        |data, calendar: AdminCalendarSettingsResponse| data.calendar = Some(calendar),
+      );
+    }
+  }
+
+  pub fn reset_calendar_settings(&self) {
+    self.send_stored(
+      ApiMethod::Delete,
+      "/api/v1/admin/settings/calendar".to_owned(),
+      None,
+      |data, calendar: AdminCalendarSettingsResponse| data.calendar = Some(calendar),
+    );
+  }
+
+  pub fn test_calendar(&self) {
+    self.run_settings_test(
+      SettingsTestKind::Calendar,
+      "/api/v1/admin/settings/calendar/test",
+      "{}".to_owned(),
+    );
+  }
+
+  pub fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
+    self.data.borrow().last_test.clone()
+  }
+
+  pub fn runtime_settings(&self) -> Option<RuntimeSettingsResponse> {
+    self.data.borrow().runtime.clone()
+  }
+
+  pub fn save_runtime_settings(&self, section: RuntimeSettingsSection) {
+    if let Ok(body) = serde_json::to_string(&section) {
+      self.send_stored(
+        ApiMethod::Put,
+        "/api/v1/admin/settings".to_owned(),
+        Some(body),
+        |data, runtime: RuntimeSettingsResponse| data.runtime = Some(runtime),
+      );
+    }
+  }
+
+  pub fn reset_runtime_settings(&self, key: RuntimeSettingsKey) {
+    self.send_stored(
+      ApiMethod::Delete,
+      format!("/api/v1/admin/settings/{}", key.as_str()),
+      None,
+      |data, runtime: RuntimeSettingsResponse| data.runtime = Some(runtime),
+    );
   }
 
   pub fn set_audit_filter(&self, filter: AuditFilter) {
@@ -270,6 +491,18 @@ impl AdminLive {
     let instance = self
       .fetch::<AdminInstanceResponse>("/api/v1/admin/instance", &mut errors)
       .await;
+    let brands = self
+      .fetch::<AdminBrandsResponse>("/api/v1/admin/brands", &mut errors)
+      .await;
+    let mail = self
+      .fetch::<AdminMailSettingsResponse>("/api/v1/admin/settings/mail", &mut errors)
+      .await;
+    let calendar = self
+      .fetch::<AdminCalendarSettingsResponse>("/api/v1/admin/settings/calendar", &mut errors)
+      .await;
+    let runtime = self
+      .fetch::<RuntimeSettingsResponse>("/api/v1/admin/settings", &mut errors)
+      .await;
 
     self.reload_cached(&mut errors).await;
 
@@ -344,6 +577,18 @@ impl AdminLive {
       }
       if instance.is_some() {
         data.instance = instance;
+      }
+      if brands.is_some() {
+        data.brands = brands;
+      }
+      if mail.is_some() {
+        data.mail = mail;
+      }
+      if calendar.is_some() {
+        data.calendar = calendar;
+      }
+      if runtime.is_some() {
+        data.runtime = runtime;
       }
       if let Some(audit) = audit {
         let (channels, users) = (data.channels.clone(), data.users.clone());
@@ -547,6 +792,83 @@ impl AdminLive {
     }
   }
 
+  /// Like [`Self::send`], and an answer of type `T` replaces the cached copy at once, so the form
+  /// shows the saved state without waiting for the refresh.
+  fn send_stored<T: serde::de::DeserializeOwned + 'static>(
+    &self,
+    method: ApiMethod,
+    path: String,
+    maybe_body: Option<String>,
+    store: impl FnOnce(&mut AdminData, T) + 'static,
+  ) {
+    let live = self.clone();
+    spawn_local(async move {
+      let message = match live.auth.api_request(method, &path, maybe_body).await {
+        Ok(response) if response.status < 300 => {
+          match serde_json::from_str::<T>(&response.body) {
+            Ok(value) => store(&mut live.data.borrow_mut(), value),
+            Err(error) => tracing::debug!(%error, %path, "the answer could not be read"),
+          }
+          None
+        },
+        Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
+        Err(error) => Some(error.to_string()),
+      };
+      live.data.borrow_mut().maybe_error = message;
+      live.changed();
+      live.queue_refresh();
+    });
+  }
+
+  fn send_brands(
+    &self,
+    method: ApiMethod,
+    path: String,
+    request: &impl serde::Serialize,
+    maybe_forgotten: Option<String>,
+  ) {
+    if let Ok(body) = serde_json::to_string(request) {
+      self.send_stored(
+        method,
+        path,
+        Some(body),
+        move |data, brands: AdminBrandsResponse| {
+          data.brands = Some(brands);
+          if let Some(id) = maybe_forgotten {
+            forget_previews(data, &id);
+          }
+        },
+      );
+    }
+  }
+
+  /// A connection test: its answer, or the refusal, is kept for the console to show.
+  fn run_settings_test(&self, kind: SettingsTestKind, path: &'static str, body: String) {
+    self.data.borrow_mut().last_test = None;
+    let live = self.clone();
+    spawn_local(async move {
+      let outcome = match live.auth.api_request(ApiMethod::Post, path, Some(body)).await {
+        Ok(response) if response.status < 300 => serde_json::from_str::<SettingsTestResponse>(&response.body)
+          .unwrap_or_else(|error| SettingsTestResponse {
+            is_ok: false,
+            maybe_error: Some(error.to_string()),
+          }),
+        Ok(response) => SettingsTestResponse {
+          is_ok: false,
+          maybe_error: Some(refusal_of(&response.body, response.status)),
+        },
+        Err(error) => SettingsTestResponse {
+          is_ok: false,
+          maybe_error: Some(error.to_string()),
+        },
+      };
+      live.data.borrow_mut().last_test = Some((kind, outcome));
+      live.changed();
+      // Mail tests change the delivery status shown next to the form.
+      live.queue_refresh();
+    });
+  }
+
   /// Fire and forget; a refusal is shown in the console, then the next refresh shows the truth.
   fn send(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
     let live = self.clone();
@@ -567,6 +889,43 @@ impl AdminLive {
 struct ChannelDetails {
   maybe_owner: Option<UserId>,
   maybe_retention: Option<RetentionStatusResponse>,
+}
+
+fn preview_key(id: &str, slot: &BrandAssetSlot) -> String {
+  format!("{id}/{}", slot.as_str())
+}
+
+/// Drops the cached images of a brand after its images changed.
+fn forget_previews(data: &mut AdminData, id: &str) {
+  let prefix = format!("{id}/");
+  data.brand_previews.retain(|key, _| !key.starts_with(&prefix));
+  data
+    .loading
+    .retain(|key| !key.starts_with(&format!("preview:{prefix}")));
+}
+
+/// Media types a brand image may have; anything else is not shown.
+const PREVIEW_TYPES: [&str; 6] = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/svg+xml",
+  "image/x-icon",
+  "image/vnd.microsoft.icon",
+];
+
+/// The image as a `data:` URL; none for a media type that is not an allowed image type.
+fn preview_data_url(maybe_content_type: Option<&str>, bytes: &[u8]) -> Option<String> {
+  let content_type = maybe_content_type?
+    .split(';')
+    .next()
+    .unwrap_or_default()
+    .trim()
+    .to_ascii_lowercase();
+  if !PREVIEW_TYPES.contains(&content_type.as_str()) || bytes.is_empty() {
+    return None;
+  }
+  Some(format!("data:{content_type};base64,{}", STANDARD.encode(bytes)))
 }
 
 fn refusal_of(body: &str, status: u16) -> String {
@@ -689,6 +1048,17 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "channel_moderation_set" => AuditAction::ModerationChanged,
     "announcement_set" | "announcement_cleared" => AuditAction::AnnouncementChanged,
     "channel_owner_assigned" | "owner_assigned" => AuditAction::OwnerAssigned,
+    "brand_created"
+    | "brand_updated"
+    | "brand_deleted"
+    | "brand_taken_over"
+    | "brand_asset_set"
+    | "brand_asset_removed" => AuditAction::BrandChanged,
+    "mail_settings_updated" | "mail_settings_reset" | "mail_test_sent" => AuditAction::MailSettingsChanged,
+    "calendar_settings_updated" | "calendar_settings_reset" | "calendar_test" => {
+      AuditAction::CalendarSettingsChanged
+    },
+    "settings_updated" | "settings_reset" => AuditAction::SettingsChanged,
     _ => AuditAction::Other,
   }
 }
@@ -790,6 +1160,16 @@ mod tests {
     assert_eq!(action_from_wire("device_revoked"), AuditAction::DeviceRemoved);
     assert_eq!(action_from_wire("space_member_added"), AuditAction::MemberAdded);
     assert_eq!(action_from_wire("something_new"), AuditAction::Other);
+    assert_eq!(action_from_wire("brand_asset_set"), AuditAction::BrandChanged);
+    assert_eq!(
+      action_from_wire("mail_test_sent"),
+      AuditAction::MailSettingsChanged
+    );
+    assert_eq!(
+      action_from_wire("calendar_test"),
+      AuditAction::CalendarSettingsChanged
+    );
+    assert_eq!(action_from_wire("settings_reset"), AuditAction::SettingsChanged);
   }
 
   #[test]
@@ -874,6 +1254,31 @@ mod tests {
       audit_from_wire(&unknown, &HashMap::new(), &channels, &[]).target,
       "conversation 999"
     );
+  }
+
+  #[test]
+  fn previews_are_data_urls_of_image_types_only() {
+    assert_eq!(
+      preview_data_url(Some("image/png; charset=binary"), &[1, 2, 3]).as_deref(),
+      Some("data:image/png;base64,AQID")
+    );
+    assert_eq!(preview_data_url(Some("text/html"), &[1]), None);
+    assert_eq!(preview_data_url(None, &[1]), None);
+    assert_eq!(preview_data_url(Some("image/png"), &[]), None);
+  }
+
+  #[test]
+  fn changed_brands_forget_their_cached_images() {
+    let mut data = AdminData::default();
+    data.brand_previews.insert("brand-a/logo".into(), "data:x".into());
+    data
+      .brand_previews
+      .insert("brand-ab/logo".into(), "data:y".into());
+    data.loading.insert("preview:brand-a/icon".into());
+    forget_previews(&mut data, "brand-a");
+    assert!(!data.brand_previews.contains_key("brand-a/logo"));
+    assert!(data.brand_previews.contains_key("brand-ab/logo"));
+    assert!(data.loading.is_empty());
   }
 
   #[test]

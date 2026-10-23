@@ -23,6 +23,7 @@ pub mod push;
 pub mod push_gateway;
 pub mod rendezvous;
 pub mod secret;
+pub mod server_secret;
 pub mod share_link;
 pub mod workspace;
 

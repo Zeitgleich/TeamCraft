@@ -22,6 +22,9 @@ const FALLBACK_NAME: &str = "TeamCraft";
 pub struct BrandView {
   pub id: String,
   pub display_name: String,
+  /// The organization behind the brand, for the footer of the sign-in page.
+  #[serde(default)]
+  pub maybe_organization_name: Option<String>,
   /// Absolute image URLs, by slot name (`logo`, `logo_dark`, `icon`, ...).
   pub assets: BTreeMap<String, String>,
   /// CSS custom properties for the light theme, e.g. `("--accent", "#0b7f78")`.
@@ -39,6 +42,7 @@ impl BrandView {
     Self {
       id: String::new(),
       display_name: FALLBACK_NAME.to_owned(),
+      maybe_organization_name: None,
       assets: BTreeMap::new(),
       light: Vec::new(),
       dark: Vec::new(),
@@ -77,6 +81,7 @@ impl BrandView {
         .take(32)
         .collect(),
       display_name: display_name.to_owned(),
+      maybe_organization_name: clean_name(response.maybe_organization_name),
       assets,
       light: css_properties(&response.colors.light),
       dark: css_properties(&response.colors.dark),
@@ -127,6 +132,14 @@ fn pick<'a>(texts: &'a BTreeMap<String, String>, language: &str) -> Option<&'a s
     .map(String::as_str)
 }
 
+/// An organization name is shown only when it is plain, short text.
+fn clean_name(maybe_name: Option<String>) -> Option<String> {
+  let name = maybe_name?;
+  let name = name.trim();
+  (!name.is_empty() && name.chars().count() <= MAX_NAME_CHARS && !name.chars().any(char::is_control))
+    .then(|| name.to_owned())
+}
+
 fn css_properties(colors: &BTreeMap<String, String>) -> Vec<(String, String)> {
   colors
     .iter()
@@ -174,6 +187,7 @@ mod tests {
     BrandResponse {
       id: "brand-a".into(),
       display_name: "Brand A".into(),
+      maybe_organization_name: None,
       origin: "https://chat.a.example.com".into(),
       assets: BTreeMap::from([
         ("logo".to_owned(), "/api/v1/brand/assets/logo".to_owned()),
@@ -262,6 +276,30 @@ mod tests {
       view.links.maybe_imprint.as_deref(),
       Some("https://example.com/imprint")
     );
+  }
+
+  #[test]
+  fn the_organization_name_is_trimmed_and_checked() {
+    let mut named = response();
+    named.maybe_organization_name = Some("  Brand A Ltd.  ".into());
+    assert_eq!(
+      BrandView::from_response(named, "")
+        .unwrap()
+        .maybe_organization_name
+        .as_deref(),
+      Some("Brand A Ltd.")
+    );
+    for bad in ["", "   ", "Brand\nA", &"x".repeat(101)] {
+      let mut hostile = response();
+      hostile.maybe_organization_name = Some(bad.to_owned());
+      assert_eq!(
+        BrandView::from_response(hostile, "")
+          .unwrap()
+          .maybe_organization_name,
+        None,
+        "{bad:?}"
+      );
+    }
   }
 
   #[test]

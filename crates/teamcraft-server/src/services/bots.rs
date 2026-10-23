@@ -43,7 +43,7 @@ pub async fn create_bot(
     .map(str::trim)
     .filter(|text| !text.is_empty());
   if let Some(text) = maybe_description {
-    super::validate_text(text, "description", state.settings.limits.max_text_length)?;
+    super::validate_text(text, "description", state.settings.get().limits.max_text_length)?;
   }
   let (token, hash) = new_token()?;
   let user: UserId = state.next_id()?;

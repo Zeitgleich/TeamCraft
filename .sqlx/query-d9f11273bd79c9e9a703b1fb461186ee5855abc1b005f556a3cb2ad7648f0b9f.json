@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO server_settings (name, value, sealed_secret, updated_by, updated_at)\n         VALUES ($1, $2::text::jsonb, $3, $4, now())\n         ON CONFLICT (name) DO UPDATE\n         SET value = EXCLUDED.value, sealed_secret = EXCLUDED.sealed_secret,\n             updated_by = EXCLUDED.updated_by, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d9f11273bd79c9e9a703b1fb461186ee5855abc1b005f556a3cb2ad7648f0b9f"
+}

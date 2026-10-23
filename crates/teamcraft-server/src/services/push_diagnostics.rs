@@ -21,7 +21,7 @@ pub async fn send_test_push(
   if !state.database.is_active_device_of(caller.user.id, device).await? {
     return Err(ApiError::device_not_found());
   }
-  let interval = state.settings.push.test_interval;
+  let interval = state.settings.get().push.test_interval;
   if !state.push_tracker.try_start_test(device, interval) {
     return Err(ApiError::RateLimited {
       retry_after_secs: interval.as_secs().max(1),

@@ -156,7 +156,7 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
   report.partitions_dropped = dropped.len() as u64;
   state
     .database
-    .ensure_partitions_at(now, state.settings.retention.partitions_ahead_months)
+    .ensure_partitions_at(now, state.settings.get().retention.partitions_ahead_months)
     .await?;
 
   if report != RetentionReport::default() {

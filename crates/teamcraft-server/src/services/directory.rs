@@ -21,7 +21,7 @@ pub async fn search_users(
       query: query.trim(),
       is_restricted_to_shared: is_guest(caller),
       maybe_organization,
-      limit: i64::from(state.settings.limits.max_directory_results),
+      limit: i64::from(state.settings.get().limits.max_directory_results),
     })
     .await?;
   let mut summaries: Vec<UserSummary> = users.iter().map(|user| user_summary(state, user)).collect();

@@ -7,8 +7,12 @@
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
 use teamcraft_proto::{
-  AdminInstanceResponse, AnnouncementResponse, BackgroundId, CategoryId, ChannelModeration, HistoryPolicy,
-  OrgBackgroundId, PermissionSchemeResponse, Role, SchemeChange, SetAnnouncementRequest, WorkspacePolicy,
+  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse, AdminMailSettingsResponse,
+  AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId, ChannelModeration, CreateBrandRequest,
+  HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
+  SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest,
+  WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -17,7 +21,7 @@ use crate::actions::{
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome,
+  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, HuddleInfo, IncomingCall,
@@ -413,6 +417,47 @@ pub trait AdminBackend {
   fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
     None
   }
+
+  // ---- Runtime settings (admin.md §6): brands, mail, calendar, instance settings ----
+
+  /// Every brand and the host names the server is deployed for; `None` while unknown.
+  fn admin_brands(&self) -> Option<AdminBrandsResponse> {
+    None
+  }
+  fn create_brand(&self, _request: CreateBrandRequest) {}
+  fn update_brand(&self, _id: String, _request: UpdateBrandRequest) {}
+  fn delete_brand(&self, _id: String) {}
+  /// Copies a brand of the configuration file into the database, where it can be edited.
+  fn take_over_brand(&self, _id: String) {}
+  /// A `data:` URL of the brand image once it is loaded (the request starts on the first call).
+  fn brand_asset_preview(&self, _id: &str, _slot: &BrandAssetSlot) -> Option<String> {
+    None
+  }
+  fn upload_brand_asset(&self, _id: String, _slot: BrandAssetSlot, _bytes: Vec<u8>, _content_type: String) {}
+  fn delete_brand_asset(&self, _id: String, _slot: BrandAssetSlot) {}
+  fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
+    None
+  }
+  fn save_mail_settings(&self, _request: UpdateMailSettingsRequest) {}
+  /// Back to the values of the configuration file.
+  fn reset_mail_settings(&self) {}
+  fn send_test_mail(&self, _request: SendTestMailRequest) {}
+  fn calendar_settings(&self) -> Option<AdminCalendarSettingsResponse> {
+    None
+  }
+  fn save_calendar_settings(&self, _request: UpdateCalendarSettingsRequest) {}
+  fn reset_calendar_settings(&self) {}
+  fn test_calendar(&self) {}
+  /// The answer of the last mail or calendar test of this console session.
+  fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
+    None
+  }
+  fn runtime_settings(&self) -> Option<RuntimeSettingsResponse> {
+    None
+  }
+  fn save_runtime_settings(&self, _section: RuntimeSettingsSection) {}
+  fn reset_runtime_settings(&self, _key: RuntimeSettingsKey) {}
+
   /// The last administrative action that the server or the core refused, in words for the user.
   fn admin_error(&self) -> Option<String> {
     None

@@ -208,6 +208,10 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Organization recovery                    | `/org-recovery/...`, see e2ee.md §6.3.1                                            |
 | Share links                              | `/shares` (members), public `/shares/{id}`; `[shares]` configuration               |
 | Call backgrounds                         | `POST /admin/backgrounds`, `POST /admin/backgrounds/{id}/complete`, `DELETE /admin/backgrounds/{id}`; everybody: `GET /org-backgrounds/{id}/download` |
+| Brands (§6)                              | `GET/POST /admin/brands`, `PUT/DELETE /admin/brands/{id}`, `POST /admin/brands/{id}/take-over`, `GET/PUT/DELETE /admin/brands/{id}/assets/{slot}` |
+| Mail server (§6.2)                       | `GET/PUT/DELETE /admin/settings/mail`, `POST /admin/settings/mail/test`            |
+| Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
+| Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
@@ -224,3 +228,102 @@ and direct messages, and cannot change instance-wide permissions inside a space.
 
 Part of the regular client (desktop/web) under "Administration", visible only to admins. No separate
 admin app, so admin actions get signed with the admin's device key.
+
+## 6. Settings: GUI vs config
+
+Everything an admin changes while the instance runs is changed in the admin console. The
+configuration file (`teamcraft.toml`, written by the deployment playbook) is for **bootstrap**: what
+the server needs before it can read its database, and what the layers in front of it must agree on.
+For runtime settings it is the **seed**: a setting nobody changed in the console comes from the file
+(`source = config`); changing it in the console stores it in the database (`source = database`) on
+top, and "Reset to configuration file" removes the stored value again. So a fresh deployment works
+from the file alone, and a later playbook run never overwrites what an admin set in the console.
+
+Every change is an audit log entry (`brand_*`, `mail_settings_*`, `mail_test_sent`,
+`calendar_settings_*`, `calendar_test`, `settings_updated`, `settings_reset`) with what changed but
+never a password. All endpoints need `manage_workspace` (instance admins and owners).
+
+| Area              | Console page                                 | In the configuration file                                                                                                              |
+|-------------------|----------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| Brands            | Administration → Brands                      | `[[brands]]` (seed, read-only until taken over), `[branding]`                                                                          |
+| Mail server       | Administration → Mail                        | `[mail.smtp]` (seed; `[meetings.smtp]` if that is missing)                                                                             |
+| Calendar (CalDAV) | Administration → Calendar                    | `[meetings.caldav]` (seed); `[meetings]` itself is bootstrap                                                                           |
+| Instance settings | Administration → Settings                    | `[policy]`, `[notifications]`, `[shares]`, `[limits]`, `[integration]`, `[local_accounts]`, `[mail]` texts, `[meetings]` texts (seeds) |
+| Signed policy     | Security, Retention, Updates, Backgrounds, … | none: owner-signed, see §2.3                                                                                                           |
+
+### 6.1 Brands
+
+Admins list, create, edit and delete brands (docs/branding.md §2.1): display name, organization name,
+host names, e-mail domains, colors for the light and dark theme (with a live preview and a contrast
+check), login title and text per language, support/privacy/terms/imprint links, the mail sender
+(name and From address) and the images (logo, icon, favicon, each with a dark variant), which are
+kept in the object storage. Brands of the configuration file are shown as "from configuration file"
+and are read-only; "Take over into the database" copies one (with its images) into the database,
+where it can be edited. Deleting a database brand that replaced a configuration brand brings the
+configuration brand back.
+
+**Host names** are bootstrap: the reverse proxy and TLS layer must route and certify every host name,
+so a brand can only use host names the server is deployed for, `[branding].served_hostnames` plus the
+host names of `[[brands]]`. The console shows each served host name with the brand it selects now
+(or none). A per-brand content security policy and extra connect origins stay in the file: they
+widen what the web client may load and talk to.
+
+### 6.2 Mail server and calendar
+
+All mail the server sends (invitations, activations, digests, meeting invitations, test mail) goes
+through one SMTP server: host, port, security (STARTTLS, TLS, or none for a server on the same
+machine only), user, password, default sender address and name. Brands may have their own sender
+(§6.1). The page shows the delivery status since the start (last success, last failure and its
+error) and sends a test mail. The CalDAV calendar of meetings has URL, account, password and the
+optional free/busy URL template, and a connection test; it needs `[meetings]`.
+
+**Passwords are write-only.** They are never sent back (the console sees "has password"). Before they
+reach the database they are encrypted with the server's **settings key** (XChaCha20-Poly1305 under a
+key derived with HKDF from `[secrets] key` or the file `[secrets] key_path`, which the server creates
+on first start; the setting's name is the associated data). This keeps them out of database dumps
+and backups. It is not end-to-end encryption: the server must hold the plaintext to log in to those
+services. Without a settings key passwords can only be set in the configuration file, and the console
+says so. Losing the key means entering the passwords again.
+
+### 6.3 Instance settings
+
+Groups that are stored and reset as a whole:
+
+| Group            | Values                                                                                                                                        |
+|------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members                                                           |
+| `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
+| `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
+| `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |
+| `limits`         | attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
+| `integration`    | default retention of integration channels                                                                                                     |
+| `local_accounts` | second factor required, activation and session lifetime, failed attempts, lockout                                                             |
+| `mail_texts`     | invitation and activation mail                                                                                                                |
+| `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
+
+**Signed or not.** Settings that member clients must be able to verify against a compromised server
+are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org
+recovery, history and retention defaults, session rules, directory privacy, presence, threads, guest
+rules (allowed e-mail domains, default expiry, DMs only with shared conversations), the shortest
+password, push content, call backgrounds and desktop updates. Everything in this section is enforced
+by the server alone (the server sends the mail, checks the sizes, applies invites): a compromised
+server could ignore these settings whether they were signed or not, so a signature would protect
+nothing. Brands, mail and calendar are server-side presentation and transport for the same reason.
+
+### 6.4 What deliberately stays in the configuration file
+
+| Setting                                                           | Why                                                                                                  |
+|-------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| `[server]`, `[database]`, `[logging]`                             | needed before the database can be read                                                               |
+| `[oidc]` (issuer, clients, roles, sync)                           | sign-in itself depends on it; a mistake would lock every admin out                                   |
+| `[storage]` endpoint and keys                                     | brand images and attachments live there; also needed to start                                        |
+| `[branding]` served host names, unknown host policy, proxies      | must match the reverse proxy and its certificates                                                    |
+| `[web]` and per-brand content security policies                   | widen what the web client may load; a console mistake could open it up                               |
+| `[security]` request limits, rate limits, `trust_forwarded_for`   | must match the proxy in front; wrong values block everybody                                          |
+| `[gateway]`, `[rendezvous]`, protocol `[limits]`                  | tuning of connections and message, MLS and key sizes, not policy                                     |
+| `[retention]` job and `[presence]` intervals, scheduler intervals | operational tuning; read when the jobs start                                                         |
+| `[push]` credentials and the push gateway URL and key             | the store apps register against the gateway of their publisher; changing it re-registers every phone |
+| `[calls]` SFU URL, signing key, tokens                            | shared with the SFU's own configuration                                                              |
+| `[meetings]` base URL, guest token secret, inbox token            | secrets shared with other components, and the base of every join link                                |
+| `[local_accounts]` on/off and session secret                      | the password hashing setup is built at start                                                         |
+| `[secrets]`                                                       | the key that protects the console's passwords cannot live next to them                               |

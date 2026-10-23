@@ -179,6 +179,13 @@ impl ApiError {
     }
   }
 
+  pub fn brand_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::BrandNotFound,
+      what: "brand",
+    }
+  }
+
   pub fn brand_asset_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::BrandAssetNotFound,

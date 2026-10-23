@@ -1,14 +1,15 @@
 //! Brands (docs/branding.md): several host names, each with its own presentation.
 //!
-//! The registry is built once at startup from `[branding]` and `[[brands]]` and is read-only
-//! afterwards. A request gets its brand from the host name alone, matched exactly against the
-//! configured list; nothing the client sends besides `Host` (and `X-Forwarded-Host` behind a trusted
-//! proxy) takes part, and the received host is never copied into a response.
+//! A registry is built from `[branding]`, the `[[brands]]` of the configuration file and the brands
+//! admins made in the console (stored in the database), and replaced as a whole when an admin
+//! changes one. A request gets its brand from the host name alone, matched exactly against the
+//! brands' host names; nothing the client sends besides `Host` (and `X-Forwarded-Host` behind a
+//! trusted proxy) takes part, and the received host is never copied into a response.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
@@ -17,9 +18,10 @@ use axum::http::{HeaderMap, HeaderValue, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use teamcraft_proto::{
-  BrandAssetSlot, BrandColors, BrandLinks, BrandResponse, BrandSummary, brand_color_properties,
+  BrandAssetSlot, BrandColors, BrandLinks, BrandResponse, BrandSource, BrandSummary, brand_color_properties,
   is_brand_hex_color,
 };
+use time::OffsetDateTime;
 
 use crate::config::{BrandConfig, BrandMailConfig, BrandingConfig, MailConfig, UnknownHostPolicy, WebConfig};
 use crate::error::ApiError;
@@ -30,6 +32,8 @@ const BUILTIN_BRAND_ID: &str = "teamcraft";
 const BUILTIN_DISPLAY_NAME: &str = "TeamCraft";
 const MAX_BRAND_ID_LEN: usize = 32;
 const MAX_TEXT_CHARS: usize = 200;
+/// Most host names and e-mail domains of one brand.
+const MAX_LIST_ENTRIES: usize = 50;
 const ASSET_EXTENSIONS: &[(&str, &str)] = &[
   ("svg", "image/svg+xml"),
   ("png", "image/png"),
@@ -39,6 +43,41 @@ const ASSET_EXTENSIONS: &[(&str, &str)] = &[
   ("ico", "image/x-icon"),
 ];
 
+/// The brands in force, replaced as a whole when an admin changes one.
+pub struct BrandStore {
+  inputs: BrandInputs,
+  current: RwLock<Arc<BrandRegistry>>,
+  /// The brands from the database, with their image bytes, as the registry in force was built from.
+  database: RwLock<Vec<DatabaseBrand>>,
+}
+
+/// What every registry is built from besides the database brands.
+#[derive(Debug, Clone, Default)]
+pub struct BrandInputs {
+  pub branding: BrandingConfig,
+  pub config_brands: Vec<BrandConfig>,
+  pub web: WebConfig,
+  pub mail: MailConfig,
+}
+
+/// A brand made or taken over in the admin console, with its images.
+#[derive(Debug, Clone)]
+pub struct DatabaseBrand {
+  /// The settings; image file names are unused (the images are in `assets`).
+  pub config: BrandConfig,
+  pub updated_at: OffsetDateTime,
+  /// Image by slot name, with its object storage key.
+  pub assets: BTreeMap<String, StoredAsset>,
+}
+
+/// An image of a database brand.
+#[derive(Debug, Clone)]
+pub struct StoredAsset {
+  pub object_key: String,
+  pub content_type: &'static str,
+  pub bytes: Bytes,
+}
+
 /// The brands of this server and how a host name selects one.
 #[derive(Debug)]
 pub struct BrandRegistry {
@@ -47,12 +86,21 @@ pub struct BrandRegistry {
   default: Arc<Brand>,
   unknown_host: UnknownHostPolicy,
   trusted_proxies: Vec<IpAddr>,
+  /// Host names brands may use: `[branding].served_hostnames` and those of `[[brands]]`.
+  served_hostnames: BTreeSet<String>,
 }
 
 /// One validated brand with everything precomputed that is served unchanged.
 #[derive(Debug)]
 pub struct Brand {
   pub id: String,
+  pub source: BrandSource,
+  pub is_default: bool,
+  /// A database brand that replaces the configuration brand with the same id.
+  pub is_overriding_config: bool,
+  pub maybe_updated_at: Option<OffsetDateTime>,
+  /// The settings it was built from (image file names aside).
+  pub config: BrandConfig,
   pub display_name: String,
   /// Canonical host name: the first configured one, empty if the brand has none.
   pub canonical_host: String,
@@ -96,6 +144,51 @@ pub enum BrandError {
   },
 }
 
+impl BrandStore {
+  /// The configuration's brands only; database brands are added with [`Self::install`].
+  pub fn new(inputs: BrandInputs) -> Result<Self, BrandError> {
+    let registry = BrandRegistry::build_with(&inputs, &[])?;
+    Ok(Self {
+      inputs,
+      current: RwLock::new(Arc::new(registry)),
+      database: RwLock::new(Vec::new()),
+    })
+  }
+
+  /// The registry in force.
+  pub fn current(&self) -> Arc<BrandRegistry> {
+    self
+      .current
+      .read()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+  }
+
+  /// The database brands the registry in force was built from.
+  pub fn database_brands(&self) -> Vec<DatabaseBrand> {
+    self
+      .database
+      .read()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+  }
+
+  pub fn inputs(&self) -> &BrandInputs {
+    &self.inputs
+  }
+
+  /// Builds the registry these database brands would give, without putting it in force.
+  pub fn check(&self, database: &[DatabaseBrand]) -> Result<BrandRegistry, BrandError> {
+    BrandRegistry::build_with(&self.inputs, database)
+  }
+
+  /// Puts a checked registry and the database brands it was built from in force.
+  pub fn install(&self, registry: BrandRegistry, database: Vec<DatabaseBrand>) {
+    *self.database.write().unwrap_or_else(PoisonError::into_inner) = database;
+    *self.current.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(registry);
+  }
+}
+
 impl BrandRegistry {
   /// Validates the configuration and reads the asset files.
   pub fn build(
@@ -104,21 +197,67 @@ impl BrandRegistry {
     web: &WebConfig,
     mail: &MailConfig,
   ) -> Result<Self, BrandError> {
-    let built = if brands.is_empty() {
-      vec![Arc::new(builtin_brand(web, mail)?)]
-    } else {
-      brands
-        .iter()
-        .map(|config| Brand::build(config, branding, web).map(Arc::new))
-        .collect::<Result<Vec<_>, _>>()?
+    let inputs = BrandInputs {
+      branding: branding.clone(),
+      config_brands: brands.to_vec(),
+      web: web.clone(),
+      mail: mail.clone(),
     };
-    let mut defaults = built
-      .iter()
-      .zip(brands_or_builtin(brands))
-      .filter(|(_, is_default)| *is_default);
+    Self::build_with(&inputs, &[])
+  }
+
+  /// The configuration's brands, replaced or extended by the database brands. A database brand is
+  /// the default if it says so; else the configuration's default; else (without configured brands)
+  /// the built-in one.
+  pub fn build_with(inputs: &BrandInputs, database: &[DatabaseBrand]) -> Result<Self, BrandError> {
+    let BrandInputs {
+      branding,
+      config_brands,
+      web,
+      mail,
+    } = inputs;
+    let served_hostnames = served_hostnames(branding, config_brands)?;
+    let stored_ids: HashSet<&str> = database.iter().map(|brand| brand.config.id.as_str()).collect();
+    let config_ids: HashSet<&str> = config_brands.iter().map(|brand| brand.id.as_str()).collect();
+    let has_stored_default = database.iter().any(|brand| brand.config.is_default);
+    let mut built = Vec::new();
+    for config in config_brands {
+      if stored_ids.contains(config.id.as_str()) {
+        continue;
+      }
+      let mut config = config.clone();
+      config.is_default &= !has_stored_default;
+      let assets = load_assets(&config, branding, &config.id)?;
+      built.push(Brand::build(&config, assets, web, BrandOrigin::Config)?);
+    }
+    for stored in database {
+      check_served(&stored.config, &served_hostnames)?;
+      let assets = stored_assets(&stored.assets, &stored.config.id)?;
+      let origin = BrandOrigin::Database {
+        is_overriding_config: config_ids.contains(stored.config.id.as_str()),
+        updated_at: stored.updated_at,
+      };
+      built.push(Brand::build(&stored.config, assets, web, origin)?);
+    }
+    if config_brands.is_empty() && !built.iter().any(|brand| brand.is_default) {
+      built.push(builtin_brand(web, mail)?);
+    }
+    Self::assemble(
+      built.into_iter().map(Arc::new).collect(),
+      branding,
+      served_hostnames,
+    )
+  }
+
+  fn assemble(
+    built: Vec<Arc<Brand>>,
+    branding: &BrandingConfig,
+    served_hostnames: BTreeSet<String>,
+  ) -> Result<Self, BrandError> {
+    let mut defaults = built.iter().filter(|brand| brand.is_default);
     let default = defaults
       .next()
-      .map(|(brand, _)| Arc::clone(brand))
+      .map(Arc::clone)
       .ok_or_else(|| BrandError::Invalid("exactly one brand needs is_default = true".into()))?;
     if defaults.next().is_some() {
       return Err(BrandError::Invalid(
@@ -126,7 +265,7 @@ impl BrandRegistry {
       ));
     }
     let mut by_host = HashMap::new();
-    let mut ids = std::collections::HashSet::new();
+    let mut ids = HashSet::new();
     for brand in &built {
       if !ids.insert(brand.id.clone()) {
         return Err(BrandError::Invalid(format!(
@@ -157,6 +296,7 @@ impl BrandRegistry {
         .iter()
         .map(IpAddr::to_canonical)
         .collect(),
+      served_hostnames,
     })
   }
 
@@ -167,6 +307,22 @@ impl BrandRegistry {
     Self::build(&BrandingConfig::default(), &[], &web, &MailConfig::default())
       // Invariant: the built-in brand is valid by construction (covered by a test).
       .expect("the built-in brand is valid")
+  }
+
+  /// Every brand, default first.
+  pub fn brands(&self) -> Vec<&Arc<Brand>> {
+    let mut brands: Vec<&Arc<Brand>> = self.brands.iter().collect();
+    brands.sort_by_key(|brand| brand.id != self.default.id);
+    brands
+  }
+
+  /// Host names brands may use, each with the brand it selects now.
+  pub fn served_hostnames(&self) -> Vec<(String, Option<String>)> {
+    self
+      .served_hostnames
+      .iter()
+      .map(|host| (host.clone(), self.by_host.get(host).map(|brand| brand.id.clone())))
+      .collect()
   }
 
   /// Which brand serves a request with this host, and whether the host is one the brand lists.
@@ -188,9 +344,8 @@ impl BrandRegistry {
 
   /// Every brand, default first, for the signed-in list.
   pub fn summaries(&self) -> Vec<BrandSummary> {
-    let mut brands: Vec<&Arc<Brand>> = self.brands.iter().collect();
-    brands.sort_by_key(|brand| brand.id != self.default.id);
-    brands
+    self
+      .brands()
       .into_iter()
       .map(|brand| BrandSummary {
         id: brand.id.clone(),
@@ -255,7 +410,12 @@ impl BrandRegistry {
 }
 
 impl Brand {
-  fn build(config: &BrandConfig, branding: &BrandingConfig, web: &WebConfig) -> Result<Self, BrandError> {
+  fn build(
+    config: &BrandConfig,
+    assets: HashMap<String, BrandAsset>,
+    web: &WebConfig,
+    origin: BrandOrigin,
+  ) -> Result<Self, BrandError> {
     let id = config.id.clone();
     let invalid = |message: String| BrandError::Invalid(format!("brand {id:?}: {message}"));
     if id.is_empty()
@@ -270,6 +430,18 @@ impl Brand {
     }
     if config.display_name.trim().is_empty() || config.display_name.chars().count() > MAX_TEXT_CHARS {
       return Err(invalid("display_name is empty or too long".into()));
+    }
+    if config.hostnames.len() > MAX_LIST_ENTRIES || config.email_domains.len() > MAX_LIST_ENTRIES {
+      return Err(invalid(format!(
+        "at most {MAX_LIST_ENTRIES} host names and e-mail domains"
+      )));
+    }
+    if let Some(name) = &config.maybe_organization_name
+      && (name.trim().is_empty()
+        || name.chars().count() > MAX_TEXT_CHARS
+        || name.chars().any(char::is_control))
+    {
+      return Err(invalid("organization_name must be short single-line text".into()));
     }
     if !config.is_default && config.hostnames.is_empty() {
       return Err(invalid(
@@ -335,11 +507,11 @@ impl Brand {
       light: checked_colors(&config.colors.light, &id)?,
       dark: checked_colors(&config.colors.dark, &id)?,
     };
-    let assets = load_assets(config, branding, &id)?;
     let canonical_host = config.hostnames.first().cloned().unwrap_or_default();
     let response = BrandResponse {
       id: id.clone(),
       display_name: config.display_name.clone(),
+      maybe_organization_name: config.maybe_organization_name.clone(),
       origin: origin_of(&canonical_host),
       assets: assets
         .keys()
@@ -350,9 +522,22 @@ impl Brand {
       login_text: config.login_text.clone(),
       links,
     };
+    let (source, is_overriding_config, maybe_updated_at) = match origin {
+      BrandOrigin::Builtin => (BrandSource::Builtin, false, None),
+      BrandOrigin::Config => (BrandSource::Config, false, None),
+      BrandOrigin::Database {
+        is_overriding_config,
+        updated_at,
+      } => (BrandSource::Database, is_overriding_config, Some(updated_at)),
+    };
     Ok(Self {
       content_security_policy: brand_policy(config, web, &id)?,
       theme_css: theme_css(&colors),
+      source,
+      is_default: config.is_default,
+      is_overriding_config,
+      maybe_updated_at,
+      config: config.clone(),
       id,
       display_name: config.display_name.clone(),
       canonical_host,
@@ -367,6 +552,17 @@ impl Brand {
   /// The image of a slot, if the brand has one.
   pub fn asset(&self, slot: &BrandAssetSlot) -> Option<&BrandAsset> {
     self.assets.get(slot.as_str())
+  }
+
+  /// The slots that have an image.
+  pub fn asset_slots(&self) -> Vec<BrandAssetSlot> {
+    let mut slots: Vec<BrandAssetSlot> = self
+      .assets
+      .keys()
+      .map(|slot| BrandAssetSlot::from(slot.clone()))
+      .collect();
+    slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    slots
   }
 
   /// The base URL links in mail are built on: the brand's own origin, else `fallback`.
@@ -432,19 +628,22 @@ impl<S: Send + Sync> FromRequestParts<S> for ResolvedBrand {
 
 /// Middleware: selects the brand of the request and refuses unknown hosts when so configured.
 pub async fn resolve_brand(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-  let registry = &state.brands;
-  let maybe_peer = request
-    .extensions()
-    .get::<ConnectInfo<SocketAddr>>()
-    .map(|ConnectInfo(peer)| peer.ip());
-  let host = registry.request_host(request.headers(), request.uri(), maybe_peer);
-  let resolved = registry.resolve(host.as_deref());
-  if !resolved.is_known_host
-    && registry.unknown_host_policy() == UnknownHostPolicy::Reject
-    && !is_host_independent(request.uri().path())
-  {
-    return ApiError::UnknownHost.into_response();
-  }
+  let resolved = {
+    let registry = state.brands.current();
+    let maybe_peer = request
+      .extensions()
+      .get::<ConnectInfo<SocketAddr>>()
+      .map(|ConnectInfo(peer)| peer.ip());
+    let host = registry.request_host(request.headers(), request.uri(), maybe_peer);
+    let resolved = registry.resolve(host.as_deref());
+    if !resolved.is_known_host
+      && registry.unknown_host_policy() == UnknownHostPolicy::Reject
+      && !is_host_independent(request.uri().path())
+    {
+      return ApiError::UnknownHost.into_response();
+    }
+    resolved
+  };
   request.extensions_mut().insert(resolved);
   next.run(request).await
 }
@@ -456,6 +655,64 @@ fn is_host_independent(path: &str) -> bool {
     || path == "/readyz"
     || path == "/api/v1/auth/backchannel-logout"
     || path.starts_with("/api/internal/")
+}
+
+/// The content type of an uploaded brand image, judged by its first bytes; `None` for anything that
+/// is not PNG, JPEG, WebP, ICO or SVG, or does not match the type the uploader declared.
+pub fn sniff_image(bytes: &[u8], declared: &str) -> Option<&'static str> {
+  let declared = declared
+    .split(';')
+    .next()
+    .unwrap_or_default()
+    .trim()
+    .to_ascii_lowercase();
+  let sniffed = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    "image/png"
+  } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+    "image/jpeg"
+  } else if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+    "image/webp"
+  } else if bytes.starts_with(&[0, 0, 1, 0]) {
+    "image/x-icon"
+  } else if is_svg(bytes) {
+    "image/svg+xml"
+  } else {
+    return None;
+  };
+  let is_declared = declared == sniffed
+    || (sniffed == "image/x-icon" && declared == "image/vnd.microsoft.icon")
+    || (sniffed == "image/jpeg" && declared == "image/jpg");
+  is_declared.then_some(sniffed)
+}
+
+/// UTF-8 text whose first element is `<svg` (after an optional XML declaration, comments, a doctype
+/// and white space). It is only ever shown through `<img>` and served under a locked-down policy.
+fn is_svg(bytes: &[u8]) -> bool {
+  let Ok(text) = std::str::from_utf8(bytes) else {
+    return false;
+  };
+  let mut rest = text.trim_start_matches('\u{feff}').trim_start();
+  loop {
+    if let Some(after) = rest.strip_prefix("<?") {
+      let Some((_, tail)) = after.split_once("?>") else {
+        return false;
+      };
+      rest = tail.trim_start();
+    } else if let Some(after) = rest.strip_prefix("<!--") {
+      let Some((_, tail)) = after.split_once("-->") else {
+        return false;
+      };
+      rest = tail.trim_start();
+    } else if let Some(after) = rest.strip_prefix("<!DOCTYPE") {
+      let Some((_, tail)) = after.split_once('>') else {
+        return false;
+      };
+      rest = tail.trim_start();
+    } else {
+      return rest.starts_with("<svg") && rest.contains("</svg>")
+        || rest.starts_with("<svg") && rest.contains("/>");
+    }
+  }
 }
 
 /// Lower-cases a host name, drops a port and a trailing dot, and accepts DNS names only: no IP
@@ -501,18 +758,86 @@ fn builtin_brand(web: &WebConfig, mail: &MailConfig) -> Result<Brand, BrandError
     display_name: BUILTIN_DISPLAY_NAME.into(),
     ..BrandConfig::default()
   };
-  let mut brand = Brand::build(&config, &BrandingConfig::default(), web)?;
+  let mut brand = Brand::build(&config, HashMap::new(), web, BrandOrigin::Builtin)?;
   // Without brands the base URL of the mail settings is the only address the server knows.
   brand.response.origin = mail.public_base_url.trim_end_matches('/').to_owned();
   Ok(brand)
 }
 
-fn brands_or_builtin(brands: &[BrandConfig]) -> Vec<bool> {
-  if brands.is_empty() {
-    vec![true]
-  } else {
-    brands.iter().map(|brand| brand.is_default).collect()
+/// Where a brand being built comes from.
+enum BrandOrigin {
+  Builtin,
+  Config,
+  Database {
+    is_overriding_config: bool,
+    updated_at: OffsetDateTime,
+  },
+}
+
+/// `[branding].served_hostnames` and the host names of `[[brands]]`: the names the proxy serves.
+fn served_hostnames(
+  branding: &BrandingConfig,
+  config_brands: &[BrandConfig],
+) -> Result<BTreeSet<String>, BrandError> {
+  let mut served = BTreeSet::new();
+  for host in &branding.served_hostnames {
+    if normalize_host(host).as_deref() != Some(host.as_str()) {
+      return Err(BrandError::Invalid(format!(
+        "branding.served_hostnames: {host:?} must be a lower-case DNS name without port, scheme or path"
+      )));
+    }
+    served.insert(host.clone());
   }
+  served.extend(
+    config_brands
+      .iter()
+      .flat_map(|brand| brand.hostnames.iter().cloned()),
+  );
+  Ok(served)
+}
+
+/// A database brand may only use host names the server is deployed for.
+fn check_served(config: &BrandConfig, served: &BTreeSet<String>) -> Result<(), BrandError> {
+  match config.hostnames.iter().find(|host| !served.contains(*host)) {
+    Some(host) => Err(BrandError::Invalid(format!(
+      "brand {:?}: host name {host:?} is not served by this server (add it to [branding].served_hostnames and the proxy)",
+      config.id
+    ))),
+    None => Ok(()),
+  }
+}
+
+/// The images of a database brand, ready to serve.
+fn stored_assets(
+  stored: &BTreeMap<String, StoredAsset>,
+  brand: &str,
+) -> Result<HashMap<String, BrandAsset>, BrandError> {
+  stored
+    .iter()
+    .map(|(slot, asset)| {
+      let etag = asset_etag(&asset.bytes).ok_or_else(|| BrandError::Asset {
+        brand: brand.to_owned(),
+        name: slot.clone(),
+        reason: "cannot compute a validator".into(),
+      })?;
+      Ok((
+        slot.clone(),
+        BrandAsset {
+          bytes: asset.bytes.clone(),
+          content_type: asset.content_type,
+          etag,
+        },
+      ))
+    })
+    .collect()
+}
+
+fn asset_etag(bytes: &[u8]) -> Option<HeaderValue> {
+  HeaderValue::from_str(&format!(
+    "\"{}\"",
+    teamcraft_crypto::account::subresource_integrity(bytes)
+  ))
+  .ok()
 }
 
 fn origin_of(host: &str) -> String {
@@ -629,11 +954,7 @@ fn load_assets(
       .as_deref()
       .ok_or_else(|| fail("[branding].assets_dir is not set".into()))?;
     let (bytes, content_type) = read_asset(dir, name, branding.max_asset_bytes).map_err(fail)?;
-    let etag = HeaderValue::from_str(&format!(
-      "\"{}\"",
-      teamcraft_crypto::account::subresource_integrity(&bytes)
-    ))
-    .map_err(|_| fail("cannot compute a validator".into()))?;
+    let etag = asset_etag(&bytes).ok_or_else(|| fail("cannot compute a validator".into()))?;
     assets.insert(
       slot.as_str().to_owned(),
       BrandAsset {
@@ -1056,6 +1377,108 @@ mod tests {
       );
       let local = self::registry(&[brand("l", &["localhost"], true)], UnknownHostPolicy::Default).unwrap();
       assert_eq!(local.default_brand().origin(), "http://localhost");
+    }
+  }
+
+  mod database_brands {
+    use super::*;
+
+    fn inputs(served: &[&str]) -> BrandInputs {
+      BrandInputs {
+        branding: BrandingConfig {
+          served_hostnames: served.iter().map(|h| (*h).to_owned()).collect(),
+          ..BrandingConfig::default()
+        },
+        config_brands: two_brands(),
+        web: WebConfig::default(),
+        mail: MailConfig::default(),
+      }
+    }
+
+    fn stored(config: BrandConfig) -> DatabaseBrand {
+      DatabaseBrand {
+        config,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        assets: BTreeMap::new(),
+      }
+    }
+
+    #[test]
+    fn a_stored_brand_replaces_the_configured_one_with_its_id() {
+      let mut replacement = brand("b", &["chat.b.example.com"], false);
+      replacement.display_name = "Brand B, edited".into();
+      let registry = BrandRegistry::build_with(&inputs(&[]), &[stored(replacement)]).unwrap();
+      let b = registry.by_id("b").unwrap();
+      assert_eq!(b.display_name, "Brand B, edited");
+      assert_eq!(b.source, BrandSource::Database);
+      assert!(b.is_overriding_config);
+      assert_eq!(registry.by_id("a").unwrap().source, BrandSource::Config);
+    }
+
+    #[test]
+    fn only_served_host_names_and_one_default() {
+      let unserved = stored(brand("c", &["chat.c.example.com"], false));
+      assert!(BrandRegistry::build_with(&inputs(&[]), std::slice::from_ref(&unserved)).is_err());
+      let registry = BrandRegistry::build_with(&inputs(&["chat.c.example.com"]), &[unserved]).unwrap();
+      assert_eq!(registry.resolve(Some("chat.c.example.com")).brand.id, "c");
+      assert!(
+        registry
+          .served_hostnames()
+          .contains(&("chat.c.example.com".to_owned(), Some("c".to_owned())))
+      );
+      // A stored default takes the role from the configuration's.
+      let default = stored(brand("c", &["chat.c.example.com"], true));
+      let registry = BrandRegistry::build_with(&inputs(&["chat.c.example.com"]), &[default]).unwrap();
+      assert_eq!(registry.default_brand().id, "c");
+      assert!(!registry.by_id("a").unwrap().is_default);
+      // A host name of a configured brand cannot be taken.
+      let thief = stored(brand("c", &["chat.a.example.com"], false));
+      assert!(BrandRegistry::build_with(&inputs(&[]), &[thief]).is_err());
+    }
+
+    #[test]
+    fn without_configured_brands_the_builtin_stays_default_until_replaced() {
+      let inputs = BrandInputs {
+        branding: BrandingConfig {
+          served_hostnames: vec!["chat.c.example.com".into()],
+          ..BrandingConfig::default()
+        },
+        ..BrandInputs::default()
+      };
+      let extra = stored(brand("c", &["chat.c.example.com"], false));
+      let registry = BrandRegistry::build_with(&inputs, &[extra]).unwrap();
+      assert_eq!(registry.default_brand().source, BrandSource::Builtin);
+      let default = stored(brand("c", &["chat.c.example.com"], true));
+      let registry = BrandRegistry::build_with(&inputs, &[default]).unwrap();
+      assert!(registry.by_id(BUILTIN_BRAND_ID).is_none());
+    }
+
+    #[test]
+    fn uploaded_images_are_sniffed_and_must_match_the_declared_type() {
+      assert_eq!(
+        sniff_image(b"\x89PNG\r\n\x1a\nrest", "image/png"),
+        Some("image/png")
+      );
+      assert_eq!(
+        sniff_image(&[0xff, 0xd8, 0xff, 0xe0], "image/jpg"),
+        Some("image/jpeg")
+      );
+      assert_eq!(
+        sniff_image(b"RIFF\0\0\0\0WEBPVP8 ", "image/webp"),
+        Some("image/webp")
+      );
+      assert_eq!(
+        sniff_image(&[0, 0, 1, 0, 1], "image/vnd.microsoft.icon"),
+        Some("image/x-icon")
+      );
+      let svg = b"<?xml version=\"1.0\"?>\n<!-- logo --><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+      assert_eq!(
+        sniff_image(svg, "image/svg+xml; charset=utf-8"),
+        Some("image/svg+xml")
+      );
+      assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\n", "image/jpeg"), None);
+      assert_eq!(sniff_image(b"<html><svg/></html>", "image/svg+xml"), None);
+      assert_eq!(sniff_image(b"", "image/png"), None);
     }
   }
 

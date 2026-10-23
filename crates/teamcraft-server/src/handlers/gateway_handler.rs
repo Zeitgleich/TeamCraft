@@ -13,7 +13,7 @@ pub async fn gateway_handler(
   Extension(ClientIp(ip)): Extension<ClientIp>,
   upgrade: WebSocketUpgrade,
 ) -> Response {
-  let max_frame_bytes = state.settings.gateway.max_frame_bytes;
+  let max_frame_bytes = state.settings.get().gateway.max_frame_bytes;
   upgrade
     .max_message_size(max_frame_bytes)
     .on_upgrade(move |socket| connection::run(state, socket, ip))

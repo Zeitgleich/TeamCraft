@@ -32,7 +32,7 @@ pub async fn send_message(
   let access = load_conversation(state, caller, conversation).await?;
   require(state, caller, Permission::CreatePost, &access.target())?;
 
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   if request.ciphertext.is_empty() {
     return Err(ApiError::InvalidRequest("ciphertext must not be empty".into()));
   }
@@ -166,7 +166,7 @@ pub async fn list_messages(
     return Err(ApiError::InvalidRequest("use either before or after".into()));
   }
 
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let limit = query
     .maybe_limit
     .unwrap_or(limits.default_page_size)

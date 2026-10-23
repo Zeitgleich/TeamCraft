@@ -122,7 +122,7 @@ pub(super) async fn inviter_brand(state: &AppState, user: &UserId) -> Arc<Brand>
       None
     },
   };
-  let brands = &state.brands;
+  let brands = state.brands.current();
   Arc::clone(
     maybe_email
       .as_deref()
@@ -138,14 +138,15 @@ async fn send_invite_mail(
   space_name: &str,
   invite: &teamcraft_db::Invite,
 ) {
-  let Some(mailer) = &state.maybe_mailer else {
+  let Some(mailer) = state.mailer.get() else {
     return;
   };
   // Mail goes out as the brand of the recipient's domain, else as the brand the inviter used.
   let inviter_brand = inviter_brand(state, &caller.user.id).await;
-  let brand = state.brands.for_recipient(&invite.email, &inviter_brand);
-  let url = brand.base_url(&state.settings.mail.public_base_url);
-  let (subject, body) = brand.invite_texts(&state.settings.mail);
+  let brands = state.brands.current();
+  let brand = brands.for_recipient(&invite.email, &inviter_brand);
+  let url = brand.base_url(&state.settings.get().mail.public_base_url);
+  let (subject, body) = brand.invite_texts(&state.settings.get().mail);
   let fill = |template: &str| {
     template
       .replace(
@@ -209,7 +210,7 @@ pub async fn delete_invite(
 pub fn check_guest_domain(state: &AppState, email: &str) -> Result<(), ApiError> {
   let policy = state.policy.get();
   let is_allowed = [
-    &state.settings.guests.allowed_email_domains,
+    &state.settings.get().guests.allowed_email_domains,
     &policy.guests.allowed_email_domains,
   ]
   .into_iter()

@@ -123,7 +123,7 @@ Notes:
 
 ### S3
 
-Attachments and index segments are immutable objects named by random IDs, so a plain
+Attachments, index segments and brand images are immutable objects named by random IDs, so a plain
 `rclone sync`/`mc mirror` to a second bucket, or the provider's bucket versioning and replication,
 works. The database references objects by key; a restore needs the database and the bucket from
 about the same time. Objects without a database row are garbage (an upload that never completed) and
@@ -132,8 +132,9 @@ harmless; rows without an object show up as failed downloads.
 ### Restore order after a total loss
 
 1. Postgres from the latest backup, S3 bucket from its copy.
-2. Server and SFU with the same configuration and **the same secrets** (see below), identity
-   provider reachable.
+2. Server and SFU with the same configuration and **the same secrets** (see below), including the
+   settings key (`[secrets]`; without it the mail and calendar passwords set in the console must be
+   entered again), identity provider reachable.
 3. Bridges: restore their database file (it holds the bot's keys) or re-enroll them with their
    passphrase (the bot's backup key is on the server, so a lost bridge database is recoverable).
 4. Clients reconnect and resume; devices whose rows were lost re-register.
@@ -269,18 +270,20 @@ The `[push.apns]` block is only rendered when `apns_key` is a secret.
 
 ## Secrets and key rotation
 
-| Secret                                      | Where                                      | Rotating it                                                                |
-|---------------------------------------------|--------------------------------------------|----------------------------------------------------------------------------|
-| Call join token signing key (Ed25519)       | `[calls] signing_key_path`; SFU public key | see below                                                                  |
-| SFU registration token                      | `[calls] sfu_registration_token`           | the SFU does not send reports yet; once it does, change both together      |
-| Bot tokens                                  | `POST /api/v1/admin/bots/{id}/token`       | the old token stops working immediately; update the bridge's configuration |
-| Guest token secret                          | `[meetings] guest_token_secret`            | invalidates open invite links and guest sessions; use between meetings     |
-| Mail inbox token                            | `[meetings] inbox_token`                   | change on the server and the inbox handler together                        |
-| VAPID key (Web Push)                        | `[push] vapid_private_key`                 | browsers must subscribe again; plan for a short push gap                   |
-| APNs key (`.p8`)                            | `[push.apns] key`                          | create a new key at Apple, switch, then revoke the old one; no gap         |
-| FCM service account key                     | `[push.fcm] service_account`               | create a new key in Firebase, switch, then delete the old one; no gap      |
-| OIDC server client secret                   | `[oidc.sync] client_secret`                | rotate in the identity provider, then restart the server                   |
-| Database password, S3 keys, SMTP and CalDAV | `[database]`, `[storage]`, `[meetings.*]`  | change at the provider, then in the configuration, then restart            |
+| Secret                                | Where                                      | Rotating it                                                                       |
+|---------------------------------------|--------------------------------------------|-----------------------------------------------------------------------------------|
+| Call join token signing key (Ed25519) | `[calls] signing_key_path`; SFU public key | see below                                                                         |
+| SFU registration token                | `[calls] sfu_registration_token`           | the SFU does not send reports yet; once it does, change both together             |
+| Bot tokens                            | `POST /api/v1/admin/bots/{id}/token`       | the old token stops working immediately; update the bridge's configuration        |
+| Guest token secret                    | `[meetings] guest_token_secret`            | invalidates open invite links and guest sessions; use between meetings            |
+| Mail inbox token                      | `[meetings] inbox_token`                   | change on the server and the inbox handler together                               |
+| VAPID key (Web Push)                  | `[push] vapid_private_key`                 | browsers must subscribe again; plan for a short push gap                          |
+| APNs key (`.p8`)                      | `[push.apns] key`                          | create a new key at Apple, switch, then revoke the old one; no gap                |
+| FCM service account key               | `[push.fcm] service_account`               | create a new key in Firebase, switch, then delete the old one; no gap             |
+| OIDC server client secret             | `[oidc.sync] client_secret`                | rotate in the identity provider, then restart the server                          |
+| Database password, S3 keys            | `[database]`, `[storage]`                  | change at the provider, then in the configuration, then restart                   |
+| SMTP and CalDAV passwords             | Administration → Mail / Calendar           | change at the provider, then enter the new one in the console; no restart         |
+| Settings key                          | `[secrets] key` or `key_path`              | a new key makes the stored SMTP and CalDAV passwords unreadable: enter them again |
 
 Prefer environment variables or files for secrets (`TEAMCRAFT_...`), not the TOML file; never commit
 them.

@@ -198,7 +198,10 @@ pub async fn get_read_receipts(
   if has_receipts(&access.view.conversation) {
     let members = state
       .database
-      .list_receipt_members(conversation, state.settings.notifications.read_receipts_default)
+      .list_receipt_members(
+        conversation,
+        state.settings.get().notifications.read_receipts_default,
+      )
       .await?;
     if members.iter().any(|member| member.user == caller.user.id) {
       receipts = members
@@ -233,7 +236,7 @@ pub async fn publish_read_receipt(
     .database
     .list_receipt_members(
       conversation.id,
-      state.settings.notifications.read_receipts_default,
+      state.settings.get().notifications.read_receipts_default,
     )
     .await?;
   if !members.iter().any(|member| member.user == reader) {
@@ -262,7 +265,7 @@ fn has_receipts(conversation: &Conversation) -> bool {
 pub fn receipts_enabled(state: &AppState, stored: &StoredUserSettings) -> bool {
   stored
     .maybe_send_read_receipts
-    .unwrap_or(state.settings.notifications.read_receipts_default)
+    .unwrap_or(state.settings.get().notifications.read_receipts_default)
 }
 
 /// The user's UTC offset at `unix_seconds` in minutes: from the schedule's time zone if it names
@@ -289,7 +292,7 @@ pub fn utc_offset_at(schedule: &DndSchedule, unix_seconds: i64) -> i16 {
 /// Whether desktop attention holds the user's phone pushes back: the instance allows it and the user
 /// did not turn it off.
 pub fn uses_desktop_attention(state: &AppState, maybe_choice: Option<bool>) -> bool {
-  state.settings.notifications.is_desktop_attention_enabled && maybe_choice.unwrap_or(true)
+  state.settings.get().notifications.is_desktop_attention_enabled && maybe_choice.unwrap_or(true)
 }
 
 /// Whether a conversation is muted by time at `now`.

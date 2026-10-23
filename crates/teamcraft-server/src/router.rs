@@ -8,14 +8,20 @@ use crate::brand;
 use crate::handlers::{
   acknowledge_message_handler, add_conversation_member_handler, add_space_member_handler,
   add_user_group_member_handler, admin_assign_channel_owner_handler, admin_clear_announcement_handler,
-  admin_create_bot_handler, admin_deactivate_user_handler, admin_get_channel_moderation_handler,
-  admin_get_permission_scheme_handler, admin_get_push_health_handler,
+  admin_create_bot_handler, admin_create_brand_handler, admin_deactivate_user_handler,
+  admin_delete_brand_asset_handler, admin_delete_brand_handler, admin_get_brand_asset_handler,
+  admin_get_calendar_settings_handler, admin_get_channel_moderation_handler, admin_get_mail_settings_handler,
+  admin_get_permission_scheme_handler, admin_get_push_health_handler, admin_get_settings_handler,
   admin_get_space_permission_scheme_handler, admin_instance_handler, admin_list_audit_handler,
-  admin_list_bots_handler, admin_list_conversation_members_handler, admin_list_conversations_handler,
-  admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
-  admin_list_users_handler, admin_reactivate_user_handler, admin_reissue_local_activation_handler,
+  admin_list_bots_handler, admin_list_brands_handler, admin_list_conversation_members_handler,
+  admin_list_conversations_handler, admin_list_space_members_handler, admin_list_spaces_handler,
+  admin_list_user_devices_handler, admin_list_users_handler, admin_put_brand_asset_handler,
+  admin_put_calendar_settings_handler, admin_put_mail_settings_handler, admin_put_settings_handler,
+  admin_reactivate_user_handler, admin_reissue_local_activation_handler,
+  admin_reset_calendar_settings_handler, admin_reset_mail_settings_handler, admin_reset_settings_handler,
   admin_revoke_bot_handler, admin_revoke_device_handler, admin_rotate_bot_token_handler,
-  admin_set_announcement_handler, admin_set_channel_moderation_handler,
+  admin_send_test_mail_handler, admin_set_announcement_handler, admin_set_channel_moderation_handler,
+  admin_take_over_brand_handler, admin_test_calendar_handler, admin_update_brand_handler,
   admin_update_permission_scheme_handler, admin_update_space_permission_scheme_handler, admit_guest_handler,
   append_policy_handler, append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
   cancel_meeting_handler, cancel_recovery_request_handler, change_local_password_handler,
@@ -145,6 +151,43 @@ pub fn router(state: AppState) -> Router {
       "/admin/announcement",
       put(admin_set_announcement_handler).delete(admin_clear_announcement_handler),
     )
+    .route(
+      "/admin/brands",
+      get(admin_list_brands_handler).post(admin_create_brand_handler),
+    )
+    .route(
+      "/admin/brands/{brand_id}",
+      put(admin_update_brand_handler).delete(admin_delete_brand_handler),
+    )
+    .route(
+      "/admin/brands/{brand_id}/take-over",
+      post(admin_take_over_brand_handler),
+    )
+    .route(
+      "/admin/brands/{brand_id}/assets/{slot}",
+      get(admin_get_brand_asset_handler)
+        .put(admin_put_brand_asset_handler)
+        .delete(admin_delete_brand_asset_handler),
+    )
+    .route(
+      "/admin/settings",
+      get(admin_get_settings_handler).put(admin_put_settings_handler),
+    )
+    .route(
+      "/admin/settings/mail",
+      get(admin_get_mail_settings_handler)
+        .put(admin_put_mail_settings_handler)
+        .delete(admin_reset_mail_settings_handler),
+    )
+    .route("/admin/settings/mail/test", post(admin_send_test_mail_handler))
+    .route(
+      "/admin/settings/calendar",
+      get(admin_get_calendar_settings_handler)
+        .put(admin_put_calendar_settings_handler)
+        .delete(admin_reset_calendar_settings_handler),
+    )
+    .route("/admin/settings/calendar/test", post(admin_test_calendar_handler))
+    .route("/admin/settings/{section}", delete(admin_reset_settings_handler))
     .route(
       "/conversations/{conversation_id}/system-events",
       get(list_system_events_handler),
@@ -498,9 +541,9 @@ pub fn router(state: AppState) -> Router {
     .route("/readyz", get(readyz_handler))
     .nest("/api/v1", api_v1)
     .nest("/api/internal/v1", internal)
-    .fallback_service(web::router(&state.settings.web))
+    .fallback_service(web::router(&state.settings.get().web))
     .layer(DefaultBodyLimit::max(
-      state.settings.security.max_request_body_bytes,
+      state.settings.get().security.max_request_body_bytes,
     ))
     .layer(middleware::from_fn_with_state(
       state.clone(),

@@ -22,7 +22,7 @@ pub async fn register_device(
   let name = validate_name(
     &request.name,
     "device name",
-    state.settings.limits.max_name_length,
+    state.settings.get().limits.max_name_length,
   )?;
   if request.public_key.is_empty() || request.public_key.len() > MAX_KEY_BYTES {
     return Err(ApiError::InvalidRequest("public_key has an invalid size".into()));
@@ -33,7 +33,7 @@ pub async fn register_device(
     ));
   }
 
-  let limit = state.settings.limits.max_devices_per_user;
+  let limit = state.settings.get().limits.max_devices_per_user;
   if state.database.count_active_devices(caller.user.id).await? >= limit as u64 {
     return Err(ApiError::Conflict(format!(
       "at most {limit} devices per user; remove one first"
@@ -169,8 +169,11 @@ pub async fn register_push(
   ) {
     // The server will POST to the endpoint (UnifiedPush registrations use the Web Push subscription
     // format); check it now rather than at the first message.
-    crate::push::WebPushSubscription::parse(&request.token, state.settings.push.allow_private_endpoints)
-      .map_err(|error| ApiError::InvalidRequest(format!("invalid push subscription: {error}")))?;
+    crate::push::WebPushSubscription::parse(
+      &request.token,
+      state.settings.get().push.allow_private_endpoints,
+    )
+    .map_err(|error| ApiError::InvalidRequest(format!("invalid push subscription: {error}")))?;
   }
   let stored = state
     .database

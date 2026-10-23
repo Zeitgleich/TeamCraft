@@ -29,7 +29,7 @@ pub async fn schedule_reminders(
   message: &StoredMessage,
   now: OffsetDateTime,
 ) -> Result<(), ApiError> {
-  let settings = &state.settings.notifications;
+  let settings = &state.settings.get().notifications;
   let is_direct = matches!(kind, ConversationKind::Dm | ConversationKind::Group);
   if !message.is_urgent || !is_direct || settings.urgent_max_pushes <= 1 {
     return Ok(());
@@ -49,7 +49,7 @@ pub async fn schedule_reminders(
 
 /// Pushes every urgent direct message that is due again and returns how many recipients were handled.
 pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
-  let max_pushes = i32::try_from(state.settings.notifications.urgent_max_pushes).unwrap_or(i32::MAX);
+  let max_pushes = i32::try_from(state.settings.get().notifications.urgent_max_pushes).unwrap_or(i32::MAX);
   let due = state
     .database
     .claim_due_reminders(now, interval(state), max_pushes, BATCH_SIZE)
@@ -139,5 +139,5 @@ async fn urgent_message(
 }
 
 fn interval(state: &AppState) -> Duration {
-  Duration::from_secs(state.settings.notifications.urgent_repeat_interval_secs)
+  Duration::from_secs(state.settings.get().notifications.urgent_repeat_interval_secs)
 }

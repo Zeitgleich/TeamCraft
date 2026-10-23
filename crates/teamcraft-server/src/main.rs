@@ -15,13 +15,12 @@ use teamcraft_proto::PushProvider;
 use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
-use teamcraft_server::brand::BrandRegistry;
+use teamcraft_server::brand::{BrandInputs, BrandStore};
 use teamcraft_server::config::{CONFIG_PATH_ENV, Config};
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
-use teamcraft_server::meetings::caldav::{CalDavStore, CalendarStore};
-use teamcraft_server::meetings::mailer::{Mailer, SmtpMailer};
+use teamcraft_server::meetings::mailer::Mailer;
 use teamcraft_server::meetings::{MeetingBackends, MeetingService};
 use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{
@@ -31,19 +30,28 @@ use teamcraft_server::push::{
 };
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
+use teamcraft_server::runtime::mail_status::MailStatus;
+use teamcraft_server::runtime::{SettingsCell, Slot, settings_key};
 use teamcraft_server::security::RateLimits;
 use teamcraft_server::services::calls::CallService;
 use teamcraft_server::services::local_accounts::LocalAuth;
 use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
-use teamcraft_server::services::{backgrounds, email_digest, guests, oidc, retention, urgent};
-use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings};
+use teamcraft_server::services::{
+  backgrounds, brands, calendar_settings, email_digest, guests, mail_settings, oidc, retention,
+  runtime_settings, urgent,
+};
+use teamcraft_server::state::{
+  AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
+};
 use teamcraft_server::storage::BlobStore;
 use tracing::{info, warn};
 
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 const BACKGROUND_SWEEP_INTERVAL: Duration = Duration::from_secs(600);
+/// `[storage].max_attachment_bytes` when there is no storage (attachments are off then anyway).
+const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -90,9 +98,26 @@ async fn run() -> anyhow::Result<()> {
     .validate()
     .map_err(anyhow::Error::msg)
     .context("checking [web]")?;
-  let brands = BrandRegistry::build(&config.branding, &config.brands, &config.web, &config.mail)
-    .context("checking [branding] and [[brands]]")?;
+  let brands = BrandStore::new(BrandInputs {
+    branding: config.branding.clone(),
+    config_brands: config.brands.clone(),
+    web: config.web.clone(),
+    mail: config.mail.clone(),
+  })
+  .context("checking [branding] and [[brands]]")?;
+  let maybe_settings_key =
+    settings_key::load(&config.secrets).context("loading the settings key ([secrets])")?;
   logging::init(&config.logging)?;
+  if config.mail.smtp.is_some()
+    && config
+      .meetings
+      .as_ref()
+      .is_some_and(|meetings| meetings.smtp.is_some())
+  {
+    warn!(
+      "[meetings.smtp] is ignored: all mail goes through [mail.smtp] (or the admin console's mail server)"
+    );
+  }
 
   let database = Database::connect(
     config.database.url.expose_secret(),
@@ -109,6 +134,8 @@ async fn run() -> anyhow::Result<()> {
     .await
     .context("creating message partitions")?;
 
+  // Filled from the admin console's settings or the configuration once the database is read.
+  let mailer: Arc<Slot<dyn Mailer>> = Arc::default();
   let state = AppState {
     database,
     validator: Arc::new(build_validator(&config)?),
@@ -138,17 +165,15 @@ async fn run() -> anyhow::Result<()> {
       .transpose()
       .context("configuring calls")?
       .map(Arc::new),
-    maybe_meetings: build_meetings(&config)?.map(Arc::new),
+    maybe_meetings: build_meetings(&config, &mailer)?.map(Arc::new),
     maybe_local: build_local_auth(&config)?.map(Arc::new),
-    maybe_mailer: match &config.mail.smtp {
-      Some(smtp) => {
-        Some(Arc::new(SmtpMailer::new(smtp).context("configuring the mail server")?) as Arc<dyn Mailer>)
-      },
-      None => None,
-    },
+    mailer,
+    mail_status: Arc::new(MailStatus::default()),
+    maybe_settings_key: maybe_settings_key.map(Arc::new),
+    settings_lock: Arc::default(),
     policy: Arc::new(PolicyHolder::default()),
     scheme: Arc::new(SchemeStore::default()),
-    settings: Arc::new(Settings {
+    settings: Arc::new(SettingsCell::new(Settings {
       maybe_oidc_sync: build_oidc_sync(&config)?,
       policy: config.policy.clone(),
       limits: config.limits.clone(),
@@ -168,12 +193,36 @@ async fn run() -> anyhow::Result<()> {
       branding: config.branding.clone(),
       brands: config.brands.clone(),
       push: push_settings(&config),
-    }),
+      max_attachment_bytes: config
+        .storage
+        .as_ref()
+        .map_or(DEFAULT_MAX_ATTACHMENT_BYTES, |storage| {
+          storage.max_attachment_bytes
+        }),
+      meeting_mail: config
+        .meetings
+        .as_ref()
+        .map_or_else(MeetingMailConfig::default, |meetings| MeetingMailConfig {
+          max_invitees: meetings.max_invitees,
+          texts: meetings.mail_texts.clone(),
+        }),
+      maybe_mail_seed: config.mail.smtp.clone().or_else(|| {
+        config
+          .meetings
+          .as_ref()
+          .and_then(|meetings| meetings.smtp.clone())
+      }),
+      maybe_calendar_seed: config
+        .meetings
+        .as_ref()
+        .and_then(|meetings| meetings.caldav.clone()),
+    })),
     rate_limits: Arc::new(RateLimits::new(&config.security.rate_limits)),
     brands: Arc::new(brands),
   };
+  load_runtime_settings(&state).await?;
   spawn_session_sweeper(state.clone());
-  if state.settings.maybe_oidc_sync.is_some() {
+  if state.settings.get().maybe_oidc_sync.is_some() {
     spawn_oidc_sync(
       state.clone(),
       Duration::from_secs(config.oidc.sync.initial_delay_secs),
@@ -247,7 +296,7 @@ fn spawn_session_sweeper(state: AppState) {
 /// calendar server now and then) and the away timeout.
 fn spawn_derived_presence(state: AppState) {
   tokio::spawn(async move {
-    let settings = state.settings.presence.clone();
+    let settings = state.settings.get().presence.clone();
     let mut interval = tokio::time::interval(Duration::from_secs(settings.auto_status_interval_secs.max(1)));
     let poll_every = Duration::from_secs(settings.calendar_poll_interval_secs.max(1));
     let mut maybe_last_poll: Option<tokio::time::Instant> = None;
@@ -277,7 +326,7 @@ fn spawn_derived_presence(state: AppState) {
 /// Runs the retention job periodically (deletes what is past retention, tops up partitions).
 fn spawn_retention_job(state: AppState) {
   tokio::spawn(async move {
-    let settings = state.settings.retention.clone();
+    let settings = state.settings.get().retention.clone();
     tokio::time::sleep(Duration::from_secs(settings.initial_delay_secs)).await;
     let mut interval = tokio::time::interval(Duration::from_secs(settings.interval_secs.max(1)));
     loop {
@@ -315,40 +364,43 @@ fn build_local_auth(config: &Config) -> anyhow::Result<Option<LocalAuth>> {
     .context("configuring local accounts")
 }
 
-/// The meeting feature, if `[meetings]` is configured.
-fn build_meetings(config: &Config) -> anyhow::Result<Option<MeetingService>> {
+/// The meeting feature, if `[meetings]` is configured. Its mail goes through the server's mail
+/// server; the calendar is put in place with the other runtime settings.
+fn build_meetings(config: &Config, mailer: &Arc<Slot<dyn Mailer>>) -> anyhow::Result<Option<MeetingService>> {
   let Some(meetings) = &config.meetings else {
     return Ok(None);
-  };
-  let maybe_calendar = match &meetings.caldav {
-    Some(caldav) => {
-      let store = CalDavStore::new(caldav).context("configuring the CalDAV client")?;
-      Some(Arc::new(store) as Arc<dyn CalendarStore>)
-    },
-    None => None,
-  };
-  let maybe_mailer = match &meetings.smtp {
-    Some(smtp) => {
-      let mailer = SmtpMailer::new(smtp).context("configuring the mail server")?;
-      Some(Arc::new(mailer) as Arc<dyn Mailer>)
-    },
-    None => None,
   };
   MeetingService::new(
     meetings,
     MeetingBackends {
-      maybe_calendar,
-      maybe_mailer,
+      calendar: Arc::default(),
+      mailer: Arc::clone(mailer),
     },
   )
   .map(Some)
   .context("configuring meetings")
 }
 
+/// Puts the admin console's settings on top of the configuration: instance settings, mail server,
+/// calendar and brands.
+async fn load_runtime_settings(state: &AppState) -> anyhow::Result<()> {
+  runtime_settings::load(state)
+    .await
+    .context("loading the instance settings")?;
+  mail_settings::load(state)
+    .await
+    .context("loading the mail server settings")?;
+  calendar_settings::load(state)
+    .await
+    .context("loading the calendar settings")?;
+  brands::load(state).await.context("loading the brands")?;
+  Ok(())
+}
+
 /// Removes guests whose membership expired (and tells their sponsors) and forgets old sessions.
 fn spawn_account_housekeeping(state: AppState) {
   tokio::spawn(async move {
-    let period = Duration::from_secs(state.settings.guests.expiry_check_interval_secs.max(1));
+    let period = Duration::from_secs(state.settings.get().guests.expiry_check_interval_secs.max(1));
     let mut interval = tokio::time::interval(period);
     loop {
       interval.tick().await;
@@ -366,7 +418,14 @@ fn spawn_account_housekeeping(state: AppState) {
 /// Pushes urgent direct messages again until they are acknowledged (PLAN.md §5).
 fn spawn_urgent_scheduler(state: AppState) {
   tokio::spawn(async move {
-    let period = Duration::from_secs(state.settings.notifications.urgent_scheduler_interval_secs.max(1));
+    let period = Duration::from_secs(
+      state
+        .settings
+        .get()
+        .notifications
+        .urgent_scheduler_interval_secs
+        .max(1),
+    );
     let mut interval = tokio::time::interval(period);
     loop {
       interval.tick().await;
@@ -377,15 +436,14 @@ fn spawn_urgent_scheduler(state: AppState) {
   });
 }
 
-/// Mails the digests of missed mentions that are due (PLAN.md §5).
+/// Mails the digests of missed mentions that are due (PLAN.md §5). Runs always: admins can switch
+/// the digest on and off in the console, and a pass with it off does nothing.
 fn spawn_email_digests(state: AppState) {
-  if !state.settings.notifications.email_digest.is_enabled {
-    return;
-  }
   tokio::spawn(async move {
     let period = Duration::from_secs(
       state
         .settings
+        .get()
         .notifications
         .email_digest
         .scheduler_interval_secs

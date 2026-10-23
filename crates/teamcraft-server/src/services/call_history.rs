@@ -16,7 +16,7 @@ pub async fn list_call_history(
   caller: &AuthenticatedUser,
   query: ListCallHistoryQuery,
 ) -> Result<ListCallHistoryResponse, ApiError> {
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let limit = query
     .maybe_limit
     .unwrap_or(limits.default_page_size)

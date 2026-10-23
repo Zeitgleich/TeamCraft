@@ -19,7 +19,7 @@ use crate::auth::{
   AuthError, BoxFuture, JwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator,
   ValidatorOptions,
 };
-use crate::brand::BrandRegistry;
+use crate::brand::{BrandInputs, BrandStore};
 use crate::config::{CallsConfig, MeetingsConfig, RoleNames, StorageConfig};
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
@@ -31,12 +31,14 @@ use crate::meetings::{MeetingBackends, MeetingService};
 use crate::push::PushDispatcher;
 use crate::rendezvous::RendezvousHub;
 use crate::router::router;
+use crate::runtime::mail_status::MailStatus;
+use crate::runtime::{SettingsCell, Slot};
 use crate::security::RateLimits;
 use crate::services::calls::CallService;
 use crate::services::local_accounts::LocalAuth;
 use crate::services::permission_scheme::SchemeStore;
 use crate::services::session::PolicyHolder;
-use crate::state::{AppState, Settings};
+use crate::state::{AppState, MeetingMailConfig, Settings};
 use crate::storage::BlobStore;
 
 pub const TEST_ISSUER: &str = "https://auth.example.com/realms/test";
@@ -71,7 +73,7 @@ impl FakeCalendar {
     self.is_failing.store(is_failing, Ordering::SeqCst);
   }
 
-  fn check(&self) -> Result<(), CalendarError> {
+  fn fail_if_down(&self) -> Result<(), CalendarError> {
     if self.is_failing.load(Ordering::SeqCst) {
       Err(CalendarError::Unreachable("the fake calendar is down".into()))
     } else {
@@ -81,9 +83,13 @@ impl FakeCalendar {
 }
 
 impl CalendarStore for FakeCalendar {
+  fn check(&self) -> BoxFuture<'_, Result<(), CalendarError>> {
+    Box::pin(async move { self.fail_if_down() })
+  }
+
   fn put_event<'a>(&'a self, object_name: &'a str, ics: &'a str) -> BoxFuture<'a, Result<(), CalendarError>> {
     Box::pin(async move {
-      self.check()?;
+      self.fail_if_down()?;
       self
         .events
         .lock()
@@ -95,7 +101,7 @@ impl CalendarStore for FakeCalendar {
 
   fn delete_event<'a>(&'a self, object_name: &'a str) -> BoxFuture<'a, Result<(), CalendarError>> {
     Box::pin(async move {
-      self.check()?;
+      self.fail_if_down()?;
       self.events.lock().unwrap().remove(object_name);
       Ok(())
     })
@@ -108,7 +114,7 @@ impl CalendarStore for FakeCalendar {
     to: OffsetDateTime,
   ) -> BoxFuture<'a, Result<Vec<BusyPeriod>, CalendarError>> {
     Box::pin(async move {
-      self.check()?;
+      self.fail_if_down()?;
       Ok(
         self
           .busy
@@ -314,17 +320,18 @@ impl TestApp {
     calls: &CallsConfig,
     signing_key_pem: &str,
   ) -> Option<Self> {
+    let meeting_mail = meeting_mail_of(meetings);
     let meetings = MeetingService::new(
       meetings,
-      MeetingBackends {
-        maybe_calendar: Some(Arc::new(FakeCalendar::default())),
-        maybe_mailer: Some(Arc::new(FakeMailer::default())),
-      },
+      MeetingBackends::fixed(
+        Some(Arc::new(FakeCalendar::default())),
+        Some(Arc::new(FakeMailer::default())),
+      ),
     )
     .unwrap();
     let calls = CallService::new(calls, signing_key_pem.as_bytes()).unwrap();
     Self::start_full(
-      |_| {},
+      move |settings: &mut Settings| settings.meeting_mail = meeting_mail,
       Extras {
         maybe_meetings: Some(meetings),
         maybe_calls: Some(calls),
@@ -341,16 +348,12 @@ impl TestApp {
     mailer: Arc<dyn Mailer>,
     customize: impl FnOnce(&mut Settings),
   ) -> Option<Self> {
-    let meetings = MeetingService::new(
-      config,
-      MeetingBackends {
-        maybe_calendar: Some(calendar),
-        maybe_mailer: Some(mailer),
-      },
-    )
-    .unwrap();
+    let meetings = MeetingService::new(config, MeetingBackends::fixed(Some(calendar), Some(mailer))).unwrap();
     Self::start_full(
-      customize,
+      |settings: &mut Settings| {
+        settings.meeting_mail = meeting_mail_of(config);
+        customize(settings)
+      },
       Extras {
         maybe_meetings: Some(meetings),
         ..Extras::default()
@@ -366,16 +369,11 @@ impl TestApp {
     calendar: Arc<dyn CalendarStore>,
     mailer: Arc<dyn Mailer>,
   ) -> Option<Self> {
-    let meetings = MeetingService::new(
-      config,
-      MeetingBackends {
-        maybe_calendar: Some(calendar),
-        maybe_mailer: Some(mailer),
-      },
-    )
-    .unwrap();
+    let meetings = MeetingService::new(config, MeetingBackends::fixed(Some(calendar), Some(mailer))).unwrap();
     Self::start_full(
-      |_| {},
+      |settings: &mut Settings| {
+        settings.meeting_mail = meeting_mail_of(config);
+      },
       Extras {
         maybe_meetings: Some(meetings),
         ..Extras::default()
@@ -441,7 +439,12 @@ impl TestApp {
       maybe_mailer,
     } = extras;
     let test_db = TestDatabase::create().await?;
-    let mut settings = Settings::default();
+    let mut settings = Settings {
+      max_attachment_bytes: maybe_storage
+        .as_ref()
+        .map_or(100 * 1024 * 1024, |storage| storage.max_attachment_bytes),
+      ..Settings::default()
+    };
     settings.gateway.presence_offline_grace_secs = 0;
     // Tests make many requests (and fail many authentications) from one address; the ones about
     // rate limits switch the limits on again.
@@ -488,7 +491,10 @@ impl TestApp {
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
       maybe_calls: maybe_calls.map(Arc::new),
       maybe_meetings: maybe_meetings.map(Arc::new),
-      maybe_mailer,
+      mailer: Arc::new(Slot::new(maybe_mailer)),
+      mail_status: Arc::new(MailStatus::default()),
+      maybe_settings_key: Some(Arc::new(test_settings_key())),
+      settings_lock: Arc::default(),
       maybe_local: settings
         .local_accounts
         .is_enabled
@@ -497,15 +503,15 @@ impl TestApp {
       scheme: Arc::new(SchemeStore::default()),
       rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
       brands: Arc::new(
-        BrandRegistry::build(
-          &settings.branding,
-          &settings.brands,
-          &settings.web,
-          &settings.mail,
-        )
+        BrandStore::new(BrandInputs {
+          branding: settings.branding.clone(),
+          config_brands: settings.brands.clone(),
+          web: settings.web.clone(),
+          mail: settings.mail.clone(),
+        })
         .unwrap(),
       ),
-      settings: Arc::new(settings),
+      settings: Arc::new(SettingsCell::new(settings)),
     };
 
     let listener = bind_listener(([127, 0, 0, 1], 0).into()).unwrap();
@@ -542,9 +548,9 @@ impl TestApp {
   /// Changes the settings of the running app (e.g. policies that name IDs created by the test) by
   /// serving the same state again under a new address; `base_url` and `ws_url` change with it.
   pub fn reconfigure(&mut self, customize: impl FnOnce(&mut Settings)) {
-    let mut settings = (*self.state.settings).clone();
+    let mut settings = (*self.state.settings.base()).clone();
     customize(&mut settings);
-    self.state.settings = Arc::new(settings);
+    self.state.settings.reset(settings);
     self.server.abort();
     let listener = bind_listener(([127, 0, 0, 1], 0).into()).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -710,6 +716,21 @@ impl JwkSource for StaticKeys {
       })
     })
   }
+}
+
+/// Meeting limits and texts as `[meetings]` sets them.
+fn meeting_mail_of(config: &MeetingsConfig) -> MeetingMailConfig {
+  MeetingMailConfig {
+    max_invitees: config.max_invitees,
+    texts: config.mail_texts.clone(),
+  }
+}
+
+/// The settings key of test servers; tests that need a server without one replace it.
+fn test_settings_key() -> teamcraft_crypto::server_secret::SettingsSealingKey {
+  teamcraft_crypto::server_secret::SettingsSealingKey::derive(
+    &teamcraft_crypto::secret::SymmetricKey::from_bytes([42; 32]),
+  )
 }
 
 fn next_worker_id() -> u16 {

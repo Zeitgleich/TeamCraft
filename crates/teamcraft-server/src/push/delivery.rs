@@ -31,7 +31,7 @@ pub(crate) async fn deliver(
     user,
     device,
     wake_up,
-    state.settings.push.retry.max_retries,
+    state.settings.get().push.retry.max_retries,
   )
   .await
 }
@@ -60,9 +60,9 @@ async fn deliver_with_retries(
     token: device.token.clone(),
     push_key: device.push_key.clone(),
   };
-  let ttl = state.settings.push.ttls.for_kind(&wake_up.kind);
+  let ttl = state.settings.get().push.ttls.for_kind(&wake_up.kind);
   let started = Instant::now();
-  let mut delay = state.settings.push.retry.initial_delay;
+  let mut delay = state.settings.get().push.retry.initial_delay;
   let mut attempt = 0;
   loop {
     let result = state
