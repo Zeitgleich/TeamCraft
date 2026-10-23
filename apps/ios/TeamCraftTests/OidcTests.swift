@@ -6,7 +6,7 @@ final class OidcTests: XCTestCase {
   private let environment = AppEnvironment(
     serverURL: URL(string: "https://chat.example.com")!,
     oidcIssuer: URL(string: "https://id.example.com/realms/team")!,
-    oidcClientId: "teamcraft", oidcRedirectScheme: "com.example.teamcraft",
+    oidcClientId: "teamcraft", oidcRedirectScheme: "de.zeitgleich.teamcraft",
     appGroupId: "group.de.zeitgleich.teamcraft", keychainAccessGroup: "")
 
   func testPkceMatchesTheRfcTestVector() {
@@ -33,19 +33,19 @@ final class OidcTests: XCTestCase {
     func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
     XCTAssertEqual(value("response_type"), "code")
     XCTAssertEqual(value("client_id"), "teamcraft")
-    XCTAssertEqual(value("redirect_uri"), "com.example.teamcraft:/oauth/callback")
+    XCTAssertEqual(value("redirect_uri"), "de.zeitgleich.teamcraft:/oauth/callback")
     XCTAssertEqual(value("code_challenge_method"), "S256")
     XCTAssertEqual(value("state"), "s1")
   }
 
   @MainActor
   func testAuthorizationCodeRequiresTheExpectedState() throws {
-    let good = URL(string: "com.example.teamcraft:/oauth/callback?code=abc&state=s1")!
+    let good = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?code=abc&state=s1")!
     XCTAssertEqual(try WebLogin.authorizationCode(from: good, expectedState: "s1"), "abc")
     XCTAssertThrowsError(try WebLogin.authorizationCode(from: good, expectedState: "other")) {
       XCTAssertEqual($0 as? OidcError, .stateMismatch)
     }
-    let denied = URL(string: "com.example.teamcraft:/oauth/callback?error=access_denied&state=s1")!
+    let denied = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?error=access_denied&state=s1")!
     XCTAssertThrowsError(try WebLogin.authorizationCode(from: denied, expectedState: "s1")) {
       XCTAssertEqual($0 as? OidcError, .invalidResponse)
     }

@@ -427,7 +427,7 @@ allow_private_endpoints = false
 # key_path = "/run/secrets/apns_key.p8"
 # key_id = "ABC123DEFG"
 # team_id = "DEF456GHIJ"
-# bundle_id = "com.example.teamcraft"
+# bundle_id = "de.zeitgleich.teamcraft"
 # use_sandbox = false            # true for development builds of the app
 # alert_text = "New message"     # generic text; the app's notification extension replaces it
 

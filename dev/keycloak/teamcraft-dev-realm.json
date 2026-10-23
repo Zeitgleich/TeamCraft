@@ -35,7 +35,7 @@
         "http://[::1]/callback",
         "http://localhost:8082/*",
         "http://127.0.0.1:8082/*",
-        "com.example.teamcraft:/oauth/callback"
+        "de.zeitgleich.teamcraft:/oauth/callback"
       ],
       "webOrigins": [
         "http://localhost:8082",

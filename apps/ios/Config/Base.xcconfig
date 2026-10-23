@@ -10,7 +10,7 @@ TEAMCRAFT_PUSH_GATEWAY_URL =
 TEAMCRAFT_OIDC_ISSUER = http:/$()/127.0.0.1:8080/realms/teamcraft-dev
 TEAMCRAFT_OIDC_CLIENT_ID = teamcraft
 // Redirect URI is <scheme>:/oauth/callback; the OIDC client must allow it.
-TEAMCRAFT_OIDC_REDIRECT_SCHEME = com.example.teamcraft
+TEAMCRAFT_OIDC_REDIRECT_SCHEME = de.zeitgleich.teamcraft
 
 // Shared between the app and the notification service extension (docs/e2ee.md §7).
 APP_GROUP_ID = group.de.zeitgleich.teamcraft

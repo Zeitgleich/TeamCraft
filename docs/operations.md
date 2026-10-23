@@ -217,7 +217,7 @@ push services to reach you. At startup the server logs the matching public key; 
    key_path = "/run/secrets/apns_key.p8"
    key_id = "ABC123DEFG"
    team_id = "DEF456GHIJ"
-   bundle_id = "com.example.teamcraft"
+   bundle_id = "de.zeitgleich.teamcraft"
    use_sandbox = false
    ```
 

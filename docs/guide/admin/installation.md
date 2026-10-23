@@ -36,7 +36,7 @@ message content.
 6. **Web client:** build `crates/teamcraft-ui` with `trunk build --release` and set
    `[web] static_dir`. Register the server's origin as a redirect URI of the OIDC client.
 7. **Desktop and Android clients** need the server URL and the same OIDC client
-   (`com.example.teamcraft:/oauth/callback` and loopback redirects are in the reference realm).
+   (`de.zeitgleich.teamcraft:/oauth/callback` and loopback redirects are in the reference realm).
 8. **First owner:** give yourself the `owner` client role, sign in on the desktop app, create your
    keys, then open Administration > Security. The first policy save founds the signed admin roster
    from the identity provider's `owner` and `admin` roles ([Security policy](security-policy.md)).
