@@ -107,6 +107,7 @@ pub async fn put_conversation_settings(
       .database
       .clear_conversation_notifications(conversation, caller.user.id)
       .await?;
+    announce_conversation_settings(state, caller, conversation);
     return get_conversation_settings(state, caller, conversation).await;
   }
   if matches!(request.level, NotificationLevel::Unknown(_)) {
@@ -122,7 +123,23 @@ pub async fn put_conversation_settings(
     .database
     .set_conversation_notifications(conversation, caller.user.id, &request.level, maybe_muted_until)
     .await?;
+  announce_conversation_settings(state, caller, conversation);
   Ok(request)
+}
+
+/// The caller's devices keep the conversation (with their membership's level and mute time) and
+/// show it muted or not; they refetch it on this event, or they would show the old state.
+fn announce_conversation_settings(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+) {
+  state.hub.publish(
+    [caller.user.id],
+    &GatewayEvent::ConversationUpdate {
+      conversation_id: conversation,
+    },
+  );
 }
 
 /// The caller's notification setting for a whole space.
