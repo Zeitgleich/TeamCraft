@@ -260,8 +260,8 @@ missed-call notifications.
 | Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | no calls in the browser                   |
 
 macOS buttons need a notification center delegate, an Objective-C class the shell cannot define
-without `unsafe`; a click brings the app to the front, where the conversation or the call card is.
-An unbundled macOS build and a Linux session without a notification service fall back to the
+without `unsafe`; a click brings the app to the front, where the conversation or the call card is
+(#189). An unbundled macOS build and a Linux session without a notification service fall back to the
 notification plugin (title and text only, no withdrawal).
 
 **Messages.** Mentions, DMs and followed thread replies by the rules above, the text only as far as
