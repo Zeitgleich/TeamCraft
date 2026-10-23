@@ -8,9 +8,9 @@ use crate::components::modal::Modal;
 use crate::components::settings_tabs::{
   CallsTab, DevicesTab, DisplayTab, LanguageTab, NotificationsTab, PrivacyTab, SidebarTab,
 };
-use crate::components::sidebar::shortcut_label;
 use crate::components::update_notice::UpdatesSection;
 use crate::i18n::use_i18n;
+use crate::keys::{ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut, ShortcutList};
 use crate::model::id_from_raw;
 use crate::security::DeviceApproval;
 use crate::settings::BackendMode;
@@ -219,29 +219,55 @@ fn AdvancedTab() -> impl IntoView {
 pub fn ShortcutsModal() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let rows: [(String, &'static str); 13] = [
-    (shortcut_label("K"), "shortcut-switcher"),
-    (shortcut_label(","), "shortcut-settings"),
-    (shortcut_label("/"), "shortcut-shortcuts"),
+  let rows: [(Vec<Shortcut>, &'static str); 13] = [
+    (vec![QUICK_SWITCHER], "shortcut-switcher"),
+    (vec![Shortcut::primary(",")], "shortcut-settings"),
+    (vec![Shortcut::primary("/")], "shortcut-shortcuts"),
     (
-      format!("{}+Shift+F", shortcut_label("").trim_end_matches('+')),
+      vec![Shortcut::new(
+        &[Modifier::Primary, Modifier::Shift],
+        Key::Char("F"),
+      )],
       "shortcut-search",
     ),
-    (shortcut_label("F"), "shortcut-search-here"),
-    ("Alt+↑ / Alt+↓".to_owned(), "shortcut-prev-next"),
-    ("Alt+Shift+↑ / Alt+Shift+↓".to_owned(), "shortcut-next-unread"),
-    ("Alt+T".to_owned(), "shortcut-threads"),
-    ("Ctrl+Shift+↑ / Ctrl+Shift+↓".to_owned(), "shortcut-move-favorite"),
-    ("Esc".to_owned(), "shortcut-close"),
-    ("↑ / ↓".to_owned(), "shortcut-messages"),
-    ("Enter".to_owned(), "shortcut-open-thread"),
+    (vec![Shortcut::primary("F")], "shortcut-search-here"),
     (
-      format!(
-        "{} / {} / {}",
-        shortcut_label("+"),
-        shortcut_label("-"),
-        shortcut_label("0")
-      ),
+      vec![
+        Shortcut::new(&[Modifier::Alt], Key::Up),
+        Shortcut::new(&[Modifier::Alt], Key::Down),
+      ],
+      "shortcut-prev-next",
+    ),
+    (
+      vec![
+        Shortcut::new(&[Modifier::Alt, Modifier::Shift], Key::Up),
+        Shortcut::new(&[Modifier::Alt, Modifier::Shift], Key::Down),
+      ],
+      "shortcut-next-unread",
+    ),
+    (
+      vec![Shortcut::new(&[Modifier::Alt], Key::Char("T"))],
+      "shortcut-threads",
+    ),
+    (
+      vec![
+        Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Up),
+        Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Down),
+      ],
+      "shortcut-move-favorite",
+    ),
+    (vec![ESCAPE], "shortcut-close"),
+    (
+      vec![Shortcut::new(&[], Key::Up), Shortcut::new(&[], Key::Down)],
+      "shortcut-messages",
+    ),
+    (vec![ENTER], "shortcut-open-thread"),
+    (
+      vec![
+        Shortcut::primary("+"),
+        Shortcut::primary("-"),
+        Shortcut::primary("0"),
+      ],
       "shortcut-zoom",
     ),
   ];
@@ -261,7 +287,7 @@ pub fn ShortcutsModal() -> impl IntoView {
               view! {
                 <tr>
                   <th scope="row">{move || i18n.t(key)}</th>
-                  <td><kbd>{keys}</kbd></td>
+                  <td><ShortcutList shortcuts=keys /></td>
                 </tr>
               }
             })

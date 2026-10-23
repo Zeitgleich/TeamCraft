@@ -7,6 +7,7 @@ use crate::components::avatar::PresenceDot;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
 use crate::sections::{
@@ -145,7 +146,7 @@ pub fn Sidebar() -> impl IntoView {
       <button class="jump-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
         <Icon name=IconName::Search />
         <span class="jump-label">{move || i18n.t("sidebar-jump")}</span>
-        <kbd>{shortcut_label("K")}</kbd>
+        <ShortcutKeys shortcut=QUICK_SWITCHER />
       </button>
       <button
         class="sb-item sb-threads"
@@ -601,17 +602,5 @@ fn SidebarItem(conversation: Conversation) -> impl IntoView {
       }}
       {(mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })}
     </button>
-  }
-}
-
-/// "Ctrl K" or "⌘K" depending on the platform.
-pub fn shortcut_label(key: &str) -> String {
-  let is_mac = web_sys::window()
-    .and_then(|window| window.navigator().platform().ok())
-    .is_some_and(|platform| platform.to_ascii_lowercase().contains("mac"));
-  if is_mac {
-    format!("⌘{key}")
-  } else {
-    format!("Ctrl+{key}")
   }
 }

@@ -94,8 +94,8 @@ composer-remove-attachment = Anhang entfernen
 composer-attach = Dateien anhängen
 composer-emoji = Emoji hinzufügen
 composer-send = Nachricht senden
-composer-hint-enter = Enter zum Senden, Umschalt+Enter für eine neue Zeile
-composer-hint-ctrl-enter = Strg+Enter zum Senden, Enter für eine neue Zeile
+composer-hint-enter = Enter zum Senden, { $newline } für eine neue Zeile
+composer-hint-ctrl-enter = { $send } zum Senden, Enter für eine neue Zeile
 composer-markdown-hint = **fett**  _kursiv_  `Code`  ```Codeblock```
 
 ## Nachrichten
@@ -160,8 +160,8 @@ settings-theme-light = Hell
 settings-theme-dark = Dunkel
 settings-language = Sprache
 settings-send-mode = Nachrichten senden mit
-settings-send-enter = Enter (Umschalt+Enter für eine neue Zeile)
-settings-send-ctrl-enter = Strg+Enter (Enter für eine neue Zeile)
+settings-send-enter = Enter ({ $newline } für eine neue Zeile)
+settings-send-ctrl-enter = { $send } (Enter für eine neue Zeile)
 settings-join-leave = Beitritts- und Austrittsmeldungen anzeigen
 settings-unreads-group = Ungelesene Kanäle oben in der Seitenleiste gruppieren
 settings-advanced-stub = Hier erscheinen die erweiterten Einstellungen.
@@ -1448,7 +1448,7 @@ jump-to-latest-new = { $count ->
 sidebar-mark-all-read = Alle als gelesen markieren
 settings-zoom = Größe der Oberfläche
 settings-zoom-percent = { $percent } %
-settings-zoom-hint = Auch mit Strg/Cmd + Plus, Minus und 0.
+settings-zoom-hint = Auch mit { $modifier } + Plus, Minus und 0.
 shortcut-next-unread = Vorherige oder nächste ungelesene Unterhaltung
 shortcut-zoom = Vergrößern, verkleinern, zurücksetzen
 action-react-with = Mit { $emoji } reagieren
@@ -1765,3 +1765,15 @@ settings-f-update_subject = Änderung, Betreff
 settings-f-update_body = Änderung, Text
 settings-f-cancellation_subject = Absage, Betreff
 settings-f-cancellation_body = Absage, Text
+
+## Key names in keyboard shortcuts (the caps shown on a keyboard)
+key-ctrl = Strg
+key-shift = Umschalt
+key-alt = Alt
+key-command = Befehl
+key-option = Wahl
+key-enter = Enter
+key-escape = Esc
+key-up = Pfeil hoch
+key-down = Pfeil runter
+key-plus-word = plus

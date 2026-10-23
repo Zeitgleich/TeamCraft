@@ -10,6 +10,7 @@ use teamcraft_client_api::privacy::LastSeenVisibility;
 
 use crate::clock::local_time_zone;
 use crate::i18n::{Locale, use_i18n};
+use crate::keys::t_with_shortcuts;
 use crate::model::User;
 use crate::model::{Conversation, DeviceId, UserId};
 use crate::notify_sync::{
@@ -780,7 +781,7 @@ pub fn DisplayTab() -> impl IntoView {
           })
           .collect_view()}
       </select>
-      <p class="muted-text small" id="setting-zoom-hint">{move || i18n.t("settings-zoom-hint")}</p>
+      <p class="muted-text small" id="setting-zoom-hint">{move || t_with_shortcuts(i18n, "settings-zoom-hint")}</p>
     </div>
     })}
     <fieldset class="settings-group">
@@ -821,7 +822,7 @@ pub fn DisplayTab() -> impl IntoView {
                 prop:checked=move || settings.send_mode.get() == mode
                 on:change=move |_| settings.send_mode.set(mode)
               />
-              <span>{move || i18n.t(&format!("settings-send-{}", mode.slug()))}</span>
+              <span>{move || t_with_shortcuts(i18n, &format!("settings-send-{}", mode.slug()))}</span>
             </label>
           }
         })

@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
+use crate::keys::{ENTER, ESCAPE, SEARCH_MESSAGES, ShortcutKeys};
 use crate::model::{Conversation, ConversationKind};
 use crate::navigation::fuzzy_score;
 use crate::state::use_app_state;
@@ -172,15 +173,15 @@ pub fn QuickSwitcher() -> impl IntoView {
       </ul>
       <footer class="switcher-foot">
         <span><kbd>"↑"</kbd><kbd>"↓"</kbd>{move || i18n.t("switcher-hint-navigate")}</span>
-        <span><kbd>"↵"</kbd>{move || i18n.t("switcher-hint-open")}</span>
+        <span><ShortcutKeys shortcut=ENTER />{move || i18n.t("switcher-hint-open")}</span>
         <button
           class="link-btn"
           on:click=move |_| state.open_search(Some(query.get_untracked().trim()))
         >
-          <kbd>"Ctrl+↵"</kbd>
+          <ShortcutKeys shortcut=SEARCH_MESSAGES />
           {move || i18n.t("switcher-search-messages")}
         </button>
-        <span><kbd>"Esc"</kbd>{move || i18n.t("switcher-hint-close")}</span>
+        <span><ShortcutKeys shortcut=ESCAPE />{move || i18n.t("switcher-hint-close")}</span>
       </footer>
     </Modal>
   }
