@@ -252,7 +252,7 @@ struct ApproveLinkView: View {
       case .compare(let shortCode):
         Section {
           Text("approve_compare")
-          Text(shortCode).font(.system(size: 36, weight: .bold, design: .monospaced))
+          Text(shortCode).font(.system(.largeTitle, design: .monospaced).bold())
           Button("approve_confirm") { Task { await confirm() } }
         }
       case .done:

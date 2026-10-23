@@ -129,7 +129,7 @@ struct PassphraseField: View {
       .accessibilityLabel(Text(isVisible ? "passphrase_hide" : "passphrase_show"))
     }
     .padding(.leading, 8)
-    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border))
+    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.controlBorder))
   }
 }
 
