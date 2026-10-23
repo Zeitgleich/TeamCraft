@@ -338,6 +338,7 @@ mod host_controls {
     seen: Seen,
     host_id: String,
     carol_id: String,
+    dave_id: String,
     devices: [String; 3],
   }
 
@@ -390,6 +391,7 @@ mod host_controls {
       seen,
       host_id,
       carol_id,
+      dave_id,
       devices,
     })
   }
@@ -495,10 +497,19 @@ mod host_controls {
       return;
     };
     let path = format!("/meetings/{}/controls", s.meeting);
+    // Carol left the call; Dave's device is still in its roster (a lost connection within the
+    // SFU's reconnect grace period).
+    report(&s.app, "left", &s.call, &s.carol_id, &s.devices[1]).await;
     s.app.post(&s.host, &path, json!({"action": "lock"})).await;
     assert_eq!(
       join_token(&s.app, &s.carol, &s.chat, &s.devices[1]).await,
-      StatusCode::FORBIDDEN
+      StatusCode::FORBIDDEN,
+      "a device not in the call is a newcomer"
+    );
+    assert_eq!(
+      join_token(&s.app, &s.dave, &s.chat, &s.devices[2]).await,
+      StatusCode::OK,
+      "a device in the call rejoins after a lost connection"
     );
     assert_eq!(
       join_token(&s.app, &s.host, &s.chat, &s.devices[0]).await,
@@ -511,19 +522,27 @@ mod host_controls {
       StatusCode::OK
     );
 
+    // A removed person stays out, also while their device is still in the roster.
     s.app
       .post(
         &s.host,
         &path,
-        json!({"action": "remove_participant", "user_id": s.carol_id}),
+        json!({"action": "remove_participant", "user_id": s.dave_id}),
       )
       .await;
     assert_eq!(
-      join_token(&s.app, &s.carol, &s.chat, &s.devices[1]).await,
+      join_token(&s.app, &s.dave, &s.chat, &s.devices[2]).await,
       StatusCode::FORBIDDEN
     );
+    s.app.post(&s.host, &path, json!({"action": "lock"})).await;
     assert_eq!(
       join_token(&s.app, &s.dave, &s.chat, &s.devices[2]).await,
+      StatusCode::FORBIDDEN,
+      "the reconnect grace doesn't bring a removed person back"
+    );
+    s.app.post(&s.host, &path, json!({"action": "unlock"})).await;
+    assert_eq!(
+      join_token(&s.app, &s.carol, &s.chat, &s.devices[1]).await,
       StatusCode::OK,
       "others are unaffected"
     );
