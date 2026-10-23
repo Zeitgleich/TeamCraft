@@ -49,12 +49,20 @@ previous release keep working.
   → Open, or `xattr -d com.apple.quarantine`), the Windows installers are not code-signed (SmartScreen
   asks once). Verify them with the checksums and attestations below.
 - **Android**: release APKs are only signed when the project's upload key is configured for the build;
-  otherwise use the `-debug-signed` APKs for testing or sign the release APKs yourself.
-- **iOS** needs your own build and signing; there is no App Store or TestFlight build.
-- **Mobile push for the store apps** goes through the publisher's push gateway: set
-  `[push.gateway] url` on your server to the gateway of the app's publisher (docs/push-gateway.md). The
-  gateway sees device tokens and ciphertext only. Direct `[push.apns]` / `[push.fcm]` credentials are for
-  apps you build and sign yourself. Without either, phones only get messages while the app runs.
+  otherwise use the `-debug-signed` APKs for testing or sign the release APKs yourself. There is no
+  Play Store or F-Droid listing yet.
+- **iOS is not distributed**: there is no App Store or TestFlight build. Build it from `apps/ios` with
+  your own Apple team and signing; push then goes through your own APNs key (`[push.apns]`), not the
+  push gateway.
+- **Push for self-built mobile apps** needs the server's own APNs / FCM credentials; the publisher's
+  push gateway only serves the official store apps.
+- **Tested in CI only, not yet on real hardware**: the macOS and Windows desktop apps (built, unit-tested
+  and packaged in CI; hardware video encoding through VideoToolbox / Media Foundation falls back to
+  software when unavailable), the iOS app (compiled and unit-tested in CI, not yet run on a device) and
+  Android video calls (audio calls are tested). Linux desktop, web, Android chat and the server are
+  covered by the end-to-end and acceptance suites.
+- The AppImage is large (~130 MB): it carries WebKitGTK and its dependencies; the deb, rpm and Flatpak
+  use the system's.
 - Calls in the browser need WebTransport (Chromium-based browsers, Firefox).
 
 ## Verify the downloads
