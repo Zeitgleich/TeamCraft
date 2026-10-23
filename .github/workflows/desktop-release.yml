@@ -6,11 +6,26 @@
 # Update artifacts (the AppImages, the Windows installers and the macOS .app.tar.gz) are signed for
 # the in-app updater when the secret TAURI_SIGNING_PRIVATE_KEY exists (docs/updates.md §3.3); the
 # `.sig` files travel with the packages and release.yml turns them into latest.json.
+#
+# With `warm-cache`, desktop-cache.yml runs the same compile on `main` without packaging and saves the
+# Rust build cache. A tag run can only restore caches of its own ref or the default branch, so the
+# release jobs restore what `main` saved and never save themselves (each tag's cache would be
+# unreadable for the next release and only evict the useful ones).
 name: Desktop release
 
 on:
   workflow_dispatch:
+    inputs:
+      warm-cache:
+        description: Compile only and save the Rust build cache (no packages)
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      warm-cache:
+        description: Compile only and save the Rust build cache (no packages)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -26,8 +41,43 @@ env:
   CARGO_PROFILE_RELEASE_STRIP: symbols
   # Builds follow this repository's releases for updates (a fork's builds follow the fork's).
   TEAMCRAFT_RELEASE_REPOSITORY: ${{ github.repository }}
+  # Prebuilt Tauri CLI for the macOS and Windows jobs, the same version as in the CI image
+  # (containers/ci.Containerfile) that the Linux jobs use. Not TAURI_*: the CLI reads its own
+  # TAURI_CLI_* variables.
+  TEAMCRAFT_TAURI_CLI_VERSION: "2.12.4"
 
 jobs:
+  ui:
+    name: Web UI bundle
+    # The wasm UI (size-optimized with fat LTO: a long serial build) is the same for every package,
+    # so it is built once here; the desktop jobs and the Flatpak embed it and release.yml ships it as
+    # the web client.
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: rust-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-ui
+          cache-bin: "false"
+          save-if: ${{ inputs.warm-cache }}
+      - name: Build the UI bundle
+        working-directory: crates/teamcraft-ui
+        run: trunk build --release
+      # The packages embed this bundle and the web client is made from it: no demo data.
+      - name: The UI bundle has no demo data
+        run: scripts/check-no-demo-data.py crates/teamcraft-ui/dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-dist
+          path: crates/teamcraft-ui/dist
+          if-no-files-found: error
+
   linux:
     name: Linux ${{ matrix.arch }} (deb, rpm, AppImage)
     # x86_64 and aarch64, each on a native runner (no emulation), in the multi-arch Debian Trixie
@@ -40,8 +90,9 @@ jobs:
             runner: ubuntu-latest
           - arch: aarch64
             runner: ubuntu-24.04-arm
+    needs: ui
     runs-on: ${{ matrix.runner }}
-    # Rust, the system packages, trunk and the Tauri CLI are in the CI image (containers/ci.Containerfile).
+    # Rust, the system packages and the Tauri CLI are in the CI image (containers/ci.Containerfile).
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
       credentials:
@@ -49,10 +100,12 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - id: rust-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-linux-${{ matrix.arch }}
           cache-bin: "false"
+          save-if: ${{ inputs.warm-cache }}
       # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
       # reports it and the update signatures bind it (docs/updates.md §3.1).
       - name: Release version
@@ -62,22 +115,33 @@ jobs:
           echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
+      # The UI bundle from the ui job; tauri.prebuilt-ui.conf.json drops the trunk build from
+      # beforeBuildCommand.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ui-dist
+          path: crates/teamcraft-ui/dist
+      # The same compile with or without packaging, so the warmed cache fits the release build. A
+      # warm-up run whose cache key already exists (same lockfile, toolchain and flags) has nothing
+      # new to save and skips it.
       - name: Build packages
+        if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
         working-directory: apps/desktop
-        run: cargo tauri build --config tauri.models.conf.json --bundles deb,rpm,appimage
+        run: >
+          cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json
+          ${{ inputs.warm-cache && '--no-bundle' || '--bundles deb,rpm,appimage' }}
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
-      # The packages embed this bundle (and the Flatpak and the web client reuse it): no demo data.
-      - name: The UI bundle has no demo data
-        run: scripts/check-no-demo-data.py crates/teamcraft-ui/dist
       # deb and rpm are updated by the package manager from the signed repositories instead.
       - name: Sign the AppImage for the updater (optional)
+        if: ${{ !inputs.warm-cache }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" target/release/bundle/appimage/*.AppImage
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - if: ${{ !inputs.warm-cache }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-packages-${{ matrix.arch }}
           path: |
@@ -86,18 +150,11 @@ jobs:
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: error
-      # The UI bundle is wasm32, the same for both architectures: keep one.
-      - name: Keep the web UI bundle for the Flatpak job
-        if: matrix.arch == 'x86_64'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ui-dist
-          path: crates/teamcraft-ui/dist
-          if-no-files-found: error
 
   flatpak:
     name: Flatpak ${{ matrix.arch }} (build only)
-    needs: linux
+    needs: ui
+    if: ${{ !inputs.warm-cache }}
     strategy:
       fail-fast: false
       matrix:
@@ -113,7 +170,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
-      # SDK's Rust lacks) comes from the Linux job.
+      # SDK's Rust lacks) comes from the ui job.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ui-dist
@@ -145,6 +202,7 @@ jobs:
             title: Intel
             arch: x64
             rustflags: ""
+    needs: ui
     runs-on: macos-26
     env:
       # Overrides the workflow-wide flags per architecture (see the matrix).
@@ -155,10 +213,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: wasm32-unknown-unknown,${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+          targets: ${{ matrix.target }}
+      - id: rust-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
+          save-if: ${{ inputs.warm-cache }}
       # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
       # reports it and the update signatures bind it (docs/updates.md §3.1).
       - name: Release version
@@ -186,27 +246,41 @@ jobs:
           echo "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7  gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
           sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
           sudo installer -pkg "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" -target /
-      - name: Trunk (builds the UI bundle)
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: trunk
+      # Prebuilt release binary, pinned by hash (building it from source took 5-10 minutes per job).
       - name: Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        run: |
+          set -euo pipefail
+          file="cargo-tauri-aarch64-apple-darwin.zip"
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" \
+            "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$TEAMCRAFT_TAURI_CLI_VERSION/$file"
+          echo "f71a34ada728ca2d1a51c28d6d21639e1e080898ec69ec8d49c5da3b7e8bc1be  $RUNNER_TEMP/$file" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/$file" cargo-tauri -d "$RUNNER_TEMP/tauri-cli"
+          echo "$RUNNER_TEMP/tauri-cli" >> "$GITHUB_PATH"
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
+      # The UI bundle from the ui job; tauri.prebuilt-ui.conf.json drops the trunk build from
+      # beforeBuildCommand.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ui-dist
+          path: crates/teamcraft-ui/dist
+      # Skipped by a warm-up run whose cache key already exists (see the Linux job).
       - name: Build the executable
+        if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
         working-directory: apps/desktop
-        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --no-bundle
+        run: >
+          cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json
+          --target ${{ matrix.target }} --no-bundle
         env:
           PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
           PKG_CONFIG_ALLOW_CROSS: "1"
-      - name: The UI bundle has no demo data
-        run: scripts/check-no-demo-data.py crates/teamcraft-ui/dist
       - name: Bundle GStreamer into the app
+        if: ${{ !inputs.warm-cache }}
         run: apps/desktop/packaging/macos/bundle-gstreamer.sh patch target/${{ matrix.target }}/release/teamcraft-desktop
       # The app only: the dmg is made from the signed app below, so nothing touches the app after
       # it is signed.
       - name: Build the app
+        if: ${{ !inputs.warm-cache }}
         working-directory: apps/desktop
         run: >
           cargo tauri bundle --config tauri.models.conf.json --config tauri.gstreamer.conf.json
@@ -214,6 +288,7 @@ jobs:
       # The bundler copies the framework without its symlinks; a framework with duplicated version
       # directories can't be sealed. ditto copies it as built.
       - name: Put the slim GStreamer framework into the app
+        if: ${{ !inputs.warm-cache }}
         run: |
           app="$(find target/${{ matrix.target }}/release/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)"
           rm -rf "$app/Contents/Frameworks/GStreamer.framework"
@@ -222,6 +297,7 @@ jobs:
       # Developer ID signing and notarization, only when the repository has the secrets; otherwise
       # the app is signed ad hoc (docs/release.md, "Opening the unsigned macOS app").
       - name: Signing identity (optional)
+        if: ${{ !inputs.warm-cache }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -243,9 +319,10 @@ jobs:
           rm -f "$RUNNER_TEMP/certificate.p12"
           echo "MACOS_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
       - name: Sign the app (inside out) and verify the signature
+        if: ${{ !inputs.warm-cache }}
         run: apps/desktop/packaging/macos/sign-app.sh "$APP"
       - name: Notarize the app (optional)
-        if: env.MACOS_SIGNING_IDENTITY != ''
+        if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -256,6 +333,7 @@ jobs:
           xcrun stapler staple "$APP"
           MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"
       - name: Build the dmg and verify the app inside it
+        if: ${{ !inputs.warm-cache }}
         run: |
           version="$(scripts/check-versions.sh)"
           mkdir -p target/dmg
@@ -263,6 +341,7 @@ jobs:
       # The updater replaces the whole app with this archive of the signed (and, with the secrets,
       # notarized and stapled) app. No AppleDouble files: they would break the seal.
       - name: Update archive of the app, signed for the updater (optional)
+        if: ${{ !inputs.warm-cache }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -272,7 +351,7 @@ jobs:
           COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$(dirname "$APP")" -czf "$archive" "$(basename "$APP")"
           apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" "$archive"
       - name: Notarize the dmg (optional)
-        if: env.MACOS_SIGNING_IDENTITY != ''
+        if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -282,7 +361,8 @@ jobs:
           xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple "$dmg"
           spctl --assess -vvv --type open --context context:primary-signature "$dmg"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - if: ${{ !inputs.warm-cache }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-${{ matrix.target }}
           path: |
@@ -293,16 +373,21 @@ jobs:
 
   windows:
     name: Windows (${{ matrix.target }}, msi, nsis)
-    runs-on: windows-latest
+    # Each architecture on a native runner (windows-11-arm is free for public repositories), so the
+    # ARM64 build compiles its C code (OpenSSL, Opus, OpenH264) natively instead of cross.
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-          # Cross-built on the x64 runner: hosted arm64 runners are not free for private repositories.
-          # Required, like x64 (the build fails the workflow); the OpenSSL, Opus and OpenH264 C code
-          # builds for ARM64 with the MSVC cross tools that windows-latest ships.
+            runner: windows-latest
+            # Release asset hash of the prebuilt Tauri CLI for this host.
+            tauri-cli-sha256: 3e8687fb184bd7f10ebd8642f7715f79f4a605c0694c142a21507e8a24dc0f8b
           - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            tauri-cli-sha256: 92aa6a90be3126ed7b6ede964ca12124535359b47d8363dc29189b4f776303e7
+    needs: ui
+    runs-on: ${{ matrix.runner }}
     # Overrides the workflow-wide flags: WebRTC echo cancellation is not part of the Windows build
     # yet (the experimental CI job tries it), so calls run without it.
     env:
@@ -311,10 +396,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: wasm32-unknown-unknown,${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+          targets: ${{ matrix.target }}
+      - id: rust-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
+          save-if: ${{ inputs.warm-cache }}
       # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
       # reports it and the update signatures bind it (docs/updates.md §3.1).
       - name: Release version
@@ -322,29 +409,44 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="$(scripts/check-versions.sh)"; fi
           echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-      # OpenSSL for SQLCipher is built from source and needs NASM; Perl comes with the image.
-      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
-      # Direct download: install-action's bash startup fails on the Windows image.
-      - name: Trunk (builds the UI bundle)
-        shell: pwsh
-        run: |
-          Invoke-WebRequest https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-pc-windows-msvc.zip -OutFile "$env:RUNNER_TEMP\trunk.zip"
-          Expand-Archive "$env:RUNNER_TEMP\trunk.zip" -DestinationPath "$env:RUNNER_TEMP\trunk"
-          "$env:RUNNER_TEMP\trunk" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      # OpenSSL for SQLCipher is built from source and needs NASM on x64 (ARM64 has no NASM
+      # assembly); Perl comes with both images.
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
+      # Prebuilt release binary for the runner's architecture, pinned by hash (building it from
+      # source took 10 minutes).
       - name: Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        shell: pwsh
+        env:
+          TAURI_CLI_SHA256: ${{ matrix.tauri-cli-sha256 }}
+        run: |
+          $file = "cargo-tauri-${{ matrix.target }}.zip"
+          $zip = "$env:RUNNER_TEMP\$file"
+          Invoke-WebRequest "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$env:TEAMCRAFT_TAURI_CLI_VERSION/$file" -OutFile $zip
+          if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne $env:TAURI_CLI_SHA256) { throw "Checksum mismatch: $file" }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\tauri-cli"
+          "$env:RUNNER_TEMP\tauri-cli" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - name: Segmentation model (background effects; not in git)
         shell: bash
         run: crates/teamcraft-media/models/fetch.sh
+      # The UI bundle from the ui job; tauri.prebuilt-ui.conf.json drops the trunk build from
+      # beforeBuildCommand.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ui-dist
+          path: crates/teamcraft-ui/dist
+      # Skipped by a warm-up run whose cache key already exists (see the Linux job).
       - name: Build installers
+        if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
         working-directory: apps/desktop
-        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles nsis,msi
+        run: >
+          cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json
+          --target ${{ matrix.target }} ${{ inputs.warm-cache && '--no-bundle' || '--bundles nsis,msi' }}
         # Signing is left out on purpose (the installers are unsigned). To enable it, see
         # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
-      - name: The UI bundle has no demo data
-        run: python scripts/check-no-demo-data.py crates/teamcraft-ui/dist
       # The updater runs the new installer of the same kind (NSIS or MSI) the app came from.
       - name: Sign the installers for the updater (optional)
+        if: ${{ !inputs.warm-cache }}
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -352,7 +454,8 @@ jobs:
         run: |
           apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" \
             target/${{ matrix.target }}/release/bundle/nsis/*.exe target/${{ matrix.target }}/release/bundle/msi/*.msi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - if: ${{ !inputs.warm-cache }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-${{ matrix.target }}
           path: |

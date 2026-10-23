@@ -33,7 +33,8 @@ env:
 # Rust, every system package and cargo-nextest, so a job starts building at once.
 #
 # The build output is cached by Swatinem/rust-cache, one key per job and architecture. Only runs
-# on main save it; pull requests restore main's cache.
+# on main save it; pull requests restore main's cache (a cache per pull request would push the
+# release caches out of the repository's 10 GB budget).
 
 jobs:
   check:
@@ -166,6 +167,8 @@ jobs:
           components: clippy
           targets: aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # OpenH264 (tests) and OpenSSL for SQLCipher (built from source) need NASM; Perl comes with the image.
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
@@ -197,6 +200,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The desktop shell links GStreamer (VideoToolbox encoding); same pinned packages as the release.
       - name: GStreamer framework
         env:
