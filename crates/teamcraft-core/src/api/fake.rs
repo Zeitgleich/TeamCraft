@@ -18,12 +18,13 @@ use teamcraft_proto::{
   DeviceResponse, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse,
   HistoryPolicy, Id, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
-  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpacesResponse, MessageId,
-  MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, Role, SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake,
-  SpaceId, SpaceResponse, SpaceRole, UnixMillis, UpdateConversationMemberRequest, UploadIdentityKeyRequest,
-  UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
+  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
+  ListSpacesResponse, MessageId, MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest,
+  MyMembership, NotificationLevel, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  PutKeyBagRequest, RegisterDeviceRequest, Role, SendMessageRequest, SetPresenceRequest,
+  SetReadPositionRequest, Snowflake, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis,
+  UpdateConversationMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind,
+  UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -708,6 +709,27 @@ impl ServerApi for FakeServerApi {
       Ok(ListSpacesResponse {
         spaces: state.spaces.values().cloned().collect(),
       })
+    })
+  }
+
+  /// Every known user is in every fake space.
+  async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
+    self.with(|state, _| {
+      state.default_space_entry();
+      if !state.spaces.contains_key(&space) {
+        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+      }
+      let members = state
+        .users
+        .values()
+        .map(|user| SpaceMemberResponse {
+          user: user.clone(),
+          role: SpaceRole::Member,
+          maybe_expires_at: None,
+          maybe_sponsor_user_id: None,
+        })
+        .collect();
+      Ok(ListSpaceMembersResponse { members })
     })
   }
 

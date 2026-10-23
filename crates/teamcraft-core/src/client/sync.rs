@@ -1,7 +1,9 @@
 //! Full state sync over REST, key package top-up and key bag upload.
 
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
-use teamcraft_proto::{Base64Bytes, ConversationId, ListThreadsQuery, UploadKeyPackagesRequest, UserSummary};
+use teamcraft_proto::{
+  Base64Bytes, ConversationId, ListThreadsQuery, SpaceId, UploadKeyPackagesRequest, UserSummary,
+};
 
 use super::Client;
 use crate::api::ServerApi;
@@ -115,11 +117,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// The user's spaces, and their members as the people the user can find and message (a new
+  /// member shares no conversation with anyone yet).
   pub(crate) async fn refresh_spaces(&mut self) -> Result<(), CoreError> {
     for space in self.api.list_spaces().await?.spaces {
       records::put_json(&self.store, Table::Spaces, &space.id.to_string(), &space)?;
+      if space.maybe_my_role.is_some() {
+        self.refresh_space_members(space.id).await?;
+      }
     }
     Ok(())
+  }
+
+  async fn refresh_space_members(&mut self, space: SpaceId) -> Result<(), CoreError> {
+    match self.api.list_space_members(space).await {
+      Ok(members) => members
+        .members
+        .iter()
+        .try_for_each(|member| self.remember_user(&member.user)),
+      // Guests may not list a space's members; they find the people of their conversations.
+      Err(error) if error.is_forbidden() || error.is_not_found() => Ok(()),
+      Err(error) => Err(error.into()),
+    }
   }
 
   pub(crate) async fn refresh_conversation(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
