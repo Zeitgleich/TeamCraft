@@ -85,14 +85,23 @@ mod lost_connection {
     assert_eq!(network.heard(BOB, ALICE).len(), 1);
   }
 
-  #[test]
-  fn new_connection_takes_over_one_the_sfu_still_thinks_alive() {
+  #[tokio::test]
+  async fn new_connection_takes_over_one_the_sfu_still_thinks_alive() {
     let mut network = Network::with_secured(&[ALICE, BOB]);
     // Bob noticed the dead path before the SFU's idle timeout did.
-    let old_link = network.client(BOB).connection().link.clone();
-    network.drop_connection_silently(BOB);
+    let mut old = network.drop_connection_silently(BOB);
     assert_eq!(network.rejoin(BOB), JoinOutcome::Resumed);
-    assert_eq!(old_link.close_code(), Some(REPLACED_BY_NEW_CONNECTION));
+    // The old connection hears why (so it doesn't rejoin in turn), then closes.
+    let mut told = Vec::new();
+    while let Ok(outgoing) = old.signals.try_recv() {
+      told.push(outgoing);
+    }
+    assert!(
+      told.contains(&Outgoing::Event(CallEvent::ConnectionReplaced)),
+      "{told:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(old.link.close_code(), Some(REPLACED_BY_NEW_CONNECTION));
     assert!(!network.saw(ALICE, &CallEngineEvent::ParticipantLeft(device(BOB))));
     assert!(network.is_secured(ALICE) && network.is_secured(BOB));
     network.speak(BOB, 1);
@@ -252,21 +261,22 @@ impl Network {
     let connection = self.drop_connection_silently(id);
     let slot_kept = self
       .rooms
-      .disconnect(&connection.0, device(id), connection.1, self.now);
+      .disconnect(&connection.room, device(id), connection.session, self.now);
     assert!(slot_kept);
     self.pump();
   }
 
   /// The client's connection dies without the SFU noticing (yet).
-  fn drop_connection_silently(&mut self, id: i64) -> (Arc<Room>, SessionId) {
+  fn drop_connection_silently(&mut self, id: i64) -> MemoryConnection {
     let client = self.client_mut(id);
     let connection = client.maybe_connection.take().unwrap();
     connection.link.is_dead.store(true, Ordering::Relaxed);
     client.engine.connection_lost();
-    let session = (Arc::clone(&connection.room), connection.session);
-    client.lost_sessions.push(session.clone());
+    client
+      .lost_sessions
+      .push((Arc::clone(&connection.room), connection.session));
     self.pump();
-    session
+    connection
   }
 
   /// A new connection with a fresh token; returns how the SFU took the join.
@@ -454,12 +464,6 @@ impl Network {
       session,
     });
     outcome
-  }
-}
-
-impl Client {
-  fn connection(&self) -> &MemoryConnection {
-    self.maybe_connection.as_ref().unwrap()
   }
 }
 

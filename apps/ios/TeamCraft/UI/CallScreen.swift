@@ -87,6 +87,7 @@ struct CallScreen: View {
     case .ringing: return "call_ringing"
     case .connecting: return call.isSecured ? "call_connecting" : "call_securing"
     case .connected: return "call_ongoing"
+    case .reconnecting: return "call_reconnecting"
     }
   }
 

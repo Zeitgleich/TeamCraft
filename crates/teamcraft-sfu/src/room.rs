@@ -633,7 +633,7 @@ impl Room {
         None => state.remove(self.call_id, *device_id, Instant::now()),
       }
     }
-    close_after_event(handles, event);
+    close_after_event(handles, event, CLOSED_BY_HOST, b"closed by the meeting host");
   }
 }
 
@@ -706,9 +706,12 @@ impl RoomState {
     participant.session = session;
     let was_reconnecting = match previous {
       Presence::Connected(old) => {
-        old
-          .link
-          .close(REPLACED_BY_NEW_CONNECTION, b"replaced by a new connection");
+        close_after_event(
+          vec![old],
+          CallEvent::ConnectionReplaced,
+          REPLACED_BY_NEW_CONNECTION,
+          b"replaced by a new connection",
+        );
         // The new connection brings a new DAVE key package: the old leaf goes.
         let outbound = self.dave.on_leave(participant_id);
         self.dispatch(outbound);
@@ -851,14 +854,14 @@ fn rejected(participant_id: DeviceId, result: Result<(), RoomError>) -> Result<(
 
 /// Sends `event` to each handle and closes the connections a moment later, so the event is
 /// written first.
-fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent) {
+fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent, code: u32, reason: &'static [u8]) {
   for handle in &handles {
     send(handle, event.clone());
   }
   tokio::spawn(async move {
     tokio::time::sleep(CLOSE_GRACE).await;
     for handle in handles {
-      handle.link.close(CLOSED_BY_HOST, b"closed by the meeting host");
+      handle.link.close(code, reason);
     }
   });
 }

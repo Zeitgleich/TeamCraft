@@ -140,6 +140,10 @@ enum Request {
   Action(Box<ChatAction>, oneshot::Sender<Result<(), String>>),
   Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  CallJoinToken(
+    ConversationId,
+    oneshot::Sender<Result<CallJoinTokenResponse, String>>,
+  ),
   BackgroundPicture(BackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
   LinkStart {
@@ -324,6 +328,14 @@ impl CoreRuntime {
   pub async fn prepare_call(&self, conversation: ConversationId) -> Result<CallPreparation, String> {
     self
       .ask(|reply| Request::PrepareCall(conversation, reply))
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// A fresh join token for the conversation's call, to rejoin after a lost connection.
+  pub async fn call_join_token(&self, conversation: ConversationId) -> Result<CallJoinTokenResponse, String> {
+    self
+      .ask(|reply| Request::CallJoinToken(conversation, reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -609,6 +621,9 @@ impl Core {
         }
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
+      Request::CallJoinToken(conversation, reply) => {
+        drop(reply.send(self.call_join_token(conversation).await))
+      },
       Request::BackgroundPicture(id, reply) => drop(reply.send(self.background_picture(id).await)),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
     }
@@ -623,6 +638,11 @@ impl Core {
   async fn org_background_picture(&mut self, id: OrgBackgroundId) -> Result<Vec<u8>, String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
     client.org_background_picture(id).await.map_err(describe)
+  }
+
+  async fn call_join_token(&mut self, conversation: ConversationId) -> Result<CallJoinTokenResponse, String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    client.call_join_token(conversation).await.map_err(describe)
   }
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {

@@ -256,6 +256,7 @@ tile-you = You
 tile-muted = muted
 tile-hand = hand raised
 tile-speaking = speaking
+tile-reconnecting = reconnecting
 
 ## Pre-join screen
 prejoin-quick-controls = Microphone and camera
@@ -889,6 +890,7 @@ audit-session-ended = Session ended
 audit-other = Other
 policy-saving = Signing and publishing…
 call-connecting = Connecting…
+call-reconnecting = Connection lost, reconnecting…
 control-deafen = Mute the call audio
 control-undeafen = Unmute the call audio
 enroll-link = Link with another device

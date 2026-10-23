@@ -256,6 +256,7 @@ tile-you = Du
 tile-muted = stummgeschaltet
 tile-hand = Hand gehoben
 tile-speaking = spricht
+tile-reconnecting = Verbindung wird wiederhergestellt
 
 ## Vorschau vor dem Beitritt
 prejoin-quick-controls = Mikrofon und Kamera
@@ -889,6 +890,7 @@ audit-session-ended = Sitzung beendet
 audit-other = Sonstiges
 policy-saving = Wird signiert und veröffentlicht…
 call-connecting = Verbindung wird hergestellt …
+call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
 control-deafen = Anrufton stummschalten
 control-undeafen = Anrufton einschalten
 enroll-link = Mit anderem Gerät verknüpfen

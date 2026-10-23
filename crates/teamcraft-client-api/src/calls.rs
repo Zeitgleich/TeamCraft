@@ -366,6 +366,12 @@ pub struct ActiveCall {
   /// Whether this device's screen share carries the computer's sound.
   #[serde(default)]
   pub screen_sound: ScreenShareSound,
+  /// This device lost its connection and is rejoining; media pauses meanwhile.
+  #[serde(default)]
+  pub is_reconnecting: bool,
+  /// Others whose connection was lost and who are rejoining.
+  #[serde(default)]
+  pub reconnecting: Vec<UserId>,
 }
 
 /// The sound of a screen share (the computer's playback without the call itself).
@@ -386,8 +392,14 @@ pub enum ScreenShareSound {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum CallEndReason {
-  RemovedByHost { by: UserId },
-  EndedByHost { by: UserId },
+  RemovedByHost {
+    by: UserId,
+  },
+  EndedByHost {
+    by: UserId,
+  },
+  /// The connection broke and rejoining didn't succeed within the grace period.
+  ConnectionLost,
 }
 
 /// Push-to-talk: the microphone is open only while the shortcut is held.

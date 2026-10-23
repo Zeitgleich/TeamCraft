@@ -6,6 +6,9 @@
 //! [`CALL_CHANGED_EVENT`] whenever it changes; the UI re-reads with `call_snapshot`. Joining asks the
 //! core for a join token, the verified device certificates of the conversation and a signer for the
 //! call key binding (e2ee.md §8), so DAVE only admits devices the user's contacts certified.
+//!
+//! A lost connection (a laptop changing networks) doesn't end the call: the driver migrates or
+//! rejoins with a fresh token from the core, and the UI shows "reconnecting" meanwhile.
 
 mod codec_library;
 pub mod commands;
@@ -29,7 +32,10 @@ use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
-use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::call_native::{
+  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
+};
+use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError};
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::system_audio::SystemAudioCapture;
@@ -42,7 +48,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use self::codec_library::CodecLibrary;
 pub(crate) use self::video::BUNDLED_MODEL;
-use crate::core::CallPreparation;
+use crate::core::{CallPreparation, CoreRuntime};
 
 pub use teamcraft_client_api::remote::CALL_CHANGED_EVENT;
 
@@ -129,6 +135,8 @@ struct Roster {
   video_devices: HashMap<MediaStreamId, DeviceId>,
   /// This device's published screen track.
   maybe_own_screen: Option<MediaStreamId>,
+  /// Others' devices whose connection was lost and who are rejoining.
+  reconnecting: BTreeSet<DeviceId>,
 }
 
 /// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
@@ -137,6 +145,12 @@ type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, VideoSink>>>;
 
 /// Lets the media layer sign with the core's signer (the device key stays in the core).
 struct CoreSigner(CallKeySigner);
+
+/// Fresh join tokens from the core, for rejoining after a lost connection.
+pub struct CoreJoinTickets {
+  runtime: Arc<CoreRuntime>,
+  conversation: ConversationId,
+}
 
 impl CallHost {
   /// `notify` tells the UI that the call state changed.
@@ -208,7 +222,12 @@ impl CallHost {
   }
 
   /// Joins the conversation's call with what the core prepared, leaving any other call first.
-  pub async fn join(&self, request: CallRequest, preparation: CallPreparation) -> Result<(), String> {
+  pub async fn join(
+    &self,
+    request: CallRequest,
+    preparation: CallPreparation,
+    tickets: Arc<dyn JoinTicketSource>,
+  ) -> Result<(), String> {
     let mut media = self.media.lock().await;
     if let Some(previous) = media.take() {
       previous.leave().await;
@@ -218,7 +237,8 @@ impl CallHost {
       (state.microphone.clone(), state.speakers.clone())
     };
     let own_device = preparation.device_id;
-    let config = native_config(preparation, microphone, speakers)?;
+    let mut config = native_config(preparation, microphone, speakers)?;
+    config.maybe_ticket_source = Some(tickets);
     let call = NativeCall::join(config)
       .await
       .map_err(|error| error.to_string())?;
@@ -243,6 +263,8 @@ impl CallHost {
         background: state.background,
         maybe_muted_by_host: None,
         screen_sound: ScreenShareSound::Off,
+        is_reconnecting: false,
+        reconnecting: Vec::new(),
       });
       state.maybe_end_reason = None;
     }
@@ -654,6 +676,31 @@ impl MediaCall {
   }
 }
 
+impl CoreJoinTickets {
+  pub fn new(runtime: Arc<CoreRuntime>, conversation: ConversationId) -> Self {
+    Self {
+      runtime,
+      conversation,
+    }
+  }
+}
+
+impl JoinTicketSource for CoreJoinTickets {
+  fn fetch(&self) -> TicketFuture {
+    let (runtime, conversation) = (Arc::clone(&self.runtime), self.conversation);
+    Box::pin(async move {
+      let join = runtime
+        .call_join_token(conversation)
+        .await
+        .map_err(|reason| JoinTicketError { reason })?;
+      Ok(JoinTicket {
+        sfu_url: join.sfu_url,
+        token: join.token,
+      })
+    })
+  }
+}
+
 impl CallBindingSigner for CoreSigner {
   fn sign_call_key_binding(
     &self,
@@ -734,6 +781,10 @@ async fn run_media(
       frames_received = stats.frames_received,
       "left the call"
     ),
+    Err(NativeCallError::ConnectionLost) => {
+      tracing::warn!("the connection to the call was lost");
+      lock(&state).maybe_end_reason = Some(CallEndReason::ConnectionLost);
+    },
     Err(error) => tracing::warn!(%error, "call ended with an error"),
   }
   {
@@ -771,6 +822,29 @@ fn apply_event(roster: &mut Roster, state: &Mutex<CallState>, event: CallEngineE
     CallEngineEvent::ParticipantLeft(device_id) => {
       roster.users_by_device.remove(&device_id);
       roster.sharing_screen.remove(&device_id);
+      roster.reconnecting.remove(&device_id);
+      active.reconnecting = reconnecting_users(roster);
+    },
+    CallEngineEvent::Reconnecting => {
+      active.is_reconnecting = true;
+      // Who else is away comes again with the SFU's answer to the rejoin.
+      roster.reconnecting.clear();
+      active.reconnecting.clear();
+      return true;
+    },
+    CallEngineEvent::Reconnected => {
+      active.is_reconnecting = false;
+      return true;
+    },
+    CallEngineEvent::ParticipantReconnecting(device_id) => {
+      roster.reconnecting.insert(device_id);
+      active.reconnecting = reconnecting_users(roster);
+      return true;
+    },
+    CallEngineEvent::ParticipantReconnected(device_id) => {
+      roster.reconnecting.remove(&device_id);
+      active.reconnecting = reconnecting_users(roster);
+      return true;
     },
     CallEngineEvent::ActiveSpeakers(devices) => {
       let mut speakers = Vec::new();
@@ -885,6 +959,23 @@ fn update_video_tracks(
     },
     _ => {},
   }
+}
+
+/// People all of whose devices in the call are reconnecting.
+fn reconnecting_users(roster: &Roster) -> Vec<UserId> {
+  let mut users: BTreeSet<UserId> = roster
+    .reconnecting
+    .iter()
+    .filter_map(|device| roster.users_by_device.get(device).copied())
+    .collect();
+  users.retain(|user| {
+    roster
+      .users_by_device
+      .iter()
+      .filter(|(_, owner)| *owner == user)
+      .all(|(device, _)| roster.reconnecting.contains(device))
+  });
+  users.into_iter().collect()
 }
 
 fn participants(roster: &Roster) -> Vec<Participant> {
@@ -1174,6 +1265,49 @@ mod tests {
     }
 
     #[test]
+    fn reconnecting_shows_for_this_device_and_for_people_whose_devices_are_all_away() {
+      let state = Mutex::new(CallState {
+        maybe_active: Some(active()),
+        ..CallState::default()
+      });
+      let mut roster = Roster::default();
+      let joined = CallEngineEvent::Joined {
+        call_id: call(),
+        participants: vec![participant(2, 20), participant(2, 21), participant(3, 30)],
+      };
+      apply_event(&mut roster, &state, joined);
+      let reconnecting = |roster: &mut Roster, device_id: i64| {
+        apply_event(
+          roster,
+          &state,
+          CallEngineEvent::ParticipantReconnecting(device(device_id)),
+        );
+        lock(&state).maybe_active.as_ref().unwrap().reconnecting.clone()
+      };
+      assert_eq!(reconnecting(&mut roster, 30), vec![user(3)]);
+      // One of two devices away: the person is still there.
+      assert_eq!(reconnecting(&mut roster, 20), vec![user(3)]);
+      apply_event(
+        &mut roster,
+        &state,
+        CallEngineEvent::ParticipantReconnected(device(30)),
+      );
+      assert!(
+        lock(&state)
+          .maybe_active
+          .as_ref()
+          .unwrap()
+          .reconnecting
+          .is_empty()
+      );
+
+      assert!(apply_event(&mut roster, &state, CallEngineEvent::Reconnecting));
+      assert!(lock(&state).maybe_active.as_ref().unwrap().is_reconnecting);
+      apply_event(&mut roster, &state, CallEngineEvent::Reconnected);
+      assert!(!lock(&state).maybe_active.as_ref().unwrap().is_reconnecting);
+    }
+
+    #[test]
     fn audio_frames_do_not_wake_the_ui() {
       let state = Mutex::new(CallState {
         maybe_active: Some(active()),
@@ -1247,6 +1381,8 @@ mod tests {
       background: UiBackgroundEffect::None,
       maybe_muted_by_host: None,
       screen_sound: ScreenShareSound::Off,
+      is_reconnecting: false,
+      reconnecting: Vec::new(),
     }
   }
 

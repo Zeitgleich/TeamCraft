@@ -82,8 +82,9 @@ pub struct CallEngine {
   verified_keys: HashMap<DeviceId, Vec<u8>>,
   /// A member failed key verification: media stays off for this call.
   is_compromised: bool,
-  /// The SFU answered `join` with an error.
-  is_refused: bool,
+  /// The call is over for this device whatever happens to the connection: the SFU refused the
+  /// join, a host removed the user or ended the call, or the device joined on another connection.
+  is_over: bool,
   has_reported_unauthenticated_keys: bool,
   uplink: SendSideEstimator,
   downlink_feedback: FeedbackRecorder,
@@ -182,6 +183,8 @@ pub enum CallEngineEvent {
   EndedByHost {
     by_user_id: UserId,
   },
+  /// This device joined the call on another connection (another window); this one ends.
+  ConnectionReplaced,
   /// Estimated uplink bandwidth and loss after new feedback. Audio encoders plan their forward
   /// error correction for `loss_percent`.
   UplinkEstimate {
@@ -293,7 +296,7 @@ impl CallEngine {
       maybe_authenticator: None,
       verified_keys: HashMap::new(),
       is_compromised: false,
-      is_refused: false,
+      is_over: false,
       has_reported_unauthenticated_keys: false,
       uplink,
       downlink_feedback: FeedbackRecorder::new(now),
@@ -359,9 +362,10 @@ impl CallEngine {
     });
   }
 
-  /// The SFU refused to let this device (back) in; the call is over.
-  pub fn is_refused(&self) -> bool {
-    self.is_refused
+  /// Over for good (refused, removed, ended, or replaced by another connection of this device):
+  /// a lost connection is not to be answered with a rejoin.
+  pub fn is_over(&self) -> bool {
+    self.is_over
   }
 
   /// Joined, and not reconnecting.
@@ -461,7 +465,7 @@ impl CallEngine {
       CallServerMessage::Error { error } => {
         // An error in answer to `join` means the SFU refused it and closes the connection.
         if matches!(self.phase, Phase::Joining | Phase::Rejoining { .. }) {
-          self.is_refused = true;
+          self.is_over = true;
         }
         self.event(CallEngineEvent::Error(error));
         Ok(())
@@ -730,11 +734,18 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::RemovedByHost { by_user_id } => {
+        self.is_over = true;
         self.event(CallEngineEvent::RemovedByHost { by_user_id });
         Ok(())
       },
       CallEvent::EndedByHost { by_user_id } => {
+        self.is_over = true;
         self.event(CallEngineEvent::EndedByHost { by_user_id });
+        Ok(())
+      },
+      CallEvent::ConnectionReplaced => {
+        self.is_over = true;
+        self.event(CallEngineEvent::ConnectionReplaced);
         Ok(())
       },
       CallEvent::Unknown => Ok(()),
@@ -1514,11 +1525,16 @@ mod tests {
         error: ErrorBody::new(teamcraft_proto::ErrorCode::CallLocked, "locked"),
       };
       engine.handle_signal(refusal.clone(), now).unwrap();
-      assert!(engine.is_refused());
+      assert!(engine.is_over());
       // Errors for requests during the call are no refusal.
       let mut joined_engine = engine_joined(2, now);
       joined_engine.handle_signal(refusal, now).unwrap();
-      assert!(!joined_engine.is_refused());
+      assert!(!joined_engine.is_over());
+      // Replaced by another connection of this device: over too.
+      joined_engine
+        .handle_signal(event(2, CallEvent::ConnectionReplaced), now)
+        .unwrap();
+      assert!(joined_engine.is_over());
     }
 
     #[test]

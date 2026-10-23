@@ -10,7 +10,7 @@
 pub mod commands;
 mod runtime;
 
-pub use runtime::{CallPreparation, TokenCache};
+pub use runtime::{CallPreparation, CoreRuntime, TokenCache};
 
 #[cfg(all(test, feature = "integration"))]
 mod dev_bridge;

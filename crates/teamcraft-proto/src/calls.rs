@@ -211,6 +211,10 @@ pub enum CallEvent {
   EndedByHost {
     by_user_id: UserId,
   },
+  /// The same device joined the call on another connection (another window, or this one came
+  /// back after the SFU gave it up for lost); the SFU closes this connection right after. Not to
+  /// be answered with a rejoin.
+  ConnectionReplaced,
   #[serde(other)]
   Unknown,
 }
@@ -407,6 +411,7 @@ mod tests {
   fn reconnect_wire_format() {
     let device_id = DeviceId::from_snowflake(Snowflake::new(5).unwrap());
     for (event, expected) in [
+      (CallEvent::ConnectionReplaced, r#"{"type":"connection_replaced"}"#),
       (
         CallEvent::ParticipantReconnecting { device_id },
         r#"{"type":"participant_reconnecting","device_id":"5"}"#,

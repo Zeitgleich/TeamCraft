@@ -568,8 +568,9 @@ async fn run_call(
     if let Err(error) = sinks.flush(&mut engine, &mut capture, connection.maybe_link.as_ref()) {
       break Err(error);
     }
-    // The SFU refused the join (locked call, removed user, invalid token): the call is over.
-    if engine.is_refused() {
+    // Refused (locked call, removed user), ended by the host, or taken over by another
+    // connection of this device: nothing to rejoin.
+    if engine.is_over() {
       break Ok(());
     }
     connection.settle(&engine);

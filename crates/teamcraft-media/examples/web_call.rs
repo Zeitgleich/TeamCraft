@@ -19,6 +19,7 @@ use js_sys::{Function, Object, Reflect};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, CallStats};
+use teamcraft_media::call_resilience::ResilienceConfig;
 use teamcraft_media::call_web::{WebCall, WebCallConfig};
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, VideoCodec};
@@ -89,6 +90,9 @@ pub async fn join_dev_call(
     maybe_trusted_roster: None,
     maybe_authenticator: None,
     jitter: JitterBufferConfig::default(),
+    resilience: ResilienceConfig::default(),
+    // The test page has one dev token; it is reused for a rejoin while still valid.
+    maybe_ticket_source: None,
   };
   let call = WebCall::join(config)
     .await

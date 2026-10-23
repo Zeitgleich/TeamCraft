@@ -181,6 +181,8 @@ mod tests {
         background: BackgroundEffect::default(),
         maybe_muted_by_host: None,
         screen_sound: Default::default(),
+        is_reconnecting: false,
+        reconnecting: Vec::new(),
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {
