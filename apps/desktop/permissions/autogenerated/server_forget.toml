@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-server-forget"
+description = "Enables the server_forget command without any pre-configured scope."
+commands.allow = ["server_forget"]
+
+[[permission]]
+identifier = "deny-server-forget"
+description = "Denies the server_forget command without any pre-configured scope."
+commands.deny = ["server_forget"]

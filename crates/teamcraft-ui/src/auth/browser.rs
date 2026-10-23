@@ -14,6 +14,8 @@ use oauth2::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::server_entry::SERVER_INFO_PATH;
+use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
 
 use super::fetch::fetch;
 use super::{ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture};
@@ -24,7 +26,8 @@ const SIGNED_IN_HINT_KEY: &str = "teamcraft.signed_in";
 const AUTOLOGIN_TRIED_KEY: &str = "teamcraft.autologin_tried";
 /// The bearer token of a local account, for the life of the tab.
 const LOCAL_SESSION_KEY: &str = "teamcraft.local_session";
-const SCOPE: &str = "openid";
+/// The scope every sign-in asks for, also with development overrides.
+const OPENID_SCOPE: &str = "openid";
 /// Refresh this long before the access token expires.
 const REFRESH_MARGIN_MS: i64 = 30_000;
 
@@ -33,7 +36,16 @@ pub struct BrowserAuth {
   /// Set while a local account (guest) is signed in instead of an identity provider account.
   local: RefCell<Option<LocalSession>>,
   tokens: RefCell<Option<Tokens>>,
+  sign_in: RefCell<Option<SignIn>>,
   discovery: RefCell<Option<Discovery>>,
+}
+
+/// How to sign in: the server's settings, or the development overrides of [`AppConfig`].
+#[derive(Clone, Debug)]
+struct SignIn {
+  issuer: String,
+  client_id: String,
+  scopes: Vec<String>,
 }
 
 /// The session of a local account: the server issues the token, there is no refresh.
@@ -75,6 +87,7 @@ impl BrowserAuth {
       config,
       local: RefCell::new(None),
       tokens: RefCell::new(None),
+      sign_in: RefCell::new(None),
       discovery: RefCell::new(None),
     }
   }
@@ -110,13 +123,14 @@ impl BrowserAuth {
   }
 
   async fn begin_login(&self) -> Result<(), AuthError> {
+    let sign_in = self.sign_in().await?;
     let discovery = self.discovery().await?;
     let redirect_uri = redirect_uri()?;
-    let client = self.client(&discovery, &redirect_uri)?;
+    let client = self.client(&discovery, &redirect_uri, &sign_in)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let (url, state) = client
       .authorize_url(CsrfToken::new_random)
-      .add_scope(Scope::new(SCOPE.to_owned()))
+      .add_scopes(sign_in.scopes.iter().cloned().map(Scope::new))
       .set_pkce_challenge(challenge)
       .url();
     let pending = Pending {
@@ -137,8 +151,9 @@ impl BrowserAuth {
     if pending.state != state {
       return Err(AuthError::StateMismatch);
     }
+    let sign_in = self.sign_in().await?;
     let discovery = self.discovery().await?;
-    let client = self.client(&discovery, &pending.redirect_uri)?;
+    let client = self.client(&discovery, &pending.redirect_uri, &sign_in)?;
     let response = client
       .exchange_code(AuthorizationCode::new(code.to_owned()))
       .set_pkce_verifier(PkceCodeVerifier::new(pending.verifier))
@@ -163,8 +178,9 @@ impl BrowserAuth {
           .map(|token| token.expose_secret().to_owned())
       })
       .ok_or(AuthError::NotSignedIn)?;
+    let sign_in = self.sign_in().await?;
     let discovery = self.discovery().await?;
-    let client = self.client(&discovery, &redirect_uri()?)?;
+    let client = self.client(&discovery, &redirect_uri()?, &sign_in)?;
     match client
       .exchange_refresh_token(&RefreshToken::new(refresh))
       .request_async(&http_client)
@@ -271,13 +287,66 @@ impl BrowserAuth {
     }));
   }
 
+  /// The sign-in settings: the development overrides if both are set, else the server's answer
+  /// (the page was served by this server, so it is the one to sign in to).
+  async fn sign_in(&self) -> Result<SignIn, AuthError> {
+    if let Some(found) = self.sign_in.borrow().clone() {
+      return Ok(found);
+    }
+    let found = match (&self.config.maybe_issuer, &self.config.maybe_client_id) {
+      (Some(issuer), Some(client_id)) => SignIn {
+        issuer: issuer.clone(),
+        client_id: client_id.clone(),
+        scopes: vec![OPENID_SCOPE.to_owned()],
+      },
+      _ => self.server_sign_in().await?,
+    };
+    self.sign_in.replace(Some(found.clone()));
+    Ok(found)
+  }
+
+  async fn server_sign_in(&self) -> Result<SignIn, AuthError> {
+    let headers = [("Accept".to_owned(), "application/json".to_owned())];
+    let response = fetch("GET", &self.config.api_url(SERVER_INFO_PATH), &headers, None)
+      .await
+      .map_err(AuthError::Network)?;
+    if response.status != 200 {
+      return Err(AuthError::Network(format!(
+        "server-info returned HTTP {}",
+        response.status
+      )));
+    }
+    let info: ServerInfoResponse = serde_json::from_slice(&response.body)
+      .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
+    if info.product != SERVER_INFO_PRODUCT
+      || info.sign_in.issuer.is_empty()
+      || info.sign_in.client_id.is_empty()
+    {
+      return Err(AuthError::InvalidResponse("not a TeamCraft server".to_owned()));
+    }
+    let mut scopes = vec![OPENID_SCOPE.to_owned()];
+    scopes.extend(
+      info
+        .sign_in
+        .scopes
+        .into_iter()
+        .filter(|scope| scope != OPENID_SCOPE),
+    );
+    Ok(SignIn {
+      issuer: info.sign_in.issuer,
+      client_id: info.sign_in.client_id,
+      scopes,
+    })
+  }
+
   async fn discovery(&self) -> Result<Discovery, AuthError> {
     if let Some(found) = self.discovery.borrow().clone() {
       return Ok(found);
     }
+    let sign_in = self.sign_in().await?;
     let url = format!(
       "{}/.well-known/openid-configuration",
-      self.config.issuer.trim_end_matches('/')
+      sign_in.issuer.trim_end_matches('/')
     );
     let response = fetch("GET", &url, &[], None).await.map_err(AuthError::Network)?;
     if response.status != 200 {
@@ -296,6 +365,7 @@ impl BrowserAuth {
     &self,
     discovery: &Discovery,
     redirect_uri: &str,
+    sign_in: &SignIn,
   ) -> Result<
     BasicClient<
       oauth2::EndpointSet,
@@ -308,7 +378,7 @@ impl BrowserAuth {
   > {
     let invalid = |error: oauth2::url::ParseError| AuthError::InvalidResponse(error.to_string());
     Ok(
-      BasicClient::new(ClientId::new(self.config.client_id.clone()))
+      BasicClient::new(ClientId::new(sign_in.client_id.clone()))
         .set_auth_uri(AuthUrl::new(discovery.authorization_endpoint.clone()).map_err(invalid)?)
         .set_token_uri(TokenUrl::new(discovery.token_endpoint.clone()).map_err(invalid)?)
         .set_redirect_uri(RedirectUrl::new(redirect_uri.to_owned()).map_err(invalid)?),
@@ -365,12 +435,13 @@ impl Authenticator for BrowserAuth {
       session_remove(AUTOLOGIN_TRIED_KEY);
       // Ending the provider session as well is what makes "sign out" mean something on shared
       // machines. A direct request with the refresh token does it without a confirmation page.
-      if let (Some(refresh), Ok(discovery)) = (maybe_refresh, self.discovery().await)
+      if let (Some(refresh), Ok(discovery), Ok(sign_in)) =
+        (maybe_refresh, self.discovery().await, self.sign_in().await)
         && let Some(endpoint) = discovery.maybe_end_session_endpoint
       {
         let body = format!(
           "client_id={}&refresh_token={}",
-          encode(&self.config.client_id),
+          encode(&sign_in.client_id),
           encode(refresh.expose_secret())
         );
         let headers = [(

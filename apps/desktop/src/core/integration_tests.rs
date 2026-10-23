@@ -136,7 +136,8 @@ async fn alice_and_carol_chat_in_a_channel_and_a_dm_through_the_core() {
 }
 
 pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person {
-  let service = Arc::new(AuthService::new(config.clone(), SharedStore::default()).expect("auth service"));
+  let service =
+    Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));
   service
     .login(|url| spawn_fake_browser(url, name))
     .await

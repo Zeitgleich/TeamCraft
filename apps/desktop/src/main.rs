@@ -31,6 +31,7 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 use tracing_subscriber::EnvFilter;
 
+use crate::auth::servers::{ManagedServer, ServerDirectory, ServerState};
 use crate::auth::{AuthService, DesktopConfig, KeyringStore};
 use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, MediaFiles};
 use crate::core::TokenCache;
@@ -47,9 +48,8 @@ fn main() -> anyhow::Result<()> {
     .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
     .init();
 
-  let config = DesktopConfig::from_env();
-  let store = KeyringStore::new(&config.issuer);
-  let service = Arc::new(AuthService::new(config.clone(), store).context("could not set up sign-in")?);
+  // No server yet: the account's server is set in `setup`, once the data directory is known.
+  let service = Arc::new(AuthService::new(None, KeyringStore).context("could not set up sign-in")?);
   let tokens = TokenCache::default();
   keep_tokens_fresh(service.clone(), tokens.clone());
 
@@ -70,13 +70,21 @@ fn main() -> anyhow::Result<()> {
         .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
         .build(),
     )
-    .manage(service)
+    .manage(service.clone())
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
     .manage(ringtone::RingtoneState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
-    .manage(CoreHost::new(config, tokens))
-    .setup(|app| {
+    .manage(CoreHost::new(tokens))
+    .setup(move |app| {
+      let servers = Arc::new(ServerState::new(
+        ServerDirectory::load(&core::commands::base_dir(app.handle())?),
+        ManagedServer::load(),
+      ));
+      if let Some(profile) = servers.startup_account() {
+        tauri::async_runtime::block_on(service.set_server(Some(DesktopConfig::from_profile(&profile))));
+      }
+      app.manage(servers);
       let emitter = app.handle().clone();
       let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if let Err(error) = emitter.emit(CALL_CHANGED_EVENT, ()) {
@@ -132,6 +140,10 @@ fn main() -> anyhow::Result<()> {
       auth::commands::api_request,
       auth::commands::api_request_bytes,
       auth::commands::public_get,
+      auth::commands::server_state,
+      auth::commands::server_check,
+      auth::commands::server_confirm,
+      auth::commands::server_forget,
       core::commands::core_start,
       core::commands::core_status,
       core::commands::core_connection,

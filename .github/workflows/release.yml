@@ -280,20 +280,13 @@ jobs:
       - name: Build APKs
         env:
           PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL }}
-          SERVER_URL: ${{ vars.TEAMCRAFT_ANDROID_SERVER_URL }}
-          OIDC_ISSUER: ${{ vars.TEAMCRAFT_ANDROID_OIDC_ISSUER }}
-          OIDC_CLIENT_ID: ${{ vars.TEAMCRAFT_ANDROID_OIDC_CLIENT_ID }}
-          OIDC_REDIRECT_SCHEME: ${{ vars.TEAMCRAFT_ANDROID_OIDC_REDIRECT_SCHEME }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
         run: |
+          # No server or identity provider: the apps ask for the server (docs/release.md).
           args=(assembleFullRelease assembleLibreRelease assembleFullDebug assembleLibreDebug)
-          [ -n "$SERVER_URL" ] && args+=("-Pteamcraft.serverUrl=$SERVER_URL")
           [ -n "$PUSH_GATEWAY_URL" ] && args+=("-Pteamcraft.pushGatewayUrl=$PUSH_GATEWAY_URL")
-          [ -n "$OIDC_ISSUER" ] && args+=("-Pteamcraft.oidcIssuer=$OIDC_ISSUER")
-          [ -n "$OIDC_CLIENT_ID" ] && args+=("-Pteamcraft.oidcClientId=$OIDC_CLIENT_ID")
-          [ -n "$OIDC_REDIRECT_SCHEME" ] && args+=("-Pteamcraft.oidcRedirectScheme=$OIDC_REDIRECT_SCHEME")
           if [ "${HAS_UPLOAD_KEY:-}" = true ]; then
             args+=("-Pteamcraft.uploadKeystore=/src/apps/android/upload.keystore"
               "-Pteamcraft.uploadKeystorePassword=$KEYSTORE_PASSWORD"

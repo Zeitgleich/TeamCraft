@@ -171,6 +171,55 @@ harmless; rows without an object show up as failed downloads.
 - Check `docs/` and the release notes for configuration changes before upgrading. The server rejects
   unknown configuration keys at startup, so a stale key fails fast instead of being ignored.
 
+## Server address in the apps
+
+The desktop, Android and iOS apps have no server built in. On first start they ask for the server
+address; users type `team.example.com`, the full URL, or paste any link into the server (an invitation,
+a message link). The app shows the server's name and host for confirmation and then signs in with the
+settings the server announces. "Change server" on the sign-in screen goes back to the entry. The web
+client needs none of this: it signs in to the server that served it.
+
+What the server announces, public and cacheable, at `GET /api/v1/server-info`:
+
+| Field                            | Source                                                                    |
+|----------------------------------|---------------------------------------------------------------------------|
+| `sign_in.issuer`                 | `[oidc] issuer`; apps require `https` (plain `http` only on loopback)     |
+| `sign_in.client_id`              | `[oidc] client_id`, the public client of the apps                         |
+| `sign_in.scopes`                 | `[oidc] app_scopes`, default `openid profile email`                       |
+| `sign_in.redirect_uris`          | `[oidc] app_redirect_uris`, optional (see below)                          |
+| `sign_in.has_local_accounts`     | Whether local guest accounts are enabled                                  |
+| `brand`                          | The brand of the requested host name, as `GET /api/v1/brand`              |
+| `server_version`, `minimum_client_version` | As `GET /api/v1/client-compatibility`                           |
+
+Nothing in it is secret. Register these redirect URIs for `client_id` at the identity provider:
+
+| App            | Redirect URI                                                     |
+|----------------|------------------------------------------------------------------|
+| Desktop        | `http://127.0.0.1/callback` (any port: loopback flow, RFC 8252)  |
+| Android, iOS   | `de.zeitgleich.teamcraft:/oauth/callback`                        |
+| Web            | `https://<host>/` of each host name                              |
+
+In Keycloak, `http://127.0.0.1/*` as a valid redirect URI covers the desktop app's changing port. When
+`app_redirect_uris` lists them, an app built with another redirect URI (a self-build with its own app
+ID) tells its user that the server is not set up for it instead of failing at the provider.
+
+The apps reject a server that is not a TeamCraft server, that answers with an HTML page or a redirect
+(a captive portal), whose version is too old (or for which the app is too old), or whose issuer is not
+`https`. Tokens and local data are kept per server origin; an app never switches to a server because
+a server told it to.
+
+**Preconfigured server (managed devices).** Companies can set the server so users don't type it, and
+optionally lock the apps to it:
+
+| Platform | Where                                                                                                                                          |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------------|
+| Desktop  | `desktop.json` with `{"server_url": "team.example.com", "lock_server": true}` in `/etc/teamcraft/` (Linux), `/Library/Application Support/TeamCraft/` (macOS) or `%ProgramData%\TeamCraft\` (Windows); or the environment variable `TEAMCRAFT_SERVER_URL` (not locked) |
+| Android  | Managed configuration (Android Enterprise / MDM app restrictions): `server_url`, `lock_server`                                                  |
+| iOS      | Managed app configuration (`com.apple.configuration.managed`): `server_url`, `lock_server`                                                      |
+
+With a preconfigured server the app checks it on first start and goes straight to the confirmation.
+`lock_server` hides "Change server" and drops an account of another server.
+
 ## Push notifications
 
 Push wakes sleeping phones and browsers. The payload is sealed with a per-device key (e2ee.md §7), so
