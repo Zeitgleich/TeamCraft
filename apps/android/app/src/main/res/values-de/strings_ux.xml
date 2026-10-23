@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Chat list -->
+  <string name="chats_empty_hint">Tritt einem Kanal bei oder starte eine Direktnachricht.</string>
+  <string name="chat_mark_read">Als gelesen markieren</string>
+  <string name="chat_mark_unread">Als ungelesen markieren</string>
+  <string name="chat_muted">Stummgeschaltet</string>
+  <string name="chat_preview_deleted">Nachricht gelöscht</string>
+  <string name="chat_preview_event">Unterhaltung geändert</string>
+  <string name="chat_preview_sender">%1$s: %2$s</string>
+  <plurals name="chat_mentions">
+    <item quantity="one">%d Erwähnung</item>
+    <item quantity="other">%d Erwähnungen</item>
+  </plurals>
+  <plurals name="chat_unread">
+    <item quantity="one">%d ungelesene Nachricht</item>
+    <item quantity="other">%d ungelesene Nachrichten</item>
+  </plurals>
+  <string name="offline_banner">Keine Verbindung. Nachrichten werden gesendet, sobald du wieder online bist.</string>
+
+  <!-- Conversation -->
+  <string name="jump_down">Zur neuesten Nachricht springen</string>
+  <plurals name="jump_down_new">
+    <item quantity="one">%d neuere Nachricht, nach unten springen</item>
+    <item quantity="other">%d neuere Nachrichten, nach unten springen</item>
+  </plurals>
+  <string name="day_today">Heute</string>
+  <string name="day_yesterday">Gestern</string>
+  <string name="react_quick">Mit %1$s reagieren</string>
+  <string name="file_open">Öffnen</string>
+  <string name="image_unreadable">Dieses Bild kann nicht angezeigt werden.</string>
+  <string name="close">Schließen</string>
+  <string name="share">Teilen</string>
+  <string name="delete_confirm_title">Nachricht löschen?</string>
+  <string name="delete_confirm_text">Sie wird für alle in der Unterhaltung entfernt.</string>
+  <string name="attach_camera">Kamera</string>
+  <string name="attach_gallery">Fotos und Videos</string>
+  <string name="attach_file">Datei</string>
+
+  <!-- Sharing from other apps -->
+  <string name="share_title">Teilen in …</string>
+  <string name="share_filter">Unterhaltung suchen</string>
+  <plurals name="share_files">
+    <item quantity="one">%d Datei</item>
+    <item quantity="other">%d Dateien</item>
+  </plurals>
+
+  <!-- App lock and composer settings -->
+  <string name="app_lock">App-Sperre (Fingerabdruck, Gesicht oder Displaysperre)</string>
+  <string name="app_lock_unavailable">Richte auf diesem Gerät eine Displaysperre ein, um die App-Sperre zu nutzen.</string>
+  <string name="app_lock_after">Erneut sperren nach Verlassen der App</string>
+  <string name="app_lock_immediately">Sofort</string>
+  <string name="app_lock_one_minute">1 Minute</string>
+  <string name="app_lock_five_minutes">5 Minuten</string>
+  <string name="app_lock_fifteen_minutes">15 Minuten</string>
+  <string name="app_lock_prompt">TeamCraft entsperren</string>
+  <string name="app_lock_locked">TeamCraft ist gesperrt</string>
+  <string name="app_lock_unlock">Entsperren</string>
+  <string name="send_with_enter">Mit Eingabetaste senden (Hardware-Tastatur)</string>
+</resources>

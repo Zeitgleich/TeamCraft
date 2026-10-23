@@ -41,11 +41,11 @@ token.
 
 | Area                     | What the app does                                                                        |
 |--------------------------|------------------------------------------------------------------------------------------|
-| Messages                 | Reply, react, edit (with history), delete for everyone, forward, pin, save, copy link    |
+| Messages                 | Reply (also by swiping), react (double tap), edit, delete, forward, pin, save, link      |
 | Sending                  | Mentions with a picker, priority, read confirmation, silent, files with progress         |
-| Reading                  | Jump to the first unread message, mark unread, link previews, thumbnails, drafts         |
+| Reading                  | Date chips, grouped follow-ups, jump to unread or newest, tappable links, drafts         |
 | Threads                  | Thread view, follow / unfollow, inbox of followed threads with unread replies            |
-| Files                    | Per-conversation gallery; downloads decrypted to app storage, opened via FileProvider    |
+| Files                    | Camera, photo picker, files; full-screen image viewer; share in from other apps          |
 | Channels and people      | Browse, join, create, archive and leave channels, bookmarks, direct messages, presence   |
 | Saved and mentions       | Saved items and recent mentions                                                          |
 | Status and notifications | Presence, custom status, push mode, read receipts, per-conversation level and mute       |
@@ -55,6 +55,8 @@ token.
 | Meetings                 | Upcoming meetings, join the meeting's call                                               |
 | Devices and recovery     | Link a device by QR code (show and scan), passphrase and organization recovery           |
 | Security                 | Own security code, changed contact keys to compare and accept                            |
+| Chat list                | Last message with sender and time, unread counts; swipe or long-press: read, favorite    |
+| App lock                 | Biometrics or screen lock with a configurable delay; screenshot protection               |
 
 Workspace administration stays on desktop and web.
 

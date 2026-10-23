@@ -15,9 +15,10 @@ data class Section(val title: SectionTitle, val conversations: List<Conversation
 
 /**
  * Favorites first, then the channels of each space (spaces and channels by name), then direct
- * messages. Empty sections are left out.
+ * messages, the most recent first (`lastActivity`: newest message per conversation; by name
+ * without one). Empty sections are left out.
  */
-fun sections(conversations: List<ConversationItem>): List<Section> {
+fun sections(conversations: List<ConversationItem>, lastActivity: Map<String, Long> = emptyMap()): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
   val favorites = conversations.filter { it.isFavorite }.sortedWith(byName)
   val rest = conversations.filterNot { it.isFavorite }
@@ -32,6 +33,7 @@ fun sections(conversations: List<ConversationItem>): List<Section> {
   return buildList {
     if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
     addAll(bySpace)
-    if (direct.isNotEmpty()) add(Section(SectionTitle.DirectMessages, direct.sortedWith(byName)))
+    val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
+    if (direct.isNotEmpty()) add(Section(SectionTitle.DirectMessages, direct.sortedWith(byRecency)))
   }
 }
