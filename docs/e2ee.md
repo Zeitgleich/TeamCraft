@@ -236,6 +236,11 @@ flag. Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
 
+MLS: the commits, welcomes and application messages of each group (opaque), and the newest MLS
+`GroupInfo` per group (§4.6, "A further device joins on its own"): the group's public ratchet tree,
+i.e. its member devices' certificates, which the server knows anyway, and the epoch's external public
+key. It holds no secrets; a joiner still needs a credential every member accepts.
+
 **Message IDs.** The sending client generates a random 128-bit **client message ID** before encrypting.
 The AEAD associated data binds conversation ID, sender user and device, client message ID and
 `content_key_id`, so the server can't move a ciphertext to another conversation, attribute it to another
@@ -248,7 +253,11 @@ already seen client message ID (replay or duplicate delivery). Sending needs no 
 member wrote this". Every message is therefore also signed by the sending device's Ed25519 key over
 the associated data, nonce and ciphertext. Receivers check it against the signing key from the
 device's verified certificate (recorded from the MLS group members and the user's signed device list);
-a message whose device key isn't known yet waits until it is. Edits, deletes and reactions are
+a message whose device key isn't known yet waits until it is. A device that isn't in the group yet
+(a new device of a member) records the keys of the senders' signed device lists and reads the
+history its key bag opens right away; until it is in the group it doesn't know when devices left the
+conversation earlier, so a removed device's message dated after its removal (which the server would
+have to accept) could show there. Edits, deletes and reactions are
 messages too, so nobody can change or delete someone else's message. A device that left a conversation
 (removed, or its user removed) can't add messages dated after it left (five minutes of slack for
 clocks). Messages from before signatures existed are refused unless the client setting
@@ -319,6 +328,29 @@ its own. See [admin.md](admin.md) §2.
 - **Exception: further devices of existing members.** A commit may add devices of users who already
   have a device in the group without a signed change, because each device is cross-signed by its
   user's identity key (§3). Removing anything always needs a signed change.
+- **Exception: a further device joins on its own.** A new device of a user who already has a device
+  in the group joins without waiting for anybody, with an MLS **external commit** from the group's
+  `GroupInfo`. Every committer sends the `GroupInfo` of the epoch its commit starts (signed by the
+  committer, with ratchet tree and external public key) along with the commit; the server keeps the
+  newest one and serves it to members for the current epoch only. The joiner verifies every leaf of
+  that tree against the pinned identities (as for a welcome) and joins only if its user is in the
+  tree and the device isn't. That the `GroupInfo` is current is the server's word, so it could hand
+  out an old one whose tree still holds a member removed since, and fork the new device into a group
+  with that member. The user's devices therefore record in their account data (in the key bag,
+  rollback-protected, §6.4) the epoch of every content key switch in each conversation (removals,
+  "from join" additions, rejoins), and a new device refuses a `GroupInfo` older than that; it waits
+  for a member instead. Members merge an external commit only if it carries nothing but the
+  external init (no removals, no authenticated data), its new leaf's certificate verifies against the
+  pinned identity, the user's signed device list names the device, the user already has a device in
+  the group and the device wasn't revoked from it: the same rule as an unsigned device addition, so
+  who may add whom doesn't change. The device's own credential is what authorizes it; nobody else
+  can join this way. openmls merges an external commit at once, so the joiner forgets the group if
+  the server refuses it; if the answer was lost and the server took it, the next try finds its
+  device in the tree and asks to be added back (below). Without a `GroupInfo` (the last commit came
+  from an older client) the device posts a device-add request into the group's queue (`TCDA`, the
+  user ID): members who see it, also later when they come online, add it like a colleague's new
+  device, checked against the signed device list. The app shows "waiting for another device" until
+  then. Neither way announces a join: the user was a member all along.
 - **Exception: a device added back.** A device that fell out of the group (see below) can ask to be
   added back with a request it signs with its device key: conversation, the group's epoch on the
   server, a random 128-bit request ID and the device. A member commits "remove the device's old leaf,
@@ -462,8 +494,9 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   transfer frame, a closed relay or 60 seconds without a receipt fail on the existing device, and the
   new device fails because the transfer never arrives (the relay closes when the existing device
   gives up). A lost receipt makes the existing device report a failure although the new device has
-  the keys; linking again is harmless. The new device then enrolls (§3.2) and an existing member
-  adds it to the groups.
+  the keys; linking again is harmless. The new device then enrolls (§3.2) and joins the user's
+  groups on its own (§4.6, "A further device joins on its own"); where it can't yet, an existing
+  member adds it when it comes online. It reads the history the key bag opens at once.
 
 ## 6. Backup and recovery
 
@@ -598,6 +631,9 @@ restored together with them on a new device.
   on first use again: it verifies colleagues' credentials with the inherited pins and refuses a
   forged genesis roster. A key change the user accepted on one device is a newer entry and reaches
   the others. The root's fingerprint is available for comparing (admin.md §2.3).
+- **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
+  switched the content key; merging keeps the higher one. A new device of the user doesn't join a
+  group from information older than that (§4.6).
 - **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
   user looked at. Merging takes the later one, so reading on any device counts everywhere and never
   moves back. The feed itself is computed from decrypted messages on each device (notifications.md).

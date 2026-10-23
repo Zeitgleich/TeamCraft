@@ -89,12 +89,35 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         </Show>
         <ChannelHeader conversation=conversation info=info />
         <KeyChangeBanner conversation=conversation />
+        <DeviceAccessBanner conversation=conversation />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
         <ChannelFeed conversation=conversation />
         <SeenLine conversation=conversation />
         <Composer conversation=conversation can_post=can_post conversation_name=name />
       </section>
+    })
+  }
+}
+
+/// This device isn't in the conversation's encryption group yet (a new device whose other devices
+/// and colleagues are offline): what it can read already, and what it waits for.
+#[component]
+fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_waiting = Memo::new(move |_| state.read(|backend| backend.is_waiting_for_device(conversation)));
+  move || {
+    is_waiting.get().then(|| {
+      view! {
+        <div class="key-banner" role="status">
+          <Icon name=IconName::Lock />
+          <div class="key-banner-text">
+            <strong>{move || i18n.t("device-waiting-title")}</strong>
+            <span>{move || i18n.t("device-waiting-body")}</span>
+          </div>
+        </div>
+      }
     })
   }
 }

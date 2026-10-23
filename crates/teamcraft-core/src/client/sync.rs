@@ -47,6 +47,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       self.catch_up_messages(conversation.id).await?;
       self.retry_undecrypted(conversation.id)?;
+      // Senders this device has no verified key for yet (it isn't in the group, or just joined).
+      self.learn_sender_keys(conversation.id).await?;
     }
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;

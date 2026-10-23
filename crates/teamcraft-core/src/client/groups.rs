@@ -396,6 +396,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       {
         self.note_rejoin_request(conversation, request).await?;
       }
+      if let Some(user) = message
+        .payload
+        .as_slice()
+        .strip_prefix(super::member_device::DEVICE_ADD_REQUEST_MAGIC)
+        && message.sender_device_id != self.account.device_id
+      {
+        self.note_device_add_request(message.sender_device_id, user)?;
+      }
       self.advance_cursor(conversation, message)?;
       return Ok(MlsProgress::Done);
     }
@@ -678,6 +686,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       epoch,
       commit: Base64Bytes::new(output.commit),
       welcomes,
+      maybe_group_info: output.maybe_group_info.map(Base64Bytes::new),
     };
     // Kept before sending, so a restart mid-request still finds the commit.
     self.persist_group(conversation)?;
@@ -892,7 +901,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Records the verified signing keys of the group's devices, which message signatures are
   /// checked against (security review A10), and retries messages that waited for them.
-  fn remember_member_keys(
+  pub(crate) fn remember_member_keys(
     &mut self,
     conversation: ConversationId,
     directory: &PinnedDirectory,
@@ -956,6 +965,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ring.insert(key.duplicate())?;
     ring.set_current(key.id())?;
     self.persist_keys()?;
+    // A new device of the user won't join from group information older than this (e2ee.md §4.6).
+    let epoch = self.group_or_error(conversation)?.epoch();
+    self.update_account_data(|data, _| data.note_group_epoch(conversation, epoch))?;
     Ok(key)
   }
 
@@ -1041,6 +1053,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self
           .store
           .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
+        self.store.delete(
+          Table::AppliedChanges,
+          &super::member_device::device_add_key(conversation),
+        )?;
         self.welcome_handled(welcome)?;
         self.remember_member_keys(conversation, &directory)?;
         // Everything up to the welcome belongs to epochs before we joined.
@@ -1271,7 +1287,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// [`ClientSettings::rejoin_retry`] if none does.
   ///
   /// [`ClientSettings::rejoin_retry`]: super::ClientSettings::rejoin_retry
-  async fn request_rejoin(
+  pub(crate) async fn request_rejoin(
     &mut self,
     conversation: ConversationId,
     current_epoch: u64,
@@ -1454,7 +1470,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  fn advance_cursor(
+  pub(crate) fn advance_cursor(
     &mut self,
     conversation: ConversationId,
     message: &MlsMessageResponse,

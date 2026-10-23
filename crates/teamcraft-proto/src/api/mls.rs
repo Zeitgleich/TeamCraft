@@ -119,6 +119,29 @@ pub struct PostMlsCommitRequest {
   pub commit: Base64Bytes,
   #[serde(default)]
   pub welcomes: Vec<MlsWelcome>,
+  /// The group's information for the new epoch (MLS `GroupInfo` with ratchet tree and external
+  /// public key), signed by the committer. Stored so a new device of a member can join by external
+  /// commit; the server never looks inside (e2ee.md §4.6).
+  #[serde(rename = "group_info", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_group_info: Option<Base64Bytes>,
+}
+
+/// `GET /api/v1/conversations/{id}/mls/group-info`: the newest group information a member published,
+/// for the group's current epoch. `404 mls_group_info_not_found` if there is none for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MlsGroupInfoResponse {
+  pub epoch: u64,
+  pub group_info: Base64Bytes,
+}
+
+/// `PUT /api/v1/conversations/{id}/mls/group-info`: a member publishes the group information for
+/// the current epoch (when the last commit came without one). `409 epoch_conflict` if the group
+/// moved on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutMlsGroupInfoRequest {
+  pub device_id: DeviceId,
+  pub epoch: u64,
+  pub group_info: Base64Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

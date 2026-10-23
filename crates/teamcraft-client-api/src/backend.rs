@@ -207,6 +207,12 @@ pub trait ChatBackend {
   /// Marks the conversation unread from this message on.
   fn mark_unread(&self, _conversation: ConversationId, _from: MessageId) {}
   /// The first message the user hasn't read, to jump to.
+  /// This device is not in the conversation's encryption group yet and waits for another device of
+  /// the user or a colleague to let it in; history the key bag holds is readable meanwhile.
+  fn is_waiting_for_device(&self, _conversation: ConversationId) -> bool {
+    false
+  }
+
   fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
     None
   }

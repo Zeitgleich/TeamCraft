@@ -109,6 +109,10 @@ pub enum MlsError {
   UnexpectedMessage(&'static str),
   #[error("there is no pending commit to confirm")]
   NoPendingCommit,
+  /// Joining by external commit: the group already has a leaf of this device (a join whose answer
+  /// was lost, or state this device lost). It has to be added back instead.
+  #[error("this device is in the group already")]
+  AlreadyInGroup,
   #[error("encoding failed: {0}")]
   Encoding(#[from] tls_codec::Error),
 }

@@ -16,6 +16,7 @@ pub mod files;
 mod gateway;
 mod groups;
 mod linking;
+mod member_device;
 mod messaging;
 mod notifications;
 mod org_backgrounds;
@@ -43,6 +44,7 @@ pub use calls::{CallEventSink, CallKeySigner};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
+pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
 pub(crate) use messaging::decrypt_content;
 #[cfg(feature = "ui")]

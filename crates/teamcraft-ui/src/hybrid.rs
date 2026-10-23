@@ -359,6 +359,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.first_unread(conversation)
   }
 
+  fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
+    self.chat.is_waiting_for_device(conversation)
+  }
+
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
     self.chat.draft(conversation, maybe_thread)
   }

@@ -224,8 +224,8 @@ async fn a_lost_device_is_revoked_by_its_owner_and_keys_rotate() {
     .await
     .unwrap();
   alice.client.upload_key_bag().await.unwrap();
+  // The laptop joins the group by itself (external commit as a further device of a member).
   let mut laptop = Peer::enroll_as(alice.api.clone(), "Alice laptop").await;
-  alice.client.add_missing_devices(channel).await.unwrap();
   settle(&mut [&mut alice, &mut bob, &mut laptop]).await;
   assert!(laptop.client.has_group(channel).unwrap());
   let listed_with_laptop = server.device_list_of(alice.client.user_id()).unwrap();

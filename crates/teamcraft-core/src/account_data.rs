@@ -46,6 +46,12 @@ pub struct AccountData {
   /// user looked) counts as read.
   #[serde(rename = "activity_read", default, skip_serializing_if = "Option::is_none")]
   pub maybe_activity_read: Option<Stamped<i64>>,
+  /// Per conversation ID, the newest MLS epoch in which one of the user's devices switched the
+  /// content key (a removal, a "from join" addition, a rejoin). A new device of the user refuses
+  /// group information older than that: a server could hand out an old one to fork the device into
+  /// a group that still holds a removed member (e2ee.md §4.6). Only grows.
+  #[serde(default)]
+  pub group_epochs: BTreeMap<String, u64>,
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
@@ -126,6 +132,10 @@ impl AccountData {
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
     merge_map(&mut self.backgrounds, &other.backgrounds);
+    for (conversation, epoch) in &other.group_epochs {
+      let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);
+      *entry = (*entry).max(*epoch);
+    }
     // Reading only moves forward: the later read time wins whatever device recorded it.
     let newer_read = [self.maybe_activity_read.take(), other.maybe_activity_read.clone()]
       .into_iter()
@@ -162,6 +172,26 @@ impl AccountData {
     self
       .backgrounds
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+  }
+
+  /// The newest epoch in which the user's devices switched the conversation's content key; 0 if
+  /// none did.
+  pub fn group_epoch(&self, conversation: ConversationId) -> u64 {
+    self
+      .group_epochs
+      .get(&conversation.to_string())
+      .copied()
+      .unwrap_or(0)
+  }
+
+  /// Records that the conversation's content key changed in `epoch`; returns whether that moved
+  /// the floor.
+  pub fn note_group_epoch(&mut self, conversation: ConversationId, epoch: u64) -> bool {
+    if epoch <= self.group_epoch(conversation) {
+      return false;
+    }
+    self.group_epochs.insert(conversation.to_string(), epoch);
+    true
   }
 
   /// Activity entries sent up to this time (Unix milliseconds) were read; 0 if never.
@@ -458,6 +488,22 @@ mod tests {
       "the later unsave wins"
     );
     assert_eq!(merged_on_phone.draft(conversation, None), Some("a later thought"));
+  }
+
+  #[test]
+  fn group_epoch_floors_only_grow_and_merge_to_the_higher_one() {
+    let conversation = ConversationId::from_snowflake(Snowflake::new(9).unwrap());
+    let mut phone = AccountData::default();
+    let mut laptop = AccountData::default();
+    assert!(phone.note_group_epoch(conversation, 7));
+    assert!(!phone.note_group_epoch(conversation, 5), "never back");
+    assert!(laptop.note_group_epoch(conversation, 4));
+    laptop.merge(&phone, 0);
+    phone.merge(&laptop, 0);
+    assert_eq!(
+      (laptop.group_epoch(conversation), phone.group_epoch(conversation)),
+      (7, 7)
+    );
   }
 
   #[test]

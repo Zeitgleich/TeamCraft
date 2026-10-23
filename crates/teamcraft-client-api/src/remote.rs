@@ -733,6 +733,9 @@ pub enum ChatQuery {
   FirstUnread {
     conversation: ConversationId,
   },
+  IsWaitingForDevice {
+    conversation: ConversationId,
+  },
   Draft {
     conversation: ConversationId,
     #[serde(default)]
@@ -904,6 +907,9 @@ impl ChatQuery {
       },
       Self::ResolvePermalink { link } => ChatAnswer::PermalinkTarget {
         maybe_target: backend.resolve_permalink(&link),
+      },
+      Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
+        value: backend.is_waiting_for_device(conversation),
       },
       Self::FirstUnread { conversation } => ChatAnswer::Message {
         maybe_message: backend.first_unread(conversation),
