@@ -514,7 +514,18 @@ Details:
 - Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else. (Through a push
   gateway, the gateway sees the same, plus an opaque ID of the sending server; §7.1.)
 - The server decides *whether* to push using metadata it has anyway: membership, mute settings,
-  presence (don't push to the phone while the desktop is active), DND, and the mention list (§4.4).
+  attention (don't push to the phone while the user looks at a desktop), DND, and the mention list
+  (§4.4). Details: notifications.md, "Push routing" and "Mobile push delivery".
+- Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
+  a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push) and
+  `test` (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
+  carries the badge count and the send time; all of it is inside the ciphertext. What push services
+  and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
+  rather than an alert.
+- iOS calls go as mutable alerts on the app's topic, never as VoIP pushes: those need the separate
+  PushKit token, and a VoIP push to the alert token is refused as a dead token. Forwarding to CallKit
+  from the NSE needs the filtering entitlement below; until it is granted the NSE shows an
+  "incoming call" alert instead.
 - Keyword notifications ("notify me on 'deploy'") are matched on the client after decryption.
 - Browser (implemented): the service worker opens the encrypted local store (§9.1) read-only, opens
   the wake-up with the push key and shows conversation and sender names. The message text appears

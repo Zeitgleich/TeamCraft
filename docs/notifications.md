@@ -145,6 +145,31 @@ on real devices.
 | iOS extras             | Mutable-content alerts through the NSE as communication notifications, thread identifier per conversation, relevance score, time-sensitive for urgent, badge.                                                                                  |
 | Diagnostics            | Mobile screen: test push (the server sends a sealed `test` wake-up end to end), provider, last push received, notification permission, battery optimisation, channel settings, DND state. Admins see per user and device how many pushes were sent, failed and suppressed (counts only). |
 
+### Server implementation
+
+`push::routing` decides, `push::delivery` sends (priority and TTL by kind, retries), `push::tracker`
+remembers per process which devices show what (for withdrawals and rings) and the delivery counts.
+
+| Setting                                           | Default     | Meaning                                                               |
+|---------------------------------------------------|-------------|-----------------------------------------------------------------------|
+| `notifications.mobile_push_delay_secs`            | 120         | Grace delay while a desktop is attentive; `0` sends nothing meanwhile |
+| `notifications.attention_lease_secs`              | 75          | How long an `attention` report counts without being repeated          |
+| `push.ttl_secs`                                   | 86400       | TTL of message and mention wake-ups                                   |
+| `push.call_ttl_secs`                              | 0           | TTL of rings; `0` uses `[calls] ring_timeout_secs`                    |
+| `push.dismiss_ttl_secs` / `push.test_ttl_secs`    | 86400 / 300 | TTL of withdrawals and test pushes                                    |
+| `push.max_retries`, `push.retry_initial_delay_ms` | 2, 2000     | Retries after temporary failures, doubling the wait, within the TTL   |
+| `push.test_interval_secs`                         | 10          | Shortest time between two test pushes to one device                   |
+
+A held push goes out early when the desktop stops being attentive (report `false`, connection closed).
+A withdrawal goes only to devices that were pushed for the conversation (or thread) and whose newest
+pushed message is now read; after a server restart nothing is withdrawn for earlier pushes. The tracker
+is per process like the gateway hub: with several instances, a read on one instance withdraws only
+what that instance pushed.
+
+The device checks again (`teamcraft_core::push_guard`): a message shown before is not shown again
+(urgent repeats are), a conversation muted or DND active on the device keeps the push silent, and the
+diagnostics record when the last push arrived and how long it took.
+
 ### Diagnostics API
 
 - `POST /api/v1/devices/{id}/push/test`: sends a `test` wake-up to one of the caller's own devices and
