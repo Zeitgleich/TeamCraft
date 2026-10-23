@@ -46,9 +46,50 @@ pub struct AccountData {
   /// user looked) counts as read.
   #[serde(rename = "activity_read", default, skip_serializing_if = "Option::is_none")]
   pub maybe_activity_read: Option<Stamped<i64>>,
+  /// Per conversation ID, the newest MLS epoch in which one of the user's devices switched the
+  /// content key (a removal, a "from join" addition, a rejoin). A new device of the user refuses
+  /// group information older than that: a server could hand out an old one to fork the device into
+  /// a group that still holds a removed member (e2ee.md §4.6). Only grows.
+  #[serde(default)]
+  pub group_epochs: BTreeMap<String, u64>,
+  /// When devices left conversations and came back, keyed `conversation/user/device`, in the server
+  /// times of the commits, as the user's devices processed them: a new device of the user refuses
+  /// messages a device signs while it is out (e2ee.md §4.4). Merging keeps the later time of each,
+  /// so no device's clock decides.
+  #[serde(default)]
+  pub removed_senders: BTreeMap<String, SenderAbsence>,
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
+}
+
+/// When a device last left a conversation, and when it was last added back, in server times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderAbsence {
+  pub left_at_ms: i64,
+  #[serde(rename = "back_at_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_back_at_ms: Option<i64>,
+}
+
+impl SenderAbsence {
+  /// Whether a message the device signed at `sent_at_ms` falls into its absence: after it left
+  /// (with `grace_ms` for messages on the way) and before it came back, if it did.
+  pub fn covers(&self, sent_at_ms: i64, grace_ms: i64) -> bool {
+    let is_after_leaving = sent_at_ms > self.left_at_ms.saturating_add(grace_ms);
+    let is_before_return = match self.maybe_back_at_ms {
+      Some(back) if back >= self.left_at_ms => sent_at_ms < back,
+      _ => true,
+    };
+    is_after_leaving && is_before_return
+  }
+
+  /// Takes the later time of each from `other`; returns whether that changed anything.
+  pub fn merge(&mut self, other: &Self) -> bool {
+    let before = *self;
+    self.left_at_ms = self.left_at_ms.max(other.left_at_ms);
+    self.maybe_back_at_ms = self.maybe_back_at_ms.max(other.maybe_back_at_ms);
+    *self != before
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +167,17 @@ impl AccountData {
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
     merge_map(&mut self.backgrounds, &other.backgrounds);
+    for (key, theirs) in &other.removed_senders {
+      self
+        .removed_senders
+        .entry(key.clone())
+        .or_insert(*theirs)
+        .merge(theirs);
+    }
+    for (conversation, epoch) in &other.group_epochs {
+      let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);
+      *entry = (*entry).max(*epoch);
+    }
     // Reading only moves forward: the later read time wins whatever device recorded it.
     let newer_read = [self.maybe_activity_read.take(), other.maybe_activity_read.clone()]
       .into_iter()
@@ -162,6 +214,71 @@ impl AccountData {
     self
       .backgrounds
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+  }
+
+  /// When the device `key` (`conversation/user/device`) left its conversation, if it is out (not
+  /// added back since).
+  pub fn removed_sender(&self, key: &str) -> Option<i64> {
+    self
+      .removed_senders
+      .get(key)
+      .filter(|entry| entry.maybe_back_at_ms.is_none_or(|back| back < entry.left_at_ms))
+      .map(|entry| entry.left_at_ms)
+  }
+
+  /// Records that a device left a conversation at `left_at_ms` (server time); returns whether that
+  /// changed anything. A removal before the one recorded changes nothing.
+  pub fn note_removed_sender(&mut self, key: &str, left_at_ms: i64) -> bool {
+    match self.removed_senders.get_mut(key) {
+      Some(entry) if entry.left_at_ms >= left_at_ms => false,
+      Some(entry) => {
+        entry.left_at_ms = left_at_ms;
+        true
+      },
+      None => {
+        self.removed_senders.insert(
+          key.to_string(),
+          SenderAbsence {
+            left_at_ms,
+            maybe_back_at_ms: None,
+          },
+        );
+        true
+      },
+    }
+  }
+
+  /// Records that a device that had left was added back at `back_at_ms` (server time); returns
+  /// whether that changed anything.
+  pub fn note_sender_back(&mut self, key: &str, back_at_ms: i64) -> bool {
+    let Some(entry) = self.removed_senders.get_mut(key) else {
+      return false;
+    };
+    if entry.maybe_back_at_ms.is_some_and(|back| back >= back_at_ms) {
+      return false;
+    }
+    entry.maybe_back_at_ms = Some(back_at_ms);
+    true
+  }
+
+  /// The newest epoch in which the user's devices switched the conversation's content key; 0 if
+  /// none did.
+  pub fn group_epoch(&self, conversation: ConversationId) -> u64 {
+    self
+      .group_epochs
+      .get(&conversation.to_string())
+      .copied()
+      .unwrap_or(0)
+  }
+
+  /// Records that the conversation's content key changed in `epoch`; returns whether that moved
+  /// the floor.
+  pub fn note_group_epoch(&mut self, conversation: ConversationId, epoch: u64) -> bool {
+    if epoch <= self.group_epoch(conversation) {
+      return false;
+    }
+    self.group_epochs.insert(conversation.to_string(), epoch);
+    true
   }
 
   /// Activity entries sent up to this time (Unix milliseconds) were read; 0 if never.
@@ -458,6 +575,43 @@ mod tests {
       "the later unsave wins"
     );
     assert_eq!(merged_on_phone.draft(conversation, None), Some("a later thought"));
+  }
+
+  #[test]
+  fn removals_and_returns_merge_by_server_time_not_by_device_clock() {
+    let key = "9/1/2";
+    let mut phone = AccountData::default();
+    let mut laptop = AccountData::default();
+    // The laptop saw the device leave at 100 and come back at 200; the phone (whatever its clock)
+    // saw it leave again at 300.
+    assert!(laptop.note_removed_sender(key, 100));
+    assert!(laptop.note_sender_back(key, 200));
+    assert!(phone.note_removed_sender(key, 300));
+    let mut merged = laptop.clone();
+    merged.merge(&phone, 0);
+    let mut merged_other_way = phone.clone();
+    merged_other_way.merge(&laptop, 0);
+    assert_eq!(merged, merged_other_way);
+    assert_eq!(merged.removed_sender(key), Some(300));
+    // Back after the last removal: a member again.
+    assert!(merged.note_sender_back(key, 400));
+    assert_eq!(merged.removed_sender(key), None);
+  }
+
+  #[test]
+  fn group_epoch_floors_only_grow_and_merge_to_the_higher_one() {
+    let conversation = ConversationId::from_snowflake(Snowflake::new(9).unwrap());
+    let mut phone = AccountData::default();
+    let mut laptop = AccountData::default();
+    assert!(phone.note_group_epoch(conversation, 7));
+    assert!(!phone.note_group_epoch(conversation, 5), "never back");
+    assert!(laptop.note_group_epoch(conversation, 4));
+    laptop.merge(&phone, 0);
+    phone.merge(&laptop, 0);
+    assert_eq!(
+      (laptop.group_epoch(conversation), phone.group_epoch(conversation)),
+      (7, 7)
+    );
   }
 
   #[test]

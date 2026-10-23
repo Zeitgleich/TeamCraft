@@ -16,6 +16,7 @@ use teamcraft_proto::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::account_data::SenderAbsence;
 use crate::convert;
 use crate::error::CoreError;
 use crate::store::{LocalStore, MessageContent, StoredMessage, Table};
@@ -471,6 +472,42 @@ pub fn device_signing_key(
       .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
       .map(teamcraft_crypto::identity::DeviceSigningPublicKey::from_bytes),
   )
+}
+
+/// Where and when a device was out of a conversation, as this device checks its messages
+/// (`conversation/user/device`). Rows from older versions hold just the time it left.
+pub fn removed_sender(store: &impl LocalStore, key: &str) -> Result<Option<SenderAbsence>, CoreError> {
+  let Some(bytes) = store.get(Table::RemovedSenders, key)? else {
+    return Ok(None);
+  };
+  if let Ok(left_at_ms) = serde_json::from_slice::<i64>(&bytes) {
+    return Ok(Some(SenderAbsence {
+      left_at_ms,
+      maybe_back_at_ms: None,
+    }));
+  }
+  serde_json::from_slice(&bytes)
+    .map(Some)
+    .map_err(|error| CoreError::Corrupt(error.to_string()))
+}
+
+/// Merges `absence` into the stored row (the later time of each); returns the merged row.
+pub fn merge_removed_sender(
+  store: &impl LocalStore,
+  key: &str,
+  absence: &SenderAbsence,
+) -> Result<SenderAbsence, CoreError> {
+  let merged = match removed_sender(store, key)? {
+    Some(mut stored) => {
+      if !stored.merge(absence) {
+        return Ok(stored);
+      }
+      stored
+    },
+    None => *absence,
+  };
+  put_json(store, Table::RemovedSenders, key, &merged)?;
+  Ok(merged)
 }
 
 pub fn put_device_signing_key(

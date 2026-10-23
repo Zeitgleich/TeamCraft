@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use openmls::prelude::{
   GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn,
-  ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome,
+  MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome,
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{
@@ -83,6 +83,9 @@ struct TouchedUser {
 pub struct CommitOutput {
   pub commit: Vec<u8>,
   pub maybe_welcome: Option<Vec<u8>>,
+  /// The group's information for the new epoch, signed by this device (ratchet tree and external
+  /// public key included): a new device of a member joins with it ([`ConversationGroup::join_external`]).
+  pub maybe_group_info: Option<Vec<u8>>,
 }
 
 /// Result of processing an incoming MLS message.
@@ -200,6 +203,108 @@ impl ConversationGroup {
       }
       loaded
     }))
+  }
+
+  /// Joins the group of a conversation whose user already has a device in it, from the group's
+  /// information, with an MLS external commit (e2ee.md §4.6). Every leaf of the group is verified
+  /// against the pinned identities, as when joining from a welcome; this device must not be in the
+  /// group yet and its user must be. `min_epoch` is the newest epoch this user's devices saw the
+  /// content key switch in: the signed epoch of the group information must not be older (a server
+  /// could hand out an old one whose tree still holds a removed member). openmls merges an external
+  /// commit at once, so the group is in the new epoch already: if the server doesn't take the
+  /// commit, [`Self::delete`] the group and try again.
+  pub fn join_external(
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    certificate: &SignedDeviceCertificate,
+    group_info: &[u8],
+    conversation_id: ConversationId,
+    min_epoch: u64,
+    directory: &impl IdentityDirectory,
+  ) -> Result<(Self, CommitOutput), MlsError> {
+    let MlsMessageBodyIn::GroupInfo(info) = MlsMessageIn::tls_deserialize_exact(group_info)?.extract() else {
+      return Err(MlsError::UnexpectedMessage("expected a group info"));
+    };
+    if info.group_id() != &group_id(conversation_id) {
+      return Err(MlsError::UnexpectedMessage("group info for another conversation"));
+    }
+    if info.ciphersuite() != CIPHERSUITE {
+      return Err(MlsError::UnexpectedMessage("group info with another ciphersuite"));
+    }
+    let config = MlsGroupJoinConfig::builder()
+      .use_ratchet_tree_extension(true)
+      .build();
+    // Lifetimes of existing leaves are not checked, as when joining from a welcome (§4.3.1).
+    let (group, bundle) = MlsGroup::external_commit_builder()
+      .with_config(config)
+      .skip_lifetime_validation()
+      .build_group(provider, info, credential::credential_with_key(certificate)?)
+      .map_err(|error| MlsError::openmls("external join", error))?
+      .load_psks(provider.storage())
+      .map_err(|error| MlsError::openmls("external join", error))?
+      .build(provider.rand(), provider.crypto(), device, |_| true)
+      .map_err(|error| MlsError::openmls("external join", error))?
+      .finalize(provider)
+      .map_err(|error| MlsError::openmls("external join", error))?;
+    let history = ChangeHistory {
+      joined_epoch: group.epoch().as_u64(),
+      ..ChangeHistory::default()
+    };
+    let joined = Self::from_group(conversation_id, group, history);
+    // The epoch from the signed group context (openmls checked the group info's signature and the
+    // tree against it); the joiner is one past it.
+    let info_epoch = joined.epoch().saturating_sub(1);
+    let checked = if info_epoch < min_epoch {
+      Err(MlsError::StaleGroupInfo {
+        epoch: info_epoch,
+        floor: min_epoch,
+      })
+    } else {
+      joined.check_external_join(certificate, directory)
+    };
+    if let Err(error) = checked {
+      // Nothing was sent yet: forget the group again.
+      joined.delete(provider)?;
+      return Err(error);
+    }
+    let maybe_welcome = bundle
+      .to_welcome_msg()
+      .map(|welcome| welcome.to_bytes())
+      .transpose()
+      .map_err(|error| MlsError::openmls("welcome encoding", error))?;
+    let maybe_group_info = bundle
+      .group_info()
+      .cloned()
+      .map(|info| MlsMessageOut::from(info).to_bytes())
+      .transpose()
+      .map_err(|error| MlsError::openmls("group info encoding", error))?;
+    let commit = bundle
+      .into_commit()
+      .to_bytes()
+      .map_err(|error| MlsError::openmls("commit encoding", error))?;
+    Ok((
+      joined,
+      CommitOutput {
+        commit,
+        maybe_welcome,
+        maybe_group_info,
+      },
+    ))
+  }
+
+  /// The group's information for its current epoch, signed by this device, for a new device of a
+  /// member to join with when none is on the server yet.
+  pub fn export_group_info(
+    &self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+  ) -> Result<Vec<u8>, MlsError> {
+    self
+      .group
+      .export_group_info(provider.crypto(), device, true)
+      .map_err(|error| MlsError::openmls("group info export", error))?
+      .to_bytes()
+      .map_err(|error| MlsError::openmls("group info encoding", error))
   }
 
   pub fn conversation_id(&self) -> ConversationId {
@@ -485,20 +590,33 @@ impl ConversationGroup {
       .group
       .process_message(provider, protocol_message)
       .map_err(|error| MlsError::openmls("message processing", error))?;
-    let Sender::Member(sender_index) = *processed.sender() else {
-      return Err(MlsError::ExternalSender);
+    // Only members send, except a new device of a member joining by external commit.
+    let maybe_sender_index = match *processed.sender() {
+      Sender::Member(index) => Some(index),
+      Sender::NewMemberCommit => None,
+      _ => return Err(MlsError::ExternalSender),
     };
     let sender = credential::member_of(processed.credential())?;
     let authenticated_data = processed.aad().to_vec();
     match processed.into_content() {
       ProcessedMessageContent::ApplicationMessage(application) => {
+        if maybe_sender_index.is_none() {
+          return Err(MlsError::ExternalSender);
+        }
         let bundle = ContentKeyBundle::from_bytes(&zeroize::Zeroizing::new(application.into_bytes()))?;
         self.ensure_conversation(bundle.conversation_id())?;
         Ok(GroupEvent::ContentKeys { sender, bundle })
       },
       ProcessedMessageContent::StagedCommitMessage(staged) => {
-        let (update, maybe_request_id) =
-          self.authorize_commit(&staged, sender_index, &authenticated_data, directory, authority)?;
+        let (update, maybe_request_id) = match maybe_sender_index {
+          Some(sender_index) => {
+            self.authorize_commit(&staged, sender_index, &authenticated_data, directory, authority)?
+          },
+          None => (
+            self.authorize_external_join(&staged, &authenticated_data, directory)?,
+            None,
+          ),
+        };
         let epoch = self.epoch();
         self
           .group
@@ -606,6 +724,12 @@ impl ConversationGroup {
       .map(|welcome| welcome.to_bytes())
       .transpose()
       .map_err(|error| MlsError::openmls("welcome encoding", error))?;
+    let maybe_group_info = bundle
+      .group_info()
+      .cloned()
+      .map(|info| MlsMessageOut::from(info).to_bytes())
+      .transpose()
+      .map_err(|error| MlsError::openmls("group info encoding", error))?;
     let commit = bundle
       .into_commit()
       .to_bytes()
@@ -613,6 +737,7 @@ impl ConversationGroup {
     Ok(CommitOutput {
       commit,
       maybe_welcome,
+      maybe_group_info,
     })
   }
 
@@ -663,6 +788,82 @@ impl ConversationGroup {
       is_self_removed: staged.self_removed(),
     };
     Ok((update, None))
+  }
+
+  /// TeamCraft's rule for an external commit: only a further device of a user who is already a
+  /// member joins this way, like an unsigned device addition (e2ee.md §4.6). It carries nothing but
+  /// the external init; no removals (no resync), no authenticated data.
+  fn authorize_external_join(
+    &self,
+    staged: &StagedCommit,
+    authenticated_data: &[u8],
+    directory: &impl IdentityDirectory,
+  ) -> Result<MembershipUpdate, MlsError> {
+    if !authenticated_data.is_empty() {
+      return Err(MlsError::UnexpectedMessage(
+        "external commit with authenticated data",
+      ));
+    }
+    for queued in staged.queued_proposals() {
+      if !matches!(queued.proposal(), Proposal::ExternalInit(_)) {
+        return Err(MlsError::UnsupportedProposal);
+      }
+    }
+    let leaf = staged
+      .update_path_leaf_node()
+      .ok_or(MlsError::UnexpectedMessage("external commit without a leaf"))?;
+    let device = credential::verify(leaf.credential(), leaf.signature_key().as_slice(), directory)?;
+    // Fails closed: nobody vouches for this device but its user's signed device list.
+    if !directory.is_listed_device(&device) {
+      return Err(MlsError::InactiveDevice(device.device_id()));
+    }
+    let joiner = GroupMember::from(&device);
+    let members = self.members()?;
+    if members.contains(&joiner) {
+      return Err(MlsError::UnexpectedMessage(
+        "external commit by a device already in the group",
+      ));
+    }
+    if !members.iter().any(|member| member.user_id == joiner.user_id) {
+      // A new user needs a signed change.
+      return Err(MlsError::MissingSignedChange);
+    }
+    self.check_not_removed(&ProposedMembership {
+      added: vec![device],
+      removed: Vec::new(),
+    })?;
+    Ok(MembershipUpdate {
+      maybe_change: None,
+      added: vec![joiner],
+      removed: Vec::new(),
+      maybe_rejoined: None,
+      is_self_removed: false,
+    })
+  }
+
+  /// Checks a group this device is joining by external commit, before the commit is sent: every
+  /// leaf verifies against the pinned identities, this device's user is in it, this device wasn't.
+  fn check_external_join(
+    &self,
+    certificate: &SignedDeviceCertificate,
+    directory: &impl IdentityDirectory,
+  ) -> Result<(), MlsError> {
+    let own = certificate.unverified();
+    let own_leaf = self.group.own_leaf_index();
+    let mut has_own_user = false;
+    // The tree already holds this device's new leaf; the others are what the group was.
+    for leaf in self.group.members().filter(|leaf| leaf.index != own_leaf) {
+      let member = credential::verify(&leaf.credential, &leaf.signature_key, directory)?;
+      if member.device_id() == own.device_id {
+        return Err(MlsError::AlreadyInGroup);
+      }
+      has_own_user |= member.user_id() == own.user_id;
+    }
+    if has_own_user {
+      Ok(())
+    } else {
+      Err(MlsError::MissingSignedChange)
+    }
   }
 
   /// The group-side checks of a verified rejoin request; returns the device's current leaf.

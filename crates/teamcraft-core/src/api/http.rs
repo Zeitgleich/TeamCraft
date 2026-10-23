@@ -479,6 +479,29 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get(&format!("/devices/{device}/welcomes{parameters}")).await
   }
 
+  async fn mls_group_info(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::MlsGroupInfoResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/mls/group-info"))
+      .await
+  }
+
+  async fn put_mls_group_info(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::PutMlsGroupInfoRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::PUT,
+        &format!("/conversations/{conversation}/mls/group-info"),
+        Some(request),
+      )
+      .await
+  }
+
   async fn put_key_bag(&self, request: &PutKeyBagRequest) -> Result<KeyBagResponse, ApiError> {
     self.send_json(Method::PUT, "/me/key-bag", request).await
   }

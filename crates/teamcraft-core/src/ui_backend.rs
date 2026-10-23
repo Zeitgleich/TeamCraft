@@ -980,6 +980,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_first_unread(conversation)
   }
 
+  fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
+    crate::client::is_waiting_for_device(&self.store, conversation).unwrap_or(false)
+  }
+
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
     self.typing.users(conversation, self.me, self.clock.now_ms())
   }

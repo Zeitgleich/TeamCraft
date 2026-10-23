@@ -39,11 +39,11 @@ use crate::handlers::{
   get_brand_asset_handler, get_brand_handler, get_brand_theme_handler, get_call_handler,
   get_client_compatibility_handler, get_conversation_handler, get_conversation_notification_settings_handler,
   get_conversation_retention_handler, get_email_digest_handler, get_identity_key_handler,
-  get_key_bag_handler, get_me_handler, get_meeting_handler, get_my_lobby_state_handler,
-  get_my_org_recovery_shares_handler, get_my_privacy_handler, get_my_profile_handler,
-  get_notification_settings_handler, get_policy_handler, get_push_gateway_handler, get_read_receipts_handler,
-  get_recovery_material_handler, get_recovery_request_handler, get_recovery_result_handler,
-  get_security_log_handler, get_share_info_handler, get_space_handler,
+  get_key_bag_handler, get_me_handler, get_meeting_handler, get_mls_group_info_handler,
+  get_my_lobby_state_handler, get_my_org_recovery_shares_handler, get_my_privacy_handler,
+  get_my_profile_handler, get_notification_settings_handler, get_policy_handler, get_push_gateway_handler,
+  get_read_receipts_handler, get_recovery_material_handler, get_recovery_request_handler,
+  get_recovery_result_handler, get_security_log_handler, get_share_info_handler, get_space_handler,
   get_space_notification_settings_handler, get_space_retention_handler, get_unread_handler,
   get_user_avatar_handler, get_user_device_list_handler, get_user_group_handler, get_user_handler,
   get_user_profile_handler, get_web_push_key_handler, healthz_handler, join_conversation_handler,
@@ -57,10 +57,10 @@ use crate::handlers::{
   local_activate_handler, local_login_handler, local_logout_handler, move_channel_handler,
   pin_message_handler, post_mls_commit_handler, post_mls_message_handler,
   put_conversation_notification_settings_handler, put_email_digest_handler, put_identity_key_handler,
-  put_key_bag_handler, put_my_device_list_handler, put_my_privacy_handler, put_my_profile_handler,
-  put_notification_settings_handler, put_org_recovery_shares_handler, put_recovery_result_handler,
-  put_recovery_share_handler, put_space_notification_settings_handler, readyz_handler,
-  receive_meeting_reply_handler, register_device_handler, register_push_handler,
+  put_key_bag_handler, put_mls_group_info_handler, put_my_device_list_handler, put_my_privacy_handler,
+  put_my_profile_handler, put_notification_settings_handler, put_org_recovery_shares_handler,
+  put_recovery_result_handler, put_recovery_share_handler, put_space_notification_settings_handler,
+  readyz_handler, receive_meeting_reply_handler, register_device_handler, register_push_handler,
   remove_conversation_member_handler, remove_space_member_handler, remove_user_group_member_handler,
   rendezvous_handler, report_participant_joined_handler, report_participant_left_handler,
   revoke_device_handler, revoke_share_link_handler, search_users_handler, send_message_handler,
@@ -368,6 +368,10 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/conversations/{conversation_id}/mls/messages",
       post(post_mls_message_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/mls/group-info",
+      get(get_mls_group_info_handler).put(put_mls_group_info_handler),
     )
     .route(
       "/conversations/{conversation_id}/mls",

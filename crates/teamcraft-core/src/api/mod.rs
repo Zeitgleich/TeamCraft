@@ -274,6 +274,16 @@ pub trait ServerApi {
     device: DeviceId,
     query: &ListMlsMessagesQuery,
   ) -> impl Future<Output = Result<ListMlsMessagesResponse, ApiError>>;
+  /// The group information for the group's current epoch (a new device joins with it).
+  fn mls_group_info(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<teamcraft_proto::MlsGroupInfoResponse, ApiError>>;
+  fn put_mls_group_info(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::PutMlsGroupInfoRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
 
   fn put_key_bag(&self, request: &PutKeyBagRequest)
   -> impl Future<Output = Result<KeyBagResponse, ApiError>>;

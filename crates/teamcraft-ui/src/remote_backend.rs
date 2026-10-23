@@ -517,6 +517,13 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::MarkUnread { conversation, from });
   }
 
+  fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
+    matches!(
+      self.ask(ChatQuery::IsWaitingForDevice { conversation }),
+      Some(ChatAnswer::Flag { value: true })
+    )
+  }
+
   fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
     match self.ask(ChatQuery::FirstUnread { conversation }) {
       Some(ChatAnswer::Message { maybe_message }) => maybe_message,

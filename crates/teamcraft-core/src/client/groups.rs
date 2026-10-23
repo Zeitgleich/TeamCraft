@@ -283,17 +283,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .ok_or(CoreError::NoGroup(conversation))?;
     let output =
       group.commit_device_additions(&self.provider, &self.account.device, &key_packages, &directory)?;
-    if self
-      .post_commit(conversation, output, &recipients)
-      .await?
-      .is_none()
-    {
+    let Some(own) = self.post_commit(conversation, output, &recipients).await? else {
       return Err(CoreError::GaveUp {
         attempts: 1,
         reason: "another commit won the epoch".into(),
       });
-    }
-    self.remember_member_keys(conversation, &directory)?;
+    };
+    self.remember_member_keys(conversation, &directory, own.at_ms)?;
     Ok(recipients.len())
   }
 
@@ -396,6 +392,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       {
         self.note_rejoin_request(conversation, request).await?;
       }
+      if let Some(user) = message
+        .payload
+        .as_slice()
+        .strip_prefix(super::member_device::DEVICE_ADD_REQUEST_MAGIC)
+        && message.sender_device_id != self.account.device_id
+      {
+        self
+          .note_device_add_request(conversation, message.sender_device_id, user)
+          .await?;
+      }
       self.advance_cursor(conversation, message)?;
       return Ok(MlsProgress::Done);
     }
@@ -438,7 +444,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if is_own && pending.is_commit(message.payload.as_slice()) {
         // This device's commit, whose answer was lost: the server took it.
         let update = self.merge_own_commit(conversation, message)?;
-        self.remember_member_keys(conversation, &directory)?;
+        self.remember_member_keys(conversation, &directory, at_ms)?;
         if let Some(share) = self.after_own_commit(conversation, &update, at_ms)? {
           self.queue_pending(PendingChange::ShareHistory {
             conversation_id: conversation,
@@ -457,7 +463,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .ok_or(CoreError::NoGroup(conversation))?;
     let result = group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
     if result.is_ok() {
-      self.remember_member_keys(conversation, &directory)?;
+      self.remember_member_keys(conversation, &directory, at_ms)?;
     }
     match result {
       Ok(GroupEvent::ContentKeys { bundle, .. }) => {
@@ -633,7 +639,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       let is_founding_commit = group.epoch() == 0;
       if let Some(own) = self.post_commit(conversation, output, &recipients).await? {
-        self.remember_member_keys(conversation, &directory)?;
+        self.remember_member_keys(conversation, &directory, own.at_ms)?;
         return match self.after_own_commit(conversation, &own.update, own.at_ms)? {
           Some(share) => self.share_history_or_queue(conversation, share).await,
           None => Ok(()),
@@ -678,6 +684,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       epoch,
       commit: Base64Bytes::new(output.commit),
       welcomes,
+      // A very large group's information is left out rather than making the commit too large.
+      maybe_group_info: output
+        .maybe_group_info
+        .filter(|info| info.len() <= self.settings.max_group_info_bytes)
+        .map(Base64Bytes::new),
     };
     // Kept before sending, so a restart mid-request still finds the commit.
     self.persist_group(conversation)?;
@@ -740,8 +751,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(response) => {
         let update = self.merge_own_commit(conversation, &response.commit)?;
         let directory = self.member_directory(conversation).await?;
-        self.remember_member_keys(conversation, &directory)?;
         let at_ms = response.commit.id.snowflake().unix_millis();
+        self.remember_member_keys(conversation, &directory, at_ms)?;
         if let Some(share) = self.after_own_commit(conversation, &update, at_ms)? {
           self.queue_pending(PendingChange::ShareHistory {
             conversation_id: conversation,
@@ -892,10 +903,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Records the verified signing keys of the group's devices, which message signatures are
   /// checked against (security review A10), and retries messages that waited for them.
-  fn remember_member_keys(
+  /// `at_ms` is the server's time of the commit (or welcome) that showed the members: a device
+  /// added back after it left counts again from then on.
+  pub(crate) fn remember_member_keys(
     &mut self,
     conversation: ConversationId,
     directory: &PinnedDirectory,
+    at_ms: i64,
   ) -> Result<(), CoreError> {
     let Some(group) = self.groups.get(&conversation) else {
       return Ok(());
@@ -904,11 +918,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for device in group.verified_members(directory)? {
       let user = convert::user_from_crypto(device.user_id())?;
       let device_id = convert::device_from_crypto(device.device_id())?;
-      // A member again (added back): its new messages count.
-      self.store.delete(
-        Table::RemovedSenders,
-        &format!("{conversation}/{user}/{device_id}"),
-      )?;
+      // A member again (added back): what it signs from now on counts; what it signed while out
+      // still doesn't.
+      let key = format!("{conversation}/{user}/{device_id}");
+      // Only while it is out: the first commit (or welcome) that shows it again is the one that
+      // added it back; later ones must not move its return.
+      if let Some(absence) = records::removed_sender(&self.store, &key)?
+        && absence.left_at_ms <= at_ms
+        && absence
+          .maybe_back_at_ms
+          .is_none_or(|back| back < absence.left_at_ms)
+      {
+        records::merge_removed_sender(
+          &self.store,
+          &key,
+          &crate::account_data::SenderAbsence {
+            left_at_ms: absence.left_at_ms,
+            maybe_back_at_ms: Some(at_ms),
+          },
+        )?;
+        self.update_account_data(|data, _| data.note_sender_back(&key, at_ms))?;
+      }
       if records::device_signing_key(&self.store, user, device_id)?.as_ref() != Some(device.signing_key()) {
         records::put_device_signing_key(&self.store, user, device_id, device.signing_key())?;
         is_new = true;
@@ -935,7 +965,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         convert::user_from_crypto(member.user_id)?,
         convert::device_from_crypto(member.device_id)?
       );
-      records::put_json(&self.store, Table::RemovedSenders, &key, &at_ms)?;
+      records::merge_removed_sender(
+        &self.store,
+        &key,
+        &crate::account_data::SenderAbsence {
+          left_at_ms: at_ms,
+          maybe_back_at_ms: None,
+        },
+      )?;
+      // The user's other (and future) devices refuse its later messages too.
+      self.update_account_data(|data, _| data.note_removed_sender(&key, at_ms))?;
     }
     Ok(())
   }
@@ -956,6 +995,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ring.insert(key.duplicate())?;
     ring.set_current(key.id())?;
     self.persist_keys()?;
+    // A new device of the user won't join from group information older than this (e2ee.md §4.6).
+    let epoch = self.group_or_error(conversation)?.epoch();
+    self.update_account_data(|data, _| data.note_group_epoch(conversation, epoch))?;
     Ok(key)
   }
 
@@ -1041,8 +1083,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self
           .store
           .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
+        self.store.delete(
+          Table::AppliedChanges,
+          &super::member_device::device_add_key(conversation),
+        )?;
         self.welcome_handled(welcome)?;
-        self.remember_member_keys(conversation, &directory)?;
+        self.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
         // Everything up to the welcome belongs to epochs before we joined.
         self.advance_cursor(conversation, welcome)?;
         if let Ok(response) = self.api.conversation(conversation).await {
@@ -1271,7 +1317,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// [`ClientSettings::rejoin_retry`] if none does.
   ///
   /// [`ClientSettings::rejoin_retry`]: super::ClientSettings::rejoin_retry
-  async fn request_rejoin(
+  pub(crate) async fn request_rejoin(
     &mut self,
     conversation: ConversationId,
     current_epoch: u64,
@@ -1454,7 +1500,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  fn advance_cursor(
+  pub(crate) fn advance_cursor(
     &mut self,
     conversation: ConversationId,
     message: &MlsMessageResponse,

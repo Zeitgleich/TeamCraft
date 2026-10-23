@@ -1121,6 +1121,208 @@ fn a_pending_commit_survives_a_reload_and_is_recognised_in_the_queue() {
   assert_eq!(world.carol_group.epoch(), reloaded.epoch());
 }
 
+mod external_join {
+  use openmls::prelude::{MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn};
+
+  use super::*;
+
+  #[test]
+  fn a_further_device_of_a_member_joins_on_its_own() {
+    let mut world = World::new();
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let group_info = world
+      .alice_group
+      .export_group_info(&world.alice.provider, &world.alice.user.device)
+      .unwrap();
+    let epoch = world.alice_group.epoch();
+    let (phone_group, output) = ConversationGroup::join_external(
+      &carol_phone.provider,
+      &carol_phone.user.device,
+      &carol_phone.user.certificate,
+      &group_info,
+      CONVERSATION,
+      0,
+      &world.directory,
+    )
+    .unwrap();
+    // openmls merges an external commit right away.
+    assert_eq!(phone_group.epoch(), epoch + 1);
+    assert!(!phone_group.has_pending_commit());
+
+    for (group, provider) in [
+      (&mut world.alice_group, &world.alice.provider),
+      (&mut world.carol_group, &world.carol.provider),
+    ] {
+      let Ok(GroupEvent::MembershipChanged(update)) =
+        group.process_message(provider, &output.commit, &world.directory, &world.authority)
+      else {
+        panic!("expected a membership change")
+      };
+      assert!(update.maybe_change.is_none());
+      assert_eq!(update.added, vec![member(&carol_phone.user)]);
+      assert_eq!(group.epoch(), phone_group.epoch());
+    }
+    assert_eq!(phone_group.members().unwrap().len(), 3);
+    assert_eq!(
+      phone_group.epoch_content_key(&carol_phone.provider).unwrap().id(),
+      world
+        .alice_group
+        .epoch_content_key(&world.alice.provider)
+        .unwrap()
+        .id()
+    );
+    // The commit carried the next epoch's group information.
+    assert!(output.maybe_group_info.is_some());
+  }
+
+  #[test]
+  fn a_user_who_is_not_a_member_cannot_join_on_their_own() {
+    let mut world = World::new();
+    let group_info = world
+      .alice_group
+      .export_group_info(&world.alice.provider, &world.alice.user.device)
+      .unwrap();
+    let result = ConversationGroup::join_external(
+      &world.bob.provider,
+      &world.bob.user.device,
+      &world.bob.user.certificate,
+      &group_info,
+      CONVERSATION,
+      0,
+      &world.directory,
+    );
+    assert!(matches!(result, Err(MlsError::MissingSignedChange)));
+
+    // A client that skips its own check is refused by the members.
+    let commit = raw_external_commit(&world.bob, &group_info);
+    world.expect_carol_rejects(&commit, |error| matches!(error, MlsError::MissingSignedChange));
+  }
+
+  #[test]
+  fn a_device_already_in_the_group_or_from_another_conversation_is_refused() {
+    let world = World::new();
+    let group_info = world
+      .alice_group
+      .export_group_info(&world.alice.provider, &world.alice.user.device)
+      .unwrap();
+    let other = DefaultMlsProvider::default();
+    let again = ConversationGroup::join_external(
+      &other,
+      &world.carol.user.device,
+      &world.carol.user.certificate,
+      &group_info,
+      CONVERSATION,
+      0,
+      &world.directory,
+    );
+    assert!(again.is_err());
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let wrong_conversation = ConversationGroup::join_external(
+      &carol_phone.provider,
+      &carol_phone.user.device,
+      &carol_phone.user.certificate,
+      &group_info,
+      ConversationId::new(43),
+      0,
+      &world.directory,
+    );
+    assert!(matches!(wrong_conversation, Err(MlsError::UnexpectedMessage(_))));
+  }
+
+  #[test]
+  fn group_information_older_than_the_users_floor_is_refused() {
+    let world = World::new();
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let group_info = world
+      .alice_group
+      .export_group_info(&world.alice.provider, &world.alice.user.device)
+      .unwrap();
+    // The signed epoch counts, whatever the server claims around it.
+    let result = ConversationGroup::join_external(
+      &carol_phone.provider,
+      &carol_phone.user.device,
+      &carol_phone.user.certificate,
+      &group_info,
+      CONVERSATION,
+      world.alice_group.epoch() + 1,
+      &world.directory,
+    );
+    assert!(matches!(result, Err(MlsError::StaleGroupInfo { .. })));
+    // Nothing of the group stays behind on the device.
+    assert!(
+      ConversationGroup::load(
+        &carol_phone.provider,
+        CONVERSATION,
+        [],
+        ChangeHistory::default(),
+        None
+      )
+      .unwrap()
+      .is_none()
+    );
+  }
+
+  #[test]
+  fn members_refuse_a_device_no_signed_device_list_names() {
+    let mut world = World::new();
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let group_info = world
+      .alice_group
+      .export_group_info(&world.alice.provider, &world.alice.user.device)
+      .unwrap();
+    let commit = raw_external_commit(&carol_phone, &group_info);
+    let unlisted = Unlisted(&world.directory);
+    let epoch = world.carol_group.epoch();
+    let result =
+      world
+        .carol_group
+        .process_message(&world.carol.provider, &commit, &unlisted, &world.authority);
+    assert!(matches!(result, Err(MlsError::InactiveDevice(_))));
+    assert_eq!(world.carol_group.epoch(), epoch);
+  }
+
+  /// A directory that knows the identities but no device list (the server 404s them).
+  struct Unlisted<'a>(&'a TestDirectory);
+
+  impl IdentityDirectory for Unlisted<'_> {
+    fn pinned_identity(&self, user_id: UserId) -> Option<crate::identity::IdentityPublicKey> {
+      self.0.pinned_identity(user_id)
+    }
+  }
+
+  /// An external commit built with openmls directly, without TeamCraft's checks.
+  fn raw_external_commit(client: &Client, group_info: &[u8]) -> Vec<u8> {
+    let MlsMessageBodyIn::GroupInfo(info) =
+      MlsMessageIn::tls_deserialize_exact(group_info).unwrap().extract()
+    else {
+      panic!("expected a group info")
+    };
+    let config = MlsGroupJoinConfig::builder()
+      .use_ratchet_tree_extension(true)
+      .build();
+    let (_, bundle) = MlsGroup::external_commit_builder()
+      .with_config(config)
+      .build_group(
+        &client.provider,
+        info,
+        credential::credential_with_key(&client.user.certificate).unwrap(),
+      )
+      .unwrap()
+      .load_psks(client.provider.storage())
+      .unwrap()
+      .build(
+        client.provider.rand(),
+        client.provider.crypto(),
+        &client.user.device,
+        |_| true,
+      )
+      .unwrap()
+      .finalize(&client.provider)
+      .unwrap();
+    bundle.into_commit().to_bytes().unwrap()
+  }
+}
+
 mod rejoin {
   use super::*;
   use crate::mls::{RejoinRequest, SignedRejoinRequest};

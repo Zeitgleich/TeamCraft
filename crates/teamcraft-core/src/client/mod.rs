@@ -16,6 +16,7 @@ pub mod files;
 mod gateway;
 mod groups;
 mod linking;
+mod member_device;
 mod messaging;
 mod notifications;
 mod org_backgrounds;
@@ -43,8 +44,9 @@ pub use calls::{CallEventSink, CallKeySigner};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
+pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
-pub(crate) use messaging::decrypt_content;
+pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
@@ -101,6 +103,9 @@ pub struct ClientSettings {
   /// A device that fell out of a group asks again to be added back after this long without a
   /// welcome (e2ee.md §4.6).
   pub rejoin_retry: std::time::Duration,
+  /// Larger MLS group information is not sent with a commit (it would push the commit over the
+  /// server's payload limit); a further device then waits for a member instead.
+  pub max_group_info_bytes: usize,
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
   /// long a new device waits when the first-ranked members are away (presence isn't per device).
   pub device_add_max_rank: u32,
@@ -133,6 +138,9 @@ pub struct Client<A, S> {
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
   last_key_package_check_ms: i64,
+  /// When this device last tried to join each conversation's group as a further device (backs
+  /// off while waiting for a member).
+  member_join_attempts: HashMap<ConversationId, i64>,
   /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
   /// sends into the others only after catching up (e2ee.md §4.6).
   mls_current: std::collections::BTreeSet<ConversationId>,
@@ -149,6 +157,7 @@ impl Default for ClientSettings {
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
+      max_group_info_bytes: 256 * 1024,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
       maybe_push_gateway_url: None,
@@ -180,7 +189,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let sync = records::load_sync_state(&store)?;
     let maybe_preview_fetcher = previews::default_fetcher(&settings.link_previews);
     let maybe_jwks_source = attested::default_jwks_source(settings.maybe_attestation.as_ref());
-    Ok(Some(Self {
+    let mut client = Self {
       api,
       store,
       clock,
@@ -196,7 +205,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
-    }))
+      member_join_attempts: HashMap::new(),
+    };
+    // Startup: removal records of the user's devices count from the start, and this device's own
+    // (also from older versions) are shared.
+    client.apply_shared_removals()?;
+    client.share_removed_senders()?;
+    Ok(Some(client))
   }
 
   /// A sealed device token is sealed again after this long (tests set it to zero to force it).

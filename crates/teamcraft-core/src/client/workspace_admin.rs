@@ -162,6 +162,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       {
         continue;
       }
+      // A further device of a user who is in the group already joins as that, unannounced
+      // (e2ee.md §4.6); only a user who isn't signs a self-add.
+      match self.join_as_member_device(response.id).await {
+        Ok(super::member_device::MemberDeviceJoin::NotAMember) => {},
+        Ok(_) => continue,
+        Err(error) if error.is_transient() => return Err(error),
+        Err(error) => {
+          tracing::warn!(conversation_id = %response.id, %error, "could not join as a further device");
+          continue;
+        },
+      }
       // Marked first: a failed attempt is not repeated on every sync, and a member's own add wins.
       records::put_json(&self.store, Table::SyncState, &key, &true)?;
       self.post_self_add(&response).await?;

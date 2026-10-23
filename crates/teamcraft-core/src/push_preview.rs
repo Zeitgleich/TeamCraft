@@ -246,6 +246,22 @@ async fn fetch_and_decrypt<A: ServerApi>(
       "pushed message is from another conversation".into(),
     ));
   }
+  // Like the app: nothing a device signed while it was out of the conversation (security review
+  // A10, e2ee.md §4.4).
+  let key = format!(
+    "{}/{}/{}",
+    message.conversation_id, message.sender_user_id, message.sender_device_id
+  );
+  if records::removed_sender(store, &key)?.is_some_and(|absence| {
+    absence.covers(
+      message.id.snowflake().unix_millis(),
+      crate::client::REMOVED_SENDER_GRACE_MS,
+    )
+  }) {
+    return Err(CoreError::Corrupt(
+      "pushed message is from a device that had left the conversation".into(),
+    ));
+  }
   let account = records::load_account(store)?.ok_or(CoreError::NotEnrolled)?;
   let maybe_sender_key =
     records::device_signing_key(store, message.sender_user_id, message.sender_device_id)?;

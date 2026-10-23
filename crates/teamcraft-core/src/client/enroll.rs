@@ -179,6 +179,7 @@ impl PendingEnrollment {
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      member_join_attempts: HashMap::new(),
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;
@@ -188,8 +189,18 @@ impl PendingEnrollment {
     if let EnrollmentSecret::OrgRecovery { new_passphrase, .. } = &options.secret {
       client.rotate_backup_key(new_passphrase, options.argon2).await?;
     }
+    // A key bag from the link is as fresh as the user's other device; one the server served may not
+    // be (e2ee.md §4.6, joining by external commit).
+    records::put_json(
+      &client.store,
+      Table::Account,
+      super::member_device::KEY_BAG_FROM_LINK_KEY,
+      &matches!(options.secret, EnrollmentSecret::Linked(_)),
+    )?;
     records::save_account(&client.store, &client.account)?;
     records::delete_pending_device(&client.store)?;
+    // Removal records from the key bag count before the first message is decrypted.
+    client.apply_shared_removals()?;
     client.finish_enrollment().await?;
     Ok(client)
   }

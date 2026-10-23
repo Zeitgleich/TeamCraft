@@ -17,6 +17,7 @@ mod files;
 mod key_packages;
 mod link_previews;
 mod linking;
+mod member_devices;
 mod messages;
 mod mls_recovery;
 mod org_backgrounds;

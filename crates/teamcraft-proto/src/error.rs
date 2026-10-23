@@ -20,6 +20,8 @@ wire_enum! {
     IdentityKeyNotFound => "identity_key_not_found",
     KeyBagNotFound => "key_bag_not_found",
     DeviceListNotFound => "device_list_not_found",
+    /// No member published the MLS group information for the group's current epoch yet.
+    MlsGroupInfoNotFound => "mls_group_info_not_found",
     AttachmentNotFound => "attachment_not_found",
     BackgroundNotFound => "background_not_found",
     CallNotFound => "call_not_found",
@@ -143,6 +145,7 @@ mod tests {
       ErrorCode::IdentityKeyNotFound,
       ErrorCode::KeyBagNotFound,
       ErrorCode::DeviceListNotFound,
+      ErrorCode::MlsGroupInfoNotFound,
       ErrorCode::AttachmentNotFound,
       ErrorCode::BackgroundNotFound,
       ErrorCode::CallNotFound,

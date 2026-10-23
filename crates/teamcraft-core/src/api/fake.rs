@@ -169,6 +169,8 @@ struct State {
   garbling_next_commit_for: HashSet<UserId>,
   /// MLS entries each user gets garbled (gateway and backlog alike).
   garbled_entries: HashMap<UserId, HashSet<teamcraft_proto::MlsMessageId>>,
+  /// Group information served whatever the group's epoch ([`FakeServer::serve_group_info`]).
+  forced_group_infos: HashMap<ConversationId, teamcraft_proto::MlsGroupInfoResponse>,
 }
 
 /// How an armed network cut ([`FakeServer::cut_network_after`]) hits the call it catches.
@@ -239,6 +241,8 @@ struct Conversation {
   favorites: HashMap<UserId, bool>,
   read_positions: HashMap<UserId, MessageId>,
   pinned: HashSet<MessageId>,
+  /// The newest MLS group information and the epoch it is for.
+  maybe_group_info: Option<(u64, Base64Bytes)>,
 }
 
 struct Session {
@@ -457,6 +461,24 @@ impl FakeServer {
   /// others merge it: the device falls out of the group (a bug, a rolled-back store).
   pub fn garble_next_commit_for(&self, user: UserId) {
     self.lock().garbling_next_commit_for.insert(user);
+  }
+
+  /// From now on serves `response` as the conversation's group information, whatever the group's
+  /// epoch: a server handing out an old one.
+  pub fn serve_group_info(
+    &self,
+    conversation: ConversationId,
+    response: teamcraft_proto::MlsGroupInfoResponse,
+  ) {
+    self.lock().forced_group_infos.insert(conversation, response);
+  }
+
+  /// Forgets every stored MLS group information, as for groups whose last commit came from a
+  /// client that sent none.
+  pub fn forget_group_infos(&self) {
+    for conversation in self.lock().conversations.values_mut() {
+      conversation.maybe_group_info = None;
+    }
   }
 
   /// From now on revoked devices stay listed and keep their key packages (a stale server).
@@ -1441,6 +1463,9 @@ impl ServerApi for FakeServerApi {
       entry.epoch += 1;
       entry.mls.push(commit.clone());
       let new_epoch = entry.epoch;
+      if let Some(group_info) = &request.maybe_group_info {
+        entry.maybe_group_info = Some((new_epoch, group_info.clone()));
+      }
       let members: Vec<UserId> = entry.members.keys().copied().collect();
       let garbled_for: Vec<UserId> = state.garbling_next_commit_for.drain().collect();
       for user in &garbled_for {
@@ -1539,6 +1564,49 @@ impl ServerApi for FakeServerApi {
           _ => message.clone(),
         });
       Ok(page(visible.collect(), query.maybe_limit, entry.epoch))
+    })
+  }
+
+  async fn mls_group_info(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::MlsGroupInfoResponse, ApiError> {
+    self.with(|state, me| {
+      if let Some(forced) = state.forced_group_infos.get(&conversation) {
+        return Ok(forced.clone());
+      }
+      let entry = state.member_conversation(conversation, me)?;
+      match &entry.maybe_group_info {
+        Some((epoch, group_info)) if *epoch == entry.epoch => Ok(teamcraft_proto::MlsGroupInfoResponse {
+          epoch: *epoch,
+          group_info: group_info.clone(),
+        }),
+        _ => Err(ApiError::status(
+          404,
+          ErrorCode::MlsGroupInfoNotFound,
+          "no group information for the current epoch",
+        )),
+      }
+    })
+  }
+
+  async fn put_mls_group_info(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::PutMlsGroupInfoRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, request.device_id)?;
+      let entry = state.member_conversation_mut(conversation, me)?;
+      if request.epoch != entry.epoch {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::EpochConflict,
+          format!("the group is in epoch {}", entry.epoch),
+        ));
+      }
+      entry.maybe_group_info = Some((request.epoch, request.group_info.clone()));
+      Ok(())
     })
   }
 
@@ -2908,6 +2976,7 @@ impl State {
         favorites: HashMap::new(),
         read_positions: HashMap::new(),
         pinned: HashSet::new(),
+        maybe_group_info: None,
       },
     );
     id

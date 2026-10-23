@@ -78,6 +78,80 @@ fn kinds(reply: &Reply) -> Vec<String> {
     .collect()
 }
 
+mod group_info {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_group_information_of_the_current_epoch_is_served_to_members() {
+    let app = app!();
+    let g = group(&app).await;
+    let path = format!("/conversations/{}/mls/group-info", g.channel);
+    assert_eq!(
+      app.get(&g.carol, &path).await.error_code(),
+      "mls_group_info_not_found"
+    );
+
+    // A commit carries the information for the epoch it starts.
+    let first = app
+      .post(
+        &g.carol,
+        &format!("/conversations/{}/mls/commits", g.channel),
+        json!({"device_id": g.carol_device, "epoch": 0, "commit": b64("commit-0"), "group_info": b64("info-1")}),
+      )
+      .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    let served = app.get(&g.dave, &path).await;
+    assert_eq!(served.status, StatusCode::OK, "{}", served.body);
+    assert_eq!(served.body, json!({"epoch": 1, "group_info": b64("info-1")}));
+
+    // A commit without one makes the stored one stale: it is not served any more.
+    commit(&app, &g.dave, &g.channel, &g.dave_device, 1, json!([])).await;
+    assert_eq!(
+      app.get(&g.dave, &path).await.error_code(),
+      "mls_group_info_not_found"
+    );
+    // A member publishes it for the current epoch; another epoch is a conflict.
+    let stale = app
+      .put(
+        &g.dave,
+        &path,
+        json!({"device_id": g.dave_device, "epoch": 1, "group_info": b64("info-old")}),
+      )
+      .await;
+    assert_eq!(stale.error_code(), "epoch_conflict");
+    let put = app
+      .put(
+        &g.dave,
+        &path,
+        json!({"device_id": g.dave_device, "epoch": 2, "group_info": b64("info-2")}),
+      )
+      .await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.body);
+    assert_eq!(app.get(&g.carol, &path).await.body["epoch"], 2);
+
+    // Too large to keep: the commit goes through without it.
+    let big = "x".repeat(2 * 1024 * 1024);
+    let third = app
+      .post(
+        &g.carol,
+        &format!("/conversations/{}/mls/commits", g.channel),
+        json!({"device_id": g.carol_device, "epoch": 2, "commit": b64("commit-2"), "group_info": b64(&big)}),
+      )
+      .await;
+    assert_eq!(third.status, StatusCode::CREATED, "{}", third.body);
+    assert_eq!(
+      app.get(&g.carol, &path).await.error_code(),
+      "mls_group_info_not_found"
+    );
+
+    // Not for outsiders.
+    let erin = member("erin");
+    register_device(&app, &erin).await;
+    assert_ne!(app.get(&erin, &path).await.status, StatusCode::OK);
+    app.stop().await;
+  }
+}
+
 mod commits {
   use super::*;
 

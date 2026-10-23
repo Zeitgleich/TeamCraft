@@ -5,9 +5,10 @@ use std::collections::HashSet;
 
 use teamcraft_db::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, DeviceId, GatewayEvent, ListMlsMessagesQuery, ListMlsMessagesResponse,
-  MlsMessageId, MlsMessageKind, MlsMessageResponse, Permission, PostMlsCommitRequest, PostMlsCommitResponse,
-  PostMlsMessageRequest, UserId,
+  Base64Bytes, ConversationId, DeviceId, ErrorCode, GatewayEvent, ListMlsMessagesQuery,
+  ListMlsMessagesResponse, MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
+  Permission, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutMlsGroupInfoRequest,
+  UserId,
 };
 
 use super::access::{load_conversation, require};
@@ -33,6 +34,15 @@ pub async fn post_commit(
   }
   for welcome in &request.welcomes {
     check_payload(state, &welcome.welcome)?;
+  }
+  // Group information too large to keep is dropped, never the commit: removals must go through.
+  let max_payload = limits.max_mls_payload_bytes;
+  let maybe_group_info = request
+    .maybe_group_info
+    .as_ref()
+    .filter(|info| !info.is_empty() && info.len() <= max_payload);
+  if request.maybe_group_info.is_some() && maybe_group_info.is_none() {
+    tracing::debug!(conversation_id = %conversation, "commit stored without its group information");
   }
 
   // Welcomes go to devices of members only, one per device.
@@ -79,7 +89,14 @@ pub async fn post_commit(
 
   let outcome = state
     .database
-    .post_mls_commit(conversation, request.epoch, request.device_id, &commit, &welcomes)
+    .post_mls_commit(
+      conversation,
+      request.epoch,
+      request.device_id,
+      &commit,
+      &welcomes,
+      maybe_group_info.map(Base64Bytes::as_slice),
+    )
     .await?;
   let new_epoch = match outcome {
     CommitOutcome::Accepted { new_epoch } => new_epoch,
@@ -156,6 +173,56 @@ pub async fn post_message(
     },
   );
   Ok(stored)
+}
+
+/// The group information for the current epoch, for a member's new device to join by external
+/// commit. Members only; the server never looks inside.
+pub async fn group_info(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+) -> Result<MlsGroupInfoResponse, ApiError> {
+  let access = load_conversation(state, caller, conversation).await?;
+  if !access.is_member() {
+    return Err(ApiError::Forbidden(
+      "only members can read the group information".into(),
+    ));
+  }
+  match state.database.current_mls_group_info(conversation).await? {
+    Some((epoch, group_info)) => Ok(MlsGroupInfoResponse {
+      epoch,
+      group_info: Base64Bytes::new(group_info),
+    }),
+    None => Err(ApiError::NotFound {
+      code: ErrorCode::MlsGroupInfoNotFound,
+      what: "MLS group information",
+    }),
+  }
+}
+
+/// A member publishes the group information for the current epoch.
+pub async fn put_group_info(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+  request: PutMlsGroupInfoRequest,
+) -> Result<(), ApiError> {
+  let access = load_conversation(state, caller, conversation).await?;
+  if !access.is_member() {
+    return Err(ApiError::Forbidden(
+      "only members can publish the group information".into(),
+    ));
+  }
+  ensure_own_device(state, caller, request.device_id).await?;
+  check_payload(state, &request.group_info)?;
+  match state
+    .database
+    .put_mls_group_info(conversation, request.epoch, request.group_info.as_slice())
+    .await?
+  {
+    PostOutcome::Accepted => Ok(()),
+    PostOutcome::EpochConflict { current_epoch } => Err(ApiError::EpochConflict { current_epoch }),
+  }
 }
 
 /// Backlog since the last entry the client processed, for catching up after a gap.

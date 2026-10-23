@@ -154,6 +154,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mut data = self.account_data();
     data.merge(&remote_data, self.now_ms());
     self.store_account_data(&data)?;
+    // Removals another device of the user saw count here before the next message is decrypted.
+    self.apply_shared_removals()?;
     // Entries the other device didn't have yet still need an upload.
     if data != remote_data {
       self.sync.is_key_bag_dirty = true;

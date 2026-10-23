@@ -32,7 +32,7 @@ pub struct FlushReport {
 
 /// Messages a removed device sent shortly before its removal reached this device can carry a
 /// slightly later server time; they still count.
-const REMOVED_SENDER_GRACE_MS: i64 = 5 * 60 * 1000;
+pub(crate) const REMOVED_SENDER_GRACE_MS: i64 = 5 * 60 * 1000;
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes a text message to the store and the outbox, then tries to send it. Works offline: the
@@ -245,8 +245,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(count)
   }
 
-  /// Fetches messages newer than the newest one this device has (after being offline).
+  /// Fetches messages newer than the newest one this device has (after being offline), and the
+  /// first time the newest page of history.
   pub async fn catch_up_messages(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
+    // The first time, the newest page of history, whatever this device stored already (its own
+    // first message would otherwise hide everything before it).
+    let history_key = format!("history_loaded/{conversation}");
+    let mut total = 0;
+    if records::get_json::<bool>(&self.store, Table::SyncState, &history_key)?.is_none() {
+      total += self.load_older_messages(conversation).await?;
+      records::put_json(&self.store, Table::SyncState, &history_key, &true)?;
+    }
     let maybe_newest = self
       .store
       .messages(conversation, MessageFilter::All)?
@@ -254,9 +263,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter_map(|message| message.maybe_server_id)
       .max();
     let Some(newest) = maybe_newest else {
-      return self.load_older_messages(conversation).await;
+      return Ok(total);
     };
-    let mut total = 0;
     let mut cursor = newest;
     loop {
       let query = ListMessagesQuery {
@@ -433,16 +441,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Whether the message's device had left the conversation before the message's time.
+  /// Whether the message's device was out of the conversation at the message's time (it had
+  /// left and, if it came back, not yet).
   fn sent_after_leaving(&self, message: &MessageResponse) -> Result<bool, CoreError> {
     let key = format!(
       "{}/{}/{}",
       message.conversation_id, message.sender_user_id, message.sender_device_id
     );
-    let maybe_left_at: Option<i64> = records::get_json(&self.store, Table::RemovedSenders, &key)?;
-    Ok(maybe_left_at.is_some_and(|left_at| {
-      message.id.snowflake().unix_millis() > left_at.saturating_add(REMOVED_SENDER_GRACE_MS)
-    }))
+    Ok(
+      records::removed_sender(&self.store, &key)?
+        .is_some_and(|absence| absence.covers(message.id.snowflake().unix_millis(), REMOVED_SENDER_GRACE_MS)),
+    )
   }
 
   fn message_context(
