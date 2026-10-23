@@ -135,7 +135,17 @@ impl ServerOrigin {
     } else {
       format!("https://{trimmed}")
     };
-    let url = Url::parse(&with_scheme).map_err(|_| ServerAddressError::Invalid)?;
+    let mut url = Url::parse(&with_scheme).map_err(|_| ServerAddressError::Invalid)?;
+    // `team.example.com.` (fully qualified) is the same server; one origin per server.
+    if let Some(Host::Domain(name)) = url.host()
+      && let Some(stripped) = name.strip_suffix('.')
+      && !stripped.is_empty()
+    {
+      let stripped = stripped.to_owned();
+      url
+        .set_host(Some(&stripped))
+        .map_err(|_| ServerAddressError::Invalid)?;
+    }
     Self::from_url(&url, policy)
   }
 
@@ -443,8 +453,13 @@ mod tests {
     fn host_names_urls_and_links_become_the_origin() {
       for input in [
         "team.example.com",
+        "team.example.com/",
         "  team.example.com  ",
+        " team.example.com/ ",
         "Team.Example.COM",
+        "TEAM.EXAMPLE.COM/",
+        "team.example.com.",
+        "https://Team.Example.com/some/page",
         "https://team.example.com",
         "https://team.example.com/",
         "https://team.example.com:443/",
@@ -479,9 +494,16 @@ mod tests {
           "{loopback}"
         );
       }
+      // Never a silent fallback: a bare domain is https, an explicit http one is refused.
       assert_eq!(
         ServerOrigin::parse("http://team.example.com", HttpPolicy::LoopbackOnly),
         Err(ServerAddressError::InsecureHttp)
+      );
+      assert_eq!(
+        ServerOrigin::parse("localhost:8081", HttpPolicy::LoopbackOnly)
+          .unwrap()
+          .as_str(),
+        "https://localhost:8081"
       );
       assert_eq!(
         ServerOrigin::parse("http://10.0.2.2:8081", HttpPolicy::Allowed)
