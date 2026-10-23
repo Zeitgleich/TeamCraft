@@ -62,6 +62,10 @@ Details: [.claude/rules/](.claude/rules/). The short version:
   constructors, public methods, then private helpers below their callers.
 - **Configurable by default:** policies and limits are settings with a sensible default, not
   hard-coded behaviour (see PLAN.md).
+- **Robust beyond the happy path:** every feature plan and PR review goes through
+  [robustness.md](.claude/rules/robustness.md) – network loss and change, offline queues, app
+  lifecycle, hostile networks, multi-device, server restarts, large data, clock skew. Known gaps are
+  tracked in [docs/robustness-audit.md](docs/robustness-audit.md).
 - **English only.** Code, identifiers, comments, logs, error messages, config keys, tool names, docs,
   commit messages and test data are plain English. The only exception are the i18n translation files
   (e.g. `i18n/de.ftl`); every user-facing string goes through i18n.
