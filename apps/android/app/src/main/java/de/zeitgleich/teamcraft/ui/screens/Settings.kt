@@ -128,6 +128,7 @@ fun SettingsScreen(
       SecureScreenSetting()
       AppLockSetting()
       SendWithEnterSetting()
+      ShareTypingSetting()
 
       HorizontalDivider()
       OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {

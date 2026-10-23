@@ -153,3 +153,23 @@ private func setAttributes(
   change(&container)
   text[lower..<upper].mergeAttributes(container)
 }
+
+/// How often the app tells the core that the user types; the core and the server throttle too.
+let typingNotifyInterval: TimeInterval = 3
+
+/// Whether a change of the composer text should announce typing now.
+func shouldNotifyTyping(_ text: String, now: Date, lastNotified: Date?) -> Bool {
+  guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+  guard let last = lastNotified else { return true }
+  return now.timeIntervalSince(last) >= typingNotifyInterval
+}
+
+/// The "… is typing" line for these names, or nothing when nobody types.
+func typingText(_ names: [String]) -> LocalizedStringKey? {
+  switch names.count {
+  case 0: return nil
+  case 1: return "typing_one \(names[0])"
+  case 2: return "typing_two \(names[0]) \(names[1])"
+  default: return "typing_several"
+  }
+}

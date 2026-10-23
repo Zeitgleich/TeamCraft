@@ -45,5 +45,6 @@ mod trust;
 pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, Client, ClientSettings, EnrollmentOptions,
   EnrollmentSecret, FlushReport, GatewayOutcome, JwksSource, LinkOffer, OrgRecoveryUnlock, PendingEnrollment,
+  TypingState,
 };
 pub use error::CoreError;

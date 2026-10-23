@@ -16,6 +16,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_ui_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
     match command {
       CoreCommand::FlushOutbox => self.flush_outbox().await.map(|_| ()),
+      // Only the sync loop has the gateway to announce it on; without one there is no one to tell.
+      CoreCommand::Typing { .. } => Ok(()),
       CoreCommand::LoadHistoryAt { conversation, at_ms } => {
         let loaded = self.load_messages_from(conversation, at_ms).await;
         // Answered even when loading failed (offline): the UI then shows what is local.
