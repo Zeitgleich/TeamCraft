@@ -16,8 +16,11 @@ struct ConversationSection: Identifiable {
 }
 
 /// Favorites first, then the channels of each space (spaces and channels by name), then direct
-/// messages. Empty sections are left out. Same grouping as the Android app.
-func conversationSections(_ conversations: [ConversationItem]) -> [ConversationSection] {
+/// messages, the most recent first (`lastActivity`: newest message per conversation; by name
+/// without one). Empty sections are left out. Same grouping as the Android app.
+func conversationSections(_ conversations: [ConversationItem], lastActivity: [String: Date] = [:])
+  -> [ConversationSection]
+{
   func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
     lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
   }
@@ -41,7 +44,12 @@ func conversationSections(_ conversations: [ConversationItem]) -> [ConversationS
     sections.append(ConversationSection(title: title, conversations: (spaces[space] ?? []).sorted(by: byName)))
   }
   if !direct.isEmpty {
-    sections.append(ConversationSection(title: .directMessages, conversations: direct.sorted(by: byName)))
+    func byRecency(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
+      let left = lastActivity[lhs.id] ?? .distantPast
+      let right = lastActivity[rhs.id] ?? .distantPast
+      return left == right ? byName(lhs, rhs) : left > right
+    }
+    sections.append(ConversationSection(title: .directMessages, conversations: direct.sorted(by: byRecency)))
   }
   return sections
 }

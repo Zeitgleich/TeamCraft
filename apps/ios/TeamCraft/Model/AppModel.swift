@@ -239,6 +239,16 @@ final class AppModel {
     (try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []
   }
 
+  /// The newest message of each conversation, for the chat list. Local reads only.
+  func chatPreviews(_ conversations: [ConversationItem], myId: String) async -> [String: ChatPreview] {
+    var previews: [String: ChatPreview] = [:]
+    for conversation in conversations {
+      guard let latest = await messages(conversationId: conversation.id, limit: 1).last else { continue }
+      previews[conversation.id] = chatPreview(latest, myId: myId, isOneToOne: conversation.kind == .direct)
+    }
+    return previews
+  }
+
   func search(_ query: String) async -> [SearchHitItem] {
     guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
     return (try? await core().search(query: query)) ?? []
@@ -246,8 +256,15 @@ final class AppModel {
 
   // MARK: Acting
 
-  func send(conversationId: String, threadId: String?, body: String) async {
-    try? await core().sendMessage(conversationId: conversationId, maybeThreadId: threadId, body: body)
+  /// Sends a text message; `false` when the core refused it (the composer keeps the text then).
+  @discardableResult
+  func send(conversationId: String, threadId: String?, body: String) async -> Bool {
+    do {
+      try await core().sendMessage(conversationId: conversationId, maybeThreadId: threadId, body: body)
+      return true
+    } catch {
+      return false
+    }
   }
 
   func markRead(conversationId: String) async {
