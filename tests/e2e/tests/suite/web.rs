@@ -300,7 +300,7 @@ async fn sign_in_as_alice(page: &Page) {
     .evaluate("localStorage.setItem('teamcraft.locale', 'en')")
     .await
     .unwrap();
-  page.goto(format!("{WEB_ORIGIN}/?backend=server")).await.unwrap();
+  page.goto(format!("{WEB_ORIGIN}/")).await.unwrap();
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;
 

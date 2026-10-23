@@ -168,23 +168,24 @@ fn main() -> anyhow::Result<()> {
   Ok(())
 }
 
-/// The window is created here, not in `tauri.conf.json`, so the data source can be chosen per launch
-/// with `TEAMCRAFT_BACKEND=server|mock` (the UI reads it from `localStorage`).
+/// The window is created here, not in `tauri.conf.json`, so it can start hidden in the tray. Debug
+/// builds take `TEAMCRAFT_BACKEND=server|mock` to pick the data source of a UI built with the `demo`
+/// feature (the UI reads it from `localStorage`); release builds never offer demo data.
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   let prefs = app.state::<ShellPrefsState>().get();
   let is_hidden = prefs.is_start_minimized && tray::has_tray(app.handle());
-  let mut window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
+  let window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
     .title("TeamCraft")
     .visible(!is_hidden)
     .inner_size(1360.0, 860.0)
     .min_inner_size(720.0, 520.0);
-  if let Ok(mode) = std::env::var("TEAMCRAFT_BACKEND")
-    && matches!(mode.as_str(), "server" | "mock")
-  {
-    window = window.initialization_script(format!(
+  #[cfg(debug_assertions)]
+  let window = match std::env::var("TEAMCRAFT_BACKEND") {
+    Ok(mode) if matches!(mode.as_str(), "server" | "mock") => window.initialization_script(format!(
       "try {{ localStorage.setItem('teamcraft.backend', '{mode}'); }} catch (_) {{}}"
-    ));
-  }
+    )),
+    _ => window,
+  };
   window.build()?;
   Ok(())
 }

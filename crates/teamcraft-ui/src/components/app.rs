@@ -54,7 +54,6 @@ use crate::components::workspace_dialogs::{
 };
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
-use crate::mock::MockBackend;
 use crate::model::TimestampMs;
 use crate::model::{ConversationId, SpaceId};
 use crate::navigation::Step;
@@ -63,7 +62,7 @@ use crate::notify_sync::NotificationSync;
 use crate::prefs::Zoom;
 use crate::reactive::use_interval;
 use crate::sections::badge_count;
-use crate::settings::{BackendMode, Settings, Theme};
+use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
 
 #[component]
@@ -90,13 +89,12 @@ pub fn App() -> impl IntoView {
     crate::bundle::watch(bundle.0);
   }
 
-  match BackendMode::load() {
-    BackendMode::Mock => {
-      let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(now_ms()));
-      view! { <Shell backend=backend settings=settings /> }.into_any()
-    },
-    BackendMode::Server => view! { <SessionGate settings=settings /> }.into_any(),
+  #[cfg(feature = "demo")]
+  if crate::settings::BackendMode::load() == crate::settings::BackendMode::Mock {
+    let backend: Rc<dyn Backend> = Rc::new(crate::mock::MockBackend::new(now_ms()));
+    return view! { <Shell backend=backend settings=settings /> }.into_any();
   }
+  view! { <SessionGate settings=settings /> }.into_any()
 }
 
 /// Everything after sign-in: the chat shell on top of a backend.
@@ -148,16 +146,21 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
 
   let _ = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
+  let banners = NodeRef::<leptos::html::Div>::new();
+  track_banner_height(banners);
 
   view! {
     <a class="skip-link" href="#main-content">
       {move || i18n.t("skip-to-content")}
     </a>
     <div class="app">
-      <BundleBanner />
-      <OfflineBanner />
-      <AnnouncementBanner />
-      <UpdateNotice />
+      // One grid row for all banners, so the top bar and the body keep their own rows.
+      <div class="app-banners" node_ref=banners>
+        <BundleBanner />
+        <OfflineBanner />
+        <AnnouncementBanner />
+        <UpdateNotice />
+      </div>
       <TopBar />
       <div class="app-body">
         // The administration console takes the whole window, like a system console.
@@ -590,6 +593,43 @@ fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
 }
 
 /// Desktop: the user's call actions go to the shell, and calls that ring there show the dialog.
+/// Keeps `--banners-h` on the root element at the height of the banner row: overlays that are fixed
+/// below the top bar (call screens, side panels on narrow windows) start below the banners too.
+fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
+  let update = move || {
+    let Some(element) = banners.get_untracked() else {
+      return;
+    };
+    let height = element.get_bounding_client_rect().height();
+    let root = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.document_element())
+      .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok());
+    if let Some(root) = root
+      && root
+        .style()
+        .set_property("--banners-h", &format!("{height}px"))
+        .is_err()
+    {
+      tracing::debug!("could not set the banner height");
+    }
+  };
+  let callback = Closure::<dyn FnMut()>::new(update);
+  let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
+    tracing::debug!("ResizeObserver unavailable");
+    return;
+  };
+  let handle = StoredValue::new_local((observer, callback));
+  Effect::new(move |_| {
+    if let Some(element) = banners.get() {
+      handle.with_value(|(observer, _)| observer.observe(&element));
+    }
+  });
+  on_cleanup(move || {
+    handle.try_with_value(|(observer, _)| observer.disconnect());
+  });
+}
+
 fn connect_calls(state: AppState) {
   let call = state.call;
   call.set_handler(move |event| {

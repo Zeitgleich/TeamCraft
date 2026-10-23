@@ -25,7 +25,7 @@ use crate::remote_backend::{self, RemoteChat};
 use crate::remote_calls::RemoteCalls;
 use crate::server_backend::{LoadError, RestChat};
 use crate::session::{LocalSignInProblem, LoginProblem, SessionControl, SessionState};
-use crate::settings::{BackendMode, Settings};
+use crate::settings::Settings;
 use teamcraft_client_api::remote::{CoreStatus, LinkStatus};
 
 /// Shows the right screen for the sign-in state and the chat shell once the user is in.
@@ -207,20 +207,32 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
       <Show when=|| !tauri::is_available() fallback=|| ()>
         <LocalSignIn control=control />
       </Show>
-      <button
-        class="link-btn"
-        on:click=move |_| {
-          BackendMode::Mock.save();
-          if let Some(window) = web_sys::window() {
-            drop(window.location().reload());
-          }
-        }
-      >
-        {move || i18n.t("login-use-demo")}
-      </button>
+      {demo_switch()}
     </AuthFrame>
   }
 }
+
+/// Development builds offer the demo data on the login screen.
+#[cfg(feature = "demo")]
+fn demo_switch() -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <button
+      class="link-btn"
+      on:click=move |_| {
+        crate::settings::BackendMode::Mock.save();
+        if let Some(window) = web_sys::window() {
+          drop(window.location().reload());
+        }
+      }
+    >
+      {move || i18n.t("login-use-demo")}
+    </button>
+  }
+}
+
+#[cfg(not(feature = "demo"))]
+fn demo_switch() -> impl IntoView {}
 
 /// First device of an account: explains what happens next. Creating the passkey is a placeholder
 /// until `teamcraft-core` provides enrollment (e2ee.md §3).
@@ -258,8 +270,8 @@ fn WelcomeScreen(name: String, control: SessionControl) -> impl IntoView {
   }
 }
 
-/// The desktop app reads chat data from the client core in the shell (encrypted store, sync); the
-/// browser build reads spaces and conversations over REST. Everything else is demo data for now.
+/// The desktop app reads chat data from the client core in the shell (encrypted store, sync), the
+/// browser build from the core in the page; without a core, spaces and conversations come over REST.
 async fn load_backend(
   auth: Rc<dyn crate::auth::Authenticator>,
   me: &GetMeResponse,
@@ -269,8 +281,8 @@ async fn load_backend(
       path: "core_snapshot".to_owned(),
       reason,
     })?;
-    let hybrid = Hybrid::with_live(chat, me.role.clone(), now_ms(), auth);
-    // Calls are optional: without them the call screens keep their demo data.
+    let hybrid = Hybrid::with_live(chat, me.role.clone(), auth);
+    // Calls are optional: without them the app offers no calls.
     let hybrid = if tauri::is_available() {
       match RemoteCalls::connect().await {
         Ok(calls) => hybrid.with_calls(calls),
@@ -280,13 +292,13 @@ async fn load_backend(
         },
       }
     } else {
-      // Media runs in the desktop shell; the browser keeps the demo call screens for now.
+      // Media runs in the desktop shell; the browser has no calls yet.
       hybrid
     };
     return Ok(Rc::new(hybrid));
   }
   let chat = RestChat::load(auth.as_ref(), me, now_ms()).await?;
-  Ok(Rc::new(Hybrid::with_live(chat, me.role.clone(), now_ms(), auth)))
+  Ok(Rc::new(Hybrid::with_live(chat, me.role.clone(), auth)))
 }
 
 /// Loads spaces, conversations and members from the server, then shows the shell. A failed load

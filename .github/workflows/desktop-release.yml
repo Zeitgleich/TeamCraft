@@ -68,6 +68,9 @@ jobs:
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
+      # The packages embed this bundle (and the Flatpak and the web client reuse it): no demo data.
+      - name: The UI bundle has no demo data
+        run: scripts/check-no-demo-data.py crates/teamcraft-ui/dist
       # deb and rpm are updated by the package manager from the signed repositories instead.
       - name: Sign the AppImage for the updater (optional)
         env:
@@ -187,6 +190,8 @@ jobs:
         env:
           PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
           PKG_CONFIG_ALLOW_CROSS: "1"
+      - name: The UI bundle has no demo data
+        run: scripts/check-no-demo-data.py crates/teamcraft-ui/dist
       - name: Bundle GStreamer into the app
         run: apps/desktop/packaging/macos/bundle-gstreamer.sh patch target/universal-apple-darwin/release/teamcraft-desktop
       # The app only: the dmg is made from the signed app below, so nothing touches the app after
@@ -326,6 +331,8 @@ jobs:
         run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles nsis,msi
         # Signing is left out on purpose (the installers are unsigned). To enable it, see
         # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
+      - name: The UI bundle has no demo data
+        run: python scripts/check-no-demo-data.py crates/teamcraft-ui/dist
       # The updater runs the new installer of the same kind (NSIS or MSI) the app came from.
       - name: Sign the installers for the updater (optional)
         shell: bash

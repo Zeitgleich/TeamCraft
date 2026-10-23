@@ -218,7 +218,9 @@ kbd {
 
 .app {
   display: grid;
-  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+  /* Banners (unsigned bundle, offline, announcement, update) share the first row; it is empty
+     without them. */
+  grid-template-rows: auto var(--topbar-h) minmax(0, 1fr);
   /* Without it the column grows to the content's minimum and the page scrolls sideways (~1100px). */
   grid-template-columns: minmax(0, 1fr);
   height: 100dvh;
@@ -2007,7 +2009,7 @@ select.input {
   .side-panel:not(.embedded) {
     position: fixed;
     right: 0;
-    top: var(--topbar-h);
+    top: calc(var(--topbar-h) + var(--banners-h, 0px));
     bottom: 0;
     z-index: 30;
     max-width: 92vw;
@@ -2151,7 +2153,7 @@ select.input {
 .prejoin,
 .call-screen {
   position: fixed;
-  inset: var(--topbar-h) 0 0 0;
+  inset: calc(var(--topbar-h) + var(--banners-h, 0px)) 0 0 0;
   z-index: 20;
   background: #0d1118;
   color: #e8ecf3;
@@ -2819,7 +2821,7 @@ select.input {
 /* Incoming call */
 .incoming {
   position: fixed;
-  top: calc(var(--topbar-h) + 12px);
+  top: calc(var(--topbar-h) + var(--banners-h, 0px) + 12px);
   right: 16px;
   z-index: 70;
   display: flex;

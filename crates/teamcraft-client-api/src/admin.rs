@@ -32,7 +32,7 @@ pub struct AdminChannel {
   pub is_archived: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceInfo {
   pub id: DeviceId,
   pub name: String,

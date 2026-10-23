@@ -138,6 +138,12 @@ pub enum CoreCommand {
     visibility: teamcraft_proto::LastSeenVisibility,
   },
   RefreshCallHistory,
+  /// This user's own device list (the devices settings).
+  RefreshOwnDevices,
+  /// Signs out one of this user's other devices.
+  RevokeOwnDevice {
+    device: teamcraft_proto::DeviceId,
+  },
   /// Files of outbox messages are waiting for upload.
   UploadFiles,
   /// Outbox messages wait for their link previews.
@@ -938,6 +944,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn refresh_call_history(&self) {
     self.ui_refresh_call_history();
+  }
+
+  fn own_devices(&self) -> Vec<teamcraft_client_api::admin::DeviceInfo> {
+    self.ui_own_devices()
+  }
+
+  fn refresh_own_devices(&self) {
+    self.ui_refresh_own_devices();
+  }
+
+  fn revoke_own_device(&self, device: teamcraft_proto::DeviceId) {
+    self.command(CoreCommand::RevokeOwnDevice { device });
   }
 
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {

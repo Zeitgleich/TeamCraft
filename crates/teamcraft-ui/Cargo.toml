@@ -12,6 +12,12 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Built-in demo data (`MockBackend`) for UI development and screenshots: `trunk serve --features demo`,
+# then `?backend=mock`. Never part of a shipped build: release builds refuse it (src/lib.rs) and the
+# release workflows check the bundle for demo data (scripts/check-no-demo-data.py).
+demo = []
+
 [dependencies]
 teamcraft-proto.workspace = true
 teamcraft-client-api = { path = "../teamcraft-client-api" }

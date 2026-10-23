@@ -33,7 +33,7 @@ pub struct KeyChange {
 }
 
 /// What the user compares with a contact out of band (call, in person) to trust their keys.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContactVerification {
   /// Twelve groups of five digits, identical on both sides.
   pub safety_number: String,

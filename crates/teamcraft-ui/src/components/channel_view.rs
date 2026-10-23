@@ -326,7 +326,9 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
     Some(ConversationKind::Direct) => CallKind::Direct,
     _ => CallKind::Group,
   };
-  let is_callable = move || kind().is_some_and(|kind| kind != ConversationKind::Integration);
+  // Without call support (the browser for now) there are no call buttons.
+  let has_calls = state.read(|backend| backend.has_calls());
+  let is_callable = move || has_calls && kind().is_some_and(|kind| kind != ConversationKind::Integration);
   let is_channel = move || matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
   let is_busy = move || call.phase.get() != CallPhase::Idle;
 

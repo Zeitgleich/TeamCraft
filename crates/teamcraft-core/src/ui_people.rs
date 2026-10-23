@@ -1,14 +1,16 @@
-//! Last seen, privacy choices and the call history in the UI adapter: reads come from the local
+//! Last seen, privacy choices, the call history and the own devices in the UI adapter: reads come from the local
 //! store; a read that finds nothing (or something old) queues a refresh and answers with what it
 //! has. Repeated reads don't repeat the request within [`RETRY_AFTER_MS`].
 
 use std::collections::HashMap;
 
+use teamcraft_client_api::admin::DeviceInfo;
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::model::{TimestampMs, UserId};
 use teamcraft_client_api::privacy::PrivacySettings;
 use teamcraft_proto::CallHistoryEntry;
 
+use crate::client::devices::{OWN_DEVICES_KEY, OwnDevicesRecord};
 use crate::client::people::{
   CALL_HISTORY_KEY, CallHistoryRecord, LastSeenRecord, PRIVACY_KEY, PrivacyRecord, last_seen_key,
 };
@@ -27,6 +29,7 @@ pub(crate) struct RequestLog {
   last_seen: HashMap<UserId, i64>,
   maybe_privacy: Option<i64>,
   maybe_call_history: Option<i64>,
+  maybe_own_devices: Option<i64>,
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -97,6 +100,36 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.request_call_history(true);
   }
 
+  pub(crate) fn ui_own_devices(&self) -> Vec<DeviceInfo> {
+    let maybe_record: Option<OwnDevicesRecord> = self.read(records::get_json(
+      self.store_ref(),
+      Table::SyncState,
+      OWN_DEVICES_KEY,
+    ));
+    if maybe_record.is_none() {
+      self.request_own_devices(false);
+    }
+    maybe_record.map(own_device_infos).unwrap_or_default()
+  }
+
+  /// The device settings were opened: fetch the list again (once per second at most).
+  pub(crate) fn ui_refresh_own_devices(&self) {
+    self.request_own_devices(true);
+  }
+
+  fn request_own_devices(&self, is_forced: bool) {
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .maybe_own_devices
+      .is_none_or(|requested| now - requested > if is_forced { 1_000 } else { RETRY_AFTER_MS });
+    if is_due {
+      log.maybe_own_devices = Some(now);
+      drop(log);
+      self.command(CoreCommand::RefreshOwnDevices);
+    }
+  }
+
   fn request_call_history(&self, is_forced: bool) {
     let now = self.now_ms();
     let mut log = self.requests.borrow_mut();
@@ -109,6 +142,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
       self.command(CoreCommand::RefreshCallHistory);
     }
   }
+}
+
+/// The server's list as the settings show it: this device first, then the newest. The server
+/// keeps no "last seen" for a user's own list, so the time shown is when the device was added.
+fn own_device_infos(record: OwnDevicesRecord) -> Vec<DeviceInfo> {
+  let mut devices: Vec<DeviceInfo> = record
+    .devices
+    .into_iter()
+    .map(|device| DeviceInfo {
+      is_current: device.id == record.current,
+      id: device.id,
+      name: device.name,
+      platform: String::new(),
+      last_seen: device.created_at.0,
+    })
+    .collect();
+  devices.sort_by_key(|device| (!device.is_current, std::cmp::Reverse(device.last_seen)));
+  devices
 }
 
 /// How a call looks to `me`.
@@ -171,5 +222,31 @@ mod tests {
       history_item(me, &call(Some(me), false)).duration_ms(),
       Some(3_000)
     );
+  }
+
+  #[test]
+  fn own_devices_list_this_device_first_then_the_newest() {
+    let device = |raw: u64, created_at: i64| teamcraft_proto::DeviceResponse {
+      id: id_from_raw(raw),
+      name: format!("Device {raw}"),
+      public_key: teamcraft_proto::Base64Bytes::new(Vec::new()),
+      cross_signature: teamcraft_proto::Base64Bytes::new(Vec::new()),
+      maybe_push_provider: None,
+      created_at: UnixMillis(created_at),
+    };
+    let infos = own_device_infos(OwnDevicesRecord {
+      devices: vec![device(1, 100), device(2, 300), device(3, 200)],
+      current: id_from_raw(3),
+      fetched_at_ms: 400,
+    });
+    let order: Vec<_> = infos
+      .iter()
+      .map(|info| (info.name.as_str(), info.is_current))
+      .collect();
+    assert_eq!(
+      order,
+      [("Device 3", true), ("Device 2", false), ("Device 1", false)]
+    );
+    assert_eq!(infos[1].last_seen, 300);
   }
 }

@@ -745,7 +745,9 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   not on the server) writes `release.json`: every file of the bundle with its SHA-256, and an Ed25519
   signature over `teamcraft-web-release-v1\n` + the canonical JSON of `{version, files}` (sorted keys).
   It also pins the release public key into `sw.js`. The files include the Rust half of the service
-  worker (`teamcraft-web-sw_bg.wasm`).
+  worker (`teamcraft-web-sw_bg.wasm`). The release workflow runs it on the published web bundle when
+  the secret `TEAMCRAFT_WEB_RELEASE_KEY` exists (release.md); without it the bundle is unsigned and
+  the UI says so.
 - **Verifying service worker.** On install and on every update `sw.js` fetches `release.json`,
   checks the signature against the pinned key, fetches every listed file, compares the hashes and only
   then stores the files in a versioned cache and activates. Files may come from the browser's HTTP

@@ -11,6 +11,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# No-op: Trunk passes `--features` to every crate of the page, so `trunk serve --features demo` (the
+# UI's development-only demo data) needs the worker to accept the name. The worker has no demo data.
+demo = []
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

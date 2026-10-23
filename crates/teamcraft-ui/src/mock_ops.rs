@@ -129,6 +129,10 @@ impl CallBackend for MockBackend {
       .collect()
   }
 
+  fn has_calls(&self) -> bool {
+    true
+  }
+
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {
     (conversation == id_from_raw::<ConversationId>(12)).then(|| HuddleInfo {
       participants: vec![id_from_raw(2), id_from_raw(3)],
@@ -542,6 +546,10 @@ impl AdminBackend for MockBackend {
       AuditAction::UserDeactivated
     };
     ops.record(self.now, action, &target, "");
+  }
+
+  fn can_start_org_recovery(&self) -> bool {
+    true
   }
 
   fn start_org_recovery(&self, user: UserId) {

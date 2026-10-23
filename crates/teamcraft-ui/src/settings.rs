@@ -14,6 +14,7 @@ const KEY_LOCALE: &str = "teamcraft.locale";
 const KEY_SEND_MODE: &str = "teamcraft.send_mode";
 const KEY_UNREADS_GROUP: &str = "teamcraft.unreads_group";
 const KEY_SHOW_JOIN_LEAVE: &str = "teamcraft.show_join_leave";
+#[cfg(feature = "demo")]
 const KEY_BACKEND: &str = "teamcraft.backend";
 const KEY_PREFS: &str = "teamcraft.prefs";
 const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
@@ -71,15 +72,18 @@ impl SendMode {
   }
 }
 
-/// Where the data comes from.
+/// Where the data comes from. Only development builds with the `demo` feature have a choice; every
+/// other build always signs in to a server.
+#[cfg(feature = "demo")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendMode {
-  /// Built-in demo data, no sign-in. The default.
+  /// Built-in demo data, no sign-in. The default of demo builds.
   Mock,
   /// Sign in with OIDC and read spaces, channels and members from `teamcraft-server`.
   Server,
 }
 
+#[cfg(feature = "demo")]
 impl BackendMode {
   pub fn slug(self) -> &'static str {
     match self {

@@ -174,12 +174,27 @@ timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to
 | iOS      | Not built: build and sign it with your own Apple team (`apps/ios/README.md`)               |
 | Linux    | Packages are unsigned; checksums and attestations cover them; the repositories sign them   |
 | Updates  | minisign signatures for the updater when `TAURI_SIGNING_PRIVATE_KEY` exists (below)        |
+| Web      | Signed release manifest (`release.json`) when `TEAMCRAFT_WEB_RELEASE_KEY` exists (below)   |
 
 Updater and repository secrets (how to create them: [updates.md](updates.md) §7):
 `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the public key goes into
 `plugins.updater.pubkey` of `apps/desktop/tauri.conf.json`), `LINUX_REPO_GPG_PRIVATE_KEY`,
 `LINUX_REPO_GPG_PASSPHRASE`. Without the updater key a release has no `latest.json` and installed apps
 don't see it; without the repository key the Pages site has the manifests but no APT/RPM repositories.
+
+Web client key (e2ee.md §9.3): `TEAMCRAFT_WEB_RELEASE_KEY`, an Ed25519 private key in PEM. The release
+signs the web bundle with it (`crates/teamcraft-ui/scripts/sign-web-release.sh`: `release.json` plus the
+public key pinned into `sw.js`); without it the web client is unsigned and shows a warning banner.
+Keep it stable: the About screen shows its fingerprint, so users and auditors can compare it between
+releases. Create it once:
+
+```sh
+openssl genpkey -algorithm ed25519 -out teamcraft-web-release.pem
+gh secret set TEAMCRAFT_WEB_RELEASE_KEY < teamcraft-web-release.pem
+```
+
+Every release checks the web bundle for demo data first (`scripts/check-no-demo-data.py`); the desktop
+jobs check the bundle they embed.
 
 Upload key secrets: `ANDROID_UPLOAD_KEYSTORE_BASE64` (the keystore file, base64),
 `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD`.

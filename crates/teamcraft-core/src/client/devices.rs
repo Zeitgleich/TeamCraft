@@ -1,10 +1,11 @@
 //! The user's signed device list (security review A4, e2ee.md §3): this user's devices publish
 //! it, and for everyone else it decides which devices may be added to groups or get secrets.
 
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::device_list::{DeviceList, DeviceListEntry, SignedDeviceList, VerifiedDeviceList};
 use teamcraft_crypto::identity::{IdentityPublicKey, SignedDeviceCertificate};
 use teamcraft_crypto::membership::IdentityDirectory;
-use teamcraft_proto::{Base64Bytes, DeviceId, PutDeviceListRequest, UserId};
+use teamcraft_proto::{Base64Bytes, DeviceId, DeviceResponse, PutDeviceListRequest, UserId};
 
 use super::Client;
 use crate::api::ServerApi;
@@ -14,7 +15,34 @@ use crate::records;
 use crate::store::{LocalStore, Table};
 use crate::trust::PinnedDirectory;
 
+/// Key of the user's own device list (as the server lists it) in [`Table::SyncState`].
+pub const OWN_DEVICES_KEY: &str = "own_devices";
+
+/// This user's devices as the server last listed them, for the devices settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnDevicesRecord {
+  pub devices: Vec<DeviceResponse>,
+  /// This device, so the list can mark it (and not offer to sign it out).
+  pub current: DeviceId,
+  pub fetched_at_ms: i64,
+}
+
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Reads this user's devices from the server for the devices settings.
+  pub async fn refresh_own_devices(&mut self) -> Result<(), CoreError> {
+    let response = self.api.list_user_devices(self.account.user_id).await?;
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      OWN_DEVICES_KEY,
+      &OwnDevicesRecord {
+        devices: response.devices,
+        current: self.account.device_id,
+        fetched_at_ms: self.now_ms(),
+      },
+    )
+  }
+
   /// Revokes one of this user's other devices (a lost laptop): the server forgets it, the user's
   /// device list drops it for good, and this device removes it from every group it shares with it.
   pub async fn revoke_device(&mut self, device: DeviceId) -> Result<(), CoreError> {

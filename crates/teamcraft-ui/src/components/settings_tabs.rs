@@ -970,6 +970,8 @@ pub fn PrivacyTab() -> impl IntoView {
 pub fn DevicesTab() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  // The list comes from the server: ask again whenever the tab opens.
+  state.read(|backend| backend.refresh_my_devices());
   let devices = Memo::new(move |_| state.read(|backend| backend.my_devices()));
   let pending = RwSignal::new(None::<DeviceId>);
   let now = now_ms();
@@ -1037,6 +1039,9 @@ pub fn DevicesTab() -> impl IntoView {
             }
           }
         </For>
+        <Show when=move || devices.with(Vec::is_empty) fallback=|| ()>
+          <li class="muted-text">{move || i18n.t("settings-devices-unavailable")}</li>
+        </Show>
       </ul>
       <div class="detail-actions">
         <button class="btn" on:click=move |_| state.overlay.set(Overlay::LinkDevice)>
@@ -1049,7 +1054,12 @@ pub fn DevicesTab() -> impl IntoView {
     <fieldset class="settings-group">
       <legend>{move || i18n.t("security-my-key")}</legend>
       <p class="muted-text small">{move || i18n.t("security-my-key-hint")}</p>
-      <p class="fingerprint" translate="no">{move || fingerprint.get()}</p>
+      <Show
+        when=move || !fingerprint.with(String::is_empty)
+        fallback=move || view! { <p class="muted-text small">{move || i18n.t("security-my-key-unavailable")}</p> }
+      >
+        <p class="fingerprint" translate="no">{move || fingerprint.get()}</p>
+      </Show>
     </fieldset>
 
     <Show when=|| crate::auth::tauri::has_core() fallback=|| ()>
