@@ -355,6 +355,10 @@ pub struct PushGatewayConfig {
   /// `key` is not set.
   #[serde(rename = "key_path")]
   pub maybe_key_path: Option<PathBuf>,
+  /// Also accept device tokens that the apps did not seal for the gateway (old apps), and send them
+  /// raw. A transition setting, off by default: a raw token can be used by any server that knows it
+  /// (docs/push-gateway.md). The gateway has to accept them as well.
+  pub accept_unbound_tokens: bool,
 }
 
 /// APNs with token authentication. On when the key, key ID, team ID and bundle ID are all set.

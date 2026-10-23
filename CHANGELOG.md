@@ -10,6 +10,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Added
 
+- **Device tokens bound to servers**: the apps seal their APNs/FCM token for the push gateway, bound to
+  the one server that may push to it and an expiry, so a server (or a copy of its database) can't push
+  to devices through another server's identity; the sealed token is renewed regularly and revoked when
+  the user leaves the server. `GET /api/v1/push/gateway` tells the apps how to seal; registrations of
+  raw tokens are refused where a gateway sends (`[push.gateway] accept_unbound_tokens` is a transition
+  setting for old apps, off by default).
 - **Push gateway support**: `[push.gateway]` sends the APNs and FCM wake-ups of the store apps through the
   publisher's push gateway (its own project, `teamcraft-push-gateway`), which holds the credentials that
   only the publisher has; every server, the publisher's own included, uses it the same way. The gateway

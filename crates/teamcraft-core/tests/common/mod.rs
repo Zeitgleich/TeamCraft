@@ -30,13 +30,22 @@ impl Peer {
   }
 
   pub async fn enroll_as(api: FakeServerApi, name: &str) -> Self {
+    Self::enroll_with(api, name, settings()).await
+  }
+
+  /// Like [`Self::enroll`], with other client settings.
+  pub async fn enroll_with_settings(server: &FakeServer, name: &str, settings: ClientSettings) -> Self {
+    Self::enroll_with(server.add_user(name), name, settings).await
+  }
+
+  async fn enroll_with(api: FakeServerApi, name: &str, client_settings: ClientSettings) -> Self {
     let store = Arc::new(MemoryStore::new());
     let mut client = PendingEnrollment::new()
       .complete(
         api.clone(),
         store.clone(),
         clock(),
-        settings(),
+        client_settings,
         options(PASSPHRASE),
       )
       .await

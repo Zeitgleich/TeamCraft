@@ -18,6 +18,8 @@ pub enum CoreError {
   Store(#[from] StoreError),
   #[error("server: {0}")]
   Api(#[from] ApiError),
+  #[error("push gateway: {0}")]
+  PushGateway(String),
   #[error("MLS: {0}")]
   Mls(#[from] MlsError),
   #[error("message encryption: {0}")]

@@ -436,6 +436,9 @@ allow_private_endpoints = false
 # url = "https://push-gw.zeitgleich.de"                 # the publisher's gateway for the official store apps
 # key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start; this is your identity there
 # key = "..."                                        # alternative: 32 bytes base64url, prefer TEAMCRAFT_PUSH__GATEWAY__KEY
+# Apps seal their device token for the gateway, bound to this server (docs/push-gateway.md §3a), so the server
+# never holds a usable token. Old apps that don't seal yet need the transition setting (also on the gateway):
+# accept_unbound_tokens = false
 
 # Android without Google services (UnifiedPush distributors such as ntfy). On by default; it needs no
 # credentials because the app hands the server the distributor's endpoint.

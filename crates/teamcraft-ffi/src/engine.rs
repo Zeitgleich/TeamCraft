@@ -63,6 +63,7 @@ pub(crate) struct Engine {
   server_url: String,
   /// Where downloaded files are decrypted to (inside the app's private storage).
   download_dir: PathBuf,
+  maybe_push_gateway_url: Option<String>,
   /// Where the app copies files to upload; the core deletes each copy once it went up.
   upload_staging_dir: PathBuf,
   tokens: ForeignTokens,
@@ -193,6 +194,7 @@ impl Engine {
       .into();
     let mut engine = Self {
       server_url: config.server_url,
+      maybe_push_gateway_url: config.push_gateway_url.filter(|url| !url.is_empty()),
       // Per account, so another account signed in on this device never sees these files.
       download_dir: directory.join(DOWNLOADS_DIR).join(&config.account),
       upload_staging_dir,
@@ -483,6 +485,18 @@ impl Engine {
     Ok(result?)
   }
 
+  /// Seals the registered device token again when that is due; whether it was renewed.
+  pub(crate) async fn refresh_push(&mut self) -> Result<bool, TeamCraftError> {
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = client.refresh_push().await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    Ok(result?)
+  }
+
   pub(crate) async fn unregister_push(&mut self) -> Result<(), TeamCraftError> {
     self
       .with_client(|client| Box::pin(async move { client.unregister_push().await }))
@@ -757,6 +771,7 @@ impl Engine {
   fn client_settings(&self) -> ClientSettings {
     ClientSettings {
       maybe_download_dir: Some(self.download_dir.clone()),
+      maybe_push_gateway_url: self.maybe_push_gateway_url.clone(),
       maybe_upload_staging_dir: Some(self.upload_staging_dir.clone()),
       ..ClientSettings::default()
     }

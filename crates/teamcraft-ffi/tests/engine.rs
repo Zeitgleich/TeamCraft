@@ -101,6 +101,7 @@ fn config(directory: &std::path::Path, key: [u8; 32]) -> AppConfig {
     data_dir: directory.to_string_lossy().into_owned(),
     account: "tester".into(),
     database_key: key.to_vec(),
+    push_gateway_url: None,
   }
 }
 

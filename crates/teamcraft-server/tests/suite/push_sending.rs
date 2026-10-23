@@ -1338,8 +1338,14 @@ mod via_gateway {
     let channel = channel_with(&app, &[&carol]).await;
     let alice_device = register_device(&app, &alice).await;
     set_level(&app, &carol, &channel, "all").await;
-    register(&app, &carol, "apns", APNS_TOKEN).await;
-    register(&app, &carol, "fcm", "fcm-registration-token").await;
+    register(&app, &carol, "apns", &stack.sealed_token("apns", APNS_TOKEN)).await;
+    register(
+      &app,
+      &carol,
+      "fcm",
+      &stack.sealed_token("fcm", "fcm-registration-token"),
+    )
+    .await;
 
     let message = send(&app, &alice, &channel, &alice_device, 1).await;
 
@@ -1347,11 +1353,11 @@ mod via_gateway {
     assert_eq!(pushes.len(), 2);
     let providers: Vec<_> = pushes
       .iter()
-      .map(|push| push.provider.as_str().to_owned())
+      .map(|push| push.request.provider.as_str().to_owned())
       .collect();
     assert!(providers.contains(&"apns".to_owned()) && providers.contains(&"fcm".to_owned()));
     for push in &pushes {
-      let wake_up = open_wakeup(&PUSH_KEY_BYTES, push.sealed.as_slice()).unwrap();
+      let wake_up = open_wakeup(&PUSH_KEY_BYTES, push.request.sealed.as_slice()).unwrap();
       assert_eq!(wake_up.kind, PushKind::Message);
       assert_eq!(wake_up.conversation_id.to_string(), channel);
       assert_eq!(wake_up.maybe_message_id.unwrap().to_string(), message);
@@ -1381,7 +1387,7 @@ mod via_gateway {
     let channel = channel_with(&app, &[&carol]).await;
     let alice_device = register_device(&app, &alice).await;
     set_level(&app, &carol, &channel, "all").await;
-    let phone = register(&app, &carol, "apns", APNS_TOKEN).await;
+    let phone = register(&app, &carol, "apns", &stack.sealed_token("apns", APNS_TOKEN)).await;
 
     // The gateway blocks this server: the push fails, the registration stays.
     stack.fake.set_reply(Some((
@@ -1406,6 +1412,81 @@ mod via_gateway {
       tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(!has_push(&app.get(&carol, "/devices").await.body, &phone));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn apps_learn_how_to_seal_and_the_server_takes_only_sealed_tokens() {
+    let Some((app, stack)) = start().await else {
+      return;
+    };
+    let carol = member("carol");
+    let device = register_device(&app, &carol).await;
+
+    let info = app.get(&carol, "/push/gateway").await;
+    assert_eq!(info.status, StatusCode::OK, "{}", info.body);
+    let gateway = &info.body["gateway"];
+    assert_eq!(gateway["server_id"], stack.client.server_id());
+    assert_eq!(gateway["url"], stack.client.url());
+    assert_eq!(gateway["providers"], json!(["apns", "fcm"]));
+
+    let put = |token: String| {
+      let path = format!("/devices/{device}/push");
+      let body = json!({"provider": "apns", "token": token, "push_key": push_key()});
+      let (app, carol) = (&app, &carol);
+      async move { app.put(carol, &path, body).await }
+    };
+    // A raw token would let any server that learns it push to the device: refused.
+    assert_eq!(put(APNS_TOKEN.into()).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+      put(stack.sealed_token("apns", APNS_TOKEN)).await.status,
+      StatusCode::NO_CONTENT
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_transition_setting_lets_old_apps_register_raw_tokens() {
+    let stack = Stack::start_with(true).await;
+    let mut stack = stack;
+    let dispatcher = std::mem::replace(&mut stack.dispatcher, PushDispatcher::new(1));
+    let Some(app) = TestApp::start_with_push(|_| {}, dispatcher).await else {
+      return;
+    };
+    let carol = member("carol");
+    let device = register_device(&app, &carol).await;
+
+    let reply = app
+      .put(
+        &carol,
+        &format!("/devices/{device}/push"),
+        json!({"provider": "apns", "token": APNS_TOKEN, "push_key": push_key()}),
+      )
+      .await;
+
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn without_a_gateway_apps_get_no_binding_and_sealed_tokens_are_refused() {
+    let Some(app) = TestApp::start().await else {
+      return;
+    };
+    let carol = member("carol");
+    let device = register_device(&app, &carol).await;
+
+    let info = app.get(&carol, "/push/gateway").await;
+    assert_eq!(info.status, StatusCode::OK, "{}", info.body);
+    assert!(info.body.get("gateway").is_none());
+    let reply = app
+      .put(
+        &carol,
+        &format!("/devices/{device}/push"),
+        json!({"provider": "apns", "token": "tcgw1:AAAA", "push_key": push_key()}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     app.stop().await;
   }
 }

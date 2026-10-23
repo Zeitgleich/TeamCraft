@@ -1,1 +1,1 @@
-{"version":"1.0.0","providers":["apns","fcm"],"is_registration_open":true,"limits":{"pushes_per_second":50,"burst":200,"pushes_per_day":200000,"pushes_per_token_per_minute":30}}
+{"version":"1.0.0","providers":["apns","fcm"],"is_registration_open":true,"limits":{"pushes_per_second":50,"burst":200,"pushes_per_day":200000,"pushes_per_token_per_minute":30},"token_key":{"key_id":"d943783749f67cb6","algorithm":"hpke-x25519-hkdf-sha256-chacha20poly1305","public_key":"3okjpnXQIYDN19AJe6QEueHikw1WZculjRdlAGNheTs="},"are_bound_tokens_required":true,"max_token_lifetime_secs":7776000}

@@ -67,7 +67,8 @@ struct CoreFactory {
       serverUrl: environment.serverURL.absoluteString,
       dataDir: container.dataDirectory.path,
       account: account,
-      databaseKey: key)
+      databaseKey: key,
+      pushGatewayUrl: environment.pushGatewayURL?.absoluteString)
     return try TeamCraft(config: config, tokens: VaultTokenProvider(vault: vault), listener: listener)
   }
 }

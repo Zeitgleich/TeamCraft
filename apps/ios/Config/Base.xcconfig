@@ -4,6 +4,9 @@
 
 // Where the app talks to; Info.plist reads these (see TeamCraft/App/AppEnvironment.swift).
 TEAMCRAFT_SERVER_URL = http:/$()/127.0.0.1:8081
+// The push gateway the APNs token is sealed for (the publisher's, e.g. https:/$()/push-gw.zeitgleich.de); empty:
+// the gateway the server names (self-built apps).
+TEAMCRAFT_PUSH_GATEWAY_URL =
 TEAMCRAFT_OIDC_ISSUER = http:/$()/127.0.0.1:8080/realms/teamcraft-dev
 TEAMCRAFT_OIDC_CLIENT_ID = teamcraft
 // Redirect URI is <scheme>:/oauth/callback; the OIDC client must allow it.
