@@ -29,6 +29,9 @@ struct ChatPane: View {
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
   @State private var typingNames: [String] = []
+  @State private var displayNames: [String: String] = [:]
+  @State private var maybeForwarding: MessageTarget?
+  @State private var maybeShowingEdits: MessageTarget?
   @State private var maybeLastTypingNotified: Date?
   @AppStorage("share_typing") private var isSharingTyping = true
   @FocusState private var isComposerFocused: Bool
@@ -43,7 +46,16 @@ struct ChatPane: View {
       await reload()
       await followTransfers()
     }
-    .task { mentionNames = await model.mentionNames() }
+    .task {
+      mentionNames = await model.mentionNames()
+      displayNames = await model.displayNames()
+    }
+    .sheet(item: $maybeForwarding) { target in
+      ForwardSheet(fromConversationId: conversation.id, message: target.message)
+    }
+    .sheet(item: $maybeShowingEdits) { target in
+      EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
+    }
     .task(id: model.changeCount) { await followTyping() }
     .onAppear { model.visibleConversationId = conversation.id }
     .onDisappear {
@@ -176,7 +188,8 @@ struct ChatPane: View {
       message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
       isContinuation: isContinuation, showsThreadLink: threadId == nil,
       onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
-      mentionNames: mentionNames
+      mentionNames: mentionNames,
+      displayNames: displayNames
     )
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
     return
@@ -321,6 +334,7 @@ struct ChatPane: View {
       }
     }
     Button("copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.body }
+    if !message.isPending { sharedMessageActions(for: message) }
     if message.authorId == account.userId && !message.isPending {
       Button("edit", systemImage: "pencil") {
         maybeEditing = message
@@ -372,6 +386,36 @@ struct ChatPane: View {
     Task {
       try? await Task.sleep(for: .seconds(2.5))
       withAnimation { maybeHighlighted = nil }
+    }
+  }
+
+  /// Forward, pin, save, link, unread from here and the edit history: what Android offers too.
+  @ViewBuilder
+  private func sharedMessageActions(for message: MessageItem) -> some View {
+    let maybeExtras = extras[message.id]
+    let isPinned = maybeExtras?.isPinned == true
+    let isSaved = maybeExtras?.isSaved == true
+    Button("forward", systemImage: "arrowshape.turn.up.right") { maybeForwarding = MessageTarget(message: message) }
+    Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
+      Task {
+        await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
+      }
+    }
+    Button(LocalizedStringKey(isSaved ? "unsave" : "save_for_later"), systemImage: isSaved ? "bookmark.slash" : "bookmark") {
+      Task { await model.perform(.setSaved(conversationId: conversation.id, messageId: message.id, isSaved: !isSaved)) }
+    }
+    Button("copy_link", systemImage: "link") {
+      Task {
+        if let link = await model.permalink(conversationId: conversation.id, messageId: message.id) {
+          UIPasteboard.general.string = link
+        }
+      }
+    }
+    Button("mark_unread_from_here", systemImage: "envelope.badge") {
+      Task { await model.perform(.markUnread(conversationId: conversation.id, fromMessageId: message.id)) }
+    }
+    if !(maybeExtras?.edits ?? []).isEmpty {
+      Button("edit_history", systemImage: "clock.arrow.circlepath") { maybeShowingEdits = MessageTarget(message: message) }
     }
   }
 
@@ -486,6 +530,7 @@ struct MessageRow: View {
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
   var mentionNames: (usernames: Set<String>, me: String) = ([], "")
+  var displayNames: [String: String] = [:]
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
@@ -504,10 +549,17 @@ struct MessageRow: View {
                 .font(.caption).foregroundStyle(Theme.textMuted)
             }
             if message.isEdited { Text("edited").font(.caption).foregroundStyle(Theme.textMuted) }
+            if maybeExtras?.isPinned == true {
+              Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Theme.textMuted)
+                .accessibilityLabel(Text("pinned"))
+            }
             if message.isPending && !isSendFailed {
               Text("pending").font(.caption).foregroundStyle(Theme.textMuted)
             }
           }
+        }
+        if let reply = maybeExtras?.maybeReply {
+          ReplyQuote(author: displayNames[reply.author] ?? "", excerpt: reply.excerpt)
         }
         if !message.body.isEmpty || files.isEmpty {
           Text(messageText(message.body, usernames: mentionNames.usernames, myUsername: mentionNames.me))
@@ -517,7 +569,8 @@ struct MessageRow: View {
             .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
         }
         if isSendFailed { notSentLine }
-        ForEach(files) { file in AttachmentView(file: file) }
+        if gridImages.count >= 2 { ImageGrid(images: gridImages) }
+        ForEach(files.filter { file in !gridImages.contains(file) }) { file in AttachmentView(file: file) }
         if let preview = maybeExtras?.maybeLinkPreview { LinkPreviewCard(preview: preview) }
         if !message.reactions.isEmpty { reactions }
         if showsThreadLink && message.replyCount > 0 {
@@ -530,6 +583,12 @@ struct MessageRow: View {
   }
 
   private var files: [FileInfo] { maybeExtras?.files ?? [] }
+
+  /// Several pictures in one message show as a grid.
+  private var gridImages: [FileInfo] {
+    let images = files.filter { $0.isImage && $0.maybeThumbnailData != nil }
+    return images.count >= 2 ? images : []
+  }
 
   private var isSendFailed: Bool { maybeExtras?.isSendFailed == true }
 
@@ -611,5 +670,94 @@ struct JumpDownButton: View {
     }
     .buttonStyle(.plain)
     .accessibilityLabel(count > 0 ? Text("jump_down_new \(count)") : Text("jump_down"))
+  }
+}
+
+/// A message as the item of a sheet.
+struct MessageTarget: Identifiable {
+  let message: MessageItem
+
+  var id: String { message.id }
+}
+
+/// Pick where to forward a message; it is sent as a copy, re-encrypted for the target.
+struct ForwardSheet: View {
+  @Environment(AppModel.self) private var model
+  @Environment(\.dismiss) private var dismiss
+  let fromConversationId: String
+  let message: MessageItem
+
+  @State private var targets: [ConversationItem] = []
+
+  var body: some View {
+    NavigationStack {
+      List(targets, id: \.id) { target in
+        Button(target.name) {
+          Task {
+            await model.perform(
+              .forward(fromConversationId: fromConversationId, messageId: message.id, toConversationId: target.id))
+            dismiss()
+          }
+        }
+      }
+      .navigationTitle("forward")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar { ToolbarItem(placement: .cancellationAction) { Button("cancel") { dismiss() } } }
+    }
+    .task { targets = await model.conversations().filter(\.canPost) }
+  }
+}
+
+/// Earlier versions of an edited message, oldest first, then the current text.
+struct EditHistorySheet: View {
+  @Environment(\.dismiss) private var dismiss
+  let edits: [MessageEdit]
+  let current: String
+
+  var body: some View {
+    NavigationStack {
+      List {
+        ForEach(Array(edits.enumerated()), id: \.offset) { _, edit in
+          VStack(alignment: .leading, spacing: 4) {
+            Text(edit.body)
+            Text(Date(timeIntervalSince1970: TimeInterval(edit.replacedAt) / 1000), style: .date)
+              .font(.caption).foregroundStyle(Theme.textMuted)
+          }
+        }
+        Text(current).fontWeight(.semibold)
+      }
+      .navigationTitle("edit_history")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } } }
+    }
+  }
+}
+
+/// The quoted message above a reply.
+struct ReplyQuote: View {
+  let author: String
+  let excerpt: String
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Rectangle().fill(Theme.accent).frame(width: 3)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(author).font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+        Text(excerpt).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(2)
+      }
+    }
+    .fixedSize(horizontal: false, vertical: true)
+  }
+}
+
+/// Square tiles, two per row; a tap opens the picture like a single one.
+struct ImageGrid: View {
+  let images: [FileInfo]
+
+  var body: some View {
+    LazyVGrid(columns: [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)], spacing: 4) {
+      ForEach(images) { image in AttachmentView(file: image, isTile: true) }
+    }
+    .frame(maxWidth: 260)
   }
 }

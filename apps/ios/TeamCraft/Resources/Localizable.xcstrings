@@ -953,6 +953,22 @@
         }
       }
     },
+    "copy_link": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link kopieren"
+          }
+        }
+      }
+    },
     "custom_status_clear": {
       "localizations": {
         "en": {
@@ -2569,6 +2585,22 @@
         }
       }
     },
+    "edit_history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit history"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bearbeitungsverlauf"
+          }
+        }
+      }
+    },
     "edited": {
       "localizations": {
         "en": {
@@ -3001,6 +3033,22 @@
         }
       }
     },
+    "forward": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forward"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weiterleiten"
+          }
+        }
+      }
+    },
     "jump_down": {
       "localizations": {
         "en": {
@@ -3165,6 +3213,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Wird geladen …"
+          }
+        }
+      }
+    },
+    "mark_unread_from_here": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark unread from here"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ab hier als ungelesen markieren"
           }
         }
       }
@@ -3741,6 +3805,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Diese Nachricht ist auf diesem Gerät nicht verfügbar."
+          }
+        }
+      }
+    },
+    "pin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anheften"
+          }
+        }
+      }
+    },
+    "pinned": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pinned"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Angeheftet"
           }
         }
       }
@@ -4425,6 +4521,22 @@
         }
       }
     },
+    "save_for_later": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save for later"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Für später speichern"
+          }
+        }
+      }
+    },
     "search_empty": {
       "localizations": {
         "en": {
@@ -4837,6 +4949,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "%1$@ und %2$@ schreiben …"
+          }
+        }
+      }
+    },
+    "unpin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unpin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lösen"
+          }
+        }
+      }
+    },
+    "unsave": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove from saved"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus Gespeichert entfernen"
           }
         }
       }

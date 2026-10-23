@@ -114,6 +114,23 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(typing, ["action": "typing", "conversation": "1"])
   }
 
+  func testMessageActionsSerialize() throws {
+    func object(_ action: ChatAction) throws -> [String: Any]? {
+      try JSONSerialization.jsonObject(with: Data(action.json.utf8)) as? [String: Any]
+    }
+    let forward = try object(.forward(fromConversationId: "1", messageId: "9", toConversationId: "2"))
+    XCTAssertEqual(forward?["action"] as? String, "forward_message")
+    XCTAssertEqual(forward?["to"] as? String, "2")
+    XCTAssertEqual(try object(.setPinned(conversationId: "1", messageId: "9", isPinned: true))?["is_pinned"] as? Bool, true)
+    XCTAssertEqual(try object(.setSaved(conversationId: "1", messageId: "9", isSaved: false))?["is_saved"] as? Bool, false)
+    let extras = Wire.decode(
+      MessageExtras.self,
+      from: #"{"message":"9","is_pinned":true,"maybe_reply":{"author":"5","excerpt":"hi"},"edits":[{"body":"old","replaced_at":1}]}"#)
+    XCTAssertEqual(extras?.isPinned, true)
+    XCTAssertEqual(extras?.maybeReply?.excerpt, "hi")
+    XCTAssertEqual(extras?.edits?.first?.body, "old")
+  }
+
   func testAppLockClock() {
     var clock = AppLockClock()
     let start = ContinuousClock.now

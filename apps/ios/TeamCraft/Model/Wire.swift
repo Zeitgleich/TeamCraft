@@ -71,6 +71,24 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   let maybeLinkPreview: LinkPreview?
   /// The server rejected this own message; it waits for "retry" or "delete".
   let isSendFailed: Bool?
+  let maybeReply: ReplyPreview?
+  let isPinned: Bool?
+  let isSaved: Bool?
+  /// Earlier versions, oldest first (empty if never edited).
+  let edits: [MessageEdit]?
+}
+
+/// The quoted message of a reply, as much as the reader can see of it.
+struct ReplyPreview: Decodable, Equatable, Sendable {
+  let author: String
+  let excerpt: String
+}
+
+/// An earlier version of an edited message.
+struct MessageEdit: Decodable, Equatable, Sendable {
+  let body: String
+  /// Unix milliseconds.
+  let replacedAt: Int64
 }
 
 /// Where a message link points (`teamcraft:/c/…/m/…[/t/…]`).
@@ -88,6 +106,7 @@ struct ChatAnswer: Decodable, Sendable {
   let maybeBytes: Int64?
   let maybeTarget: PermalinkTarget?
   let users: [String]?
+  let maybeLink: String?
 }
 
 /// The people part of the core's chat snapshot: who can be mentioned.
