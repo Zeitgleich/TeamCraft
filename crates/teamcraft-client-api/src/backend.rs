@@ -61,6 +61,10 @@ pub trait ChatBackend {
 
   /// Number of top-level messages (thread replies excluded).
   fn message_count(&self, conversation: ConversationId) -> usize;
+  /// When the newest top-level message was sent, for ordering conversations by recency.
+  fn last_activity(&self, _conversation: ConversationId) -> Option<TimestampMs> {
+    None
+  }
   /// Top-level messages `start..start + len`, oldest first. Out-of-range parts are clipped.
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message>;
   /// The thread root followed by its replies, oldest first.
@@ -214,6 +218,8 @@ pub trait ChatBackend {
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
   /// Starts (or finds) the direct conversation with a person; it shows up in the lists when ready.
   fn open_dm(&self, _user: UserId) {}
+  /// Starts (or finds) the group DM with exactly these people and the user.
+  fn open_group_dm(&self, _users: Vec<UserId>) {}
   /// Confirms having read a message that asked for acknowledgement.
   fn acknowledge(&self, _conversation: ConversationId, _message: MessageId) {}
   /// Sends an own message again that the server rejected.

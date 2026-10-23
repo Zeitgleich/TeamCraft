@@ -143,6 +143,10 @@ pub struct ChatSnapshot {
   pub conversations: Vec<Conversation>,
   /// Top-level messages per conversation, so the feed knows its length before loading any row.
   pub message_counts: Vec<(ConversationId, usize)>,
+  /// When the newest top-level message of each conversation was sent (conversations without one
+  /// are left out), so lists can be ordered by recency.
+  #[serde(default)]
+  pub last_activity: Vec<(ConversationId, TimestampMs)>,
   /// Identity keys this device knows, for key verification and key-change warnings.
   #[serde(default)]
   pub security: SecuritySnapshot,
@@ -182,15 +186,32 @@ impl ChatSnapshot {
       .iter()
       .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
       .collect();
+    let last_activity = last_activity_of(backend, &conversations);
     Self {
       me: backend.me(),
       users: backend.users(),
       spaces,
       conversations,
       message_counts,
+      last_activity,
       security,
     }
   }
+}
+
+/// The newest message time of every conversation that has one.
+pub fn last_activity_of(
+  backend: &(impl ChatBackend + ?Sized),
+  conversations: &[Conversation],
+) -> Vec<(ConversationId, TimestampMs)> {
+  conversations
+    .iter()
+    .filter_map(|conversation| {
+      backend
+        .last_activity(conversation.id)
+        .map(|at| (conversation.id, at))
+    })
+    .collect()
 }
 
 impl MessageWindow {
@@ -318,6 +339,10 @@ pub enum ChatAction {
   /// Opens, or finds, the direct message with one person.
   OpenDm {
     user: UserId,
+  },
+  /// Opens, or finds, the group DM with exactly these people (and the user).
+  OpenGroupDm {
+    users: Vec<UserId>,
   },
   /// Adds a person to a conversation and gives them the history the policy allows.
   AddMember {

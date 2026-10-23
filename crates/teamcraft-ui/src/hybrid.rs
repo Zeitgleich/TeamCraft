@@ -248,6 +248,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.open_dm(user);
   }
 
+  fn open_group_dm(&self, users: Vec<UserId>) {
+    self.chat.open_group_dm(users);
+  }
+
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
     self.chat.set_favorite(conversation, is_favorite);
   }

@@ -703,6 +703,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .count()
   }
 
+  fn last_activity(&self, conversation: ConversationId) -> Option<TimestampMs> {
+    self
+      .read(
+        self
+          .store
+          .messages(conversation, MessageFilter::TopLevel)
+          .map_err(CoreError::from),
+      )
+      .iter()
+      .filter(|message| !is_deleted(message))
+      .map(|message| message.sent_at_ms)
+      .max()
+  }
+
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
     let all = self.all_messages(conversation);
     let top_level: Vec<&StoredMessage> = all

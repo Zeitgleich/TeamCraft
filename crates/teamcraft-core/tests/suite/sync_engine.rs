@@ -376,6 +376,36 @@ async fn direct_messages_work_both_ways() {
 }
 
 #[tokio::test]
+async fn group_direct_messages_reach_everyone() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+
+  // Duplicates and the user themself are ignored.
+  let group = alice
+    .client
+    .open_group_dm(&[bob_id, carol_id, bob_id, alice.client.user_id()])
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  assert_eq!(
+    carol
+      .client
+      .open_group_dm(&[alice.client.user_id(), bob_id])
+      .await
+      .unwrap(),
+    group,
+    "the same people find the same group"
+  );
+  carol.client.send_text(group, None, "hi both").await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  assert_eq!(alice.texts(group), vec!["hi both"]);
+  assert_eq!(bob.texts(group), vec!["hi both"]);
+}
+
+#[tokio::test]
 async fn reactions_and_thread_replies_are_encrypted_messages() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;

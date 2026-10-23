@@ -10,8 +10,8 @@ use teamcraft_crypto::membership::{
 use teamcraft_crypto::mls::{CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent};
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
-  CreateDmRequest, HistoryPolicy, ListMlsMessagesQuery, MlsMessageKind, MlsMessageResponse, MlsWelcome,
-  PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
+  CreateDmRequest, CreateGroupDmRequest, HistoryPolicy, ListMlsMessagesQuery, MlsMessageKind,
+  MlsMessageResponse, MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
 use super::Client;
@@ -79,6 +79,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// the other; if both try at once, the loser joins the winner's group (first commit wins).
   pub async fn open_dm(&mut self, user: UserId) -> Result<ConversationId, CoreError> {
     let conversation = self.api.create_dm(&CreateDmRequest { user_id: user }).await?;
+    self.found_participants_group(conversation, &[user]).await
+  }
+
+  /// Opens (or returns) the group DM with exactly these people (and the user). Founding works
+  /// like [`Self::open_dm`]: whoever commits first owns the group, the others join by welcome.
+  pub async fn open_group_dm(&mut self, users: &[UserId]) -> Result<ConversationId, CoreError> {
+    let conversation = self
+      .api
+      .create_group_dm(&CreateGroupDmRequest {
+        user_ids: users.to_vec(),
+      })
+      .await?;
+    let me = self.user_id();
+    let others: Vec<UserId> = conversation_members(users, me);
+    self.found_participants_group(conversation, &others).await
+  }
+
+  /// Stores a DM or group DM and founds its MLS group with `others`, unless this device already
+  /// has it or someone else founded it first.
+  async fn found_participants_group(
+    &mut self,
+    conversation: teamcraft_proto::ConversationResponse,
+    others: &[UserId],
+  ) -> Result<ConversationId, CoreError> {
     let id = conversation.id;
     records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
     if self.has_group(id)? {
@@ -97,15 +121,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(id);
     }
     self.found_group(id)?;
-    self
-      .commit_change(
-        id,
-        ChangeSource::Own(MembershipAction::AddUser {
-          user_id: convert::user(user),
-          history: HistoryShare::Full,
-        }),
-      )
-      .await?;
+    for user in others {
+      self
+        .commit_change(
+          id,
+          ChangeSource::Own(MembershipAction::AddUser {
+            user_id: convert::user(*user),
+            history: HistoryShare::Full,
+          }),
+        )
+        .await?;
+    }
     Ok(id)
   }
 
@@ -885,4 +911,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.persist_sync()
   }
+}
+
+/// The other people of a group DM: `users` without the user and without duplicates, in order.
+fn conversation_members(users: &[UserId], me: UserId) -> Vec<UserId> {
+  let mut seen = BTreeSet::new();
+  users
+    .iter()
+    .copied()
+    .filter(|user| *user != me && seen.insert(*user))
+    .collect()
 }

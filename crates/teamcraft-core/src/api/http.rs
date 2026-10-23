@@ -11,14 +11,14 @@ use serde::de::DeserializeOwned;
 use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
   AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
-  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest, DeviceId,
-  DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
-  KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
-  ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
-  MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
-  UserId, UserSummary,
+  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
+  CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage,
+  GetMeResponse, IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse,
+  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
+  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
+  ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest,
+  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest,
+  SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -294,6 +294,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn create_dm(&self, request: &CreateDmRequest) -> Result<ConversationResponse, ApiError> {
     self.send_json(Method::POST, "/dms", request).await
+  }
+
+  async fn create_group_dm(&self, request: &CreateGroupDmRequest) -> Result<ConversationResponse, ApiError> {
+    self.send_json(Method::POST, "/group-dms", request).await
   }
 
   async fn add_member(
