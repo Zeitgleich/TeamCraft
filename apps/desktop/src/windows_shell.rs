@@ -1,34 +1,25 @@
-//! Windows shell integration: `teamcraft://` links, a single running instance and the "start at
-//! login" option.
+//! Windows shell integration: `teamcraft://` links and the "start at login" option.
 //!
 //! The installers register the `teamcraft` scheme from `tauri.windows.conf.json`; Windows then
 //! starts the app with the link as an argument. A second launch hands its arguments to the running
-//! instance (single-instance plugin, which forwards links to the deep-link plugin) and exits.
+//! instance (`single_instance.rs`, whose plugin forwards links to the deep-link plugin) and exits.
 //! Links are forwarded to the webview as the [`DEEP_LINK_EVENT`] event; the UI decides what to do
 //! with them. "Start at login" is the autostart plugin's registry entry, toggled through the shell's own
 //! `autostart_get`/`autostart_set` commands (`autostart.rs`); the plugin's commands are not exposed.
 
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Emitter, Wry};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tracing::{debug, warn};
 
+use crate::tray;
+
 /// Event with the link (a string) that opened or re-opened the app.
 pub const DEEP_LINK_EVENT: &str = "teamcraft://deep-link";
 
-/// Adds the Windows plugins. The single-instance plugin must be registered first.
+/// Adds the Windows plugins, after the single-instance plugin.
 pub fn plugins(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
   builder
-    .plugin(tauri_plugin_single_instance::init(
-      |app, args, _working_directory| {
-        // The deep-link plugin has already consumed any link in `args` (the `deep-link` feature).
-        debug!(
-          argument_count = args.len(),
-          "second instance started; focusing the first"
-        );
-        focus_main_window(app);
-      },
-    ))
     .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
 }
@@ -44,7 +35,7 @@ pub fn forward_deep_links(app: &AppHandle) {
   let emitter = app.clone();
   deep_links.on_open_url(move |event| {
     emit_links(&emitter, event.urls().iter().map(url::Url::as_str));
-    focus_main_window(&emitter);
+    tray::show_main_window(&emitter);
   });
 }
 
@@ -54,14 +45,5 @@ fn emit_links<'a>(app: &AppHandle, links: impl Iterator<Item = &'a str>) {
     if let Err(error) = app.emit(DEEP_LINK_EVENT, link) {
       debug!(%error, "could not forward a link to the webview");
     }
-  }
-}
-
-fn focus_main_window(app: &AppHandle) {
-  let Some(window) = app.get_webview_window("main") else {
-    return;
-  };
-  if let Err(error) = window.unminimize().and_then(|()| window.set_focus()) {
-    debug!(%error, "could not bring the window to the front");
   }
 }

@@ -19,7 +19,9 @@ use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
 };
 use teamcraft_core::records;
-use teamcraft_core::store::{DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore};
+use teamcraft_core::store::{
+  DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock,
+};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::workspace::RosterRole;
@@ -44,6 +46,9 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 /// How often account data (saved items, drafts) is pulled from the user's other devices.
 const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
+/// A core of this process that is just stopping may hold the store lock for a moment longer.
+const STORE_LOCK_ATTEMPTS: u32 = 15;
+const STORE_LOCK_RETRY: Duration = Duration::from_millis(200);
 
 /// Where the core keeps its data and talks to.
 #[derive(Clone, Debug)]
@@ -374,6 +379,8 @@ struct Core {
   on_change: Arc<dyn Fn() + Send + Sync>,
   on_call_event: CallEventHandler,
   store: Option<Store>,
+  /// Keeps a second process off the store while this one has it open (e2ee.md §9.4).
+  store_lock: Option<StoreLock>,
   client: Option<Client<Api, Store>>,
   backend: Option<CoreChatBackend<Store>>,
   connection: ConnectionSupervisor<Gateway>,
@@ -417,6 +424,7 @@ impl Core {
       on_change,
       on_call_event,
       store: None,
+      store_lock: None,
       client: None,
       backend: None,
       connection,
@@ -468,6 +476,9 @@ impl Core {
   async fn try_open(&mut self) -> Result<CoreStatus, String> {
     std::fs::create_dir_all(&self.config.data_dir).map_err(|error| error.to_string())?;
     let path = self.config.data_dir.join(format!("{}.db", self.user));
+    if self.store_lock.is_none() {
+      self.store_lock = Some(lock_store(&path).await?);
+    }
     let store = Arc::new(SqlCipherStore::open(&path, &self.key).map_err(|error| error.to_string())?);
     self.store = Some(store.clone());
     match Client::open(
@@ -1027,4 +1038,15 @@ async fn poll_link(link: &mut Option<LinkRun>) -> Result<LinkedSecrets, String> 
     Some(run) => run.future.as_mut().await,
     None => std::future::pending().await,
   }
+}
+
+/// Takes the store's lock; another instance of the app holding it is an error the user sees.
+async fn lock_store(path: &std::path::Path) -> Result<StoreLock, String> {
+  for _ in 1..STORE_LOCK_ATTEMPTS {
+    match StoreLock::acquire(path) {
+      Err(StoreError::InUse) => tokio::time::sleep(STORE_LOCK_RETRY).await,
+      outcome => return outcome.map_err(|error| error.to_string()),
+    }
+  }
+  StoreLock::acquire(path).map_err(|error| error.to_string())
 }

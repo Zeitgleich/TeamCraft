@@ -55,6 +55,8 @@ pub mod slash;
 pub mod state;
 #[cfg(target_arch = "wasm32")]
 pub mod web_core;
+#[cfg(target_arch = "wasm32")]
+mod web_tabs;
 
 pub use components::app::App;
 

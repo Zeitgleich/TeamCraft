@@ -14,6 +14,7 @@ mod core;
 mod freedesktop;
 mod notifications;
 mod shell_prefs;
+mod single_instance;
 mod tray;
 mod updates;
 #[cfg(windows)]
@@ -49,8 +50,8 @@ fn main() -> anyhow::Result<()> {
   let tokens = TokenCache::default();
   keep_tokens_fresh(service.clone(), tokens.clone());
 
-  let builder = tauri::Builder::default();
   // Registered first: the single-instance plugin must see a second launch before anything else.
+  let builder = tauri::Builder::default().plugin(single_instance::plugin());
   #[cfg(windows)]
   let builder = windows_shell::plugins(builder);
   builder

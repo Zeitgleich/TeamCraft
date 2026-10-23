@@ -8,6 +8,9 @@
 //!
 //! The access token is the page's own (the browser flow keeps tokens in memory, see `auth::browser`);
 //! a small loop keeps the copy the core reads fresh.
+//!
+//! Only one tab per account runs the core (`web_tabs`, e2ee.md §9.4); the others pass their calls
+//! to it.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -50,6 +53,7 @@ use teamcraft_proto::{
 use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
+use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
@@ -79,11 +83,28 @@ struct Setup {
   server_url: String,
 }
 
-struct Running {
-  user: UserId,
-  requests: mpsc::UnboundedSender<Request>,
-  /// Read without asking the loop, which may be busy connecting.
-  connection: ConnectionStatus,
+/// The core of the signed-in account: in this tab, or in the tab that owns the store.
+enum Running {
+  Owner {
+    user: UserId,
+    requests: mpsc::UnboundedSender<Request>,
+    /// `None` without Web Locks: then no other tab can find this one.
+    maybe_channel: Option<OwnerChannel>,
+    /// Read without asking the loop, which may be busy connecting.
+    connection: ConnectionStatus,
+  },
+  Follower {
+    user: UserId,
+    follower: Rc<Follower>,
+  },
+}
+
+impl Running {
+  fn user(&self) -> UserId {
+    match self {
+      Self::Owner { user, .. } | Self::Follower { user, .. } => *user,
+    }
+  }
 }
 
 /// The access token the core reads synchronously; renewed by [`keep_token_fresh`].
@@ -133,6 +154,26 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
       stop();
       Ok(Value::Null)
     },
+    _ => match current_follower() {
+      Some(follower) => follower.call(command, args).await,
+      None => serve(command, args).await,
+    },
+  }
+}
+
+/// A call from a follower tab. Starting and stopping stay with the tab that asks: a follower's
+/// start only asks where the core stands, its stop only ends its own link.
+async fn serve_follower(command: String, args: Value) -> Result<Value, String> {
+  match command.as_str() {
+    "core_start" => to_value(ask(Request::Status).await?),
+    "core_stop" => Ok(Value::Null),
+    _ => serve(&command, args).await,
+  }
+}
+
+/// Runs a command on this tab's core.
+async fn serve(command: &str, args: Value) -> Result<Value, String> {
+  match command {
     "core_status" => to_value(ask(Request::Status).await?),
     "core_connection" => to_value(connection_state()?),
     "core_network_changed" => {
@@ -223,15 +264,34 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<Value, String> {
   serde_json::to_value(value).map_err(|error| error.to_string())
 }
 
-/// Starts (or reuses) the core for `user` and reports where it stands.
+/// Starts (or reuses) the core for `user` and reports where it stands. The core runs in this tab
+/// when it gets the store's lock; otherwise the tab follows the one that has it.
 async fn start(user: UserId) -> Result<CoreStatus, String> {
   let reuse = RUNNING.with(|running| {
     running
       .borrow()
       .as_ref()
-      .is_some_and(|running| running.user == user)
+      .is_some_and(|running| running.user() == user)
   });
   if !reuse {
+    match web_tabs::try_own(user).await {
+      Ownership::Owned(lock) => start_owner(user, Some(lock)).await?,
+      Ownership::Unsupported => start_owner(user, None).await?,
+      Ownership::Taken => start_follower(user)?,
+    }
+  }
+  match current_follower() {
+    Some(follower) => {
+      let status = follower.call("core_start", Value::Null).await?;
+      serde_json::from_value(status).map_err(|error| error.to_string())
+    },
+    None => ask(Request::Status).await,
+  }
+}
+
+/// Runs the core in this tab. With a lock, other tabs of the account can reach it.
+async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), String> {
+  {
     let (auth, server_url) = SETUP
       .with(|setup| {
         setup
@@ -248,8 +308,12 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
       .map_err(|error: AuthError| error.to_string())?;
     *tokens.0.borrow_mut() = Some(first);
     let (sender, receiver) = mpsc::unbounded();
+    let maybe_channel = match maybe_lock.is_some() {
+      true => Some(OwnerChannel::open(user, serve_follower)?),
+      false => None,
+    };
     let connection = ConnectionStatus::new();
-    let core = Core::new(server_url, user, tokens.clone(), connection.clone());
+    let core = Core::new(server_url, user, tokens.clone(), connection.clone(), maybe_lock);
     let generation = std::rc::Rc::new(());
     keep_token_fresh(auth, tokens, Rc::downgrade(&generation));
     wasm_bindgen_futures::spawn_local(async move {
@@ -258,23 +322,60 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
     });
     // Replacing a running core (another account signed in) drops its sender, which stops it.
     RUNNING.with(|running| {
-      *running.borrow_mut() = Some(Running {
+      *running.borrow_mut() = Some(Running::Owner {
         user,
         requests: sender,
         connection,
+        maybe_channel,
       })
     });
   }
-  ask(Request::Status).await
+  Ok(())
 }
 
-fn connection_state() -> Result<CoreConnection, String> {
+/// Follows the tab that owns the store, and takes over once that tab is gone.
+fn start_follower(user: UserId) -> Result<(), String> {
+  tracing::info!("TeamCraft is open in another tab; following it");
+  let follower = Follower::join(user, notify_local)?;
   RUNNING.with(|running| {
-    running
-      .borrow()
-      .as_ref()
-      .map(|running| running.connection.get().into())
-      .ok_or_else(|| "the core has not been started".to_owned())
+    *running.borrow_mut() = Some(Running::Follower {
+      user,
+      follower: Rc::new(follower),
+    })
+  });
+  wasm_bindgen_futures::spawn_local(async move {
+    let Some(lock) = web_tabs::wait_to_own(user).await else {
+      return;
+    };
+    let is_still_following = RUNNING.with(|running| {
+      matches!(&*running.borrow(), Some(Running::Follower { user: following, .. }) if *following == user)
+    });
+    if !is_still_following {
+      // Dropping the lock hands it on.
+      return;
+    }
+    tracing::info!("the other tab closed; TeamCraft runs in this tab now");
+    match start_owner(user, Some(lock)).await {
+      Ok(()) => notify_local(),
+      Err(error) => tracing::error!(%error, "could not take over the local data"),
+    }
+  });
+  Ok(())
+}
+
+fn current_follower() -> Option<Rc<Follower>> {
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Follower { follower, .. }) => Some(follower.clone()),
+    _ => None,
+  })
+}
+
+/// The owner's connection; a follower's calls are answered by the owner.
+fn connection_state() -> Result<CoreConnection, String> {
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Owner { connection, .. }) => Ok(connection.get().into()),
+    Some(Running::Follower { .. }) => Err("the core runs in another tab".to_owned()),
+    None => Err("the core has not been started".to_owned()),
   })
 }
 
@@ -283,14 +384,10 @@ fn stop() {
 }
 
 fn send(request: Request) -> Result<(), String> {
-  RUNNING.with(|running| {
-    running
-      .borrow()
-      .as_ref()
-      .ok_or_else(|| "the core has not been started".to_owned())?
-      .requests
-      .unbounded_send(request)
-      .map_err(|_| stopped())
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Owner { requests, .. }) => requests.unbounded_send(request).map_err(|_| stopped()),
+    Some(Running::Follower { .. }) => Err("the core runs in another tab".to_owned()),
+    None => Err("the core has not been started".to_owned()),
   })
 }
 
@@ -320,7 +417,21 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
   });
 }
 
+/// Tells this tab's UI, and the follower tabs, that the core's data changed.
 fn notify_changed() {
+  RUNNING.with(|running| {
+    if let Some(Running::Owner {
+      maybe_channel: Some(channel),
+      ..
+    }) = &*running.borrow()
+    {
+      channel.announce_change();
+    }
+  });
+  notify_local();
+}
+
+fn notify_local() {
   let listeners: Vec<_> = LISTENERS.with(|listeners| listeners.borrow().clone());
   for listener in listeners {
     if let Ok(mut callback) = listener.try_borrow_mut() {
@@ -378,6 +489,8 @@ enum Wake {
 }
 
 struct Core {
+  /// Held while the core runs; other tabs of the account follow this one (e2ee.md §9.4).
+  _maybe_lock: Option<OwnerLock>,
   server_url: String,
   user: UserId,
   tokens: WebTokens,
@@ -410,10 +523,17 @@ struct LinkRun {
 }
 
 impl Core {
-  fn new(server_url: String, user: UserId, tokens: WebTokens, status: ConnectionStatus) -> Self {
+  fn new(
+    server_url: String,
+    user: UserId,
+    tokens: WebTokens,
+    status: ConnectionStatus,
+    maybe_lock: Option<OwnerLock>,
+  ) -> Self {
     let mut connection = ConnectionSupervisor::new(ConnectionSettings::default(), status);
     connection.set_observer(Box::new(|_| notify_changed()));
     Self {
+      _maybe_lock: maybe_lock,
       server_url,
       user,
       tokens,

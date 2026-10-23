@@ -880,6 +880,34 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   auditors a signed list of what a release is. People who need more use the desktop and mobile apps,
   which do not take their code from the server.
 
+### 9.4 One owner per store, durable writes (implemented)
+
+Every store is loaded into memory, worked on there and written back. Two cores on the same store
+would each keep their own copy of the MLS state, the outbox and the key packages; whoever writes last
+wins per record. MLS epochs fork (messages become undecryptable) and queued messages go out twice.
+So exactly one core owns a device's store at a time:
+
+- **Web.** The tab holding the Web Lock `teamcraft-core-<user>` (`navigator.locks`, taken with
+  `ifAvailable` before IndexedDB is opened) owns the store and runs the core. Other tabs of the same
+  account are followers: their `core_*` calls go over the `BroadcastChannel` of the same name to the
+  owner, which answers them and announces every change, so all tabs show the same data. Each
+  follower also waits for the lock; when the owner closes or crashes, the browser hands it to one of
+  them, which opens the store and becomes the owner. A follower whose owner does not answer (a frozen
+  tab) gets an error instead of waiting forever. Browsers without Web Locks run one core per tab, as
+  before. The service worker only reads the store (push previews, §7).
+- **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
+  Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
+  and exits. Behind that, an OS file lock (`<store>.lock`, `StoreLock`) keeps any second process off
+  the store, for example on Linux without a session bus. The OS releases it when the process ends.
+- **Mobile.** One app process; the iOS notification service extension only reads the store.
+
+**Writes that fail (web).** IndexedDB refuses writes when the origin's quota is exhausted. A failed
+write is kept and issued again on every flush, until it went through; the flush reports the reason
+(quota exceeded, or the database closed for a newer version) and the app shows that changes are not
+saved on this device. Without that, memory and disk would diverge silently and the next reload would
+roll the MLS state back. A newer version of the app that upgrades the database (`versionchange`) gets
+it: the old page closes its connection, stops writing and asks for a reload.
+
 ## 10. Search
 
 Users expect search to be fast and complete on every device right after login – a common weak point
