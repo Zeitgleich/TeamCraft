@@ -13,6 +13,7 @@ pub mod call;
 pub mod mail;
 pub mod peer;
 pub mod process;
+pub mod resources;
 pub mod rest;
 pub mod scenario;
 pub mod stack;

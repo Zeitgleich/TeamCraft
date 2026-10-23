@@ -99,9 +99,9 @@ impl BrowserSession {
   }
 }
 
-/// Exclusive use of the web client's port 8082 (the redirect URI the dev realm registers) for as
-/// long as it is held, across every test process on the machine: other checkouts run the suite
-/// too, and a second server on the port fails to start.
+/// Exclusive use of a web client port (one the dev realm registers as redirect URI: 8082, 8083)
+/// for as long as it is held, across every test process on the machine: other checkouts run the
+/// suite too, and a second server on the port fails to start.
 pub struct WebPortLease {
   _turn: tokio::sync::MutexGuard<'static, ()>,
   _file: std::fs::File,
@@ -109,10 +109,10 @@ pub struct WebPortLease {
 
 static WEB_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Waits until no other test (in this process or another) uses port 8082.
-pub async fn lease_web_port() -> WebPortLease {
+/// Waits until no other test (in this process or another) uses `port`.
+pub async fn lease_web_port(port: u16) -> WebPortLease {
   let turn = WEB_PORT.lock().await;
-  let path = std::env::temp_dir().join("teamcraft-e2e-web-port.lock");
+  let path = std::env::temp_dir().join(format!("teamcraft-e2e-web-port-{port}.lock"));
   let file = std::fs::File::options()
     .create(true)
     .truncate(false)

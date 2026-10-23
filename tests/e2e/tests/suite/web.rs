@@ -372,7 +372,7 @@ impl Rig {
       .with_web_dir(web_dir)
       .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP);
     // One test at a time owns the port.
-    let turn = lease_web_port().await;
+    let turn = lease_web_port(8082).await;
     let stack = builder.start().await?;
     let browser = BrowserSession::launch().await?;
 
