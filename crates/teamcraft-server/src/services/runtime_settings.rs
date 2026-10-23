@@ -585,7 +585,7 @@ mod tests {
       RuntimeSettingsSection::MailTexts(defaults.mail_texts),
       RuntimeSettingsSection::MeetingMail(defaults.meeting_mail),
     ] {
-      assert!(validate(&section).is_ok(), "{section:?}");
+      assert!(validate(&section).is_ok(), "{}", section.key());
     }
   }
 

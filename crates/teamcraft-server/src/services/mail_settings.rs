@@ -442,7 +442,7 @@ mod tests {
 
   #[test]
   fn broken_values_are_refused() {
-    for change in [
+    for (index, change) in [
       |r: &mut UpdateMailSettingsRequest| r.host = "smtp example.com".into(),
       |r: &mut UpdateMailSettingsRequest| r.host = String::new(),
       |r: &mut UpdateMailSettingsRequest| r.port = 0,
@@ -450,10 +450,14 @@ mod tests {
       |r: &mut UpdateMailSettingsRequest| r.from_address = "a@example.com\r\nBcc: b@example.com".into(),
       |r: &mut UpdateMailSettingsRequest| r.maybe_from_name = Some("A\nB".into()),
       |r: &mut UpdateMailSettingsRequest| r.security = SmtpSecurityMode::Unknown("ssl3".into()),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
       let mut broken = request();
       change(&mut broken);
-      assert!(validate(&broken).is_err(), "{broken:?}");
+      // Only the case number: the request type carries a password field.
+      assert!(validate(&broken).is_err(), "broken case {index}");
     }
   }
 
