@@ -28,11 +28,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Connects the gateway, resuming the stored session if possible; a fresh session triggers a
   /// full sync. Process the returned connection with [`Self::pump`] or [`Self::run_gateway`].
   pub async fn connect_gateway(&mut self) -> Result<(A::Gateway, GatewayOutcome), CoreError> {
-    let mut connection = self.api.connect_gateway().await?;
-    match receive(&mut connection).await? {
-      GatewayServerMessage::Hello { .. } => {},
-      other => return Err(CoreError::Gateway(format!("expected hello, got {other:?}"))),
-    }
+    let mut connection = self.open_gateway().await?;
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
       connection
         .send(&GatewayClientMessage::Resume {
@@ -44,7 +40,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?;
       match receive(&mut connection).await? {
         GatewayServerMessage::Resumed { .. } => return Ok((connection, GatewayOutcome::Resumed)),
-        GatewayServerMessage::SessionInvalid => {},
+        GatewayServerMessage::SessionInvalid => {
+          // The server forgot the session (a restart, or the resume window passed) and closes this
+          // connection. Forget it here too, or every reconnect would try it again forever.
+          self.sync.maybe_gateway_session = None;
+          self.persist_sync()?;
+          connection = self.open_gateway().await?;
+        },
         other => {
           return Err(CoreError::Gateway(format!(
             "unexpected answer to resume: {other:?}"
@@ -75,6 +77,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.full_sync().await?;
     Ok((connection, GatewayOutcome::Fresh))
+  }
+
+  /// A new gateway connection, after the server's `hello`.
+  async fn open_gateway(&self) -> Result<A::Gateway, CoreError> {
+    let mut connection = self.api.connect_gateway().await?;
+    match receive(&mut connection).await? {
+      GatewayServerMessage::Hello { .. } => Ok(connection),
+      other => Err(CoreError::Gateway(format!("expected hello, got {other:?}"))),
+    }
   }
 
   /// Applies every frame that is already waiting on the connection, without blocking. Returns
