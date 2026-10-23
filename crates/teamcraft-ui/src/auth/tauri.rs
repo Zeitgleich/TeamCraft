@@ -257,6 +257,47 @@ pub async fn set_autostart(is_enabled: bool) -> Result<(), String> {
   call::<()>("autostart_set", &serde_json::json!({ "enabled": is_enabled })).await
 }
 
+/// Desktop only: where the update machinery is (docs/updates.md §4). `None` in the browser.
+pub async fn update_status() -> Option<teamcraft_client_api::updates::UpdateStatus> {
+  if !is_available() {
+    return None;
+  }
+  call("update_status", &serde_json::json!({}))
+    .await
+    .inspect_err(|error| tracing::debug!(%error, "no update status"))
+    .ok()
+}
+
+/// Desktop only: "Check now".
+pub async fn update_check() -> Result<(), String> {
+  call::<()>("update_check", &serde_json::json!({})).await
+}
+
+pub async fn update_set_preference(
+  preference: teamcraft_client_api::updates::UpdatePreference,
+) -> Result<(), String> {
+  call::<()>(
+    "update_set_preference",
+    &serde_json::json!({ "preference": preference }),
+  )
+  .await
+}
+
+/// Notify-only: downloads the update now.
+pub async fn update_download() -> Result<(), String> {
+  call::<()>("update_download", &serde_json::json!({})).await
+}
+
+/// Installs the downloaded update and restarts; refused during a call.
+pub async fn update_restart() -> Result<(), String> {
+  call::<()>("update_restart", &serde_json::json!({})).await
+}
+
+/// deb/rpm: asks PackageKit to install the update.
+pub async fn update_with_package_manager() -> Result<(), String> {
+  call::<()>("update_with_package_manager", &serde_json::json!({})).await
+}
+
 /// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.
 pub async fn call<T: for<'de> Deserialize<'de>>(
   command: &str,

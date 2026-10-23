@@ -213,11 +213,21 @@ pub enum AvailableAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TooOldAction {
-  /// The app can update itself: the normal flow is under way or can be started.
-  SelfUpdate,
+  /// The app can update itself; what the user can do about it right now.
+  SelfUpdate(SelfUpdateStep),
   PackageManager(PackageManagerHint),
   /// Updates are off here (policy, machine, Flatpak): IT or the store has to do it.
   Elsewhere,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfUpdateStep {
+  /// Downloaded: restart (not during a call).
+  Restart { can_restart: bool },
+  /// Found, not downloaded (notify only, or waiting for a call to end).
+  Download { can_download: bool },
+  /// Checking, downloading, or not found yet: nothing to click.
+  Wait,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -397,7 +407,15 @@ impl UpdateStatus {
     match (&self.state, &self.maybe_package_manager) {
       (UpdateState::Off { .. }, _) => TooOldAction::Elsewhere,
       (_, Some(hint)) => TooOldAction::PackageManager(hint.clone()),
-      _ if self.install.updates_itself() => TooOldAction::SelfUpdate,
+      (state, None) if self.install.updates_itself() => TooOldAction::SelfUpdate(match state {
+        UpdateState::Ready { .. } => SelfUpdateStep::Restart {
+          can_restart: !self.is_in_call,
+        },
+        UpdateState::Available { .. } => SelfUpdateStep::Download {
+          can_download: !self.is_in_call,
+        },
+        _ => SelfUpdateStep::Wait,
+      }),
       _ => TooOldAction::Elsewhere,
     }
   }
@@ -828,9 +846,30 @@ mod tests {
         current.banner(),
         Some(UpdateBanner::TooOld {
           required_version: "1.2.0".into(),
-          action: TooOldAction::SelfUpdate,
+          action: TooOldAction::SelfUpdate(SelfUpdateStep::Restart { can_restart: true }),
         })
       );
+      current.is_in_call = true;
+      current.state = UpdateState::Available {
+        version: "1.3.0".into(),
+        maybe_notes_url: None,
+      };
+      assert!(matches!(
+        current.banner(),
+        Some(UpdateBanner::TooOld {
+          action: TooOldAction::SelfUpdate(SelfUpdateStep::Download { can_download: false }),
+          ..
+        })
+      ));
+      current.is_in_call = false;
+      current.state = UpdateState::Checking;
+      assert!(matches!(
+        current.banner(),
+        Some(UpdateBanner::TooOld {
+          action: TooOldAction::SelfUpdate(SelfUpdateStep::Wait),
+          ..
+        })
+      ));
 
       current.state = UpdateState::Off {
         reason: UpdateBlocker::Policy,

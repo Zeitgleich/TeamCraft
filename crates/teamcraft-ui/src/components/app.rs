@@ -47,6 +47,7 @@ use crate::components::status_menu::CustomStatusDialog;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
+use crate::components::update_notice::UpdateNotice;
 use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, JoinSpaceDialog, NewChannelDialog, NewSpaceDialog,
   SpaceSettingsDialog,
@@ -156,6 +157,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <BundleBanner />
       <OfflineBanner />
       <AnnouncementBanner />
+      <UpdateNotice />
       <TopBar />
       <div class="app-body">
         // The administration console takes the whole window, like a system console.

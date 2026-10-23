@@ -220,13 +220,15 @@ pub enum AdminSection {
   Announcement,
   Backgrounds,
   Retention,
+  /// How the desktop apps update (docs/updates.md §4.4).
+  Updates,
   /// Media server, push providers, storage and telephony.
   Instance,
   Audit,
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 10] = [
+  pub const ALL: [AdminSection; 11] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -235,6 +237,7 @@ impl AdminSection {
     Self::Announcement,
     Self::Backgrounds,
     Self::Retention,
+    Self::Updates,
     Self::Instance,
     Self::Audit,
   ];
@@ -249,6 +252,7 @@ impl AdminSection {
       Self::Announcement => "announcement",
       Self::Backgrounds => "backgrounds",
       Self::Retention => "retention",
+      Self::Updates => "updates",
       Self::Instance => "instance",
       Self::Audit => "audit",
     }
