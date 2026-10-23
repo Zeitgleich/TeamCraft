@@ -7,6 +7,7 @@ use teamcraft_proto::{
 
 use super::Client;
 use crate::api::ServerApi;
+use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
 use crate::store::{LocalStore, Table};
 use crate::{read_state, records};
@@ -75,10 +76,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     read_state::save_unread(&self.store, &unread)
   }
 
+  /// Checks the key packages on the server once [`ClientSettings::key_package_check_interval`]
+  /// has passed since the last check (the runner calls this on its ticks), so packages are renewed
+  /// on a long-running device too, not only after a full sync. Returns whether it checked.
+  ///
+  /// [`ClientSettings::key_package_check_interval`]: super::ClientSettings::key_package_check_interval
+  pub async fn renew_key_packages_if_due(&mut self) -> Result<bool, CoreError> {
+    let interval_ms = i64::try_from(self.settings.key_package_check_interval.as_millis()).unwrap_or(i64::MAX);
+    if self.now_ms().saturating_sub(self.last_key_package_check_ms) < interval_ms {
+      return Ok(false);
+    }
+    self.top_up_key_packages().await?;
+    Ok(true)
+  }
+
   /// Keeps enough key packages on the server so others can add this device (e2ee.md §4.3), plus a
-  /// last-resort one for when they run out.
+  /// last-resort one for when they run out. The server counts packages that expire within its
+  /// renewal window as "expiring soon", not as available, and an expiring last-resort package as
+  /// missing, so this also replaces packages before they expire.
   pub async fn top_up_key_packages(&mut self) -> Result<(), CoreError> {
     let status = self.api.key_package_status(self.account.device_id).await?;
+    self.last_key_package_check_ms = self.now_ms();
     let missing = if status.available < self.settings.key_package_low_water {
       self.settings.key_package_target.saturating_sub(status.available)
     } else {
@@ -87,14 +105,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if missing == 0 && status.has_last_resort {
       return Ok(());
     }
+    // openmls checks lifetimes against the system clock, so they are made from it too (not from
+    // the injectable clock, which tests move freely).
+    let now_unix_secs = u64::try_from(SystemClock.now_ms().div_euclid(1000)).unwrap_or(0);
     let mut key_packages = Vec::new();
     for _ in 0..missing {
       key_packages.push(Base64Bytes::new(create_key_package(
         &self.provider,
         &self.account.device,
         &self.account.certificate,
+        now_unix_secs,
       )?));
     }
+    // A last-resort package close to expiry is reported as missing: it is rotated, the server
+    // replaces the old one.
     let maybe_last_resort = if status.has_last_resort {
       None
     } else {
@@ -102,6 +126,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &self.provider,
         &self.account.device,
         &self.account.certificate,
+        now_unix_secs,
       )?))
     };
     // The private parts must be stored before the public parts become claimable.
@@ -116,6 +141,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await?;
+    tracing::info!(
+      uploaded = missing,
+      expiring_soon = status.expiring_soon,
+      is_last_resort_rotated = !status.has_last_resort,
+      "key packages renewed"
+    );
     Ok(())
   }
 

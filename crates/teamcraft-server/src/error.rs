@@ -31,6 +31,9 @@ pub enum ApiError {
   VersionConflict { current_version: u64 },
   #[error("the user has no key package left")]
   KeyPackageExhausted,
+  /// An uploaded key package doesn't parse, isn't validly signed, or is (nearly) expired.
+  #[error("invalid key package: {0}")]
+  InvalidKeyPackage(String),
   #[error("payload too large: {0}")]
   PayloadTooLarge(String),
   /// Too many requests; retry after this many seconds.
@@ -201,7 +204,7 @@ impl ApiError {
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
-      Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+      Self::InvalidRequest(_) | Self::InvalidKeyPackage(_) => StatusCode::BAD_REQUEST,
       Self::Conflict(_)
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
@@ -230,6 +233,7 @@ impl ApiError {
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
+      Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
       Self::VersionConflict { .. } => ErrorCode::VersionConflict,
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
@@ -323,6 +327,11 @@ mod tests {
   #[test]
   fn domain_errors_map_to_status_and_code() {
     let cases = [
+      (
+        ApiError::InvalidKeyPackage("expired".into()),
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidKeyPackage,
+      ),
       (
         ApiError::UnknownHost,
         StatusCode::MISDIRECTED_REQUEST,

@@ -120,6 +120,12 @@ max_unread_counted = 1000
 max_key_packages_per_device = 200
 max_key_package_bytes = 16384
 max_key_packages_per_upload = 100
+# Key packages are valid for 83 days. One is handed out only while it stays valid at least
+# key_package_min_validity_secs (members processing the add later still accept it); below that it is
+# deleted. Packages within key_package_renewal_window_secs of expiry count as "expiring soon" and
+# devices upload replacements. Must be min_validity < renewal_window < 83 days.
+key_package_min_validity_secs = 3628800
+key_package_renewal_window_secs = 4838400
 # One MLS commit/welcome/proposal/application message, and welcomes per commit.
 max_mls_payload_bytes = 1048576
 max_welcomes_per_commit = 500

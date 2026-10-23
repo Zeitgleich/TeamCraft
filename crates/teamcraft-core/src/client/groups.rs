@@ -7,7 +7,7 @@ use rand_core::OsRng;
 use teamcraft_crypto::membership::{
   HistoryShare, MembershipAction, MembershipChange, SignedMembershipChange,
 };
-use teamcraft_crypto::mls::{CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent};
+use teamcraft_crypto::mls::{CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent, MlsError};
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
   CreateDmRequest, CreateGroupDmRequest, HistoryPolicy, ListMlsMessagesQuery, MlsMessageKind,
@@ -35,6 +35,15 @@ pub(crate) enum ChangeSource {
 
 /// Marks an MLS "proposal" entry that carries a signed admin change instead of an MLS proposal.
 pub(crate) const ADMIN_CHANGE_MAGIC: &[u8] = b"TCAC";
+
+/// The claimed key packages of one user that can go into a commit.
+#[derive(Default)]
+struct UsablePackages {
+  key_packages: Vec<Vec<u8>>,
+  recipients: Vec<teamcraft_proto::DeviceId>,
+  /// Why the first left-out package was refused.
+  maybe_first_error: Option<MlsError>,
+}
 
 /// What processing one MLS queue entry led to.
 #[derive(Debug, PartialEq, Eq)]
@@ -231,14 +240,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .api
         .claim_key_packages(member.user.id, &ClaimKeyPackagesRequest::new(conversation))
         .await?;
-      for package in claimed
-        .packages
-        .into_iter()
-        .filter(|package| !group_devices.contains(&package.device_id))
-      {
-        recipients.push(package.device_id);
-        key_packages.push(package.key_package.into_vec());
-      }
+      // Other users' devices still go in when one user's packages are all bad.
+      let usable = self.usable_key_packages(conversation, member.user.id, claimed.packages, &directory)?;
+      key_packages.extend(usable.key_packages);
+      recipients.extend(usable.recipients);
     }
     if key_packages.is_empty() {
       return Ok(0);
@@ -462,7 +467,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let (key_packages, recipients) = match action {
         MembershipAction::AddUser { user_id, .. } => {
           self
-            .claim_new_devices(conversation, convert::user_from_crypto(user_id)?)
+            .claim_new_devices(conversation, convert::user_from_crypto(user_id)?, &directory)
             .await?
         },
         MembershipAction::RemoveUser { .. } | MembershipAction::RemoveDevice { .. } => {
@@ -774,8 +779,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
     user: UserId,
+    directory: &PinnedDirectory,
   ) -> Result<(Vec<Vec<u8>>, Vec<teamcraft_proto::DeviceId>), CoreError> {
-    let in_group = self.group_device_ids(conversation)?;
     let claimed = match self
       .api
       .claim_key_packages(user, &ClaimKeyPackagesRequest::new(conversation))
@@ -787,20 +792,62 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => return Err(error.into()),
     };
-    let mut key_packages = Vec::new();
-    let mut recipients = Vec::new();
-    // The server claims for every device of the user, including ones already in the group (and
-    // this device); those packages are wasted (crate README: server gaps).
-    for package in claimed.packages {
-      if !in_group.contains(&package.device_id) {
-        recipients.push(package.device_id);
-        key_packages.push(package.key_package.into_vec());
-      }
+    let usable = self.usable_key_packages(conversation, user, claimed.packages, directory)?;
+    match usable.maybe_first_error {
+      // Not one device of the user can be added: say why instead of doing nothing.
+      Some(error) if usable.key_packages.is_empty() => Err(error.into()),
+      _ => Ok((usable.key_packages, usable.recipients)),
     }
-    Ok((key_packages, recipients))
   }
 
-  pub(crate) fn group_device_ids(
+  /// The claimed packages of `user`'s devices that aren't in the group yet and pass the checks a
+  /// commit makes. A bad package (expired, revoked device, not the device or user the server says)
+  /// is left out and logged, so one broken device doesn't keep its user's other devices out.
+  fn usable_key_packages(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    claimed: Vec<teamcraft_proto::ClaimedKeyPackage>,
+    directory: &PinnedDirectory,
+  ) -> Result<UsablePackages, CoreError> {
+    let in_group = self.group_device_ids(conversation)?;
+    let group = self
+      .groups
+      .get(&conversation)
+      .ok_or(CoreError::NoGroup(conversation))?;
+    let mut usable = UsablePackages::default();
+    // The server claims for every device of the user, including ones already in the group (and
+    // this device); those packages are wasted (crate README: server gaps).
+    for package in claimed {
+      if in_group.contains(&package.device_id) {
+        continue;
+      }
+      let bytes = package.key_package.into_vec();
+      match group.check_key_package(&self.provider, &bytes, directory) {
+        Ok(member)
+          if member.user_id == convert::user(user)
+            && member.device_id == convert::device(package.device_id) =>
+        {
+          usable.recipients.push(package.device_id);
+          usable.key_packages.push(bytes);
+        },
+        Ok(_) => {
+          tracing::warn!(conversation_id = %conversation, device_id = %package.device_id, "skipped a key package of another device");
+          usable
+            .maybe_first_error
+            .get_or_insert(MlsError::UnexpectedMessage("key package of another device"));
+        },
+        Err(error) => {
+          tracing::warn!(conversation_id = %conversation, device_id = %package.device_id, %error, "skipped an invalid key package");
+          usable.maybe_first_error.get_or_insert(error);
+        },
+      }
+    }
+    Ok(usable)
+  }
+
+  /// The devices in the conversation's MLS group on this device.
+  pub fn group_device_ids(
     &mut self,
     conversation: ConversationId,
   ) -> Result<BTreeSet<teamcraft_proto::DeviceId>, CoreError> {

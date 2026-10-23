@@ -13,6 +13,7 @@ mod dev_stack;
 mod devices;
 mod enrollment;
 mod files;
+mod key_packages;
 mod link_previews;
 mod linking;
 mod messages;

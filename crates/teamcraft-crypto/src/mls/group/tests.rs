@@ -713,6 +713,66 @@ mod rejection {
   }
 }
 
+mod key_package_lifetime {
+  use super::*;
+  use crate::mls::{KEY_PACKAGE_LIFETIME_SECS, inspect_key_package};
+
+  const DAY_SECS: u64 = 24 * 60 * 60;
+
+  #[test]
+  fn lifetime_follows_the_creators_clock() {
+    let world = World::new();
+    let now = now_secs();
+    let info = inspect_key_package(&world.bob.key_package_at(now)).unwrap();
+    assert_eq!(info.not_after_unix_secs, now + KEY_PACKAGE_LIFETIME_SECS);
+    assert!(!info.is_last_resort);
+    let last_resort = crate::mls::create_last_resort_key_package(
+      &world.bob.provider,
+      &world.bob.user.device,
+      &world.bob.user.certificate,
+      now,
+    )
+    .unwrap();
+    assert!(inspect_key_package(&last_resort).unwrap().is_last_resort);
+  }
+
+  #[test]
+  fn an_expired_package_is_refused_by_server_and_committer() {
+    let mut world = World::new();
+    let expired = world.bob.key_package_at(now_secs() - 90 * DAY_SECS);
+    assert!(inspect_key_package(&expired).is_err());
+    let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+    let result = world.alice_group.commit_membership_change(
+      &world.alice.provider,
+      &world.alice.user.device,
+      &change,
+      &[expired],
+      &world.directory,
+      &world.authority,
+    );
+    assert!(result.is_err());
+    assert!(!world.alice_group.has_pending_commit());
+  }
+
+  #[test]
+  fn a_creator_clock_hours_ahead_is_tolerated() {
+    let mut world = World::new();
+    let ahead = world.bob.key_package_at(now_secs() + 6 * 60 * 60);
+    assert!(inspect_key_package(&ahead).is_ok());
+    let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+    let output = world.commit_change(&change, &[ahead]);
+    world.carol_processes(&output.commit).unwrap();
+    world.bob_joins(&output);
+  }
+
+  #[test]
+  fn garbage_is_not_a_key_package() {
+    for garbage in [&[][..], &[0, 1, 2], &[0xff; 64]] {
+      assert!(inspect_key_package(garbage).is_err());
+    }
+  }
+}
+
 /// Alice (admin) and Carol share a group; Bob and Dave are pinned but not members.
 struct World {
   alice: Client,
@@ -930,8 +990,26 @@ impl Client {
   }
 
   fn key_package(&self) -> Vec<u8> {
-    create_key_package(&self.provider, &self.user.device, &self.user.certificate).unwrap()
+    self.key_package_at(now_secs())
   }
+
+  /// A key package as made by a device whose clock shows `now_unix_secs`.
+  fn key_package_at(&self, now_unix_secs: u64) -> Vec<u8> {
+    create_key_package(
+      &self.provider,
+      &self.user.device,
+      &self.user.certificate,
+      now_unix_secs,
+    )
+    .unwrap()
+  }
+}
+
+fn now_secs() -> u64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs()
 }
 
 fn apply_keys(
@@ -1003,6 +1081,7 @@ fn last_resort_key_package_can_be_used_twice() {
     &world.bob.provider,
     &world.bob.user.device,
     &world.bob.user.certificate,
+    now_secs(),
   )
   .unwrap();
   let add_bob = world.signed_change(ALICE, add(BOB, HistoryShare::Full));

@@ -16,9 +16,15 @@ pub struct UploadKeyPackagesRequest {
 }
 
 /// How many key packages of a device are left; clients top up when `available` runs low.
+/// Packages that expire within the server's renewal window don't count as available, and an
+/// expiring last-resort package as none, so clients replace them in time (e2ee.md §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct KeyPackageStatusResponse {
   pub available: u32,
+  /// Regular packages that expire within the renewal window (still handed out while valid enough).
+  #[serde(default)]
+  pub expiring_soon: u32,
+  /// A last-resort package that stays valid beyond the renewal window.
   pub has_last_resort: bool,
 }
 

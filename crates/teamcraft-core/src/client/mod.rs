@@ -69,8 +69,10 @@ use crate::trust::PinnedDirectory;
 pub struct ClientSettings {
   /// Regular key packages kept on the server.
   pub key_package_target: u32,
-  /// Top up when fewer than this are left.
+  /// Top up when fewer than this are left (packages expiring soon don't count).
   pub key_package_low_water: u32,
+  /// How often a running client asks the server whether its key packages need renewing.
+  pub key_package_check_interval: std::time::Duration,
   /// Messages per history page.
   pub history_page_size: u32,
   /// Attempts to land a commit when other members' commits win the epoch.
@@ -125,6 +127,8 @@ pub struct Client<A, S> {
   maybe_call_sink: Option<CallEventSink>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
+  /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
+  last_key_package_check_ms: i64,
 }
 
 impl Default for ClientSettings {
@@ -132,6 +136,7 @@ impl Default for ClientSettings {
     Self {
       key_package_target: 30,
       key_package_low_water: 10,
+      key_package_check_interval: std::time::Duration::from_secs(6 * 60 * 60),
       history_page_size: 50,
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),
@@ -181,6 +186,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_call_sink: None,
       maybe_preview_fetcher,
       maybe_jwks_source,
+      last_key_package_check_ms: i64::MIN,
     }))
   }
 

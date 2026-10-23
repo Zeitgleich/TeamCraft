@@ -39,8 +39,8 @@ use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
-  attachments, backgrounds, brands, calendar_settings, email_digest, guests, mail_settings, oidc, retention,
-  runtime_settings, urgent,
+  attachments, backgrounds, brands, calendar_settings, email_digest, guests, key_packages, mail_settings,
+  oidc, retention, runtime_settings, urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -425,7 +425,8 @@ async fn load_runtime_settings(state: &AppState) -> anyhow::Result<()> {
   Ok(())
 }
 
-/// Removes guests whose membership expired (and tells their sponsors) and forgets old sessions.
+/// Removes guests whose membership expired (and tells their sponsors), forgets old sessions and
+/// deletes key packages that expire too soon to be handed out.
 fn spawn_account_housekeeping(state: AppState) {
   tokio::spawn(async move {
     let period = Duration::from_secs(state.settings.get().guests.expiry_check_interval_secs.max(1));
@@ -438,6 +439,11 @@ fn spawn_account_housekeeping(state: AppState) {
       }
       if let Err(error) = session::forget_stale_sessions(&state, now).await {
         warn!(%error, "forgetting stale sessions failed");
+      }
+      match key_packages::sweep_expired(&state, now).await {
+        Ok(0) => {},
+        Ok(deleted) => info!(deleted, "deleted expiring key packages"),
+        Err(error) => warn!(%error, "deleting expiring key packages failed"),
       }
     }
   });

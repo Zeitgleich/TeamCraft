@@ -136,7 +136,14 @@ impl ConversationGroup {
     let config = MlsGroupJoinConfig::builder()
       .use_ratchet_tree_extension(true)
       .build();
-    let staged = StagedWelcome::new_from_welcome(provider, &config, welcome, None)
+    // Leaves that never committed still carry the lifetime of the key package they joined with;
+    // checking it would make every group unjoinable once such a member's package expired. A
+    // lifetime only bounds when a package may be *added* (RFC 9420 §7.3, openmls #1810), which
+    // the committer and every member checked then; credentials are verified below.
+    let staged = StagedWelcome::build_from_welcome(provider, &config, welcome)
+      .map_err(|error| MlsError::openmls("welcome processing", error))?
+      .skip_lifetime_validation()
+      .build()
       .map_err(|error| MlsError::openmls("welcome processing", error))?;
     if staged.group_context().group_id() != &group_id(conversation_id) {
       return Err(MlsError::UnexpectedMessage("welcome for another conversation"));
@@ -284,6 +291,24 @@ impl ConversationGroup {
       removed: proposed.removed,
     });
     Ok(output)
+  }
+
+  /// Checks one key package fetched from the server the way the commit functions do (signature,
+  /// lifetime, credential, signed device list, not revoked from this group), so the caller can leave
+  /// out one device's bad package instead of failing the whole commit. Returns whose it is.
+  pub fn check_key_package(
+    &self,
+    provider: &impl OpenMlsProvider,
+    bytes: &[u8],
+    directory: &impl IdentityDirectory,
+  ) -> Result<GroupMember, MlsError> {
+    let (_, device) = validate_key_package(provider, bytes, directory)?;
+    let member = GroupMember::from(&device);
+    self.check_not_removed(&ProposedMembership {
+      added: vec![device],
+      removed: Vec::new(),
+    })?;
+    Ok(member)
   }
 
   /// Adds further devices of users who are already members. Needs no admin signature: each

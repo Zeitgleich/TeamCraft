@@ -8,7 +8,8 @@
 
 use teamcraft_db::testing::TestDatabase;
 use teamcraft_db::{
-  NewConversation, NewMessage, NewSpace, OidcIdentity, SnowflakeGenerator, participants_key,
+  KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewSpace, OidcIdentity,
+  SnowflakeGenerator, participants_key,
 };
 use teamcraft_proto::{
   ClientMessageId, ConversationId, ConversationKind, ConversationVisibility, DeviceId, HistoryPolicy, Id,
@@ -16,6 +17,83 @@ use teamcraft_proto::{
 };
 
 const ISSUER: &str = "https://auth.example.com/realms/dev";
+
+#[tokio::test]
+async fn key_packages_are_served_only_while_valid_and_swept_after() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let user = db
+    .upsert_oidc_user(&identity("k", "Kim"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let device = db
+    .register_device(&NewDevice {
+      id: ids.next_id().unwrap(),
+      user_id: user.id,
+      name: "laptop",
+      public_key: &[1; 32],
+      cross_signature: &[2; 64],
+    })
+    .await
+    .unwrap()
+    .id;
+  let now = time::OffsetDateTime::now_utc();
+  let day = time::Duration::days(1);
+  let package = |bytes: &'static [u8], expires_at| NewKeyPackage {
+    id: ids.next_id::<DeviceId>().unwrap().snowflake(),
+    bytes,
+    expires_at,
+  };
+  let regular = [package(b"soon", now + 5 * day), package(b"later", now + 70 * day)];
+  db.add_key_packages(device, &regular, Some(package(b"last", now + 20 * day)), 10, now)
+    .await
+    .unwrap();
+
+  // With a renewal window of 30 days: one available, one expiring soon, no fresh last resort.
+  let counts = db.key_package_counts(device, now, now + 30 * day).await.unwrap();
+  assert_eq!(
+    counts,
+    KeyPackageCounts {
+      available: 1,
+      expiring_soon: 1,
+      has_last_resort: false,
+    }
+  );
+  // 100 days on: nothing counts any more.
+  let later = now + 100 * day;
+  let counts = db
+    .key_package_counts(device, later, later + 30 * day)
+    .await
+    .unwrap();
+  assert_eq!(
+    (counts.available, counts.expiring_soon, counts.has_last_resort),
+    (0, 0, false)
+  );
+
+  // Only packages valid for 10 more days are served, the one expiring first; then the last resort.
+  let valid_until = now + 10 * day;
+  let first = db.claim_key_package(device, valid_until).await.unwrap().unwrap();
+  assert_eq!(
+    (first.key_package.as_slice(), first.is_last_resort),
+    (&b"later"[..], false)
+  );
+  let second = db.claim_key_package(device, valid_until).await.unwrap().unwrap();
+  assert_eq!(
+    (second.key_package.as_slice(), second.is_last_resort),
+    (&b"last"[..], true)
+  );
+  // At +100 days nothing at all is served.
+  assert!(db.claim_key_package(device, later).await.unwrap().is_none());
+
+  // The sweep deletes what can't be served any more; the rest stays.
+  assert_eq!(db.delete_expiring_key_packages(valid_until).await.unwrap(), 1);
+  assert!(db.claim_key_package(device, now).await.unwrap().is_some());
+  assert_eq!(db.delete_expiring_key_packages(later).await.unwrap(), 2);
+  test_db.drop_database().await;
+}
 
 #[tokio::test]
 async fn upsert_creates_then_updates_user() {
