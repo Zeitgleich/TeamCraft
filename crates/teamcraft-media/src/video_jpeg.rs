@@ -102,7 +102,8 @@ mod tests {
     let frame = gray_frame(64, 48, 0);
     let jpeg = encode_jpeg(&frame, 70).unwrap();
     assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
-    let mut decoder = zune_jpeg::JpegDecoder::new(jpeg.as_slice());
+    let mut decoder =
+      zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(jpeg.as_slice()));
     let pixels = decoder.decode().unwrap();
     let (width, height) = decoder.dimensions().unwrap();
     assert_eq!((width, height), (64, 48));

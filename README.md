@@ -26,9 +26,9 @@ docker compose -f docker-compose.dev.yml up -d
 
 | Service  | Image                      | Address                                       |
 |----------|----------------------------|-----------------------------------------------|
-| Postgres | `postgres:18.6-alpine3.23` | `127.0.0.1:5432`                              |
-| Keycloak | `keycloak/keycloak:26.7.5` | `http://127.0.0.1:8080`                       |
-| Garage   | `dxflrs/garage:v2.4.0`     | S3 `http://127.0.0.1:3900`, admin API `:3903` |
+| Postgres | `postgres:18.6-alpine3.24` | `127.0.0.1:5432`                              |
+| Keycloak | `keycloak/keycloak:26.8.1` | `http://127.0.0.1:8080`                       |
+| Garage   | `dxflrs/garage:v2.4.1`     | S3 `http://127.0.0.1:3900`, admin API `:3903` |
 
 All ports are bound to loopback on both IPv4 and IPv6 (`127.0.0.1` and `[::1]`). **Every credential below is public and for development only.**
 `docker compose -f docker-compose.dev.yml down -v` throws away all dev state.

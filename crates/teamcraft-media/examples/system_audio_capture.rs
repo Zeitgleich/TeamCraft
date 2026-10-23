@@ -132,7 +132,7 @@ fn run_tone(stop: pw::channel::Receiver<()>) -> Result<(), pw::Error> {
       };
       let mut frames = 0;
       if let Some(bytes) = data.data() {
-        for sample in bytes.chunks_exact_mut(4) {
+        for sample in bytes.as_chunks_mut::<4>().0 {
           let t = *position as f32 / 48_000.0;
           let value = 0.3 * (2.0 * std::f32::consts::PI * OWN_TONE_HZ * t).sin();
           sample.copy_from_slice(&value.to_le_bytes());

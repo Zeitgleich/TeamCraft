@@ -1,5 +1,12 @@
-# Dependency updates. Actions are pinned to commit SHAs (CodeQL actions/unpinned-tag); Dependabot
-# bumps the SHA and the version comment together.
+# Dependency updates, weekly, grouped so a week's bumps arrive as a few PRs. Major versions get a
+# PR of their own (they usually need code changes and, for crypto, a review).
+#
+# Actions are pinned to commit SHAs (CodeQL actions/unpinned-tag); Dependabot bumps the SHA and the
+# version comment together. Container base images are pinned by tag and index digest in literal
+# FROM lines (Dependabot reads FROM, not ARG defaults).
+#
+# No `swift` or `npm` entries: the iOS app has no Swift packages (XcodeGen project, the Rust core
+# is a local XCFramework) and the repository has no package.json.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -9,8 +16,63 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
   - package-ecosystem: cargo
-    directory: /
+    directories: ["/", "/fuzz"]
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+    # teamcraft-crypto keeps the RustCrypto stack on the versions openmls_rust_crypto uses, so it
+    # isn't built twice (crates/teamcraft-crypto/Cargo.toml). Lift these with the openmls upgrade
+    # that moves them. Only breaking bumps are ignored: for 0.x crates Dependabot calls 0.10 -> 0.11
+    # "minor", so those ignore minor too; patch releases (and security fixes) still come through.
+    ignore:
+      - dependency-name: aes-gcm
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: chacha20poly1305
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: ed25519-dalek
+        update-types: [version-update:semver-major]
+      - dependency-name: x25519-dalek
+        update-types: [version-update:semver-major]
+      - dependency-name: p256
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: rand_core
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: "hpke-rs*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      # oauth2 5 still draws from getrandom 0.2; teamcraft-ui only enables its wasm backend.
+      - dependency-name: getrandom
+        update-types: [version-update:semver-major, version-update:semver-minor]
+
+  - package-ecosystem: docker
+    directories:
+      - /containers
+      - /fuzz
+      - /dev/wasm-test
+      - /tests/e2e/web
+      - /apps/android/docker
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev-stack:
+        patterns: ["*"]
+
+  - package-ecosystem: gradle
+    directory: /apps/android
+    schedule:
+      interval: weekly
+    groups:
+      android-minor:
+        update-types: [minor, patch]

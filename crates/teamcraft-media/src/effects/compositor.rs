@@ -167,7 +167,7 @@ impl Compositor {
       BackgroundEffect::Image(_) => (2, 0),
     };
     let resolution = frame.resolution();
-    if resolution.width % 8 != 0 {
+    if !resolution.width.is_multiple_of(8) {
       return Err(EffectsError::UnsupportedWidth(resolution.width));
     }
     let key = SizeKey {
