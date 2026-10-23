@@ -5,18 +5,14 @@
 # `--format docker` keeps the HEALTHCHECK instruction (the OCI image format has none); orchestrators
 # that run the image should configure the same command themselves: `teamcraft-bridge healthcheck`.
 #
-# Base images are pinned by digest so builds are reproducible; bump them deliberately
-# with the multi-arch index digest
+# Base images are pinned by tag and multi-arch index digest so builds are reproducible. Dependabot
+# bumps both in the FROM lines; by hand, take the index digest
 # (`docker buildx imagetools inspect <image>`, the top-level Digest), never a single-platform one.
 #
-# Unlike the server images this one needs distroless "base" instead of "cc": the encrypted local
-# database (SQLCipher) links the system libcrypto, which "base" ships (with the CA certificates).
-# "base" lacks libgcc_s, which the Rust runtime needs, so the build stage hands it over.
+# The encrypted local database (SQLCipher) links the system libcrypto; distroless "cc" ships it
+# (OpenSSL 3 from the same Debian release as the build stage) along with libgcc_s.
 
-ARG RUST_IMAGE=docker.io/library/rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
-ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
-
-FROM ${RUST_IMAGE} AS build
+FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
 ENV CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_RELEASE_STRIP=symbols
 WORKDIR /src
@@ -28,24 +24,21 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
     --mount=type=cache,id=teamcraft-bridge-target,target=/src/target \
     cargo build --release --locked -p teamcraft-bridge --bin teamcraft-bridge \
  && install -D target/release/teamcraft-bridge /out/teamcraft-bridge \
- && mkdir -p /out/data /out/lib \
- && cp "$(gcc -print-file-name=libgcc_s.so.1)" /out/lib/
+ && mkdir -p /out/data
 
-FROM ${RUNTIME_IMAGE}
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:83b9b50586253821cf63ffcec87d3d94265a093ad30da232039af962dd8f4edf
 LABEL org.opencontainers.image.title="teamcraft-bridge" \
       org.opencontainers.image.description="TeamCraft integration bridge: webhooks and logs into encrypted channels" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 COPY --from=build /out/teamcraft-bridge /usr/local/bin/teamcraft-bridge
-COPY --from=build /out/lib/libgcc_s.so.1 /usr/local/lib/libgcc_s.so.1
 COPY --from=build --chown=65532:65532 /out/data /var/lib/teamcraft-bridge
 # Non-root. The bridge writes only its database, in the volume at /var/lib/teamcraft-bridge (owned
 # by 65532); the rest of the filesystem can be read-only.
 USER 65532:65532
 # Inside a container the endpoints must listen on all interfaces (publish the port on loopback
 # only on the host: `-p 127.0.0.1:8088:8088`). `[::]` is dual stack.
-ENV LD_LIBRARY_PATH=/usr/local/lib \
-    TEAMCRAFT_BRIDGE_LISTEN__ADDRS='["[::]:8088"]' \
+ENV TEAMCRAFT_BRIDGE_LISTEN__ADDRS='["[::]:8088"]' \
     TEAMCRAFT_BRIDGE_STORE__PATH=/var/lib/teamcraft-bridge/bridge.db
 VOLUME ["/var/lib/teamcraft-bridge"]
 EXPOSE 8088/tcp
