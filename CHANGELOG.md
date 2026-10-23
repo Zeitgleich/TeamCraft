@@ -46,6 +46,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Changed
 
+- **macOS**: a dmg and an update per architecture, Apple silicon (`TeamCraft_<version>_aarch64.dmg`) and
+  Intel (`TeamCraft_<version>_x64.dmg`), instead of one universal dmg with both: smaller downloads and
+  updates. Installed universal apps update to the build of their own Mac. The download page offers
+  both, Apple silicon first.
 - All of the server's mail, meeting invitations included, goes through one mail server;
   `[meetings.smtp]` only counts when `[mail.smtp]` is missing.
 

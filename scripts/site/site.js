@@ -23,6 +23,7 @@ async function detectSystem() {
   else if (/win/i.test(platform) || /windows/i.test(agent)) os = "windows";
   else if (/mac/i.test(platform) || /mac os x/i.test(agent)) os = "macos";
   else if (/linux|x11|cros/i.test(platform + " " + agent)) os = "linux";
+  if (os === "macos") return { os, arch: await macArch() };
   let arch = /aarch64|arm64|armv8/i.test(agent + " " + platform) ? "arm64" : "x64";
   try {
     if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
@@ -34,6 +35,31 @@ async function detectSystem() {
     // Not offered by every browser; the guess from the user agent stays.
   }
   return { os, arch };
+}
+
+// Apple silicon or Intel, or "" when the browser doesn't tell: Safari reports an Intel Mac in its user
+// agent on every Mac, so only explicit signals count. Unknown keeps the page's order (Apple silicon
+// first), and the other button always stays.
+async function macArch() {
+  try {
+    if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+      const { architecture } = await navigator.userAgentData.getHighEntropyValues(["architecture"]);
+      if (architecture === "arm") return "arm64";
+      if (architecture === "x86") return "x64";
+    }
+  } catch (_) {
+    // Not offered by every browser; the graphics renderer may still tell.
+  }
+  try {
+    const gl = document.createElement("canvas").getContext("webgl");
+    const info = gl && gl.getExtension("WEBGL_debug_renderer_info");
+    const renderer = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : "";
+    if (/Apple M\d/.test(renderer)) return "arm64";
+    if (/Intel|AMD|Radeon|NVIDIA/i.test(renderer)) return "x64";
+  } catch (_) {
+    // No WebGL: unknown.
+  }
+  return "";
 }
 
 function offerDownload({ os, arch }) {
@@ -65,8 +91,7 @@ function offerDownload({ os, arch }) {
   const block = document.querySelector(`[data-channel-block="${cta.dataset.channel}"]`);
   if (!block) return;
   const candidates = [...block.querySelectorAll(`a.download[data-primary][data-os="${os}"]`)];
-  const choice = candidates.find((link) => link.dataset.arch === arch || link.dataset.arch === "universal")
-    || candidates[0];
+  const choice = candidates.find((link) => link.dataset.arch === arch) || candidates[0];
   if (!choice) return;
   label.textContent = `Download for ${OS_NAMES[os]}`;
   button.href = choice.href;
@@ -80,10 +105,17 @@ function offerDownload({ os, arch }) {
 }
 
 // On the visitor's own platform card the main button gets their architecture: it trades places
-// with the "Also for" link of that architecture.
+// with the "Also for" link of that architecture, or, on a card with a button per architecture, takes
+// the highlight and the first place.
 function preferArch(card, arch) {
+  if (!arch) return;
+  const choices = card.querySelector(".choices");
+  if (choices) {
+    preferChoice(choices, arch);
+    return;
+  }
   const main = card.querySelector(".primary a.download");
-  if (!main || main.dataset.arch === arch || main.dataset.arch === "universal") return;
+  if (!main || main.dataset.arch === arch) return;
   const other = card.querySelector(`.primary-alt a.download[data-arch="${arch}"]`);
   if (!other) return;
   const mainMeta = card.querySelector(".primary-meta");
@@ -99,6 +131,16 @@ function preferArch(card, arch) {
   other.setAttribute("aria-label", mainLabel.replace(/^Download /, ""));
   other.textContent = other.dataset.meta;
   if (mainMeta) mainMeta.textContent = main.dataset.meta;
+}
+
+function preferChoice(choices, arch) {
+  const pick = choices.querySelector(`a.choice[data-arch="${arch}"]`);
+  if (!pick || pick.classList.contains("button-primary")) return;
+  for (const link of choices.querySelectorAll("a.choice")) {
+    link.classList.toggle("button-primary", link === pick);
+    link.classList.toggle("button-secondary", link !== pick);
+  }
+  choices.prepend(pick);
 }
 
 function watchHeader() {

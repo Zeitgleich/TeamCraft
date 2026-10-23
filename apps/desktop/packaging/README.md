@@ -64,11 +64,12 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
 - `Info.plist` adds the camera and microphone usage descriptions; the bundler merges it into the app.
 - `macos/Entitlements.plist` grants camera, microphone and network access under the hardened runtime
   (`hardenedRuntime` is on). The listener entitlement covers the loopback redirect of the login.
-- The dmg is one universal build (arm64 and x86_64). Hardware H.264 uses GStreamer's VideoToolbox encoder:
+- There is a dmg per architecture (Apple silicon and Intel; no universal build, which carried the
+  native code twice). Hardware H.264 uses GStreamer's VideoToolbox encoder:
   the release workflow installs the official universal GStreamer framework, links against it, and
   `macos/bundle-gstreamer.sh` builds a slim copy: only the four plugins the encoder pipeline uses (its
-  `PLUGINS`), the plugin scanner and the libraries they and the executable load, stripped (about 32 MB
-  instead of more than 1 GB for the installed runtime and development files). It rewrites install names
+  `PLUGINS`), the plugin scanner and the libraries they and the executable load, thinned to the
+  executable's architecture and stripped (about 32 MB for both architectures together, instead of more than 1 GB for the installed runtime and development files). It rewrites install names
   and search paths to the app's `Frameworks` directory, re-signs ad hoc and verifies that every reference
   resolves (`tauri.gstreamer.conf.json` adds the copy to the bundle). A new element in the pipeline needs
   its plugin added to `PLUGINS`. Compile- and link-checked in CI only; whether the relocated framework finds its plugins at
@@ -82,7 +83,7 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
 
 `.github/workflows/desktop-release.yml` runs on manual dispatch, or is called by `release.yml` when a tag
 like `v1.0.0` is pushed. It builds the Linux packages, a Flatpak bundle (from source inside the Flatpak
-builder container, with the web UI from the Linux job), the macOS dmg (one universal build for both
-architectures) and the Windows installers (x64, arm64), and keeps them as workflow artifacts.
+builder container, with the web UI from the Linux job), the macOS dmgs (Apple silicon and Intel, one job
+each) and the Windows installers (x64, arm64), and keeps them as workflow artifacts.
 `release.yml` attaches them to the draft GitHub release ([docs/release.md](../../../docs/release.md));
 nothing is published to any store.

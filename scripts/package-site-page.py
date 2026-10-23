@@ -48,9 +48,21 @@ CSP = (
     "base-uri 'none'; form-action 'none'"
 )
 OS_TITLES = {"windows": "Windows", "macos": "macOS", "linux": "Linux", "android": "Android"}
-ARCH_TITLES = {"x64": "x64", "arm64": "ARM64", "universal": "Apple silicon + Intel"}
+ARCH_TITLES = {"x64": "x64", "arm64": "ARM64"}
+# Where an OS calls its architectures something else.
+OS_ARCH_TITLES = {"macos": {"arm64": "Apple silicon", "x64": "Intel"}}
 # What the main button of a platform card downloads.
 KIND_BUTTONS = {"exe": "installer", "dmg": "disk image", "appimage": "AppImage", "apk-full": "APK"}
+# Platforms whose main download is a choice between architectures the visitor has to know: a button
+# each, with a hint, instead of one button and "Also for" links.
+ARCH_CHOICES = {
+    "macos": {
+        "hints": {"arm64": "M1 and newer, most Macs since 2020", "x64": "Older Macs with an Intel processor"},
+        "help": ("<strong>Which Mac do I have?</strong> Apple menu &rsaquo; About This Mac: "
+                 "&ldquo;Chip: Apple M&hellip;&rdquo; means Apple silicon, "
+                 "&ldquo;Processor: &hellip; Intel&rdquo; means Intel."),
+    },
+}
 # Fixed requirements shown on a platform card, before what the assets say.
 OS_REQUIREMENTS = {"macos": "macOS 14 or newer"}
 
@@ -93,7 +105,7 @@ RULES = [
     (r"_(?P<arch>x64|arm64)-setup\.exe$", "windows", "exe", "Installer (.exe)", True, ""),
     (r"_(?P<arch>x64|arm64)_[A-Za-z-]+\.msi$", "windows", "msi", "MSI package", False,
       "For managed installs (Group Policy, Intune)"),
-    (r"_(?P<arch>universal)\.dmg$", "macos", "dmg", "Disk image (.dmg)", True, ""),
+    (r"_(?P<arch>aarch64|x64)\.dmg$", "macos", "dmg", "Disk image (.dmg)", True, ""),
     (r"_(?P<arch>amd64|aarch64)\.AppImage$", "linux", "appimage", "AppImage", True,
       "Runs on most distributions, updates itself"),
     (r"_(?P<arch>amd64|arm64)\.deb$", "linux", "deb", "Debian / Ubuntu (.deb)", False, ""),
@@ -115,7 +127,9 @@ DEBUG_RULES = [
 ARCH_ALIASES = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64"}
 OS_ORDER = list(OS_TITLES)
 KIND_ORDER = ["exe", "msi", "dmg", "appimage", "deb", "rpm", "flatpak", "apk-full", "apk-libre"]
-ARCH_ORDER = ["universal", "x64", "arm64", ""]
+ARCH_ORDER = ["x64", "arm64", ""]
+# Where another architecture comes first: nearly every Mac sold since 2020 has Apple silicon.
+OS_ARCH_ORDER = {"macos": ["arm64", "x64", ""]}
 # English month names regardless of the build machine's locale.
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -180,7 +194,7 @@ def classify_assets(assets, allow_debug):
     if allow_debug and not has_release_apk:
         downloads += match_rules(assets, DEBUG_RULES, is_test_build=True)
     return sorted(downloads, key=lambda d: (
-        OS_ORDER.index(d.os), KIND_ORDER.index(d.kind), ARCH_ORDER.index(d.arch)))
+        OS_ORDER.index(d.os), KIND_ORDER.index(d.kind), OS_ARCH_ORDER.get(d.os, ARCH_ORDER).index(d.arch)))
 
 
 def match_rules(assets, rules, is_test_build=False):
@@ -434,7 +448,9 @@ def render_platform(channel, os_name, env, has_linux_repositories):
     primaries = [d for d in downloads if d.is_primary]
     others = [d for d in downloads if not d.is_primary]
     body = []
-    if primaries:
+    if primaries and os_name in ARCH_CHOICES:
+        body.append(render_arch_choice(primaries, channel, ARCH_CHOICES[os_name]))
+    elif primaries:
         body.append(render_primary_downloads(primaries, channel))
     if any(d.is_test_build for d in downloads):
         body.append(f"""<p class="caution">{ICON_INFO}<span>Test build, signed with a throwaway key: it can&rsquo;t
@@ -463,9 +479,7 @@ def render_platform(channel, os_name, env, has_linux_repositories):
 
 def platform_summary(os_name, downloads):
     """Requirements and architectures, from the assets."""
-    # A universal build names its architectures on the button already.
-    archs = list(dict.fromkeys(
-        ARCH_TITLES.get(d.arch, d.arch) for d in downloads if d.arch and d.arch != "universal"))
+    archs = list(dict.fromkeys(arch_title(d) for d in downloads if d.arch))
     parts = [OS_REQUIREMENTS[os_name]] if os_name in OS_REQUIREMENTS else []
     if archs:
         parts.append(" and ".join(archs) if len(archs) <= 2 else ", ".join(archs))
@@ -495,6 +509,25 @@ def render_primary_downloads(primaries, channel):
           {others}""".rstrip()
 
 
+def render_arch_choice(primaries, channel, choice):
+    """A button per architecture, the first one (the most common) highlighted, and how to tell which
+    one the visitor's machine has. site.js may move the highlight; both stay visible."""
+    buttons = []
+    for index, download in enumerate(primaries):
+        style = "button-primary" if index == 0 else "button-secondary"
+        maybe_hint = choice["hints"].get(download.arch, "")
+        hint = f'<span class="choice-hint">{esc(maybe_hint)}</span>' if maybe_hint else ""
+        buttons.append(
+            f'<a class="button {style} download choice" href="{esc(download.url)}" {download_data(download, channel)} '
+            f'aria-label="Download {esc(download.label)} for {esc(download_meta(download))}">{ICON_DOWNLOAD}'
+            f'<span class="choice-text"><span class="choice-title">{esc(arch_title(download))}</span>{hint}</span>'
+            f'<span class="choice-size">{esc(format_size(download.size_bytes))}</span></a>')
+    return f"""<div class="choices">
+            {"".join(buttons)}
+          </div>
+          <p class="choice-help">{ICON_INFO}<span>{choice["help"]}</span></p>"""
+
+
 def render_more_downloads(others, channel, links_repositories):
     """Every further package kind, with a link per architecture."""
     kinds = list(dict.fromkeys(d.kind for d in others))
@@ -522,8 +555,12 @@ def render_more_downloads(others, channel, links_repositories):
 
 
 def download_meta(download):
-    arch = ARCH_TITLES.get(download.arch, download.arch)
-    return " · ".join(x for x in (arch, format_size(download.size_bytes)) if x)
+    return " · ".join(x for x in (arch_title(download), format_size(download.size_bytes)) if x)
+
+
+def arch_title(download):
+    titles = OS_ARCH_TITLES.get(download.os, ARCH_TITLES)
+    return titles.get(download.arch, download.arch)
 
 
 def download_data(download, channel):

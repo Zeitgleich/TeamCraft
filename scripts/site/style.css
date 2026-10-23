@@ -2150,6 +2150,63 @@ svg {
   font-size: 0.875rem;
 }
 
+/* A button per architecture (macOS): the recommended one highlighted, both always visible. */
+.choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.button.choice {
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 56px;
+  padding: 8px 16px;
+  text-align: left;
+  white-space: normal;
+}
+
+.choice-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.choice-title {
+  font-weight: 600;
+}
+
+.choice-hint,
+.choice-size {
+  font-size: 0.8125rem;
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.choice-size {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.choice-help {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.choice-help .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+
+.choice-help strong {
+  color: var(--text-2);
+}
+
 .platform-empty {
   color: var(--muted);
 }

@@ -126,23 +126,39 @@ jobs:
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
 
   macos:
-    name: macOS (universal dmg)
-    # One dmg with both slices (arm64 + x86_64), built on an Apple silicon runner; Rust cross-compiles
-    # the x86_64 slice and `cargo tauri build --target universal-apple-darwin` joins them with lipo.
-    # Each slice is compiled for its own architecture, so the OpenH264 download picks the matching
-    # Cisco library at runtime (openh264_library.rs).
+    name: macOS ${{ matrix.title }} (dmg)
+    # One dmg and one update archive per architecture (no universal build: it carried the native code
+    # twice in every download and update). Both run on the current Apple silicon image; Rust
+    # cross-compiles the Intel build.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            title: Apple silicon
+            # Asset name suffix, as the Tauri bundler names macOS packages: TeamCraft_<version>_<arch>.dmg.
+            arch: aarch64
+            rustflags: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
+          # WebRTC audio processing is built with Meson for the host architecture only, so the
+          # cross-compiled Intel build goes without echo cancellation (#197).
+          - target: x86_64-apple-darwin
+            title: Intel
+            arch: x64
+            rustflags: ""
     runs-on: macos-26
     env:
+      # Overrides the workflow-wide flags per architecture (see the matrix).
+      RUSTFLAGS: ${{ matrix.rustflags }}
       # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
       MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
+          targets: wasm32-unknown-unknown,${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: universal-apple-darwin
+          key: ${{ matrix.target }}
       # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
       # reports it and the update signatures bind it (docs/updates.md §3.1).
       - name: Release version
@@ -152,8 +168,8 @@ jobs:
           echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Meson and ninja (build WebRTC audio processing)
         run: brew install meson ninja pkg-config
-      # The official universal GStreamer (both slices): development files to link against, and the
-      # runtime that is bundled into the app for VideoToolbox hardware encoding.
+      # The official universal GStreamer: development files to link against, and the runtime that is
+      # bundled into the app for VideoToolbox hardware encoding (thinned to the build's architecture).
       # (The Homebrew casks are disabled, so the packages come from gstreamer.freedesktop.org, pinned by hash.)
       - name: GStreamer framework
         env:
@@ -178,34 +194,28 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
-      # WebRTC audio processing is built with Meson for the host architecture only, so only the arm64
-      # slice gets echo cancellation; the x86_64 slice is built without it (a per-target flag, which
-      # the workflow-wide RUSTFLAGS would override, hence the unset).
-      - name: Build the universal executable
+      - name: Build the executable
         working-directory: apps/desktop
-        run: |
-          unset RUSTFLAGS
-          export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
-          cargo tauri build --config tauri.models.conf.json --target universal-apple-darwin --no-bundle
+        run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --no-bundle
         env:
           PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
           PKG_CONFIG_ALLOW_CROSS: "1"
       - name: The UI bundle has no demo data
         run: scripts/check-no-demo-data.py crates/teamcraft-ui/dist
       - name: Bundle GStreamer into the app
-        run: apps/desktop/packaging/macos/bundle-gstreamer.sh patch target/universal-apple-darwin/release/teamcraft-desktop
+        run: apps/desktop/packaging/macos/bundle-gstreamer.sh patch target/${{ matrix.target }}/release/teamcraft-desktop
       # The app only: the dmg is made from the signed app below, so nothing touches the app after
       # it is signed.
       - name: Build the app
         working-directory: apps/desktop
         run: >
           cargo tauri bundle --config tauri.models.conf.json --config tauri.gstreamer.conf.json
-          --target universal-apple-darwin --bundles app
+          --target ${{ matrix.target }} --bundles app
       # The bundler copies the framework without its symlinks; a framework with duplicated version
       # directories can't be sealed. ditto copies it as built.
       - name: Put the slim GStreamer framework into the app
         run: |
-          app="$(find target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)"
+          app="$(find target/${{ matrix.target }}/release/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)"
           rm -rf "$app/Contents/Frameworks/GStreamer.framework"
           ditto target/gstreamer-framework/GStreamer.framework "$app/Contents/Frameworks/GStreamer.framework"
           echo "APP=$app" >> "$GITHUB_ENV"
@@ -249,7 +259,7 @@ jobs:
         run: |
           version="$(scripts/check-versions.sh)"
           mkdir -p target/dmg
-          apps/desktop/packaging/macos/make-dmg.sh "$APP" "target/dmg/TeamCraft_${version}_universal.dmg"
+          apps/desktop/packaging/macos/make-dmg.sh "$APP" "target/dmg/TeamCraft_${version}_${{ matrix.arch }}.dmg"
       # The updater replaces the whole app with this archive of the signed (and, with the secrets,
       # notarized and stapled) app. No AppleDouble files: they would break the seal.
       - name: Update archive of the app, signed for the updater (optional)
@@ -258,7 +268,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           version="$(scripts/check-versions.sh)"
-          archive="target/dmg/TeamCraft_${version}_universal.app.tar.gz"
+          archive="target/dmg/TeamCraft_${version}_${{ matrix.arch }}.app.tar.gz"
           COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$(dirname "$APP")" -czf "$archive" "$(basename "$APP")"
           apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" "$archive"
       - name: Notarize the dmg (optional)
@@ -274,7 +284,7 @@ jobs:
           spctl --assess -vvv --type open --context context:primary-signature "$dmg"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: macos-universal
+          name: macos-${{ matrix.target }}
           path: |
             target/dmg/*.dmg
             target/dmg/*.app.tar.gz
