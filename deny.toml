@@ -7,6 +7,17 @@ all-features = true
 [advisories]
 # Every ignored advisory needs a reason and a link.
 ignore = [
+  # zip 4 (via tauri-plugin-updater 2.14, whose latest stable release still requires zip ^4) keeps
+  # SUID/SGID bits when extracting. The updater only extracts update archives after checking their
+  # minisign signature against the key in tauri.conf.json, so a crafted archive never reaches it; Windows
+  # has no SUID bits. Remove once tauri-plugin-updater moves to zip >= 9.
+  # https://rustsec.org/advisories/RUSTSEC-2026-0367
+  { id = "RUSTSEC-2026-0367", reason = "zip only extracts signature-verified update archives (tauri-plugin-updater)" },
+  # The same zip 4 extraction, symlinks pointing outside the destination / permissions applied through
+  # them: same reasoning (only signature-verified update archives are extracted).
+  # https://rustsec.org/advisories/RUSTSEC-2026-0368 https://rustsec.org/advisories/RUSTSEC-2026-0369
+  { id = "RUSTSEC-2026-0368", reason = "zip only extracts signature-verified update archives (tauri-plugin-updater)" },
+  { id = "RUSTSEC-2026-0369", reason = "zip only extracts signature-verified update archives (tauri-plugin-updater)" },
   # Unmaintained TOML parser, no known vulnerability: askama (via uniffi_bindgen) reads UniFFI's own
   # template config with it while generating the mobile bindings at build time; nothing at runtime.
   # https://rustsec.org/advisories/RUSTSEC-2026-0374
