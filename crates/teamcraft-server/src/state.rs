@@ -15,7 +15,7 @@ use crate::error::ApiError;
 use crate::gateway::Hub;
 use crate::meetings::MeetingService;
 use crate::meetings::mailer::Mailer;
-use crate::push::PushDispatcher;
+use crate::push::{PushDispatcher, PushTracker};
 use crate::rendezvous::RendezvousHub;
 use crate::security::RateLimits;
 use crate::services::calls::CallService;
@@ -35,6 +35,8 @@ pub struct AppState {
   pub hub: Arc<Hub>,
   pub rendezvous: Arc<RendezvousHub>,
   pub push: Arc<PushDispatcher>,
+  /// What was pushed to which device: withdrawals, rings, delivery counts, test limits.
+  pub push_tracker: Arc<PushTracker>,
   /// Attachment storage, if configured.
   pub maybe_blob_store: Option<Arc<BlobStore>>,
   /// Call join tokens, if calls are configured.
@@ -104,14 +106,63 @@ pub struct OidcSyncSettings {
 /// What the message routing needs from the push configuration.
 #[derive(Debug, Clone)]
 pub struct PushSettings {
-  pub ttl: std::time::Duration,
+  pub ttls: PushTtls,
+  pub retry: RetryPolicy,
+  /// The shortest time between two test pushes to one device.
+  pub test_interval: std::time::Duration,
+  /// Rings one caller may push per minute.
+  pub max_rings_per_minute: u32,
+  /// How long withdrawals for one conversation are collected before one goes out.
+  pub dismiss_coalesce: std::time::Duration,
   pub allow_private_endpoints: bool,
+}
+
+/// How long push services may hold a wake-up, per kind (notifications.md, "TTL per kind").
+#[derive(Debug, Clone, Copy)]
+pub struct PushTtls {
+  pub message: std::time::Duration,
+  pub call: std::time::Duration,
+  pub dismiss: std::time::Duration,
+  pub test: std::time::Duration,
+}
+
+/// Retries of pushes that failed for a temporary reason.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+  pub max_retries: u32,
+  /// Wait before the first retry; doubles for each further one.
+  pub initial_delay: std::time::Duration,
+}
+
+impl PushTtls {
+  pub fn for_kind(&self, kind: &teamcraft_proto::PushKind) -> std::time::Duration {
+    use teamcraft_proto::PushKind;
+    match kind {
+      PushKind::Call => self.call,
+      PushKind::Dismiss => self.dismiss,
+      PushKind::Test => self.test,
+      PushKind::Message | PushKind::Mention | PushKind::Unknown(_) => self.message,
+    }
+  }
 }
 
 impl Default for PushSettings {
   fn default() -> Self {
+    use std::time::Duration;
     Self {
-      ttl: std::time::Duration::from_secs(3600),
+      ttls: PushTtls {
+        message: Duration::from_secs(86_400),
+        call: Duration::from_secs(30),
+        dismiss: Duration::from_secs(86_400),
+        test: Duration::from_secs(300),
+      },
+      retry: RetryPolicy {
+        max_retries: 2,
+        initial_delay: Duration::from_secs(2),
+      },
+      test_interval: Duration::from_secs(10),
+      max_rings_per_minute: 10,
+      dismiss_coalesce: Duration::from_millis(3000),
       allow_private_endpoints: false,
     }
   }

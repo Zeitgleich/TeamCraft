@@ -8,13 +8,20 @@ use crate::components::background_picker::{BackgroundPicker, effect_from_slug, e
 use crate::components::icons::{Icon, IconName};
 use teamcraft_client_api::privacy::LastSeenVisibility;
 
+use crate::clock::local_time_zone;
 use crate::i18n::{Locale, use_i18n};
+use crate::model::User;
 use crate::model::{Conversation, DeviceId, UserId};
+use crate::notify_sync::{
+  MAX_DND_ALLOWED_USERS, MAX_DND_WINDOWS, format_minutes, is_valid_window, parse_minutes,
+};
 use crate::prefs::{
-  CallPrefs, Density, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, SidebarSort, ThreadReplies, Zoom,
+  CallPrefs, Density, DndSchedule, EVERY_DAY, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, SidebarSort,
+  ThreadReplies, Zoom, default_dnd_window,
 };
 use crate::settings::{SendMode, Theme, load_string, store_string};
 use crate::state::{Overlay, use_app_state};
+use teamcraft_proto::DndWindow;
 
 /// A labelled `<select>` bound to a stored slug.
 #[component]
@@ -274,6 +281,24 @@ pub fn NotificationsTab() -> impl IntoView {
         })
         hint="notif-push-delay-hint"
       />
+      <SelectField
+        id="notif-attention-input"
+        label="notif-attention-input"
+        options=options(&["60", "120", "300", "600"], "notif-attention-input-")
+        value=Signal::derive(move || notes.get().attention_input_secs.to_string())
+        on_change=Callback::new(move |value: String| {
+          if let Ok(seconds) = value.parse::<u32>() {
+            edit(Box::new(move |n| n.attention_input_secs = seconds));
+          }
+        })
+        hint="notif-attention-input-hint"
+      />
+      <CheckField
+        label="notif-uses-attention"
+        hint="notif-uses-attention-hint"
+        value=Signal::derive(move || notes.get().uses_desktop_attention)
+        on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.uses_desktop_attention = value)))
+      />
     </fieldset>
 
     <fieldset class="settings-group">
@@ -355,50 +380,7 @@ pub fn NotificationsTab() -> impl IntoView {
       />
     </fieldset>
 
-    <fieldset class="settings-group">
-      <legend>{move || i18n.t("notif-dnd")}</legend>
-      <CheckField
-        label="notif-dnd-enable"
-        value=Signal::derive(move || notes.get().dnd.is_enabled)
-        on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.dnd.is_enabled = value)))
-        hint="notif-dnd-hint"
-      />
-      <div class="field-row dnd-times">
-        <div class="field">
-          <label for="dnd-from">{move || i18n.t("notif-dnd-from")}</label>
-          <input
-            id="dnd-from"
-            class="input"
-            type="time"
-            prop:disabled=move || !notes.get().dnd.is_enabled
-            prop:value=move || notes.get().dnd.from
-            on:change=move |ev| {
-              let value = event_target_value(&ev);
-              edit(Box::new(move |n| n.dnd.from = value));
-            }
-          />
-        </div>
-        <div class="field">
-          <label for="dnd-to">{move || i18n.t("notif-dnd-to")}</label>
-          <input
-            id="dnd-to"
-            class="input"
-            type="time"
-            prop:disabled=move || !notes.get().dnd.is_enabled
-            prop:value=move || notes.get().dnd.to
-            on:change=move |ev| {
-              let value = event_target_value(&ev);
-              edit(Box::new(move |n| n.dnd.to = value));
-            }
-          />
-        </div>
-      </div>
-      <CheckField
-        label="notif-dnd-weekdays"
-        value=Signal::derive(move || notes.get().dnd.weekdays_only)
-        on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.dnd.weekdays_only = value)))
-      />
-    </fieldset>
+    <DndEditor />
 
     <fieldset class="settings-group">
       <legend>{move || i18n.t("notif-per-conversation")}</legend>
@@ -500,6 +482,246 @@ pub fn NotificationsTab() -> impl IntoView {
       </div>
     </fieldset>
     <p class="muted-text small">{move || i18n.t("notif-enforcement-note")}</p>
+  }
+}
+
+/// The do-not-disturb schedule: several weekly ranges with their own weekdays, evaluated in this
+/// device's time zone, and who or what still gets through (also during a manual DND).
+#[component]
+fn DndEditor() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let prefs = state.settings.prefs;
+  let dnd = Memo::new(move |_| prefs.get().notifications.dnd);
+  let edit =
+    move |change: Box<dyn FnOnce(&mut DndSchedule)>| prefs.update(|all| change(&mut all.notifications.dnd));
+  let zone = local_time_zone();
+  let people = Memo::new(move |_| {
+    let me = state.me().id;
+    let mut users: Vec<User> = state.read(|backend| backend.users());
+    users.retain(|user| user.id != me && !user.is_bot);
+    users.sort_by_key(|user| user.display_name.to_lowercase());
+    users
+  });
+  let chosen_person = RwSignal::new(String::new());
+  let add_person = move |_| {
+    let Ok(raw) = chosen_person.get_untracked().parse::<UserId>() else {
+      return;
+    };
+    edit(Box::new(move |dnd| {
+      if !dnd.allow_user_ids.contains(&raw) && dnd.allow_user_ids.len() < MAX_DND_ALLOWED_USERS {
+        dnd.allow_user_ids.push(raw);
+      }
+    }));
+    chosen_person.set(String::new());
+  };
+  let name_of = move |id: UserId| {
+    people
+      .get()
+      .into_iter()
+      .find(|user| user.id == id)
+      .map_or_else(|| id.to_string(), |user| user.display_name)
+  };
+
+  view! {
+    <fieldset class="settings-group">
+      <legend>{move || i18n.t("notif-dnd")}</legend>
+      <CheckField
+        label="notif-dnd-enable"
+        value=Signal::derive(move || dnd.get().is_enabled)
+        on_change=Callback::new(move |value: bool| edit(Box::new(move |dnd| dnd.is_enabled = value)))
+        hint="notif-dnd-hint"
+      />
+      <p class="muted-text small">
+        {move || match &zone {
+          Some(zone) => i18n.t_with("notif-dnd-zone", &[("zone", zone)]),
+          None => i18n.t("notif-dnd-zone-unknown"),
+        }}
+      </p>
+      <ul class="dnd-ranges" aria-label=move || i18n.t("notif-dnd-ranges")>
+        {move || {
+          dnd
+            .get()
+            .windows
+            .into_iter()
+            .enumerate()
+            .map(|(index, window)| view! { <DndRangeRow index=index window=window is_enabled=Signal::derive(move || dnd.get().is_enabled) /> })
+            .collect_view()
+        }}
+      </ul>
+      <button
+        type="button"
+        class="btn"
+        disabled=move || { !dnd.get().is_enabled || dnd.get().windows.len() >= MAX_DND_WINDOWS }
+        on:click=move |_| edit(Box::new(|dnd| dnd.windows.push(default_dnd_window())))
+      >
+        {move || i18n.t("notif-dnd-add-range")}
+      </button>
+
+      <CheckField
+        label="notif-dnd-urgent"
+        hint="notif-dnd-urgent-hint"
+        value=Signal::derive(move || dnd.get().allows_urgent)
+        on_change=Callback::new(move |value: bool| edit(Box::new(move |dnd| dnd.allows_urgent = value)))
+      />
+      <div class="field">
+        <label for="dnd-allow-person">{move || i18n.t("notif-dnd-allow")}</label>
+        <div class="field-row">
+          <select
+            id="dnd-allow-person"
+            class="input grow"
+            prop:value=move || chosen_person.get()
+            on:change=move |ev| chosen_person.set(event_target_value(&ev))
+          >
+            <option value="">{move || i18n.t("notif-dnd-allow-choose")}</option>
+            {move || {
+              let allowed = dnd.get().allow_user_ids;
+              people
+                .get()
+                .into_iter()
+                .filter(|user| !allowed.contains(&user.id))
+                .map(|user| view! { <option value=user.id.to_string()>{user.display_name}</option> })
+                .collect_view()
+            }}
+          </select>
+          <button
+            type="button"
+            class="btn"
+            disabled=move || { chosen_person.get().is_empty() || dnd.get().allow_user_ids.len() >= MAX_DND_ALLOWED_USERS }
+            on:click=add_person
+          >
+            {move || i18n.t("notif-dnd-allow-add")}
+          </button>
+        </div>
+        <p class="muted-text small">{move || i18n.t("notif-dnd-allow-hint")}</p>
+        <ul class="keyword-chips" aria-label=move || i18n.t("notif-dnd-allow")>
+          {move || {
+            dnd
+              .get()
+              .allow_user_ids
+              .into_iter()
+              .map(|id| {
+                let name = name_of(id);
+                let remove_label = name.clone();
+                view! {
+                  <li class="token-chip">
+                    <span translate="no">{name}</span>
+                    <button
+                      type="button"
+                      class="icon-btn icon-btn-small"
+                      aria-label=move || i18n.t_with("notif-dnd-allow-remove", &[("name", &remove_label)])
+                      on:click=move |_| edit(Box::new(move |dnd| dnd.allow_user_ids.retain(|allowed| *allowed != id)))
+                    >
+                      <Icon name=IconName::Close />
+                    </button>
+                  </li>
+                }
+              })
+              .collect_view()
+          }}
+        </ul>
+      </div>
+    </fieldset>
+  }
+}
+
+/// One range of the schedule: its weekdays, start and end.
+#[component]
+fn DndRangeRow(index: usize, window: DndWindow, #[prop(into)] is_enabled: Signal<bool>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let prefs = state.settings.prefs;
+  let edit = move |change: Box<dyn FnOnce(&mut DndWindow)>| {
+    prefs.update(|all| {
+      if let Some(window) = all.notifications.dnd.windows.get_mut(index) {
+        change(window);
+      }
+    });
+  };
+  let from_id = format!("dnd-from-{index}");
+  let to_id = format!("dnd-to-{index}");
+  let weekdays = window.weekdays.clone();
+  view! {
+    <li class="dnd-range">
+      <div class="dnd-weekdays" role="group" aria-label=move || i18n.t_with("notif-dnd-range", &[("number", &(index + 1).to_string())])>
+        {EVERY_DAY.iter()
+          .map(|day| {
+            let is_on = weekdays.contains(day);
+            let key = format!("weekday-{}", day.as_str());
+            let toggled = day.clone();
+            view! {
+              <label class="checkbox dnd-weekday">
+                <input
+                  type="checkbox"
+                  prop:checked=is_on
+                  prop:disabled=move || !is_enabled.get()
+                  on:change=move |ev| {
+                    let is_checked = event_target_checked(&ev);
+                    let day = toggled.clone();
+                    edit(Box::new(move |window| {
+                      window.weekdays.retain(|existing| *existing != day);
+                      if is_checked {
+                        window.weekdays.push(day);
+                      }
+                    }));
+                  }
+                />
+                <span>{move || i18n.t(&key)}</span>
+              </label>
+            }
+          })
+          .collect_view()}
+      </div>
+      <div class="field-row dnd-times">
+        <div class="field">
+          <label for=from_id.clone()>{move || i18n.t("notif-dnd-from")}</label>
+          <input
+            id=from_id
+            class="input"
+            type="time"
+            prop:disabled=move || !is_enabled.get()
+            prop:value=format_minutes(window.start_minute)
+            on:change=move |ev| {
+              if let Some(minute) = parse_minutes(&event_target_value(&ev)) {
+                edit(Box::new(move |window| window.start_minute = minute));
+              }
+            }
+          />
+        </div>
+        <div class="field">
+          <label for=to_id.clone()>{move || i18n.t("notif-dnd-to")}</label>
+          <input
+            id=to_id
+            class="input"
+            type="time"
+            prop:disabled=move || !is_enabled.get()
+            prop:value=format_minutes(window.end_minute)
+            on:change=move |ev| {
+              if let Some(minute) = parse_minutes(&event_target_value(&ev)) {
+                edit(Box::new(move |window| window.end_minute = minute));
+              }
+            }
+          />
+        </div>
+        <button
+          type="button"
+          class="icon-btn"
+          prop:disabled=move || !is_enabled.get()
+          aria-label=move || i18n.t("notif-dnd-remove-range")
+          title=move || i18n.t("notif-dnd-remove-range")
+          on:click=move |_| {
+            prefs.update(|all| {
+              if index < all.notifications.dnd.windows.len() {
+                all.notifications.dnd.windows.remove(index);
+              }
+            })
+          }
+        >
+          <Icon name=IconName::Close />
+        </button>
+      </div>
+      {(!is_valid_window(&window)).then(|| view! { <p class="muted-text small" role="alert">{move || i18n.t("notif-dnd-range-invalid")}</p> })}
+    </li>
   }
 }
 

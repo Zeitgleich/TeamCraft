@@ -54,6 +54,10 @@ mod tests {
       maybe_message_id: None,
       maybe_sender_id: None,
       is_urgent: true,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: None,
     };
     let key = [7u8; PUSH_KEY_BYTES];
     assert_eq!(

@@ -57,27 +57,69 @@ pub struct DndWindow {
   pub end_minute: u16,
 }
 
-/// Do-not-disturb schedule (PLAN.md §5). The server evaluates it to decide on pushes; clients
-/// show it. Times are local; `utc_offset_minutes` is the user's current offset, which the client
-/// updates when daylight saving time changes.
+/// Do-not-disturb schedule and overrides (PLAN.md §5). The server evaluates it to decide on pushes;
+/// clients show it and check it again before they show a notification. Times are local to the user's
+/// time zone: evaluators with a time zone database use `time_zone` at the moment in question, others
+/// `utc_offset_minutes`, which clients keep current. The overrides apply to manual DND as well.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DndSchedule {
   pub utc_offset_minutes: i16,
+  /// IANA time zone name, for example `Europe/Berlin`.
+  #[serde(rename = "time_zone", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_time_zone: Option<String>,
   pub windows: Vec<DndWindow>,
   /// People whose messages still notify during DND (for example a manager).
   #[serde(default)]
   pub allow_user_ids: Vec<UserId>,
+  /// Messages the sender marked urgent still notify during DND (where `urgent_scope` says).
+  #[serde(default)]
+  pub allows_urgent: bool,
+  /// Where an urgent message may break through DND: only in DMs and group DMs unless the user
+  /// widens it, so anybody in a big channel can't wake them up.
+  #[serde(default)]
+  pub urgent_scope: UrgentScope,
+}
+
+wire_enum! {
+  /// Where urgent messages break through DND (with `allows_urgent`).
+  #[derive(Default)]
+  pub enum UrgentScope {
+    /// DMs and group DMs only (the default).
+    #[default]
+    Direct => "direct",
+    /// Every conversation, channels included.
+    Everywhere => "everywhere",
+  }
+}
+
+/// What DND's overrides need to know about one message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DndCandidate {
+  pub sender: UserId,
+  pub is_urgent: bool,
+  /// A DM or group DM.
+  pub is_direct: bool,
 }
 
 impl DndSchedule {
-  /// Whether a message from `sender` at `unix_seconds` is silenced.
-  pub fn silences(&self, unix_seconds: i64, sender: UserId) -> bool {
-    !self.allow_user_ids.contains(&sender) && self.is_active_at(unix_seconds)
+  /// Whether DND, scheduled or manual, lets this message through anyway: an allowed sender, or an
+  /// urgent message where the user lets urgent ones through.
+  pub fn lets_through(&self, message: DndCandidate) -> bool {
+    let is_urgent_allowed = self.allows_urgent
+      && message.is_urgent
+      && (message.is_direct || self.urgent_scope == UrgentScope::Everywhere);
+    self.allow_user_ids.contains(&message.sender) || is_urgent_allowed
   }
 
-  /// Whether `unix_seconds` falls into one of the windows.
-  pub fn is_active_at(&self, unix_seconds: i64) -> bool {
-    let local = unix_seconds + i64::from(self.utc_offset_minutes) * 60;
+  /// Whether the windows silence the message at `unix_seconds`, given the user's UTC offset at that
+  /// moment.
+  pub fn silences(&self, unix_seconds: i64, offset_minutes: i16, message: DndCandidate) -> bool {
+    !self.lets_through(message) && self.is_active_at(unix_seconds, offset_minutes)
+  }
+
+  /// Whether `unix_seconds` falls into one of the windows, given the user's UTC offset at that moment.
+  pub fn is_active_at(&self, unix_seconds: i64, offset_minutes: i16) -> bool {
+    let local = unix_seconds + i64::from(offset_minutes) * 60;
     let day = local.div_euclid(SECONDS_PER_DAY);
     let minute = u16::try_from(local.rem_euclid(SECONDS_PER_DAY) / 60).unwrap_or(0);
     // 1970-01-01 was a Thursday; Monday is index 0.
@@ -107,6 +149,16 @@ pub struct NotificationSettings {
   pub send_read_receipts: bool,
   #[serde(rename = "dnd_schedule", default, skip_serializing_if = "Option::is_none")]
   pub maybe_dnd_schedule: Option<DndSchedule>,
+  /// Desktop and web sessions report whether the user looks at them, so phone pushes wait while
+  /// they do (notifications.md, "Attention"). Reads: whether that is in effect (the user's choice
+  /// and the instance's switch); clients that read `false` report nothing. Writes: absent keeps the
+  /// stored choice.
+  #[serde(
+    rename = "uses_desktop_attention",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_uses_desktop_attention: Option<bool>,
 }
 
 /// `GET`/`PUT /api/v1/conversations/{id}/notification-settings`; `PUT` replaces both fields.
@@ -208,19 +260,28 @@ mod tests {
         start_minute: 22 * 60,
         end_minute: 7 * 60,
       }],
-      allow_user_ids: Vec::new(),
+      ..DndSchedule::default()
     }
   }
 
   #[test]
   fn windows_past_midnight_continue_into_the_next_day() {
     let schedule = night_shift(vec![Weekday::Monday]);
-    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 23 * HOUR));
-    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 24 * HOUR + 6 * HOUR));
-    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 24 * HOUR + 7 * HOUR));
+    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 23 * HOUR, schedule.utc_offset_minutes));
+    assert!(schedule.is_active_at(
+      MONDAY_MIDNIGHT + 24 * HOUR + 6 * HOUR,
+      schedule.utc_offset_minutes
+    ));
+    assert!(!schedule.is_active_at(
+      MONDAY_MIDNIGHT + 24 * HOUR + 7 * HOUR,
+      schedule.utc_offset_minutes
+    ));
     // Monday's morning belongs to Sunday's window.
-    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 6 * HOUR));
-    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 2 * 24 * HOUR + 23 * HOUR));
+    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 6 * HOUR, schedule.utc_offset_minutes));
+    assert!(!schedule.is_active_at(
+      MONDAY_MIDNIGHT + 2 * 24 * HOUR + 23 * HOUR,
+      schedule.utc_offset_minutes
+    ));
   }
 
   #[test]
@@ -232,11 +293,11 @@ mod tests {
         start_minute: 9 * 60,
         end_minute: 10 * 60,
       }],
-      allow_user_ids: Vec::new(),
+      ..DndSchedule::default()
     };
-    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 9 * HOUR));
-    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 10 * HOUR));
-    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 8 * HOUR));
+    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 9 * HOUR, schedule.utc_offset_minutes));
+    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 10 * HOUR, schedule.utc_offset_minutes));
+    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 8 * HOUR, schedule.utc_offset_minutes));
   }
 
   #[test]
@@ -244,11 +305,14 @@ mod tests {
     let mut schedule = night_shift(vec![Weekday::Monday]);
     schedule.utc_offset_minutes = 120;
     // 21:00 UTC is 23:00 local.
-    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 21 * HOUR));
-    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 19 * HOUR));
+    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 21 * HOUR, schedule.utc_offset_minutes));
+    assert!(!schedule.is_active_at(MONDAY_MIDNIGHT + 19 * HOUR, schedule.utc_offset_minutes));
     schedule.utc_offset_minutes = -300;
     // 03:00 UTC Tuesday is 22:00 local Monday.
-    assert!(schedule.is_active_at(MONDAY_MIDNIGHT + 24 * HOUR + 3 * HOUR));
+    assert!(schedule.is_active_at(
+      MONDAY_MIDNIGHT + 24 * HOUR + 3 * HOUR,
+      schedule.utc_offset_minutes
+    ));
   }
 
   #[test]
@@ -258,8 +322,48 @@ mod tests {
     let mut schedule = night_shift(vec![Weekday::Monday]);
     schedule.allow_user_ids = vec![manager];
     let night = MONDAY_MIDNIGHT + 23 * HOUR;
-    assert!(!schedule.silences(night, manager));
-    assert!(schedule.silences(night, other));
+    assert!(!schedule.silences(night, 0, candidate(manager, false, false)));
+    assert!(schedule.silences(night, 0, candidate(other, false, false)));
+  }
+
+  #[test]
+  fn urgent_messages_break_through_only_when_allowed() {
+    let sender = UserId::from_snowflake(Snowflake::new(8).unwrap());
+    let mut schedule = night_shift(vec![Weekday::Monday]);
+    let night = MONDAY_MIDNIGHT + 23 * HOUR;
+    assert!(schedule.silences(night, 0, candidate(sender, true, true)));
+    schedule.allows_urgent = true;
+    assert!(!schedule.silences(night, 0, candidate(sender, true, true)));
+    assert!(schedule.silences(night, 0, candidate(sender, false, true)));
+    // In a channel only when the user widened it.
+    assert!(schedule.silences(night, 0, candidate(sender, true, false)));
+    schedule.urgent_scope = UrgentScope::Everywhere;
+    assert!(!schedule.silences(night, 0, candidate(sender, true, false)));
+  }
+
+  fn candidate(sender: UserId, is_urgent: bool, is_direct: bool) -> DndCandidate {
+    DndCandidate {
+      sender,
+      is_urgent,
+      is_direct,
+    }
+  }
+
+  #[test]
+  fn schedule_wire_format_keeps_old_fields_and_reads_old_values() {
+    let old: DndSchedule = serde_json::from_str(r#"{"utc_offset_minutes":60,"windows":[]}"#).unwrap();
+    assert_eq!(old.maybe_time_zone, None);
+    assert!(!old.allows_urgent);
+    let schedule = DndSchedule {
+      utc_offset_minutes: 60,
+      maybe_time_zone: Some("Europe/Berlin".into()),
+      allows_urgent: true,
+      ..DndSchedule::default()
+    };
+    assert_eq!(
+      serde_json::to_string(&schedule).unwrap(),
+      r#"{"utc_offset_minutes":60,"time_zone":"Europe/Berlin","windows":[],"allow_user_ids":[],"allows_urgent":true,"urgent_scope":"direct"}"#
+    );
   }
 
   #[test]
@@ -269,6 +373,7 @@ mod tests {
       push_mode: PushMode::AwayOnly,
       send_read_receipts: false,
       maybe_dnd_schedule: None,
+      maybe_uses_desktop_attention: None,
     };
     assert_eq!(
       serde_json::to_string(&settings).unwrap(),

@@ -8,15 +8,16 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::clock::now_ms;
+use crate::clock::{local_utc_offset_minutes, now_ms};
+use teamcraft_client_api::actions::MessagePriority;
 pub use teamcraft_client_api::notify::needs_channel_confirmation;
 use teamcraft_client_api::notify::{self, MentionRules};
-use teamcraft_proto::PushContentMode;
+use teamcraft_proto::{DndCandidate, PushContentMode};
 
 use crate::model::{
   Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, ThreadId, User, UserId,
 };
-use crate::notify_sync::dnd_to_server;
+use crate::notify_sync::{LocalZone, dnd_to_server};
 use crate::prefs::{NotificationPrefs, NotifyLevel, ThreadReplies};
 
 /// How many of the newest messages of a conversation are looked at per check.
@@ -36,6 +37,12 @@ pub struct PolicyInput<'a> {
   pub now: crate::model::TimestampMs,
   /// The window has focus and shows this conversation.
   pub is_viewing: bool,
+  /// The sender marked the message urgent.
+  pub is_urgent: bool,
+  /// The device's offset from UTC now; the schedule is checked in the device's own time.
+  pub utc_offset_minutes: i16,
+  /// When a quick do-not-disturb chosen on this device ends.
+  pub maybe_dnd_until: Option<crate::model::TimestampMs>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +83,7 @@ pub fn decide(input: &PolicyInput) -> Decision {
   if input.prefs.is_muted_in(&id, maybe_space.as_deref()) {
     return Decision::Skip(SkipReason::Muted);
   }
-  if input.me.presence == PresenceStatus::DoNotDisturb || is_in_dnd_schedule(input) {
+  if is_silenced_by_dnd(input) {
     return Decision::Skip(SkipReason::DoNotDisturb);
   }
   let is_mentioned = is_mentioned(input.body, input.me, input.prefs);
@@ -109,9 +116,34 @@ pub fn decide(input: &PolicyInput) -> Decision {
   }
 }
 
-fn is_in_dnd_schedule(input: &PolicyInput) -> bool {
-  dnd_to_server(&input.prefs.dnd, None, input.now)
-    .is_some_and(|schedule| schedule.silences(input.now / MS_PER_SECOND, input.sender))
+/// The second check after the server's (notifications.md, "DND"): manual DND (until it ends) or a
+/// schedule window silences, unless the sender is on the allow list or an urgent message may break
+/// through.
+fn is_silenced_by_dnd(input: &PolicyInput) -> bool {
+  let zone = LocalZone {
+    utc_offset_minutes: input.utc_offset_minutes,
+    maybe_time_zone: None,
+  };
+  let maybe_schedule = dnd_to_server(&input.prefs.dnd, &zone, None);
+  let lets_through = maybe_schedule.as_ref().is_some_and(|schedule| {
+    schedule.lets_through(DndCandidate {
+      sender: input.sender,
+      is_urgent: input.is_urgent,
+      is_direct: matches!(
+        input.conversation.kind,
+        ConversationKind::Direct | ConversationKind::Group
+      ),
+    })
+  });
+  if lets_through {
+    return false;
+  }
+  let is_manual = input.me.presence == PresenceStatus::DoNotDisturb
+    && input.maybe_dnd_until.is_none_or(|until| input.now < until);
+  is_manual
+    || maybe_schedule.is_some_and(|schedule| {
+      schedule.is_active_at(input.now.div_euclid(MS_PER_SECOND), input.utc_offset_minutes)
+    })
 }
 
 /// `@username`, `@channel`/`@here`/`@all` (when enabled), the first name (when enabled) or a keyword
@@ -180,11 +212,7 @@ impl Notifier {
   pub fn collect(&self, backend: &dyn crate::backend::Backend) -> Vec<Found> {
     let me = backend.me();
     let mut found = Vec::new();
-    let mut conversations = Vec::new();
-    for space in backend.spaces() {
-      conversations.extend(backend.space_conversations(space.id));
-    }
-    conversations.extend(backend.direct_conversations());
+    let conversations = all_conversations(backend);
     for conversation in &conversations {
       self.collect_messages(backend, conversation, &mut found);
     }
@@ -262,15 +290,52 @@ impl Notifier {
   }
 }
 
+/// Channels of every space and the direct conversations.
+pub fn all_conversations(backend: &dyn crate::backend::Backend) -> Vec<Conversation> {
+  let mut conversations = Vec::new();
+  for space in backend.spaces() {
+    conversations.extend(backend.space_conversations(space.id));
+  }
+  conversations.extend(backend.direct_conversations());
+  conversations
+}
+
+/// Finds conversations that became read (here or on another device), so their notifications can be
+/// withdrawn. The first look reports every read conversation: push notifications the service worker
+/// showed while the app was closed may still be on screen.
+#[derive(Default)]
+pub struct ReadWatcher {
+  maybe_unread: RefCell<Option<HashMap<ConversationId, u32>>>,
+}
+
+impl ReadWatcher {
+  pub fn newly_read(&self, conversations: &[(ConversationId, u32)]) -> Vec<ConversationId> {
+    let current: HashMap<ConversationId, u32> = conversations.iter().copied().collect();
+    let previous = self.maybe_unread.replace(Some(current));
+    conversations
+      .iter()
+      .filter(|(_, unread)| *unread == 0)
+      .filter(|(id, _)| {
+        previous
+          .as_ref()
+          .is_none_or(|previous| previous.get(id).is_some_and(|before| *before > 0))
+      })
+      .map(|(id, _)| *id)
+      .collect()
+  }
+}
+
 /// Applies the policy to what the watcher found and builds what should be shown.
 pub fn notifications_for(
   found: Vec<Found>,
   prefs: &NotificationPrefs,
   backend: &dyn crate::backend::Backend,
   is_viewing: impl Fn(ConversationId) -> bool,
+  maybe_dnd_until: Option<crate::model::TimestampMs>,
 ) -> Vec<Notification> {
   let me = backend.me();
   let now = now_ms();
+  let utc_offset_minutes = local_utc_offset_minutes(now);
   let mode = backend.push_content_mode();
   found
     .into_iter()
@@ -284,6 +349,9 @@ pub fn notifications_for(
         kind: item.kind,
         now,
         is_viewing: is_viewing(item.conversation.id),
+        is_urgent: is_urgent(backend, &item.message),
+        utc_offset_minutes,
+        maybe_dnd_until,
       };
       if decide(&input) != Decision::Notify {
         return None;
@@ -308,6 +376,13 @@ pub fn notifications_for(
     })
     .map(|notification| limited_to(notification, &mode))
     .collect()
+}
+
+fn is_urgent(backend: &dyn crate::backend::Backend, message: &Message) -> bool {
+  backend
+    .message_extras(message.conversation, &[message.id])
+    .first()
+    .is_some_and(|extras| extras.priority == MessagePriority::Urgent)
 }
 
 /// Cuts a notification down to what the verified workspace policy allows on a lock screen, whatever
@@ -359,6 +434,47 @@ mod tests {
       let generic = limited_to(shown(), &mode);
       assert_eq!(generic.body, None);
       assert_eq!(generic.title, NotificationTitle::Generic);
+    }
+  }
+
+  mod withdrawal {
+    use super::*;
+
+    #[test]
+    fn the_first_look_reports_every_read_conversation() {
+      let watcher = ReadWatcher::default();
+      assert_eq!(
+        watcher.newly_read(&[(id_from_raw(1), 0), (id_from_raw(2), 3)]),
+        vec![id_from_raw(1)]
+      );
+    }
+
+    #[test]
+    fn a_conversation_is_reported_once_when_its_unread_count_drops_to_zero() {
+      let watcher = ReadWatcher::default();
+      watcher.newly_read(&[(id_from_raw(1), 0), (id_from_raw(2), 3)]);
+      assert_eq!(
+        watcher.newly_read(&[(id_from_raw(1), 0), (id_from_raw(2), 3)]),
+        Vec::new()
+      );
+      assert_eq!(
+        watcher.newly_read(&[(id_from_raw(1), 0), (id_from_raw(2), 0)]),
+        vec![id_from_raw(2)]
+      );
+      assert_eq!(
+        watcher.newly_read(&[(id_from_raw(1), 0), (id_from_raw(2), 0)]),
+        Vec::new()
+      );
+    }
+
+    #[test]
+    fn a_new_conversation_without_unread_messages_is_not_reported() {
+      let watcher = ReadWatcher::default();
+      watcher.newly_read(&[(id_from_raw(1), 2)]);
+      assert_eq!(
+        watcher.newly_read(&[(id_from_raw(1), 2), (id_from_raw(9), 0)]),
+        Vec::new()
+      );
     }
   }
 
@@ -475,31 +591,142 @@ mod tests {
     assert_eq!(decide(&input), Decision::Skip(SkipReason::Viewing));
   }
 
-  #[test]
-  fn the_do_not_disturb_schedule_silences() {
-    let prefs = NotificationPrefs {
-      dnd: DndSchedule {
-        is_enabled: true,
-        from: "00:00".into(),
-        to: "23:59".into(),
-        weekdays_only: false,
-      },
-      ..NotificationPrefs::default()
-    };
-    assert_eq!(
-      decide(&input(&prefs, ConversationKind::Direct, "hi")),
-      Decision::Skip(SkipReason::DoNotDisturb)
-    );
-  }
+  mod dnd {
+    use super::*;
+    use teamcraft_proto::{DndWindow, Weekday};
 
-  #[test]
-  fn manual_do_not_disturb_silences() {
-    let prefs = NotificationPrefs::default();
-    let mut input = input(&prefs, ConversationKind::Direct, "hi");
-    let mut me = input.me.clone();
-    me.presence = PresenceStatus::DoNotDisturb;
-    input.me = &me;
-    assert_eq!(decide(&input), Decision::Skip(SkipReason::DoNotDisturb));
+    #[test]
+    fn a_schedule_window_silences() {
+      let prefs = scheduled(vec![midday(vec![Weekday::Wednesday])]);
+      assert_eq!(
+        decide(&input(&prefs, ConversationKind::Direct, "hi")),
+        Decision::Skip(SkipReason::DoNotDisturb)
+      );
+    }
+
+    #[test]
+    fn only_the_window_on_todays_weekday_counts() {
+      // NOW is a Wednesday.
+      let prefs = scheduled(vec![midday(vec![Weekday::Monday, Weekday::Thursday])]);
+      assert_eq!(
+        decide(&input(&prefs, ConversationKind::Direct, "hi")),
+        Decision::Notify
+      );
+    }
+
+    #[test]
+    fn any_of_several_windows_silences() {
+      let prefs = scheduled(vec![
+        midday(vec![Weekday::Monday]),
+        midday(vec![Weekday::Wednesday]),
+      ]);
+      assert_eq!(
+        decide(&input(&prefs, ConversationKind::Direct, "hi")),
+        Decision::Skip(SkipReason::DoNotDisturb)
+      );
+    }
+
+    #[test]
+    fn the_device_offset_places_the_window() {
+      // 12:00 UTC is 15:00 at +180; the window ends at 14:00 local time.
+      let prefs = scheduled(vec![midday(vec![Weekday::Wednesday])]);
+      let mut candidate = input(&prefs, ConversationKind::Direct, "hi");
+      candidate.utc_offset_minutes = 180;
+      assert_eq!(decide(&candidate), Decision::Notify);
+    }
+
+    #[test]
+    fn manual_do_not_disturb_silences_until_it_ends() {
+      let prefs = NotificationPrefs::default();
+      let mut candidate = input(&prefs, ConversationKind::Direct, "hi");
+      let me = in_dnd(candidate.me);
+      candidate.me = &me;
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::DoNotDisturb));
+      candidate.maybe_dnd_until = Some(NOW + 1);
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::DoNotDisturb));
+      candidate.maybe_dnd_until = Some(NOW);
+      assert_eq!(decide(&candidate), Decision::Notify);
+    }
+
+    #[test]
+    fn allowed_people_break_through_schedule_and_manual_dnd() {
+      let mut prefs = scheduled(vec![midday(vec![Weekday::Wednesday])]);
+      prefs.dnd.allow_user_ids = vec![id_from_raw(2)];
+      let mut candidate = input(&prefs, ConversationKind::Direct, "hi");
+      assert_eq!(decide(&candidate), Decision::Notify);
+      let me = in_dnd(candidate.me);
+      candidate.me = &me;
+      assert_eq!(decide(&candidate), Decision::Notify);
+      candidate.sender = id_from_raw(3);
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::DoNotDisturb));
+    }
+
+    #[test]
+    fn allowed_people_break_through_manual_dnd_without_a_schedule() {
+      let mut prefs = NotificationPrefs::default();
+      prefs.dnd.allow_user_ids = vec![id_from_raw(2)];
+      let mut candidate = input(&prefs, ConversationKind::Direct, "hi");
+      let me = in_dnd(candidate.me);
+      candidate.me = &me;
+      assert_eq!(decide(&candidate), Decision::Notify);
+    }
+
+    #[test]
+    fn urgent_messages_break_through_only_when_allowed() {
+      let quiet = scheduled(vec![midday(vec![Weekday::Wednesday])]);
+      let mut candidate = input(&quiet, ConversationKind::Direct, "hi");
+      candidate.is_urgent = true;
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::DoNotDisturb));
+      let mut urgent = quiet.clone();
+      urgent.dnd.allows_urgent = true;
+      candidate.prefs = &urgent;
+      assert_eq!(decide(&candidate), Decision::Notify);
+      candidate.is_urgent = false;
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::DoNotDisturb));
+    }
+
+    #[test]
+    fn breaking_through_dnd_still_respects_mutes() {
+      let mut prefs = scheduled(vec![midday(vec![Weekday::Wednesday])]);
+      prefs.dnd.allows_urgent = true;
+      prefs.set_conversation(
+        &conversation(ConversationKind::Direct).id.to_string(),
+        ConversationNotify {
+          maybe_level: None,
+          mute: MuteFor::Forever,
+        },
+      );
+      let mut candidate = input(&prefs, ConversationKind::Direct, "hi");
+      candidate.is_urgent = true;
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::Muted));
+    }
+
+    fn scheduled(windows: Vec<DndWindow>) -> NotificationPrefs {
+      NotificationPrefs {
+        dnd: DndSchedule {
+          is_enabled: true,
+          windows,
+          ..DndSchedule::default()
+        },
+        ..NotificationPrefs::default()
+      }
+    }
+
+    /// 10:00 to 14:00 local time.
+    fn midday(weekdays: Vec<Weekday>) -> DndWindow {
+      DndWindow {
+        weekdays,
+        start_minute: 10 * 60,
+        end_minute: 14 * 60,
+      }
+    }
+
+    fn in_dnd(me: &User) -> User {
+      User {
+        presence: PresenceStatus::DoNotDisturb,
+        ..me.clone()
+      }
+    }
   }
 
   #[test]
@@ -589,6 +816,9 @@ mod tests {
       kind: CandidateKind::Message,
       now: NOW,
       is_viewing: false,
+      is_urgent: false,
+      utc_offset_minutes: 0,
+      maybe_dnd_until: None,
     }
   }
 

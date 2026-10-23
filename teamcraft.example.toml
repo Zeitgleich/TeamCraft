@@ -194,9 +194,18 @@ read_receipts_default = true
 urgent_repeat_interval_secs = 120
 urgent_max_pushes = 5
 urgent_scheduler_interval_secs = 15
-# While a desktop device of a user is active, pushes to their phones wait this long and are sent only
-# if the message is still unread; 0 pushes at once.
+# While a desktop or web session of a user is attentive (window focused, recent input, screen not
+# locked), pushes to their phones wait this long and are sent only if the message is still unread; 0
+# sends none while the desktop is attentive.
 mobile_push_delay_secs = 120
+# Desktop and web sessions report whether the user looks at them (transitions only, kept in memory,
+# never stored or logged); off: they don't, and an active desktop holds pushes back like presence.
+is_desktop_attention_enabled = true
+# How long an "attentive" report counts; the session's gateway heartbeats renew it (keep it above
+# twice [gateway] heartbeat_interval_secs).
+attention_lease_secs = 75
+# Pushes held per user while a desktop is attentive; beyond that the oldest goes out at once.
+max_held_pushes_per_user = 100
 
 # E-mail digest of missed mentions (PLAN.md §5): people who turn it on get one content-free mail per
 # interval ("3 new mentions") for mentions that are still unread. Needs [mail.smtp] and
@@ -388,7 +397,21 @@ max_asset_bytes = 524288
 # server logs at startup.
 # vapid_private_key = "..."
 vapid_subject = "mailto:admin@example.com"
-ttl_secs = 3600
+# How long push services may hold a wake-up for an offline device: messages, rings (0: the ring
+# timeout of [calls]), withdrawals after reading elsewhere, test pushes.
+ttl_secs = 86400
+call_ttl_secs = 0
+dismiss_ttl_secs = 86400
+test_ttl_secs = 300
+# Temporary failures (5xx, timeouts) are tried again this often, waiting 2 s, then 4 s, ...
+max_retries = 2
+retry_initial_delay_ms = 2000
+# The shortest time between two test pushes to one device (notification diagnostics).
+test_interval_secs = 10
+# Calls one user may push to other people's phones per minute (further rings reach open apps only).
+max_rings_per_minute = 10
+# Withdrawals ("read elsewhere") for one conversation within this time go out as one.
+dismiss_coalesce_ms = 3000
 request_timeout_secs = 10
 # Per pool: APNs/FCM share one, Web Push/UnifiedPush (endpoints users chose) another.
 max_concurrent_sends = 32

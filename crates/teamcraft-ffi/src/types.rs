@@ -4,8 +4,9 @@
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
 use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
+use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
 use teamcraft_core::push_preview::{PreviewContent, PushPreview};
-use teamcraft_proto::{PushKind, PushProvider};
+use teamcraft_proto::{PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto, TestPushResponse};
 
 /// Where the app keeps an account's data.
 #[derive(uniffi::Record)]
@@ -91,10 +92,66 @@ pub struct SearchHitItem {
   pub maybe_space_name: Option<String>,
 }
 
+/// What a wake-up asks the app to do (notifications.md, "Mobile push delivery").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PushNotificationKind {
+  /// Show a message notification (Android: the conversation's MessagingStyle notification).
+  Message,
+  /// Report an incoming call (Android: full-screen notification, iOS: CallKit).
+  Call,
+  /// Remove what was shown: the conversation (or thread) up to `maybe_message_id` was read on
+  /// another device, or, with `maybe_call_id`, the ring ended. Never shows anything.
+  Dismiss,
+  /// The diagnostics' test push: show a short confirmation on the "other" channel.
+  Test,
+  /// A kind this version doesn't know: show nothing.
+  Unknown,
+}
+
+/// Why the device keeps a push silent although the server sent it (its own second check).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NotificationSuppression {
+  Muted,
+  DoNotDisturb,
+}
+
+/// What the device saw of pushes, for the notification diagnostics screen.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PushDiagnosticsInfo {
+  pub received_count: u64,
+  pub maybe_last_received_at_ms: Option<i64>,
+  pub maybe_last_kind: Option<PushNotificationKind>,
+  /// From the server sending to the device opening the last push.
+  pub maybe_last_delay_ms: Option<i64>,
+  pub maybe_last_test_at_ms: Option<i64>,
+}
+
+/// How the push service took a test push.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TestPushOutcome {
+  Sent,
+  NotRegistered,
+  NotConfigured,
+  Unavailable,
+  Rejected,
+  /// The registration was dead; register again.
+  Gone,
+  Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TestPushResult {
+  pub outcome: TestPushOutcome,
+  /// `apns`, `fcm`, `unifiedpush` or `webpush` as the server knows the registration.
+  pub maybe_provider: Option<String>,
+  pub sent_at_ms: i64,
+}
+
 /// What a notification shows; the app formats it (MessagingStyle on Android) and translates the
 /// fallback texts.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct PushNotification {
+  pub kind: PushNotificationKind,
   pub conversation_id: String,
   pub maybe_message_id: Option<String>,
   pub maybe_conversation_name: Option<String>,
@@ -115,6 +172,19 @@ pub struct PushNotification {
   /// signature-checked there). Offer reply and mark-read only then: the conversation of a
   /// wake-up alone is the server's word.
   pub is_conversation_verified: bool,
+  /// The thread the message replies in, or (dismiss) the thread that was read.
+  pub maybe_thread_id: Option<String>,
+  /// The ringing call, or (dismiss) the call whose ring ended.
+  pub maybe_call_id: Option<String>,
+  /// What the app icon badge should show now.
+  pub maybe_badge: Option<u32>,
+  /// When the server sent the push (order notifications by message time, not by arrival).
+  pub maybe_sent_at_ms: Option<i64>,
+  /// The message was shown before: don't post or alert again (urgent repeats are never duplicates).
+  pub is_duplicate: bool,
+  /// The device's own check of mutes and DND says: show nothing (iOS without the filtering
+  /// entitlement: show it silently).
+  pub maybe_suppression: Option<NotificationSuppression>,
 }
 
 /// Device-local mention preferences (as on desktop): the server routes push by explicit mentions,
@@ -199,7 +269,15 @@ impl From<PushPreview> for PushNotification {
       PreviewContent::File { file_name } => (None, Some(file_name)),
       PreviewContent::Unavailable => (None, None),
     };
+    let wake_up = &preview.wake_up;
     Self {
+      kind: notification_kind(&wake_up.kind),
+      maybe_thread_id: wake_up.maybe_thread_id.map(|id| id.to_string()),
+      maybe_call_id: wake_up.maybe_call_id.map(|id| id.to_string()),
+      maybe_badge: wake_up.maybe_badge,
+      maybe_sent_at_ms: wake_up.maybe_sent_at.map(|at| at.0),
+      is_duplicate: false,
+      maybe_suppression: None,
       conversation_id: preview.wake_up.conversation_id.to_string(),
       maybe_message_id: preview.wake_up.maybe_message_id.map(|id| id.to_string()),
       maybe_conversation_name: preview.maybe_conversation_name,
@@ -213,6 +291,57 @@ impl From<PushPreview> for PushNotification {
       is_call: preview.wake_up.kind == PushKind::Call,
       is_silent: preview.is_silent,
       is_conversation_verified: preview.is_conversation_verified,
+    }
+  }
+}
+
+pub(crate) fn notification_kind(kind: &PushKind) -> PushNotificationKind {
+  match kind {
+    PushKind::Message | PushKind::Mention => PushNotificationKind::Message,
+    PushKind::Call => PushNotificationKind::Call,
+    PushKind::Dismiss => PushNotificationKind::Dismiss,
+    PushKind::Test => PushNotificationKind::Test,
+    PushKind::Unknown(_) => PushNotificationKind::Unknown,
+  }
+}
+
+impl From<Suppression> for NotificationSuppression {
+  fn from(suppression: Suppression) -> Self {
+    match suppression {
+      Suppression::Muted => Self::Muted,
+      Suppression::DoNotDisturb => Self::DoNotDisturb,
+    }
+  }
+}
+
+impl From<PushDiagnostics> for PushDiagnosticsInfo {
+  fn from(diagnostics: PushDiagnostics) -> Self {
+    Self {
+      received_count: diagnostics.received_count,
+      maybe_last_received_at_ms: diagnostics.maybe_last_received_at_ms,
+      maybe_last_kind: diagnostics.maybe_last_kind.as_ref().map(notification_kind),
+      maybe_last_delay_ms: diagnostics.maybe_last_delay_ms,
+      maybe_last_test_at_ms: diagnostics.maybe_last_test_at_ms,
+    }
+  }
+}
+
+impl From<TestPushResponse> for TestPushResult {
+  fn from(response: TestPushResponse) -> Self {
+    Self {
+      outcome: match response.outcome {
+        TestPushOutcomeProto::Sent => TestPushOutcome::Sent,
+        TestPushOutcomeProto::NotRegistered => TestPushOutcome::NotRegistered,
+        TestPushOutcomeProto::NotConfigured => TestPushOutcome::NotConfigured,
+        TestPushOutcomeProto::Unavailable => TestPushOutcome::Unavailable,
+        TestPushOutcomeProto::Rejected => TestPushOutcome::Rejected,
+        TestPushOutcomeProto::Gone => TestPushOutcome::Gone,
+        TestPushOutcomeProto::Unknown(_) => TestPushOutcome::Unknown,
+      },
+      maybe_provider: response
+        .maybe_provider
+        .map(|provider| provider.as_str().to_owned()),
+      sent_at_ms: response.sent_at.0,
     }
   }
 }

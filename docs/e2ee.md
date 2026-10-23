@@ -514,7 +514,36 @@ Details:
 - Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else. (Through a push
   gateway, the gateway sees the same, plus an opaque ID of the sending server; §7.1.)
 - The server decides *whether* to push using metadata it has anyway: membership, mute settings,
-  presence (don't push to the phone while the desktop is active), DND, and the mention list (§4.4).
+  attention (don't push to the phone while the user looks at a desktop), DND, and the mention list
+  (§4.4). Details: notifications.md, "Push routing" and "Mobile push delivery".
+- **What this shows the server, beyond content-free metadata it had before:**
+  - *Attention:* desktop and web sessions tell the server whether the user looks at the app (focused,
+    recent input, not idle, screen unlocked; never which window, what input or any content). They
+    report transitions only, and "away" only once it lasted a minute, so short glances away never
+    reach the server; the gateway heartbeats keep an attentive report alive as a lease. The server
+    learns coarse "at the desktop / not at the desktop" periods, held in memory only, never stored or
+    logged. Users turn it off in their notification settings ("Use desktop activity to hold phone
+    notifications"), admins for the whole instance (`[notifications] is_desktop_attention_enabled`);
+    without it a connected, active desktop holds phone pushes back as presence already did.
+    Organisations with works councils or employee-monitoring rules should decide on it.
+  - *DND:* the weekly schedule, the allow list of people who break through, whether urgent messages
+    do, and the IANA time zone (sent only while the schedule has ranges) are stored on the server, so
+    that routing works with every device offline. The time zone says roughly where the user is.
+  - *Urgent breaks DND* (opt-in): with the option on, an urgent message reaches the user during DND, by
+    default only in DMs and group DMs (`urgent_scope: direct`), so not everybody in a big channel can
+    wake them; `everywhere` widens it. People on the allow list break through anyway.
+- A forged `dismiss` (the server knows the push key) can only remove notifications and set the badge;
+  it never shows anything.
+- Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
+  a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push) and
+  `test` (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
+  carries the badge count and the send time; all of it is inside the ciphertext. What push services
+  and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
+  rather than an alert.
+- iOS calls go as mutable alerts on the app's topic, never as VoIP pushes: those need the separate
+  PushKit token, and a VoIP push to the alert token is refused as a dead token. Forwarding to CallKit
+  from the NSE needs the filtering entitlement below; until it is granted the NSE shows an
+  "incoming call" alert instead.
 - Keyword notifications ("notify me on 'deploy'") are matched on the client after decryption.
 - Browser (implemented): the service worker opens the encrypted local store (§9.1) read-only, opens
   the wake-up with the push key and shows conversation and sender names. The message text appears

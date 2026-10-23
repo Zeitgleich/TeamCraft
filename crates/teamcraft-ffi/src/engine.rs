@@ -16,9 +16,10 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServe
 use teamcraft_core::client::LinkApproval;
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
-use teamcraft_core::clock::SystemClock;
+use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
+use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::push_preview;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{SealedSqliteStore, StaticKeySource};
@@ -36,7 +37,8 @@ use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem, Presence,
-  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
+  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
+  SegmentPrefetchResult, TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -526,12 +528,21 @@ impl Engine {
   pub(crate) async fn notification_for_push(
     &mut self,
     payload: Vec<u8>,
+    utc_offset_minutes: i16,
   ) -> Result<PushNotification, TeamCraftError> {
     let api = self.api();
     // Without a token the preview still names conversation and sender.
     let maybe_api = self.tokens.0.access_token().map(|_| &api);
     let preview = push_preview(self.store.as_ref(), maybe_api, &payload).await?;
+    let now_ms = SystemClock.now_ms();
+    let store = self.store.as_ref();
+    push_guard::record_received(store, &preview.wake_up, now_ms);
+    let is_duplicate = push_guard::is_duplicate(store, &preview.wake_up)?;
+    let maybe_suppression =
+      push_guard::local_suppression(store, &preview.wake_up, now_ms, utc_offset_minutes)?;
     let mut notification: PushNotification = preview.into();
+    notification.is_duplicate = is_duplicate;
+    notification.maybe_suppression = maybe_suppression.map(Into::into);
     if !notification.is_mention
       && let (Some(text), Ok(backend)) = (&notification.maybe_text, self.backend())
     {
@@ -548,6 +559,19 @@ impl Engine {
       );
     }
     Ok(notification)
+  }
+
+  pub(crate) fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
+    Ok(push_guard::push_diagnostics(self.store.as_ref())?.into())
+  }
+
+  pub(crate) async fn send_test_push(&self) -> Result<TestPushResult, TeamCraftError> {
+    let api = self.api();
+    Ok(
+      push_guard::send_test_push(self.store.as_ref(), &api)
+        .await?
+        .into(),
+    )
   }
 
   /// Remembers the preferences in the store, so a process that opens the store later (the iOS

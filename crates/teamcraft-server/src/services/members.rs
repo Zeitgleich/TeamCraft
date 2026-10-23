@@ -327,6 +327,14 @@ pub async fn set_read_position(
     [caller.user.id],
     &GatewayEvent::ConversationUpdate { conversation_id: id },
   );
+  // Phones that show a notification for what was just read remove it.
+  tokio::spawn(crate::push::routing::dismiss_read(
+    state.clone(),
+    caller.user.id,
+    id,
+    None,
+    request.message_id,
+  ));
   notifications::publish_read_receipt(
     state,
     caller.user.id,

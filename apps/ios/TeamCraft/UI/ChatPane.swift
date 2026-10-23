@@ -234,6 +234,7 @@ struct ChatPane: View {
         Image(systemName: conversation.isFavorite ? "star.fill" : "star")
       }
       .accessibilityLabel(Text("favorite"))
+      ConversationMuteMenu(conversationId: conversation.id)
       Button { isShowingFiles = true } label: { Image(systemName: "folder") }
         .accessibilityLabel(Text("files_title"))
       if conversation.kind != .integration {

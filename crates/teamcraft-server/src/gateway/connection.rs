@@ -226,7 +226,10 @@ async fn handle_client_message(
   message: GatewayClientMessage,
 ) -> bool {
   match message {
-    GatewayClientMessage::Heartbeat => send(socket, &GatewayServerMessage::HeartbeatAck).await.is_ok(),
+    GatewayClientMessage::Heartbeat => {
+      state.hub.renew_attention(&attached.session_id);
+      send(socket, &GatewayServerMessage::HeartbeatAck).await.is_ok()
+    },
     GatewayClientMessage::SetActivity { activity } => {
       let now = Instant::now();
       let is_too_soon = connection
@@ -235,6 +238,15 @@ async fn handle_client_message(
       if !is_too_soon {
         connection.maybe_last_activity_change = Some(now);
         set_activity(state, caller, attached, activity).await;
+      }
+      true
+    },
+    GatewayClientMessage::Attention { is_attentive } => {
+      // Kept in memory only, never stored or logged (e2ee.md §7). Cheap and idempotent: no throttle
+      // needed. Ignored where the instance turned attention off; the user's own choice is applied
+      // in the routing, and clients that know it send nothing.
+      if state.settings.notifications.is_desktop_attention_enabled {
+        state.hub.set_attention(&attached.session_id, is_attentive);
       }
       true
     },

@@ -400,6 +400,24 @@ impl TestApp {
   }
 
   /// Like [`Self::start_with`] with the given push dispatcher (tests record or fake the senders).
+  /// Calls and push together (ring pushes).
+  pub async fn start_with_calls_and_push(
+    config: &CallsConfig,
+    signing_key_pem: &str,
+    dispatcher: PushDispatcher,
+  ) -> Option<Self> {
+    let calls = CallService::new(config, signing_key_pem.as_bytes()).unwrap();
+    Self::start_full(
+      |_| {},
+      Extras {
+        maybe_calls: Some(calls),
+        maybe_push: Some(dispatcher),
+        ..Extras::default()
+      },
+    )
+    .await
+  }
+
   pub async fn start_with_push(
     customize: impl FnOnce(&mut Settings),
     dispatcher: PushDispatcher,
@@ -428,6 +446,8 @@ impl TestApp {
     // Tests make many requests (and fail many authentications) from one address; the ones about
     // rate limits switch the limits on again.
     settings.security.rate_limits.is_enabled = false;
+    // Withdrawals coalesce for a moment only, so tests see them quickly.
+    settings.push.dismiss_coalesce = Duration::from_millis(50);
     customize(&mut settings);
 
     let keys = JwksCache::new(
@@ -455,12 +475,14 @@ impl TestApp {
       // Each app gets its own worker ID: parallel tests share the S3 bucket, and IDs name its objects.
       ids: Arc::new(SnowflakeGenerator::new(next_worker_id()).unwrap()),
       push: Arc::new(maybe_push.unwrap_or_else(|| PushDispatcher::new(4))),
+      push_tracker: Arc::default(),
       revocations: Arc::new(Revocations::default()),
       hub: Arc::new(Hub::new(HubOptions {
         resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
         buffer_events: settings.gateway.resume_buffer_events,
         max_sessions_per_device: settings.gateway.max_sessions_per_device,
         max_sessions_per_user: settings.gateway.max_sessions_per_user,
+        attention_lease: Duration::from_secs(settings.notifications.attention_lease_secs),
       })),
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),

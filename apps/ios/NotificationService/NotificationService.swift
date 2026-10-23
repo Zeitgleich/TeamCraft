@@ -2,16 +2,21 @@ import CallKit
 import Foundation
 import UserNotifications
 
-/// Rewrites the generic APNs alert into a notification with sender and preview (docs/e2ee.md §7,
-/// the Threema model): opens the sealed wake-up with the device's push key, fetches and decrypts
-/// the message from the shared store through the Rust core, and shows it. A call wake-up is handed
-/// to CallKit instead. The extension never touches MLS state; it takes the cross-process lock so
-/// the app and the extension don't sync at the same time.
+/// Rewrites the generic APNs alert into what the push means (docs/e2ee.md §7, notifications.md
+/// "Mobile push delivery"): opens the sealed wake-up with the device's push key, fetches and
+/// decrypts the message from the shared store through the Rust core, and shows it with sender,
+/// preview, badge and the right interruption level. Calls go to CallKit (with the filtering
+/// entitlement) or show as an incoming-call alert; muted, DND and already shown messages stay quiet.
+/// The extension never touches MLS state; it takes the cross-process lock so the app and the
+/// extension don't sync at the same time.
 ///
 /// Memory: extensions have a small limit (about 24 MB); the first device test must watch it.
 final class NotificationService: UNNotificationServiceExtension {
   /// How long to wait for the app, which holds the lock while it is in the foreground.
   private static let lockTimeout: TimeInterval = 8
+  /// Info.plist key (from `NSE_NOTIFICATION_FILTERING`): the extension is signed with
+  /// `com.apple.developer.usernotifications.filtering`, so an empty content shows nothing.
+  private static let filteringKey = "TCNotificationFiltering"
 
   private let delivery = DeliveryGate()
   private var maybeOriginal: UNNotificationContent?
@@ -22,18 +27,18 @@ final class NotificationService: UNNotificationServiceExtension {
   ) {
     maybeOriginal = request.content
     maybeHandler = contentHandler
-    let userInfo = request.content.userInfo
     let original = request.content
     Task {
-      let content = await Self.process(userInfo: userInfo, original: original)
+      let content = await Self.process(original: original)
       deliver(content)
     }
   }
 
-  /// About 30 seconds passed: show the best we have.
+  /// About 30 seconds passed: show the best we have. The sealed wake-up stays, so an app in the
+  /// foreground can still open it.
   override func serviceExtensionTimeWillExpire() {
     guard let original = maybeOriginal else { return }
-    deliver(Self.builder.generic(from: original))
+    deliver(Self.builder.generic(from: original, keepsSealed: true))
   }
 
   private func deliver(_ content: UNNotificationContent) {
@@ -42,32 +47,51 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   private static var builder: NotificationContentBuilder {
-    NotificationContentBuilder(
-      fallbackSender: String(localized: "app_name"),
-      fallbackText: String(localized: "notification_new_message"),
-      fileText: { String(localized: "notification_file \($0)") })
+    NotificationContentBuilder(strings: .localized)
   }
 
-  private static func process(userInfo: [AnyHashable: Any], original: UNNotificationContent) async
-    -> UNNotificationContent
-  {
-    guard let sealed = PushPayload.sealedBytes(from: userInfo),
+  private static var canFilter: Bool {
+    let value = Bundle.main.object(forInfoDictionaryKey: filteringKey) as? String
+    return value?.uppercased() == "YES"
+  }
+
+  private static func process(original: UNNotificationContent) async -> UNNotificationContent {
+    guard let sealed = PushPayload.sealedBytes(from: original.userInfo),
       let notification = await decrypt(sealed)
     else {
-      return builder.generic(from: original)
+      return builder.generic(from: original, keepsSealed: true)
     }
+    let flags = PushFlags(notification)
     // App lock on: the lock screen must not show what the locked app hides. Calls still ring.
-    if SharedContainer().isAppLockOn && !notification.isCall {
+    if SharedContainer().isAppLockOn && notification.kind == .message
+      && !(flags.isDuplicate || flags.maybeSuppression != nil)
+    {
+      await DeliveredNotifications.setBadge(flags.maybeBadge)
       return builder.generic(from: original)
     }
-    if notification.isCall {
+    let presentation = PushPresentation.of(flags, canFilter: canFilter)
+    switch presentation {
+    case .message, .quietMessage:
+      await DeliveredNotifications.removeEarlier(of: notification)
+      let (content, maybeIntent) = builder.message(for: notification, presentation: presentation, base: original)
+      return await builder.communicationStyled(
+        content, intent: maybeIntent, presentation: presentation, flags: flags)
+    case .callKit:
       await reportCall(notification)
-      // With the filtering entitlement an empty content shows nothing; without it the system
-      // falls back to the generic alert, which is acceptable.
+      await DeliveredNotifications.setBadge(flags.maybeBadge)
       return UNNotificationContent()
+    case .callAlert:
+      return builder.callAlert(for: notification, base: original)
+    case .test:
+      return builder.test(for: notification, base: original)
+    case .drop:
+      if notification.kind == .dismiss { await DeliveredNotifications.apply(dismiss: notification) }
+      await DeliveredNotifications.setBadge(flags.maybeBadge)
+      return UNNotificationContent()
+    case .quietGeneric:
+      if notification.kind == .dismiss { await DeliveredNotifications.apply(dismiss: notification) }
+      return builder.quietGeneric(for: flags, base: original)
     }
-    let (content, intent) = builder.content(for: notification, base: original)
-    return await builder.communicationStyled(content, intent: intent)
   }
 
   /// Opens the core under the cross-process lock; `nil` if not signed in, locked out or failed.
@@ -80,7 +104,8 @@ final class NotificationService: UNNotificationServiceExtension {
     defer { lock.release() }
     do {
       let core = try CoreFactory().open(account: account, createKey: false, listener: ClosureEventListener {})
-      let notification = try await core.notificationForPush(payload: sealed)
+      let notification = try await core.notificationForPush(
+        payload: sealed, utcOffsetMinutes: PushClock.utcOffsetMinutes())
       // The app reloads what the extension stored.
       StoreChangeNotifier().post()
       return notification
@@ -89,14 +114,15 @@ final class NotificationService: UNNotificationServiceExtension {
     }
   }
 
-  /// Wakes the app into CallKit (`reportNewIncomingVoIPPushPayload`, iOS 14.5+); the app's PushKit
-  /// registry receives the payload and reports the call.
+  /// Wakes the app into CallKit (`reportNewIncomingVoIPPushPayload`, iOS 14.5+, needs the filtering
+  /// entitlement); the app's PushKit registry receives the payload and reports the call.
   private static func reportCall(_ notification: PushNotification) async {
     let name = notification.maybeSenderName ?? notification.maybeConversationName ?? String(localized: "app_name")
-    let payload: [AnyHashable: Any] = [
-      "conversation_id": notification.conversationId,
-      "caller_name": name,
+    var payload: [AnyHashable: Any] = [
+      CallForward.conversationKey: notification.conversationId,
+      CallForward.callerNameKey: name,
     ]
+    if let callId = notification.maybeCallId { payload[CallForward.callIdKey] = callId }
     await withCheckedContinuation { continuation in
       CXProvider.reportNewIncomingVoIPPushPayload(payload) { _ in continuation.resume() }
     }

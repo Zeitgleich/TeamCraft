@@ -1,4 +1,5 @@
-//! Push registration with the device's push key (e2ee.md §7) and typing indicators.
+//! Push registration with the device's push key (e2ee.md §7), the settings and diagnostics the
+//! device's own push checks need (`push_guard`), and typing indicators.
 
 use std::collections::HashMap;
 
@@ -10,12 +11,13 @@ use teamcraft_crypto::push_gateway::seal_bound_token;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
   BOUND_TOKEN_PREFIX, Base64Bytes, ConversationId, GatewayClientMessage, PushProvider, PushWakeUp,
-  RegisterPushRequest, UserId,
+  RegisterPushRequest, TestPushResponse, UserId,
 };
 
 use super::Client;
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
+use crate::push_guard;
 use crate::push_preview::{self, PUSH_KEY_RECORD};
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -206,6 +208,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.api.unregister_push(self.account.device_id).await?;
     Ok(())
+  }
+
+  /// Asks the server for a test wake-up to this device (notification diagnostics).
+  pub async fn send_test_push(&self) -> Result<TestPushResponse, CoreError> {
+    Ok(self.api.send_test_push(self.account.device_id).await?)
+  }
+
+  /// Fetches the user's notification settings for the device's own DND check (on fresh sessions
+  /// and when another device changed them).
+  pub async fn refresh_notification_settings(&mut self) -> Result<(), CoreError> {
+    let settings = self.api.notification_settings().await?;
+    push_guard::save_notification_settings(&self.store, &settings)
   }
 
   /// What sealing a token for the server's gateway needs, or `None` when the provider goes to the

@@ -177,7 +177,11 @@ mod routing {
       user_id(&app, &s.alice).await
     );
     assert!(!push.wake_up.is_urgent);
-    assert_eq!(push.urgency, Urgency::Normal);
+    // Everything the user should see goes out at high priority (notifications.md, "Priority").
+    assert_eq!(push.urgency, Urgency::High);
+    assert!(push.wake_up.maybe_sent_at.is_some());
+    // A channel message that doesn't mention carol is not part of the badge.
+    assert_eq!(push.wake_up.maybe_badge, Some(0));
     app.stop().await;
   }
 
@@ -628,11 +632,15 @@ mod mobile_delay {
       .await;
     assert_eq!(read.status, StatusCode::NO_CONTENT, "{}", read.body);
     tokio::time::sleep(Duration::from_millis(1600)).await;
-    assert_eq!(
-      recorder.seen.lock().unwrap().len(),
-      1,
-      "the read message was not pushed"
-    );
+    let kinds: Vec<PushKind> = recorder
+      .seen
+      .lock()
+      .unwrap()
+      .iter()
+      .map(|push| push.wake_up.kind.clone())
+      .collect();
+    // The read message was not pushed; the phone was told to remove the first one, now read too.
+    assert_eq!(kinds, vec![PushKind::Mention, PushKind::Dismiss]);
     app.stop().await;
   }
 
@@ -956,8 +964,8 @@ mod web_push {
     // Transport headers.
     assert_eq!(headers["content-encoding"], "aes128gcm");
     assert_eq!(headers["content-type"], "application/octet-stream");
-    assert_eq!(headers["urgency"], "normal");
-    assert_eq!(headers["ttl"], "3600");
+    assert_eq!(headers["urgency"], "high");
+    assert_eq!(headers["ttl"], "86400");
     // VAPID: a token for the push service's origin, signed by the configured key.
     let vapid = VapidKey::from_base64url(VAPID_PRIVATE).unwrap();
     let authorization = headers["authorization"].to_str().unwrap();
@@ -1479,6 +1487,697 @@ mod via_gateway {
       )
       .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    app.stop().await;
+  }
+}
+
+/// Sends a gateway frame from a connected test client.
+async fn send_frame(socket: &mut ws::Socket, message: &GatewayClientMessage) {
+  socket
+    .send(Message::Text(serde_json::to_string(message).unwrap().into()))
+    .await
+    .unwrap();
+  // The server handles frames in order; a heartbeat round trip shows this one was seen.
+  socket
+    .send(Message::Text(
+      serde_json::to_string(&GatewayClientMessage::Heartbeat)
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+  while let Ok(Some(Ok(Message::Text(text)))) =
+    tokio::time::timeout(Duration::from_secs(5), socket.next()).await
+  {
+    if text.as_str().contains("heartbeat_ack") {
+      break;
+    }
+  }
+}
+
+fn kinds(pushes: &[Recorded]) -> Vec<PushKind> {
+  pushes.iter().map(|push| push.wake_up.kind.clone()).collect()
+}
+
+async fn mention_carol(app: &TestApp, s: &Scene, n: u8) -> String {
+  let id = user_id(app, &s.carol).await;
+  let mut body = message_body(n, &s.alice_device);
+  body["mentioned_user_ids"] = json!([id]);
+  let reply = app
+    .post(&s.alice, &format!("/conversations/{}/messages", s.channel), body)
+    .await;
+  assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+  reply.id()
+}
+
+/// Desktop attention (notifications.md, "Attention").
+mod attention {
+  use super::*;
+
+  async fn start_with_grace(recorder: &Recorder, grace_secs: u64) -> Option<TestApp> {
+    TestApp::start_with_push(
+      |settings| settings.notifications.mobile_push_delay_secs = grace_secs,
+      recorder.dispatcher(),
+    )
+    .await
+  }
+
+  #[tokio::test]
+  async fn an_open_desktop_the_user_does_not_look_at_never_delays_the_phone() {
+    let recorder = Recorder::default();
+    let Some(app) = start_with_grace(&recorder, 30).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+
+    mention_carol(&app, &s, 1).await;
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn looking_away_releases_a_held_push_before_the_grace_delay_ends() {
+    let recorder = Recorder::default();
+    let Some(app) = start_with_grace(&recorder, 30).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: true },
+    )
+    .await;
+
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+      recorder.seen.lock().unwrap().is_empty(),
+      "held while carol looks at the desktop"
+    );
+    // The screen locks: the phone gets the push now, not after 30 seconds.
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn users_who_turn_attention_off_are_held_by_presence_only() {
+    let recorder = Recorder::default();
+    let Some(app) = start_with_grace(&recorder, 1).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let reply = app
+      .put(
+        &s.carol,
+        "/me/notification-settings",
+        json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
+               "uses_desktop_attention": false}),
+      )
+      .await;
+    assert_eq!(reply.body["uses_desktop_attention"], false, "{}", reply.body);
+    // A later write that doesn't name the setting keeps it.
+    let kept = app
+      .put(
+        &s.carol,
+        "/me/notification-settings",
+        json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true}),
+      )
+      .await;
+    assert_eq!(kept.body["uses_desktop_attention"], false, "{}", kept.body);
+
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    // The report is ignored: the active desktop holds the push as presence would.
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+      recorder.seen.lock().unwrap().is_empty(),
+      "held by the active desktop"
+    );
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_instance_without_attention_says_so_and_ignores_reports() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| {
+        settings.notifications.mobile_push_delay_secs = 1;
+        settings.notifications.is_desktop_attention_enabled = false;
+      },
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    let settings = app.get(&s.carol, "/me/notification-settings").await;
+    assert_eq!(
+      settings.body["uses_desktop_attention"], false,
+      "{}",
+      settings.body
+    );
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+      recorder.seen.lock().unwrap().is_empty(),
+      "held by the active desktop"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn closing_the_desktop_releases_a_held_push() {
+    let recorder = Recorder::default();
+    let Some(app) = start_with_grace(&recorder, 30).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: true },
+    )
+    .await;
+
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(socket);
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+}
+
+/// Reading on one device removes the notification on the others.
+mod read_elsewhere {
+  use super::*;
+
+  #[tokio::test]
+  async fn reading_the_conversation_withdraws_the_phones_notification_with_the_new_badge() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let message = mention_carol(&app, &s, 1).await;
+    let first = recorder.wait_for(1).await;
+    assert_eq!(kinds(&first), vec![PushKind::Mention]);
+    assert_eq!(
+      first[0].wake_up.maybe_badge,
+      Some(1),
+      "one conversation with an unread mention"
+    );
+
+    let read = app
+      .put(
+        &s.carol,
+        &format!("/conversations/{}/read-position", s.channel),
+        json!({"message_id": message}),
+      )
+      .await;
+    assert_eq!(read.status, StatusCode::NO_CONTENT, "{}", read.body);
+    let pushes = recorder.wait_for(2).await;
+    assert_eq!(kinds(&pushes), vec![PushKind::Mention, PushKind::Dismiss]);
+    let dismiss = &pushes[1];
+    assert_eq!(dismiss.device, s.carol_push_device);
+    assert_eq!(dismiss.wake_up.conversation_id.to_string(), s.channel);
+    assert_eq!(dismiss.wake_up.maybe_message_id.unwrap().to_string(), message);
+    assert_eq!(dismiss.wake_up.maybe_thread_id, None);
+    assert_eq!(dismiss.wake_up.maybe_badge, Some(0));
+    // Withdrawals are silent: they never need to wake a dozing phone.
+    assert_eq!(dismiss.urgency, Urgency::Normal);
+
+    // Reading again changes nothing on the phone.
+    app
+      .put(
+        &s.carol,
+        &format!("/conversations/{}/read-position", s.channel),
+        json!({"message_id": message}),
+      )
+      .await;
+    assert_eq!(recorder.wait_for(3).await.len(), 2);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_notification_for_a_newer_message_stays_until_that_is_read() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let first = mention_carol(&app, &s, 1).await;
+    mention_carol(&app, &s, 2).await;
+    recorder.wait_for(2).await;
+
+    app
+      .put(
+        &s.carol,
+        &format!("/conversations/{}/read-position", s.channel),
+        json!({"message_id": first}),
+      )
+      .await;
+    assert_eq!(
+      kinds(&recorder.wait_for(3).await),
+      vec![PushKind::Mention, PushKind::Mention]
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn reading_a_thread_withdraws_only_that_threads_notification() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let carol_id = user_id(&app, &s.carol).await;
+    let root = send_in(&app, &s.carol, &s.channel, &s.carol_push_device, 1, None, &[]).await;
+    let reply = send_in(
+      &app,
+      &s.alice,
+      &s.channel,
+      &s.alice_device,
+      2,
+      Some(&root),
+      &[carol_id.as_str()],
+    )
+    .await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(kinds(&pushes), vec![PushKind::Mention]);
+    assert_eq!(pushes[0].wake_up.maybe_thread_id.unwrap().to_string(), root);
+
+    let read = app
+      .put(
+        &s.carol,
+        &format!("/conversations/{}/threads/{root}/read", s.channel),
+        json!({"message_id": reply}),
+      )
+      .await;
+    assert_eq!(read.status, StatusCode::NO_CONTENT, "{}", read.body);
+    let pushes = recorder.wait_for(2).await;
+    assert_eq!(kinds(&pushes), vec![PushKind::Mention, PushKind::Dismiss]);
+    assert_eq!(pushes[1].wake_up.maybe_thread_id.unwrap().to_string(), root);
+    app.stop().await;
+  }
+}
+
+/// DND overrides: allowed people and urgent messages (notifications.md, "DND").
+mod dnd_overrides {
+  use super::*;
+
+  async fn set_dnd(
+    app: &TestApp,
+    user: &TestUser,
+    allows_urgent: bool,
+    time_zone: &str,
+  ) -> reqwest::StatusCode {
+    let reply = app
+      .put(
+        user,
+        "/me/notification-settings",
+        json!({
+          "auto_follow_mentioned_threads": true,
+          "push_mode": "away_only",
+          "send_read_receipts": true,
+          "dnd_schedule": {
+            "utc_offset_minutes": 0,
+            "time_zone": time_zone,
+            "windows": [],
+            "allow_user_ids": [],
+            "allows_urgent": allows_urgent,
+            // The scene is a channel; DMs are the default scope.
+            "urgent_scope": "everywhere",
+          },
+        }),
+      )
+      .await;
+    reply.status
+  }
+
+  async fn urgent_mention(app: &TestApp, s: &Scene, n: u8, is_urgent: bool) {
+    let id = user_id(app, &s.carol).await;
+    let mut body = message_body(n, &s.alice_device);
+    body["mentioned_user_ids"] = json!([id]);
+    body["is_urgent"] = json!(is_urgent);
+    let reply = app
+      .post(&s.alice, &format!("/conversations/{}/messages", s.channel), body)
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+  }
+
+  #[tokio::test]
+  async fn urgent_messages_break_through_manual_dnd_only_when_allowed() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let dnd = app.put(&s.carol, "/me/presence", json!({"manual": "dnd"})).await;
+    assert!(dnd.status.is_success(), "{}", dnd.body);
+
+    assert_eq!(
+      set_dnd(&app, &s.carol, false, "Europe/Berlin").await,
+      StatusCode::OK
+    );
+    urgent_mention(&app, &s, 1, true).await;
+    assert!(
+      recorder.wait_for(0).await.is_empty(),
+      "urgent does not break through by default"
+    );
+
+    assert_eq!(
+      set_dnd(&app, &s.carol, true, "Europe/Berlin").await,
+      StatusCode::OK
+    );
+    urgent_mention(&app, &s, 2, false).await;
+    urgent_mention(&app, &s, 3, true).await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert!(pushes[0].wake_up.is_urgent);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn urgent_messages_in_channels_break_through_only_where_the_user_widened_it() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    app.put(&s.carol, "/me/presence", json!({"manual": "dnd"})).await;
+    let put = |scope: &'static str| {
+      json!({
+        "auto_follow_mentioned_threads": true,
+        "push_mode": "away_only",
+        "send_read_receipts": true,
+        "dnd_schedule": {"utc_offset_minutes": 0, "windows": [], "allow_user_ids": [],
+                         "allows_urgent": true, "urgent_scope": scope},
+      })
+    };
+    assert_eq!(
+      app
+        .put(&s.carol, "/me/notification-settings", put("direct"))
+        .await
+        .status,
+      StatusCode::OK
+    );
+    urgent_mention(&app, &s, 1, true).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "a channel is not a DM");
+    assert_eq!(
+      app
+        .put(&s.carol, "/me/notification-settings", put("everywhere"))
+        .await
+        .status,
+      StatusCode::OK
+    );
+    urgent_mention(&app, &s, 2, true).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn unknown_time_zones_are_refused_and_other_devices_hear_about_changes() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let other_device = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &other_device).await;
+
+    assert_eq!(
+      set_dnd(&app, &s.carol, false, "Mars/Olympus").await,
+      StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+      set_dnd(&app, &s.carol, false, "America/New_York").await,
+      StatusCode::OK
+    );
+    let events = ws::events(&mut socket, Duration::from_millis(500)).await;
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, teamcraft_proto::GatewayEvent::NotificationSettingsUpdate)),
+      "{events:?}"
+    );
+    let stored = app.get(&s.carol, "/me/notification-settings").await;
+    assert_eq!(stored.body["dnd_schedule"]["time_zone"], "America/New_York");
+    app.stop().await;
+  }
+}
+
+/// Rings reach phones without a live connection and stop when the ring ends.
+mod rings {
+  use std::path::PathBuf;
+
+  use teamcraft_server::config::CallsConfig;
+
+  use super::*;
+
+  /// Throwaway Ed25519 key used only by these tests. It protects nothing.
+  const SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
+-----END PRIVATE KEY-----
+";
+  const SFU_TOKEN: &str = "sfu-registration-token-for-tests";
+
+  #[tokio::test]
+  async fn a_ring_wakes_the_phone_and_answering_stops_it() {
+    let recorder = Recorder::default();
+    let Some(app) =
+      TestApp::start_with_calls_and_push(&calls_config(), SIGNING_KEY_PEM, recorder.dispatcher()).await
+    else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    let dm = app.post(&alice, "/dms", json!({"user_id": carol_id})).await;
+    assert!(dm.status.is_success(), "{}", dm.body);
+    let dm = dm.id();
+    let alice_device = register_device(&app, &alice).await;
+    let carol_phone = register_push_device(&app, &carol, "fcm").await;
+    let carol_desktop = register_device(&app, &carol).await;
+    let alice_id = user_id(&app, &alice).await;
+
+    let call = join_token(&app, &alice, &dm, &alice_device).await;
+    report(&app, "joined", &call, &alice_id, &alice_device).await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(kinds(&pushes), vec![PushKind::Call]);
+    assert_eq!(pushes[0].device, carol_phone);
+    assert_eq!(pushes[0].wake_up.maybe_call_id.unwrap().to_string(), call);
+    assert_eq!(pushes[0].wake_up.maybe_sender_id.unwrap().to_string(), alice_id);
+    assert_eq!(pushes[0].urgency, Urgency::High);
+
+    // Carol answers on her desktop: the phone stops ringing.
+    report(&app, "joined", &call, &carol_id, &carol_desktop).await;
+    let pushes = recorder.wait_for(2).await;
+    assert_eq!(kinds(&pushes), vec![PushKind::Call, PushKind::Dismiss]);
+    assert_eq!(pushes[1].wake_up.maybe_call_id.unwrap().to_string(), call);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_caller_ringing_too_often_reaches_open_apps_only() {
+    let recorder = Recorder::default();
+    let Some(app) =
+      TestApp::start_with_calls_and_push(&calls_config(), SIGNING_KEY_PEM, recorder.dispatcher()).await
+    else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    let dm = app.post(&alice, "/dms", json!({"user_id": carol_id})).await.id();
+    let alice_device = register_device(&app, &alice).await;
+    register_push_device(&app, &carol, "fcm").await;
+    let alice_id = user_id(&app, &alice).await;
+    // Ring, hang up, ring again: the default allows 10 a minute.
+    for _ in 0..11 {
+      let call = join_token(&app, &alice, &dm, &alice_device).await;
+      report(&app, "joined", &call, &alice_id, &alice_device).await;
+      report(&app, "left", &call, &alice_id, &alice_device).await;
+    }
+    let rings = recorder
+      .wait_for(30)
+      .await
+      .iter()
+      .filter(|push| push.wake_up.kind == PushKind::Call)
+      .count();
+    assert_eq!(rings, 10);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn do_not_disturb_keeps_rings_away() {
+    let recorder = Recorder::default();
+    let Some(app) =
+      TestApp::start_with_calls_and_push(&calls_config(), SIGNING_KEY_PEM, recorder.dispatcher()).await
+    else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    let dm = app.post(&alice, "/dms", json!({"user_id": carol_id})).await.id();
+    let alice_device = register_device(&app, &alice).await;
+    register_push_device(&app, &carol, "fcm").await;
+    app.put(&carol, "/me/presence", json!({"manual": "dnd"})).await;
+
+    let call = join_token(&app, &alice, &dm, &alice_device).await;
+    report(&app, "joined", &call, &user_id(&app, &alice).await, &alice_device).await;
+    assert!(recorder.wait_for(0).await.is_empty());
+    app.stop().await;
+  }
+
+  fn calls_config() -> CallsConfig {
+    CallsConfig {
+      sfu_url: "https://sfu.example.com:4433/call".into(),
+      issuer: teamcraft_server::testing::TEST_ISSUER.into(),
+      signing_key_path: PathBuf::from("unused.pem"),
+      join_token_ttl_secs: 60,
+      call_idle_secs: 3600,
+      maybe_sfu_registration_token: Some(SFU_TOKEN.to_owned().into()),
+      ring_timeout_secs: 30,
+      maybe_sfu_control_url: None,
+    }
+  }
+
+  async fn join_token(app: &TestApp, user: &TestUser, conversation: &str, device: &str) -> String {
+    let reply = app
+      .post(
+        user,
+        &format!("/conversations/{conversation}/call/join-token"),
+        json!({ "device_id": device }),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    reply.body["call_id"].as_str().unwrap().to_owned()
+  }
+
+  async fn report(app: &TestApp, action: &str, call_id: &str, user_id: &str, device_id: &str) {
+    let status = app
+      .http
+      .post(format!(
+        "{}/api/internal/v1/calls/participants/{action}",
+        app.base_url
+      ))
+      .bearer_auth(SFU_TOKEN)
+      .json(&json!({ "call_id": call_id, "user_id": user_id, "device_id": device_id }))
+      .send()
+      .await
+      .unwrap()
+      .status();
+    assert_eq!(status, StatusCode::NO_CONTENT);
+  }
+}
+
+/// Test pushes and delivery counts (notifications.md, "Diagnostics API").
+mod diagnostics {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_test_push_reaches_the_own_device_and_is_rate_limited() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+
+    let reply = app
+      .post(
+        &s.carol,
+        &format!("/devices/{}/push/test", s.carol_push_device),
+        json!({}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "sent");
+    assert_eq!(reply.body["provider"], "fcm");
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(kinds(&pushes), vec![PushKind::Test]);
+    assert_eq!(pushes[0].device, s.carol_push_device);
+
+    let again = app
+      .post(
+        &s.carol,
+        &format!("/devices/{}/push/test", s.carol_push_device),
+        json!({}),
+      )
+      .await;
+    assert_eq!(again.status, StatusCode::TOO_MANY_REQUESTS);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn test_pushes_go_only_to_own_registered_devices() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let foreign = app
+      .post(
+        &s.alice,
+        &format!("/devices/{}/push/test", s.carol_push_device),
+        json!({}),
+      )
+      .await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+    let unregistered = register_device(&app, &s.carol).await;
+    let reply = app
+      .post(&s.carol, &format!("/devices/{unregistered}/push/test"), json!({}))
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "not_registered");
+    assert!(recorder.wait_for(0).await.is_empty());
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn admins_see_delivery_counts_and_nothing_else() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    mention_carol(&app, &s, 1).await;
+    recorder.wait_for(1).await;
+    let carol_id = user_id(&app, &s.carol).await;
+
+    let health = app
+      .get(&s.alice, &format!("/admin/users/{carol_id}/push-health"))
+      .await;
+    assert_eq!(health.status, StatusCode::OK, "{}", health.body);
+    let device = health.body["devices"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|device| device["device_id"] == s.carol_push_device.as_str())
+      .unwrap()
+      .clone();
+    assert_eq!(device["provider"], "fcm");
+    assert_eq!(device["counts"]["sent"], 1);
+    assert_eq!(device["counts"]["failed"], 0);
+    let text = health.body.to_string();
+    assert!(
+      !text.contains(&s.channel),
+      "no conversation in the counts: {text}"
+    );
+
+    let denied = app
+      .get(&s.carol, &format!("/admin/users/{carol_id}/push-health"))
+      .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
     app.stop().await;
   }
 }

@@ -49,6 +49,7 @@ use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
+use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -341,6 +342,10 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<(), ApiError>>;
   /// Removes the device's push registration (`DELETE /devices/{id}/push`).
   fn unregister_push(&self, device: DeviceId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Asks the server to send a test wake-up to the device (`POST /devices/{id}/push/test`).
+  fn send_test_push(&self, device: DeviceId) -> impl Future<Output = Result<TestPushResponse, ApiError>>;
+  /// The user's notification settings (`GET /me/notification-settings`).
+  fn notification_settings(&self) -> impl Future<Output = Result<NotificationSettings, ApiError>>;
   /// How the server reaches its push gateway (`GET /push/gateway`), for sealing device tokens.
   fn push_gateway(&self) -> impl Future<Output = Result<PushGatewayResponse, ApiError>>;
   /// The public information of a push gateway (`GET /v1/info`, no account): its token key. Asked

@@ -16,6 +16,10 @@ use crate::{
   SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
 };
 
+/// How long a client waits before it reports that the user stopped being attentive, so the server
+/// learns coarse transitions, not a timeline of every glance away.
+pub const ATTENTION_AWAY_DELAY_SECS: u64 = 60;
+
 /// Frames sent by the client.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -42,6 +46,13 @@ pub enum GatewayClientMessage {
   /// The device became active or idle.
   SetActivity {
     activity: DeviceActivity,
+  },
+  /// Whether the user is looking at this desktop or web session right now: window focused and
+  /// visible, recent input, screen not locked (notifications.md, "Attention"). Sent on changes only
+  /// ("away" after [`ATTENTION_AWAY_DELAY_SECS`]) and only where the user's notification settings say
+  /// `uses_desktop_attention`; the session's heartbeats keep an attentive report alive.
+  Attention {
+    is_attentive: bool,
   },
   #[serde(other)]
   Unknown,
@@ -163,6 +174,9 @@ pub enum GatewayEvent {
     user_id: UserId,
     message_id: MessageId,
   },
+  /// The user's notification settings (DND schedule and overrides, push mode) changed on another
+  /// device; refetch `GET /me/notification-settings`. Sent only to that user.
+  NotificationSettingsUpdate,
   /// The user's thread follow or thread read position changed (on another device or by an
   /// automatic follow); refetch `GET /threads` or `GET /unread`. Sent only to that user.
   ThreadUpdate {
@@ -264,6 +278,10 @@ impl fmt::Debug for GatewayClientMessage {
         .field("conversation_id", conversation_id)
         .finish(),
       Self::SetActivity { activity } => f.debug_struct("SetActivity").field("activity", activity).finish(),
+      Self::Attention { is_attentive } => f
+        .debug_struct("Attention")
+        .field("is_attentive", is_attentive)
+        .finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
   }
@@ -302,6 +320,18 @@ mod tests {
         ..
       }
     ));
+  }
+
+  #[test]
+  fn attention_reports_have_a_stable_wire_format() {
+    assert_eq!(
+      serde_json::to_string(&GatewayClientMessage::Attention { is_attentive: true }).unwrap(),
+      r#"{"type":"attention","is_attentive":true}"#
+    );
+    assert_eq!(
+      serde_json::to_string(&GatewayEvent::NotificationSettingsUpdate).unwrap(),
+      r#"{"type":"notification_settings_update"}"#
+    );
   }
 
   #[test]

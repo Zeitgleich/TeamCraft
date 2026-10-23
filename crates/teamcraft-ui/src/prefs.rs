@@ -8,6 +8,10 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::{DndWindow, Weekday};
+
+use crate::attention::DEFAULT_ATTENTION_INPUT_SECS;
+use crate::model::UserId;
 
 /// Which messages notify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,25 +139,48 @@ impl Default for ConversationNotify {
   }
 }
 
-/// "Do not disturb" on a schedule, e.g. 18:00 to 08:00. Mentions are still collected.
+/// Monday first, as the schedule editor lists them.
+pub const EVERY_DAY: [Weekday; 7] = [
+  Weekday::Monday,
+  Weekday::Tuesday,
+  Weekday::Wednesday,
+  Weekday::Thursday,
+  Weekday::Friday,
+  Weekday::Saturday,
+  Weekday::Sunday,
+];
+
+/// "Do not disturb" on a weekly schedule, plus the people and messages that still get through (also
+/// during a manual DND). Mentions are still collected. Stored on the server (`notify_sync`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DndSchedule {
   pub is_enabled: bool,
-  /// `HH:MM`, local time.
-  pub from: String,
-  pub to: String,
-  pub weekdays_only: bool,
+  /// Weekly ranges in local time; kept while the schedule is off so turning it on again restores them.
+  pub windows: Vec<DndWindow>,
+  /// People whose messages notify anyway.
+  pub allow_user_ids: Vec<UserId>,
+  /// Messages marked urgent notify anyway.
+  pub allows_urgent: bool,
 }
 
 impl Default for DndSchedule {
   fn default() -> Self {
     Self {
       is_enabled: false,
-      from: "18:00".to_owned(),
-      to: "08:00".to_owned(),
-      weekdays_only: false,
+      windows: vec![default_dnd_window()],
+      allow_user_ids: Vec::new(),
+      allows_urgent: false,
     }
+  }
+}
+
+/// The range a new schedule starts with: evenings and nights, every day.
+pub fn default_dnd_window() -> DndWindow {
+  DndWindow {
+    weekdays: EVERY_DAY.to_vec(),
+    start_minute: 18 * 60,
+    end_minute: 8 * 60,
   }
 }
 
@@ -165,6 +192,12 @@ pub struct NotificationPrefs {
   pub push_when: PushWhen,
   /// Don't push to the phone while the desktop app is active, for this many minutes after activity.
   pub push_delay_minutes: u32,
+  /// This session counts as attentive (holding phone pushes back) only with input in the app within
+  /// this many seconds (notifications.md, "Attention").
+  pub attention_input_secs: u32,
+  /// Report whether the user looks at this session at all (the user's choice, synced through the
+  /// server's notification settings; off also where the instance turned it off).
+  pub uses_desktop_attention: bool,
   pub first_name_is_mention: bool,
   pub channel_mentions_notify: bool,
   /// Show the message text in desktop notifications (off: only who wrote where).
@@ -177,6 +210,8 @@ pub struct NotificationPrefs {
   pub thread_replies: ThreadReplies,
   pub auto_follow_on_channel_mention: bool,
   pub dnd: DndSchedule,
+  /// When the quick do-not-disturb chosen on this device ends (the server ends it then too).
+  pub maybe_dnd_until: Option<crate::model::TimestampMs>,
   /// Per conversation, keyed by the conversation ID as text.
   pub conversations: BTreeMap<String, ConversationNotify>,
   /// Per space, keyed by the space ID as text. Its channels follow it unless they have an entry of
@@ -191,6 +226,8 @@ impl Default for NotificationPrefs {
       push: NotifyLevel::Mentions,
       push_when: PushWhen::AwayOrOffline,
       push_delay_minutes: 2,
+      attention_input_secs: DEFAULT_ATTENTION_INPUT_SECS,
+      uses_desktop_attention: true,
       first_name_is_mention: true,
       channel_mentions_notify: true,
       show_preview: true,
@@ -200,6 +237,7 @@ impl Default for NotificationPrefs {
       thread_replies: ThreadReplies::Participating,
       auto_follow_on_channel_mention: true,
       dnd: DndSchedule::default(),
+      maybe_dnd_until: None,
       conversations: BTreeMap::new(),
       spaces: BTreeMap::new(),
     }

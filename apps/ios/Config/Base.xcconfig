@@ -19,6 +19,9 @@ KEYCHAIN_ACCESS_GROUP = $(AppIdentifierPrefix)de.zeitgleich.teamcraft
 // Entitlements of the extension. Swap for NotificationService.Filtering.entitlements once Apple granted
 // com.apple.developer.usernotifications.filtering (needed to suppress call pushes, README.md).
 NSE_ENTITLEMENTS = NotificationService/NotificationService.entitlements
+// YES together with the Filtering entitlements above: the extension then drops muted and duplicate
+// pushes and hands calls to CallKit; NO shows them quietly and calls as an incoming-call alert.
+NSE_NOTIFICATION_FILTERING = NO
 
 // APNs environment of the push entitlement (archives for TestFlight/App Store get production from the profile).
 APS_ENVIRONMENT = development

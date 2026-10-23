@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  Base64Bytes, ConversationResponse, Id, ListMessagesQuery, MessageId, PushContentMode, PushWakeUp,
+  Base64Bytes, ConversationResponse, Id, ListMessagesQuery, MessageId, PushContentMode, PushKind, PushWakeUp,
   Snowflake, UserSummary,
 };
 
@@ -95,9 +95,22 @@ pub async fn push_preview<A: ServerApi>(
       .or_else(|| participant_name(maybe_conversation.as_ref(), sender)),
     None => None,
   };
-  let (content, is_silent, is_conversation_verified) = match wake_up.maybe_message_id {
-    Some(message_id) => preview_content(store, maybe_api, &wake_up, message_id).await,
-    None => (PreviewContent::Unavailable, false, false),
+  // Only messages have content to fetch; a withdrawal names the newest message read, not one to show.
+  let (content, is_silent, is_conversation_verified) = match (&wake_up.kind, wake_up.maybe_message_id) {
+    (PushKind::Message | PushKind::Mention, Some(message_id)) => {
+      preview_content(store, maybe_api, &wake_up, message_id).await
+    },
+    // A ring names no message; answering joins that conversation's call, which the server controls
+    // anyway. It counts as verified when this device knows the conversation as one it is in, so the
+    // apps offer answer and decline.
+    (PushKind::Call, _) => (
+      PreviewContent::Unavailable,
+      false,
+      maybe_conversation
+        .as_ref()
+        .is_some_and(|conversation| conversation.maybe_my_membership.is_some()),
+    ),
+    _ => (PreviewContent::Unavailable, false, false),
   };
   let preview = PushPreview {
     wake_up,
@@ -322,6 +335,10 @@ mod tests {
         maybe_message_id: None,
         maybe_sender_id: None,
         is_urgent: false,
+        maybe_thread_id: None,
+        maybe_call_id: None,
+        maybe_badge: None,
+        maybe_sent_at: None,
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),

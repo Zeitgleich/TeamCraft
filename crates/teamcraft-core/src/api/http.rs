@@ -43,6 +43,7 @@ use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
+use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
 #[cfg(target_arch = "wasm32")]
@@ -736,6 +737,20 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/devices/{device}/push"), None)
       .await
+  }
+
+  async fn send_test_push(&self, device: DeviceId) -> Result<TestPushResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/devices/{device}/push/test"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
+  async fn notification_settings(&self) -> Result<NotificationSettings, ApiError> {
+    self.get("/me/notification-settings").await
   }
 
   async fn push_gateway(&self) -> Result<PushGatewayResponse, ApiError> {

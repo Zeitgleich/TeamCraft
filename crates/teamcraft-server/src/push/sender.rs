@@ -55,7 +55,8 @@ pub enum Urgency {
 pub struct PushMessage {
   /// `seal_wakeup` output: opaque to push services.
   pub sealed: Vec<u8>,
-  /// What the wake-up is for. Push services only need it to pick a channel (APNs: VoIP for calls).
+  /// What the wake-up is for. Push services only need it to pick a channel (APNs: background push
+  /// for withdrawals; FCM: priority).
   pub kind: PushKind,
   pub urgency: Urgency,
   /// How long the push service may hold it if the device is offline.
@@ -327,7 +328,7 @@ fn known_name(provider: &PushProvider) -> Option<&'static str> {
   }
 }
 
-fn now_millis() -> UnixMillis {
+pub(crate) fn now_millis() -> UnixMillis {
   let millis = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .map_or(0, |elapsed| elapsed.as_millis());
@@ -370,6 +371,10 @@ mod tests {
       maybe_message_id: None,
       maybe_sender_id: None,
       is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: None,
     }
   }
 

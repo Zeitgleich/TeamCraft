@@ -90,6 +90,13 @@ pub async fn set_thread_read(
     return Err(ApiError::Conflict("the thread is not followed".into()));
   }
   announce(state, conversation, thread, vec![caller.user.id]);
+  tokio::spawn(crate::push::routing::dismiss_read(
+    state.clone(),
+    caller.user.id,
+    conversation,
+    Some(thread),
+    reply.id,
+  ));
   Ok(())
 }
 

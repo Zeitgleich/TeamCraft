@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, push_provider AS \"push_provider!\", push_token AS \"push_token!\", push_key AS \"push_key!\"\n         FROM devices\n         WHERE user_id = $1 AND revoked_at IS NULL AND push_provider IS NOT NULL\n           AND push_token IS NOT NULL AND push_key IS NOT NULL\n         ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "push_provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_provider"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "push_token!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_token"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "push_key!",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "22c2d3a94650f7a263ed12a769cd851984d6d80e3b6b03199b86633ca91a9322"
+}

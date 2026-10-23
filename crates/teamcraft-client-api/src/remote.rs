@@ -289,6 +289,9 @@ pub enum ChatAction {
   },
   SetPresence {
     presence: PresenceStatus,
+    /// When a timed presence (quick do-not-disturb) ends; without it the presence stays.
+    #[serde(default)]
+    maybe_until: Option<TimestampMs>,
   },
   SetCustomStatus {
     #[serde(default)]
@@ -333,6 +336,11 @@ pub enum ChatAction {
   /// as away (docs/gateway.md).
   SetActivity {
     is_idle: bool,
+  },
+  /// Whether the user is looking at this session (window focused and visible, recent input, screen
+  /// not locked); repeated while attentive (notifications.md, "Attention").
+  SetAttention {
+    is_attentive: bool,
   },
   /// The user compared the keys and accepts the contact's new identity key.
   AcceptKeyChange {
@@ -501,7 +509,10 @@ impl ChatAction {
         conversation,
         is_favorite,
       } => backend.set_favorite(conversation, is_favorite),
-      Self::SetPresence { presence } => backend.set_presence(presence),
+      Self::SetPresence {
+        presence,
+        maybe_until,
+      } => backend.set_presence_until(presence, maybe_until),
       Self::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
       Self::MarkActivityRead => backend.mark_activity_read(),
       Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),

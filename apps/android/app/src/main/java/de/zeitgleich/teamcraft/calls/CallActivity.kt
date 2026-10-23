@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.calls
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -77,17 +79,87 @@ class CallActivity : ComponentActivity() {
     if (prefs(this).isSecureScreen) window.setFlags(FLAG_SECURE, FLAG_SECURE)
     setShowWhenLocked(true)
     setTurnScreenOn(true)
+    // A ring only shows the incoming-call screen; the microphone is asked for when answering.
+    if (intent?.action != ACTION_SHOW_INCOMING) requestMicrophoneIfMissing()
+    handle(intent)
+    setContent {
+      TeamCraftTheme {
+        val maybeState by calls.callState.collectAsStateWithLifecycle()
+        val maybeRing by calls.incomingRing.collectAsStateWithLifecycle()
+        val isJoining by calls.isJoining.collectAsStateWithLifecycle()
+        val isIdle = maybeRing == null && !isJoining && (maybeState == null || maybeState?.phase == CallPhase.ENDED)
+        LaunchedEffect(isIdle) {
+          // Declined, rang out, or the call ended.
+          if (isIdle) finish()
+        }
+        val ring = maybeRing
+        if (ring != null && maybeState == null && !isJoining) {
+          IncomingCallScreen(
+            ring = ring,
+            onAnswer = {
+              requestMicrophoneIfMissing()
+              calls.answer(ring.conversationId)
+            },
+            onDecline = { calls.decline() },
+          )
+        } else {
+          CallScreen(calls, maybeState)
+        }
+      }
+    }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    handle(intent)
+  }
+
+  /** "Answer" on the incoming-call notification opens this screen with the conversation. */
+  private fun handle(intent: Intent?) {
+    if (intent?.action != ACTION_ANSWER) return
+    val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: return
+    // Handled once: a recreated activity must not answer again.
+    intent.action = null
+    requestMicrophoneIfMissing()
+    calls.answer(conversationId)
+  }
+
+  private fun requestMicrophoneIfMissing() {
     val microphone = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
     if (microphone != PackageManager.PERMISSION_GRANTED) {
       microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
     }
-    setContent {
-      TeamCraftTheme {
-        val maybeState by calls.callState.collectAsStateWithLifecycle()
-        LaunchedEffect(maybeState?.phase) {
-          if (maybeState?.phase == CallPhase.ENDED) finish()
-        }
-        CallScreen(calls, maybeState)
+  }
+
+  companion object {
+    /** The full-screen intent of a ring: show answer and decline. */
+    const val ACTION_SHOW_INCOMING = "de.zeitgleich.teamcraft.calls.SHOW_INCOMING"
+    const val ACTION_ANSWER = "de.zeitgleich.teamcraft.calls.ANSWER"
+    const val EXTRA_CONVERSATION_ID = "conversation_id"
+  }
+}
+
+/** Who calls, with answer and decline (the ring's full-screen screen). */
+@Composable
+private fun IncomingCallScreen(ring: IncomingRing, onAnswer: () -> Unit, onDecline: () -> Unit) {
+  Surface(modifier = Modifier.fillMaxSize()) {
+    Column(
+      modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp),
+      verticalArrangement = Arrangement.SpaceBetween,
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.call_incoming), style = MaterialTheme.typography.titleMedium)
+        Text(ring.displayName, style = MaterialTheme.typography.headlineMedium)
+        ring.maybeCallerName?.takeIf { it != ring.displayName }?.let { Text(it) }
+      }
+      Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+        Button(
+          onClick = onDecline,
+          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+        ) { Text(stringResource(R.string.call_decline)) }
+        Button(onClick = onAnswer) { Text(stringResource(R.string.call_answer)) }
       }
     }
   }

@@ -56,6 +56,9 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire
 # Push-to-talk on Wayland through the GlobalShortcuts portal (MIT; already in the tree for capture).
 ashpd = { version = "0.13.13", features = ["global_shortcuts"] }
 futures-util = "0.3"
+# Idle time, screen lock and replaceable, withdrawable notifications over D-Bus (MIT; already in the
+# tree through ashpd, same version and runtime).
+zbus = { version = "5.13", default-features = false, features = ["tokio"] }
 
 # macOS cameras (AVFoundation) and hardware H.264 through GStreamer's VideoToolbox encoder
 # (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);
@@ -66,6 +69,9 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfounda
 # Opens the system's video effects panel (Portrait, background, Studio Light): a safe AVFoundation
 # API (MIT/Apache-2.0), same author and Core Foundation layer as screencapturekit.
 avcapture = "0.7.0"
+# OS idle time for the attention report through a safe Core Graphics binding (Zlib/Apache-2.0/MIT;
+# already in the tree through the media stack).
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEventSource", "CGEventTypes"] }
 
 # Windows: Media Foundation cameras and Windows Graphics Capture for screens and windows.
 # teamcraft-media's `gstreamer` feature would build the Media Foundation encoder element
@@ -79,6 +85,9 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["mediafou
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-autostart = "2"
+# OS idle time for the attention report: a safe wrapper of GetLastInputInfo (MIT/Apache-2.0; only
+# windows-sys and anyhow, both already in the tree).
+user-idle-time = { version = "0.7", default-features = false }
 
 [features]
 # Serve the embedded `dist` instead of the dev server URL. `cargo tauri build` enables it.

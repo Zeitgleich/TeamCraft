@@ -38,7 +38,7 @@ use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{backgrounds, email_digest, guests, oidc, retention, urgent};
-use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, Settings};
+use teamcraft_server::state::{AppState, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings};
 use teamcraft_server::storage::BlobStore;
 use tracing::{info, warn};
 
@@ -114,12 +114,14 @@ async fn run() -> anyhow::Result<()> {
     validator: Arc::new(build_validator(&config)?),
     ids: Arc::new(SnowflakeGenerator::new(config.server.worker_id).context("invalid server.worker_id")?),
     push: Arc::new(build_push(&config)?),
+    push_tracker: Arc::default(),
     revocations: Arc::new(Revocations::default()),
     hub: Arc::new(Hub::new(HubOptions {
       resume_window: Duration::from_secs(config.gateway.resume_window_secs),
       buffer_events: config.gateway.resume_buffer_events,
       max_sessions_per_device: config.gateway.max_sessions_per_device,
       max_sessions_per_user: config.gateway.max_sessions_per_user,
+      attention_lease: Duration::from_secs(config.notifications.attention_lease_secs),
     })),
     rendezvous: Arc::new(RendezvousHub::new(&config.rendezvous)),
     maybe_blob_store: config
@@ -165,10 +167,7 @@ async fn run() -> anyhow::Result<()> {
       maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
       branding: config.branding.clone(),
       brands: config.brands.clone(),
-      push: PushSettings {
-        ttl: Duration::from_secs(config.push.ttl_secs),
-        allow_private_endpoints: config.push.allow_private_endpoints,
-      },
+      push: push_settings(&config),
     }),
     rate_limits: Arc::new(RateLimits::new(&config.security.rate_limits)),
     brands: Arc::new(brands),
@@ -690,6 +689,31 @@ fn config_path() -> Option<PathBuf> {
     }
   }
   std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from)
+}
+
+/// The push settings of the routing; a ring waits at most as long as it rings.
+fn push_settings(config: &Config) -> PushSettings {
+  let push = &config.push;
+  let call_ttl_secs = match push.call_ttl_secs {
+    0 => config.calls.as_ref().map_or(30, |calls| calls.ring_timeout_secs),
+    secs => secs,
+  };
+  PushSettings {
+    ttls: PushTtls {
+      message: Duration::from_secs(push.ttl_secs),
+      call: Duration::from_secs(call_ttl_secs),
+      dismiss: Duration::from_secs(push.dismiss_ttl_secs),
+      test: Duration::from_secs(push.test_ttl_secs),
+    },
+    retry: RetryPolicy {
+      max_retries: push.max_retries,
+      initial_delay: Duration::from_millis(push.retry_initial_delay_ms),
+    },
+    test_interval: Duration::from_secs(push.test_interval_secs),
+    max_rings_per_minute: push.max_rings_per_minute,
+    dismiss_coalesce: Duration::from_millis(push.dismiss_coalesce_ms),
+    allow_private_endpoints: push.allow_private_endpoints,
+  }
 }
 
 #[cfg(test)]

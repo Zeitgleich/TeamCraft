@@ -18,6 +18,8 @@ use crate::state::AppState;
 const MAX_DND_WINDOWS: usize = 14;
 const MAX_DND_ALLOWED_USERS: usize = 50;
 const MAX_UTC_OFFSET_MINUTES: i16 = 14 * 60;
+/// The longest IANA zone name is about 30 characters; this bounds stored garbage.
+const MAX_TIME_ZONE_CHARS: usize = 64;
 
 pub async fn get_settings(
   state: &AppState,
@@ -48,16 +50,27 @@ pub async fn put_settings(
     .map(serde_json::to_string)
     .transpose()
     .map_err(|error| ApiError::Internal(format!("serializing the DND schedule failed: {error}")))?;
+  let previous = state
+    .database
+    .get_user_notification_settings(caller.user.id)
+    .await?;
   let stored = StoredUserSettings {
     maybe_auto_follow_mentioned_threads: Some(request.auto_follow_mentioned_threads),
     push_mode: request.push_mode.as_str().to_owned(),
     maybe_send_read_receipts: Some(request.send_read_receipts),
     maybe_dnd_schedule,
+    maybe_uses_desktop_attention: request
+      .maybe_uses_desktop_attention
+      .or(previous.maybe_uses_desktop_attention),
   };
   state
     .database
     .set_user_notification_settings(caller.user.id, &stored)
     .await?;
+  // The user's other devices check DND again before they show anything; keep them current.
+  state
+    .hub
+    .publish([caller.user.id], &GatewayEvent::NotificationSettingsUpdate);
   settings_response(state, &stored)
 }
 
@@ -235,6 +248,33 @@ pub fn receipts_enabled(state: &AppState, stored: &StoredUserSettings) -> bool {
     .unwrap_or(state.settings.notifications.read_receipts_default)
 }
 
+/// The user's UTC offset at `unix_seconds` in minutes: from the schedule's time zone if it names
+/// one this server knows (so daylight saving time needs no client), else the stored offset.
+pub fn utc_offset_at(schedule: &DndSchedule, unix_seconds: i64) -> i16 {
+  use chrono::{Offset, TimeZone};
+  let maybe_offset = schedule
+    .maybe_time_zone
+    .as_deref()
+    .and_then(|zone| zone.parse::<chrono_tz::Tz>().ok())
+    .zip(chrono::DateTime::from_timestamp(unix_seconds, 0))
+    .map(|(zone, at)| {
+      zone
+        .offset_from_utc_datetime(&at.naive_utc())
+        .fix()
+        .local_minus_utc()
+        / 60
+    });
+  maybe_offset
+    .and_then(|minutes| i16::try_from(minutes).ok())
+    .unwrap_or(schedule.utc_offset_minutes)
+}
+
+/// Whether desktop attention holds the user's phone pushes back: the instance allows it and the user
+/// did not turn it off.
+pub fn uses_desktop_attention(state: &AppState, maybe_choice: Option<bool>) -> bool {
+  state.settings.notifications.is_desktop_attention_enabled && maybe_choice.unwrap_or(true)
+}
+
 /// Whether a conversation is muted by time at `now`.
 pub fn is_muted(maybe_muted_until: Option<OffsetDateTime>, now: OffsetDateTime) -> bool {
   maybe_muted_until.is_some_and(|until| until > now)
@@ -257,6 +297,7 @@ fn settings_response(
     push_mode: PushMode::from(stored.push_mode.clone()),
     send_read_receipts: receipts_enabled(state, stored),
     maybe_dnd_schedule,
+    maybe_uses_desktop_attention: Some(uses_desktop_attention(state, stored.maybe_uses_desktop_attention)),
   })
 }
 
@@ -271,6 +312,11 @@ fn validate_schedule(schedule: &DndSchedule) -> Result<(), ApiError> {
   }
   if schedule.allow_user_ids.len() > MAX_DND_ALLOWED_USERS {
     return Err(ApiError::InvalidRequest("too many allowed users".into()));
+  }
+  if let Some(zone) = &schedule.maybe_time_zone
+    && (zone.len() > MAX_TIME_ZONE_CHARS || zone.parse::<chrono_tz::Tz>().is_err())
+  {
+    return Err(ApiError::InvalidRequest("unknown time_zone".into()));
   }
   for window in &schedule.windows {
     if window.weekdays.is_empty()

@@ -21,18 +21,22 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
-import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.push.UnifiedPushBackend
+import de.zeitgleich.teamcraft.push.UnifiedPushStatus
 import net.openid.appauth.AuthorizationException
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.Presence
+import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.SearchHitItem
 import uniffi.teamcraft_ffi.TeamCraftException
+import uniffi.teamcraft_ffi.TestPushResult
 
 /** What the app shows at the top level. */
 sealed interface AppState {
@@ -142,6 +146,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.core.close()
     graph.auth.signOut()
     graph.notifier.clearAll()
+    graph.pushStats.clear()
     state.value = AppState.SignedOut()
   }
 
@@ -293,6 +298,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun pushService(): PushService? = graph.push.activeService()
 
   fun registerPush() = graph.push.register()
+
+  /** What this device saw of pushes; `null` when the core can't answer. */
+  suspend fun pushDiagnostics(): PushDiagnosticsInfo? = read { pushDiagnostics() }
+
+  /** Asks the server for a test push to this device. */
+  suspend fun sendTestPush(): Result<TestPushResult> = runCatching { graph.core.core().sendTestPush() }
+
+  /** Increments with every wake-up handled. */
+  val pushHandledCount: StateFlow<Long> get() = graph.pushHandler.handledCount
+
+  val pushStats get() = graph.pushStats
+
+  fun unifiedPushStatus(): UnifiedPushStatus = UnifiedPushStatus(getApplication())
+
+  fun selectDistributor(packageName: String) = UnifiedPushBackend.selectDistributor(getApplication(), packageName)
 
   /** Existing device: starts approving a new device; returns the short code to compare. */
   suspend fun approveLink(code: String): Result<String> =

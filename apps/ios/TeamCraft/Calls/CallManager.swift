@@ -9,7 +9,10 @@ struct ActiveCall: Identifiable, Equatable {
   enum Phase: Equatable { case ringing, connecting, connected }
 
   let id: UUID
-  let conversationId: String
+  /// Empty while a VoIP push is still being opened (the call was reported before it was readable).
+  var conversationId: String
+  /// The server's call, when a push named it (a later `dismiss` with it stops the ring).
+  var maybeCallId: String?
   var displayName: String
   let isOutgoing: Bool
   var phase: Phase
@@ -37,10 +40,6 @@ struct RemoteVideoStream: Identifiable {
 /// `pushRegistry(_:didReceiveIncomingPushWith:)` and from there into CallKit (e2ee.md §7).
 @Observable
 final class CallManager: NSObject, @unchecked Sendable {
-  /// Keys of the payload the extension forwards.
-  static let conversationKey = "conversation_id"
-  static let callerNameKey = "caller_name"
-
   /// Main-thread state; the in-call screen observes it.
   private(set) var activeCall: ActiveCall?
   /// Why the last call ended, shown briefly on the screen.
@@ -151,7 +150,9 @@ final class CallManager: NSObject, @unchecked Sendable {
 
   /// Shows the system's incoming call screen. `completion` runs once CallKit has the call (PushKit
   /// requires that before it returns).
-  func reportIncoming(conversationId: String, displayName: String, completion: (() -> Void)? = nil) {
+  func reportIncoming(
+    conversationId: String, displayName: String, maybeCallId: String? = nil, completion: (() -> Void)? = nil
+  ) {
     if activeCall != nil {
       // Already in a call (or ringing for one): CallKit allows one; a second ring isn't shown.
       completion?()
@@ -168,19 +169,33 @@ final class CallManager: NSObject, @unchecked Sendable {
     update.supportsDTMF = false
     configureAudioSession()
     activeCall = ActiveCall(
-      id: uuid, conversationId: conversationId, displayName: displayName, isOutgoing: false,
-      phase: .ringing)
+      id: uuid, conversationId: conversationId, maybeCallId: maybeCallId, displayName: displayName,
+      isOutgoing: false, phase: .ringing)
     provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
       if error != nil { self?.clear() }
       completion?()
     }
   }
 
+  /// A `dismiss` wake-up for a call: the ring ended (answered elsewhere, declined, timed out), so
+  /// this phone stops ringing. A call that was already answered here goes on.
+  @MainActor
+  func endRinging(conversationId: String, maybeCallId: String?) {
+    guard let call = activeCall, call.phase == .ringing, !call.isOutgoing else { return }
+    var isSameCall = call.conversationId == conversationId
+    if let callId = maybeCallId, let ringing = call.maybeCallId { isSameCall = callId == ringing }
+    guard isSameCall else { return }
+    provider.reportCall(with: call.id, endedAt: Date(), reason: .answeredElsewhere)
+    clear()
+  }
+
   // MARK: Joining
 
   /// Joins in the core once CallKit activated the audio session and an answer or start is pending.
   private func joinIfReady() {
-    guard wantsJoin, isAudioActive, !isJoining, maybeSession == nil, let call = activeCall else { return }
+    guard wantsJoin, isAudioActive, !isJoining, maybeSession == nil, let call = activeCall,
+      !call.conversationId.isEmpty
+    else { return }
     isJoining = true
     Task { @MainActor in
       defer { isJoining = false }
@@ -327,15 +342,94 @@ extension CallManager: PKPushRegistryDelegate {
     // The server pushes through APNs only; this registry exists to receive the extension's forward.
   }
 
+  /// Two sources: the extension's forward (already decrypted: conversation and caller name), or a
+  /// VoIP push from the server with the sealed wake-up under `w`. Every VoIP push must end in a
+  /// reported call before this returns, or iOS stops waking the app: the sealed one is reported
+  /// first with a placeholder name and filled in (or ended) once the core opened it.
   func pushRegistry(
     _ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType,
     completion: @escaping () -> Void
   ) {
     let info = payload.dictionaryPayload
-    let conversationId = (info[Self.conversationKey] as? String) ?? ""
-    let name = (info[Self.callerNameKey] as? String) ?? "TeamCraft"
-    // Every VoIP push must end in a reported call, or the system stops waking the app.
-    reportIncoming(conversationId: conversationId, displayName: name, completion: completion)
+    if let sealed = PushPayload.sealedBytes(from: info) {
+      reportSealedIncoming(sealed, completion: completion)
+      return
+    }
+    let conversationId = (info[CallForward.conversationKey] as? String) ?? ""
+    let name = (info[CallForward.callerNameKey] as? String) ?? String(localized: "app_name")
+    let maybeCallId = info[CallForward.callIdKey] as? String
+    if activeCall != nil {
+      reportBusyRing(completion: completion)
+      return
+    }
+    reportIncoming(conversationId: conversationId, displayName: name, maybeCallId: maybeCallId, completion: completion)
+  }
+
+  /// CallKit holds one call: a VoIP push during a call is reported and ended at once, only to
+  /// satisfy PushKit.
+  private func reportBusyRing(completion: @escaping () -> Void) {
+    let uuid = UUID()
+    let update = CXCallUpdate()
+    update.localizedCallerName = String(localized: "call_incoming_placeholder")
+    provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+      completion()
+      if error == nil { self?.provider.reportCall(with: uuid, endedAt: Date(), reason: .unanswered) }
+    }
+  }
+
+  private func reportSealedIncoming(_ sealed: Data, completion: @escaping () -> Void) {
+    if activeCall != nil {
+      reportBusyRing(completion: completion)
+      return
+    }
+    let uuid = UUID()
+    let update = CXCallUpdate()
+    update.localizedCallerName = String(localized: "call_incoming_placeholder")
+    update.hasVideo = false
+    update.supportsHolding = true
+    update.supportsGrouping = false
+    update.supportsUngrouping = false
+    update.supportsDTMF = false
+    configureAudioSession()
+    activeCall = ActiveCall(
+      id: uuid, conversationId: "", displayName: String(localized: "call_incoming_placeholder"),
+      isOutgoing: false, phase: .ringing)
+    provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+      completion()
+      guard let self else { return }
+      if error != nil {
+        self.clear()
+        return
+      }
+      Task { @MainActor in await self.resolveSealedCall(uuid: uuid, sealed: sealed) }
+    }
+  }
+
+  /// Fills in the reported call from the opened wake-up, or ends it if it isn't a ring to show
+  /// (unreadable, not a call, already shown, or silenced by mute or DND on this device).
+  @MainActor
+  private func resolveSealedCall(uuid: UUID, sealed: Data) async {
+    let maybeNotification = await AppModel.shared.openPush(sealed)
+    guard var call = activeCall, call.id == uuid else { return }
+    guard let notification = maybeNotification, notification.kind == .call, !notification.isDuplicate,
+      notification.maybeSuppression == nil
+    else {
+      provider.reportCall(with: uuid, endedAt: Date(), reason: maybeNotification == nil ? .failed : .remoteEnded)
+      clear()
+      return
+    }
+    var name = notification.maybeSenderName ?? notification.maybeConversationName ?? ""
+    if name.isEmpty { name = await AppModel.shared.conversationName(notification.conversationId) }
+    call.conversationId = notification.conversationId
+    call.maybeCallId = notification.maybeCallId
+    call.displayName = name
+    activeCall = call
+    let update = CXCallUpdate()
+    update.remoteHandle = CXHandle(type: .generic, value: notification.conversationId)
+    update.localizedCallerName = name
+    provider.reportCall(with: uuid, updated: update)
+    // Answered while it was being opened: join now.
+    joinIfReady()
   }
 }
 

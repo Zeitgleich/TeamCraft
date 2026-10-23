@@ -199,8 +199,21 @@ wire_enum! {
     Message => "message",
     /// A message that mentions the user, or arrives in a DM.
     Mention => "mention",
-    /// Someone calls the user (a ring); the iOS extension hands it to CallKit (e2ee.md §7).
+    /// Someone calls the user (a ring). On iOS a mutable alert on the app's topic, Android shows a
+    /// full-screen incoming call (e2ee.md §7).
     Call => "call",
+    /// The conversation was read on another device, or a ring ended: remove what was shown. Sent
+    /// silently (APNs background push, FCM normal priority); never shows anything by itself.
+    Dismiss => "dismiss",
+    /// A test push the user asked for in the notification diagnostics.
+    Test => "test",
+  }
+}
+
+impl PushKind {
+  /// Whether the wake-up is meant to show something to the user (and may wake a dozing phone).
+  pub fn is_visible(&self) -> bool {
+    !matches!(self, Self::Dismiss)
   }
 }
 
@@ -208,9 +221,13 @@ wire_enum! {
 /// (XChaCha20-Poly1305), so Apple, Google and push relays see only ciphertext. The app (or the iOS
 /// notification service extension) opens it, fetches the real message and decrypts that locally.
 /// It names the conversation and message but carries no content.
+///
+/// A `dismiss` names the conversation (and thread) whose notifications to remove, with
+/// `message_id` the newest message read; or, with `call_id`, the call whose ring ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PushWakeUp {
   pub kind: PushKind,
+  /// `0` for `test`, which names no conversation.
   pub conversation_id: crate::ConversationId,
   #[serde(rename = "message_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_message_id: Option<crate::MessageId>,
@@ -219,4 +236,41 @@ pub struct PushWakeUp {
   /// The sender marked the message urgent.
   #[serde(default)]
   pub is_urgent: bool,
+  /// The thread the message replies in (`message`, `mention`), or the thread that was read
+  /// (`dismiss`).
+  #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thread_id: Option<crate::ThreadId>,
+  /// The ringing call (`call`), or the call whose ring ended (`dismiss`).
+  #[serde(rename = "call_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_call_id: Option<crate::CallId>,
+  /// What the app icon badge should show: conversations with unread mentions or DMs plus followed
+  /// threads with unread mentions. Absent when the server did not count.
+  #[serde(rename = "badge", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_badge: Option<u32>,
+  /// When the server sent the wake-up; the diagnostics show the delay, the apps order by it.
+  #[serde(rename = "sent_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sent_at: Option<UnixMillis>,
+}
+
+impl PushWakeUp {
+  /// A wake-up for a message or mention, without the optional extras.
+  pub fn for_message(
+    kind: PushKind,
+    conversation_id: crate::ConversationId,
+    message_id: crate::MessageId,
+    sender_id: UserId,
+    is_urgent: bool,
+  ) -> Self {
+    Self {
+      kind,
+      conversation_id,
+      maybe_message_id: Some(message_id),
+      maybe_sender_id: Some(sender_id),
+      is_urgent,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: None,
+    }
+  }
 }

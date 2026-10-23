@@ -18,6 +18,8 @@ pub struct StoredUserSettings {
   pub maybe_send_read_receipts: Option<bool>,
   /// The DND schedule as JSON text; the database does not interpret it.
   pub maybe_dnd_schedule: Option<String>,
+  /// `None`: never chose (desktop attention is used).
+  pub maybe_uses_desktop_attention: Option<bool>,
 }
 
 impl Default for StoredUserSettings {
@@ -27,6 +29,7 @@ impl Default for StoredUserSettings {
       push_mode: "away_only".into(),
       maybe_send_read_receipts: None,
       maybe_dnd_schedule: None,
+      maybe_uses_desktop_attention: None,
     }
   }
 }
@@ -50,7 +53,8 @@ impl Database {
   pub async fn get_user_notification_settings(&self, user: UserId) -> Result<StoredUserSettings, DbError> {
     let row = sqlx::query!(
       r#"SELECT u.auto_follow_mentioned_threads,
-                COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.send_read_receipts, s.dnd_schedule
+                COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.send_read_receipts, s.dnd_schedule,
+                s.uses_desktop_attention
          FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id
          WHERE u.id = $1"#,
       to_db(user),
@@ -63,6 +67,7 @@ impl Database {
         push_mode: row.push_mode,
         maybe_send_read_receipts: row.send_read_receipts,
         maybe_dnd_schedule: row.dnd_schedule,
+        maybe_uses_desktop_attention: row.uses_desktop_attention,
       }),
     )
   }
@@ -82,15 +87,17 @@ impl Database {
     .execute(&mut *tx)
     .await?;
     sqlx::query!(
-      r#"INSERT INTO user_notification_settings (user_id, push_mode, send_read_receipts, dnd_schedule)
-         VALUES ($1, $2, $3, $4)
+      r#"INSERT INTO user_notification_settings
+           (user_id, push_mode, send_read_receipts, dnd_schedule, uses_desktop_attention)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (user_id) DO UPDATE SET push_mode = EXCLUDED.push_mode,
            send_read_receipts = EXCLUDED.send_read_receipts, dnd_schedule = EXCLUDED.dnd_schedule,
-           updated_at = now()"#,
+           uses_desktop_attention = EXCLUDED.uses_desktop_attention, updated_at = now()"#,
       to_db(user),
       settings.push_mode,
       settings.maybe_send_read_receipts,
       settings.maybe_dnd_schedule,
+      settings.maybe_uses_desktop_attention,
     )
     .execute(&mut *tx)
     .await?;

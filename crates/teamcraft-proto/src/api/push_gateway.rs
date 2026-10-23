@@ -67,7 +67,7 @@ pub struct GatewayPushRequest {
   pub request_id: Base64Bytes,
   /// `apns` or `fcm`. Web Push and UnifiedPush never go through a gateway.
   pub provider: PushProvider,
-  /// What the wake-up is for; picks the APNs channel (`call` uses the VoIP topic).
+  /// What the wake-up is for; picks the APNs push type (`dismiss`: background) and the priority.
   pub kind: PushKind,
   pub urgency: GatewayUrgency,
   /// How long the push service may hold the wake-up for an offline device.
@@ -81,6 +81,11 @@ pub struct GatewayPushRequest {
   pub maybe_bound_token: Option<Base64Bytes>,
   /// The wake-up sealed to the device's push key; opaque to the gateway.
   pub sealed: Base64Bytes,
+  /// Replaces an earlier notification with the same ID (APNs `apns-collapse-id`, FCM
+  /// `collapse_key`); 1-64 printable ASCII. The gateway passes on a hash with the server's ID. This
+  /// server sends none: the apps replace notifications themselves.
+  #[serde(rename = "collapse_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_collapse_id: Option<String>,
 }
 
 // The token identifies a device at Apple or Google: keep it out of debug output.
@@ -115,6 +120,10 @@ pub struct GatewayInfoResponse {
   pub are_bound_tokens_required: bool,
   /// The longest validity a sealed token may claim.
   pub max_token_lifetime_secs: u64,
+  /// The wake-up kinds the gateway forwards; it refuses others. Empty from gateways older than the
+  /// field.
+  #[serde(default)]
+  pub kinds: Vec<PushKind>,
 }
 
 /// The gateway's current token key.
@@ -260,6 +269,12 @@ mod tests {
       "../../tests/fixtures/push_gateway/info_response.json"
     ));
     assert_eq!(info.providers, [PushProvider::Apns, PushProvider::Fcm]);
+    assert!(info.kinds.contains(&PushKind::Dismiss) && info.kinds.contains(&PushKind::Test));
+    let dismiss: GatewayPushRequest = check(include_str!(
+      "../../tests/fixtures/push_gateway/push_request_dismiss.json"
+    ));
+    assert_eq!(dismiss.kind, PushKind::Dismiss);
+    assert_eq!(dismiss.maybe_collapse_id.as_deref(), Some("k3Yh7Qm9"));
     let limited: GatewayErrorBody = check(include_str!(
       "../../tests/fixtures/push_gateway/error_rate_limited.json"
     ));
@@ -296,6 +311,7 @@ mod tests {
       maybe_token: Some("secret-token".into()),
       maybe_bound_token: None,
       sealed: Base64Bytes::new(vec![2, 3]),
+      maybe_collapse_id: None,
     };
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["provider"], "apns");

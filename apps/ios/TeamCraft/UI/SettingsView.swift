@@ -63,7 +63,9 @@ struct SettingsView: View {
           Text("fingerprint_hint")
         }
         Section {
+          NavigationLink("dnd_title") { DndSettingsView() }
           NavigationLink("rules_title") { NotificationRulesView() }
+          NavigationLink("diagnostics_title") { NotificationDiagnosticsView(account: account) }
         } header: {
           Text("notifications_title")
         }

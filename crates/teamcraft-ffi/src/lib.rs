@@ -25,8 +25,9 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem,
-  OrgRecoveryStart, Presence, PushNotification, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult,
+  NotificationSuppression, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification,
+  PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
+  TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -233,12 +234,30 @@ impl TeamCraft {
     self.call(|engine| Box::pin(engine.unregister_push())).await
   }
 
-  /// What to show for a push payload (an FCM data message or a UnifiedPush message): opened with
-  /// the push key, names from the store, the text fetched and decrypted if possible.
-  pub async fn notification_for_push(&self, payload: Vec<u8>) -> Result<PushNotification, TeamCraftError> {
+  /// What to do for a push payload (an FCM data message, a UnifiedPush message, an APNs payload's
+  /// `w`): opened with the push key, names from the store, the text fetched and decrypted if
+  /// possible, checked against what was shown before and against mutes and DND.
+  /// `utc_offset_minutes` is the device's current offset from UTC (for the DND schedule).
+  pub async fn notification_for_push(
+    &self,
+    payload: Vec<u8>,
+    utc_offset_minutes: i16,
+  ) -> Result<PushNotification, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.notification_for_push(payload)))
+      .call(move |engine| Box::pin(engine.notification_for_push(payload, utc_offset_minutes)))
       .await
+  }
+
+  /// What this device saw of pushes (notification diagnostics).
+  pub async fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.push_diagnostics() }))
+      .await
+  }
+
+  /// Asks the server for a sealed test wake-up to this device; it arrives like any push.
+  pub async fn send_test_push(&self) -> Result<TestPushResult, TeamCraftError> {
+    self.call(|engine| Box::pin(engine.send_test_push())).await
   }
 
   /// Keywords, first name and `@channel` preferences for marking pushed messages as mentions.

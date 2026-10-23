@@ -121,9 +121,12 @@ Gradle properties (`gradle.properties` has the development defaults; override wi
 ### Tests
 
 - Unit tests (JVM, both flavors) run with every build: notification texts, push payload decoding,
-  the UnifiedPush subscription JSON, sidebar sections.
+  the UnifiedPush subscription JSON, sidebar sections, what each wake-up kind shows, notification
+  line order and dismissal matching, ring matching, the DND schedule JSON and quick-DND times
+  across DST.
 - Instrumented tests (`app/src/androidTest`) run the Rust core on a device: library loading via JNA,
-  the engine thread, the sealed store, error mapping, and the Keystore sealing. On a headless
+  the engine thread, the sealed store, error mapping, and the Keystore sealing; and the notification
+  channels, posting and removing conversation and incoming-call notifications. On a headless
   emulator in the container (needs `/dev/kvm`; run a normal build first):
 
   ```sh
@@ -177,7 +180,36 @@ HTTP v1 API with the format above. Without either, notifications only appear whi
 Notifications use `MessagingStyle` (sender as `Person`, group conversations titled with the
 channel), category `MESSAGE`, and two actions that don't open the app: reply (`RemoteInput`,
 `SEMANTIC_ACTION_REPLY`) and mark as read (`SEMANTIC_ACTION_MARK_AS_READ`). Replies are appended to
-the notification. DMs and mentions use a high-importance channel.
+the notification.
+
+| Wake-up   | What the app does (`notifications/PushDecision.kt`)                                                    |
+|-----------|--------------------------------------------------------------------------------------------------------|
+| `message` | Adds the message to its conversation's notification (see below); a duplicate re-posts it silently, an urgent repeat alerts again; nothing when the device's own mute/DND check says so (counted for the diagnostics) |
+| `call`    | CallStyle incoming-call notification with a full-screen intent, plus a Telecom call; stops after 45 s    |
+| `dismiss` | With a call ID: stops ringing; otherwise removes the read lines of the conversation or thread           |
+| `test`    | A short confirmation on the `other` channel                                                            |
+
+One notification per conversation (tag = conversation ID) with a long-lived conversation shortcut and
+a group summary that carries the badge; lines are ordered by message time and deduplicated by
+message ID, and kept sealed in app storage so a new process continues them (deleted on sign-out).
+Every high-priority FCM wake-up shows or updates a notification, since FCM deprioritises apps that
+show nothing. A wake-up that takes longer than about 8 s continues as expedited work
+(`push/WakeUpWork.kt`).
+
+| Channel          | Importance | For                                   |
+|------------------|------------|---------------------------------------|
+| `messages`       | default    | Channels and groups                   |
+| `mentions`       | high       | DMs, mentions, urgent messages        |
+| `incoming_calls` | high       | Rings (ringtone, full-screen intent)  |
+| `calls`          | default    | The ongoing call (foreground service) |
+| `other`          | low        | Test pushes, background work          |
+
+Settings has "Do not disturb" (quick DND through presence, weekly schedule, exceptions; stored on
+the server) and "Notification diagnostics" (push service and UnifiedPush distributor, system
+switches, battery state, DND state, pushes received, test push). The app never asks to be exempt
+from battery optimisation: FCM relies on high-priority messages, and with UnifiedPush the
+distributor is the app that must run in the background (it raises this app to the foreground per
+message), so the guidance links to the distributor's settings.
 
 ## Android Auto
 

@@ -309,8 +309,25 @@ pub struct PushConfig {
   pub maybe_vapid_private_key: Option<SecretString>,
   /// Contact for push services, `mailto:` or `https:` (RFC 8292).
   pub vapid_subject: String,
-  /// How long push services may hold a wake-up for an offline device.
+  /// How long push services may hold a message or mention wake-up for an offline device.
   pub ttl_secs: u64,
+  /// How long a ring may wait at the push service; `0` uses the ring timeout of `[calls]`.
+  pub call_ttl_secs: u64,
+  /// How long a withdrawal ("read elsewhere") may wait at the push service.
+  pub dismiss_ttl_secs: u64,
+  /// How long a test push from the notification diagnostics may wait at the push service.
+  pub test_ttl_secs: u64,
+  /// How often a push that failed for a temporary reason (5xx, timeout) is tried again. `0`: never.
+  pub max_retries: u32,
+  /// Wait before the first retry; it doubles for each further one.
+  pub retry_initial_delay_ms: u64,
+  /// The shortest time between two test pushes to one device.
+  pub test_interval_secs: u64,
+  /// Calls one user may ring other people's phones with per minute; further rings reach only
+  /// devices with a live connection.
+  pub max_rings_per_minute: u32,
+  /// Withdrawals for one conversation that come within this time go out as one (reading in bursts).
+  pub dismiss_coalesce_ms: u64,
   pub request_timeout_secs: u64,
   /// Pushes sent in parallel, per pool: APNs and FCM share one, Web Push and UnifiedPush (endpoints
   /// users chose) another.
@@ -922,9 +939,20 @@ pub struct NotificationsConfig {
   pub urgent_max_pushes: u32,
   /// How often the scheduler looks for due repeats.
   pub urgent_scheduler_interval_secs: u64,
-  /// While a desktop device of the user is active, pushes to their phones wait this long and are
-  /// sent only if the message is still unread. `0` pushes at once.
+  /// While a desktop or web session of the user is attentive (notifications.md, "Attention"),
+  /// pushes to their phones wait this long and are sent only if the message is still unread. `0`
+  /// never sends them while the desktop is attentive.
   pub mobile_push_delay_secs: u64,
+  /// Off: desktop and web sessions are told not to report attention and the server ignores such
+  /// reports; a connected, active desktop holds phone pushes back as presence would (works councils
+  /// may want this; notifications.md, "Attention").
+  pub is_desktop_attention_enabled: bool,
+  /// How long an "attentive" report of a desktop or web session counts. The session's gateway
+  /// heartbeats renew it, so keep it above twice `[gateway] heartbeat_interval_secs`; a session that
+  /// stops (sleep, crash, lost network) no longer holds pushes back.
+  pub attention_lease_secs: u64,
+  /// Pushes held for an attentive desktop per user at most; beyond that the oldest goes out at once.
+  pub max_held_pushes_per_user: usize,
   /// E-mail digest of missed mentions.
   pub email_digest: EmailDigestConfig,
 }
@@ -1208,7 +1236,15 @@ impl Default for PushConfig {
     Self {
       maybe_vapid_private_key: None,
       vapid_subject: "mailto:admin@example.com".into(),
-      ttl_secs: 3600,
+      ttl_secs: 86_400,
+      call_ttl_secs: 0,
+      dismiss_ttl_secs: 86_400,
+      test_ttl_secs: 300,
+      max_retries: 2,
+      retry_initial_delay_ms: 2000,
+      test_interval_secs: 10,
+      max_rings_per_minute: 10,
+      dismiss_coalesce_ms: 3000,
       request_timeout_secs: 10,
       max_concurrent_sends: 32,
       max_concurrent_sends_per_user: 4,
@@ -1263,6 +1299,9 @@ impl Default for NotificationsConfig {
       urgent_max_pushes: 5,
       urgent_scheduler_interval_secs: 15,
       mobile_push_delay_secs: 120,
+      is_desktop_attention_enabled: true,
+      attention_lease_secs: 75,
+      max_held_pushes_per_user: 100,
       email_digest: EmailDigestConfig::default(),
     }
   }

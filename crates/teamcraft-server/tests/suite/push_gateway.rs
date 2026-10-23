@@ -503,5 +503,9 @@ fn wake_up(kind: PushKind) -> PushWakeUp {
     maybe_message_id: None,
     maybe_sender_id: None,
     is_urgent: false,
+    maybe_thread_id: None,
+    maybe_call_id: None,
+    maybe_badge: None,
+    maybe_sent_at: None,
   }
 }

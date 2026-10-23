@@ -1,11 +1,15 @@
 //! Desktop sign-in: the Tauri shell (Rust side) runs the OIDC flow with the system browser and keeps
 //! the tokens in the OS keyring; the webview only calls commands and never sees a token.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{ApiMethod, ApiResponse, AuthError, Authenticator, LocalFuture};
+use crate::model::ConversationId;
 
 /// Whether the page runs inside the desktop shell.
 pub fn is_available() -> bool {
@@ -136,14 +140,63 @@ fn serde_wasm_json<T: for<'de> Deserialize<'de>>(value: &JsValue) -> Result<T, A
 
 /// Shows a system notification through the desktop shell. Failures are logged, never shown.
 pub async fn notify(title: &str, maybe_body: Option<&str>) {
-  if !is_available() {
-    show_page_notification(title, maybe_body);
+  show_notification(None, title, maybe_body).await;
+}
+
+/// Shows the notification of a conversation; a newer one replaces it, and
+/// [`withdraw_notifications`] removes it once the conversation is read.
+pub async fn notify_conversation(conversation: ConversationId, title: &str, maybe_body: Option<&str>) {
+  show_notification(Some(&conversation.to_string()), title, maybe_body).await;
+}
+
+/// Removes the notifications of conversations that were read (here or on another device): the page's
+/// own, the service worker's push notifications (tagged with the conversation ID too) and the desktop
+/// shell's, where the platform allows.
+pub async fn withdraw_notifications(conversations: &[ConversationId]) {
+  if conversations.is_empty() {
     return;
   }
-  let args = serde_json::json!({ "title": title, "body": maybe_body });
+  let tags: Vec<String> = conversations.iter().map(ToString::to_string).collect();
+  if is_available() {
+    let args = serde_json::json!({ "tags": tags });
+    if let Err(error) = call::<()>("withdraw_notifications", &args).await {
+      tracing::debug!(%error, "could not withdraw notifications");
+    }
+    return;
+  }
+  close_page_notifications(&tags);
+  close_service_worker_notifications(&tags).await;
+}
+
+async fn show_notification(maybe_tag: Option<&str>, title: &str, maybe_body: Option<&str>) {
+  if !is_available() {
+    show_page_notification(maybe_tag, title, maybe_body);
+    return;
+  }
+  let args = serde_json::json!({ "title": title, "body": maybe_body, "tag": maybe_tag });
   if let Err(error) = call::<()>("notify_user", &args).await {
     tracing::debug!(%error, "could not show a notification");
   }
+}
+
+/// What the desktop shell knows about the computer: input anywhere and the screen lock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct OsAttention {
+  #[serde(rename = "idle_ms", default)]
+  pub maybe_idle_ms: Option<u64>,
+  #[serde(default)]
+  pub is_locked: bool,
+}
+
+/// Desktop only: OS idle time and screen lock. `None` in the browser or when the shell can't tell.
+pub async fn os_attention() -> Option<OsAttention> {
+  if !is_available() {
+    return None;
+  }
+  call::<OsAttention>("os_attention", &serde_json::json!({}))
+    .await
+    .inspect_err(|error| tracing::debug!(%error, "no OS attention"))
+    .ok()
 }
 
 /// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.
@@ -288,9 +341,14 @@ pub async fn request_notification_permission() -> Option<String> {
   JsFuture::from(promise).await.ok()?.as_string()
 }
 
-/// Shows a notification from the page while it is open. Closed pages need Web Push, which waits for
-/// the service worker build; without permission nothing is shown.
-fn show_page_notification(title: &str, maybe_body: Option<&str>) {
+thread_local! {
+  /// The page's own notifications by conversation, so they can be closed once read.
+  static PAGE_NOTIFICATIONS: RefCell<HashMap<String, JsValue>> = RefCell::new(HashMap::new());
+}
+
+/// Shows a notification from the page while it is open (closed pages get Web Push through the
+/// service worker); without permission nothing is shown.
+fn show_page_notification(maybe_tag: Option<&str>, title: &str, maybe_body: Option<&str>) {
   if notification_permission().as_deref() != Some("granted") {
     return;
   }
@@ -301,9 +359,70 @@ fn show_page_notification(title: &str, maybe_body: Option<&str>) {
   if let Some(body) = maybe_body {
     drop(js_sys::Reflect::set(&options, &"body".into(), &body.into()));
   }
+  if let Some(tag) = maybe_tag {
+    drop(js_sys::Reflect::set(&options, &"tag".into(), &tag.into()));
+  }
   let args = js_sys::Array::of2(&JsValue::from_str(title), &options);
-  if js_sys::Reflect::construct(&constructor, &args).is_err() {
-    tracing::debug!("could not show a notification");
+  match js_sys::Reflect::construct(&constructor, &args) {
+    Ok(notification) => {
+      if let Some(tag) = maybe_tag {
+        PAGE_NOTIFICATIONS.with(|shown| shown.borrow_mut().insert(tag.to_owned(), notification));
+      }
+    },
+    Err(_) => tracing::debug!("could not show a notification"),
+  }
+}
+
+fn close_page_notifications(tags: &[String]) {
+  let closing: Vec<JsValue> = PAGE_NOTIFICATIONS.with(|shown| {
+    let mut shown = shown.borrow_mut();
+    tags.iter().filter_map(|tag| shown.remove(tag)).collect()
+  });
+  for notification in closing {
+    close_notification(&notification);
+  }
+}
+
+/// Push notifications the service worker showed while no page was open carry the conversation ID
+/// as their tag (`teamcraft_core::web_push`).
+async fn close_service_worker_notifications(tags: &[String]) {
+  let Some(window) = web_sys::window() else { return };
+  let Ok(ready) = window.navigator().service_worker().ready() else {
+    return;
+  };
+  let Ok(registration) = JsFuture::from(ready).await else {
+    return;
+  };
+  let get_notifications = js_sys::Reflect::get(&registration, &"getNotifications".into())
+    .ok()
+    .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
+  let Some(get_notifications) = get_notifications else {
+    return;
+  };
+  let Ok(promise) = get_notifications.call0(&registration) else {
+    return;
+  };
+  let Ok(shown) = JsFuture::from(js_sys::Promise::from(promise)).await else {
+    return;
+  };
+  for notification in js_sys::Array::from(&shown).iter() {
+    let tag = js_sys::Reflect::get(&notification, &"tag".into())
+      .ok()
+      .and_then(|value| value.as_string());
+    if tag.is_some_and(|tag| tags.contains(&tag)) {
+      close_notification(&notification);
+    }
+  }
+}
+
+fn close_notification(notification: &JsValue) {
+  let close = js_sys::Reflect::get(notification, &"close".into())
+    .ok()
+    .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
+  if let Some(close) = close
+    && close.call0(notification).is_err()
+  {
+    tracing::debug!("could not close a notification");
   }
 }
 

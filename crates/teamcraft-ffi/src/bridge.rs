@@ -89,7 +89,7 @@ impl Engine {
           .with_client(|client| Box::pin(async move { client.accept_identity_change(user) }))
           .await
       },
-      ChatAction::SetActivity { .. } => Ok(()),
+      ChatAction::SetActivity { .. } | ChatAction::SetAttention { .. } => Ok(()),
       ChatAction::PublishPolicy { .. } | ChatAction::AdminJoinChannel { .. } => Err(
         TeamCraftError::InvalidInput("workspace administration is on desktop and web".into()),
       ),

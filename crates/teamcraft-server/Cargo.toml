@@ -28,6 +28,7 @@ anyhow.workspace = true
 aws-lc-rs.workspace = true
 time.workspace = true
 chrono-tz.workspace = true
+chrono.workspace = true
 axum.workspace = true
 figment.workspace = true
 jsonwebtoken.workspace = true

@@ -17,6 +17,54 @@
         }
       }
     },
+    "notification_call_from %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Incoming call from %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eingehender Anruf von %@"
+          }
+        }
+      }
+    },
+    "notification_call_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Incoming call"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eingehender Anruf"
+          }
+        }
+      }
+    },
+    "notification_call_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone is calling you"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand ruft dich an"
+          }
+        }
+      }
+    },
     "notification_file %@": {
       "localizations": {
         "en": {
@@ -45,6 +93,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Neue Nachricht"
+          }
+        }
+      }
+    },
+    "notification_quiet_update": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications updated"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Benachrichtigungen aktualisiert"
+          }
+        }
+      }
+    },
+    "notification_test_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Test notification: push notifications reach this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Testbenachrichtigung: Push-Benachrichtigungen erreichen dieses Gerät."
           }
         }
       }

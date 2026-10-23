@@ -14,14 +14,14 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
   ConversationNotificationSettings, DndSchedule as DndWire, DndWindow, ListConversationsResponse,
-  ListSpacesResponse, NotificationLevel, NotificationSettings, PushMode, SpaceNotificationSettings,
-  UnixMillis, Weekday,
+  ListSpacesResponse, MINUTES_PER_DAY, NotificationLevel, NotificationSettings, PushMode,
+  SpaceNotificationSettings, UnixMillis,
 };
 
 use crate::auth::{ApiMethod, Authenticator};
-use crate::clock::{end_of_local_day, local_utc_offset_minutes, now_ms};
+use crate::clock::{end_of_local_day, local_time_zone, local_utc_offset_minutes, now_ms};
 use crate::model::TimestampMs;
-use crate::prefs::{ConversationNotify, DndSchedule, MuteFor, NotifyLevel, Preferences, PushWhen};
+use crate::prefs::{ConversationNotify, DndSchedule, EVERY_DAY, MuteFor, NotifyLevel, Preferences, PushWhen};
 use crate::settings::Settings;
 
 const MS_PER_HOUR: i64 = 3_600_000;
@@ -29,23 +29,6 @@ const MS_PER_HOUR: i64 = 3_600_000;
 const FOREVER_MS: i64 = 100 * 365 * 24 * MS_PER_HOUR;
 /// Mutes longer than this count as forever when read back.
 const FOREVER_THRESHOLD_MS: i64 = 10 * 365 * 24 * MS_PER_HOUR;
-const WORKDAYS: [Weekday; 5] = [
-  Weekday::Monday,
-  Weekday::Tuesday,
-  Weekday::Wednesday,
-  Weekday::Thursday,
-  Weekday::Friday,
-];
-const EVERY_DAY: [Weekday; 7] = [
-  Weekday::Monday,
-  Weekday::Tuesday,
-  Weekday::Wednesday,
-  Weekday::Thursday,
-  Weekday::Friday,
-  Weekday::Saturday,
-  Weekday::Sunday,
-];
-
 /// Talks to the server on behalf of the settings screens. Provided as context by the data gate.
 #[derive(Clone)]
 pub struct NotificationSync {
@@ -135,7 +118,7 @@ impl NotificationSync {
       let previous = state.maybe_global.clone();
       let wanted = previous
         .as_ref()
-        .map(|previous| global_from_prefs(prefs, previous, now_ms()));
+        .map(|previous| global_from_prefs(prefs, previous, &LocalZone::current(now_ms())));
       let global = wanted.filter(|wanted| Some(wanted) != previous.as_ref());
       let ids: std::collections::BTreeSet<&String> = prefs
         .notifications
@@ -239,18 +222,22 @@ pub fn apply_global(prefs: &mut Preferences, server: &NotificationSettings) {
   notes.dnd = server.maybe_dnd_schedule.as_ref().map_or_else(
     || DndSchedule {
       is_enabled: false,
+      allow_user_ids: Vec::new(),
+      allows_urgent: false,
       ..notes.dnd.clone()
     },
-    dnd_from_server,
+    |schedule| dnd_from_server(schedule, &notes.dnd),
   );
   prefs.privacy.share_read_receipts = server.send_read_receipts;
+  // Servers from before the setting say nothing: attention is used there.
+  prefs.notifications.uses_desktop_attention = server.maybe_uses_desktop_attention.unwrap_or(true);
 }
 
 /// Local preferences as server settings; fields the UI has no control for come from `previous`.
 pub fn global_from_prefs(
   prefs: &Preferences,
   previous: &NotificationSettings,
-  now: TimestampMs,
+  zone: &LocalZone,
 ) -> NotificationSettings {
   let notes = &prefs.notifications;
   NotificationSettings {
@@ -260,49 +247,116 @@ pub fn global_from_prefs(
       PushWhen::AwayOrOffline => PushMode::AwayOnly,
     },
     send_read_receipts: prefs.privacy.share_read_receipts,
-    maybe_dnd_schedule: dnd_to_server(&notes.dnd, previous.maybe_dnd_schedule.as_ref(), now),
+    maybe_dnd_schedule: dnd_to_server(&notes.dnd, zone, previous.maybe_dnd_schedule.as_ref()),
+    maybe_uses_desktop_attention: Some(notes.uses_desktop_attention),
   }
 }
 
-pub fn dnd_to_server(dnd: &DndSchedule, previous: Option<&DndWire>, now: TimestampMs) -> Option<DndWire> {
-  if !dnd.is_enabled {
+/// Most ranges and allowed people the server stores (it refuses more).
+pub const MAX_DND_WINDOWS: usize = 14;
+pub const MAX_DND_ALLOWED_USERS: usize = 50;
+
+/// Where the device is: the schedule is evaluated in this time zone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalZone {
+  pub utc_offset_minutes: i16,
+  /// IANA name from the browser, when it tells.
+  pub maybe_time_zone: Option<String>,
+}
+
+impl LocalZone {
+  pub fn current(now: TimestampMs) -> Self {
+    Self {
+      utc_offset_minutes: local_utc_offset_minutes(now),
+      maybe_time_zone: local_time_zone(),
+    }
+  }
+}
+
+/// The editor's schedule for the server. Without a schedule but with overrides (allowed people,
+/// urgent messages, which also apply to manual DND) it is a schedule without windows. Ranges the
+/// server would refuse (no weekday, empty) are left out. A time zone another device stored stays when
+/// this one cannot tell its own.
+pub fn dnd_to_server(dnd: &DndSchedule, zone: &LocalZone, previous: Option<&DndWire>) -> Option<DndWire> {
+  let has_overrides = !dnd.allow_user_ids.is_empty() || dnd.allows_urgent;
+  if !dnd.is_enabled && !has_overrides {
     return None;
   }
-  let (start_minute, end_minute) = (parse_minutes(&dnd.from)?, parse_minutes(&dnd.to)?);
-  let weekdays = if dnd.weekdays_only {
-    WORKDAYS.to_vec()
+  let windows = if dnd.is_enabled {
+    dnd
+      .windows
+      .iter()
+      .filter(|window| is_valid_window(window))
+      .take(MAX_DND_WINDOWS)
+      .map(|window| DndWindow {
+        weekdays: EVERY_DAY
+          .iter()
+          .filter(|day| window.weekdays.contains(day))
+          .cloned()
+          .collect(),
+        ..window.clone()
+      })
+      .collect()
   } else {
-    EVERY_DAY.to_vec()
+    Vec::new()
   };
   Some(DndWire {
-    utc_offset_minutes: local_utc_offset_minutes(now),
-    windows: vec![DndWindow {
-      weekdays,
-      start_minute,
-      end_minute,
-    }],
-    allow_user_ids: previous
-      .map(|previous| previous.allow_user_ids.clone())
+    utc_offset_minutes: zone.utc_offset_minutes,
+    maybe_time_zone: zone
+      .maybe_time_zone
+      .clone()
+      .or_else(|| previous.and_then(|previous| previous.maybe_time_zone.clone())),
+    windows,
+    allow_user_ids: dnd
+      .allow_user_ids
+      .iter()
+      .copied()
+      .take(MAX_DND_ALLOWED_USERS)
+      .collect(),
+    allows_urgent: dnd.allows_urgent,
+    // Not edited here yet: keep what another device chose.
+    urgent_scope: previous
+      .map(|previous| previous.urgent_scope.clone())
       .unwrap_or_default(),
   })
 }
 
-pub fn dnd_from_server(server: &DndWire) -> DndSchedule {
-  let defaults = DndSchedule::default();
-  let Some(window) = server.windows.first() else {
-    return DndSchedule {
-      is_enabled: false,
-      ..defaults
-    };
-  };
+/// The server's schedule for the editor. A schedule without windows is off; the editor then keeps
+/// its own ranges to start from.
+pub fn dnd_from_server(server: &DndWire, local: &DndSchedule) -> DndSchedule {
+  let is_enabled = !server.windows.is_empty();
   DndSchedule {
-    is_enabled: true,
-    from: format_minutes(window.start_minute),
-    to: format_minutes(window.end_minute),
-    weekdays_only: window.weekdays.len() == WORKDAYS.len()
-      && !window.weekdays.contains(&Weekday::Saturday)
-      && !window.weekdays.contains(&Weekday::Sunday),
+    is_enabled,
+    windows: if is_enabled {
+      server.windows.clone()
+    } else {
+      local.windows.clone()
+    },
+    allow_user_ids: server.allow_user_ids.clone(),
+    allows_urgent: server.allows_urgent,
   }
+}
+
+/// A range the server accepts: at least one weekday, start and end inside the day and different.
+pub fn is_valid_window(window: &DndWindow) -> bool {
+  window.weekdays.iter().any(|day| EVERY_DAY.contains(day))
+    && window.start_minute < MINUTES_PER_DAY
+    && window.end_minute < MINUTES_PER_DAY
+    && window.start_minute != window.end_minute
+}
+
+/// `HH:MM` of an `<input type="time">` as minutes since midnight.
+pub fn parse_minutes(text: &str) -> Option<u16> {
+  let (hours, minutes) = text.split_once(':')?;
+  let (hours, minutes) = (
+    hours.trim().parse::<u16>().ok()?,
+    minutes.trim().parse::<u16>().ok()?,
+  );
+  (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
+}
+
+pub fn format_minutes(minutes: u16) -> String {
+  format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// A conversation's setting for the server. The default setting means "follow the space", which the
@@ -391,83 +445,208 @@ fn mute_from(maybe_muted_until: Option<UnixMillis>, now: TimestampMs) -> MuteFor
   }
 }
 
-fn parse_minutes(text: &str) -> Option<u16> {
-  let (hours, minutes) = text.split_once(':')?;
-  let (hours, minutes) = (
-    hours.trim().parse::<u16>().ok()?,
-    minutes.trim().parse::<u16>().ok()?,
-  );
-  (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
-}
-
-fn format_minutes(minutes: u16) -> String {
-  format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
 
+  use teamcraft_proto::Weekday;
+
   const NOW: TimestampMs = 1_792_540_800_000;
+  const WORKDAYS: [Weekday; 5] = [
+    Weekday::Monday,
+    Weekday::Tuesday,
+    Weekday::Wednesday,
+    Weekday::Thursday,
+    Weekday::Friday,
+  ];
 
-  #[test]
-  fn global_settings_round_trip_through_the_preferences() {
-    let mut prefs = Preferences::default();
-    let server = NotificationSettings {
-      auto_follow_mentioned_threads: false,
-      push_mode: PushMode::Always,
-      send_read_receipts: false,
-      maybe_dnd_schedule: Some(DndWire {
-        utc_offset_minutes: 0,
-        windows: vec![DndWindow {
-          weekdays: WORKDAYS.to_vec(),
-          start_minute: 22 * 60,
-          end_minute: 6 * 60 + 30,
-        }],
-        allow_user_ids: Vec::new(),
-      }),
-    };
-    apply_global(&mut prefs, &server);
-    assert_eq!(prefs.notifications.push_when, PushWhen::Always);
-    assert!(!prefs.privacy.share_read_receipts);
-    assert_eq!(prefs.notifications.dnd.from, "22:00");
-    assert_eq!(prefs.notifications.dnd.to, "06:30");
-    assert!(prefs.notifications.dnd.weekdays_only);
-    assert_eq!(global_from_prefs(&prefs, &server, NOW), server);
-  }
+  mod dnd {
+    use super::*;
 
-  #[test]
-  fn a_disabled_schedule_is_no_schedule() {
-    let dnd = DndSchedule::default();
-    assert!(!dnd.is_enabled);
-    assert_eq!(dnd_to_server(&dnd, None, NOW), None);
-  }
+    #[test]
+    fn global_settings_round_trip_through_the_preferences() {
+      let mut prefs = Preferences::default();
+      let server = NotificationSettings {
+        auto_follow_mentioned_threads: false,
+        push_mode: PushMode::Always,
+        send_read_receipts: false,
+        maybe_dnd_schedule: Some(DndWire {
+          utc_offset_minutes: 60,
+          maybe_time_zone: Some("Europe/Berlin".into()),
+          windows: vec![night(WORKDAYS.to_vec()), weekend_afternoon()],
+          allow_user_ids: vec![crate::model::id_from_raw(5)],
+          allows_urgent: true,
+          urgent_scope: teamcraft_proto::UrgentScope::Direct,
+        }),
+        maybe_uses_desktop_attention: Some(true),
+      };
+      apply_global(&mut prefs, &server);
+      assert_eq!(prefs.notifications.push_when, PushWhen::Always);
+      assert!(!prefs.privacy.share_read_receipts);
+      let dnd = &prefs.notifications.dnd;
+      assert!(dnd.is_enabled);
+      assert_eq!(dnd.windows.len(), 2);
+      assert!(dnd.allows_urgent);
+      assert_eq!(global_from_prefs(&prefs, &server, &berlin()), server);
+    }
 
-  #[test]
-  fn the_allow_list_survives_edits_the_ui_cannot_make() {
-    let sender = crate::model::id_from_raw(5);
-    let previous = DndWire {
-      utc_offset_minutes: 60,
-      windows: Vec::new(),
-      allow_user_ids: vec![sender],
-    };
-    let dnd = DndSchedule {
-      is_enabled: true,
-      ..DndSchedule::default()
-    };
-    let wire = dnd_to_server(&dnd, Some(&previous), NOW).expect("schedule");
-    assert_eq!(wire.allow_user_ids, vec![sender]);
-  }
-
-  #[test]
-  fn malformed_times_do_not_produce_a_schedule() {
-    for bad in ["", "7", "25:00", "08:75", "ab:cd"] {
+    #[test]
+    fn several_ranges_with_their_own_weekdays_go_to_the_server() {
       let dnd = DndSchedule {
         is_enabled: true,
-        from: bad.to_owned(),
+        windows: vec![night(WORKDAYS.to_vec()), weekend_afternoon()],
         ..DndSchedule::default()
       };
-      assert_eq!(dnd_to_server(&dnd, None, NOW), None, "{bad}");
+      let wire = dnd_to_server(&dnd, &berlin(), None).expect("schedule");
+      assert_eq!(wire.windows, dnd.windows);
+      assert_eq!(wire.utc_offset_minutes, 60);
+      assert_eq!(wire.maybe_time_zone.as_deref(), Some("Europe/Berlin"));
+    }
+
+    #[test]
+    fn weekdays_are_sent_in_calendar_order() {
+      let dnd = DndSchedule {
+        is_enabled: true,
+        windows: vec![night(vec![Weekday::Sunday, Weekday::Monday])],
+        ..DndSchedule::default()
+      };
+      let wire = dnd_to_server(&dnd, &berlin(), None).expect("schedule");
+      assert_eq!(wire.windows[0].weekdays, vec![Weekday::Monday, Weekday::Sunday]);
+    }
+
+    #[test]
+    fn a_disabled_schedule_without_overrides_is_no_schedule() {
+      let dnd = DndSchedule::default();
+      assert!(!dnd.is_enabled);
+      assert_eq!(dnd_to_server(&dnd, &berlin(), None), None);
+    }
+
+    #[test]
+    fn overrides_without_a_schedule_are_a_schedule_without_windows() {
+      let dnd = DndSchedule {
+        allows_urgent: true,
+        allow_user_ids: vec![crate::model::id_from_raw(5)],
+        ..DndSchedule::default()
+      };
+      let wire = dnd_to_server(&dnd, &berlin(), None).expect("overrides");
+      assert!(wire.windows.is_empty());
+      assert!(wire.allows_urgent);
+      let back = dnd_from_server(&wire, &DndSchedule::default());
+      assert!(!back.is_enabled);
+      assert_eq!(back.windows, DndSchedule::default().windows);
+      assert_eq!(back.allow_user_ids, dnd.allow_user_ids);
+    }
+
+    #[test]
+    fn ranges_the_server_would_refuse_are_left_out() {
+      let dnd = DndSchedule {
+        is_enabled: true,
+        windows: vec![
+          night(Vec::new()),
+          DndWindow {
+            weekdays: WORKDAYS.to_vec(),
+            start_minute: 600,
+            end_minute: 600,
+          },
+          DndWindow {
+            weekdays: WORKDAYS.to_vec(),
+            start_minute: 1440,
+            end_minute: 60,
+          },
+          weekend_afternoon(),
+        ],
+        ..DndSchedule::default()
+      };
+      let wire = dnd_to_server(&dnd, &berlin(), None).expect("schedule");
+      assert_eq!(wire.windows, vec![weekend_afternoon()]);
+    }
+
+    #[test]
+    fn the_server_limits_are_kept() {
+      let dnd = DndSchedule {
+        is_enabled: true,
+        windows: vec![weekend_afternoon(); MAX_DND_WINDOWS + 3],
+        allow_user_ids: (1..=60).map(crate::model::id_from_raw).collect(),
+        ..DndSchedule::default()
+      };
+      let wire = dnd_to_server(&dnd, &berlin(), None).expect("schedule");
+      assert_eq!(wire.windows.len(), MAX_DND_WINDOWS);
+      assert_eq!(wire.allow_user_ids.len(), MAX_DND_ALLOWED_USERS);
+    }
+
+    #[test]
+    fn a_time_zone_from_another_device_stays_when_this_one_has_none() {
+      let previous = DndWire {
+        maybe_time_zone: Some("America/New_York".into()),
+        ..DndWire::default()
+      };
+      let dnd = DndSchedule {
+        is_enabled: true,
+        ..DndSchedule::default()
+      };
+      let zone = LocalZone {
+        utc_offset_minutes: -240,
+        maybe_time_zone: None,
+      };
+      let wire = dnd_to_server(&dnd, &zone, Some(&previous)).expect("schedule");
+      assert_eq!(wire.maybe_time_zone.as_deref(), Some("America/New_York"));
+      assert_eq!(wire.utc_offset_minutes, -240);
+      let own = dnd_to_server(&dnd, &berlin(), Some(&previous)).expect("schedule");
+      assert_eq!(own.maybe_time_zone.as_deref(), Some("Europe/Berlin"));
+    }
+
+    #[test]
+    fn no_server_schedule_turns_the_overrides_off_but_keeps_the_ranges() {
+      let mut prefs = Preferences::default();
+      prefs.notifications.dnd = DndSchedule {
+        is_enabled: true,
+        windows: vec![weekend_afternoon()],
+        allow_user_ids: vec![crate::model::id_from_raw(5)],
+        allows_urgent: true,
+      };
+      let server = NotificationSettings {
+        auto_follow_mentioned_threads: true,
+        push_mode: PushMode::AwayOnly,
+        send_read_receipts: true,
+        maybe_dnd_schedule: None,
+        maybe_uses_desktop_attention: None,
+      };
+      apply_global(&mut prefs, &server);
+      let dnd = &prefs.notifications.dnd;
+      assert!(!dnd.is_enabled && !dnd.allows_urgent && dnd.allow_user_ids.is_empty());
+      assert_eq!(dnd.windows, vec![weekend_afternoon()]);
+    }
+
+    #[test]
+    fn editor_times_parse_and_format() {
+      assert_eq!(parse_minutes("06:30"), Some(390));
+      assert_eq!(format_minutes(390), "06:30");
+      for bad in ["", "7", "25:00", "08:75", "ab:cd"] {
+        assert_eq!(parse_minutes(bad), None, "{bad}");
+      }
+    }
+
+    fn night(weekdays: Vec<Weekday>) -> DndWindow {
+      DndWindow {
+        weekdays,
+        start_minute: 22 * 60,
+        end_minute: 6 * 60 + 30,
+      }
+    }
+
+    fn weekend_afternoon() -> DndWindow {
+      DndWindow {
+        weekdays: vec![Weekday::Saturday, Weekday::Sunday],
+        start_minute: 12 * 60,
+        end_minute: 18 * 60,
+      }
+    }
+
+    fn berlin() -> LocalZone {
+      LocalZone {
+        utc_offset_minutes: 60,
+        maybe_time_zone: Some("Europe/Berlin".into()),
+      }
     }
   }
 

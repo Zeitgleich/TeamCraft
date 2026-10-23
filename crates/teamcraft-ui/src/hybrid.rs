@@ -266,6 +266,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.set_presence(presence);
   }
 
+  fn set_presence_until(&self, presence: PresenceStatus, maybe_until: Option<TimestampMs>) {
+    self.chat.set_presence_until(presence, maybe_until);
+  }
+
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     match &self.maybe_live {
       Some(live) => live.set_custom_status(self.chat.me().id, maybe_status.as_ref(), now_ms()),
@@ -275,6 +279,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 
   fn set_activity(&self, is_idle: bool) {
     self.chat.set_activity(is_idle);
+  }
+
+  fn set_attention(&self, is_attentive: bool) {
+    self.chat.set_attention(is_attentive);
   }
 
   fn search_backend(&self) -> Option<&dyn SearchBackend> {

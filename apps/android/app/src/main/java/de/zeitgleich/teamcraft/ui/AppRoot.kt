@@ -20,6 +20,9 @@ import de.zeitgleich.teamcraft.ui.screens.MeetingsScreen
 import de.zeitgleich.teamcraft.ui.screens.SavedScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadsScreen
 import de.zeitgleich.teamcraft.ui.screens.ConversationScreen
+import de.zeitgleich.teamcraft.ui.screens.DoNotDisturbScreen
+import de.zeitgleich.teamcraft.ui.screens.NotificationDiagnosticsScreen
+import de.zeitgleich.teamcraft.ui.screens.PushBatteryScreen
 import de.zeitgleich.teamcraft.ui.screens.EnrollScreen
 import de.zeitgleich.teamcraft.ui.screens.LinkThisDeviceScreen
 import de.zeitgleich.teamcraft.ui.screens.LoadingScreen
@@ -200,7 +203,28 @@ private fun ReadyNavigation(
       }
     }
     composable("settings") {
-      SettingsScreen(viewModel = viewModel, account = account, onBack = { navigation.popBackStack() })
+      SettingsScreen(
+        viewModel = viewModel,
+        account = account,
+        onBack = { navigation.popBackStack() },
+        onDnd = { navigation.navigate("dnd") },
+        onDiagnostics = { navigation.navigate("notification_diagnostics") },
+      )
+    }
+    composable("dnd") {
+      DoNotDisturbScreen(viewModel = viewModel, account = account, onBack = { navigation.popBackStack() })
+    }
+    composable("notification_diagnostics") {
+      NotificationDiagnosticsScreen(
+        viewModel = viewModel,
+        account = account,
+        onBattery = { navigation.navigate("push_battery") },
+        onDnd = { navigation.navigate("dnd") },
+        onBack = { navigation.popBackStack() },
+      )
+    }
+    composable("push_battery") {
+      PushBatteryScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
     }
   }
 }

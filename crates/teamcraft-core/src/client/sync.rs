@@ -44,6 +44,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.retry_undecrypted(conversation.id)?;
     }
     self.refresh_read_state().await?;
+    self.refresh_notification_settings().await?;
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
     self.top_up_key_packages().await?;

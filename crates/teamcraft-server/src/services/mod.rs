@@ -35,6 +35,7 @@ pub mod org_recovery;
 pub mod permission_scheme;
 pub mod presence;
 pub mod profiles;
+pub mod push_diagnostics;
 pub mod retention;
 pub mod session;
 pub mod shares;

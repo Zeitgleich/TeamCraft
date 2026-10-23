@@ -17,6 +17,7 @@ import java.nio.ByteBuffer
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -59,6 +60,11 @@ class CallController(
   @Volatile private var isCameraStarting = false
   @Volatile private var maybePermission: CompletableDeferred<Boolean>? = null
   @Volatile private var options = CallOptions()
+  @Volatile private var isTelecomRegistered = false
+  @Volatile private var maybeRingTimeout: Job? = null
+  private val ringing = MutableStateFlow<IncomingRing?>(null)
+  private val joining = MutableStateFlow(false)
+  private val incomingNotifier = IncomingCallNotifier(context)
 
   /** The call this device is in, as the engine reports it; `null` when idle. */
   val callState: StateFlow<CallStateInfo?> = state
@@ -75,12 +81,102 @@ class CallController(
   /** Audio goes to the loudspeaker. */
   val isSpeakerOn: StateFlow<Boolean> = speaker
 
+  /** The call ringing on this device, until answered, declined or ended elsewhere. */
+  val incomingRing: StateFlow<IncomingRing?> = ringing
+
+  /** Joining a call (answered, not connected yet). */
+  val isJoining: StateFlow<Boolean> = joining
+
   /** Registers with Telecom and listens for rings. Safe to call more than once. */
   suspend fun start() {
     if (isStarted) return
-    callsManager.registerAppWithTelecom(CallsManager.CAPABILITY_BASELINE or CallsManager.CAPABILITY_SUPPORTS_VIDEO_CALLING)
+    registerWithTelecom()
     core.core().setCallListener(Listener())
     isStarted = true
+  }
+
+  /**
+   * Rings for an incoming call (a `call` wake-up, or the gateway while the app runs): the
+   * incoming-call notification with its full-screen intent, and a Telecom call so headsets, car
+   * kits and Android Auto can answer. Ignored while this device is in a call or another rings.
+   */
+  fun ring(incoming: IncomingRing) {
+    if (maybeSession != null || joining.value) return
+    val current = ringing.value
+    if (current != null) {
+      // The gateway and a wake-up may report the same ring; another conversation's waits.
+      val maybeMerged = current.merged(incoming) ?: return
+      ringing.value = maybeMerged
+      // The device verified the ring only now: offer answering from here on.
+      if (maybeMerged.isVerified && !current.isVerified) {
+        incomingNotifier.show(maybeMerged)
+        reportToTelecom(maybeMerged)
+      }
+      return
+    }
+    ringing.value = incoming
+    incomingNotifier.show(incoming)
+    maybeRingTimeout?.cancel()
+    maybeRingTimeout = scope.launch {
+      delay(IncomingCallNotifier.RING_TIMEOUT_MS)
+      if (ringing.value?.conversationId == incoming.conversationId) endRing()
+    }
+    if (incoming.isVerified) reportToTelecom(incoming)
+  }
+
+  /** Lets headsets, car kits and Android Auto answer; only for rings the device verified. */
+  private fun reportToTelecom(incoming: IncomingRing) {
+    scope.launch {
+      try {
+        registerWithTelecom()
+        addTelecomCall(incoming.conversationId, incoming.displayName, CallAttributesCompat.DIRECTION_INCOMING)
+      } catch (error: Exception) {
+        // The notification still rings; only headsets and cars can't answer.
+        Log.w(TAG, "the ring could not be reported to Telecom", error)
+      }
+    }
+  }
+
+  /**
+   * Answers from the notification or the call screen. Also works when the ring is gone (the
+   * process restarted in between): joining needs only the conversation.
+   */
+  fun answer(conversationId: String) {
+    val maybeCall = maybeTelecomCall
+    clearRing()
+    scope.launch {
+      if (maybeCall != null) {
+        runCatching { maybeCall.answer(CallAttributesCompat.CALL_TYPE_AUDIO_CALL) }
+          .onFailure { Log.w(TAG, "Telecom refused the answer", it) }
+        if (!join(conversationId)) maybeCall.disconnect(DisconnectCause(DisconnectCause.ERROR))
+      } else if (maybeTelecomJob?.isActive == true) {
+        // Telecom is still adding the ring: join without waiting for it.
+        join(conversationId)
+      } else {
+        options = CallOptions()
+        addTelecomCall(conversationId, displayNameOf(conversationId), CallAttributesCompat.DIRECTION_OUTGOING)
+      }
+    }
+  }
+
+  /** Declines on this device: stops ringing. The others keep ringing until they answer or it ends. */
+  fun decline() {
+    if (maybeSession != null) return
+    val maybeCall = maybeTelecomCall
+    clearRing()
+    if (maybeCall != null) {
+      scope.launch {
+        runCatching { maybeCall.disconnect(DisconnectCause(DisconnectCause.REJECTED)) }
+        maybeTelecomJob?.cancel()
+      }
+    } else {
+      maybeTelecomJob?.cancel()
+    }
+  }
+
+  /** A `dismiss` wake-up: the ring ended elsewhere (answered, declined, timed out, cancelled). */
+  fun stopRinging(callId: String) {
+    if (ringing.value?.isEndedBy(callId) == true) endRing()
   }
 
   /** Starts (or joins) the conversation's call, with the choices of the pre-join dialog. */
@@ -142,6 +238,7 @@ class CallController(
   fun hangUp() {
     val session = maybeSession
     if (session == null) {
+      clearRing()
       maybeTelecomJob?.cancel()
     } else {
       session.leave()
@@ -162,7 +259,11 @@ class CallController(
       try {
         callsManager.addCall(
           attributes,
-          onAnswer = { join(conversationId) },
+          onAnswer = {
+            // Answered through Telecom: a headset, the car or Android Auto.
+            clearRing()
+            join(conversationId)
+          },
           onDisconnect = { leave() },
           onSetActive = {},
           onSetInactive = { maybeSession?.setMuted(true) },
@@ -198,6 +299,15 @@ class CallController(
 
   /** Joins in the engine and shows the call; `false` if joining failed. */
   private suspend fun join(conversationId: String): Boolean {
+    if (maybeSession != null || !joining.compareAndSet(expect = false, update = true)) return maybeSession != null
+    try {
+      return joinOnce(conversationId)
+    } finally {
+      joining.value = false
+    }
+  }
+
+  private suspend fun joinOnce(conversationId: String): Boolean {
     showCall()
     if (!hasMicrophone() && !requestMicrophone()) return false
     // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
@@ -216,6 +326,32 @@ class CallController(
     CallService.start(context, hasCamera = false)
     return true
   }
+
+  /** Ends the ring here: notification, timeout and the Telecom call unless it was answered. */
+  private fun endRing() {
+    clearRing()
+    if (maybeSession == null && !joining.value) maybeTelecomJob?.cancel()
+  }
+
+  private fun clearRing() {
+    ringing.value = null
+    maybeRingTimeout?.cancel()
+    maybeRingTimeout = null
+    incomingNotifier.cancel()
+  }
+
+  private fun registerWithTelecom() {
+    if (isTelecomRegistered) return
+    callsManager.registerAppWithTelecom(CallsManager.CAPABILITY_BASELINE or CallsManager.CAPABILITY_SUPPORTS_VIDEO_CALLING)
+    isTelecomRegistered = true
+  }
+
+  private suspend fun displayNameOf(conversationId: String): String =
+    conversationNameOf(conversationId) ?: context.getString(R.string.app_name)
+
+  /** The name of a conversation this device knows; `null` for one it doesn't. */
+  private suspend fun conversationNameOf(conversationId: String): String? =
+    runCatching { core.core().conversations().firstOrNull { it.id == conversationId }?.name }.getOrNull()
 
   private fun showCall() {
     // The previous call's ended state would close the screen right away.
@@ -259,15 +395,22 @@ class CallController(
 
     override fun onIncomingCall(call: IncomingCallInfo) {
       scope.launch {
-        val name = core.core().conversations().firstOrNull { it.id == call.conversationId }?.name
-        val displayName = name ?: context.getString(R.string.app_name)
-        addTelecomCall(call.conversationId, displayName, CallAttributesCompat.DIRECTION_INCOMING)
+        val maybeName = conversationNameOf(call.conversationId)
+        ring(
+          IncomingRing(
+            call.conversationId,
+            maybeCallId = null,
+            displayName = maybeName ?: context.getString(R.string.app_name),
+            maybeCallerName = null,
+            isVerified = maybeName != null,
+          ),
+        )
       }
     }
 
     override fun onRingEnded(conversationId: String) {
       // Answered on another device, declined or over: stop ringing here.
-      if (maybeSession == null) maybeTelecomJob?.cancel()
+      if (ringing.value?.conversationId == conversationId) endRing()
     }
   }
 

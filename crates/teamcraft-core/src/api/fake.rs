@@ -52,6 +52,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
 };
+use teamcraft_proto::{NotificationSettings, PushKind, PushMode, TestPushOutcome, TestPushResponse};
 
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
 
@@ -101,6 +102,7 @@ struct State {
   admins: HashSet<UserId>,
   attachments: HashMap<AttachmentId, FakeAttachment>,
   push_registrations: HashMap<DeviceId, RegisterPushRequest>,
+  notification_settings: HashMap<UserId, NotificationSettings>,
   /// What `GET /push/gateway` answers (`None`: the server sends to APNs and FCM itself).
   push_gateway: Option<PushGatewayBinding>,
   /// Sealed tokens that were revoked at the (fake) gateway.
@@ -258,6 +260,11 @@ impl FakeServer {
   /// Sets when the user was last active (Unix milliseconds).
   pub fn set_last_seen(&self, user: UserId, at: i64) {
     self.lock().last_seen.insert(user, at);
+  }
+
+  /// What `GET /me/notification-settings` answers for the user from now on.
+  pub fn set_notification_settings(&self, user: UserId, settings: NotificationSettings) {
+    self.lock().notification_settings.insert(user, settings);
   }
 
   pub fn set_admin(&self, user: UserId) {
@@ -1984,6 +1991,13 @@ impl ServerApi for FakeServerApi {
       },
       are_bound_tokens_required: true,
       max_token_lifetime_secs: 90 * 24 * 3600,
+      kinds: vec![
+        PushKind::Message,
+        PushKind::Mention,
+        PushKind::Call,
+        PushKind::Dismiss,
+        PushKind::Test,
+      ],
     })
   }
 
@@ -2000,6 +2014,37 @@ impl ServerApi for FakeServerApi {
       state.ensure_own_device(me, device)?;
       state.push_registrations.remove(&device);
       Ok(())
+    })
+  }
+
+  async fn send_test_push(&self, device: DeviceId) -> Result<TestPushResponse, ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, device)?;
+      let maybe_provider = state
+        .push_registrations
+        .get(&device)
+        .map(|registration| registration.provider.clone());
+      Ok(TestPushResponse {
+        outcome: if maybe_provider.is_some() {
+          TestPushOutcome::Sent
+        } else {
+          TestPushOutcome::NotRegistered
+        },
+        maybe_provider,
+        sent_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn notification_settings(&self) -> Result<NotificationSettings, ApiError> {
+    self.with(|state, me| {
+      Ok(
+        state
+          .notification_settings
+          .get(&me)
+          .cloned()
+          .unwrap_or_else(default_notification_settings),
+      )
     })
   }
 
@@ -2132,7 +2177,9 @@ impl GatewayConnection for FakeGateway {
           },
         );
       },
-      GatewayClientMessage::SetActivity { .. } | GatewayClientMessage::Unknown => {},
+      GatewayClientMessage::SetActivity { .. }
+      | GatewayClientMessage::Attention { .. }
+      | GatewayClientMessage::Unknown => {},
     }
     Ok(())
   }
@@ -2608,5 +2655,15 @@ fn privacy_of(state: &State, user: UserId) -> teamcraft_proto::PrivacyResponse {
       teamcraft_proto::LastSeenVisibility::Everyone
     },
     is_last_seen_available: true,
+  }
+}
+
+fn default_notification_settings() -> NotificationSettings {
+  NotificationSettings {
+    auto_follow_mentioned_threads: true,
+    push_mode: PushMode::AwayOnly,
+    send_read_receipts: true,
+    maybe_dnd_schedule: None,
+    maybe_uses_desktop_attention: None,
   }
 }

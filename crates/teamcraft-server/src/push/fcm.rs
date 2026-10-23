@@ -189,12 +189,7 @@ impl PushSender for FcmSender {
       if !is_registration_token(&target.token) {
         return Err(PushError::Invalid("not an FCM registration token".into()));
       }
-      // Calls and urgent messages must wake a dozing phone; the rest may wait for the next window.
-      let priority = if message.urgency == Urgency::High || message.kind == PushKind::Call {
-        "HIGH"
-      } else {
-        "NORMAL"
-      };
+      let priority = android_priority(message);
       let body = json!({
         "message": {
           "token": target.token,
@@ -230,6 +225,17 @@ impl PushSender for FcmSender {
       }
       classify(status, &error_status)
     })
+  }
+}
+
+/// Everything the user should see must wake a dozing phone at once (Doze holds `NORMAL` messages
+/// for a maintenance window); silent withdrawals may wait for it. Android lowers the priority of apps
+/// whose high-priority messages show nothing, so `dismiss` never goes out as `HIGH`.
+fn android_priority(message: &PushMessage) -> &'static str {
+  if message.kind.is_visible() && (message.urgency == Urgency::High || message.kind == PushKind::Call) {
+    "HIGH"
+  } else {
+    "NORMAL"
   }
 }
 
@@ -273,6 +279,31 @@ mod tests {
     ));
     assert!(matches!(class(429, "QUOTA_EXCEEDED"), PushError::Unavailable(_)));
     assert!(matches!(class(503, "UNAVAILABLE"), PushError::Unavailable(_)));
+  }
+
+  #[test]
+  fn visible_pushes_are_high_priority_and_withdrawals_normal() {
+    let message = |kind: PushKind, urgency: Urgency| PushMessage {
+      sealed: Vec::new(),
+      kind,
+      urgency,
+      ttl: Duration::from_secs(60),
+    };
+    for kind in [PushKind::Message, PushKind::Mention, PushKind::Test] {
+      assert_eq!(android_priority(&message(kind, Urgency::High)), "HIGH");
+    }
+    assert_eq!(
+      android_priority(&message(PushKind::Call, Urgency::Normal)),
+      "HIGH"
+    );
+    assert_eq!(
+      android_priority(&message(PushKind::Dismiss, Urgency::High)),
+      "NORMAL"
+    );
+    assert_eq!(
+      android_priority(&message(PushKind::Message, Urgency::Normal)),
+      "NORMAL"
+    );
   }
 
   #[test]

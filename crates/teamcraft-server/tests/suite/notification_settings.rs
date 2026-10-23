@@ -30,26 +30,30 @@ mod user_settings {
     assert_eq!(defaults.status, StatusCode::OK, "{}", defaults.body);
     assert_eq!(
       defaults.body,
-      json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true})
+      json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
+             "uses_desktop_attention": true})
     );
 
     let schedule = json!({
       "utc_offset_minutes": 60,
       "windows": [{"weekdays": ["mon", "fri"], "start_minute": 1320, "end_minute": 420}],
       "allow_user_ids": [],
+      "allows_urgent": false,
+      "urgent_scope": "direct",
     });
     let body = json!({
       "auto_follow_mentioned_threads": false,
       "push_mode": "always",
       "send_read_receipts": false,
       "dnd_schedule": schedule,
+      "uses_desktop_attention": false,
     });
     let put = app.put(&carol, "/me/notification-settings", body.clone()).await;
     assert_eq!((put.status, &put.body), (StatusCode::OK, &body));
     assert_eq!(app.get(&carol, "/me/notification-settings").await.body, body);
 
-    let cleared =
-      json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true});
+    let cleared = json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
+                         "uses_desktop_attention": true});
     app
       .put(&carol, "/me/notification-settings", cleared.clone())
       .await;
