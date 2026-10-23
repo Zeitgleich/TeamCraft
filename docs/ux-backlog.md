@@ -44,8 +44,9 @@ exists).
 | Pasting a URL over selected text replaces the text instead of making a link                       | done  |
 | Drag and drop of files only works over the composer, not over the whole conversation              | done  |
 | Pasted images are attached by name only, without a preview                                        | done  |
-| No undo toast after deleting a message or leaving a channel (deleting asks to confirm instead)    | open  |
-| Optimistic sending with a retry for messages that failed                                          | open  |
+| No undo after deleting a message (it asked "Delete for everyone?" instead); now an Undo toast     | done  |
+| No undo after leaving a channel                                                                   | open  |
+| Messages in the outbox look sent; now "Sending…", then "Not sent yet, retrying"                   | done  |
 
 ## General and desktop
 
@@ -56,7 +57,7 @@ exists).
 | The desktop window forgets its size and position                                                  | done  |
 | Tray icon with unread badge, start minimised to tray                                              | open  |
 | Clicking an author name does nothing; it now opens the profile card (local time, status, message) | done  |
-| Hover card on names (without a click)                                                             | open  |
+| Hover card on names (picture, status, local time, message, profile)                               | done  |
 | Drag to reorder favourites; custom sidebar sections exist as categories but can't be reordered    | open  |
 | Loading skeletons while a conversation's history loads                                            | done  |
 

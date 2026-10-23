@@ -115,19 +115,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if !tauri::is_available() {
     open_conversations_from_notifications(state);
   }
-  let indexed_toasts = Memo::new(move |_| {
-    state
-      .toasts
-      .get()
-      .into_iter()
-      .enumerate()
-      .collect::<Vec<(usize, String)>>()
-  });
   // `/remind` reminders come due while the app is open.
   crate::reactive::use_interval(REMINDER_CHECK_MS, move || {
     for reminder in crate::components::composer_commands::due_reminders(now_ms()) {
       let message = i18n.t_with("reminder-due", &[("text", &reminder.text)]);
-      state.toasts.update(|list| list.push(message.clone()));
+      state.show_toast(message.clone());
       leptos::task::spawn_local(async move { tauri::notify("TeamCraft", Some(&message)).await });
     }
   });
@@ -207,13 +199,18 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <IncomingCallDialog />
       <Show when=move || !state.toasts.with(Vec::is_empty) fallback=|| ()>
         <div class="toasts" role="status">
-          <For each=move || indexed_toasts.get() key=|(index, text)| (*index, text.clone()) let:entry>
+          <For each=move || state.toasts.get() key=|toast| toast.id let:toast>
             {
-              let (index, text) = entry;
+              let id = toast.id;
               view! {
                 <div class="toast">
-                  <span>{text}</span>
-                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.toasts.update(|list| { if index < list.len() { list.remove(index); } })>
+                  <span>{toast.text}</span>
+                  {toast.maybe_undo.map(|undo| view! {
+                    <button class="btn btn-small" on:click=move |_| state.undo(id, undo)>
+                      {move || i18n.t("undo")}
+                    </button>
+                  })}
+                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
                     <Icon name=IconName::Close />
                   </button>
                 </div>

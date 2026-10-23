@@ -19,6 +19,15 @@ pub fn raw_id(id: impl Id) -> u64 {
   u64::try_from(id.snowflake().get()).unwrap_or(0)
 }
 
+/// Bit set on the IDs of messages that are still in the client's outbox (not confirmed by the
+/// server yet). Real snowflakes stay below it for decades (41 bits of milliseconds shifted by 22).
+pub const PENDING_ID_BIT: i64 = 1 << 62;
+
+/// Whether a message is still waiting in the outbox; the UI shows it as "sending".
+pub fn is_pending(id: MessageId) -> bool {
+  id.snowflake().get() & PENDING_ID_BIT != 0
+}
+
 /// A thread is identified by its root message (proto: "ThreadId is the ID of its root message").
 pub fn thread_id_of(root: MessageId) -> ThreadId {
   ThreadId::from_snowflake(root.snowflake())
@@ -342,6 +351,14 @@ pub struct ThreadSummary {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn pending_ids_are_recognized() {
+    assert!(!is_pending(id_from_raw(42)));
+    assert!(is_pending(id_from_raw(
+      u64::try_from(PENDING_ID_BIT | 7).unwrap_or(0)
+    )));
+  }
 
   #[test]
   fn bridge_lines_become_log_lines() {

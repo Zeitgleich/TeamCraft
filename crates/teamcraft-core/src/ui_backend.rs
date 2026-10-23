@@ -21,8 +21,8 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind,
-  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary,
-  TimestampMs, User, UserId,
+  PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
+  ThreadSummary, TimestampMs, User, UserId,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -43,10 +43,6 @@ use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
 };
-
-/// Bit set on the IDs the UI gets for messages still in the outbox. Real snowflakes stay below it
-/// for decades (41 bits of milliseconds since 2026 shifted by 22).
-const PENDING_ID_BIT: i64 = 1 << 62;
 
 /// Requests from the UI that need the server; the sync task drains and runs them.
 #[derive(Clone, Debug, PartialEq)]
