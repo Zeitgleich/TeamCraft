@@ -210,15 +210,12 @@ lost frame) and when the user turns the setting off, and repeat their last repor
 The server renews an attentive report on every gateway heartbeat, keeps it in memory only and never
 logs it.
 
-| Platform | OS idle                              | Screen lock                                    | Withdraw notifications read elsewhere    |
-|----------|--------------------------------------|------------------------------------------------|------------------------------------------|
-| Linux    | GNOME idle monitor, else ScreenSaver | logind `LockedHint`, ScreenSaver `GetActive`   | yes (freedesktop notification service)   |
-| macOS    | Core Graphics event source           | not read; locking takes focus from the window  | no: they stay until dismissed            |
-| Windows  | `GetLastInputInfo`                   | not read; locking takes focus from the window  | no: they stay until dismissed            |
-| Web      | none (in-app input only)             | none                                           | yes (page and service worker, by tag)    |
-
-Desktop and web withdraw their own notifications by conversation tag when a conversation becomes read
-or is opened, also service-worker notifications still on screen when the page loads.
+| Platform | OS idle                              | Screen lock                                    |
+|----------|--------------------------------------|------------------------------------------------|
+| Linux    | GNOME idle monitor, else ScreenSaver | logind `LockedHint`, ScreenSaver `GetActive`   |
+| macOS    | Core Graphics event source           | not read; locking takes focus from the window  |
+| Windows  | `GetLastInputInfo`                   | not read; locking takes focus from the window  |
+| Web      | none (in-app input only)             | none                                           |
 
 **Urgent and DND.** With "urgent messages break through" on, an urgent message reaches the user during
 DND only in DMs and group DMs by default (`urgent_scope: direct`); `everywhere` includes channels.
@@ -243,6 +240,67 @@ it the extension hands it to CallKit (`NSE_NOTIFICATION_FILTERING` in `Base.xcco
 pushes are shown passively (no sound, no banner). While the app is in the foreground it holds the store
 and opens pushes itself (`willPresent`). A `dismiss` without a thread removes only top-level
 notifications. The PushKit path is ready for when a VoIP token is registered.
+
+### Desktop notifications
+
+Desktop and web decide on the device what to show (`teamcraft_ui::notifier`, `call_alerts`,
+`meeting_reminders`; wiring in `os_alerts`); the desktop shell (`apps/desktop/src/notifications`) or
+the browser only displays, replaces, withdraws and reports clicks and buttons back as a
+`NotificationActionEvent` (`teamcraft_client_api::os_notify`). Every notification has a tag: the
+conversation ID for messages (as the service worker's push notifications), `call:`, `missed-call:`,
+`meeting:` and `reminder:` prefixes otherwise. A newer notification with the same tag replaces the
+older one; a conversation that becomes read anywhere, or is opened, withdraws its message and
+missed-call notifications.
+
+| Platform | Shown through                          | Replace, withdraw | Buttons | Reply field                     | Ringtone, attention                       |
+|----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|
+| Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    |
+| Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        |
+| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | no      | no                              | yes; dock bounce                          |
+| Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | no calls in the browser                   |
+
+macOS buttons need a notification center delegate, an Objective-C class the shell cannot define
+without `unsafe`; a click brings the app to the front, where the conversation or the call card is.
+An unbundled macOS build and a Linux session without a notification service fall back to the
+notification plugin (title and text only, no withdrawal).
+
+**Messages.** Mentions, DMs and followed thread replies by the rules above, the text only as far as
+"show message preview" and the workspace's lock-screen policy (`push_content_mode`) allow. Buttons:
+Mark as read; for top-level messages in conversations the user may post in also a reply field (a
+thread reply's answer belongs in the thread, so it has none). A reply is sent like a composer message
+(end-to-end encrypted, through the outbox) and marks the conversation read; `@channel` in a large
+conversation opens the conversation with the text as draft instead, for the usual confirmation.
+
+**Calls (desktop).** A ringing call follows the rules of a direct message from the caller: a muted
+conversation, the level "nothing" and do-not-disturb (except people on the allow list) keep it to the
+in-app card. Otherwise the ringtone plays (setting `plays_ringtone`, default on; a synthesized
+electric-piano arpeggio from `teamcraft_media::ringtone` on the default output; not during another
+call; not while the desktop's own do-not-disturb is on, where the OS tells: GNOME, KDE). With the
+window not in front a notification with Accept and Decline comes too (Accept with video only where the
+in-app card offers it), and the window asks for attention. All of it stops the moment the call stops
+ringing on this device: answered here or on another device (the user is in the roster), declined
+here, answered by someone else (group calls), cancelled or timed out. A call nobody answered and the
+user did not decline here leaves a "missed call" notification with Call back, under the direct-message
+rules again. Names appear only where the lock-screen policy allows sender names.
+
+**Meeting reminders.** For meetings the user is invited to or organizes, planned (not "meet now"),
+not cancelled and not declined: one notification `maybe_meeting_reminder_minutes` before (default 5,
+off possible) and one at the start (`notifies_meeting_start`, default on), each with Join. Times are
+the server's: `GET /meetings` carries `server_now`, and the client applies the measured offset, so a
+wrong device clock does not shift reminders. One timer sleeps until the next reminder, at most 15
+minutes (the list is refreshed then; a meeting created meanwhile is seen within that time); right
+before a reminder the list is fetched again, so a cancelled or moved meeting does not remind. A device
+that slept through the "before" time gets only the start reminder, up to 10 minutes after the start.
+Shown reminders are remembered per device by meeting, start time and kind (local storage), so a
+restart or a second tab never repeats one and a moved meeting reminds again for its new time; each of
+the user's devices reminds once. Later occurrences of a repeating meeting are not reminded yet (the
+list returns a series once).
+
+**Several tabs.** In a browser only the tab that owns the account's store (e2ee.md §9.4) shows
+notifications. Each tab records in local storage which conversation it shows while in front, so the
+owner stays quiet about a conversation the user reads in another tab. Buttons of page notifications
+reach the service worker, which hands them to an open tab as a `notification_action` message (Mark as
+read without bringing the window up).
 
 ### Diagnostics API
 

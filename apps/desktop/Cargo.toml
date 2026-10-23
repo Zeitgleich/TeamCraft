@@ -83,6 +83,12 @@ avcapture = "0.7.0"
 # OS idle time for the attention report through a safe Core Graphics binding (Zlib/Apache-2.0/MIT;
 # already in the tree through the media stack).
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEventSource", "CGEventTypes"] }
+# Notifications that can be replaced and withdrawn (UNUserNotificationCenter), through the same
+# safe objc2 bindings (Zlib/Apache-2.0/MIT; already in the tree through Tauri's macOS stack).
+objc2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSError", "NSString"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+block2 = "0.6.2"
 
 # Windows: Media Foundation cameras and Windows Graphics Capture for screens and windows.
 # teamcraft-media's `gstreamer` feature would build the Media Foundation encoder element
@@ -99,6 +105,9 @@ tauri-plugin-autostart = "2"
 # OS idle time for the attention report: a safe wrapper of GetLastInputInfo (MIT/Apache-2.0; only
 # windows-sys and anyhow, both already in the tree).
 user-idle-time = { version = "0.7", default-features = false }
+# Toasts with buttons and a reply field that can be replaced and withdrawn (WinRT; MIT/Apache-2.0,
+# the version the notification plugin already pulls in).
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications"] }
 
 [features]
 # Serve the embedded `dist` instead of the dev server URL. `cargo tauri build` enables it.

@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
-  NotificationTag, OsNotification, OsNotificationKind, TagTarget,
+  NotificationTag, OsNotification, OsNotificationKind, ReplyField, TagTarget,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -139,8 +139,10 @@ fn watch_messages(state: AppState, i18n: I18n) {
         .body
         .or_else(|| (!is_generic).then(|| i18n.t("notify-new-message")));
       // Browsers have no text field in notifications.
-      let maybe_reply_placeholder =
-        (notification.can_reply && tauri::is_available()).then(|| i18n.t("notify-reply-placeholder"));
+      let maybe_reply = (notification.can_reply && tauri::is_available()).then(|| ReplyField {
+        placeholder: i18n.t("notify-reply-placeholder"),
+        send_label: i18n.t("notify-action-send"),
+      });
       let shown = OsNotification {
         tag: NotificationTag::conversation(notification.conversation),
         kind: OsNotificationKind::Message,
@@ -150,7 +152,7 @@ fn watch_messages(state: AppState, i18n: I18n) {
           NotificationAction::MarkRead,
           i18n.t("notify-action-mark-read"),
         )],
-        maybe_reply_placeholder,
+        maybe_reply,
       };
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
@@ -313,7 +315,7 @@ fn incoming_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) 
     title: i18n.t("incoming-title"),
     maybe_body,
     actions,
-    maybe_reply_placeholder: None,
+    maybe_reply: None,
   }
 }
 
@@ -329,7 +331,7 @@ fn missed_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) ->
       NotificationAction::CallBack,
       i18n.t("notify-action-call-back"),
     )],
-    maybe_reply_placeholder: None,
+    maybe_reply: None,
   }
 }
 
@@ -453,7 +455,7 @@ fn meeting_notification(
     title,
     maybe_body: may_name.then(|| reminder.title.clone()),
     actions: vec![button(NotificationAction::JoinMeeting, i18n.t("meetings-join"))],
-    maybe_reply_placeholder: None,
+    maybe_reply: None,
   }
 }
 

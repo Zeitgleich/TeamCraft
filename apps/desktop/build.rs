@@ -37,6 +37,8 @@ const COMMANDS: &[&str] = &[
   "call_unwatch_video",
   "notify_user",
   "withdraw_notifications",
+  "request_attention",
+  "set_ringtone",
   "os_attention",
   "autostart_get",
   "autostart_set",

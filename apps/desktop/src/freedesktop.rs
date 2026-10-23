@@ -1,6 +1,7 @@
 //! Linux desktop services over D-Bus: idle time and screen lock for attention (notifications.md,
-//! "Attention"), and notifications that can be replaced and withdrawn (the notification plugin can
-//! neither). Every probe falls back quietly: desktops implement different subsets.
+//! "Attention"), and notifications that can be replaced and withdrawn, with buttons and, where the
+//! server offers it, an inline reply (the notification plugin can do none of it). Every probe falls
+//! back quietly: desktops implement different subsets.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -18,6 +19,11 @@ const DEFAULT_EXPIRY: i32 = -1;
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 const DEFAULT_ACTION: &str = "default";
+/// The capability of servers that offer a text field (KDE Plasma); the action key that asks for it.
+const INLINE_REPLY: &str = "inline-reply";
+/// Urgency hint values of the notification spec.
+const URGENCY_NORMAL: u8 = 1;
+const URGENCY_CRITICAL: u8 = 2;
 
 const LOGIND: &str = "org.freedesktop.login1";
 const LOGIND_MANAGER: &str = "org.freedesktop.login1.Manager";
@@ -27,6 +33,8 @@ const LOGIND_MANAGER: &str = "org.freedesktop.login1.Manager";
 pub struct Buses {
   session: OnceCell<Option<Connection>>,
   system: OnceCell<Option<Connection>>,
+  /// What the notification server supports (`GetCapabilities`), asked once.
+  capabilities: OnceCell<Vec<String>>,
 }
 
 /// What the desktop says about the user right now.
@@ -46,6 +54,24 @@ pub struct DesktopNotification<'a> {
   pub body: &'a str,
   /// The notification this one replaces (0: none).
   pub replaces_id: u32,
+  /// Buttons as (action key, label); a click on the notification itself is always reported.
+  pub actions: &'a [(&'a str, &'a str)],
+  /// The placeholder of a text field, shown where the server has `inline-reply`.
+  pub maybe_reply_placeholder: Option<&'a str>,
+  /// `im.received`, `call.incoming`, … (the spec's categories); servers pick sounds and icons by it.
+  pub category: &'a str,
+  /// A ringing call: critical urgency (stays until withdrawn), no server sound (the app rings).
+  pub is_ringing: bool,
+}
+
+/// What the user did with a notification, as the server reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerAction {
+  pub id: u32,
+  /// The action key (`default` for a click on the notification).
+  pub key: String,
+  /// The text of an inline reply.
+  pub maybe_text: Option<String>,
 }
 
 impl Buses {
@@ -81,10 +107,25 @@ impl Buses {
   /// Shows a notification; returns its ID, `None` when no notification server answered.
   pub async fn notify(&self, notification: &DesktopNotification<'_>) -> Option<u32> {
     let session = self.session().await?;
+    let has_inline_reply = self.has_capability(INLINE_REPLY).await;
     let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
     hints.insert("desktop-entry", Value::from(notification.desktop_entry));
-    // "default" is what the server invokes when the notification itself is clicked; no button.
-    let actions: Vec<&str> = vec![DEFAULT_ACTION, ""];
+    hints.insert("category", Value::from(notification.category));
+    let urgency = if notification.is_ringing {
+      URGENCY_CRITICAL
+    } else {
+      URGENCY_NORMAL
+    };
+    hints.insert("urgency", Value::from(urgency));
+    if notification.is_ringing {
+      hints.insert("suppress-sound", Value::from(true));
+    }
+    let actions = server_actions(notification, has_inline_reply);
+    let expire_timeout = if notification.is_ringing {
+      0
+    } else {
+      DEFAULT_EXPIRY
+    };
     let body = (
       notification.app_name,
       notification.replaces_id,
@@ -93,7 +134,7 @@ impl Buses {
       notification.body,
       actions,
       hints,
-      DEFAULT_EXPIRY,
+      expire_timeout,
     );
     call::<u32, _>(
       session,
@@ -106,31 +147,66 @@ impl Buses {
     .await
   }
 
-  /// Calls `on_click` with the ID of every notification the user clicks, for as long as the session
-  /// bus lives. Returns at once when there is no session bus.
-  pub async fn watch_clicks(&self, on_click: impl Fn(u32) + Send + 'static) {
+  /// Calls `on_action` for every click, button and inline reply on a notification, for as long as
+  /// the session bus lives. Returns at once when there is no session bus.
+  pub async fn watch_actions(&self, on_action: impl Fn(ServerAction) + Send + 'static) {
     let Some(session) = self.session().await else {
       return;
     };
     let rule = zbus::MatchRule::builder()
       .msg_type(zbus::message::Type::Signal)
       .interface(NOTIFICATIONS)
-      .and_then(|builder| builder.member("ActionInvoked"))
       .map(|builder| builder.build());
     let Ok(rule) = rule else {
       return;
     };
     let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, session, None).await else {
-      tracing::debug!("cannot watch notification clicks");
+      tracing::debug!("cannot watch notification actions");
       return;
     };
     while let Some(Ok(message)) = stream.next().await {
-      if let Ok((id, action)) = message.body().deserialize::<(u32, String)>()
-        && action == DEFAULT_ACTION
-      {
-        on_click(id);
-      }
+      let header = message.header();
+      let Some(member) = header.member() else {
+        continue;
+      };
+      let Ok((id, value)) = message.body().deserialize::<(u32, String)>() else {
+        continue;
+      };
+      let action = match member.as_str() {
+        "ActionInvoked" => ServerAction {
+          id,
+          key: value,
+          maybe_text: None,
+        },
+        "NotificationReplied" => ServerAction {
+          id,
+          key: INLINE_REPLY.to_owned(),
+          maybe_text: Some(value),
+        },
+        _ => continue,
+      };
+      on_action(action);
     }
+  }
+
+  /// Whether the desktop's own do-not-disturb is on: the notification server's `Inhibited`
+  /// property (KDE Plasma and others), or GNOME's "show banners" switch.
+  pub async fn is_do_not_disturb(&self) -> bool {
+    if let Some(session) = self.session().await
+      && let Some(value) = call::<OwnedValue, _>(
+        session,
+        NOTIFICATIONS,
+        NOTIFICATIONS_PATH,
+        "org.freedesktop.DBus.Properties",
+        "Get",
+        &(NOTIFICATIONS, "Inhibited"),
+      )
+      .await
+      && bool::try_from(value).unwrap_or(false)
+    {
+      return true;
+    }
+    gnome_hides_banners()
   }
 
   /// Calls `on_wake` every time the computer resumes from suspend (logind `PrepareForSleep(false)`),
@@ -178,6 +254,28 @@ impl Buses {
     }
   }
 
+  async fn has_capability(&self, capability: &str) -> bool {
+    let capabilities = self
+      .capabilities
+      .get_or_init(|| async {
+        match self.session().await {
+          Some(session) => call::<Vec<String>, _>(
+            session,
+            NOTIFICATIONS,
+            NOTIFICATIONS_PATH,
+            NOTIFICATIONS,
+            "GetCapabilities",
+            &(),
+          )
+          .await
+          .unwrap_or_default(),
+          None => Vec::new(),
+        }
+      })
+      .await;
+    capabilities.iter().any(|known| known == capability)
+  }
+
   async fn session(&self) -> Option<&Connection> {
     self
       .session
@@ -203,6 +301,32 @@ impl Buses {
       .await
       .as_ref()
   }
+}
+
+/// The `actions` list of `Notify`: key and label pairs. "default" (no button) reports a click on
+/// the notification; "inline-reply" with the placeholder as label asks for a text field.
+fn server_actions<'a>(notification: &DesktopNotification<'a>, has_inline_reply: bool) -> Vec<&'a str> {
+  let mut actions = vec![DEFAULT_ACTION, ""];
+  for (key, label) in notification.actions {
+    actions.extend([*key, *label]);
+  }
+  if let (true, Some(placeholder)) = (has_inline_reply, notification.maybe_reply_placeholder) {
+    actions.extend([INLINE_REPLY, placeholder]);
+  }
+  actions
+}
+
+/// GNOME's do-not-disturb: `show-banners` off in `org.gnome.desktop.notifications`. Other desktops
+/// don't have the schema.
+fn gnome_hides_banners() -> bool {
+  use gtk::gio;
+  use gtk::gio::prelude::SettingsExt;
+
+  const SCHEMA: &str = "org.gnome.desktop.notifications";
+  let has_schema = gio::SettingsSchemaSource::default()
+    .and_then(|source| source.lookup(SCHEMA, true))
+    .is_some_and(|schema| schema.has_key("show-banners"));
+  has_schema && !gio::Settings::new(SCHEMA).boolean("show-banners")
 }
 
 /// GNOME (Mutter): milliseconds since the last input, on X11 and Wayland.
@@ -276,4 +400,52 @@ where
   .inspect_err(|error| tracing::trace!(service, method, %error, "D-Bus call failed"))
   .ok()?;
   reply.body().deserialize::<T>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn buttons_follow_the_click_action_and_the_reply_field_needs_the_capability() {
+    let buttons = [("mark-read", "Mark as read")];
+    let notification = notification(&buttons, Some("Reply…"));
+    assert_eq!(
+      server_actions(&notification, false),
+      ["default", "", "mark-read", "Mark as read"]
+    );
+    assert_eq!(
+      server_actions(&notification, true),
+      [
+        "default",
+        "",
+        "mark-read",
+        "Mark as read",
+        "inline-reply",
+        "Reply…"
+      ]
+    );
+    assert_eq!(
+      server_actions(&self::notification(&[], None), true),
+      ["default", ""]
+    );
+  }
+
+  fn notification<'a>(
+    actions: &'a [(&'a str, &'a str)],
+    maybe_reply_placeholder: Option<&'a str>,
+  ) -> DesktopNotification<'a> {
+    DesktopNotification {
+      app_name: "TeamCraft",
+      app_icon: "teamcraft-desktop",
+      desktop_entry: "de.zeitgleich.teamcraft",
+      title: "Bob",
+      body: "hello",
+      replaces_id: 0,
+      actions,
+      maybe_reply_placeholder,
+      category: "im.received",
+      is_ringing: false,
+    }
+  }
 }

@@ -147,7 +147,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         title: brand.0.with_untracked(|brand| brand.display_name.clone()),
         maybe_body: Some(message),
         actions: Vec::new(),
-        maybe_reply_placeholder: None,
+        maybe_reply: None,
       };
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }

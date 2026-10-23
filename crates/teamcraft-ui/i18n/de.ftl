@@ -828,6 +828,7 @@ notify-in-channel = { $name } in { $channel }
 notify-new-message = Neue Nachricht
 notify-thread-reply = { $name } hat in einem Thread geantwortet
 notify-reply-placeholder = Antworten…
+notify-action-send = Senden
 notify-action-mark-read = Als gelesen markieren
 notify-missed-call = Verpasster Anruf
 notify-missed-call-from = { $name } hat angerufen

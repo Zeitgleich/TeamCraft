@@ -30,14 +30,18 @@ pub struct OsNotification {
   /// Buttons, in order; platforms show as many as they can (Linux servers usually three).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub actions: Vec<NotificationButton>,
-  /// A text field to answer in, where the platform has one (Windows, macOS, Linux servers with
-  /// `inline-reply`). Its placeholder text.
-  #[serde(
-    rename = "reply_placeholder",
-    default,
-    skip_serializing_if = "Option::is_none"
-  )]
-  pub maybe_reply_placeholder: Option<String>,
+  /// A text field to answer in, where the platform has one (Windows, Linux servers with
+  /// `inline-reply`).
+  #[serde(rename = "reply", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_reply: Option<ReplyField>,
+}
+
+/// The texts of a notification's reply field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyField {
+  pub placeholder: String,
+  /// The button that sends (Windows).
+  pub send_label: String,
 }
 
 /// The tag of a notification: the conversation ID for messages (as the service worker's push
