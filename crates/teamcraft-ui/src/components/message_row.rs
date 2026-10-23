@@ -11,8 +11,9 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::MessageMenu;
 use crate::components::rich_text::RichText;
 use crate::i18n::use_i18n;
+use crate::markdown;
 use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, thread_id_of};
-use crate::state::use_app_state;
+use crate::state::{Overlay, use_app_state};
 
 /// Messages by the same author closer together than this share one header.
 const GROUP_WINDOW_MS: i64 = 5 * 60_000;
@@ -208,6 +209,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
   let reply_count = message.reply_count;
   let reactions = message.reactions.clone();
   let is_mine = message.author == me.id;
+  let author_id = message.author;
   let author_name = author
     .as_ref()
     .map(|user| user.display_name.clone())
@@ -251,9 +253,15 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     let badge_guest = author.as_ref().is_some_and(|user| user.is_guest);
     view! {
       <div class="msg-header">
-        <span class="msg-author" translate="no">
+        <button
+          type="button"
+          class="msg-author"
+          translate="no"
+          aria-haspopup="dialog"
+          on:click=move |_| state.overlay.set(Overlay::UserProfile(author_id))
+        >
           {author_name.clone()}
-        </span>
+        </button>
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
@@ -464,6 +472,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     }
     is_editing.set(false);
   };
+  let is_long_body = markdown::is_long(&body_text);
+  let is_expanded = RwSignal::new(false);
   let rendered_body = {
     let body_text = body_text.clone();
     move || {
@@ -494,7 +504,22 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
         }
         .into_any();
       }
-      view! { <RichText body=body_text.clone() me=me.username.clone() /> }.into_any()
+      if !is_long_body {
+        return view! { <RichText body=body_text.clone() me=me.username.clone() /> }.into_any();
+      }
+      view! {
+        <div class="msg-long" class:collapsed=move || !is_expanded.get()>
+          <RichText body=body_text.clone() me=me.username.clone() />
+        </div>
+        <button
+          class="link-btn msg-expand"
+          aria-expanded=move || is_expanded.get().to_string()
+          on:click=move |_| is_expanded.update(|value| *value = !*value)
+        >
+          {move || i18n.t(if is_expanded.get() { "message-show-less" } else { "message-show-more" })}
+        </button>
+      }
+      .into_any()
     }
   };
 
