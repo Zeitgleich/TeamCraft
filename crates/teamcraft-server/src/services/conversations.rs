@@ -88,7 +88,7 @@ pub async fn create_channel(
   if space_access.view.space.is_archived {
     return Err(ApiError::Conflict("the space is archived".into()));
   }
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let name = validate_name(&request.name, "channel name", limits.max_name_length)?;
   for text in [&request.maybe_topic, &request.maybe_description]
     .into_iter()
@@ -166,10 +166,10 @@ pub async fn create_group_dm(
       "a group DM needs at least two other people; use a DM for one".into(),
     ));
   }
-  if others.len() + 1 > state.settings.limits.max_group_dm_participants {
+  if others.len() + 1 > state.settings.get().limits.max_group_dm_participants {
     return Err(ApiError::InvalidRequest(format!(
       "a group DM has at most {} participants",
-      state.settings.limits.max_group_dm_participants
+      state.settings.get().limits.max_group_dm_participants
     )));
   }
   open_participants_conversation(state, caller, ConversationKind::Group, others).await
@@ -206,7 +206,7 @@ pub async fn update_conversation(
     return Err(ApiError::InvalidRequest("unknown visibility".into()));
   }
 
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let maybe_name = request
     .maybe_name
     .as_deref()
@@ -455,7 +455,7 @@ fn visible_changes(
 /// Retention suited to logs for a channel that just became an integration channel, unless the
 /// channel already has its own setting (ARCHITECTURE.md §4.5).
 async fn apply_integration_defaults(state: &AppState, id: ConversationId) -> Result<(), ApiError> {
-  let days = state.settings.integration.default_retention_days;
+  let days = state.settings.get().integration.default_retention_days;
   let Some(target) = state.database.get_conversation_retention(id).await? else {
     return Ok(());
   };

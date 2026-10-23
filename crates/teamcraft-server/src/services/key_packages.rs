@@ -21,7 +21,7 @@ pub async fn upload_key_packages(
   if !state.database.is_active_device_of(caller.user.id, device).await? {
     return Err(ApiError::device_not_found());
   }
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   if request.key_packages.len() > limits.max_key_packages_per_upload {
     return Err(ApiError::InvalidRequest(format!(
       "at most {} key packages per upload",

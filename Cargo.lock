@@ -10229,6 +10229,7 @@ dependencies = [
  "anyhow",
  "ashpd",
  "avcapture",
+ "base64 0.23.1",
  "futures-util",
  "keyring",
  "oauth2",
@@ -10445,6 +10446,7 @@ dependencies = [
 name = "teamcraft-ui"
 version = "1.0.0"
 dependencies = [
+ "base64 0.23.1",
  "console_error_panic_hook",
  "fluent-bundle",
  "futures-channel",

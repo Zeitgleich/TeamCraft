@@ -203,7 +203,7 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
     // The web client sets its own headers (see `web`).
     return next.run(request).await;
   }
-  let settings = &state.settings.security;
+  let settings = &state.settings.get().security;
   let ip = client_ip(&request, settings.trust_forwarded_for);
   let mut request = request;
   warn_once_if_behind_an_unconfigured_proxy(&request, settings.trust_forwarded_for);

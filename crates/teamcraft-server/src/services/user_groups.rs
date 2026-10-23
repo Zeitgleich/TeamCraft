@@ -171,7 +171,7 @@ pub async fn add_user_group_member(
       "only members can belong to user groups".into(),
     ));
   }
-  if group.member_count as usize >= state.settings.limits.max_user_group_members {
+  if group.member_count as usize >= state.settings.get().limits.max_user_group_members {
     return Err(ApiError::Conflict("the group is full".into()));
   }
   if state.database.add_user_group_member(id, user).await? {
@@ -283,7 +283,7 @@ fn require_not_guest(caller: &AuthenticatedUser) -> Result<(), ApiError> {
 
 fn clean_name(state: &AppState, name: &str) -> Result<String, ApiError> {
   let name = name.trim();
-  if name.is_empty() || name.chars().count() > state.settings.limits.max_name_length {
+  if name.is_empty() || name.chars().count() > state.settings.get().limits.max_name_length {
     return Err(ApiError::InvalidRequest("invalid name".into()));
   }
   Ok(name.to_owned())
@@ -300,7 +300,7 @@ fn clean_description(
   if text.is_empty() {
     return Ok(None);
   }
-  if text.chars().count() > state.settings.limits.max_text_length {
+  if text.chars().count() > state.settings.get().limits.max_text_length {
     return Err(ApiError::InvalidRequest("the description is too long".into()));
   }
   Ok(Some(text.to_owned()))

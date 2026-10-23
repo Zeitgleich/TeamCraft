@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO brands (id, is_default, settings, updated_by, updated_at)\n         VALUES ($1, $2, $3::text::jsonb, $4, now())\n         ON CONFLICT (id) DO UPDATE\n         SET is_default = EXCLUDED.is_default, settings = EXCLUDED.settings,\n             updated_by = EXCLUDED.updated_by, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aeca0dd7eb7d351dc123ebb619e6ae0138ab26ab5502f10ee6a03f49fa3d4b81"
+}

@@ -48,7 +48,7 @@ pub async fn put_my_profile(
   caller: &AuthenticatedUser,
   request: UpdateProfileRequest,
 ) -> Result<ProfileResponse, ApiError> {
-  let limit = state.settings.limits.max_profile_text_chars;
+  let limit = state.settings.get().limits.max_profile_text_chars;
   let current = state.database.get_profile(caller.user.id).await?;
   let profile = StoredProfile {
     maybe_title: clean_text(request.maybe_title, limit, "title")?,
@@ -74,7 +74,7 @@ pub async fn create_avatar_upload(
       "avatars must be PNG, JPEG or WebP images".into(),
     ));
   }
-  let max = state.settings.limits.max_avatar_bytes;
+  let max = state.settings.get().limits.max_avatar_bytes;
   if request.size_bytes == 0 {
     return Err(ApiError::InvalidRequest("size_bytes must be positive".into()));
   }

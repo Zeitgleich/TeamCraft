@@ -15,7 +15,7 @@ const ID_HEX_CHARS: usize = 32;
 
 /// Runs one device's side of a rendezvous: join, relay binary frames, end.
 pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
-  let config = state.settings.rendezvous.clone();
+  let config = state.settings.get().rendezvous.clone();
   let first = timeout(
     Duration::from_secs(config.join_timeout_secs),
     next_text(&mut socket),

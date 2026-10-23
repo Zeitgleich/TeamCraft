@@ -27,7 +27,7 @@ pub async fn post_commit(
   }
   ensure_own_device(state, caller, request.device_id).await?;
   check_payload(state, &request.commit)?;
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   if request.welcomes.len() > limits.max_welcomes_per_commit {
     return Err(ApiError::InvalidRequest("too many welcomes".into()));
   }
@@ -213,7 +213,7 @@ fn page(mut rows: Vec<StoredMlsMessage>, limit: u32, current_epoch: u64) -> List
 }
 
 fn page_limit(state: &AppState, maybe_limit: Option<u32>) -> u32 {
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   maybe_limit
     .unwrap_or(limits.default_page_size)
     .clamp(1, limits.max_page_size)
@@ -232,7 +232,7 @@ async fn ensure_own_device(
 }
 
 fn check_payload(state: &AppState, payload: &Base64Bytes) -> Result<(), ApiError> {
-  let max = state.settings.limits.max_mls_payload_bytes;
+  let max = state.settings.get().limits.max_mls_payload_bytes;
   if payload.is_empty() {
     return Err(ApiError::InvalidRequest("payload must not be empty".into()));
   }

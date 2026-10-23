@@ -68,7 +68,7 @@ pub async fn list_system_events(
   let Some(membership) = &access.view.maybe_membership else {
     return Err(ApiError::conversation_not_found());
   };
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let limit = query
     .maybe_limit
     .unwrap_or(limits.default_page_size)

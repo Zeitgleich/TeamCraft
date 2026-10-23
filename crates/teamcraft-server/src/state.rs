@@ -3,13 +3,15 @@ use std::sync::Arc;
 use teamcraft_db::{Database, SnowflakeGenerator};
 
 use crate::auth::{Revocations, TokenValidator};
-use crate::brand::BrandRegistry;
 use secrecy::SecretString;
 
+use teamcraft_crypto::server_secret::SettingsSealingKey;
+
+use crate::brand::BrandStore;
 use crate::config::{
-  BrandConfig, BrandingConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
-  LocalAccountsConfig, MailConfig, NotificationsConfig, PolicyConfig, PresenceConfig, RendezvousConfig,
-  RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, WebConfig,
+  BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
+  LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig, PolicyConfig, PresenceConfig,
+  RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, SmtpConfig, WebConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -17,6 +19,8 @@ use crate::meetings::MeetingService;
 use crate::meetings::mailer::Mailer;
 use crate::push::{PushDispatcher, PushTracker};
 use crate::rendezvous::RendezvousHub;
+use crate::runtime::mail_status::MailStatus;
+use crate::runtime::{SettingsCell, Slot};
 use crate::security::RateLimits;
 use crate::services::calls::CallService;
 use crate::services::local_accounts::LocalAuth;
@@ -43,17 +47,26 @@ pub struct AppState {
   pub maybe_calls: Option<Arc<CallService>>,
   /// Meetings, if configured.
   pub maybe_meetings: Option<Arc<MeetingService>>,
-  /// Outgoing e-mail of the server (invitations), if `[mail.smtp]` is configured.
-  pub maybe_mailer: Option<Arc<dyn Mailer>>,
+  /// Outgoing e-mail of the server (invitations, activations, digests and, in production, meeting
+  /// invitations): from the admin console, else `[mail.smtp]`. Empty: no mail is sent.
+  pub mailer: Arc<Slot<dyn Mailer>>,
+  /// How that mail went since the start.
+  pub mail_status: Arc<MailStatus>,
+  /// Encrypts passwords entered in the admin console; `None` without `[secrets]`.
+  pub maybe_settings_key: Option<Arc<SettingsSealingKey>>,
+  /// Serializes changes of runtime settings (brands, mail, calendar, instance settings), so each
+  /// one is validated against the state it replaces.
+  pub settings_lock: Arc<tokio::sync::Mutex<()>>,
   /// Local guest accounts, if enabled.
   pub maybe_local: Option<Arc<LocalAuth>>,
   /// The signed workspace policy in force.
   pub policy: Arc<PolicyHolder>,
   pub scheme: Arc<SchemeStore>,
-  pub settings: Arc<Settings>,
+  /// The settings in force: the configuration with the admin console's changes on top.
+  pub settings: Arc<SettingsCell>,
   pub rate_limits: Arc<RateLimits>,
   /// The brands and the host names that select them.
-  pub brands: Arc<BrandRegistry>,
+  pub brands: Arc<BrandStore>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -80,6 +93,30 @@ pub struct Settings {
   pub maybe_organization_claim: Option<String>,
   pub branding: BrandingConfig,
   pub brands: Vec<BrandConfig>,
+  /// Largest attachment a client may announce (`[storage].max_attachment_bytes`).
+  pub max_attachment_bytes: u64,
+  /// Meeting invitations: most invitees and the mail texts.
+  pub meeting_mail: MeetingMailConfig,
+  /// The mail server of the configuration file (`[mail.smtp]`, else `[meetings.smtp]`).
+  pub maybe_mail_seed: Option<SmtpConfig>,
+  /// The calendar of the configuration file (`[meetings.caldav]`).
+  pub maybe_calendar_seed: Option<CalDavConfig>,
+}
+
+/// Limits and texts of meeting invitations.
+#[derive(Debug, Clone)]
+pub struct MeetingMailConfig {
+  pub max_invitees: usize,
+  pub texts: MailTexts,
+}
+
+impl Default for MeetingMailConfig {
+  fn default() -> Self {
+    Self {
+      max_invitees: 200,
+      texts: MailTexts::default(),
+    }
+  }
 }
 
 impl AppState {

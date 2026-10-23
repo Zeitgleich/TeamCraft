@@ -53,7 +53,6 @@ wire_enum! {
     ServerRules => "server_rules",
     Notifications => "notifications",
     EmailDigest => "email_digest",
-    Guests => "guests",
     Shares => "shares",
     Limits => "limits",
     Integration => "integration",
@@ -297,9 +296,8 @@ pub struct UpdateCalendarSettingsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RuntimeSettingsResponse {
   pub server_rules: ServerRulesSettings,
-  pub notifications: NotificationDefaults,
+  pub notifications: NotificationRuntimeSettings,
   pub email_digest: EmailDigestSettings,
-  pub guests: GuestSettings,
   pub shares: ShareSettings,
   pub limits: LimitSettings,
   pub integration: IntegrationSettings,
@@ -323,9 +321,8 @@ pub struct RuntimeSettingsState {
 #[serde(tag = "section", content = "values", rename_all = "snake_case")]
 pub enum RuntimeSettingsSection {
   ServerRules(ServerRulesSettings),
-  Notifications(NotificationDefaults),
+  Notifications(NotificationRuntimeSettings),
   EmailDigest(EmailDigestSettings),
-  Guests(GuestSettings),
   Shares(ShareSettings),
   Limits(LimitSettings),
   Integration(IntegrationSettings),
@@ -334,11 +331,10 @@ pub enum RuntimeSettingsSection {
   MeetingMail(MeetingMailSettings),
 }
 
-/// Rules the server enforces (they are not part of the signed workspace policy, admin.md §6.3).
+/// Rules only the server enforces (admin.md §6.3). Guest rules and password lengths are part of
+/// the signed workspace policy instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ServerRulesSettings {
-  /// Guests can only open DMs with people they share a conversation with (and vice versa).
-  pub guests_dm_only_with_shared_conversations: bool,
   /// Pending invites only apply to accounts whose provider verified the e-mail address.
   pub invites_require_verified_email: bool,
   /// Spaces every new member joins at the first sign-in.
@@ -350,7 +346,7 @@ pub struct ServerRulesSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct NotificationDefaults {
+pub struct NotificationRuntimeSettings {
   /// People who never chose send read receipts in DMs and group DMs.
   pub read_receipts_default: bool,
   /// Urgent DMs are pushed again this often until acknowledged.
@@ -373,15 +369,6 @@ pub struct EmailDigestSettings {
   pub subject_many: String,
   pub body_one: String,
   pub body_many: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct GuestSettings {
-  /// Guests without an explicit expiry expire this many days later; 0 = never.
-  pub default_expiry_days: u32,
-  /// If not empty, guests can only be invited with addresses in these domains (and subdomains).
-  #[serde(default)]
-  pub allowed_email_domains: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -414,10 +401,10 @@ pub struct IntegrationSettings {
   pub default_retention_days: u32,
 }
 
-/// Rules for local (password) accounts; whether they exist at all stays in the configuration.
+/// Rules for local (password) accounts; whether they exist at all stays in the configuration, the
+/// shortest password is part of the signed workspace policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct LocalAccountSettings {
-  pub min_password_chars: u32,
   pub require_totp: bool,
   pub activation_ttl_hours: u32,
   pub session_ttl_hours: u32,
@@ -472,7 +459,6 @@ impl RuntimeSettingsSection {
       Self::ServerRules(_) => RuntimeSettingsKey::ServerRules,
       Self::Notifications(_) => RuntimeSettingsKey::Notifications,
       Self::EmailDigest(_) => RuntimeSettingsKey::EmailDigest,
-      Self::Guests(_) => RuntimeSettingsKey::Guests,
       Self::Shares(_) => RuntimeSettingsKey::Shares,
       Self::Limits(_) => RuntimeSettingsKey::Limits,
       Self::Integration(_) => RuntimeSettingsKey::Integration,

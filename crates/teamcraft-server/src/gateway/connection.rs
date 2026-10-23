@@ -29,7 +29,7 @@ const CLOSE_NORMAL: u16 = 1000;
 
 /// Runs one gateway connection from `hello` to close.
 pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
-  let config = state.settings.gateway.clone();
+  let config = state.settings.get().gateway.clone();
   let hello = GatewayServerMessage::Hello {
     heartbeat_interval_ms: config.heartbeat_interval_secs * 1000,
   };
@@ -171,7 +171,7 @@ async fn serve(
   attached: &mut Attached,
   socket: &mut WebSocket,
 ) {
-  let config = &state.settings.gateway;
+  let config = &state.settings.get().gateway;
   let heartbeat_timeout = Duration::from_secs(config.heartbeat_timeout_secs);
   let mut deadline = Instant::now() + heartbeat_timeout;
   let max_age = Instant::now() + Duration::from_secs(config.connection_max_age_secs);
@@ -245,7 +245,7 @@ async fn handle_client_message(
       // Kept in memory only, never stored or logged (e2ee.md §7). Cheap and idempotent: no throttle
       // needed. Ignored where the instance turned attention off; the user's own choice is applied
       // in the routing, and clients that know it send nothing.
-      if state.settings.notifications.is_desktop_attention_enabled {
+      if state.settings.get().notifications.is_desktop_attention_enabled {
         state.hub.set_attention(&attached.session_id, is_attentive);
       }
       true

@@ -231,7 +231,7 @@ async fn push_to_recipient(
     is_followed_thread: recipient.is_following_thread,
     always_pushes: always_pushes(&recipient),
     attention: attention(state, &recipient),
-    has_grace: state.settings.notifications.mobile_push_delay_secs > 0,
+    has_grace: state.settings.get().notifications.mobile_push_delay_secs > 0,
   });
   let decision = match verdict {
     Ok(decision) => decision,
@@ -258,7 +258,7 @@ async fn push_to_recipient(
   match decision.timing {
     Timing::Now => send_to_offline_devices(state, recipient.user, recipient.devices, &wake_up),
     Timing::AfterGrace => {
-      let grace = Duration::from_secs(state.settings.notifications.mobile_push_delay_secs);
+      let grace = Duration::from_secs(state.settings.get().notifications.mobile_push_delay_secs);
       hold_for_desktop(state, recipient, wake_up, grace);
     },
   }
@@ -269,7 +269,7 @@ async fn push_to_recipient(
 pub async fn notify_ring(state: AppState, conversation: ConversationId, call: CallId, caller: UserId) {
   if !state
     .push_tracker
-    .try_start_ring(caller, state.settings.push.max_rings_per_minute)
+    .try_start_ring(caller, state.settings.get().push.max_rings_per_minute)
   {
     warn!(user_id = %caller, "too many rings in a minute; no ring pushes for this call");
     return;
@@ -394,7 +394,7 @@ pub async fn dismiss_read(
   if !state.push_tracker.queue_dismiss(key, up_to, devices) {
     return;
   }
-  tokio::time::sleep(state.settings.push.dismiss_coalesce).await;
+  tokio::time::sleep(state.settings.get().push.dismiss_coalesce).await;
   let Some((up_to, devices)) = state.push_tracker.take_dismiss(key) else {
     return;
   };
@@ -471,7 +471,7 @@ fn hold_for_desktop(state: &AppState, recipient: PushRecipientRow, wake_up: Push
   };
   match state
     .push_tracker
-    .hold(push, state.settings.notifications.max_held_pushes_per_user)
+    .hold(push, state.settings.get().notifications.max_held_pushes_per_user)
   {
     Holding::StartWorker => {
       tokio::spawn(work_held(state.clone(), user));

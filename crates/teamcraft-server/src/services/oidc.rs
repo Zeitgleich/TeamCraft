@@ -81,7 +81,7 @@ pub struct SyncReport {
 /// Compares our users with the provider and applies the differences. Does nothing if the sync
 /// is not configured. Fails without changing anything if the provider can't be read completely.
 pub async fn sync_once(state: &AppState) -> Result<SyncReport, ApiError> {
-  let Some(settings) = &state.settings.maybe_oidc_sync else {
+  let Some(settings) = &state.settings.get().maybe_oidc_sync else {
     return Ok(SyncReport::default());
   };
   let provider = Provider::new(settings).await.map_err(unavailable)?;

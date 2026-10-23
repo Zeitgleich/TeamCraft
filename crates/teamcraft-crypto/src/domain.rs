@@ -37,6 +37,8 @@ pub(crate) const LOCAL_STORE_LOOKUP: &str = "TeamCraft-v1 local store lookup";
 pub(crate) const LOCAL_STORE_RECORD: &str = "TeamCraft-v1 local store record";
 pub(crate) const SHARE_LINK_KEY_WRAP: &str = "TeamCraft-v1 share link key wrap";
 pub(crate) const SHARE_LINK_NAME: &str = "TeamCraft-v1 share link name";
+pub(crate) const SERVER_SETTING_KEY: &str = "TeamCraft-v1 server setting key";
+pub(crate) const SERVER_SETTING_AAD: &str = "TeamCraft-v1 server setting";
 /// MLS exporter label (RFC 9420 §8.5) for the content key of an epoch.
 pub(crate) const EPOCH_CONTENT_KEY: &str = "TeamCraft-v1 epoch content key";
 pub(crate) const DEVICE_LIST: &str = "TeamCraft-v1 device list";
@@ -57,7 +59,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 30] = [
+  const ALL_LABELS: [&str; 32] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -88,6 +90,8 @@ mod tests {
     LOCAL_STORE_RECORD,
     SHARE_LINK_KEY_WRAP,
     SHARE_LINK_NAME,
+    SERVER_SETTING_KEY,
+    SERVER_SETTING_AAD,
   ];
 
   #[test]

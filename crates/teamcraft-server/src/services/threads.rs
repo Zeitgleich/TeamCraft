@@ -106,7 +106,7 @@ pub async fn list_threads(
   caller: &AuthenticatedUser,
   query: ListThreadsQuery,
 ) -> Result<ListThreadsResponse, ApiError> {
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let limit = query
     .maybe_limit
     .unwrap_or(limits.default_page_size)
@@ -150,7 +150,7 @@ pub async fn list_threads(
 pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<UnreadResponse, ApiError> {
   let conversations = state
     .database
-    .conversation_unread_counts(caller.user.id, state.settings.limits.max_unread_counted)
+    .conversation_unread_counts(caller.user.id, state.settings.get().limits.max_unread_counted)
     .await?
     .into_iter()
     .map(|row| ConversationUnread {

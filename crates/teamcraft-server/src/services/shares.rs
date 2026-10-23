@@ -31,7 +31,7 @@ pub async fn create_share(
   brand: &ResolvedBrand,
   request: CreateShareLinkRequest,
 ) -> Result<ShareLinkResponse, ApiError> {
-  let settings = &state.settings.shares;
+  let settings = &state.settings.get().shares;
   if !settings.is_enabled {
     return Err(ApiError::Forbidden("share links are switched off".into()));
   }
@@ -191,7 +191,7 @@ async fn usable_share(
   brand: &ResolvedBrand,
   id: &str,
 ) -> Result<(ShareLink, teamcraft_db::ShareTarget), ApiError> {
-  if !state.settings.shares.is_enabled {
+  if !state.settings.get().shares.is_enabled {
     return Err(ApiError::ShareUnavailable);
   }
   let (link, target) = state
@@ -212,19 +212,22 @@ fn is_served_on(state: &AppState, link: &ShareLink, request: &ResolvedBrand) -> 
   let Some(stored) = link.maybe_brand_id.as_deref() else {
     return true;
   };
-  let owner = state.brands.by_id(stored).unwrap_or(state.brands.default_brand());
+  let brands = state.brands.current();
+  let owner = brands.by_id(stored).unwrap_or(brands.default_brand());
   request.brand.id == owner.id && (owner.hostnames.is_empty() || request.is_known_host)
 }
 
 fn response(state: &AppState, link: &ShareLink) -> ShareLinkResponse {
   // The link names a host of the brand that made it; without brand hosts the configured base is used.
+  let brands = state.brands.current();
   let brand = link
     .maybe_brand_id
     .as_deref()
-    .and_then(|id| state.brands.by_id(id))
-    .unwrap_or(state.brands.default_brand());
+    .and_then(|id| brands.by_id(id))
+    .unwrap_or(brands.default_brand());
   let brand_origin = brand.origin();
-  let configured = state.settings.shares.public_base_url.trim_end_matches('/');
+  let settings = state.settings.get();
+  let configured = settings.shares.public_base_url.trim_end_matches('/');
   let base = if brand_origin.is_empty() {
     configured
   } else {

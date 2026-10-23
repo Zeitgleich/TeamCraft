@@ -14,7 +14,8 @@ use subtle::ConstantTimeEq;
 use teamcraft_proto::MeetingId;
 use url::Url;
 
-use crate::config::{MailTexts, MeetingsConfig};
+use crate::config::MeetingsConfig;
+use crate::runtime::Slot;
 use caldav::CalendarStore;
 use guest::{GuestTokenError, GuestTokens};
 use mailer::Mailer;
@@ -25,21 +26,20 @@ pub struct MeetingService {
   /// Host part of the public base URL; names the iCalendar UIDs.
   host: String,
   organizer_fallback_address: String,
-  max_invitees: usize,
-  maybe_calendar: Option<Arc<dyn CalendarStore>>,
-  maybe_mailer: Option<Arc<dyn Mailer>>,
-  texts: MailTexts,
+  calendar: Arc<Slot<dyn CalendarStore>>,
+  mailer: Arc<Slot<dyn Mailer>>,
   tokens: GuestTokens,
   guest_grace: Duration,
   /// Token of the inbox handler that forwards RSVP e-mail; `None` disables that endpoint.
   maybe_inbox_token: Option<Vec<u8>>,
 }
 
-/// The external systems a meeting service talks to; each is optional.
+/// The external systems a meeting service talks to; each may be empty, and admins can replace
+/// them while the server runs (admin.md §6).
 #[derive(Default)]
 pub struct MeetingBackends {
-  pub maybe_calendar: Option<Arc<dyn CalendarStore>>,
-  pub maybe_mailer: Option<Arc<dyn Mailer>>,
+  pub calendar: Arc<Slot<dyn CalendarStore>>,
+  pub mailer: Arc<Slot<dyn Mailer>>,
 }
 
 /// Why the meeting feature can't be set up from the configuration.
@@ -49,6 +49,19 @@ pub enum MeetingsSetupError {
   InvalidBaseUrl(String),
   #[error("meetings.guest_token_secret is unusable: {0}")]
   GuestTokenSecret(#[from] GuestTokenError),
+}
+
+impl MeetingBackends {
+  /// Backends that start out as given.
+  pub fn fixed(
+    maybe_calendar: Option<Arc<dyn CalendarStore>>,
+    maybe_mailer: Option<Arc<dyn Mailer>>,
+  ) -> Self {
+    Self {
+      calendar: Arc::new(Slot::new(maybe_calendar)),
+      mailer: Arc::new(Slot::new(maybe_mailer)),
+    }
+  }
 }
 
 impl MeetingService {
@@ -63,10 +76,8 @@ impl MeetingService {
       base_url: config.public_base_url.trim_end_matches('/').to_owned(),
       host,
       organizer_fallback_address: config.organizer_fallback_address.clone(),
-      max_invitees: config.max_invitees,
-      maybe_calendar: backends.maybe_calendar,
-      maybe_mailer: backends.maybe_mailer,
-      texts: config.mail_texts.clone(),
+      calendar: backends.calendar,
+      mailer: backends.mailer,
       tokens: GuestTokens::new(&config.guest_token_secret)?,
       guest_grace: Duration::from_secs(config.guest_grace_secs),
       maybe_inbox_token: config
@@ -86,24 +97,22 @@ impl MeetingService {
     format!("{meeting}@{}", self.host)
   }
 
-  pub fn max_invitees(&self) -> usize {
-    self.max_invitees
-  }
-
   pub fn organizer_fallback_address(&self) -> &str {
     &self.organizer_fallback_address
   }
 
-  pub fn calendar(&self) -> Option<&Arc<dyn CalendarStore>> {
-    self.maybe_calendar.as_ref()
+  /// The calendar meetings are written to now, if any.
+  pub fn calendar(&self) -> Option<Arc<dyn CalendarStore>> {
+    self.calendar.get()
   }
 
-  pub fn mailer(&self) -> Option<&Arc<dyn Mailer>> {
-    self.maybe_mailer.as_ref()
+  /// Where admins put a new calendar.
+  pub fn calendar_slot(&self) -> &Arc<Slot<dyn CalendarStore>> {
+    &self.calendar
   }
 
-  pub fn texts(&self) -> &MailTexts {
-    &self.texts
+  pub fn mailer(&self) -> Option<Arc<dyn Mailer>> {
+    self.mailer.get()
   }
 
   pub fn tokens(&self) -> &GuestTokens {

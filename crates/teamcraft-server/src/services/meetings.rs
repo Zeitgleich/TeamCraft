@@ -25,6 +25,7 @@ use super::convert::{offset_date_time, presented_name, unix_millis};
 use super::{validate_name, validate_text};
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::brand::Brand;
+use crate::config::MailTexts;
 use crate::error::ApiError;
 use crate::meetings::MeetingService;
 use crate::meetings::ical::{self, EventAttendee, EventData, EventPerson, EventStatus, Method};
@@ -59,7 +60,7 @@ pub async fn create_meeting(
     .as_ref()
     .map(recurrence_rule)
     .transpose()?;
-  let attendees = resolve_invitees(state, service, caller.user.id, &request.invitees).await?;
+  let attendees = resolve_invitees(state, caller.user.id, &request.invitees).await?;
 
   let id: MeetingId = state.next_id()?;
   let uid = service.uid(id);
@@ -219,7 +220,7 @@ pub async fn update_meeting(
       .unwrap_or_else(|| unix_millis(before.ends_at)),
   )?;
   let wanted = match &request.maybe_invitees {
-    Some(invitees) => Some(resolve_invitees(state, service, caller.user.id, invitees).await?),
+    Some(invitees) => Some(resolve_invitees(state, caller.user.id, invitees).await?),
     None => None,
   };
 
@@ -556,7 +557,7 @@ async fn send_invitations(
       attendee.maybe_email.is_some() || attendee.maybe_user.is_some_and(|user| emails.contains_key(&user))
     })
     .collect();
-  let budget = state.settings.limits.max_meeting_mails_per_user_per_hour;
+  let budget = state.settings.get().limits.max_meeting_mails_per_user_per_hour;
   let is_within_budget = u32::try_from(mailable.len())
     .is_ok_and(|count| state.rate_limits.spend_mails(meeting.organizer, count, budget));
   if !is_within_budget {
@@ -585,7 +586,8 @@ async fn send_invitations(
       Some(_) => join_url_on(service, &brand, meeting.id),
       None => personal_join_url(state, service, &brand, meeting, &address).await?,
     };
-    let (subject, text, method, status) = compose(service, meeting, kind, &organizer_name, &join_url);
+    let texts = &state.settings.get().meeting_mail.texts;
+    let (subject, text, method, status) = compose(texts, meeting, kind, &organizer_name, &join_url);
     let event = event_for(state, service, &brand, meeting, join_url).await?;
     let mail = OutgoingMail {
       to_address: address.clone(),
@@ -632,12 +634,11 @@ async fn personal_join_url(
 /// default brand.
 async fn organizer_brand(state: &AppState, meeting: &StoredMeeting) -> Result<Arc<Brand>, ApiError> {
   let emails = state.database.get_user_emails(&[meeting.organizer]).await?;
+  let brands = state.brands.current();
   Ok(Arc::clone(
     emails
       .get(&meeting.organizer)
-      .map_or(state.brands.default_brand(), |email| {
-        state.brands.for_email(email)
-      }),
+      .map_or(brands.default_brand(), |email| brands.for_email(email)),
   ))
 }
 
@@ -653,13 +654,12 @@ fn join_url_on(service: &MeetingService, brand: &Brand, meeting: MeetingId) -> S
 
 /// Subject, text, iMIP method and event status of a mail from the configured templates.
 fn compose(
-  service: &MeetingService,
+  texts: &MailTexts,
   meeting: &StoredMeeting,
   kind: MailKind,
   organizer_name: &str,
   join_url: &str,
 ) -> (String, String, Method, EventStatus) {
-  let texts = service.texts();
   let (subject, body, method, status) = match kind {
     MailKind::Invitation => (
       &texts.invitation_subject,
@@ -743,14 +743,13 @@ fn format_human(time: OffsetDateTime) -> String {
 /// identified by their lower-cased e-mail address; duplicates and the organizer are dropped.
 async fn resolve_invitees(
   state: &AppState,
-  service: &MeetingService,
   organizer: UserId,
   invitees: &[MeetingInvitee],
 ) -> Result<Vec<NewAttendee>, ApiError> {
-  if invitees.len() > service.max_invitees() {
+  let max_invitees = state.settings.get().meeting_mail.max_invitees;
+  if invitees.len() > max_invitees {
     return Err(ApiError::InvalidRequest(format!(
-      "at most {} invitees",
-      service.max_invitees()
+      "at most {max_invitees} invitees"
     )));
   }
   let user_ids: Vec<UserId> = invitees

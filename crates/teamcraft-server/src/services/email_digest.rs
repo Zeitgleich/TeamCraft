@@ -37,7 +37,7 @@ pub async fn put_settings(
   caller: &AuthenticatedUser,
   request: SetEmailDigestRequest,
 ) -> Result<EmailDigestResponse, ApiError> {
-  let config = &state.settings.notifications.email_digest;
+  let config = &state.settings.get().notifications.email_digest;
   if let Some(minutes) = request.maybe_interval_minutes {
     let min_minutes = min_interval_minutes(config);
     if minutes < min_minutes || minutes > MAX_INTERVAL_MINUTES {
@@ -72,8 +72,8 @@ pub async fn put_settings(
 /// Looks at every digest that is due: mails the number of mentions that are still unread after the
 /// grace period, then waits for the next interval. Returns how many mails were sent.
 pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
-  let config = &state.settings.notifications.email_digest;
-  let (true, Some(mailer)) = (config.is_enabled, &state.maybe_mailer) else {
+  let config = &state.settings.get().notifications.email_digest;
+  let (true, Some(mailer)) = (config.is_enabled, state.mailer.get()) else {
     return Ok(0);
   };
   let due = state.database.list_due_email_digests(now, BATCH_SIZE).await?;
@@ -99,7 +99,8 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
       continue;
     };
     // The digest goes out as the recipient's home brand: sender name and link host.
-    let brand = state.brands.for_email(address);
+    let brands = state.brands.current();
+    let brand = brands.for_email(address);
     let (subject, text) = compose(state, brand, count);
     let mail = OutgoingMail {
       to_address: address.clone(),
@@ -134,16 +135,17 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
 }
 
 fn compose(state: &AppState, brand: &Brand, count: u32) -> (String, String) {
-  let config = &state.settings.notifications.email_digest;
+  let config = &state.settings.get().notifications.email_digest;
   let (subject, body) = if count == 1 {
     (&config.subject_one, &config.body_one)
   } else {
     (&config.subject_many, &config.body_many)
   };
   let fill = |template: &str| {
-    template
-      .replace("{count}", &count.to_string())
-      .replace("{url}", &brand.base_url(&state.settings.mail.public_base_url))
+    template.replace("{count}", &count.to_string()).replace(
+      "{url}",
+      &brand.base_url(&state.settings.get().mail.public_base_url),
+    )
   };
   (fill(subject), fill(body))
 }
@@ -153,7 +155,7 @@ async fn response(
   user: UserId,
   stored: StoredEmailDigest,
 ) -> Result<EmailDigestResponse, ApiError> {
-  let config = &state.settings.notifications.email_digest;
+  let config = &state.settings.get().notifications.email_digest;
   let interval_minutes = stored
     .maybe_interval_minutes
     .and_then(|minutes| u32::try_from(minutes).ok())
@@ -167,7 +169,7 @@ async fn response(
 }
 
 fn is_sending(state: &AppState) -> bool {
-  state.settings.notifications.email_digest.is_enabled && state.maybe_mailer.is_some()
+  state.settings.get().notifications.email_digest.is_enabled && state.mailer.is_set()
 }
 
 async fn has_email(state: &AppState, user: UserId) -> Result<bool, ApiError> {

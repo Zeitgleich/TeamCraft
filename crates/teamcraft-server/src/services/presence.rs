@@ -133,7 +133,7 @@ async fn poll_calendar(state: &AppState, users: &[UserId], now: OffsetDateTime) 
     return;
   };
   let lookahead = time::Duration::seconds(
-    i64::try_from(state.settings.presence.calendar_lookahead_secs).unwrap_or(i64::MAX / 4),
+    i64::try_from(state.settings.get().presence.calendar_lookahead_secs).unwrap_or(i64::MAX / 4),
   );
   let emails = match state.database.get_user_emails(users).await {
     Ok(emails) => emails,
@@ -381,7 +381,7 @@ pub async fn set_custom_status(
     return Err(ApiError::InvalidRequest("the emoji is invalid".into()));
   }
   if let Some(text) = text {
-    super::validate_name(text, "status text", state.settings.limits.max_name_length)?;
+    super::validate_name(text, "status text", state.settings.get().limits.max_name_length)?;
   }
   let maybe_expires_at = match request.maybe_expires_at {
     Some(millis) => {

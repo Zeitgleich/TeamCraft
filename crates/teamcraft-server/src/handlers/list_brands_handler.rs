@@ -16,7 +16,7 @@ pub async fn list_brands_handler(
   let brands = if is_guest(&caller) {
     Vec::new()
   } else {
-    state.brands.summaries()
+    state.brands.current().summaries()
   };
   Json(ListBrandsResponse { brands })
 }

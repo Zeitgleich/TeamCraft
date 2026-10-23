@@ -142,7 +142,7 @@ pub async fn enforce(state: &AppState, identity: &TokenIdentity) -> Result<(), A
 fn check_guest_sign_in(state: &AppState, identity: &TokenIdentity) -> Result<(), ApiError> {
   let policy = state.policy.get();
   let lists = [
-    &state.settings.guests.allowed_email_domains,
+    &state.settings.get().guests.allowed_email_domains,
     &policy.guests.allowed_email_domains,
   ];
   if is_guest_sign_in_allowed(&lists, identity) {

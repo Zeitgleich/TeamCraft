@@ -18,7 +18,7 @@ pub async fn put_key_bag(
       "key bag and wrapped backup keys must not be empty".into(),
     ));
   }
-  let max = state.settings.limits.max_key_bag_bytes;
+  let max = state.settings.get().limits.max_key_bag_bytes;
   if request.encrypted_key_bag.len() + request.wrapped_backup_keys.len() > max {
     return Err(ApiError::PayloadTooLarge(format!("key bag exceeds {max} bytes")));
   }

@@ -18,6 +18,11 @@ pub trait CalendarStore: Send + Sync {
   /// Removes the event; an event that is already gone is not an error.
   fn delete_event<'a>(&'a self, object_name: &'a str) -> BoxFuture<'a, Result<(), CalendarError>>;
 
+  /// Whether the calendar can be reached with the account (the admin console's connection test).
+  fn check(&self) -> BoxFuture<'_, Result<(), CalendarError>> {
+    Box::pin(async { Ok(()) })
+  }
+
   /// When the owner of `email` is busy between `from` and `to`, according to their own calendar.
   /// Calendars that cannot tell answer with no periods.
   fn busy_periods<'a>(
@@ -132,6 +137,31 @@ impl CalendarStore for CalDavStore {
         .await
         .map_err(|error| CalendarError::Unreachable(error.to_string()))?;
       Ok(parse_free_busy(&text))
+    })
+  }
+
+  fn check(&self) -> BoxFuture<'_, Result<(), CalendarError>> {
+    Box::pin(async move {
+      let body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:propfind xmlns:D=\"DAV:\"><D:prop><D:resourcetype/></D:prop></D:propfind>\n";
+      let response = self
+        .client
+        .request(
+          reqwest::Method::from_bytes(b"PROPFIND")
+            .map_err(|error| CalendarError::Unreachable(error.to_string()))?,
+          format!("{}/", self.calendar_url),
+        )
+        .basic_auth(&self.username, Some(self.password.expose_secret()))
+        .header(reqwest::header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .header("Depth", "0")
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| CalendarError::Unreachable(error.to_string()))?;
+      // 207 Multi-Status is the answer to PROPFIND; 200 from servers that simplify it.
+      match response.status().as_u16() {
+        200 | 207 => Ok(()),
+        other => Err(CalendarError::Rejected(other)),
+      }
     })
   }
 

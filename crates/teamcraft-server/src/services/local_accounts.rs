@@ -119,8 +119,8 @@ pub async fn create_local_guest(
   let local = local_auth(state)?;
   let _ = local;
   let mailer = state
-    .maybe_mailer
-    .as_ref()
+    .mailer
+    .get()
     .ok_or_else(|| ApiError::Unavailable("no mail server is configured".into()))?;
   let access = load_space(state, caller, space).await?;
   require_member_management(state, caller, &SpaceRole::Guest, &access.target())?;
@@ -139,7 +139,9 @@ pub async fn create_local_guest(
   let user: UserId = state.next_id()?;
   let token = new_one_time_token(&mut OsRng);
   let activation_expires_at = OffsetDateTime::now_utc()
-    + Duration::hours(i64::from(state.settings.local_accounts.activation_ttl_hours));
+    + Duration::hours(i64::from(
+      state.settings.get().local_accounts.activation_ttl_hours,
+    ));
   let is_created = state
     .database
     .create_local_account(
@@ -179,12 +181,13 @@ pub async fn create_local_guest(
   .await?;
 
   let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
-  let brand = state.brands.for_recipient(&email, &inviter_brand);
+  let brands = state.brands.current();
+  let brand = brands.for_recipient(&email, &inviter_brand);
   let url = format!(
     "{}/activate#token={token}",
-    brand.base_url(&state.settings.mail.public_base_url)
+    brand.base_url(&state.settings.get().mail.public_base_url)
   );
-  let (subject, body) = brand.activation_texts(&state.settings.mail);
+  let (subject, body) = brand.activation_texts(&state.settings.get().mail);
   let fill = |template: &str| {
     template
       .replace(
@@ -231,8 +234,8 @@ pub async fn reissue_activation(
 ) -> Result<LocalGuestResponse, ApiError> {
   let _ = local_auth(state)?;
   let mailer = state
-    .maybe_mailer
-    .as_ref()
+    .mailer
+    .get()
     .ok_or_else(|| ApiError::Unavailable("no mail server is configured".into()))?;
   let account = state
     .database
@@ -241,7 +244,9 @@ pub async fn reissue_activation(
     .ok_or_else(ApiError::user_not_found)?;
   let token = new_one_time_token(&mut OsRng);
   let activation_expires_at = OffsetDateTime::now_utc()
-    + Duration::hours(i64::from(state.settings.local_accounts.activation_ttl_hours));
+    + Duration::hours(i64::from(
+      state.settings.get().local_accounts.activation_ttl_hours,
+    ));
   state
     .database
     .reissue_local_activation(user, &digest_token(&token), activation_expires_at)
@@ -259,12 +264,13 @@ pub async fn reissue_activation(
   )
   .await?;
   let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
-  let brand = state.brands.for_recipient(&account.login, &inviter_brand);
+  let brands = state.brands.current();
+  let brand = brands.for_recipient(&account.login, &inviter_brand);
   let url = format!(
     "{}/activate#token={token}",
-    brand.base_url(&state.settings.mail.public_base_url)
+    brand.base_url(&state.settings.get().mail.public_base_url)
   );
-  let (subject, body) = brand.activation_texts(&state.settings.mail);
+  let (subject, body) = brand.activation_texts(&state.settings.get().mail);
   let mail = OutgoingMail {
     to_address: account.login.clone(),
     maybe_to_name: None,
@@ -343,14 +349,14 @@ pub async fn activate(
   .await?;
   Ok(ActivateLocalAccountResponse {
     totp_secret: secret.to_base32(),
-    totp_uri: secret.provisioning_uri(&state.settings.local_accounts.totp_issuer, &login),
+    totp_uri: secret.provisioning_uri(&state.settings.get().local_accounts.totp_issuer, &login),
   })
 }
 
 /// Checks password and TOTP code and opens a session.
 pub async fn login(state: &AppState, request: LocalLoginRequest) -> Result<LocalLoginResponse, ApiError> {
   let local = local_auth(state)?;
-  let settings = &state.settings.local_accounts;
+  let settings = &state.settings.get().local_accounts;
   let now = OffsetDateTime::now_utc();
   let login = request.login.trim().to_lowercase();
   let Some(account) = state.database.find_local_account(&login).await? else {
@@ -580,7 +586,7 @@ async fn fail(
   account: &LocalAccount,
   now: OffsetDateTime,
 ) -> Result<LocalLoginResponse, ApiError> {
-  let settings = &state.settings.local_accounts;
+  let settings = &state.settings.get().local_accounts;
   let lock_until = now + Duration::seconds(i64::try_from(settings.lockout_secs).unwrap_or(i64::MAX / 2));
   state
     .database
@@ -639,7 +645,7 @@ async fn rehash_if_needed(
 
 /// How long a new session may last: the configured lifetime, shortened by the workspace policy.
 fn session_ttl(state: &AppState) -> Duration {
-  let configured = Duration::hours(i64::from(state.settings.local_accounts.session_ttl_hours));
+  let configured = Duration::hours(i64::from(state.settings.get().local_accounts.session_ttl_hours));
   let limits = super::session::limits_for(state);
   limits.maybe_max_age.map_or(configured, |max| max.min(configured))
 }

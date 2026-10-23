@@ -47,7 +47,7 @@ pub async fn create_space(
     Permission::CreateSpace,
     &teamcraft_proto::Target::Instance,
   )?;
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let name = validate_name(&request.name, "space name", limits.max_name_length)?;
   for text in [
     &request.maybe_icon,
@@ -100,7 +100,7 @@ pub async fn update_space(
 ) -> Result<SpaceResponse, ApiError> {
   let access = load_space(state, caller, id).await?;
   require(state, caller, Permission::ManageSpaceProperties, &access.target())?;
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   let maybe_name = request
     .maybe_name
     .as_deref()
@@ -118,7 +118,7 @@ pub async fn update_space(
   }
   if let Some(brand_id) = request.maybe_brand_id.as_deref()
     && !brand_id.is_empty()
-    && !state.brands.is_known_id(brand_id)
+    && !state.brands.current().is_known_id(brand_id)
   {
     return Err(ApiError::InvalidRequest("unknown brand".into()));
   }
@@ -443,7 +443,7 @@ pub async fn create_category(
   let name = validate_name(
     &request.name,
     "category name",
-    state.settings.limits.max_name_length,
+    state.settings.get().limits.max_name_length,
   )?;
   let category = state
     .database
@@ -466,7 +466,7 @@ pub async fn update_category(
   let maybe_name = request
     .maybe_name
     .as_deref()
-    .map(|n| validate_name(n, "category name", state.settings.limits.max_name_length))
+    .map(|n| validate_name(n, "category name", state.settings.get().limits.max_name_length))
     .transpose()?;
   state
     .database

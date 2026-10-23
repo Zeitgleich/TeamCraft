@@ -26,7 +26,7 @@ pub async fn create_background_upload(
   request: CreateBackgroundUploadRequest,
 ) -> Result<CreateBackgroundUploadResponse, ApiError> {
   let store = blob_store(state)?;
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   if request.size_bytes == 0 {
     return Err(ApiError::InvalidRequest("size_bytes must be positive".into()));
   }

@@ -165,7 +165,7 @@ pub async fn deactivate_user_as_admin(
   }
   ensure_may_act_on(state, caller, user).await?;
   let note = request.maybe_note.unwrap_or_default();
-  if note.chars().count() > state.settings.limits.max_text_length {
+  if note.chars().count() > state.settings.get().limits.max_text_length {
     return Err(ApiError::InvalidRequest("note is too long".into()));
   }
   deactivate_user(
@@ -357,7 +357,7 @@ async fn query_audit(state: &AppState, query: ListAuditQuery) -> Result<ListAudi
 }
 
 fn page_limit(state: &AppState, maybe_limit: Option<u32>) -> u32 {
-  let limits = &state.settings.limits;
+  let limits = &state.settings.get().limits;
   maybe_limit
     .unwrap_or(limits.default_page_size)
     .clamp(1, limits.max_page_size)

@@ -16,9 +16,10 @@ pub async fn rendezvous_handler(
 ) -> Response {
   let max_frame_bytes = state
     .settings
+    .get()
     .rendezvous
     .max_frame_bytes
-    .max(state.settings.gateway.max_frame_bytes);
+    .max(state.settings.get().gateway.max_frame_bytes);
   upgrade
     .max_message_size(max_frame_bytes)
     .on_upgrade(move |socket| connection::run(state, socket, ip))
