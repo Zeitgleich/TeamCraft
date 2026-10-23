@@ -19,7 +19,11 @@ pub fn SpaceRail() -> impl IntoView {
           <SpaceButton space=space />
         </For>
       </ul>
-      <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::NewSpace) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
+      <button class="rail-add" on:click=move |_| {
+        // Joining an open space is the common case for everyone but the first person.
+        let has_joinable = state.read(|backend| !backend.joinable_spaces().is_empty());
+        state.overlay.set(if has_joinable { Overlay::JoinSpace } else { Overlay::NewSpace });
+      } aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
         <Icon name=IconName::Plus />
       </button>
     </nav>
@@ -54,16 +58,6 @@ fn SpaceButton(space: Space) -> impl IntoView {
     }
   };
 
-  let first_conversation = move |space| {
-    state.read(|backend| {
-      backend
-        .space_conversations(space)
-        .into_iter()
-        .next()
-        .map(|conv| conv.id)
-    })
-  };
-
   view! {
     <li>
       <button
@@ -88,10 +82,10 @@ fn SpaceButton(space: Space) -> impl IntoView {
             | MainView::Activity
             | MainView::Calls
             | MainView::Directory => true,
-            MainView::Admin(_) => false,
+            MainView::Admin(_) | MainView::GettingStarted => false,
           };
-          if !belongs && let Some(conversation) = first_conversation(id) {
-            state.open_conversation(conversation);
+          if !belongs {
+            state.open_first_conversation_of(id);
           }
         }
       >

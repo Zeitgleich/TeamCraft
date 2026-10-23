@@ -344,7 +344,9 @@ fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionContr
   let name = StoredValue::new(name);
   let passphrase = RwSignal::new(String::new());
   let confirm = RwSignal::new(String::new());
-  let device_name = RwSignal::new(default_device_name());
+  let device_name = RwSignal::new(default_device_name(i18n));
+  let is_revealed = RwSignal::new(false);
+  let input_type = move || if is_revealed.get() { "text" } else { "password" };
   let mismatch =
     move || !has_existing_identity && !confirm.get().is_empty() && confirm.get() != passphrase.get();
   let too_short = move || {
@@ -384,10 +386,11 @@ fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionContr
           <label for="enroll-passphrase">
             {move || if has_existing_identity { i18n.t("enroll-passphrase-recover") } else { i18n.t("enroll-passphrase-new") }}
           </label>
+          <div class="input-with-action">
           <input
             id="enroll-passphrase"
             class="input"
-            type="password"
+            type=input_type
             name="passphrase"
             autocomplete=if has_existing_identity { "current-password" } else { "new-password" }
             data-autofocus
@@ -395,6 +398,16 @@ fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionContr
             prop:value=move || passphrase.get()
             on:input=move |ev| passphrase.set(event_target_value(&ev))
           />
+          <button
+            type="button"
+            class="btn btn-small"
+            aria-pressed=move || is_revealed.get().to_string()
+            aria-controls="enroll-passphrase enroll-confirm"
+            on:click=move |_| is_revealed.update(|value| *value = !*value)
+          >
+            {move || if is_revealed.get() { i18n.t("passphrase-hide") } else { i18n.t("passphrase-show") }}
+          </button>
+          </div>
           <p id="enroll-passphrase-hint" class="muted-text small" class:warn-text=too_short>
             {move || {
               if has_existing_identity {
@@ -411,7 +424,7 @@ fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionContr
             <input
               id="enroll-confirm"
               class="input"
-              type="password"
+              type=input_type
               name="passphrase-confirm"
               autocomplete="new-password"
               aria-invalid=move || mismatch().to_string()
@@ -558,14 +571,21 @@ const LINK_POLL_MS: u64 = 1000;
 /// derivation (Argon2id) does the rest.
 const MIN_PASSPHRASE_CHARS: usize = 12;
 
-fn default_device_name() -> String {
+/// "Desktop (Linux x86_64)" in the desktop app, "Browser (Linux x86_64)" in a browser: the name
+/// the user sees later in the device list, so it should say what this device is.
+fn default_device_name(i18n: crate::i18n::I18n) -> String {
   let platform = web_sys::window()
     .and_then(|window| window.navigator().platform().ok())
     .unwrap_or_default();
-  if platform.is_empty() {
-    "Desktop".to_owned()
+  let kind = if tauri::is_available() {
+    i18n.t("device-kind-desktop")
   } else {
-    format!("Desktop ({platform})")
+    i18n.t("device-kind-browser")
+  };
+  if platform.is_empty() {
+    kind
+  } else {
+    format!("{kind} ({platform})")
   }
 }
 

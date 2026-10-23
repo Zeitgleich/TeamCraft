@@ -29,6 +29,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// full sync. Process the returned connection with [`Self::pump`] or [`Self::run_gateway`].
   pub async fn connect_gateway(&mut self) -> Result<(A::Gateway, GatewayOutcome), CoreError> {
     let mut connection = self.open_gateway().await?;
+    // A resumed session skips the full sync; the own name may still be missing from older stores.
+    self.refresh_own_summary().await;
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
       connection
         .send(&GatewayClientMessage::Resume {

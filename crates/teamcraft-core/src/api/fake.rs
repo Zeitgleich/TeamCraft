@@ -1262,6 +1262,20 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn join_space(&self, space: SpaceId) -> Result<SpaceResponse, ApiError> {
+    self.with(|state, _| {
+      let entry = state
+        .spaces
+        .get_mut(&space)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"))?;
+      if entry.join_policy != JoinPolicy::Open || entry.is_archived {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "invitation only"));
+      }
+      entry.maybe_my_role.get_or_insert(SpaceRole::Member);
+      Ok(entry.clone())
+    })
+  }
+
   async fn join_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
     self.with(|state, me| {
       let floor = state.peek_id();

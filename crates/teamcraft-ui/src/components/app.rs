@@ -24,6 +24,7 @@ use crate::components::calls_view::CallsView;
 use crate::components::channel_view::ChannelView;
 use crate::components::directory_view::DirectoryView;
 use crate::components::file_views::{FilesPanel, Gallery};
+use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
@@ -47,7 +48,8 @@ use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
 use crate::components::workspace_dialogs::{
-  BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
+  BrowseChannelsDialog, ChannelSettingsDialog, JoinSpaceDialog, NewChannelDialog, NewSpaceDialog,
+  SpaceSettingsDialog,
 };
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
@@ -174,6 +176,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Activity => view! { <ActivityView /> }.into_any(),
             MainView::Calls => view! { <CallsView /> }.into_any(),
             MainView::Directory => view! { <DirectoryView /> }.into_any(),
+            MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
@@ -242,6 +245,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
         Overlay::Gallery(conversation, message) => view! { <Gallery conversation=conversation start=message /> }.into_any(),
         Overlay::NewSpace => view! { <NewSpaceDialog /> }.into_any(),
+        Overlay::JoinSpace => view! { <JoinSpaceDialog /> }.into_any(),
         Overlay::NewChannel(space) => view! { <NewChannelDialog space=space /> }.into_any(),
         Overlay::BrowseChannels(space) => view! { <BrowseChannelsDialog space=space /> }.into_any(),
         Overlay::ChannelSettings(id) => view! { <ChannelSettingsDialog conversation=id /> }.into_any(),

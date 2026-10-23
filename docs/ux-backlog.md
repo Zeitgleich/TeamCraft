@@ -8,6 +8,22 @@ a day comes first.
 States: **done** (fixed on the branch named in the PR), **open** (not started), **partly** (some of it
 exists).
 
+## Onboarding (first sign-in, empty workspace)
+
+| Friction                                                                                          | State  |
+|---------------------------------------------------------------------------------------------------|--------|
+| After sign-in, an empty workspace shows an empty Threads inbox and no next step                   | done   |
+| Colleagues can't find or join open spaces (the server allows it; the client hid them)             | done   |
+| A new space or channel is created but not opened                                                  | done   |
+| A new space has no channel and gives no hint to create one                                        | done   |
+| The new space/channel dialogs show labels and fields side by side                                 | done   |
+| The members panel and an empty channel have no way to add people                                  | done   |
+| Inviting colleagues is hidden in the space settings                                               | done   |
+| Someone in no conversation has no name in the app (account menu, greeting)                        | done   |
+| In a browser the first device is named "Desktop (…)"                                              | done   |
+| The recovery passphrase can't be shown while typing it                                            | done   |
+| First call checked against a running SFU                                                          | open   |
+
 ## Reading
 
 | Friction                                                                                          | State  |

@@ -29,6 +29,7 @@ pub mod composer_commands;
 pub mod directory_view;
 pub mod emoji_picker;
 pub mod file_views;
+pub mod getting_started;
 pub mod guest_join;
 pub mod huddle_bar;
 pub mod icons;
