@@ -50,6 +50,8 @@ async fn mobile_client_receives_and_answers_a_message() {
     panic!("not enrolled: {state:?}");
   };
   phone.start().await.unwrap();
+  // The app starts again on every foreground; a running sync loop must survive that.
+  phone.start().await.unwrap();
 
   // Alice is a desktop-like core client.
   let api = HttpServerApi::new(server_url.clone(), StaticToken(alice_token.clone()));

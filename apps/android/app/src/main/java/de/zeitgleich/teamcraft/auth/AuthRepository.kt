@@ -40,7 +40,11 @@ class AuthRepository(context: Context) {
   )
   private val service = AuthorizationService(
     context,
-    AppAuthConfiguration.Builder().setConnectionBuilder(DevAwareConnectionBuilder).build(),
+    AppAuthConfiguration.Builder()
+      .setConnectionBuilder(DevAwareConnectionBuilder)
+      // AppAuth rejects ID tokens of a plain-HTTP issuer; the development stack's Keycloak is one.
+      .setSkipIssuerHttpsCheck(isDevIssuer(BuildConfig.OIDC_ISSUER))
+      .build(),
   )
   private var state: AuthState = loadState()
   private val signedIn = MutableStateFlow(state.isAuthorized)
@@ -170,5 +174,7 @@ class AuthRepository(context: Context) {
     const val SESSION_KEY_ALIAS = "teamcraft_session"
     const val REFRESH_TIMEOUT_SECONDS = 10L
     val DEV_HOSTS = setOf("10.0.2.2", "127.0.0.1", "localhost")
+
+    fun isDevIssuer(issuer: String): Boolean = Uri.parse(issuer).let { it.scheme == "http" && it.host in DEV_HOSTS }
   }
 }
