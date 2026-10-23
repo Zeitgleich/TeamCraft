@@ -56,6 +56,10 @@ final class NotificationService: UNNotificationServiceExtension {
     else {
       return builder.generic(from: original)
     }
+    // App lock on: the lock screen must not show what the locked app hides. Calls still ring.
+    if SharedContainer().isAppLockOn && !notification.isCall {
+      return builder.generic(from: original)
+    }
     if notification.isCall {
       await reportCall(notification)
       // With the filtering entitlement an empty content shows nothing; without it the system

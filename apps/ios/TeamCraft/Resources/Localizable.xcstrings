@@ -33,6 +33,22 @@
         }
       }
     },
+    "app_lock_confirm_change": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm to change app lock"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bestätigen, um die App-Sperre zu ändern"
+          }
+        }
+      }
+    },
     "app_lock_fifteen_minutes": {
       "localizations": {
         "en": {

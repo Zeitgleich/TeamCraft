@@ -23,19 +23,22 @@ enum LockAfter: String, CaseIterable, Identifiable {
 }
 
 /// Decides when the app is locked: at launch, and when it comes back after more than
-/// `lockAfter` in the background. `now` is injectable for tests.
+/// `lockAfter` in the background. Measured on the continuous clock (it keeps counting while the
+/// device sleeps and can't be set back like the wall clock). `now` is injectable for tests.
 struct AppLockClock {
-  private var maybeBackgroundedAt: Date?
+  private var maybeBackgroundedAt: ContinuousClock.Instant?
 
-  mutating func didEnterBackground(at now: Date) {
+  mutating func didEnterBackground(at now: ContinuousClock.Instant) {
     maybeBackgroundedAt = now
   }
 
   /// Whether the app must lock now that it is active again; uses up the background phase.
-  mutating func shouldLock(at now: Date, isEnabled: Bool, lockAfter: LockAfter) -> Bool {
+  mutating func shouldLock(at now: ContinuousClock.Instant, isEnabled: Bool, lockAfter: LockAfter) -> Bool {
     guard let backgroundedAt = maybeBackgroundedAt else { return false }
     maybeBackgroundedAt = nil
-    return isEnabled && now.timeIntervalSince(backgroundedAt) >= lockAfter.seconds
+    let elapsed = backgroundedAt.duration(to: now)
+    // A negative span can't happen on this clock; if it did, locking is the safe answer.
+    return isEnabled && (elapsed < .zero || elapsed >= .seconds(lockAfter.seconds))
   }
 }
 
@@ -55,6 +58,15 @@ final class AppLock {
   init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
     isLocked = defaults.bool(forKey: Self.enabledKey)
+    SharedContainer().isAppLockOn = isEnabled
+  }
+
+  var isEnabled: Bool { defaults.bool(forKey: Self.enabledKey) }
+
+  /// The cover over the app while it is not active: on when asked for, and always with app lock
+  /// (the app switcher must not show what the lock hides).
+  var isCoverWanted: Bool {
+    isEnabled || defaults.bool(forKey: Self.privacyCoverKey)
   }
 
   var lockAfter: LockAfter {
@@ -67,13 +79,26 @@ final class AppLock {
   }
 
   func didEnterBackground() {
-    clock.didEnterBackground(at: .now)
+    clock.didEnterBackground(at: ContinuousClock.now)
+    // Locked already in the background when there is no delay, so the app comes back locked.
+    if isEnabled && lockAfter == .immediately {
+      isLocked = true
+    }
   }
 
   func didBecomeActive() {
-    if clock.shouldLock(at: .now, isEnabled: defaults.bool(forKey: Self.enabledKey), lockAfter: lockAfter) {
+    if clock.shouldLock(at: ContinuousClock.now, isEnabled: isEnabled, lockAfter: lockAfter) {
       isLocked = true
     }
+  }
+
+  /// Asks for Face ID / Touch ID or the passcode before the lock is weakened (switched off or
+  /// given a longer delay); `true` if allowed. Without any authenticator there is nothing to ask.
+  @MainActor
+  static func confirmChange(reason: String) async -> Bool {
+    let context = LAContext()
+    guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { return true }
+    return (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) == true
   }
 
   /// Asks for Face ID / Touch ID or the passcode. Without any, the lock is pointless and opens.
