@@ -10,6 +10,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Added
 
+- **Runtime settings in the admin console**: brands (create, edit, delete, take over configured ones;
+  logos, icons and favicons with dark variants in the object storage; colors with preview and
+  contrast check; login texts in English and German; links; mail sender; host names limited to the
+  served ones), the mail server (password write-only and encrypted with the new `[secrets]` settings
+  key, delivery status, test mail), the meeting calendar (CalDAV, connection test) and instance
+  settings (server rules, notification defaults, mention digest, share links, limits, integration
+  channels, local accounts, mail and meeting texts). The configuration file stays the seed; every
+  change is audit-logged and can be reset to the file's value
+  ([docs/admin.md](docs/admin.md) §6).
+
 - **Desktop updates**: Windows, macOS and AppImage installs check for updates in the background,
   download and verify them (minisign, bound to the version) and install them on restart or quit,
   never during a call; Settings → Advanced → Updates offers automatic, notify only or off. deb and rpm installs
@@ -18,6 +28,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   allowed/disabled, channel, pinned and minimum version, mirror), and the server announces the oldest
   client it supports (`GET /api/v1/client-compatibility`); older apps ask for an update
   ([docs/updates.md](docs/updates.md)).
+
+### Changed
+
+- All of the server's mail, meeting invitations included, goes through one mail server;
+  `[meetings.smtp]` only counts when `[mail.smtp]` is missing.
 
 ## [1.0.0] - 2026-10-23
 

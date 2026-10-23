@@ -13,7 +13,7 @@ Related: [PLAN.md](../PLAN.md) §1 and §11, [admin.md](admin.md), [notification
 
 | Term          | Meaning                                                                                      |
 |---------------|----------------------------------------------------------------------------------------------|
-| Brand         | A named set of presentation settings with one or more host names. Configured, not user data. |
+| Brand         | A named set of presentation settings with one or more host names. Set by admins, not users.  |
 | Default brand | Exactly one brand is the default. Used for unknown hosts (if allowed), tools and fallbacks.  |
 | Request brand | The brand whose host name the request arrived on (`Host` header, validated).                 |
 | Home brand    | The brand of a user's e-mail domain (`email_domains`), else the default brand.               |
@@ -32,12 +32,14 @@ entry the server runs as before with one built-in default brand named "TeamCraft
 assets_dir = "/etc/teamcraft/brands"   # brand files are read from here, never from elsewhere
 unknown_host = "reject"                # "reject" (default) or "default" (see §3)
 trusted_proxies = []                   # proxy addresses whose X-Forwarded-Host replaces Host
+served_hostnames = []                  # further host names the proxy serves, for console brands (§2.1)
 
 [[brands]]
 id = "brand-a"                         # [a-z0-9-], 1..=32, stable; used in URLs and by clients
 is_default = true
 hostnames = ["chat.brand-a.example.com", "chat.brand-a.example.org"]
 display_name = "Brand A"
+organization_name = "Brand A Ltd."     # optional, shown in the footer of the sign-in page
 email_domains = ["brand-a.example.com"] # users with such an address have this home brand
 logo = "brand-a/logo.svg"              # file names below assets_dir; *_dark optional
 logo_dark = "brand-a/logo-dark.svg"
@@ -86,6 +88,30 @@ Validation at startup (the server refuses to start otherwise):
 - URLs are `https://` (or `http://` for localhost);
 - `connect_origins` are origins as in `[web]`.
 
+### 2.1 Brands in the admin console
+
+Admins manage brands in Administration → Brands ([admin.md](admin.md) §6.1; API
+`/api/v1/admin/brands`). The configuration file is the seed:
+
+- `[[brands]]` are shown as "from configuration file" and are read-only. "Take over into the database"
+  copies one, with its images, into the database (`brands`, `brand_assets`); the database brand with
+  the same id then replaces it. Deleting that database brand brings the configuration brand back.
+- New brands are stored in the database; their images go to the object storage (`[storage]`), at
+  most `max_asset_bytes` each, PNG, JPEG, WebP, ICO or SVG (checked by their first bytes, and they must
+  match the declared type).
+- A database brand may only use **served host names**: `[branding].served_hostnames` plus the host
+  names of `[[brands]]`. The proxy and TLS layer must know a host name before a brand can use it, so
+  adding one is a deployment change (the playbook's served host names), assigning it is a console
+  change. The console shows every served host name and the brand it selects.
+- The default: a database brand that says it is the default takes that role from the configuration's.
+  Without configured brands and without a database default, the built-in brand stays the default.
+- Content security policies and connect origins per brand stay in the configuration file
+  ([admin.md](admin.md) §6.4); a taken-over brand keeps the ones it had.
+- Every change builds the complete set of brands and checks it as at startup (one default, unique
+  ids and host names, hex colors, https links) before anything is stored; a change that does not fit
+  is refused as a whole. At startup a stored brand loses host names the server no longer serves, with
+  a warning.
+
 ## 3. Choosing the brand of a request
 
 Only host names from the configuration select a brand. Nothing else is ever used: not a query
@@ -117,6 +143,7 @@ of the request host:
 {
   "id": "brand-a",
   "display_name": "Brand A",
+  "organization_name": "Brand A Ltd.",
   "origin": "https://chat.brand-a.example.com",
   "assets": { "logo": "/api/v1/brand/assets/logo", "logo_dark": "...", "icon": "...", "favicon": "..." },
   "colors": { "light": { "accent": "#0b7f78" }, "dark": { "accent": "#35c6ba" } },
@@ -268,10 +295,12 @@ An optional label per user, taken from the identity provider.
   forwards configured hosts anyway.
 - No reflection: no response contains the received host. Links in mail and API payloads use configured
   host names. Test: a request with `Host: evil.example` never yields `evil.example` in any body.
-- No phishing aid: an administrator can only brand hosts they configure; there is no API to create or
-  change a brand at run time, no per-user or per-request brand selection, and the client never
-  accepts a brand from a server other than the one in its URL bar / entered URL.
-- Assets are read-only configured files; CSS contains only validated hex values and fixed token names;
+- No phishing aid: an administrator can only brand host names the deployment serves (§2.1); brands are
+  changed by instance admins only, every change is in the audit log, there is no per-user or
+  per-request brand selection, and the client never accepts a brand from a server other than the one
+  in its URL bar / entered URL.
+- Assets are configured files or images admins uploaded (type checked by content); CSS contains only
+  validated hex values and fixed token names;
   SVG logos are shown via `<img>` only (scripts in SVG do not run there) and are served with a locked-down CSP.
 - Per-brand CSP as in §4; share links are bound to the creating brand's hosts (§8).
 - Session tokens and local sessions are not brand-scoped: signing in on one brand host does not sign you

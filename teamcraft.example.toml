@@ -78,7 +78,8 @@ filter = "info"
 # "pretty" for humans, "json" for log collectors.
 format = "pretty"
 
-# Instance policies (PLAN.md §12, §13). Later these become signed, runtime-editable policy.
+# Rules only the server enforces (PLAN.md §12, §13). Seed of Administration → Settings → server rules;
+# guest rules there and in the signed policy win over guests_dm_only_with_shared_conversations.
 [policy]
 # Guests can only open DMs with people they share a conversation with (and vice versa).
 guests_dm_only_with_shared_conversations = true
@@ -295,9 +296,14 @@ unknown_host = "reject"
 # Addresses of reverse proxies whose X-Forwarded-Host (last entry) replaces Host. Requests from other
 # addresses are matched by their own Host. Empty (default): Host only, which is right for Caddy.
 trusted_proxies = []
-# Largest brand image file.
+# Largest brand image file (also for images uploaded in the admin console).
 max_asset_bytes = 524288
+# Host names the reverse proxy and TLS layer serve for this server besides those of [[brands]]. Brands
+# made in the admin console can only use these and the [[brands]] host names (docs/branding.md §2.1).
+served_hostnames = []
 
+# These brands are the seed: admins see them in Administration → Brands as "from configuration file" and
+# can take them over into the database, where they are edited (docs/admin.md §6).
 # Exactly one brand has is_default = true. Host names are lower-case DNS names without port; each
 # belongs to one brand and must be a redirect URI host of the OIDC client (docs/branding.md §10).
 # [[brands]]
@@ -305,6 +311,7 @@ max_asset_bytes = 524288
 # is_default = true
 # hostnames = ["chat.brand-a.example.com"]
 # display_name = "Brand A"
+# organization_name = "Brand A Ltd."         # optional, footer of the sign-in page
 # email_domains = ["brand-a.example.com"]     # people with such an address have this home brand: their
 #                                             # invitation and meeting mail goes out as this brand
 # logo = "brand-a/logo.svg"                   # svg, png, jpg, webp or ico; *_dark variants optional
@@ -479,7 +486,9 @@ is_enabled = true
 # the registration token above authenticates this server. Without it those controls answer 503.
 # sfu_control_url = "http://sfu.internal:8081"
 
-# E-mail the server sends on its own: invitations to spaces and channels (meeting invitations use [meetings]).
+# E-mail the server sends on its own: invitations, activations, digests and meeting invitations. The mail
+# server and the texts are the seed of Administration → Mail and → Settings; what an admin sets there
+# wins (docs/admin.md §6). [meetings.smtp] is only used when [mail.smtp] is missing.
 [mail]
 # public_base_url = "https://chat.example.com"
 # invite_subject = "{inviter} invited you to {space}"
@@ -514,3 +523,11 @@ max_downloads_cap = 0
 # Public URL of this server without trailing slash; shown as <base>/f/<id> in the API.
 public_base_url = ""
 max_links_per_user = 500
+
+# The key that encrypts the passwords admins enter in the console (mail server, calendar) before they are
+# stored in the database (docs/admin.md §6.2). Without it those passwords can only be set in this file.
+# Either a file the server creates on first start (keep it with the backups of this file, not of the
+# database) or 32 random bytes as base64 (prefer TEAMCRAFT_SECRETS__KEY).
+[secrets]
+# key_path = "/var/lib/teamcraft/settings.key"
+# key = "..."

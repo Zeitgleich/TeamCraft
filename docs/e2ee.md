@@ -36,6 +36,12 @@ WhatsApp or Threema.
 | **Backup key** (random 256 bit)                    | user                          | Encrypts the key bag; itself wrapped by passkey, devices, org recovery |
 | **Push key** (random 256 bit)                      | one device                    | Shared with the server; hides push metadata from Apple/Google          |
 
+Not part of end-to-end encryption, listed so every key is in one place: the server's **settings key**
+(`[secrets]`, random 256 bit) encrypts the SMTP and CalDAV passwords admins enter in the console
+before the server stores them (XChaCha20-Poly1305 under an HKDF-derived key, the setting's name as
+associated data; `teamcraft-crypto::server_secret`). The server holds both key and plaintext; the
+key only keeps the passwords out of database dumps and backups ([admin.md](admin.md) §6.2).
+
 ## 3. Identity and devices
 
 - On first login the client generates the identity key and one device key, signs the device key with
