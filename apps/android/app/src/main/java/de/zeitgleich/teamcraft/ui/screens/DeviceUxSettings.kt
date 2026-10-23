@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.security.LockAfter
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
@@ -42,6 +43,8 @@ fun AppLockSetting() {
         onCheckedChange = {
           isEnabled = it
           prefs.setEnabled(it)
+          // Notifications already shown follow the new setting at once.
+          TeamCraftApplication.graph(context).notifier.repostAll()
         },
       )
       Text(stringResource(R.string.app_lock), modifier = Modifier.padding(start = 8.dp))

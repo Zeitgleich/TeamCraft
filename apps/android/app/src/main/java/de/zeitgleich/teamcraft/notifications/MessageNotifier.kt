@@ -19,6 +19,7 @@ import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.MainActivity
 import uniffi.teamcraft_ffi.PushNotification
 
@@ -134,6 +135,18 @@ class MessageNotifier(
     }
   }
 
+  /**
+   * Shows the current notifications again, silently, as the app lock now says (turning it on hides
+   * what is already in the shade; turning it off brings the text back).
+   */
+  fun repostAll() {
+    synchronized(lock) {
+      val shown = shown()
+      shown.conversations.values.forEach { entry -> post(entry, isAlerting = false) }
+      postSummary()
+    }
+  }
+
   /** Conversations that have a notification now. */
   fun shownConversationIds(): Set<String> = synchronized(lock) { shown().conversations.keys }
 
@@ -203,15 +216,10 @@ class MessageNotifier(
   private fun post(entry: ConversationNotification, isAlerting: Boolean) {
     if (!canPost()) return
     val newest = entry.lines.lastOrNull { !it.isOwn } ?: return
-    val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
-    val style = NotificationCompat.MessagingStyle(me)
-      .setConversationTitle(entry.maybeTitle)
-      .setGroupConversation(entry.maybeTitle != null)
-    entry.lines.forEach { line -> style.addMessage(line.text, line.sentAtMs, person(line)) }
+    val privacy = MessagePrivacy.of(isAppLockOn(), entry.isVerified)
     val channel = if (entry.isMention) NotificationChannels.MENTIONS else NotificationChannels.MESSAGES
     val builder = NotificationCompat.Builder(context, channel)
       .setSmallIcon(R.drawable.ic_notification)
-      .setStyle(style)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       .setWhen(newest.sentAtMs)
       .setShowWhen(true)
@@ -222,15 +230,29 @@ class MessageNotifier(
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
       .setContentIntent(openIntent(entry.conversationId))
       .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, entry.conversationId, isMutable = false))
-      .setShortcutId(entry.conversationId)
-      .setLocusId(LocusIdCompat(entry.conversationId))
       // The lock screen shows only "New message" unless the user unlocks.
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setPublicVersion(publicVersion(channel))
-    if (entry.isVerified) {
+    if (privacy.showsContent) {
+      val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
+      val style = NotificationCompat.MessagingStyle(me)
+        .setConversationTitle(entry.maybeTitle)
+        .setGroupConversation(entry.maybeTitle != null)
+      entry.lines.forEach { line -> style.addMessage(line.text, line.sentAtMs, person(line)) }
+      builder.setStyle(style)
+    } else {
+      // App lock: the same as the lock screen's public version, also in the unlocked shade.
+      builder
+        .setContentTitle(context.getString(R.string.app_name))
+        .setContentText(context.getString(R.string.notification_new_message))
+    }
+    if (privacy.pushesShortcut) {
+      builder.setShortcutId(entry.conversationId).setLocusId(LocusIdCompat(entry.conversationId))
+      pushShortcut(entry, newest)
+    }
+    if (privacy.offersActions) {
       builder.addAction(replyAction(entry.conversationId)).addAction(markReadAction(entry.conversationId))
     }
-    pushShortcut(entry, newest)
     postSafely(entry.conversationId, MESSAGE_ID, builder.build())
   }
 
@@ -250,10 +272,8 @@ class MessageNotifier(
     val count = shown.conversations.size
     val title = context.resources.getQuantityString(R.plurals.notification_summary, count, count)
     val inbox = NotificationCompat.InboxStyle().setBigContentTitle(title)
-    // Names only: the summary may show where the conversations' text does not.
-    shown.conversations.values.forEach { entry ->
-      inbox.addLine(entry.maybeTitle ?: entry.lines.lastOrNull { !it.isOwn }?.senderName.orEmpty())
-    }
+    // Names only (none with the app lock on): the summary may show where the text does not.
+    MessagePrivacy.summaryLines(isAppLockOn(), shown.conversations.values).forEach(inbox::addLine)
     val summary = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentTitle(title)
@@ -299,6 +319,8 @@ class MessageNotifier(
       Log.w(TAG, "notification not posted: permission missing")
     }
   }
+
+  private fun isAppLockOn(): Boolean = AppLockPrefs.prefs(context).isEnabled
 
   private fun publicVersion(channel: String) = NotificationCompat.Builder(context, channel)
     .setSmallIcon(R.drawable.ic_notification)
