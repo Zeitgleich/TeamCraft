@@ -58,6 +58,16 @@ class ChatClient(private val core: suspend () -> TeamCraft) {
     )
   }
 
+  /** Quick DND (`manual = "dnd"`, until a time or open-ended) or back to automatic. */
+  suspend fun setManualPresence(presence: ManualPresence) {
+    api("PUT", "/me/presence", WireJson.encodeToString(ManualPresence.serializer(), presence))
+  }
+
+  /** What others see of `userId` now (`online`, `away`, `dnd`, `offline`); `null` if unknown. */
+  suspend fun presenceState(userId: String): String? =
+    WireJson.decodeFromString(PresenceList.serializer(), api("GET", "/presence?user_ids=$userId"))
+      .presences.firstOrNull { it.userId == userId }?.state
+
   suspend fun meetings(): List<Meeting> =
     WireJson.decodeFromString(MeetingList.serializer(), api("GET", "/meetings")).meetings
 }

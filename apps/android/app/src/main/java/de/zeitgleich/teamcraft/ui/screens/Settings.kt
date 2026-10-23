@@ -55,7 +55,13 @@ import uniffi.teamcraft_ffi.PushService
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: () -> Unit) {
+fun SettingsScreen(
+  viewModel: MainViewModel,
+  account: AppState.Ready,
+  onBack: () -> Unit,
+  onDnd: () -> Unit = {},
+  onDiagnostics: () -> Unit = {},
+) {
   var presence by rememberSaveable { mutableStateOf(Presence.ONLINE) }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.settings_title), maybeOnBack = onBack) }) { padding ->
     Column(
@@ -96,6 +102,10 @@ fun SettingsScreen(viewModel: MainViewModel, account: AppState.Ready, onBack: ()
           },
         ),
       )
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = onDnd) { Text(stringResource(R.string.dnd_title)) }
+        OutlinedButton(onClick = onDiagnostics) { Text(stringResource(R.string.diagnostics_title)) }
+      }
 
       HorizontalDivider()
       Heading(R.string.search_prefetch_title)

@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import de.zeitgleich.teamcraft.notifications.DndSchedule
 
 /**
  * The core's view models as they arrive over the JSON bridge (teamcraft-client-api `model`,
@@ -280,7 +281,7 @@ data class NotificationSettings(
   @SerialName("auto_follow_mentioned_threads") val autoFollowMentionedThreads: Boolean = true,
   @SerialName("push_mode") val pushMode: String = "away_only",
   @SerialName("send_read_receipts") val sendReadReceipts: Boolean = true,
-  @SerialName("dnd_schedule") val dndSchedule: JsonObject? = null,
+  @SerialName("dnd_schedule") val maybeDndSchedule: DndSchedule? = null,
 )
 
 /** Per-conversation level (`all`, `mentions`, `none`) and mute time. */
@@ -288,7 +289,23 @@ data class NotificationSettings(
 data class ConversationNotificationSettings(
   val level: String = "all",
   @SerialName("muted_until") val mutedUntil: Long? = null,
+  /** Follows the space's setting; saving a level or mute makes it the conversation's own. */
+  @SerialName("is_inherited") val isInherited: Boolean = false,
 )
+
+/** `PUT /me/presence`: `dnd` (optionally until a time) or `auto`. */
+@Serializable
+data class ManualPresence(
+  val manual: String,
+  @SerialName("until") val maybeUntil: Long? = null,
+)
+
+/** One user's presence (`GET /presence?user_ids=`). */
+@Serializable
+data class UserPresence(@SerialName("user_id") val userId: String, val state: String)
+
+@Serializable
+data class PresenceList(val presences: List<UserPresence> = emptyList())
 
 @Serializable
 data class Meeting(
