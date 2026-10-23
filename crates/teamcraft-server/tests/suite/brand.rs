@@ -128,7 +128,9 @@ async fn server_info_carries_the_brand_of_the_host_and_the_configured_sign_in() 
   let dir = files.dir.clone();
   let Some(app) = TestApp::start_with(move |settings| {
     settings.web.maybe_static_dir = Some(dir.join("site"));
-    settings.brands = vec![brand("a", HOST_A, true), brand("b", HOST_B, false)];
+    let mut b = brand("b", HOST_B, false);
+    b.maybe_sso_label = Some("Example SSO".into());
+    settings.brands = vec![brand("a", HOST_A, true), b];
     settings.sign_in = teamcraft_server::state::SignInSettings::new(
       "https://auth.example.com/realms/company".into(),
       "teamcraft-apps".into(),
@@ -162,8 +164,12 @@ async fn server_info_carries_the_brand_of_the_host_and_the_configured_sign_in() 
     serde_json::json!(["http://127.0.0.1/callback"])
   );
 
+  assert_eq!(info["sign_in"]["sso_label"], "Example SSO");
+  assert_eq!(info["sign_in"]["methods"], serde_json::json!(["sso"]));
+
   let (_, _, body) = get_as(&app, Some(HOST_A), "/api/v1/server-info").await;
   assert_eq!(json(&body)["brand"]["id"], "a");
+  assert!(json(&body)["sign_in"].get("sso_label").is_none());
   app.stop().await;
 }
 

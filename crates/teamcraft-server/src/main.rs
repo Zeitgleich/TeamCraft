@@ -190,6 +190,7 @@ async fn run() -> anyhow::Result<()> {
       guests: config.guests.clone(),
       mail: config.mail.clone(),
       local_accounts: config.local_accounts.clone(),
+      sign_in_page: config.sign_in_page.clone(),
       presence: config.presence.clone(),
       shares: config.shares.clone(),
       maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),

@@ -17,6 +17,8 @@ wire_enum! {
     IconDark => "icon_dark",
     Favicon => "favicon",
     FaviconDark => "favicon_dark",
+    /// The provider icon on the sign-in button.
+    SsoIcon => "sso_icon",
   }
 }
 

@@ -510,7 +510,12 @@ pub async fn validate_session_token(
   state: &AppState,
   token: &str,
 ) -> Result<Option<TokenIdentity>, AuthError> {
-  let Some(local) = &state.maybe_local else {
+  // Switched off in the admin console: the sessions of local accounts end with it.
+  let Some(local) = state
+    .maybe_local
+    .as_deref()
+    .filter(|_| state.settings.get().local_accounts.is_enabled)
+  else {
     return Ok(None);
   };
   let Some(claims) = local.verify(token) else {
@@ -569,11 +574,21 @@ pub async fn validate_session_token(
   }))
 }
 
+/// Whether local accounts can sign in now: configured (session secret) and switched on.
+pub fn is_available(state: &AppState) -> bool {
+  state.maybe_local.is_some() && state.settings.get().local_accounts.is_enabled
+}
+
 fn local_auth(state: &AppState) -> Result<&LocalAuth, ApiError> {
-  state
+  let local = state
     .maybe_local
     .as_deref()
-    .ok_or_else(|| ApiError::Unavailable("local accounts are not enabled".into()))
+    .ok_or_else(|| ApiError::Unavailable("local accounts are not enabled".into()))?;
+  if state.settings.get().local_accounts.is_enabled {
+    Ok(local)
+  } else {
+    Err(ApiError::LocalAccountsDisabled)
+  }
 }
 
 fn invalid_credentials() -> ApiError {

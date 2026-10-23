@@ -31,6 +31,7 @@ wire_enum! {
     AnnouncementNotFound => "announcement_not_found",
     RecoveryRequestNotFound => "recovery_request_not_found",
     ShareUnavailable => "share_unavailable",
+    LocalAccountsDisabled => "local_accounts_disabled",
     UserGroupNotFound => "user_group_not_found",
     MfaRequired => "mfa_required",
     Conflict => "conflict",

@@ -11,7 +11,8 @@ use crate::brand::BrandStore;
 use crate::config::{
   BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
   LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig, PolicyConfig, PresenceConfig,
-  RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, SmtpConfig, WebConfig,
+  RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, SignInPageConfig,
+  SmtpConfig, WebConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -89,6 +90,7 @@ pub struct Settings {
   pub guests: GuestsConfig,
   pub mail: MailConfig,
   pub local_accounts: LocalAccountsConfig,
+  pub sign_in_page: SignInPageConfig,
   pub presence: PresenceConfig,
   pub shares: SharesConfig,
   pub push: PushSettings,

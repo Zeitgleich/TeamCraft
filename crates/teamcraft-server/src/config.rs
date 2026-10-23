@@ -7,7 +7,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ConversationId, SpaceId};
+use teamcraft_proto::{ConversationId, SignInMethod, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
 /// `TEAMCRAFT_OIDC__ISSUER`, `TEAMCRAFT_OIDC__ROLES__GUEST`, `TEAMCRAFT_DATABASE__URL`.
@@ -56,6 +56,9 @@ pub struct Config {
   pub mail: MailConfig,
   #[serde(default)]
   pub local_accounts: LocalAccountsConfig,
+  /// What the sign-in page offers; the admin console changes it at runtime.
+  #[serde(default)]
+  pub sign_in_page: SignInPageConfig,
   /// How the server picks a brand for a request (docs/branding.md).
   #[serde(default)]
   pub branding: BrandingConfig,
@@ -557,6 +560,31 @@ pub struct LocalAccountsConfig {
   pub password_parallelism: u32,
 }
 
+/// What the sign-in page offers (`GET /api/v1/server-info`), the seed of the admin console's
+/// "Sign-in page" settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SignInPageConfig {
+  /// `sso` and `local` in display order, each at most once. `local` only shows while local
+  /// accounts are enabled.
+  pub methods: Vec<SignInMethod>,
+  /// Language code -> help text below the form.
+  pub help_text: BTreeMap<String, String>,
+  /// A help page (https).
+  #[serde(rename = "help_link")]
+  pub maybe_help_link: Option<String>,
+}
+
+impl Default for SignInPageConfig {
+  fn default() -> Self {
+    Self {
+      methods: vec![SignInMethod::Sso, SignInMethod::Local],
+      help_text: BTreeMap::new(),
+      maybe_help_link: None,
+    }
+  }
+}
+
 impl Default for LocalAccountsConfig {
   fn default() -> Self {
     Self {
@@ -804,6 +832,13 @@ pub struct BrandConfig {
   pub maybe_favicon: Option<String>,
   #[serde(rename = "favicon_dark", skip_serializing_if = "Option::is_none")]
   pub maybe_favicon_dark: Option<String>,
+  /// Icon of the identity provider on the sign-in button.
+  #[serde(rename = "sso_icon", skip_serializing_if = "Option::is_none")]
+  pub maybe_sso_icon: Option<String>,
+  /// The provider part of the sign-in button "Sign in with …" (e.g. "Microsoft"); else the
+  /// display name.
+  #[serde(rename = "sso_label", skip_serializing_if = "Option::is_none")]
+  pub maybe_sso_label: Option<String>,
   #[serde(rename = "support_url", skip_serializing_if = "Option::is_none")]
   pub maybe_support_url: Option<String>,
   #[serde(rename = "privacy_url", skip_serializing_if = "Option::is_none")]
