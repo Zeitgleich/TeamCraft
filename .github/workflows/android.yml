@@ -77,9 +77,10 @@ jobs:
             ${{ runner.temp }}/android/gradle/wrapper/dists
             ${{ runner.temp }}/android/target
           key: android-${{ hashFiles('Cargo.lock', 'apps/android/gradle/**', 'apps/android/**/*.gradle.kts', 'apps/android/docker/Dockerfile') }}-${{ github.run_id }}
+          # No generic fallback: a cache from another toolchain (NDK, Gradle, Cargo.lock) carries
+          # CMake caches that point at the old NDK path and break the native builds.
           restore-keys: |
             android-${{ hashFiles('Cargo.lock', 'apps/android/gradle/**', 'apps/android/**/*.gradle.kts', 'apps/android/docker/Dockerfile') }}-
-            android-
       - name: Rust core, Kotlin bindings, app and unit tests
         run: >
           apps/android/scripts/docker-build.sh
