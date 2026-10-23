@@ -13,6 +13,7 @@ mod core;
 #[cfg(target_os = "linux")]
 mod freedesktop;
 mod notifications;
+mod ringtone;
 mod shell_prefs;
 mod single_instance;
 mod tray;
@@ -72,6 +73,7 @@ fn main() -> anyhow::Result<()> {
     .manage(service)
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
+    .manage(ringtone::RingtoneState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(CoreHost::new(config, tokens))
     .setup(|app| {
@@ -94,8 +96,9 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, "no tray icon");
       }
       create_main_window(app)?;
+      notifications::prepare();
       #[cfg(target_os = "linux")]
-      notifications::watch_clicks(app.handle());
+      notifications::watch_actions(app.handle());
       #[cfg(target_os = "linux")]
       watch_wake(app.handle());
       #[cfg(windows)]
@@ -154,6 +157,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_unwatch_video,
       notifications::notify_user,
       notifications::withdraw_notifications,
+      notifications::request_attention,
+      ringtone::set_ringtone,
       attention::os_attention,
       autostart::autostart_get,
       autostart::autostart_set,

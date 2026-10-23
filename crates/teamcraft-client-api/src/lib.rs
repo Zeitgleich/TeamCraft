@@ -18,6 +18,7 @@ pub mod links;
 pub mod log;
 pub mod model;
 pub mod notify;
+pub mod os_notify;
 pub mod privacy;
 pub mod remote;
 pub mod search;

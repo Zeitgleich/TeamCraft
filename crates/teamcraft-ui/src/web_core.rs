@@ -146,6 +146,12 @@ pub fn is_available() -> bool {
   SETUP.with(|setup| setup.borrow().is_some())
 }
 
+/// Whether this tab shows the account's notifications: the store's owner, or a tab running its own
+/// core (no Web Locks). Followers stay quiet, so several tabs notify once (e2ee.md §9.4).
+pub fn is_notifying_tab() -> bool {
+  RUNNING.with(|running| !matches!(running.borrow().as_ref(), Some(Running::Follower { .. })))
+}
+
 /// Calls `callback` whenever the core's data changed.
 pub fn listen(callback: impl FnMut() + 'static) {
   LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));

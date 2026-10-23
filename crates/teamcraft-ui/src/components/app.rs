@@ -4,14 +4,15 @@ use std::time::Duration;
 
 use leptos::ev;
 use leptos::prelude::*;
+use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotificationKind};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::attention::{AttentionReporter, AttentionSignals, is_attentive};
 use crate::auth::tauri;
 use crate::backend::Backend;
-use crate::calls::CallEvent;
 use crate::calls::CallPhase;
+use crate::calls::{CallEvent, CallRequest};
 use crate::clock::now_ms;
 use crate::components::activity_view::ActivityView;
 use crate::components::admin_console::AdminConsole;
@@ -60,7 +61,6 @@ use crate::meetings::parse_guest_link;
 use crate::model::TimestampMs;
 use crate::model::{ConversationId, SpaceId};
 use crate::navigation::Step;
-use crate::notifier::{NotificationTitle, Notifier, ReadWatcher, all_conversations, notifications_for};
 use crate::notify_sync::NotificationSync;
 use crate::prefs::Zoom;
 use crate::reactive::use_interval;
@@ -127,26 +127,29 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     sync.get_value().start(settings);
   }
   if tauri::has_core() {
-    watch_for_notifications(state, i18n);
+    crate::os_alerts::start(state, i18n);
   }
   if tauri::is_available() {
     sync_tray(state, i18n);
-    // A click on a desktop notification (tagged with its conversation) opens that conversation.
-    tauri::listen_text(NOTIFICATION_OPENED_EVENT, move |tag| {
-      if let Ok(conversation) = tag.parse::<ConversationId>() {
-        state.open_conversation(conversation);
-      }
-    });
   }
   if !tauri::is_available() {
     open_conversations_from_notifications(state);
   }
   // `/remind` reminders come due while the app is open.
+  let brand = crate::brand::Brand::use_current();
   crate::reactive::use_interval(REMINDER_CHECK_MS, move || {
     for reminder in crate::components::composer_commands::due_reminders(now_ms()) {
       let message = i18n.t_with("reminder-due", &[("text", &reminder.text)]);
       state.show_toast(message.clone());
-      leptos::task::spawn_local(async move { tauri::notify("TeamCraft", Some(&message)).await });
+      let shown = OsNotification {
+        tag: NotificationTag::reminder(reminder.due_at),
+        kind: OsNotificationKind::Reminder,
+        title: brand.0.with_untracked(|brand| brand.display_name.clone()),
+        maybe_body: Some(message),
+        actions: Vec::new(),
+        maybe_reply: None,
+      };
+      leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
   });
   if tauri::is_available() {
@@ -459,12 +462,8 @@ fn initial_location(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> 
   Some((space.id, conversation.id))
 }
 
-/// Desktop only: new mentions and DMs become system notifications, decided by the user's preferences.
 /// Keeps the tray icon's badge, tooltip and menu texts in step with the unread messages and the
 /// language (desktop app).
-/// What the desktop shell emits when one of its notifications was clicked (payload: the tag).
-const NOTIFICATION_OPENED_EVENT: &str = "notification-opened";
-
 fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
   let brand = crate::brand::Brand::use_current();
   Effect::new(move |previous: Option<(u32, String, String)>| {
@@ -495,66 +494,6 @@ fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
       leptos::task::spawn_local(async move { tauri::tray_update(unread, &tooltip, &show, &quit).await });
     }
     current
-  });
-}
-
-fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
-  let notifier = Notifier::default();
-  let read_watcher = ReadWatcher::default();
-  let settings = state.settings;
-  Effect::new(move |_| {
-    // Reading through the state subscribes to every backend change.
-    let found = state.read(|backend| notifier.collect(backend));
-    let read = state.read(|backend| {
-      let unread: Vec<(ConversationId, u32)> = all_conversations(backend)
-        .iter()
-        .map(|conversation| (conversation.id, conversation.unread_count))
-        .collect();
-      read_watcher.newly_read(&unread)
-    });
-    if !read.is_empty() {
-      leptos::task::spawn_local(async move { tauri::withdraw_notifications(&read).await });
-    }
-    if found.is_empty() {
-      return;
-    }
-    let prefs = settings.prefs.get_untracked().notifications;
-    let current = state.current_conversation_id();
-    let has_focus = window_has_focus();
-    let notifications = state.read(|backend| {
-      notifications_for(
-        found,
-        &prefs,
-        backend,
-        |conversation| has_focus && current == Some(conversation),
-        prefs.maybe_dnd_until,
-      )
-    });
-    for notification in notifications {
-      let is_generic = notification.title == NotificationTitle::Generic;
-      let title = match &notification.title {
-        NotificationTitle::Generic => i18n.t("notify-new-message"),
-        NotificationTitle::Sender(name) => name.clone(),
-        NotificationTitle::InChannel { sender, channel } => {
-          i18n.t_with("notify-in-channel", &[("name", sender), ("channel", channel)])
-        },
-        NotificationTitle::ThreadReply { sender } => i18n.t_with("notify-thread-reply", &[("name", sender)]),
-      };
-      // A generic notification is only its title; otherwise the fallback body says what happened.
-      let body = notification
-        .body
-        .or_else(|| (!is_generic).then(|| i18n.t("notify-new-message")));
-      let conversation = notification.conversation;
-      leptos::task::spawn_local(async move {
-        tauri::notify_conversation(conversation, &title, body.as_deref()).await;
-      });
-    }
-  });
-  // Opening a conversation withdraws its notifications, also those of thread replies.
-  Effect::new(move |_| {
-    if let Some(conversation) = state.current_conversation_id() {
-      leptos::task::spawn_local(async move { tauri::withdraw_notifications(&[conversation]).await });
-    }
   });
 }
 
@@ -651,7 +590,16 @@ fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
 
 fn connect_calls(state: AppState) {
   let call = state.call;
+  let maybe_alerts = use_context::<crate::os_alerts::CallAlertsCell>();
   call.set_handler(move |event| {
+    // Answered or declined here: the ring that ends now was not missed.
+    if let (
+      Some(alerts),
+      CallEvent::Join(CallRequest { conversation, .. }) | CallEvent::Decline(conversation),
+    ) = (maybe_alerts, &event)
+    {
+      alerts.handled_here(*conversation);
+    }
     state.read(|backend| match event {
       CallEvent::Join(request) => backend.join_call(request),
       CallEvent::Leave => backend.leave_call(),

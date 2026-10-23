@@ -10,6 +10,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture};
+use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget};
+
 use crate::model::ConversationId;
 
 /// Whether the page runs inside the desktop shell.
@@ -182,25 +184,33 @@ fn serde_wasm_json<T: for<'de> Deserialize<'de>>(value: &JsValue) -> Result<T, A
   serde_json::from_str(&text).map_err(|error| AuthError::InvalidResponse(error.to_string()))
 }
 
-/// Shows a system notification through the desktop shell. Failures are logged, never shown.
-pub async fn notify(title: &str, maybe_body: Option<&str>) {
-  show_notification(None, title, maybe_body).await;
-}
-
-/// Shows the notification of a conversation; a newer one replaces it, and
-/// [`withdraw_notifications`] removes it once the conversation is read.
-pub async fn notify_conversation(conversation: ConversationId, title: &str, maybe_body: Option<&str>) {
-  show_notification(Some(&conversation.to_string()), title, maybe_body).await;
-}
-
-/// Removes the notifications of conversations that were read (here or on another device): the page's
-/// own, the service worker's push notifications (tagged with the conversation ID too) and the desktop
-/// shell's, where the platform allows.
-pub async fn withdraw_notifications(conversations: &[ConversationId]) {
-  if conversations.is_empty() {
+/// Shows a system notification: through the desktop shell, or from the page (the service worker's
+/// registration where there is one, so buttons work and a click reaches the worker). A newer one with
+/// the same tag replaces it. Failures are logged, never shown.
+pub async fn show_notification(notification: &OsNotification) {
+  if !is_available() {
+    show_page_notification(notification).await;
     return;
   }
-  let tags: Vec<String> = conversations.iter().map(ToString::to_string).collect();
+  let args = serde_json::json!({ "notification": notification });
+  if let Err(error) = call::<()>("notify_user", &args).await {
+    tracing::debug!(%error, "could not show a notification");
+  }
+}
+
+/// Removes the notifications of conversations that were read (here or on another device).
+pub async fn withdraw_notifications(conversations: &[ConversationId]) {
+  let tags: Vec<NotificationTag> = conversations.iter().map(NotificationTag::conversation).collect();
+  withdraw_tags(&tags).await;
+}
+
+/// Removes notifications by tag: the page's own, the service worker's push notifications (tagged with
+/// the conversation ID too) and the desktop shell's.
+pub async fn withdraw_tags(tags: &[NotificationTag]) {
+  if tags.is_empty() {
+    return;
+  }
+  let tags: Vec<String> = tags.iter().map(|tag| tag.as_str().to_owned()).collect();
   if is_available() {
     let args = serde_json::json!({ "tags": tags });
     if let Err(error) = call::<()>("withdraw_notifications", &args).await {
@@ -212,14 +222,25 @@ pub async fn withdraw_notifications(conversations: &[ConversationId]) {
   close_service_worker_notifications(&tags).await;
 }
 
-async fn show_notification(maybe_tag: Option<&str>, title: &str, maybe_body: Option<&str>) {
+/// Desktop: starts or stops the ringtone of an incoming call (the browser plays none).
+pub async fn set_ringtone(is_ringing: bool) {
   if !is_available() {
-    show_page_notification(maybe_tag, title, maybe_body);
     return;
   }
-  let args = serde_json::json!({ "title": title, "body": maybe_body, "tag": maybe_tag });
-  if let Err(error) = call::<()>("notify_user", &args).await {
-    tracing::debug!(%error, "could not show a notification");
+  let args = serde_json::json!({ "is_ringing": is_ringing });
+  if let Err(error) = call::<()>("set_ringtone", &args).await {
+    tracing::debug!(%error, "could not switch the ringtone");
+  }
+}
+
+/// Desktop: asks for the user's attention (taskbar flash, dock bounce) or stops asking.
+pub async fn request_attention(is_wanted: bool) {
+  if !is_available() {
+    return;
+  }
+  let args = serde_json::json!({ "is_wanted": is_wanted });
+  if let Err(error) = call::<()>("request_attention", &args).await {
+    tracing::debug!(%error, "could not ask for attention");
   }
 }
 
@@ -530,29 +551,83 @@ thread_local! {
 }
 
 /// Shows a notification from the page while it is open (closed pages get Web Push through the
-/// service worker); without permission nothing is shown.
-fn show_page_notification(maybe_tag: Option<&str>, title: &str, maybe_body: Option<&str>) {
+/// service worker); without permission nothing is shown. Through the worker's registration when
+/// there is one: only those notifications have buttons, and their clicks reach the worker, which
+/// hands them back to an open page (`teamcraft_core::web_push`). Otherwise the page's own.
+async fn show_page_notification(notification: &OsNotification) {
   if notification_permission().as_deref() != Some("granted") {
+    return;
+  }
+  let options = page_notification_options(notification);
+  if show_through_worker(&notification.title, &options).await {
     return;
   }
   let Some(constructor) = notification_constructor() else {
     return;
   };
-  let options = js_sys::Object::new();
-  if let Some(body) = maybe_body {
-    drop(js_sys::Reflect::set(&options, &"body".into(), &body.into()));
-  }
-  if let Some(tag) = maybe_tag {
-    drop(js_sys::Reflect::set(&options, &"tag".into(), &tag.into()));
-  }
-  let args = js_sys::Array::of2(&JsValue::from_str(title), &options);
+  let args = js_sys::Array::of2(&JsValue::from_str(&notification.title), &options);
   match js_sys::Reflect::construct(&constructor, &args) {
-    Ok(notification) => {
-      if let Some(tag) = maybe_tag {
-        PAGE_NOTIFICATIONS.with(|shown| shown.borrow_mut().insert(tag.to_owned(), notification));
-      }
+    Ok(shown) => {
+      let tag = notification.tag.as_str().to_owned();
+      PAGE_NOTIFICATIONS.with(|page| page.borrow_mut().insert(tag, shown));
     },
     Err(_) => tracing::debug!("could not show a notification"),
+  }
+}
+
+/// The options of `showNotification` / `new Notification`: body, tag, buttons, and the data the
+/// worker's click handler reads (the conversation of a message, the tag of everything).
+fn page_notification_options(notification: &OsNotification) -> js_sys::Object {
+  let set = |object: &js_sys::Object, key: &str, value: &JsValue| {
+    drop(js_sys::Reflect::set(object, &JsValue::from_str(key), value));
+  };
+  let options = js_sys::Object::new();
+  if let Some(body) = &notification.maybe_body {
+    set(&options, "body", &body.into());
+  }
+  set(&options, "tag", &notification.tag.as_str().into());
+  let data = js_sys::Object::new();
+  set(&data, "tag", &notification.tag.as_str().into());
+  if let TagTarget::Conversation(conversation) = notification.tag.target() {
+    set(&data, "conversation_id", &conversation.into());
+  }
+  set(&options, "data", &data);
+  if notification.kind.is_ringing() {
+    set(&options, "requireInteraction", &JsValue::TRUE);
+  }
+  let actions = js_sys::Array::new();
+  for button in &notification.actions {
+    let action = js_sys::Object::new();
+    set(&action, "action", &button.action.key().into());
+    set(&action, "title", &button.label.as_str().into());
+    actions.push(&action);
+  }
+  if actions.length() > 0 {
+    set(&options, "actions", &actions);
+  }
+  options
+}
+
+/// `registration.showNotification`; false when the page has no active service worker.
+async fn show_through_worker(title: &str, options: &js_sys::Object) -> bool {
+  let Some(window) = web_sys::window() else {
+    return false;
+  };
+  let container = window.navigator().service_worker();
+  if container.controller().is_none() {
+    return false;
+  }
+  let Ok(ready) = container.ready() else {
+    return false;
+  };
+  let Ok(registration) = JsFuture::from(ready).await else {
+    return false;
+  };
+  let registration: web_sys::ServiceWorkerRegistration = registration.unchecked_into();
+  let options: &web_sys::NotificationOptions = options.unchecked_ref();
+  match registration.show_notification_with_options(title, options) {
+    Ok(promise) => JsFuture::from(promise).await.is_ok(),
+    Err(_) => false,
   }
 }
 

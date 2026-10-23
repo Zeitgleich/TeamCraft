@@ -188,7 +188,10 @@ pub async fn list_meetings(
   for meeting in &stored {
     meetings.push(respond(state, service, meeting, Vec::new()).await?);
   }
-  Ok(ListMeetingsResponse { meetings })
+  Ok(ListMeetingsResponse {
+    meetings,
+    maybe_server_now: Some(unix_millis(OffsetDateTime::now_utc())),
+  })
 }
 
 /// Changes a meeting (organizer only): the calendar event is replaced and the invited users hear

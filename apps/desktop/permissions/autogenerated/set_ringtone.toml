@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-ringtone"
+description = "Enables the set_ringtone command without any pre-configured scope."
+commands.allow = ["set_ringtone"]
+
+[[permission]]
+identifier = "deny-set-ringtone"
+description = "Denies the set_ringtone command without any pre-configured scope."
+commands.deny = ["set_ringtone"]

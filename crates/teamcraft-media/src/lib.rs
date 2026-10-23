@@ -18,6 +18,7 @@ pub mod fragment;
 pub mod jitter;
 #[cfg(feature = "native")]
 pub mod openh264_library;
+pub mod ringtone;
 pub mod rtp;
 pub mod uplink_layers;
 pub mod video;

@@ -14,9 +14,9 @@ use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
   ExternalInvitee, FormError, MeetingsHub, Repeat, ScheduleForm, hosts_lobby, is_over, my_rsvp,
 };
-use crate::model::UserId;
+use crate::model::{ConversationId, UserId};
 use crate::reactive::use_interval;
-use crate::state::{Overlay, use_app_state};
+use crate::state::{AppState, Overlay, use_app_state};
 
 /// How often the list and the lobbies are reloaded while the screen is open.
 const REFRESH_MS: u64 = 10_000;
@@ -39,7 +39,7 @@ pub fn MeetingsView() -> impl IntoView {
     spawn_local(async move {
       let client = hub.client();
       if let Some(meeting) = hub.run(me, now_ms(), client.start_instant(None)).await {
-        join_meeting(&meeting);
+        join_meeting(state, i18n, meeting.conversation_id);
       }
     });
   };
@@ -187,7 +187,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
           .then(|| {
             let meeting = meeting_for_join.clone();
             view! {
-              <button class="btn btn-primary" on:click=move |_| join_meeting(&meeting)>
+              <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, meeting.conversation_id)>
                 {move || i18n.t("meetings-join")}
               </button>
             }
@@ -304,17 +304,16 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
   }
 }
 
-/// Members join through the meeting's chat conversation and its call.
-fn join_meeting(meeting: &MeetingResponse) {
-  let state = use_app_state();
-  state.open_conversation(meeting.conversation_id);
+/// Members join through the meeting's chat conversation and its call (also from a reminder).
+pub fn join_meeting(state: AppState, i18n: I18n, conversation: ConversationId) {
+  state.open_conversation(conversation);
   if !state.read(|backend| backend.has_calls()) {
-    state.show_toast(use_i18n().t("calls-unavailable"));
+    state.show_toast(i18n.t("calls-unavailable"));
     return;
   }
   state.call.prepare(
     CallRequest {
-      conversation: meeting.conversation_id,
+      conversation,
       kind: CallKind::Group,
     },
     true,

@@ -175,6 +175,10 @@ pub struct ListMeetingsQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListMeetingsResponse {
   pub meetings: Vec<MeetingResponse>,
+  /// The server's clock when it answered: clients schedule meeting reminders on it, not on their
+  /// own clock, which may be off (robustness.md, "Time"). Absent from older servers.
+  #[serde(rename = "server_now", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_server_now: Option<UnixMillis>,
 }
 
 /// `POST /api/v1/meetings/{id}/guest-links`: a personal join link for somebody without an account.

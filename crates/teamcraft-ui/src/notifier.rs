@@ -167,6 +167,9 @@ pub struct Notification {
   pub conversation: ConversationId,
   pub title: NotificationTitle,
   pub body: Option<String>,
+  /// A reply from the notification goes to the conversation: offered for messages in conversations
+  /// the user may post in, not for thread replies (the answer belongs in the thread).
+  pub can_reply: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -372,6 +375,7 @@ pub fn notifications_for(
         conversation: item.conversation.id,
         title,
         body: prefs.show_preview.then(|| preview(&item.message.body)),
+        can_reply: item.kind == CandidateKind::Message && item.conversation.can_post,
       })
     })
     .map(|notification| limited_to(notification, &mode))
@@ -412,6 +416,7 @@ mod tests {
         channel: "planning".into(),
       },
       body: Some("lunch at noon?".into()),
+      can_reply: true,
     }
   }
 

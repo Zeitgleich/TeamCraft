@@ -533,6 +533,25 @@ impl AppState {
     }
   }
 
+  /// Answers a ringing call on this device: opens its conversation and joins. The in-app card and
+  /// the system notification's Accept share this.
+  pub fn accept_call(&self, incoming: crate::calls::IncomingCall, with_video: bool) {
+    let kind = match self
+      .read(|backend| backend.conversation(incoming.conversation))
+      .map(|conversation| conversation.kind)
+    {
+      Some(crate::model::ConversationKind::Direct) | None => crate::calls::CallKind::Direct,
+      Some(_) => crate::calls::CallKind::Group,
+    };
+    self.call.incoming.set(None);
+    self.call.is_camera_on.set(with_video);
+    self.open_conversation(incoming.conversation);
+    self.call.join(crate::calls::CallRequest {
+      conversation: incoming.conversation,
+      kind,
+    });
+  }
+
   pub fn open_conversation(&self, id: ConversationId) {
     self.awaits_first_conversation.set(false);
     let Some(conversation) = self.read(|backend| backend.conversation(id)) else {

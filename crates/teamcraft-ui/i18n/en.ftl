@@ -813,9 +813,31 @@ message-seen-by = Seen by { $names }
 
 notif-preview = Show message text in desktop notifications
 notif-preview-hint = Off: notifications only say who wrote and where.
+notif-calls-meetings = Calls and meetings
+notif-ringtone = Play a ringtone for incoming calls
+notif-ringtone-hint = On the default speakers. Quiet during do not disturb, for muted conversations and while you are in a call.
+notif-meeting-reminder = Remind me before a meeting
+notif-meeting-reminder-off = Off
+notif-meeting-reminder-1 = 1 minute before
+notif-meeting-reminder-5 = 5 minutes before
+notif-meeting-reminder-10 = 10 minutes before
+notif-meeting-reminder-15 = 15 minutes before
+notif-meeting-start = Notify me when a meeting starts
+notif-meeting-hint = For meetings you are invited to and have not declined. Each device reminds once.
 notify-in-channel = { $name } in { $channel }
 notify-new-message = New message
 notify-thread-reply = { $name } replied in a thread
+notify-reply-placeholder = Reply…
+notify-action-send = Send
+notify-action-mark-read = Mark as read
+notify-missed-call = Missed call
+notify-missed-call-from = { $name } called you
+notify-action-call-back = Call back
+notify-meeting-soon = { $minutes ->
+    [one] Meeting in 1 minute
+   *[other] Meeting in { $minutes } minutes
+}
+notify-meeting-now = Meeting starting now
 
 # ---- Meetings ----
 sidebar-meetings = Meetings
