@@ -37,7 +37,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Rust, the system packages, trunk and the Tauri CLI are in the CI image (containers/ci.Containerfile).
     container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:26f5d789fcfe6519b5c77b21e69e4f687dec2c5a8630b683f253dfa201cedbf4
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
