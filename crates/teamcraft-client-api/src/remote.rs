@@ -266,6 +266,10 @@ pub enum CoreStatus {
   NeedsEnrollment {
     /// The account already has keys on the server, so the recovery passphrase unlocks them.
     has_existing_identity: bool,
+    /// This device was set up before, but its local data is gone (the browser deleted it): the user
+    /// is told why setup is asked for again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    was_data_lost: bool,
   },
   Ready {
     /// Fingerprint of the account's identity key.
@@ -289,6 +293,24 @@ pub enum CoreConnection {
   },
   /// The server refused the access token: the user has to sign in again.
   SignInRequired,
+}
+
+/// Whether the local data keeps up with the core. The browser can refuse writes (quota) or hand
+/// the database to a newer version of the app (e2ee.md §9.4); the user is told, since a reload would
+/// lose what was not saved.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreHealth {
+  #[default]
+  Saved,
+  /// The browser has no storage space left for the app.
+  QuotaExceeded,
+  /// A newer version of the app took the database over: reload.
+  Closed,
+  /// Writes fail for another reason.
+  Failed,
+  #[serde(other)]
+  Unknown,
 }
 
 /// First-run setup of this device (e2ee.md §3, §6).
@@ -1120,10 +1142,32 @@ mod tests {
   fn status_is_tagged_by_state() {
     let status = CoreStatus::NeedsEnrollment {
       has_existing_identity: true,
+      was_data_lost: false,
     };
     assert_eq!(
       serde_json::to_string(&status).expect("serialize"),
       r#"{"state":"needs_enrollment","has_existing_identity":true}"#
     );
+    let lost: CoreStatus = serde_json::from_str(
+      r#"{"state":"needs_enrollment","has_existing_identity":true,"was_data_lost":true}"#,
+    )
+    .expect("parse");
+    assert_eq!(
+      lost,
+      CoreStatus::NeedsEnrollment {
+        has_existing_identity: true,
+        was_data_lost: true
+      }
+    );
+  }
+
+  #[test]
+  fn store_health_is_forward_compatible() {
+    assert_eq!(
+      serde_json::to_string(&StoreHealth::QuotaExceeded).expect("serialize"),
+      r#""quota_exceeded""#
+    );
+    let newer: StoreHealth = serde_json::from_str(r#""read_only""#).expect("parse");
+    assert_eq!(newer, StoreHealth::Unknown);
   }
 }

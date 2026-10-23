@@ -501,6 +501,7 @@ impl Core {
         };
         Ok(CoreStatus::NeedsEnrollment {
           has_existing_identity,
+          was_data_lost: false,
         })
       },
     }
@@ -520,6 +521,7 @@ impl Core {
     {
       self.status = CoreStatus::NeedsEnrollment {
         has_existing_identity,
+        was_data_lost: false,
       };
     }
   }

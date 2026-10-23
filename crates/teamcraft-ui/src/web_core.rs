@@ -27,7 +27,7 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
-  LinkStatus, MessageWindow, SecuritySnapshot, last_activity_of,
+  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, last_activity_of,
 };
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
@@ -35,8 +35,7 @@ use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::records;
-use teamcraft_core::store::IndexedDbStore;
-use teamcraft_core::store::browser_database_key;
+use teamcraft_core::store::{IndexedDbStore, StoreError, browser_database_key};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::workspace::RosterRole;
@@ -53,6 +52,7 @@ use teamcraft_proto::{
 use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
+use crate::settings::{load_string, store_string};
 use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// Wrong short codes allowed before a link approval is dropped.
@@ -66,6 +66,9 @@ const TOKEN_REFRESH: Duration = Duration::from_secs(20);
 /// How long the access token stored for the service worker is used. Tokens are renewed every
 /// [`TOKEN_REFRESH`]; the stored one only has to outlive a push that arrives while no page is open.
 const PUSH_SESSION_LIFETIME_MS: i64 = 4 * 60 * 1000;
+/// Local storage key (per user) remembering that this browser had the account set up, so a store
+/// the browser deleted is told apart from a first visit (e2ee.md §9.4).
+const STORE_READY_PREFIX: &str = "teamcraft.store_ready.";
 
 type Api = HttpServerApi<WebTokens>;
 type Store = Rc<IndexedDbStore>;
@@ -180,6 +183,7 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       send(Request::NetworkChanged)?;
       Ok(Value::Null)
     },
+    "core_store_health" => to_value(ask(Request::StoreHealth).await?),
     "core_enroll" => {
       let request: EnrollRequest = field(&args, "request")?;
       ask(|reply| Request::Enroll(request, reply))
@@ -442,6 +446,7 @@ fn notify_local() {
 
 enum Request {
   Status(oneshot::Sender<CoreStatus>),
+  StoreHealth(oneshot::Sender<StoreHealth>),
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
   Messages {
@@ -513,6 +518,8 @@ struct Core {
   /// The last attention report, repeated after a reconnect (the server forgets it with the
   /// connection).
   maybe_attention: Option<bool>,
+  /// Whether IndexedDB keeps up with the cache, as of the last flush.
+  store_health: StoreHealth,
 }
 
 /// A link in progress on this (new) device.
@@ -550,6 +557,7 @@ impl Core {
       approval: None,
       approval_misses: 0,
       maybe_attention: None,
+      store_health: StoreHealth::Saved,
     }
   }
 
@@ -564,6 +572,29 @@ impl Core {
         Wake::Linked(result) => self.on_linked(result).await,
         Wake::Tick => self.on_tick().await,
       }
+      self.check_store().await;
+    }
+  }
+
+  /// Waits until IndexedDB has everything written so far, and tells the UI when that stops (or
+  /// starts again) working: what is not saved is lost on reload (e2ee.md §9.4).
+  async fn check_store(&mut self) {
+    let Some(store) = self.store.as_ref() else {
+      return;
+    };
+    let health = match store.flush().await {
+      Ok(()) => StoreHealth::Saved,
+      Err(StoreError::QuotaExceeded) => StoreHealth::QuotaExceeded,
+      Err(StoreError::Closed) => StoreHealth::Closed,
+      Err(error) => {
+        tracing::warn!(%error, "local data not saved");
+        StoreHealth::Failed
+      },
+    };
+    if health != self.store_health {
+      tracing::info!(?health, "local storage state changed");
+      self.store_health = health;
+      notify_changed();
     }
   }
 
@@ -608,6 +639,7 @@ impl Core {
   async fn try_open(&mut self) -> Result<CoreStatus, String> {
     let name = format!("teamcraft-{}", self.user);
     announce_database(&name);
+    request_persistent_storage();
     let key = browser_database_key(&name)
       .await
       .map_err(|error| error.to_string())?;
@@ -628,6 +660,7 @@ impl Core {
       Some(client) => Ok(self.adopt(client)),
       None => Ok(CoreStatus::NeedsEnrollment {
         has_existing_identity: self.has_existing_identity().await?,
+        was_data_lost: load_string(&self.store_ready_key()).is_some(),
       }),
     }
   }
@@ -645,11 +678,12 @@ impl Core {
   async fn refresh_enrollment_hint(&mut self) {
     if self.client.is_none()
       && self.link.is_none()
-      && let CoreStatus::NeedsEnrollment { .. } = self.status
+      && let CoreStatus::NeedsEnrollment { was_data_lost, .. } = self.status
       && let Ok(has_existing_identity) = self.has_existing_identity().await
     {
       self.status = CoreStatus::NeedsEnrollment {
         has_existing_identity,
+        was_data_lost,
       };
     }
   }
@@ -664,7 +698,12 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.client = Some(client);
+    store_string(&self.store_ready_key(), "1");
     status
+  }
+
+  fn store_ready_key(&self) -> String {
+    format!("{STORE_READY_PREFIX}{}", self.user)
   }
 
   fn api(&self) -> Api {
@@ -677,6 +716,7 @@ impl Core {
         self.refresh_enrollment_hint().await;
         drop(reply.send(self.status.clone()));
       },
+      Request::StoreHealth(reply) => drop(reply.send(self.store_health.clone())),
       Request::Enroll(request, reply) => {
         let result = self.enroll(request).await;
         if result.is_ok() {
@@ -1195,6 +1235,22 @@ async fn link_task(
   };
   notify_changed();
   link.receive_secrets().await.map_err(describe)
+}
+
+/// Asks the browser not to delete the store under storage pressure (e2ee.md §9.4). Browsers decide
+/// on their own (Chrome grants it to installed or often used sites, Firefox asks the user); without
+/// it the store can be evicted, and the enrollment screen says so.
+fn request_persistent_storage() {
+  let Some(window) = web_sys::window() else { return };
+  let Ok(promise) = window.navigator().storage().persist() else {
+    return;
+  };
+  wasm_bindgen_futures::spawn_local(async move {
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+      Ok(granted) => tracing::info!(is_persistent = granted.is_truthy(), "persistent storage"),
+      Err(error) => tracing::debug!(?error, "persistent storage not available"),
+    }
+  });
 }
 
 /// Tells the service worker which database holds this account's keys, so it can open pushes. It

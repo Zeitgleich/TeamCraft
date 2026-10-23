@@ -908,6 +908,15 @@ saved on this device. Without that, memory and disk would diverge silently and t
 roll the MLS state back. A newer version of the app that upgrades the database (`versionchange`) gets
 it: the old page closes its connection, stops writing and asks for a reload.
 
+**Eviction (web).** The core asks for persistent storage (`navigator.storage.persist()`) when it
+opens the store; browsers grant it by their own rules (installed or often used sites, or the user
+agrees). Without it the browser may delete the origin's data under storage pressure, and Safari
+deletes it after weeks without a visit. Deleted data can't be restored from the device, but the keys
+can: the enrollment screen comes up again, and when this browser had the account set up before (a
+marker in local storage), it says that the browser deleted the data and offers the recovery
+passphrase or linking from another device. If the browser deleted the marker as well, it looks like a
+first visit, which offers the same two ways.
+
 ## 10. Search
 
 Users expect search to be fast and complete on every device right after login – a common weak point

@@ -45,6 +45,7 @@ use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::settings_tabs::apply_call_prefs;
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
+use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
@@ -159,6 +160,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <div class="app-banners" node_ref=banners>
         <BundleBanner />
         <OfflineBanner />
+        <StorageBanner />
         <AnnouncementBanner />
         <UpdateNotice />
       </div>
