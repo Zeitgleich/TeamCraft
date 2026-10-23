@@ -353,7 +353,7 @@ pub fn NewMessageDialog() -> impl IntoView {
   };
 
   view! {
-    <Modal labelled_by="new-message-title" class="modal-small">
+    <Modal labelled_by="new-message-title" class="modal-small new-message">
       <form on:submit=move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         submit();

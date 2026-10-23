@@ -5213,6 +5213,27 @@ select.input {
   height: 30px;
 }
 
+/* Inputs on the sidebar's chrome colours, like the jump button. */
+.dm-filter .input,
+.dm-options .input {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--chrome-strong);
+}
+
+.dm-filter .input::placeholder {
+  color: var(--sb-muted);
+}
+
+.dm-options option {
+  background: var(--sb-bg);
+  color: var(--chrome-strong);
+}
+
+.dm-options .muted-text {
+  color: var(--sb-muted);
+}
+
 .dm-options {
   display: grid;
   gap: 4px;
@@ -5279,4 +5300,8 @@ select.input {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.new-message .input {
+  width: 100%;
 }
