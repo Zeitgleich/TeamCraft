@@ -378,6 +378,9 @@ struct Core {
   link_failure: LinkStatus,
   approval: Option<LinkApproval<<Api as ServerApi>::Rendezvous>>,
   approval_misses: u8,
+  /// The last attention report, repeated after a reconnect (the server forgets it with the
+  /// connection).
+  maybe_attention: Option<bool>,
 }
 
 /// A link in progress on this (new) device.
@@ -407,6 +410,7 @@ impl Core {
       link_failure: LinkStatus::Idle,
       approval: None,
       approval_misses: 0,
+      maybe_attention: None,
     }
   }
 
@@ -814,6 +818,10 @@ impl Core {
         self.send_activity(*is_idle).await;
         return Ok(());
       },
+      ChatAction::SetAttention { is_attentive } => {
+        self.send_attention(*is_attentive).await;
+        return Ok(());
+      },
       ChatAction::AcceptKeyChange { user } => {
         let mut pinned = records::pinned_identities(client.store()).map_err(describe)?;
         if let Some(entry) = pinned.get_mut(user)
@@ -853,13 +861,17 @@ impl Core {
         conversation,
         is_favorite,
       } => backend.set_favorite(conversation, is_favorite),
-      ChatAction::SetPresence { presence } => backend.set_presence(presence),
+      ChatAction::SetPresence {
+        presence,
+        maybe_until,
+      } => backend.set_presence_until(presence, maybe_until),
       ChatAction::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
       ChatAction::CreateChannel { .. }
       | ChatAction::OpenDm { .. }
       | ChatAction::AddMember { .. }
       | ChatAction::ChangePassphrase { .. }
       | ChatAction::SetActivity { .. }
+      | ChatAction::SetAttention { .. }
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::AdminJoinChannel { .. } => {},
@@ -937,6 +949,7 @@ impl Core {
         self.gateway = Some(connection);
         self.backoff = RECONNECT_MIN;
         self.last_heartbeat_ms = now_ms();
+        self.repeat_attention().await;
         notify_changed();
       },
       Err(error) => {
@@ -1014,6 +1027,28 @@ impl Core {
     {
       tracing::warn!(%error, "could not report the device activity");
       self.schedule_reconnect();
+    }
+  }
+
+  /// Tells the server whether the user is looking at this session (notifications.md, "Attention").
+  /// Remembered so a new connection repeats it.
+  async fn send_attention(&mut self, is_attentive: bool) {
+    self.maybe_attention = Some(is_attentive);
+    let Some(connection) = self.gateway.as_mut() else {
+      return;
+    };
+    if let Err(error) = connection
+      .send(&GatewayClientMessage::Attention { is_attentive })
+      .await
+    {
+      tracing::warn!(%error, "could not report the attention");
+      self.schedule_reconnect();
+    }
+  }
+
+  async fn repeat_attention(&mut self) {
+    if let Some(is_attentive) = self.maybe_attention {
+      self.send_attention(is_attentive).await;
     }
   }
 }

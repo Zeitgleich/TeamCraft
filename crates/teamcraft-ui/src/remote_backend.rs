@@ -370,6 +370,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::SetActivity { is_idle });
   }
 
+  fn set_attention(&self, is_attentive: bool) {
+    self.act(ChatAction::SetAttention { is_attentive });
+  }
+
   fn search_backend(&self) -> Option<&dyn SearchBackend> {
     Some(self)
   }
@@ -902,8 +906,19 @@ impl ChatBackend for RemoteChat {
   }
 
   fn set_presence(&self, presence: PresenceStatus) {
+    self.set_presence_until(presence, None);
+  }
+
+  fn set_presence_until(
+    &self,
+    presence: PresenceStatus,
+    maybe_until: Option<teamcraft_client_api::model::TimestampMs>,
+  ) {
     self.mirror.borrow_mut().snapshot.me.presence = presence;
-    self.act(ChatAction::SetPresence { presence });
+    self.act(ChatAction::SetPresence {
+      presence,
+      maybe_until,
+    });
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {

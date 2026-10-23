@@ -21,8 +21,8 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind,
-  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, User,
-  UserId,
+  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary,
+  TimestampMs, User, UserId,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -62,6 +62,8 @@ pub enum CoreCommand {
   },
   SetPresence {
     presence: PresenceStatus,
+    /// When a quick do-not-disturb ends.
+    maybe_until: Option<TimestampMs>,
   },
   SetCustomStatus {
     maybe_status: Option<CustomStatus>,
@@ -761,7 +763,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn set_presence(&self, presence: PresenceStatus) {
-    self.command(CoreCommand::SetPresence { presence });
+    self.set_presence_until(presence, None);
+  }
+
+  fn set_presence_until(&self, presence: PresenceStatus, maybe_until: Option<TimestampMs>) {
+    self.command(CoreCommand::SetPresence {
+      presence,
+      maybe_until,
+    });
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {

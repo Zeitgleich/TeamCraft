@@ -70,6 +70,11 @@ pub trait ChatBackend {
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool);
 
   fn set_presence(&self, presence: PresenceStatus);
+  /// Sets the presence with an end time, for a quick do-not-disturb ("for 1 hour"). Backends without
+  /// timed presence keep it until changed.
+  fn set_presence_until(&self, presence: PresenceStatus, _maybe_until: Option<TimestampMs>) {
+    self.set_presence(presence);
+  }
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>);
 
   /// Whether the user follows the thread (followed threads feed the threads inbox).
@@ -115,6 +120,9 @@ pub trait ChatBackend {
   fn accept_key_change(&self, _user: UserId) {}
   /// The device became idle or active; the server derives "away" from it.
   fn set_activity(&self, _is_idle: bool) {}
+  /// Whether the user is looking at this desktop or web session right now (notifications.md,
+  /// "Attention"); the server holds phone pushes back while a session is attentive.
+  fn set_attention(&self, _is_attentive: bool) {}
   /// Whether the person is in a call right now (server roster), shown next to their name.
   fn is_in_call(&self, _user: UserId) -> bool {
     false
