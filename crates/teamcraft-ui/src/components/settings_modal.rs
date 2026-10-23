@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::auth::tauri;
 use crate::calls::IncomingCall;
 use crate::components::bundle_banner::AboutSection;
 use crate::components::icons::{Icon, IconName};
@@ -140,6 +141,7 @@ fn AdvancedTab() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   view! {
+    {tauri::is_available().then(|| view! { <DesktopSection /> })}
     <p class="muted-text">{move || i18n.t("settings-advanced-stub")}</p>
     <div class="field">
       <label for="setting-backend">{move || i18n.t("settings-backend")}</label>
@@ -266,5 +268,69 @@ pub fn ShortcutsModal() -> impl IntoView {
         </tbody>
       </table>
     </Modal>
+  }
+}
+
+/// Desktop app only: start at login, close to the tray, start minimized. The shell stores them.
+#[component]
+fn DesktopSection() -> impl IntoView {
+  let i18n = use_i18n();
+  let prefs = RwSignal::new(None::<tauri::ShellPrefs>);
+  let autostart = RwSignal::new(None::<bool>);
+  let error = RwSignal::new(None::<String>);
+  leptos::task::spawn_local(async move {
+    prefs.set(tauri::shell_prefs().await);
+    autostart.set(tauri::autostart().await);
+  });
+  let save = move |change: fn(&mut tauri::ShellPrefs, bool), value: bool| {
+    let Some(mut next) = prefs.get_untracked() else {
+      return;
+    };
+    change(&mut next, value);
+    prefs.set(Some(next));
+    leptos::task::spawn_local(async move {
+      error.set(tauri::set_shell_prefs(next).await.err());
+    });
+  };
+  view! {
+    <fieldset class="settings-group">
+      <legend>{move || i18n.t("settings-desktop")}</legend>
+      {move || autostart.get().map(|is_enabled| view! {
+        <label class="check-row">
+          <input
+            type="checkbox"
+            prop:checked=is_enabled
+            on:change=move |ev| {
+              let on = event_target_checked(&ev);
+              autostart.set(Some(on));
+              leptos::task::spawn_local(async move { error.set(tauri::set_autostart(on).await.err()) });
+            }
+          />
+          <span>{move || i18n.t("settings-autostart")}</span>
+        </label>
+      })}
+      {move || prefs.get().map(|current| view! {
+        <label class="check-row">
+          <input
+            type="checkbox"
+            prop:checked=current.is_close_to_tray
+            on:change=move |ev| save(|prefs, on| prefs.is_close_to_tray = on, event_target_checked(&ev))
+          />
+          <span>
+            {move || i18n.t("settings-close-to-tray")}
+            <small class="muted-text">{move || i18n.t("settings-close-to-tray-hint")}</small>
+          </span>
+        </label>
+        <label class="check-row">
+          <input
+            type="checkbox"
+            prop:checked=current.is_start_minimized
+            on:change=move |ev| save(|prefs, on| prefs.is_start_minimized = on, event_target_checked(&ev))
+          />
+          <span>{move || i18n.t("settings-start-minimized")}</span>
+        </label>
+      })}
+      {move || error.get().map(|message| view! { <p class="composer-error" role="alert">{message}</p> })}
+    </fieldset>
   }
 }

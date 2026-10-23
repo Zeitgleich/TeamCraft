@@ -13,6 +13,8 @@ mod core;
 #[cfg(target_os = "linux")]
 mod freedesktop;
 mod notifications;
+mod shell_prefs;
+mod tray;
 #[cfg(windows)]
 mod windows_shell;
 
@@ -21,13 +23,15 @@ use std::time::Duration;
 
 use anyhow::Context;
 use tauri::path::BaseDirectory;
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{AuthService, DesktopConfig, KeyringStore};
 use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, MediaFiles};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
+use crate::shell_prefs::ShellPrefsState;
 
 /// How often the core's token cache is refreshed from the login session.
 const TOKEN_REFRESH: Duration = Duration::from_secs(2);
@@ -51,7 +55,12 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
-    .plugin(tauri_plugin_window_state::Builder::default().build())
+    // Size, position and maximized state; visibility is ours (start minimized to the tray).
+    .plugin(
+      tauri_plugin_window_state::Builder::default()
+        .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+        .build(),
+    )
     .manage(service)
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
@@ -69,10 +78,30 @@ fn main() -> anyhow::Result<()> {
         maybe_segmentation_model: app.path().resolve(BUNDLED_MODEL, BaseDirectory::Resource).ok(),
       };
       app.manage(Arc::new(CallHost::new(notify, files)));
+      app.manage(ShellPrefsState::load(app.handle()));
+      // Without a tray (some Linux desktops) the window must never be hidden.
+      if let Err(error) = tray::install(app) {
+        tracing::warn!(%error, "no tray icon");
+      }
       create_main_window(app)?;
+      #[cfg(target_os = "linux")]
+      notifications::watch_clicks(app.handle());
       #[cfg(windows)]
       windows_shell::forward_deep_links(app.handle());
       Ok(())
+    })
+    .on_window_event(|window, event| {
+      // Closing keeps the app running in the tray (notifications keep coming) when the user wants it.
+      if let WindowEvent::CloseRequested { api, .. } = event
+        && window.label() == tray::MAIN_WINDOW
+        && window.state::<ShellPrefsState>().get().is_close_to_tray
+        && tray::has_tray(window.app_handle())
+      {
+        api.prevent_close();
+        if let Err(error) = window.hide() {
+          tracing::debug!(%error, "could not hide the window");
+        }
+      }
     })
     .invoke_handler(tauri::generate_handler![
       auth::commands::auth_restore,
@@ -108,16 +137,32 @@ fn main() -> anyhow::Result<()> {
       attention::os_attention,
       autostart::autostart_get,
       autostart::autostart_set,
+      shell_prefs::shell_prefs_get,
+      shell_prefs::shell_prefs_set,
+      tray::tray_update,
     ])
-    .run(tauri::generate_context!())
-    .context("failed to run the TeamCraft desktop shell")
+    .build(tauri::generate_context!())
+    .context("failed to build the TeamCraft desktop shell")?
+    .run(|app, event| {
+      // macOS: clicking the dock icon brings back a window that was closed to the tray.
+      #[cfg(target_os = "macos")]
+      if let tauri::RunEvent::Reopen { .. } = event {
+        tray::show_main_window(app);
+      }
+      #[cfg(not(target_os = "macos"))]
+      let _ = (app, event);
+    });
+  Ok(())
 }
 
 /// The window is created here, not in `tauri.conf.json`, so the data source can be chosen per launch
 /// with `TEAMCRAFT_BACKEND=server|mock` (the UI reads it from `localStorage`).
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
-  let mut window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+  let prefs = app.state::<ShellPrefsState>().get();
+  let is_hidden = prefs.is_start_minimized && tray::has_tray(app.handle());
+  let mut window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
     .title("TeamCraft")
+    .visible(!is_hidden)
     .inner_size(1360.0, 860.0)
     .min_inner_size(720.0, 520.0);
   if let Ok(mode) = std::env::var("TEAMCRAFT_BACKEND")

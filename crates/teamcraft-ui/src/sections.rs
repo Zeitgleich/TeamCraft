@@ -1,6 +1,6 @@
 //! Pure grouping of conversations into sidebar sections.
 
-use crate::model::{Conversation, ConversationId, SidebarCategory, SpaceId};
+use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId};
 use crate::prefs::SidebarSort;
 
 /// Sidebar sections in display order.
@@ -134,6 +134,25 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   sections
 }
 
+/// The number on the app's badge (dock, taskbar, tray): mentions everywhere plus unread direct and
+/// group messages, as people know it from other chat apps. Muted conversations count only mentions.
+pub fn badge_count(conversations: &[Conversation]) -> u32 {
+  conversations
+    .iter()
+    .map(|conversation| {
+      let is_direct = matches!(
+        conversation.kind,
+        ConversationKind::Direct | ConversationKind::Group
+      );
+      if is_direct && !conversation.is_muted {
+        conversation.unread_count.max(conversation.mention_count)
+      } else {
+        conversation.mention_count
+      }
+    })
+    .sum()
+}
+
 /// Puts the favorites of `list` into the user's own order (IDs in `order` first, in that order; the
 /// rest after them as they were). Other conversations keep their places.
 pub fn apply_favorite_order(list: &mut [Conversation], order: &[ConversationId]) {
@@ -216,6 +235,20 @@ pub fn build_grouped(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn badge_counts_mentions_and_unread_direct_messages() {
+    let mut channel = conversation(1, SidebarCategory::Channels, 7, false);
+    channel.mention_count = 2;
+    let mut direct = conversation(2, SidebarCategory::DirectMessages, 3, false);
+    direct.kind = ConversationKind::Direct;
+    let mut muted_direct = conversation(3, SidebarCategory::DirectMessages, 4, false);
+    muted_direct.kind = ConversationKind::Group;
+    muted_direct.is_muted = true;
+    muted_direct.mention_count = 1;
+    assert_eq!(badge_count(&[channel, direct, muted_direct]), 2 + 3 + 1);
+    assert_eq!(badge_count(&[]), 0);
+  }
 
   mod favorite_order {
     use super::*;

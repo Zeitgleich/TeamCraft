@@ -25,6 +25,48 @@ pub struct ShownNotifications {
   by_tag: Mutex<HashMap<String, u32>>,
 }
 
+/// Emitted to the webview with the tag (conversation ID) of a clicked notification.
+#[cfg(target_os = "linux")]
+pub const NOTIFICATION_OPENED_EVENT: &str = "notification-opened";
+
+#[cfg(target_os = "linux")]
+impl ShownNotifications {
+  /// The tag of a notification the service showed under `id`.
+  fn tag_of(&self, id: u32) -> Option<String> {
+    self
+      .by_tag
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .iter()
+      .find(|(_, shown)| **shown == id)
+      .map(|(tag, _)| tag.clone())
+  }
+}
+
+/// Linux: a click on one of our notifications brings the window up and opens its conversation.
+/// (macOS and Windows: the notification plugin reports no clicks; the OS just focuses the app.)
+#[cfg(target_os = "linux")]
+pub fn watch_clicks(app: &AppHandle) {
+  use tauri::{Emitter, Manager};
+
+  let app = app.clone();
+  tauri::async_runtime::spawn(async move {
+    let buses = app.state::<crate::attention::OsProbe>().buses();
+    let handle = app.clone();
+    buses
+      .watch_clicks(move |id| {
+        let Some(tag) = handle.state::<ShownNotifications>().tag_of(id) else {
+          return;
+        };
+        crate::tray::show_main_window(&handle);
+        if let Err(error) = handle.emit(NOTIFICATION_OPENED_EVENT, tag) {
+          tracing::debug!(%error, "could not tell the webview about the click");
+        }
+      })
+      .await;
+  });
+}
+
 #[tauri::command]
 pub async fn notify_user(
   app: AppHandle,

@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -199,6 +199,53 @@ pub async fn os_attention() -> Option<OsAttention> {
     .ok()
 }
 
+/// Desktop only: unread count and menu texts for the tray icon and the dock/taskbar badge.
+pub async fn tray_update(unread: u32, tooltip: &str, show_label: &str, quit_label: &str) {
+  if !is_available() {
+    return;
+  }
+  let args = serde_json::json!({
+    "update": { "unread": unread, "tooltip": tooltip, "show_label": show_label, "quit_label": quit_label }
+  });
+  if let Err(error) = call::<()>("tray_update", &args).await {
+    tracing::debug!(%error, "could not update the tray");
+  }
+}
+
+/// The desktop shell's own preferences (closing to the tray, starting minimized).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellPrefs {
+  pub is_close_to_tray: bool,
+  pub is_start_minimized: bool,
+}
+
+/// `None` outside the desktop app.
+pub async fn shell_prefs() -> Option<ShellPrefs> {
+  if !is_available() {
+    return None;
+  }
+  call::<ShellPrefs>("shell_prefs_get", &serde_json::json!({}))
+    .await
+    .inspect_err(|error| tracing::debug!(%error, "no shell preferences"))
+    .ok()
+}
+
+pub async fn set_shell_prefs(prefs: ShellPrefs) -> Result<(), String> {
+  call::<()>("shell_prefs_set", &serde_json::json!({ "prefs": prefs })).await
+}
+
+/// "Start at login": `None` outside the desktop app or where the shell doesn't support it.
+pub async fn autostart() -> Option<bool> {
+  if !is_available() {
+    return None;
+  }
+  call::<bool>("autostart_get", &serde_json::json!({})).await.ok()
+}
+
+pub async fn set_autostart(is_enabled: bool) -> Result<(), String> {
+  call::<()>("autostart_set", &serde_json::json!({ "enabled": is_enabled })).await
+}
+
 /// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.
 pub async fn call<T: for<'de> Deserialize<'de>>(
   command: &str,
@@ -260,6 +307,27 @@ pub fn listen(event: &str, callback: impl FnMut() + 'static) {
     drop((event, callback));
     return;
   }
+  let mut callback = callback;
+  subscribe(event, move |_| callback());
+}
+
+/// Calls `callback` with the text payload of every `event` the desktop shell emits (desktop only).
+pub fn listen_text(event: &str, mut callback: impl FnMut(String) + 'static) {
+  if !is_available() {
+    return;
+  }
+  subscribe(event, move |message| {
+    // Tauri delivers `{ event, id, payload }`.
+    if let Some(text) = js_sys::Reflect::get(&message, &JsValue::from_str("payload"))
+      .ok()
+      .and_then(|payload| payload.as_string())
+    {
+      callback(text);
+    }
+  });
+}
+
+fn subscribe(event: &str, callback: impl FnMut(JsValue) + 'static) {
   let Some(internals) = internals() else {
     tracing::warn!(event, "the desktop event bridge is not available");
     return;
@@ -271,9 +339,7 @@ pub fn listen(event: &str, callback: impl FnMut() + 'static) {
     tracing::warn!(event, "the desktop event bridge is not available");
     return;
   };
-  let mut callback = callback;
-  let handler =
-    wasm_bindgen::closure::Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| callback());
+  let handler = wasm_bindgen::closure::Closure::<dyn FnMut(JsValue)>::new(callback);
   // Same call the Tauri JS API makes: register the callback, then subscribe to the event with it.
   let Ok(callback_id) = transform.call1(&internals, handler.as_ref()) else {
     tracing::warn!(event, "could not register the event callback");
