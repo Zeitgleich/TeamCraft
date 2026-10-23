@@ -27,6 +27,13 @@ issuer = "http://127.0.0.1:8080/realms/teamcraft-dev"
 # Public client the apps log in with; tokens must be issued to it (`azp` or `aud`). Its client
 # roles are read from `resource_access.<client_id>.roles`.
 client_id = "teamcraft"
+# Scopes the apps ask for at sign-in (announced in GET /api/v1/server-info; `openid` is always added).
+app_scopes = ["openid", "profile", "email"]
+# Optional: the redirect URIs registered for `client_id`. When set, an app whose redirect URI is not
+# listed tells its user the server is not set up for it. The released apps use
+# `http://127.0.0.1/callback` (desktop, any port) and `de.zeitgleich.teamcraft:/oauth/callback`
+# (Android, iOS); see docs/operations.md.
+# app_redirect_uris = ["http://127.0.0.1/callback", "de.zeitgleich.teamcraft:/oauth/callback"]
 # Confidential client with a service account (reserved for the admin API and back-channel logout).
 server_client = "teamcraft-server"
 # Optional: use this key set URL instead of the one in the discovery document, e.g. when the

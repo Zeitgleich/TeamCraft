@@ -44,6 +44,7 @@ use teamcraft_server::services::{
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
+  SignInSettings,
 };
 use teamcraft_server::storage::BlobStore;
 use tracing::{info, warn};
@@ -192,6 +193,12 @@ async fn run() -> anyhow::Result<()> {
       presence: config.presence.clone(),
       shares: config.shares.clone(),
       maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
+      sign_in: SignInSettings::new(
+        config.oidc.issuer.clone(),
+        config.oidc.client_id.clone(),
+        &config.oidc.app_scopes,
+        config.oidc.maybe_app_redirect_uris.clone(),
+      ),
       branding: config.branding.clone(),
       brands: config.brands.clone(),
       push: push_settings(&config),

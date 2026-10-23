@@ -10,6 +10,7 @@ mod bridge;
 mod calls;
 mod engine;
 mod error;
+mod server_entry;
 mod types;
 mod video;
 
@@ -21,6 +22,10 @@ pub use calls::{
   RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
+pub use server_entry::{
+  CheckedServer, ServerAddress, ServerEntryError, StoredServer, check_server_info, normalize_server_address,
+  stored_server,
+};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};

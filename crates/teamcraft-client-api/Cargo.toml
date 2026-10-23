@@ -17,6 +17,7 @@ serde.workspace = true
 thiserror.workspace = true
 # Release versions for desktop updates (1.2.3-rc.1 < 1.2.3); already in the tree through Tauri.
 semver = "1"
-
-[dev-dependencies]
+# The server entry: what users type becomes a server origin; the server's answer is JSON.
+url.workspace = true
 serde_json.workspace = true
+

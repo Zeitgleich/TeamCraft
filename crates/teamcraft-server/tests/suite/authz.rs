@@ -25,6 +25,8 @@ const PUBLIC: &[(&str, &str)] = &[
   ("get", "/api/v1/openapi.json"),
   // Clients check the server version and the oldest supported client before they can sign in.
   ("get", "/api/v1/client-compatibility"),
+  // The apps learn how to sign in to a server from it, before anyone is signed in.
+  ("get", "/api/v1/server-info"),
   // Public presentation of the host (name, colors, logo): the login screen needs it before sign-in.
   ("get", "/api/v1/brand"),
   ("get", "/api/v1/brand/theme.css"),

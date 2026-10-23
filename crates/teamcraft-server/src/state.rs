@@ -28,6 +28,9 @@ use crate::services::permission_scheme::SchemeStore;
 use crate::services::session::PolicyHolder;
 use crate::storage::BlobStore;
 
+/// The scope every sign-in asks for.
+const OPENID_SCOPE: &str = "openid";
+
 /// Shared, cheaply cloneable application state of all handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -91,6 +94,8 @@ pub struct Settings {
   pub push: PushSettings,
   /// Token claim the organization is read from, if any.
   pub maybe_organization_claim: Option<String>,
+  /// How the apps sign in, announced in `GET /api/v1/server-info`.
+  pub sign_in: SignInSettings,
   pub branding: BrandingConfig,
   pub brands: Vec<BrandConfig>,
   /// Largest attachment a client may announce (`[storage].max_attachment_bytes`).
@@ -138,6 +143,39 @@ pub struct OidcSyncSettings {
   pub roles: RoleNames,
   pub page_size: u32,
   pub sync_groups: bool,
+}
+
+/// The public part of `[oidc]` the apps need to sign in (docs/operations.md "Server address in
+/// the apps"). Nothing secret: it is served to anyone.
+#[derive(Debug, Clone, Default)]
+pub struct SignInSettings {
+  pub issuer: String,
+  pub client_id: String,
+  /// Always starts with `openid`.
+  pub scopes: Vec<String>,
+  pub maybe_redirect_uris: Option<Vec<String>>,
+}
+
+impl SignInSettings {
+  pub fn new(
+    issuer: String,
+    client_id: String,
+    configured_scopes: &[String],
+    maybe_redirect_uris: Option<Vec<String>>,
+  ) -> Self {
+    let mut scopes = vec![OPENID_SCOPE.to_owned()];
+    for scope in configured_scopes {
+      if !scopes.contains(scope) {
+        scopes.push(scope.clone());
+      }
+    }
+    Self {
+      issuer,
+      client_id,
+      scopes,
+      maybe_redirect_uris,
+    }
+  }
 }
 
 /// What the message routing needs from the push configuration.
