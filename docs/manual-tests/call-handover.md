@@ -71,7 +71,22 @@ leave, A's privacy code is the same afterwards for both (the group re-keyed; com
 - [ ] Android with a VPN app (always-on VPN): switching networks inside the VPN – note the gap.
 - [ ] Dual-SIM or eSIM switch of the data SIM mid-call (if available).
 
-## 7. After the run
+## 7. Status sounds
+
+- [ ] While A is "reconnecting" (airplane mode, §3), A hears a soft "du-dun" about every two
+  seconds, quieter than speech, until the call is back; then one short rising tone. B hears one
+  quieter "du-dun" when A drops (setting "Mine and others'").
+- [ ] Beyond the grace period (§3, 45 s): A hears three falling tones, then the call ends.
+- [ ] B never hears A's tones through the call (they are local; also with A's microphone on and
+  the phone on loudspeaker – the echo canceller removes them).
+- [ ] The tones follow the call's route: earpiece, then loudspeaker, then a Bluetooth headset and a
+  car (Android Auto / CarPlay) – switch mid-"reconnecting".
+- [ ] A muted and deafened: the tones still play.
+- [ ] Setting "Only mine": B no longer hears A dropping; A still hears its own. "Off": no tones at
+  all. Desktop: the setting changes a running call at once; mobile: from the next call.
+- [ ] Desktop and browser sound the same as the phones.
+
+## 8. After the run
 
 - [ ] SFU log has no panics or `signaling queue full` lines; no participant stayed listed after its
   call ended.

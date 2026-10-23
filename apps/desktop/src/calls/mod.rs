@@ -20,8 +20,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallRequest, IncomingCall, MediaDevice,
-  MediaDevices, Participant, PushToTalk, RemoteVideoTrack, RunningCall, ScreenShareSound,
+  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallRequest, CallStatusSounds,
+  IncomingCall, MediaDevice, MediaDevices, Participant, PushToTalk, RemoteVideoTrack, RunningCall,
+  ScreenShareSound,
 };
 use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_core::CallKeySigner;
@@ -31,6 +32,7 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
+use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
@@ -98,6 +100,8 @@ struct CallState {
   video_tracks: BTreeMap<MediaStreamId, RemoteVideoTrack>,
   push_to_talk: PushToTalk,
   maybe_end_reason: Option<CallEndReason>,
+  /// Which call status sounds play (the user's setting).
+  status_sounds: CallStatusSounds,
 }
 
 /// Control of the task that owns the [`NativeCall`].
@@ -119,6 +123,7 @@ enum Control {
   /// Sends a screen share's sound from this capture; the answer says whether it started.
   StartScreenAudio(Box<dyn SystemAudioCapture>, oneshot::Sender<Result<(), String>>),
   StopScreenAudio,
+  StatusSounds(CallStatusSounds),
   Subscribe {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
@@ -239,6 +244,7 @@ impl CallHost {
     let own_device = preparation.device_id;
     let mut config = native_config(preparation, microphone, speakers)?;
     config.maybe_ticket_source = Some(tickets);
+    config.status_cues = status_cues(lock(&self.state).status_sounds);
     let call = NativeCall::join(config)
       .await
       .map_err(|error| error.to_string())?;
@@ -365,6 +371,12 @@ impl CallHost {
 
   pub async fn set_deafened(&self, is_deafened: bool) {
     self.control(Control::Deafen(is_deafened)).await;
+  }
+
+  /// Remembers the status sounds setting for later calls and applies it to the running one.
+  pub async fn set_status_sounds(&self, sounds: CallStatusSounds) {
+    lock(&self.state).status_sounds = sounds;
+    self.control(Control::StatusSounds(sounds)).await;
   }
 
   /// Remembers the microphone for the next call and switches the running one; `None` follows
@@ -756,6 +768,7 @@ async fn run_media(
         },
         Some(Control::StopScreenAudio) => call.stop_screen_audio(),
         Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
+        Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::Leave) | None => break,
       },
       maybe_event = call.next_event() => match maybe_event {
@@ -958,6 +971,14 @@ fn update_video_tracks(
       });
     },
     _ => {},
+  }
+}
+
+fn status_cues(sounds: CallStatusSounds) -> StatusCues {
+  match sounds {
+    CallStatusSounds::All | CallStatusSounds::Unknown => StatusCues::All,
+    CallStatusSounds::OwnOnly => StatusCues::OwnOnly,
+    CallStatusSounds::Off => StatusCues::Off,
   }
 }
 

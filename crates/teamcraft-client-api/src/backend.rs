@@ -24,8 +24,8 @@ use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, HuddleInfo, IncomingCall,
-  MediaDevices, Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, CallStatusSounds,
+  HuddleInfo, IncomingCall, MediaDevices, Participant,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
@@ -366,6 +366,8 @@ pub trait CallBackend {
   fn decline_call(&self, _conversation: ConversationId) {}
   fn set_call_muted(&self, _is_muted: bool) {}
   fn set_call_deafened(&self, _is_deafened: bool) {}
+  /// Which call status sounds play on this device, for this and later calls.
+  fn set_call_status_sounds(&self, _sounds: CallStatusSounds) {}
   /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.
   fn select_microphone(&self, _maybe_device: Option<String>) {}
   fn select_speakers(&self, _maybe_device: Option<String>) {}

@@ -320,6 +320,7 @@ class CallController(
       return false
     }
     maybeSession = session
+    session.setStatusSounds(CallSoundPrefs.prefs(context).statusSounds)
     maybeNetworkWatcher = NetworkWatcher(context) { maybeSession?.networkChanged() }.also { it.start() }
     session.setVideoListener(Video())
     if (options.isMuted) session.setMuted(true)

@@ -778,6 +778,11 @@ calls-noise = Noise suppression
 calls-echo = Echo cancellation
 calls-ptt = Push to talk
 calls-ptt-hint = Hold a key to talk instead of an open microphone.
+calls-status-sounds = Call status sounds
+calls-status-sounds-hint = A soft tone repeats while your connection is lost, and short tones tell when it is back or the call ended. Only you hear them.
+calls-status-sounds-all = Mine and others' connections
+calls-status-sounds-own-only = Only my connection
+calls-status-sounds-off = Off
 calls-background = Default background
 calls-background-hint = Applied on your device before your video is sent.
 

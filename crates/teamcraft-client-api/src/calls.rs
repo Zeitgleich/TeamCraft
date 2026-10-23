@@ -388,6 +388,38 @@ pub enum ScreenShareSound {
   Unknown,
 }
 
+/// Which call status sounds play: the soft repeating tone while this device reconnects, the cues
+/// when it is back or the call is lost, and the quieter one when someone else drops.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallStatusSounds {
+  #[default]
+  All,
+  /// Only the sounds about this device's own connection.
+  OwnOnly,
+  Off,
+  #[serde(other)]
+  Unknown,
+}
+
+impl CallStatusSounds {
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::All | Self::Unknown => "all",
+      Self::OwnOnly => "own_only",
+      Self::Off => "off",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Self {
+    match slug {
+      "own_only" => Self::OwnOnly,
+      "off" => Self::Off,
+      _ => Self::All,
+    }
+  }
+}
+
 /// Why the last call ended other than by leaving.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]

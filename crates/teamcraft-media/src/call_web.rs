@@ -54,6 +54,7 @@ use crate::audio_frame::{
 use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource, sine_tone};
 use crate::audio_level::{DEFAULT_VOICE_THRESHOLD_DBOV, measure_audio_level};
 use crate::call_auth::CallKeyAuthenticator;
+use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
@@ -114,6 +115,8 @@ pub struct WebCallConfig {
   /// Fresh join tickets for rejoining; without one the first ticket is used again, which works
   /// only while it is valid (development pages).
   pub maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
+  /// Which call status sounds (reconnecting, reconnected, connection lost) play.
+  pub status_cues: StatusCues,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` in the page.
@@ -213,6 +216,7 @@ enum Command {
     canvas: HtmlCanvasElement,
   },
   UnwatchVideo(MediaStreamId),
+  SetStatusCues(StatusCues),
   Leave,
 }
 
@@ -397,6 +401,12 @@ impl WebCall {
     let _ = self.command(Command::UnwatchVideo(stream_id));
   }
 
+  /// Which call status sounds play from now on.
+  pub fn set_status_cues(&self, status_cues: StatusCues) {
+    // The call already ended if this fails.
+    let _ = self.command(Command::SetStatusCues(status_cues));
+  }
+
   fn command(&self, command: Command) -> Result<(), WebCallError> {
     self
       .inputs
@@ -476,6 +486,8 @@ async fn run_call(
     maybe_certificate_hash: config.maybe_certificate_hash,
     resilience: config.resilience,
     maybe_ticket_source: config.maybe_ticket_source.clone(),
+    cues: CuePlayer::new(config.status_cues),
+    is_ending_lost: false,
     inputs: &inputs,
     events: &events,
     jitter: config.jitter,
@@ -543,6 +555,10 @@ struct CallState<'a> {
   maybe_certificate_hash: Option<[u8; 32]>,
   resilience: ResilienceConfig,
   maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
+  /// Status sounds, mixed into the playback (never sent).
+  cues: CuePlayer,
+  /// Rejoining failed; the call ends once the "connection lost" sound has played.
+  is_ending_lost: bool,
   inputs: &'a mpsc::UnboundedSender<Input>,
   events: &'a mpsc::UnboundedSender<CallEngineEvent>,
   jitter: JitterBufferConfig,
@@ -583,7 +599,10 @@ impl CallState<'_> {
         engine.rejoin(ticket.token.clone(), Instant::now());
         self.ticket = ticket;
       },
-      Input::ReconnectExpired => return Err(WebCallError::ConnectionLost),
+      Input::ReconnectExpired => {
+        self.is_ending_lost = true;
+        self.cues.play(CallCue::ConnectionLost);
+      },
       Input::Datagram(bytes) => engine.handle_datagram(&bytes, Instant::now()),
       Input::Captured(samples) => {
         if !self.is_muted {
@@ -604,7 +623,12 @@ impl CallState<'_> {
         }
       },
       Input::CodecFailed(message) => warn!(%message, "audio codec error"),
-      Input::FrameTick => self.on_frame_tick(audio)?,
+      Input::FrameTick => {
+        self.on_frame_tick(audio)?;
+        if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
+          return Err(WebCallError::ConnectionLost);
+        }
+      },
       Input::TimerTick => engine.on_timer(Instant::now()),
       Input::VideoTick(kind) => {
         if let Some(sender) = self.senders.iter_mut().find(|sender| sender.kind == kind) {
@@ -696,6 +720,7 @@ impl CallState<'_> {
             },
             _ => {},
           }
+          self.cues.on_event(&event);
           // The app may have stopped listening; the call goes on.
           let _ = self.events.unbounded_send(event);
         },
@@ -792,13 +817,16 @@ impl CallState<'_> {
       }
     }
     if self.is_deafened {
-      return Ok(());
-    }
-    for sample in &mut mix {
-      *sample = sample.clamp(-1.0, 1.0);
-    }
-    if mix.iter().any(|sample| sample.abs() > AUDIBLE_AMPLITUDE) {
+      mix.fill(0.0);
+    } else if mix.iter().any(|sample| sample.abs() > AUDIBLE_AMPLITUDE) {
       self.stats.audible_frames_played += 1;
+    }
+    // Status sounds play even when deafened: they are status, not call audio.
+    for (sample, cue) in mix
+      .iter_mut()
+      .zip(self.cues.next_samples(FRAME_SAMPLES_PER_CHANNEL))
+    {
+      *sample = (*sample + cue).clamp(-1.0, 1.0);
     }
     audio.play(&mix)
   }
@@ -845,6 +873,7 @@ impl CallState<'_> {
         self.views.insert(stream_id, view);
         engine.subscribe_video(stream_id, Some(0));
       },
+      Command::SetStatusCues(status_cues) => self.cues.set_setting(status_cues),
       Command::UnwatchVideo(stream_id) => {
         if self.views.remove(&stream_id).is_some() {
           engine.subscribe_video(stream_id, None);

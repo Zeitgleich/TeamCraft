@@ -79,6 +79,11 @@
   <string name="typing_two">%1$s und %2$s schreiben …</string>
   <string name="typing_several">Mehrere Personen schreiben …</string>
   <string name="share_typing">Anderen zeigen, wenn ich schreibe</string>
+  <string name="call_status_sounds">Statustöne im Anruf</string>
+  <string name="call_status_sounds_hint">Ein leiser Ton wiederholt sich, solange deine Verbindung unterbrochen ist; kurze Töne zeigen, wenn sie wieder steht oder der Anruf beendet ist. Nur du hörst sie, über die Audioausgabe des Anrufs.</string>
+  <string name="call_status_sounds_all">Meine und die anderer</string>
+  <string name="call_status_sounds_own_only">Nur meine</string>
+  <string name="call_status_sounds_off">Aus</string>
   <string name="no_conversation_selected">Wähle eine Unterhaltung.</string>
   <string name="image_save">Speichern</string>
   <string name="image_saved">In Bilder/TeamCraft gespeichert</string>

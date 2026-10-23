@@ -778,6 +778,11 @@ calls-noise = Rauschunterdrückung
 calls-echo = Echounterdrückung
 calls-ptt = Push-to-Talk
 calls-ptt-hint = Taste halten zum Sprechen statt offenem Mikrofon.
+calls-status-sounds = Statustöne im Anruf
+calls-status-sounds-hint = Ein leiser Ton wiederholt sich, solange deine Verbindung unterbrochen ist; kurze Töne zeigen, wenn sie wieder steht oder der Anruf beendet ist. Nur du hörst sie.
+calls-status-sounds-all = Meine und die Verbindungen anderer
+calls-status-sounds-own-only = Nur meine Verbindung
+calls-status-sounds-off = Aus
 calls-background = Standardhintergrund
 calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gesendet wird.
 

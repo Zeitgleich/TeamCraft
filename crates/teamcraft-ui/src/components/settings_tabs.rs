@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use crate::clock::{format_relative, now_ms};
 use crate::components::background_picker::{BackgroundPicker, effect_from_slug, effect_slug};
 use crate::components::icons::{Icon, IconName};
+use teamcraft_client_api::calls::CallStatusSounds;
 use teamcraft_client_api::privacy::LastSeenVisibility;
 
 use crate::clock::local_time_zone;
@@ -1166,6 +1167,19 @@ pub fn CallsTab() -> impl IntoView {
         hint="calls-ptt-hint"
         value=Signal::derive(move || calls.get().push_to_talk)
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.calls.push_to_talk = value))
+      />
+      <SelectField
+        id="calls-status-sounds"
+        label="calls-status-sounds"
+        hint="calls-status-sounds-hint"
+        options=[CallStatusSounds::All, CallStatusSounds::OwnOnly, CallStatusSounds::Off]
+          .into_iter()
+          .map(|sounds| (sounds.slug().to_owned(), format!("calls-status-sounds-{}", sounds.slug().replace('_', "-"))))
+          .collect()
+        value=Signal::derive(move || calls.get().status_sounds.slug().to_owned())
+        on_change=Callback::new(move |slug: String| {
+          prefs.update(|all| all.calls.status_sounds = CallStatusSounds::from_slug(&slug))
+        })
       />
     </fieldset>
     <fieldset class="settings-group">

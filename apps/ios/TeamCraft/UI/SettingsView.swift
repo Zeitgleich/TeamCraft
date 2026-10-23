@@ -134,6 +134,7 @@ private struct NotificationsSettingsPage: View {
 private struct ChatsSettingsPage: View {
   @Environment(AppModel.self) private var model
   @AppStorage("share_typing") private var isSharingTyping = true
+  @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
 
@@ -141,6 +142,15 @@ private struct ChatsSettingsPage: View {
     Form {
       Section {
         Toggle("share_typing", isOn: $isSharingTyping)
+      }
+      Section {
+        Picker("call_status_sounds", selection: $statusSounds) {
+          Text("call_status_sounds_all").tag(CallStatusSoundsSetting.all.rawValue)
+          Text("call_status_sounds_own_only").tag(CallStatusSoundsSetting.ownOnly.rawValue)
+          Text("call_status_sounds_off").tag(CallStatusSoundsSetting.off.rawValue)
+        }
+      } footer: {
+        Text("call_status_sounds_hint")
       }
       Section {
         Picker("prefetch_title", selection: $prefetch) {

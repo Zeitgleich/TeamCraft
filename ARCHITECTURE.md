@@ -387,6 +387,19 @@ back in.
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
 browser driver rejoins as above.
 
+**Status sounds.** The user hears the state, like in phone calls: while this device rejoins, a soft
+falling two-tone "du-dun" repeats every two seconds; a short rising two-tone says it is back, three
+falling tones that the call was lost; a quieter "du-dun" plays once when someone else drops into
+"reconnecting". The tones are synthesized in `teamcraft-media` (`call_cues`, no sound file, so the
+same sound everywhere and nothing to license), peak at about −18 dBFS, below speech, and are mixed
+into the call's own playback after the jitter buffers: they are never sent, they play even when
+muted or deafened, and they take the call's audio route on every platform (Android: the call's
+output stream and Telecom route – earpiece, speaker, Bluetooth; iOS: the active `playAndRecord`
+session; desktop: the selected speakers; browsers: the call's AudioWorklet). The echo canceller gets
+them as far-end signal, so the microphone doesn't pick them up. A device setting chooses all
+sounds, only the own connection's, or none (desktop and web: Settings → Calls; Android and iOS:
+Settings → Chats).
+
 **Media on bad links.**
 
 - Audio first: own video layers follow the uplink estimate (screen shares before cameras), keeping

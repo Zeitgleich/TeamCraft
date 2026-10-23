@@ -207,6 +207,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       do {
         let session = try await AppModel.shared.joinCall(conversationId: call.conversationId)
         maybeSession = session
+        session.setStatusSounds(sounds: CallStatusSoundsSetting.current.sounds)
         let watcher = NetworkWatcher()
         watcher.start { session.networkChanged() }
         maybeNetworkWatcher = watcher

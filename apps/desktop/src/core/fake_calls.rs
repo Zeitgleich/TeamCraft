@@ -121,6 +121,7 @@ impl FakeCalls {
       | CallAction::SetPushToTalk { .. }
       | CallAction::SetTalking { .. }
       | CallAction::SelectCamera { .. }
+      | CallAction::SetStatusSounds { .. }
       | CallAction::Unknown => {},
     }
   }

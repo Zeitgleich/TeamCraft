@@ -18,6 +18,7 @@ use futures::{StreamExt, future};
 use js_sys::{Function, Object, Reflect};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
+use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, CallStats};
 use teamcraft_media::call_resilience::ResilienceConfig;
 use teamcraft_media::call_web::{WebCall, WebCallConfig};
@@ -93,6 +94,7 @@ pub async fn join_dev_call(
     resilience: ResilienceConfig::default(),
     // The test page has one dev token; it is reused for a rejoin while still valid.
     maybe_ticket_source: None,
+    status_cues: StatusCues::default(),
   };
   let call = WebCall::join(config)
     .await

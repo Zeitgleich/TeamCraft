@@ -45,6 +45,8 @@ pub mod audio_processing;
 #[cfg(feature = "dave")]
 pub mod call_auth;
 #[cfg(feature = "dave")]
+pub mod call_cues;
+#[cfg(feature = "dave")]
 pub mod call_engine;
 #[cfg(feature = "native")]
 pub mod call_native;

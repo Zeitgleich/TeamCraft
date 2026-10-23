@@ -204,6 +204,7 @@ pub async fn call_action(
       calls.set_push_to_talk(is_enabled, shortcut, is_global).await;
     },
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,
+    CallAction::SetStatusSounds { sounds } => calls.set_status_sounds(sounds).await,
     CallAction::Unknown => return Err(CommandError::from("unknown call action".to_owned())),
   }
   Ok(())

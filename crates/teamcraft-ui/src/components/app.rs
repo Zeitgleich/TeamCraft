@@ -649,7 +649,13 @@ fn connect_calls(state: AppState) {
       CallEvent::Effect(effect) => backend.set_background_effect(effect),
       CallEvent::StartScreenShare { has_sound } => backend.start_screen_share(has_sound),
       CallEvent::StopScreenShare => backend.stop_screen_share(),
+      CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
     });
+  });
+  // The status sounds setting reaches the shell at start and on every change.
+  Effect::new(move |_| {
+    let sounds = state.settings.prefs.with(|prefs| prefs.calls.status_sounds);
+    call.emit(CallEvent::StatusSounds(sounds));
   });
   // The effect picker writes the signal; the media layer applies it to the camera image.
   Effect::new(move |previous: Option<()>| {

@@ -18,6 +18,7 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
+use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
@@ -157,6 +158,17 @@ pub enum CallEndReason {
   Failed,
 }
 
+/// Which call status sounds play: a soft repeating tone while this device reconnects, short
+/// tones when it is back or the call is lost, and a quieter one when someone else drops. They are
+/// mixed into the call's own playback, so they follow its route (earpiece, speaker, Bluetooth).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CallStatusSounds {
+  All,
+  /// Only the sounds about this device's own connection.
+  OwnOnly,
+  Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct IncomingCallInfo {
   pub conversation_id: String,
@@ -206,6 +218,7 @@ enum Control {
   WatchEncodedVideo(MediaStreamId),
   UnwatchEncodedVideo(MediaStreamId),
   NetworkChanged,
+  SetStatusSounds(CallStatusSounds),
   Leave,
 }
 
@@ -279,6 +292,11 @@ impl CallSession {
   /// otherwise; while rejoining, it retries at once.
   pub fn network_changed(&self) {
     self.send(Control::NetworkChanged);
+  }
+
+  /// Which call status sounds play (the app's setting); call it after joining.
+  pub fn set_status_sounds(&self, sounds: CallStatusSounds) {
+    self.send(Control::SetStatusSounds(sounds));
   }
 
   /// Leaves the call; the listener gets the ended state.
@@ -489,6 +507,7 @@ async fn run_call(
           call.set_muted(audio.is_silent());
         },
         Some(Control::NetworkChanged) => call.network_changed(),
+        Some(Control::SetStatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::SetHeld(is_held)) => {
           audio.is_held = is_held;
           call.set_muted(audio.is_silent());
@@ -571,6 +590,7 @@ async fn apply_control(
     | Control::WatchEncodedVideo(_)
     | Control::UnwatchEncodedVideo(_)
     | Control::NetworkChanged
+    | Control::SetStatusSounds(_)
     | Control::Leave => {},
   }
 }
@@ -878,6 +898,14 @@ fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamC
   config.sink = AudioSink::Speakers(AudioDeviceChoice::Default);
   config.maybe_processing = Some(AudioProcessingConfig::default());
   Ok(config)
+}
+
+fn status_cues(sounds: CallStatusSounds) -> StatusCues {
+  match sounds {
+    CallStatusSounds::All => StatusCues::All,
+    CallStatusSounds::OwnOnly => StatusCues::OwnOnly,
+    CallStatusSounds::Off => StatusCues::Off,
+  }
 }
 
 fn count(len: usize) -> u32 {

@@ -41,6 +41,7 @@ use crate::audio_device::{AudioDeviceError, AudioInput, AudioOutput, PlaybackBuf
 use crate::audio_io::{AudioSink, AudioSource, sine_tone};
 use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer};
 use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
+use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
@@ -99,6 +100,8 @@ pub struct NativeCallConfig {
   /// Fresh join tickets for rejoining after a lost connection. Without one the first ticket is
   /// used again, which works only while it is valid (development tools).
   pub maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
+  /// Which call status sounds (reconnecting, reconnected, connection lost) play.
+  pub status_cues: StatusCues,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` (a new token, possibly another SFU URL).
@@ -155,6 +158,7 @@ enum Command {
   ),
   StopScreenAudio,
   NetworkChanged,
+  SetStatusCues(StatusCues),
   Leave,
 }
 
@@ -226,6 +230,7 @@ impl NativeCallConfig {
       maybe_processing: None,
       resilience: ResilienceConfig::default(),
       maybe_ticket_source: None,
+      status_cues: StatusCues::default(),
     }
   }
 
@@ -361,6 +366,12 @@ impl NativeCall {
     let _ = self.commands.send(Command::NetworkChanged);
   }
 
+  /// Which call status sounds play from now on.
+  pub fn set_status_cues(&self, status_cues: StatusCues) {
+    // A closed channel means the call already ended.
+    let _ = self.commands.send(Command::SetStatusCues(status_cues));
+  }
+
   fn video(&self, command: VideoCommand) {
     // A closed channel means the call already ended.
     let _ = self.commands.send(Command::Video(command));
@@ -435,6 +446,7 @@ async fn run_call(
     mixer,
     stats: CallStats::default(),
     video: VideoState::default(),
+    cues: CuePlayer::new(config.status_cues),
   };
   let mut connection = CallConnection::new(&config, link, start);
 
@@ -482,10 +494,7 @@ async fn run_call(
             sinks.stats.frames_sent += 1;
           }
         }
-        let mix = sinks.mixer.next_frame()?;
-        if mix.iter().any(|sample| sample.abs() > 0.01) {
-          sinks.stats.audible_frames_played += 1;
-        }
+        let mix = sinks.next_playback_frame()?;
         if let Some(buffer) = &devices.maybe_playback {
           buffer.push(&mix);
         }
@@ -565,6 +574,7 @@ async fn run_call(
           },
           Some(Command::StopScreenAudio) => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
           Some(Command::NetworkChanged) => connection.on_network_changed(Instant::now()),
+          Some(Command::SetStatusCues(status_cues)) => sinks.cues.set_setting(status_cues),
           Some(Command::Leave) | None => break Ok(()),
         }
       },
@@ -582,6 +592,9 @@ async fn run_call(
 
   if let Some(mut screen_audio) = maybe_screen_audio {
     screen_audio.capture.stop();
+  }
+  if matches!(result, Err(NativeCallError::ConnectionLost)) {
+    sinks.play_to_end(CallCue::ConnectionLost, &devices).await;
   }
   devices.close();
   connection.close();
@@ -993,9 +1006,47 @@ struct Sinks {
   mixer: PlaybackMixer,
   stats: CallStats,
   video: VideoState,
+  /// Status sounds, mixed into the playback (never sent).
+  cues: CuePlayer,
 }
 
 impl Sinks {
+  /// The next 20 ms for the speakers: the call's mix with the status sounds on top. The sounds
+  /// play even when deafened (they are status, not call audio) and reach the echo canceller as
+  /// far-end signal, so the microphone doesn't send them.
+  fn next_playback_frame(&mut self) -> Result<Vec<f32>, NativeCallError> {
+    let cue = self.cues.next_samples(FRAME_SAMPLES_PER_CHANNEL);
+    let has_cue = cue.iter().any(|sample| *sample != 0.0);
+    if has_cue {
+      self.mixer.push_echo_reference(&cue);
+    }
+    let mut mix = self.mixer.next_frame()?;
+    if mix.iter().any(|sample| sample.abs() > 0.01) {
+      self.stats.audible_frames_played += 1;
+    }
+    if has_cue {
+      for (sample, cue_sample) in mix.iter_mut().zip(cue) {
+        *sample = (*sample + cue_sample).clamp(-1.0, 1.0);
+      }
+    }
+    Ok(mix)
+  }
+
+  /// Plays `cue` out (in real time) before the devices close.
+  async fn play_to_end(&mut self, cue: CallCue, devices: &AudioDevices) {
+    self.cues.play(cue);
+    let mut frame_tick = tokio::time::interval(FRAME_INTERVAL);
+    while self.cues.is_playing(cue) {
+      frame_tick.tick().await;
+      let samples = self.cues.next_samples(FRAME_SAMPLES_PER_CHANNEL);
+      if let Some(buffer) = &devices.maybe_playback {
+        buffer.push(&samples);
+      }
+    }
+    // What is still buffered for the speakers.
+    tokio::time::sleep(FRAME_INTERVAL * 5).await;
+  }
+
   /// Sends what the engine produced. Without a link (rejoining), signaling and media are
   /// dropped: the engine renews what matters when it is back.
   fn flush(
@@ -1071,6 +1122,7 @@ impl Sinks {
             },
             _ => {},
           }
+          self.cues.on_event(&event);
           // The app may have stopped listening; the call goes on.
           let _ = self.events.send(event);
         },
