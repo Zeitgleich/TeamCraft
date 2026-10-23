@@ -734,7 +734,11 @@ impl CallConnection {
     if self.maybe_link.is_some() {
       self.monitor.on_network_changed(now, &self.resilience);
     } else if let Some(schedule) = &mut self.maybe_schedule {
-      // The network is back: don't wait for the back-off.
+      // A network is back: an attempt still waiting on the old one starts over on it, without
+      // waiting for the back-off.
+      if let Some(attempt) = self.maybe_attempt.take() {
+        attempt.abort();
+      }
       schedule.hurry(now);
     }
   }
