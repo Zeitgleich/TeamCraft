@@ -79,15 +79,15 @@ A failed run can be re-run from the Actions UI; the last job uploads into the ex
 
 Rendered by `scripts/render-release-notes.py` from the template `.github/release-notes.md`:
 
-| Part                        | Comes from                                                                      |
-|-----------------------------|---------------------------------------------------------------------------------|
-| Pre-release notice          | tags with a `-` suffix                                                          |
-| Highlights                  | the version's `CHANGELOG.md` section (for a candidate: the base version's)      |
-| Install                     | the template, with the image references of `images.txt`                         |
-| Upgrading, breaking changes | the template; `### Breaking` of the changelog section, else "None."             |
-| Known limitations           | the template: unsigned builds, iOS self-build, mobile push via the push gateway |
-| Verify the downloads        | the template: checksums, attestations, cosign                                   |
-| What's changed              | GitHub's generated notes, grouped by `.github/release.yml`                      |
+| Part                        | Comes from                                                                                                             |
+|-----------------------------|------------------------------------------------------------------------------------------------------------------------|
+| Pre-release notice          | tags with a `-` suffix                                                                                                 |
+| Highlights                  | the version's `CHANGELOG.md` section (for a candidate: the base version's)                                             |
+| Install                     | the template, with the image references of `images.txt`                                                                |
+| Upgrading, breaking changes | the template; `### Breaking` of the changelog section, else "None."                                                    |
+| Known limitations           | the template: unsigned builds, iOS not distributed, push for self-built apps, what is tested in CI only, AppImage size |
+| Verify the downloads        | the template: checksums, attestations, cosign                                                                          |
+| What's changed              | GitHub's generated notes, grouped by `.github/release.yml`                                                             |
 
 Label pull requests so the generated notes group them: `security`, `breaking`, `feature` /
 `enhancement`, `bug` / `fix`, `documentation`, `dependencies`; `skip-changelog` leaves one out.
