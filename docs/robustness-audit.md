@@ -25,21 +25,29 @@ separate session can pick up.
 
 ## Summary
 
-Open v1 blockers, most severe first:
+The larger gaps, most severe first. v1 blockers are worked on in their own sessions; the rest are
+GitHub issues in milestone v1.1 ("#n"). F1 was found after the audit, while building the client
+benchmark. The "v1 blocker" column of the tables below is the assessment at audit time; this table
+is the current plan.
 
-| Brief | Gap                                                                                             | Severity |
-|-------|-------------------------------------------------------------------------------------------------|----------|
-| B1    | Two web tabs or two desktop instances fork the E2EE store                                       | critical |
-| B2    | A lost commit response or any rejected commit leaves a device out of the group for good         | critical |
-| B3    | Key packages expire after ~84 days and are never renewed; one bad device blocks adding its user | critical |
-| B4    | No reconnect on network change; no "online but disconnected" state on any platform              | high     |
-| B5    | Transfers: not resumable, whole file in memory, block the sync loop; downloads unbounded        | high     |
-| B6    | Search rebuilds a full index per query; no full-history search on new devices                   | high     |
-| B7    | Whole store and whole conversations in memory; unpaged full sync; iOS extension memory          | high     |
-| B8    | Enrollment not resumable; linking success is not confirmed                                      | high     |
-| B9    | Web: silent service-worker takeover, push subscription never refreshed, storage errors ignored  | high     |
-| B10   | Gateway memory per event in big channels                                                        | high     |
-| B13   | iOS: no background task around stopping sync (0xdead10cc risk, untested)                        | high     |
+| Brief | Gap                                                                                               | Severity    | Where           |
+|-------|---------------------------------------------------------------------------------------------------|-------------|-----------------|
+| B1    | Two web tabs or two desktop instances fork the E2EE store                                         | critical    | v1, in progress |
+| B2    | A lost commit response or any rejected commit leaves a device out of the group for good           | critical    | v1, in progress |
+| B3    | Key packages expire after ~84 days and are never renewed; one bad device blocks adding its user   | critical    | v1, in progress |
+| B4    | No reconnect on network change; no "online but disconnected" state on any platform                | high        | v1, #150        |
+| B8    | Enrollment not resumable; linking success is not confirmed                                        | high        | v1, done        |
+| B9    | Web: silent service-worker takeover, push subscription never refreshed, storage errors ignored    | high        | v1, in progress |
+| B11   | Push delivery retries short and in memory                                                         | medium/high | v1, done        |
+| B5    | Transfers: not resumable, whole file in memory, block the sync loop; downloads unbounded          | high        | v1.1, #153      |
+| B6    | Search rebuilds a full index per query; no full-history search on new devices                     | high        | v1.1, #154      |
+| B7    | Whole store and whole conversations in memory; unpaged full sync; iOS extension memory            | high        | v1.1, #155      |
+| B10   | Gateway memory per event in big channels; no graceful drain                                       | high        | v1.1, #156      |
+| B13   | Mobile background execution, composer state, pending/failed UI                                    | high        | v1.1, #158      |
+| B12   | Proxies, captive portals, company CAs                                                             | medium/high | v1.1, #157      |
+| B14   | Offline queue for read markers and pins; resilient full sync                                      | medium      | v1.1, #159      |
+| B15   | Local store integrity: transactions, schema versions, recovery                                    | medium      | v1.1, #160      |
+| F1    | A new device of an existing member reads nothing until another device is online; announces a join | high        | v1.1, #161      |
 
 Fixed in this change (one commit each, with a test where the condition can be simulated):
 
@@ -284,7 +292,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
   (reconnect < 5 s) and wake; one implementation used by all shells; "online but disconnected" visible
   on every platform.
 
-### B5 Streaming, resumable transfers off the sync loop – high, v1 blocker (PLAN §6)
+### B5 Streaming, resumable transfers off the sync loop – v1.1 (#153)
 
 - **Scope:** encrypt with the existing streaming `AttachmentEncryptor` into S3 multipart parts with
   presigned part URLs (server: create, sign part, complete, abort; the sweeper aborts stale uploads).
@@ -301,7 +309,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
   resumes from the last part; heartbeats continue during a 60 s transfer (test with a slow fake blob
   server).
 
-### B6 Search that scales, full history on new devices – high, v1 blocker (PLAN §7)
+### B6 Search that scales, full history on new devices – v1.1 (#154)
 
 - **Scope:** publish index segments from the apps (periodic job for closed months) and fetch them on
   desktop too; replace the per-query in-memory index with a persistent incremental one (encrypted at
@@ -312,7 +320,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
 - **Done:** 500k local messages searched in < 300 ms (p95) with bounded memory; a new device finds a
   two-year-old message right after login (end-to-end test).
 
-### B7 Large data in the client store and sync – high, v1 blocker for larger instances
+### B7 Large data in the client store and sync – v1.1 (#155)
 
 - **Scope:** range queries in `LocalStore` (newest N, before/after an ID, min/max ID, attachment by ID)
   so nothing loads a whole conversation; a sealed store that doesn't hold the whole database in memory
@@ -348,7 +356,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
 - **Done:** an update during a session never mixes versions; a rotated subscription keeps push working
   (test with a fake push service); a quota error is shown to the user.
 
-### B10 Gateway memory and server lifecycle – high (memory), medium (rest)
+### B10 Gateway memory and server lifecycle – high (memory), medium (rest) (#156)
 
 - **Scope:** serialize each event once and share it across sessions; bound resume buffers by bytes;
   don't clone under the global lock; give typing and presence no sequence number; a send timeout per
@@ -370,7 +378,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
 - **Done:** `kill -9` during a provider outage still delivers within the TTL after restart; documented
   device test results.
 
-### B12 Hostile networks: proxies, captive portals, company CAs – medium/high for business customers
+### B12 Hostile networks: proxies, captive portals, company CAs – medium/high for business customers (#157)
 
 - **Scope:** enable reqwest's system proxy; HTTP CONNECT for the native WebSocket (gateway, relay,
   SFU signalling); Happy Eyeballs for the WebSocket connect; treat a 200 with a non-JSON body as
@@ -381,7 +389,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
 - **Done:** tests connect the gateway through a local CONNECT proxy, retry an HTML 200, and fall back
   from a black-holed IPv6 address within the connect timeout.
 
-### B13 Mobile background execution and app state – medium/high
+### B13 Mobile background execution and app state – medium/high (#158)
 
 - **Scope:** iOS `beginBackgroundTask` around `stopSyncing` with a bounded wait, don't start the runner
   without the process lock, reload the store after extension writes, persist the composer through the
@@ -393,7 +401,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
 - **Done:** a send started just before backgrounding completes on both platforms; text typed before a
   kill is restored; no 0xdead10cc in a device soak.
 
-### B14 Offline queue for other actions, resilient full sync – medium
+### B14 Offline queue for other actions, resilient full sync – medium (#159)
 
 - **Scope:** a persistent, coalescing queue for read positions, acknowledgements, server pins and
   presence; full sync continues past one failing conversation and refetches presence and call state.
@@ -401,7 +409,7 @@ Fixed in this change (one commit each, with a test where the condition can be si
 - **Done:** a read marker set offline arrives after reconnect and after a restart; one 403 conversation
   doesn't block the others.
 
-### B15 Local store integrity – medium
+### B15 Local store integrity – medium (#160)
 
 - **Scope:** batched/transactional writes in `LocalStore` (enqueue, MLS state plus cursor, key bag);
   schema versioning with a downgrade guard and fixture databases per released version; desktop recovery
