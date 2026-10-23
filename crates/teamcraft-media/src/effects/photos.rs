@@ -166,6 +166,13 @@ mod tests {
     assert_eq!((image.width(), image.height()), (PRESET_WIDTH, PRESET_HEIGHT));
     let thumbnail = PhotoBackground::EmptyRoom.decode(160, 160).unwrap();
     assert_eq!((thumbnail.width(), thumbnail.height()), (160, 90));
-    assert!(image.rgba().chunks_exact(4).all(|pixel| pixel[3] == 255));
+    assert!(
+      image
+        .rgba()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| pixel[3] == 255)
+    );
   }
 }

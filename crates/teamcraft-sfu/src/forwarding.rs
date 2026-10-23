@@ -964,7 +964,7 @@ mod tests {
       let mut layers_seen: Vec<u8> = Vec::new();
       while now < end {
         // 30 fps; a keyframe every second so layer switches can happen.
-        let is_keyframe = frame_number % 30 == 0;
+        let is_keyframe = frame_number.is_multiple_of(30);
         for info in three_layers() {
           let frame_bytes = (info.max_bitrate_bps / 8 / 30) as usize;
           for (fragment, payload) in
