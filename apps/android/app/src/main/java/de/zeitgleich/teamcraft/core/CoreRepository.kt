@@ -14,6 +14,7 @@ import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
 import uniffi.teamcraft_ffi.AppConfig
+import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.EventListener
 import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TokenProvider
@@ -24,12 +25,22 @@ import uniffi.teamcraft_ffi.TokenProvider
  */
 class CoreRepository(private val context: Context, private val auth: AuthRepository) {
   private val lock = Mutex()
-  private var maybeCore: TeamCraft? = null
+
+  @Volatile private var maybeCore: TeamCraft? = null
   private var maybeAccount: String? = null
   private val changes = MutableStateFlow(0L)
+  private val connection = MutableStateFlow<ConnectionState?>(null)
 
   /** Increments whenever the local store changed; screens re-read on every value. */
   val changeCount: StateFlow<Long> = changes
+
+  /** Where the core's gateway connection stands (`null`: no core open); the banner follows it. */
+  val connectionState: StateFlow<ConnectionState?> = connection
+
+  /** The network changed: the open core checks its connection now. Opens no core. */
+  fun networkChanged() {
+    maybeCore?.networkChanged()
+  }
 
   /** The core of the signed-in account, opened on first use. */
   suspend fun core(): TeamCraft = lock.withLock {
@@ -46,11 +57,15 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
           pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
         ),
         Tokens(auth),
-        Changes { changes.update { it + 1 } },
+        Changes {
+          changes.update { it + 1 }
+          connection.value = maybeCore?.connectionState()
+        },
       )
     }
     maybeCore = core
     maybeAccount = account
+    connection.value = core.connectionState()
     core
   }
 
@@ -59,6 +74,7 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
     maybeCore?.close()
     maybeCore = null
     maybeAccount = null
+    connection.value = null
   }
 
   private fun databaseKey(account: String): ByteArray =

@@ -296,7 +296,7 @@ private fun ChatScaffold(
     snackbarHost = { SnackbarHost(snackbars) },
   ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
-      OfflineBanner()
+      OfflineBanner(onSignInAgain = { viewModel.signOut() })
       content()
     }
   }

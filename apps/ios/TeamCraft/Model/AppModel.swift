@@ -79,6 +79,8 @@ final class AppModel {
   /// The conversation on screen; its notifications are not shown as banners.
   var visibleConversationId: String?
   private(set) var pushStatus: PushStatus = .unknown
+  /// Where the core's gateway connection stands (`nil`: no core open); the banner follows it.
+  private(set) var connection: ConnectionState?
 
   let calls = CallManager()
   /// The server's brand for the sign-in screen.
@@ -107,6 +109,8 @@ final class AppModel {
   func bootstrap() async {
     guard case .starting = phase else { return }
     storeChanges.observe { [weak self] in self?.storeDidChange() }
+    // Starts following the network, so changes reach the core from now on.
+    _ = NetworkMonitor.shared
     // Copies of picked files older than a week were uploaded long ago.
     container.pruneUploads(olderThan: 7 * 24 * 3600)
     await refreshAccountState()
@@ -147,6 +151,7 @@ final class AppModel {
         try? factory.keys.delete(for: account)
       }
       maybeCore = nil
+      connection = nil
       vault.clear()
       NotificationAuthenticator().removeKey()
       container.wipeDownloads()
@@ -531,6 +536,7 @@ final class AppModel {
   /// conversations that are read now go.
   private func storeDidChange() {
     changeCount += 1
+    connection = maybeCore?.connectionState()
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
       // Coalesces a burst of changes (a sync delivers many) into one pass.
@@ -656,7 +662,13 @@ final class AppModel {
         Task { @MainActor in self?.storeDidChange() }
       })
     maybeCore = opened
+    connection = opened.connectionState()
     return opened
+  }
+
+  /// The network changed: the open core checks its connection now. Opens no core.
+  func networkChanged() {
+    maybeCore?.networkChanged()
   }
 
   private func answer(_ query: ChatQuery) async -> ChatAnswer? {

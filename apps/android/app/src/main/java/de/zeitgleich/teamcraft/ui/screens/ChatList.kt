@@ -178,7 +178,7 @@ fun ChatListScreen(
     },
   ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
-      OfflineBanner()
+      OfflineBanner(onSignInAgain = { viewModel.signOut() })
       NotificationPermissionCard()
       LazyRow(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
