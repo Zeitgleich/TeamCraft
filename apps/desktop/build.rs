@@ -29,7 +29,12 @@ const COMMANDS: &[&str] = &[
   "call_snapshot",
   "call_media_devices",
   "call_action",
+  "call_watch_video",
+  "call_background_preview",
+  "call_unwatch_video",
   "notify_user",
+  "withdraw_notifications",
+  "os_attention",
   "autostart_get",
   "autostart_set",
 ];

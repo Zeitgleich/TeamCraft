@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-background-preview"
+description = "Enables the call_background_preview command without any pre-configured scope."
+commands.allow = ["call_background_preview"]
+
+[[permission]]
+identifier = "deny-call-background-preview"
+description = "Denies the call_background_preview command without any pre-configured scope."
+commands.deny = ["call_background_preview"]

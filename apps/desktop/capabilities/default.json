@@ -33,7 +33,12 @@
     "allow-call-snapshot",
     "allow-call-media-devices",
     "allow-call-action",
+    "allow-call-watch-video",
+    "allow-call-background-preview",
+    "allow-call-unwatch-video",
     "allow-notify-user",
+    "allow-withdraw-notifications",
+    "allow-os-attention",
     "allow-autostart-get",
     "allow-autostart-set"
   ]
