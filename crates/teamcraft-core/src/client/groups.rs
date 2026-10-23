@@ -685,14 +685,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub(crate) async fn join_from_welcome(&mut self, welcome: &MlsMessageResponse) -> Result<(), CoreError> {
     let conversation = welcome.conversation_id;
-    self.sync.maybe_welcome_cursor = Some(
-      self
-        .sync
-        .maybe_welcome_cursor
-        .map_or(welcome.id, |cursor| cursor.max(welcome.id)),
-    );
     if self.has_group(conversation)? {
-      return self.persist_sync();
+      return self.welcome_handled(welcome);
     }
     let members = self.api.list_members(conversation).await?;
     let directory: PinnedDirectory = self
@@ -716,6 +710,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.persist_keys()?;
         self.groups.insert(conversation, group);
         self.persist_group(conversation)?;
+        self.welcome_handled(welcome)?;
         self.remember_member_keys(conversation, &directory)?;
         // Everything up to the welcome belongs to epochs before we joined.
         self.advance_cursor(conversation, welcome)?;
@@ -731,9 +726,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "rejected welcome");
-        self.persist_sync()
+        self.welcome_handled(welcome)
       },
     }
+  }
+
+  /// Moves the welcome cursor past `welcome` once it has been joined or definitely rejected. Only
+  /// then: a welcome skipped after a network error would be lost, and with it the conversation.
+  fn welcome_handled(&mut self, welcome: &MlsMessageResponse) -> Result<(), CoreError> {
+    self.sync.maybe_welcome_cursor = Some(
+      self
+        .sync
+        .maybe_welcome_cursor
+        .map_or(welcome.id, |cursor| cursor.max(welcome.id)),
+    );
+    self.persist_sync()
   }
 
   /// Claims key packages for the user's devices that aren't in the group yet.

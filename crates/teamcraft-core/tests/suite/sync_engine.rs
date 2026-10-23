@@ -220,6 +220,44 @@ async fn outbox_survives_being_offline() {
 }
 
 #[tokio::test]
+async fn a_welcome_that_arrives_during_a_network_error_is_joined_later() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "flaky")
+    .await
+    .unwrap();
+
+  // The welcome arrives on the gateway, but REST fails while Bob joins.
+  server.set_rest_failing(bob.client.user_id(), true);
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  // Every event fails on its REST call; the welcome among them is consumed.
+  let mut failures = 0;
+  while bob.client.pump(&mut bob.gateway).await.is_err() {
+    failures += 1;
+    assert!(failures < 10, "events keep failing");
+  }
+  assert!(failures > 0);
+
+  // Once the network is back, the welcome is fetched again and joined.
+  server.set_rest_failing(bob.client.user_id(), false);
+  bob.client.sync_welcomes().await.unwrap();
+  alice
+    .client
+    .send_text(channel, None, "welcome after all")
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(bob.texts(channel), vec!["welcome after all"]);
+}
+
+#[tokio::test]
 async fn an_expired_token_keeps_queued_messages_pending() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
