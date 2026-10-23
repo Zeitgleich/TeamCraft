@@ -414,3 +414,61 @@ mod tests {
     assert_eq!(text, "mon fri, 09:00–17:00");
   }
 }
+
+/// The small card that appears when the pointer rests on a person's name: picture, status, local
+/// time and a button for a direct message. Keyboard users open the full card with Enter instead.
+#[component]
+pub fn UserHoverCard(
+  user: UserId,
+  /// Fixed position (top, left) in pixels.
+  top: f64,
+  left: f64,
+  on_enter: Callback<()>,
+  on_leave: Callback<()>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let locale = i18n.locale().tag();
+  let Some(person) = state.read(|backend| backend.user(user)) else {
+    return ().into_any();
+  };
+  let is_me = person.id == state.me().id;
+  let name = person.display_name.clone();
+  let label = name.clone();
+  let local_time = move || {
+    let profile = use_profiles().and_then(|hub| hub.profile(user))?;
+    let zone = profile.maybe_time_zone?;
+    time_in_zone(now_ms(), &zone, locale)
+  };
+  view! {
+    <div
+      class="hover-card"
+      role="dialog"
+      aria-label=label
+      style:top=format!("{top}px")
+      style:left=format!("{left}px")
+      on:mouseenter=move |_| on_enter.run(())
+      on:mouseleave=move |_| on_leave.run(())
+    >
+      <div class="hover-card-head">
+        <Avatar user=person.clone() size=AvatarSize::Large show_presence=true />
+        <div>
+          <strong translate="no">{name}</strong>
+          {person.maybe_custom_status.clone().map(|status| view! { <p class="small">{status.emoji} " " {status.text}</p> })}
+          {move || local_time().map(|time| view! { <p class="small muted-text">{move || i18n.t_with("hover-card-local-time", &[("time", &time)])}</p> })}
+        </div>
+      </div>
+      <div class="hover-card-actions">
+        {(!is_me).then(|| view! {
+          <button class="btn btn-small btn-primary" on:click=move |_| { on_leave.run(()); state.open_direct(user); }>
+            {move || i18n.t("profile-message")}
+          </button>
+        })}
+        <button class="btn btn-small" on:click=move |_| { on_leave.run(()); state.overlay.set(crate::state::Overlay::UserProfile(user)); }>
+          {move || i18n.t("hover-card-profile")}
+        </button>
+      </div>
+    </div>
+  }
+  .into_any()
+}

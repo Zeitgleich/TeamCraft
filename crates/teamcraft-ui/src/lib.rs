@@ -16,6 +16,7 @@ pub mod calls;
 pub mod channel_policy;
 pub mod clock;
 pub mod components;
+pub mod delivery;
 pub mod diff;
 pub mod emoji;
 pub mod emoji_catalog;

@@ -40,7 +40,6 @@ pub fn MessageMenu(
   let state = use_app_state();
   let i18n = use_i18n();
   let is_open = RwSignal::new(false);
-  let is_confirming_delete = RwSignal::new(false);
   let conversation = message.conversation;
   let id = message.id;
   let thread_root = message
@@ -56,14 +55,12 @@ pub fn MessageMenu(
   let is_saved = move || extras.get().is_some_and(|extras| extras.is_saved);
   let close = move || {
     is_open.set(false);
-    is_confirming_delete.set(false);
   };
 
   // Opening the menu starts fetching the permalink so that "Copy link" has it by the time it is used.
   let toggle = move |_| {
     let opening = !is_open.get_untracked();
     is_open.set(opening);
-    is_confirming_delete.set(false);
     if opening {
       state.read(|backend| drop(backend.permalink(conversation, id)));
     }
@@ -195,18 +192,12 @@ pub fn MessageMenu(
                   class="menu-item menu-danger"
                   role="menuitem"
                   on:click=move |_| {
-                    if is_confirming_delete.get_untracked() {
-                      state.write(|backend| backend.delete_message(conversation, id));
-                      close();
-                    } else {
-                      is_confirming_delete.set(true);
-                    }
+                    state.delete_with_undo(conversation, id, i18n.t("message-deleted-toast"));
+                    close();
                   }
                 >
                   <Icon name=IconName::Trash />
-                  <span class="menu-label">
-                    {move || if is_confirming_delete.get() { i18n.t("action-delete-confirm") } else { i18n.t("action-delete") }}
-                  </span>
+                  <span class="menu-label">{move || i18n.t("action-delete")}</span>
                 </button>
               }
             })}

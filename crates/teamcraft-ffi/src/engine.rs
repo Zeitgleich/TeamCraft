@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
-use teamcraft_client_api::model::Message as MessageView;
+use teamcraft_client_api::model::{Message as MessageView, is_pending};
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
@@ -51,9 +51,6 @@ const UPLOAD_STAGING_DIR: &str = "outgoing";
 pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// Work for the engine thread.
 pub(crate) type Job = Box<dyn for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, ()> + Send>;
-
-/// Outbox messages get IDs with this bit set in the UI view model (teamcraft-core ui_backend).
-const PENDING_ID_BIT: i64 = 1 << 62;
 
 pub(crate) type Api = HttpServerApi<ForeignTokens>;
 pub(crate) type Store = Arc<SealedSqliteStore>;
@@ -766,7 +763,7 @@ impl Engine {
       .user(message.author)
       .map(|user| user.display_name)
       .unwrap_or_default();
-    let is_pending = message.id.snowflake().get() & PENDING_ID_BIT != 0;
+    let is_pending = is_pending(message.id);
     MessageItem::from_view(message, author_name, is_pending)
   }
 

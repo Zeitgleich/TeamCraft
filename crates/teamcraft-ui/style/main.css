@@ -994,6 +994,11 @@ select.input {
   outline-offset: -2px;
 }
 
+/* Deleted with an undo window still open. */
+.msg[hidden] {
+  display: none;
+}
+
 .msg-user {
   display: flex;
   gap: 10px;
@@ -4744,4 +4749,56 @@ select.input {
   font-weight: 600;
   box-shadow: 0 1px 4px rgba(16, 24, 40, 0.12);
   pointer-events: none;
+}
+
+/* A message still in the outbox. */
+.msg-delivery {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.msg-delivery .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.msg-delayed {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* Card over a person's name while the pointer rests on it. */
+.hover-card {
+  position: fixed;
+  z-index: 42;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 280px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.hover-card-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.hover-card-head p {
+  margin: 2px 0 0;
+}
+
+.hover-card-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }

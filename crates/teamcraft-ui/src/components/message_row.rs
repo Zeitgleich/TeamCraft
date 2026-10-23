@@ -1,22 +1,35 @@
+use std::time::Duration;
+
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 
-use crate::clock::{format_time, format_time_seconds, local_day};
+use crate::clock::{format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::emoji_picker::EmojiPicker;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::MessageMenu;
+use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
+use crate::delivery::Delivery;
 use crate::i18n::use_i18n;
 use crate::markdown;
 use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, thread_id_of};
+use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
 
 /// Messages by the same author closer together than this share one header.
 const GROUP_WINDOW_MS: i64 = 5 * 60_000;
+/// How long the pointer rests on a name before its hover card opens.
+const HOVER_CARD_DELAY: Duration = Duration::from_millis(450);
+/// Room the hover card needs; it opens above the name when there is less below.
+const HOVER_CARD_HEIGHT_PX: f64 = 130.0;
+/// How long the card stays after the pointer left, so it can move into the card.
+const HOVER_CARD_GRACE: Duration = Duration::from_millis(250);
+/// How often a message in the outbox re-checks whether it counts as delayed.
+const DELIVERY_TICK_MS: u64 = 2_000;
 /// Quick reactions on hover until the user has used emoji of their own.
 const DEFAULT_QUICK_REACTIONS: [&str; 3] = ["👍", "❤️", "😂"];
 /// How many quick reactions the hover toolbar shows.
@@ -247,6 +260,56 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     },
   };
 
+  // Hover card: appears when the pointer rests on the name, stays while it moves into the card.
+  let hover_card = RwSignal::new(None::<(f64, f64)>);
+  let card_timer = StoredValue::new(0_u32);
+  let cancel_card_timer = move || {
+    card_timer.try_update_value(|generation| *generation += 1);
+  };
+  let after_delay = move |delay: Duration, action: Box<dyn FnOnce()>| {
+    cancel_card_timer();
+    let generation = card_timer.try_get_value();
+    set_timeout(
+      move || {
+        if generation.is_some() && card_timer.try_get_value() == generation {
+          action();
+        }
+      },
+      delay,
+    );
+  };
+  let show_card_soon = move |anchor: web_sys::Element| {
+    after_delay(
+      HOVER_CARD_DELAY,
+      Box::new(move || {
+        let rect = anchor.get_bounding_client_rect();
+        let window_height = web_sys::window()
+          .and_then(|window| window.inner_height().ok())
+          .and_then(|height| height.as_f64())
+          .unwrap_or(f64::MAX);
+        // Below the name, or above it when the card would leave the window.
+        let top = if rect.bottom() + HOVER_CARD_HEIGHT_PX + 8.0 > window_height {
+          rect.top() - HOVER_CARD_HEIGHT_PX - 4.0
+        } else {
+          rect.bottom() + 4.0
+        };
+        hover_card.try_set(Some((top.max(4.0), rect.left())));
+      }),
+    );
+  };
+  let hide_card_soon = move || {
+    after_delay(
+      HOVER_CARD_GRACE,
+      Box::new(move || {
+        hover_card.try_set(None);
+      }),
+    );
+  };
+  let hide_card_now = move || {
+    cancel_card_timer();
+    hover_card.set(None);
+  };
+
   let header = (!is_grouped).then(|| {
     let status = author.as_ref().and_then(|user| user.maybe_custom_status.clone());
     let badge_bot = author.as_ref().is_some_and(|user| user.is_bot);
@@ -258,10 +321,24 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
           class="msg-author"
           translate="no"
           aria-haspopup="dialog"
-          on:click=move |_| state.overlay.set(Overlay::UserProfile(author_id))
+          on:click=move |_| {
+            hide_card_now();
+            state.overlay.set(Overlay::UserProfile(author_id));
+          }
+          on:mouseenter=move |ev| show_card_soon(event_target::<web_sys::Element>(&ev))
+          on:mouseleave=move |_| hide_card_soon()
         >
           {author_name.clone()}
         </button>
+        {move || hover_card.get().map(|(top, left)| view! {
+          <UserHoverCard
+            user=author_id
+            top=top
+            left=left
+            on_enter=Callback::new(move |()| cancel_card_timer())
+            on_leave=Callback::new(move |()| hide_card_soon())
+          />
+        })}
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
@@ -472,6 +549,35 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     }
     is_editing.set(false);
   };
+  // Messages still in the outbox say so; the core retries by itself.
+  let sent_at = message.sent_at;
+  let delivery = RwSignal::new(Delivery::of(message_id, sent_at, now_ms()));
+  if delivery.get_untracked() != Delivery::Sent {
+    use_interval(DELIVERY_TICK_MS, move || {
+      delivery.set(Delivery::of(message_id, sent_at, now_ms()))
+    });
+  }
+  let delivery_view = move || match delivery.get() {
+    Delivery::Sent => None,
+    Delivery::Sending => Some(
+      view! {
+        <span class="msg-delivery" role="status">
+          <Icon name=IconName::Clock />
+          {move || i18n.t("message-sending")}
+        </span>
+      }
+      .into_any(),
+    ),
+    Delivery::Delayed => Some(
+      view! {
+        <span class="msg-delivery msg-delayed" role="status">
+          <Icon name=IconName::Alert />
+          {move || i18n.t("message-not-sent")}
+        </span>
+      }
+      .into_any(),
+    ),
+  };
   let is_long_body = markdown::is_long(&body_text);
   let is_expanded = RwSignal::new(false);
   let rendered_body = {
@@ -534,6 +640,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       class="msg msg-user"
       class:msg-grouped=is_grouped
       class:msg-mine=is_mine
+      hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
       tabindex="-1"
       data-nav="row"
       aria-label=aria_label
@@ -545,6 +652,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
           {rendered_body}
           {edited}
           {badges}
+          {delivery_view}
         </div> {attachments} {acknowledge} {reaction_chips} {replies}
       </div>
       {actions}

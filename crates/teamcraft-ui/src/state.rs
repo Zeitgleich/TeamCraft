@@ -1,7 +1,8 @@
 //! Shared application state, provided through Leptos context.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use leptos::prelude::*;
 
@@ -17,6 +18,24 @@ use crate::settings::Settings;
 
 /// How many of the newest messages are searched for the first unread one.
 const UNREAD_SCAN_LIMIT: usize = 500;
+
+/// How long a deleted message can be restored before it is deleted for everyone.
+const UNDO_WINDOW: Duration = Duration::from_secs(6);
+
+/// A short message over the app, optionally with an Undo button.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toast {
+  pub id: u64,
+  pub text: String,
+  pub maybe_undo: Option<Undo>,
+}
+
+/// What the Undo button of a toast reverts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Undo {
+  /// Keep a message whose deletion is still waiting.
+  RestoreMessage(MessageId),
+}
 
 /// A message the user is replying to with a quote.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,8 +148,11 @@ pub struct AppState {
   pub reply_target: RwSignal<Option<ReplyTarget>>,
   /// The person whose direct conversation was asked for and is not there yet.
   pub pending_dm: RwSignal<Option<UserId>>,
-  /// Short messages shown over the app until dismissed (reminders).
-  pub toasts: RwSignal<Vec<String>>,
+  /// Short messages shown over the app until dismissed (reminders, undo).
+  pub toasts: RwSignal<Vec<Toast>>,
+  next_toast: StoredValue<u64>,
+  /// Messages deleted with an undo window: hidden now, deleted when the window ends.
+  pub hidden_messages: RwSignal<HashSet<MessageId>>,
   /// A conversation to open as soon as it appears in the lists (after joining it).
   pub pending_open: RwSignal<Option<ConversationId>>,
   pub jump_to_latest: RwSignal<u64>,
@@ -165,6 +187,8 @@ impl AppState {
       reply_target: RwSignal::new(None),
       pending_dm: RwSignal::new(None),
       toasts: RwSignal::new(Vec::new()),
+      next_toast: StoredValue::new(0),
+      hidden_messages: RwSignal::new(HashSet::new()),
       pending_open: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
@@ -333,6 +357,56 @@ impl AppState {
         backend.mark_read(conversation);
       }
     });
+  }
+
+  /// Shows a toast until the user closes it.
+  pub fn show_toast(&self, text: String) {
+    self.push_toast(text, None);
+  }
+
+  pub fn dismiss_toast(&self, id: u64) {
+    self.toasts.update(|list| list.retain(|toast| toast.id != id));
+  }
+
+  /// Hides an own message at once and deletes it after the undo window, unless Undo was pressed.
+  pub fn delete_with_undo(&self, conversation: ConversationId, message: MessageId, text: String) {
+    let state = *self;
+    self.hidden_messages.update(|hidden| {
+      hidden.insert(message);
+    });
+    let toast = self.push_toast(text, Some(Undo::RestoreMessage(message)));
+    set_timeout(
+      move || {
+        state.dismiss_toast(toast);
+        let mut is_still_deleted = false;
+        state
+          .hidden_messages
+          .update(|hidden| is_still_deleted = hidden.remove(&message));
+        if is_still_deleted {
+          state.write(|backend| backend.delete_message(conversation, message));
+        }
+      },
+      UNDO_WINDOW,
+    );
+  }
+
+  /// Runs the Undo of a toast and closes it.
+  pub fn undo(&self, toast: u64, undo: Undo) {
+    match undo {
+      Undo::RestoreMessage(message) => self.hidden_messages.update(|hidden| {
+        hidden.remove(&message);
+      }),
+    }
+    self.dismiss_toast(toast);
+  }
+
+  fn push_toast(&self, text: String, maybe_undo: Option<Undo>) -> u64 {
+    let id = self.next_toast.get_value();
+    self.next_toast.set_value(id + 1);
+    self
+      .toasts
+      .update(|list| list.push(Toast { id, text, maybe_undo }));
+    id
   }
 
   pub fn open_admin(&self, section: AdminSection) {
