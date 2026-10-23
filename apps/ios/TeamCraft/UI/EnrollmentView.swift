@@ -147,7 +147,7 @@ struct LinkThisDeviceView: View {
           // Connected: only the comparison matters now.
           Text("link_compare").foregroundStyle(Theme.textMuted)
           Text(shortCode)
-            .font(.system(size: 40, weight: .bold, design: .monospaced))
+            .font(.system(.largeTitle, design: .monospaced).bold())
             .accessibilityLabel(Text(verbatim: shortCode.map(String.init).joined(separator: " ")))
           Text("link_confirm_on_other").foregroundStyle(Theme.textMuted)
           ProgressView()
@@ -186,7 +186,7 @@ struct OrgRecoveryView: View {
         Text("recovery_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
         Text("recovery_hint").foregroundStyle(Theme.textMuted)
         Text(progress.verificationCode)
-          .font(.system(size: 32, weight: .bold, design: .monospaced))
+          .font(.system(.title, design: .monospaced).bold())
           .frame(maxWidth: .infinity)
           .padding()
           .background(Theme.surface)
