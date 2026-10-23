@@ -49,7 +49,7 @@ struct CallScreen: View {
       if let code = call.maybePrivacyCode {
         VStack(spacing: 6) {
           Text("call_privacy_code_hint").font(.footnote).foregroundStyle(Theme.textMuted).multilineTextAlignment(.center)
-          Text(code).font(.system(size: 24, weight: .bold, design: .monospaced))
+          Text(code).font(.system(.title2, design: .monospaced).bold())
         }
       }
       if call.participantCount > 0 {

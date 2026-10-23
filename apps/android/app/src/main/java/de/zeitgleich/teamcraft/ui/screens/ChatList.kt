@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.ui.semantics.heading
 import android.content.Context
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
@@ -229,7 +230,13 @@ private fun SectionHeader(title: SectionTitle) {
     text.uppercase(),
     style = MaterialTheme.typography.labelMedium,
     color = MaterialTheme.colorScheme.onSurfaceVariant,
-    modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
+    modifier = Modifier
+      .padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
+      // Read as written, not spelled out in capitals; TalkBack can jump between sections.
+      .semantics {
+        heading()
+        contentDescription = text
+      },
   )
 }
 

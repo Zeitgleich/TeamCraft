@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
 import android.app.Activity
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -331,7 +333,7 @@ private fun ChangePassphrase(viewModel: MainViewModel) {
 
 @Composable
 private fun Heading(text: Int) {
-  Text(stringResource(text), style = MaterialTheme.typography.titleMedium)
+  Text(stringResource(text), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
 }
 
 private val PRESENCE_CHOICES = listOf(

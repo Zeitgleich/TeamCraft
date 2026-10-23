@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -253,7 +255,7 @@ private data class TestRun(val requestedAtMs: Long, val maybeResult: TestPushRes
 
 @Composable
 private fun SectionTitle(@StringRes text: Int) {
-  Text(stringResource(text), style = MaterialTheme.typography.titleMedium)
+  Text(stringResource(text), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
 }
 
 @Composable

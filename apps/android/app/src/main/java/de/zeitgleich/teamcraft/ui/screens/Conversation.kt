@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -543,13 +545,15 @@ private fun MessageActions(
       // One row, spread over the width: the reactions are the sheet's most used part.
       Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
         for (emoji in QUICK_REACTIONS) {
+          val label = stringResource(R.string.react_quick, emoji)
           TextButton(
             onClick = {
               viewModel.act(ChatActions.react(conversationId, message.id, emoji))
               onDismiss()
             },
             contentPadding = PaddingValues(4.dp),
-            modifier = Modifier.weight(1f),
+            // "React with 👍": TalkBack names the emoji and says what the button does.
+            modifier = Modifier.weight(1f).semantics(mergeDescendants = true) { contentDescription = label },
           ) { Text(emoji, style = MaterialTheme.typography.titleLarge) }
         }
       }

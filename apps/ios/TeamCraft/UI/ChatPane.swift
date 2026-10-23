@@ -627,10 +627,11 @@ struct MessageRow: View {
             .font(.caption)
             .padding(.horizontal, 8).padding(.vertical, 4)
             .background(reaction.reactedByMe ? Theme.accentSoft : Theme.surface)
-            .overlay(Capsule().stroke(reaction.reactedByMe ? Theme.accent : Theme.border))
+            .overlay(Capsule().stroke(reaction.reactedByMe ? Theme.accent : Theme.controlBorder))
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(reaction.reactedByMe ? .isSelected : [])
       }
     }
   }
@@ -667,7 +668,8 @@ struct JumpDownButton: View {
     Button(action: action) {
       Image(systemName: "chevron.down")
         .font(.body.weight(.semibold))
-        .frame(width: 40, height: 40)
+        // 44 pt: the smallest touch target the Human Interface Guidelines allow.
+        .frame(width: 44, height: 44)
         .background(.regularMaterial)
         .clipShape(Circle())
         .overlay(alignment: .topTrailing) {

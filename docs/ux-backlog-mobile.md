@@ -131,3 +131,24 @@ against the dev stack with a test brand.
 | Approving a new device on iOS: code typed by hand, no QR scanner                                                                           | iOS          | open                                 |
 | Server URL is fixed per build: no server-URL screen (needs a public OIDC discovery endpoint)                                               | Android, iOS | open: server + design                |
 | SVG brand logos don't show on mobile (name shown instead)                                                                                  | Android, iOS | open                                 |
+
+## Accessibility (2026-10-23)
+
+Checked with an audit script over uiautomator dumps (labels, 48 dp targets), WCAG contrast ratios
+of both palettes, and font scale 200 % on the emulator.
+
+| Friction                                                                                                        | Platform     | Status |
+|-----------------------------------------------------------------------------------------------------------------|--------------|--------|
+| Unread badge: white on #E4572E was 3.7:1; now #C8441F, 4.9:1                                                    | Android, iOS | done   |
+| Field and control borders 1.3:1; now 3:1 (`outline`, `Theme.controlBorder`), dividers stay light                | Android, iOS | done   |
+| Selected chips in Material's default purple; sheets and menus lavender-tinted; now the accent and neutral grays | Android      | done   |
+| Screen titles, chat list sections and settings headings weren't headings for TalkBack                           | Android      | done   |
+| Chat list section headers in capitals were read as written in capitals                                          | Android      | done   |
+| Quick reactions in the long-press sheet read only the emoji; now "React with 👍"                                 | Android      | done   |
+| Reaction chips: own reaction now announced as selected                                                          | iOS          | done   |
+| Jump-to-newest button 40 pt; now 44 pt                                                                          | iOS          | done   |
+| Link and call short codes in fixed font sizes; now follow Dynamic Type                                          | iOS          | done   |
+| Font scale 200 %: settings hub and long-press sheet checked, nothing cut off                                    | Android      | done   |
+| Audit: every clickable node on chat list, conversation, settings and sheet has a label and is ≥ 48 dp           | Android      | done   |
+| VoiceOver and Dynamic Type not checked on a device (CI compile only)                                            | iOS          | open   |
+| Desktop uses the same badge color (3.7:1)                                                                       | desktop      | open   |

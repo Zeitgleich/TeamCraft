@@ -12,10 +12,13 @@ enum Theme {
   static let surface = dynamic(light: 0xFFFFFF, dark: 0x151B27)
   static let text = dynamic(light: 0x1B2230, dark: 0xE4E9F2)
   static let textMuted = dynamic(light: 0x566175, dark: 0x9AA6BA)
+  /// Dividers and card edges.
   static let border = dynamic(light: 0xDCE0E7, dark: 0x28324A)
+  /// Edges of fields and controls: 3:1 against the surface (WCAG 1.4.11).
+  static let controlBorder = dynamic(light: 0x848EA0, dark: 0x626D86)
   static let danger = dynamic(light: 0xC0392B, dark: 0xFF7A6B)
-  /// Unread and mention badges.
-  static let badge = dynamic(light: 0xE4572E, dark: 0xE4572E)
+  /// Unread and mention badges; white numbers on it need 4.5:1.
+  static let badge = dynamic(light: 0xC8441F, dark: 0xC8441F)
   static let mentionBackground = dynamic(light: 0xFFF2CC, dark: 0x4A3B10)
   static let mentionText = dynamic(light: 0x6A4B00, dark: 0xFFD978)
   /// Own messages.
