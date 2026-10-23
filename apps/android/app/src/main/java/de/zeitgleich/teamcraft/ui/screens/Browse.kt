@@ -13,7 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,7 +53,7 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.browse_title), maybeOnBack = onBack) }) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
-      TabRow(selectedTabIndex = if (showPeople) 1 else 0) {
+      PrimaryTabRow(selectedTabIndex = if (showPeople) 1 else 0) {
         Tab(selected = !showPeople, onClick = { showPeople = false }, text = { Text(stringResource(R.string.channels)) })
         Tab(selected = showPeople, onClick = { showPeople = true }, text = { Text(stringResource(R.string.people)) })
       }
@@ -79,7 +79,7 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
         }
       } else {
         if (spaces.size > 1) {
-          TabRow(selectedTabIndex = spaceIndex.coerceAtMost(spaces.lastIndex)) {
+          PrimaryTabRow(selectedTabIndex = spaceIndex.coerceAtMost(spaces.lastIndex)) {
             spaces.forEachIndexed { index, space ->
               Tab(selected = index == spaceIndex, onClick = { spaceIndex = index }, text = { Text(space.name) })
             }
