@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -107,6 +108,8 @@ fun ConversationScreen(
   onOpenThread: (String) -> Unit,
   onOpenFiles: () -> Unit,
   onBack: () -> Unit,
+  maybeFocusMessage: String? = null,
+  onOpenPermalink: (String) -> Unit = {},
 ) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
@@ -147,6 +150,8 @@ fun ConversationScreen(
       onOpenThread = onOpenThread,
       maybeOnReply = { message -> ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty()) },
       modifier = Modifier.weight(1f),
+      maybeFocusMessage = maybeFocusMessage,
+      onOpenPermalink = onOpenPermalink,
     )
     if (conversation?.canPost != false) {
       Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot)
@@ -161,7 +166,14 @@ fun ConversationScreen(
 }
 
 @Composable
-fun ThreadScreen(viewModel: MainViewModel, conversationId: String, threadId: String, onBack: () -> Unit) {
+fun ThreadScreen(
+  viewModel: MainViewModel,
+  conversationId: String,
+  threadId: String,
+  onBack: () -> Unit,
+  maybeFocusMessage: String? = null,
+  onOpenPermalink: (String) -> Unit = {},
+) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
@@ -196,6 +208,8 @@ fun ThreadScreen(viewModel: MainViewModel, conversationId: String, threadId: Str
       onOpenThread = null,
       maybeOnReply = null,
       modifier = Modifier.weight(1f),
+      maybeFocusMessage = maybeFocusMessage,
+      onOpenPermalink = onOpenPermalink,
     )
     Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot)
   }
@@ -429,6 +443,8 @@ private fun MessageList(
   onOpenThread: ((String) -> Unit)?,
   maybeOnReply: ((Message) -> Unit)?,
   modifier: Modifier,
+  maybeFocusMessage: String?,
+  onOpenPermalink: (String) -> Unit,
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
   MessageFeed(
@@ -441,6 +457,8 @@ private fun MessageList(
     maybeOnReply = maybeOnReply,
     onLongPress = { maybeSelected = it },
     modifier = modifier,
+    maybeFocusMessage = maybeFocusMessage,
+    onOpenPermalink = onOpenPermalink,
   )
   maybeSelected?.let { message ->
     MessageActions(
@@ -481,12 +499,17 @@ private fun MessageActions(
   var isConfirmingDelete by remember { mutableStateOf(false) }
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
-      FlowRow(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      // One row, spread over the width: the reactions are the sheet's most used part.
+      Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
         for (emoji in QUICK_REACTIONS) {
-          TextButton(onClick = {
-            viewModel.act(ChatActions.react(conversationId, message.id, emoji))
-            onDismiss()
-          }) { Text(emoji, style = MaterialTheme.typography.titleLarge) }
+          TextButton(
+            onClick = {
+              viewModel.act(ChatActions.react(conversationId, message.id, emoji))
+              onDismiss()
+            },
+            contentPadding = PaddingValues(4.dp),
+            modifier = Modifier.weight(1f),
+          ) { Text(emoji, style = MaterialTheme.typography.titleLarge) }
         }
       }
       SheetItem(R.string.action_reply) {
@@ -538,7 +561,7 @@ private fun MessageActions(
           style = MaterialTheme.typography.titleSmall,
           modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
-        maybeExtras?.edits?.forEach { edit ->
+        maybeExtras.edits.forEach { edit ->
           Text(edit.body, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp))
         }
       }
