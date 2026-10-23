@@ -52,7 +52,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
 };
-use teamcraft_proto::{NotificationSettings, PushMode, TestPushOutcome, TestPushResponse};
+use teamcraft_proto::{NotificationSettings, PushKind, PushMode, TestPushOutcome, TestPushResponse};
 
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
 
@@ -1991,6 +1991,13 @@ impl ServerApi for FakeServerApi {
       },
       are_bound_tokens_required: true,
       max_token_lifetime_secs: 90 * 24 * 3600,
+      kinds: vec![
+        PushKind::Message,
+        PushKind::Mention,
+        PushKind::Call,
+        PushKind::Dismiss,
+        PushKind::Test,
+      ],
     })
   }
 

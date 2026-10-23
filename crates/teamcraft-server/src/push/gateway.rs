@@ -246,6 +246,7 @@ impl PushSender for GatewaySender {
           maybe_token,
           maybe_bound_token,
           sealed: Base64Bytes::new(message.sealed.clone()),
+          maybe_collapse_id: None,
         })
         .await
     })
