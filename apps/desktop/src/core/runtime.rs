@@ -28,8 +28,8 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  BackgroundId, CallJoinTokenResponse, ConversationId, DeviceActivity, DeviceId, GatewayClientMessage,
-  GatewayEvent, OrgBackgroundId, UserId, WorkspacePolicy,
+  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity, DeviceId,
+  GatewayClientMessage, GatewayEvent, OrgBackgroundId, UserId, WorkspacePolicy,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -121,6 +121,7 @@ enum Request {
   Status(oneshot::Sender<CoreStatus>),
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
+  UpdatePolicy(oneshot::Sender<Option<ClientUpdatePolicy>>),
   Messages {
     conversation: ConversationId,
     start: usize,
@@ -207,6 +208,11 @@ impl CoreRuntime {
       .ask(Request::Snapshot)
       .await
       .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// The update rules of the workspace policy this device verified (docs/updates.md §4.4).
+  pub async fn client_update_policy(&self) -> Option<ClientUpdatePolicy> {
+    self.ask(Request::UpdatePolicy).await.flatten()
   }
 
   pub async fn messages(
@@ -529,6 +535,14 @@ impl Core {
       },
       Request::ApprovalCancel => self.approval = None,
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
+      Request::UpdatePolicy(reply) => drop(
+        reply.send(
+          self
+            .client
+            .as_ref()
+            .and_then(|client| teamcraft_core::workspace::verified_client_update_policy(client.store())),
+        ),
+      ),
       Request::Messages {
         conversation,
         start,

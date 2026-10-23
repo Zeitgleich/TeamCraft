@@ -41,6 +41,12 @@ const COMMANDS: &[&str] = &[
   "shell_prefs_set",
   "tray_update",
   "set_zoom",
+  "update_status",
+  "update_check",
+  "update_set_preference",
+  "update_download",
+  "update_restart",
+  "update_with_package_manager",
 ];
 
 fn main() {
