@@ -5,10 +5,13 @@
 // Hides the console window on Windows release builds; harmless on macOS and Linux.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod attention;
 mod auth;
 mod autostart;
 mod calls;
 mod core;
+#[cfg(target_os = "linux")]
+mod freedesktop;
 mod notifications;
 #[cfg(windows)]
 mod windows_shell;
@@ -49,6 +52,8 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
     .manage(service)
+    .manage(attention::OsProbe::default())
+    .manage(notifications::ShownNotifications::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(CoreHost::new(config, tokens))
     .setup(|app| {
@@ -98,6 +103,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,
       notifications::notify_user,
+      notifications::withdraw_notifications,
+      attention::os_attention,
       autostart::autostart_get,
       autostart::autostart_set,
     ])
