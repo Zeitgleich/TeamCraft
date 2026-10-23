@@ -2,6 +2,8 @@
 //! (tokio-tungstenite on native targets, the browser's `WebSocket` in wasm).
 
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder, Response};
 use serde::Serialize;
@@ -50,6 +52,18 @@ use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversa
 use super::web_socket::{BrowserSocket, SocketFrame};
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
 
+/// How long a TCP and TLS (or WebSocket) handshake may take.
+#[cfg(not(target_arch = "wasm32"))]
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Keepalive probes and HTTP/2 pings on open connections, below the idle timeout of common proxies.
+#[cfg(not(target_arch = "wasm32"))]
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+#[cfg(not(target_arch = "wasm32"))]
+const KEEPALIVE_RETRIES: u32 = 3;
+/// How long sent data may stay unacknowledged before the connection counts as dead.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const UNACKNOWLEDGED_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
 pub trait AccessTokenSource {
   fn access_token(&self) -> Result<String, ApiError>;
@@ -69,10 +83,7 @@ pub struct HttpServerApi<T> {
 impl<T: AccessTokenSource> HttpServerApi<T> {
   /// `base_url` without trailing slash, e.g. `https://chat.example.com`.
   pub fn new(base_url: impl Into<String>, tokens: T) -> Self {
-    #[cfg(target_os = "android")]
-    let client = super::tls::http_client();
-    #[cfg(not(target_os = "android"))]
-    let client = reqwest::Client::new();
+    let client = http_client();
     let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
@@ -1071,6 +1082,44 @@ impl fmt::Debug for HttpRendezvous {
   }
 }
 
+/// The HTTP client of the native apps. reqwest has no timeouts by default, so a request on a
+/// connection that died silently (Wi-Fi to mobile handover, laptop sleep) would hang until the
+/// kernel gives up, which takes many minutes. There is deliberately no total or read timeout: a big
+/// upload on a slow link is slow, not dead. Instead a connection is dropped when it stops making
+/// progress (robustness.md, "Network loss and change").
+#[cfg(not(target_arch = "wasm32"))]
+fn http_client() -> reqwest::Client {
+  let builder = reqwest::Client::builder()
+    .connect_timeout(CONNECT_TIMEOUT)
+    .tcp_keepalive(KEEPALIVE_INTERVAL)
+    .tcp_keepalive_interval(KEEPALIVE_INTERVAL)
+    .tcp_keepalive_retries(KEEPALIVE_RETRIES)
+    .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
+    .http2_keep_alive_timeout(KEEPALIVE_INTERVAL)
+    .http2_keep_alive_while_idle(true);
+  // Data that the peer doesn't acknowledge for this long means the connection is gone, even while a
+  // request is in flight (keepalive probes only run on an idle socket).
+  #[cfg(any(target_os = "android", target_os = "linux"))]
+  let builder = builder.tcp_user_timeout(UNACKNOWLEDGED_TIMEOUT);
+  #[cfg(target_os = "android")]
+  let builder = builder.tls_backend_preconfigured((*super::tls::client_config()).clone());
+  match builder.build() {
+    Ok(client) => client,
+    // Only a reqwest/rustls version mismatch can cause this; the default client still works for
+    // plain HTTP (development) and reports TLS errors per request.
+    Err(error) => {
+      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
+      reqwest::Client::new()
+    },
+  }
+}
+
+/// The browser's `fetch` has its own timeouts and connection handling.
+#[cfg(target_arch = "wasm32")]
+fn http_client() -> reqwest::Client {
+  reqwest::Client::new()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 type NativeSocket =
   tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1079,8 +1128,11 @@ type NativeSocket =
 async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
   // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
-  let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector)
+  let connecting = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector);
+  // A black-holed server would otherwise stall the caller's loop (outbox, heartbeats) for minutes.
+  let (socket, _) = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
     .await
+    .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
     .map_err(|error| ApiError::Network(error.to_string()))?;
   Ok(socket)
 }
@@ -1192,6 +1244,20 @@ mod tests {
       api.connect_gateway().await,
       Err(ApiError::InsecureServerUrl(_))
     ));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_server_that_never_answers_the_websocket_handshake_times_out() {
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // Accepts the TCP connection and then stays silent, like a black-holed proxy.
+    tokio::spawn(async move {
+      let (_socket, _) = listener.accept().await.unwrap();
+      std::future::pending::<()>().await;
+    });
+    // Paused time jumps ahead while everything waits, so the timeout fires without a real wait.
+    let result = connect_websocket(&format!("ws://{address}/api/v1/gateway")).await;
+    assert!(matches!(result, Err(ApiError::Network(message)) if message.contains("timed out")));
   }
 
   #[test]
