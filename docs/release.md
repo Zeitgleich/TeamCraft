@@ -155,7 +155,7 @@ point at the development defaults in `apps/android/gradle.properties`.
 
 ```sh
 scripts/check-versions.sh v1.0.0-rc.1        # the tag fits the tree
-docker run --rm -v "$PWD:/repo" -w /repo docker.io/rhysd/actionlint:1.7.7
+docker run --rm -v "$PWD:/repo" -w /repo docker.io/rhysd/actionlint:1.7.12
 echo "ghcr.io/x/teamcraft-server:1.0.0@sha256:0" > /tmp/images.txt
 scripts/render-release-notes.py --version 1.0.0 --tag v1.0.0 --repo Zeitgleich/TeamCraft --images /tmp/images.txt
 ```

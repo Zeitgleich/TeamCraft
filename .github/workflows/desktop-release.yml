@@ -17,6 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   # Release builds include WebRTC echo cancellation, built from source (crates/teamcraft-media/README.md).
   RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
+  # Shipped binaries carry no symbol table (106 MB -> 78 MB for the Linux executable); release builds
+  # have no debug info to keep separately.
+  CARGO_PROFILE_RELEASE_STRIP: symbols
 
 jobs:
   linux:
