@@ -218,6 +218,8 @@ kbd {
 .app {
   display: grid;
   grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+  /* Without it the column grows to the content's minimum and the page scrolls sideways (~1100px). */
+  grid-template-columns: minmax(0, 1fr);
   height: 100dvh;
 }
 
@@ -924,6 +926,7 @@ select.input {
 /* ---- Message list ---- */
 
 .message-list-wrap {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1041,7 +1044,17 @@ select.input {
 }
 
 .msg-author {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
   font-weight: 700;
+  cursor: pointer;
+}
+
+.msg-author:hover {
+  text-decoration: underline;
 }
 
 .msg-time,
@@ -1369,6 +1382,20 @@ select.input {
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface-2);
+}
+
+/* A pasted or dropped image shows a thumbnail instead of the file icon. */
+.chip-image {
+  height: 52px;
+  padding-left: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.chip-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 4px;
+  object-fit: cover;
 }
 
 .chip-name {
@@ -4598,4 +4625,86 @@ select.input {
   font-size: 13px;
   font-weight: 600;
   border-bottom: 1px solid var(--border);
+}
+
+/* Long messages start collapsed; "Show more" expands them. */
+.msg-long.collapsed {
+  max-height: 16em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 75%, transparent);
+  mask-image: linear-gradient(to bottom, #000 75%, transparent);
+}
+
+.msg-expand {
+  margin: 2px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Placeholder for a message that is still loading. */
+.msg-skeleton {
+  display: flex;
+  gap: 12px;
+  padding: 8px 16px;
+}
+
+.skeleton-avatar,
+.skeleton-lines span {
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.skeleton-avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+}
+
+.skeleton-lines {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.skeleton-lines span {
+  height: 10px;
+  width: 30%;
+}
+
+.skeleton-lines span + span {
+  width: 65%;
+}
+
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-avatar,
+  .skeleton-lines span {
+    animation: none;
+  }
+}
+
+/* The day of the top message while scrolled up (the dividers scroll away with their rows). */
+.floating-day {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 5;
+  transform: translateX(-50%);
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.12);
+  pointer-events: none;
 }

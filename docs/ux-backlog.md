@@ -17,8 +17,8 @@ exists).
 | "Jump to latest" doesn't say how many new messages arrived while scrolled up                      | done  |
 | After sending, the feed stops a few pixels short of the new message (the last line is cut off)    | done  |
 | The scroll position of a conversation is lost when switching away and back                        | done  |
-| Long messages and code blocks are not collapsed                                                   | open  |
-| Sticky date headers while scrolling                                                               | open  |
+| Long messages and code blocks are not collapsed                                                   | done  |
+| The day of the top message while scrolling up (floating date)                                     | done  |
 
 ## Navigation and keyboard
 
@@ -43,7 +43,7 @@ exists).
 | The edit box of a message doesn't take the focus when editing starts                              | done  |
 | Pasting a URL over selected text replaces the text instead of making a link                       | done  |
 | Drag and drop of files only works over the composer, not over the whole conversation              | done  |
-| Pasted images are attached by name only, without a preview                                        | open  |
+| Pasted images are attached by name only, without a preview                                        | done  |
 | No undo toast after deleting a message or leaving a channel (deleting asks to confirm instead)    | open  |
 | Optimistic sending with a retry for messages that failed                                          | open  |
 
@@ -55,14 +55,16 @@ exists).
 | No zoom shortcuts (Ctrl/Cmd + `+` / `-` / `0`) and no text size setting                           | done  |
 | The desktop window forgets its size and position                                                  | done  |
 | Tray icon with unread badge, start minimised to tray                                              | open  |
-| Hover card on names (local time, status, message, call)                                           | open  |
+| Clicking an author name does nothing; it now opens the profile card (local time, status, message) | done  |
+| Hover card on names (without a click)                                                             | open  |
 | Drag to reorder favourites; custom sidebar sections exist as categories but can't be reordered    | open  |
-| Loading skeletons while a conversation's history loads                                            | open  |
+| Loading skeletons while a conversation's history loads                                            | done  |
 
 ## Bugs found on the way
 
 | Bug                                                                                               | State |
 |---------------------------------------------------------------------------------------------------|-------|
+| Below about 1100px width the page scrolls sideways and header buttons are cut off                 | done  |
 | Two unclosed blocks in `style/main.css` hid every later rule; a test now checks the braces        | done  |
 
 ## Already in place (checked)

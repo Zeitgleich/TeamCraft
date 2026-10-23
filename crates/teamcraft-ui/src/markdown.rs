@@ -149,9 +149,27 @@ fn link(rest: &str) -> Option<(Inline, usize)> {
   (url.len() > prefix.len()).then(|| (Inline::Link(url.to_owned()), url.len()))
 }
 
+/// Messages longer than this many lines (or characters) start collapsed with a "Show more" button.
+const LONG_MESSAGE_LINES: usize = 14;
+const LONG_MESSAGE_CHARS: usize = 1_400;
+
+/// Whether a message body is long enough to start collapsed in the feed.
+pub fn is_long(body: &str) -> bool {
+  body.lines().count() > LONG_MESSAGE_LINES || body.chars().count() > LONG_MESSAGE_CHARS
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn long_messages_by_lines_or_length() {
+    assert!(!is_long("short"));
+    assert!(!is_long(&"line\n".repeat(14)));
+    assert!(is_long(&"line\n".repeat(15)));
+    assert!(is_long(&"x".repeat(1_401)));
+    assert!(!is_long(&"ü".repeat(1_400)));
+  }
 
   #[test]
   fn escaped_punctuation_is_literal() {
