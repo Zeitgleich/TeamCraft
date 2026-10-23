@@ -142,7 +142,7 @@ const BOUND_TOKEN_VERSION: u8 = 1;
 const MAX_BOUND_TOKEN_BYTES: usize = 4096;
 
 /// What an app seals for a gateway: the device token, bound to the one server that may push to it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundToken {
   #[serde(rename = "v")]
   pub version: u8,
@@ -153,6 +153,19 @@ pub struct BoundToken {
   /// After this the gateway refuses the token (milliseconds since the Unix epoch).
   pub expires_at_ms: u64,
   pub token: String,
+}
+
+// The device token is never printed (security.md).
+impl std::fmt::Debug for BoundToken {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("BoundToken")
+      .field("version", &self.version)
+      .field("provider", &self.provider)
+      .field("server_id", &self.server_id)
+      .field("expires_at_ms", &self.expires_at_ms)
+      .field("token", &"[redacted]")
+      .finish()
+  }
 }
 
 /// The ID of a gateway token key: the first 8 bytes of the SHA-256 of its public key.

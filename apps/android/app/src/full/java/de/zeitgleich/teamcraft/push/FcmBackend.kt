@@ -20,11 +20,29 @@ object FcmBackend : PushBackend {
 
   override fun register(context: Context) {
     ensureInitialized(context)
-    FirebaseMessaging.getInstance().isAutoInitEnabled = true
-    FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+    val messaging = FirebaseMessaging.getInstance()
+    messaging.isAutoInitEnabled = true
+    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    if (!prefs.getBoolean(KEY_ROTATED_FOR_SEALING, false)) {
+      // Once, when the app starts sealing its token: versions before handed the raw token to
+      // servers, which could seal it for themselves forever. A fresh token makes those copies dead.
+      messaging.deleteToken().addOnCompleteListener {
+        prefs.edit().putBoolean(KEY_ROTATED_FOR_SEALING, true).apply()
+        requestToken(context, messaging)
+      }
+      return
+    }
+    requestToken(context, messaging)
+  }
+
+  private fun requestToken(context: Context, messaging: FirebaseMessaging) {
+    messaging.token.addOnSuccessListener { token ->
       TeamCraftApplication.graph(context).push.onToken(PushService.FCM, token)
     }
   }
+
+  private const val PREFS = "fcm"
+  private const val KEY_ROTATED_FOR_SEALING = "rotated_for_sealing"
 
   override fun unregister(context: Context) {
     if (!isAvailable(context)) return

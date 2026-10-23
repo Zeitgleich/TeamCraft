@@ -236,7 +236,7 @@ mod sealed_tokens {
   }
 
   #[tokio::test]
-  async fn providers_the_server_sends_directly_and_servers_without_a_gateway_get_the_raw_token() {
+  async fn self_built_apps_give_servers_without_a_gateway_the_raw_token() {
     let server = FakeServer::new();
     let mut bob = Peer::enroll(&server, "Bob").await;
 
@@ -363,6 +363,51 @@ mod sealed_tokens {
     assert_eq!(server.revoked_gateway_tokens(), vec![blob]);
     // Nothing is left to renew.
     assert!(!bob.client.refresh_push().await.unwrap());
+    settle(&mut [&mut bob]).await;
+  }
+
+  #[tokio::test]
+  async fn an_app_built_for_a_gateway_never_hands_out_its_raw_token() {
+    let server = FakeServer::new();
+    let mut bob = Peer::enroll_with_settings(
+      &server,
+      "Bob",
+      ClientSettings {
+        maybe_push_gateway_url: Some("https://store-app-gateway.example.com".into()),
+        ..settings()
+      },
+    )
+    .await;
+    // The server names no gateway (or none for this provider): no registration at all.
+    for providers in [None, Some(vec![PushProvider::Fcm])] {
+      server.set_push_gateway(providers.map(|providers| PushGatewayBinding {
+        url: "https://gateway.example.com".into(),
+        server_id: SERVER_ID.into(),
+        providers,
+      }));
+      assert!(
+        bob
+          .client
+          .register_push(PushProvider::Apns, APNS_TOKEN)
+          .await
+          .is_err()
+      );
+      assert!(server.push_registration(bob.client.device_id()).is_none());
+    }
+
+    // Registered sealed, then the server stops naming a gateway: the sealed registration stays,
+    // it is not replaced by the raw token.
+    through_gateway(&server, vec![PushProvider::Apns]);
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+    server.set_push_gateway(None);
+    assert!(bob.client.refresh_push().await.is_err());
+    let registered = server.push_registration(bob.client.device_id()).unwrap().token;
+    assert!(registered.starts_with(BOUND_TOKEN_PREFIX), "{registered}");
+    assert!(server.revoked_gateway_tokens().is_empty());
     settle(&mut [&mut bob]).await;
   }
 

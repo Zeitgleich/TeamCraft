@@ -132,6 +132,12 @@ final class AppModel {
   func signOut() async {
     await busy {
       await stopSyncing()
+      // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
+      // and the registration on the server, so the server can't push to this phone any more.
+      // Best effort and at most a few seconds; offline, the push key is still gone.
+      if let core = try? core() {
+        await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
+      }
       if let account = container.activeAccount {
         try? factory.keys.delete(for: account)
       }
@@ -507,6 +513,21 @@ final class AppModel {
     processLock.release()
   }
 
+  /// Waits for `operation`, but no longer than `seconds`; a slower operation keeps running.
+  private static func awaitAtMost(seconds: Double, _ operation: @escaping @Sendable () async -> Void) async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+      let gate = ResumeOnce(continuation)
+      Task {
+        await operation()
+        gate.resume()
+      }
+      Task {
+        try? await Task.sleep(for: .seconds(seconds))
+        gate.resume()
+      }
+    }
+  }
+
   private func registerPushIfNeeded(token: String) async {
     let defaults = UserDefaults.standard
     guard let core = try? core() else { return }
@@ -539,5 +560,23 @@ final class AppModel {
 
   private var deviceName: String {
     UIDevice.current.name
+  }
+}
+
+/// Resumes a continuation exactly once, whichever caller comes first.
+private final class ResumeOnce: @unchecked Sendable {
+  private let lock = NSLock()
+  private var maybeContinuation: CheckedContinuation<Void, Never>?
+
+  init(_ continuation: CheckedContinuation<Void, Never>) {
+    maybeContinuation = continuation
+  }
+
+  func resume() {
+    lock.lock()
+    let continuation = maybeContinuation
+    maybeContinuation = nil
+    lock.unlock()
+    continuation?.resume()
   }
 }

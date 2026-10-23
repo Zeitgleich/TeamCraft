@@ -34,11 +34,14 @@ pub(crate) struct TypingState {
 
 /// How long a sealed device token stays valid at the gateway.
 pub const PUSH_TOKEN_LIFETIME_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// How far under the gateway's longest accepted lifetime a token is sealed.
+const GATEWAY_LIFETIME_MARGIN_MS: i64 = 24 * 60 * 60 * 1000;
 /// Record of the registration (the raw token is kept in the encrypted local store only).
 const PUSH_REGISTRATION_RECORD: &str = "push_registration";
 
-/// What the app registered with the server, to seal it again and to end it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// What the app registered with the server, to seal it again and to end it. No `Debug`: it holds
+/// the raw device token.
+#[derive(Clone, Serialize, Deserialize)]
 struct StoredPushRegistration {
   provider: PushProvider,
   /// The device token as the platform gave it.
@@ -47,12 +50,16 @@ struct StoredPushRegistration {
   maybe_sealed: Option<SealedRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SealedRecord {
   gateway_url: String,
   /// The server's ID at the gateway the token is bound to.
   server_id: String,
   sealed_at_ms: i64,
+  /// How long the sealed token is valid; 0 in records from before it was stored (then
+  /// [`PUSH_TOKEN_LIFETIME_MS`]).
+  #[serde(default)]
+  lifetime_ms: i64,
   /// The blob the server holds (`tcgw1:...` is this, encoded): revoked when it is replaced.
   blob: Base64Bytes,
 }
@@ -62,6 +69,8 @@ struct GatewayPlan {
   gateway_url: String,
   server_id: String,
   public_key: [u8; 32],
+  /// How long a sealed token may be valid: ours, or less if the gateway accepts less.
+  lifetime_ms: i64,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -89,10 +98,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let is_due = match (&stored.maybe_sealed, &plan) {
       (None, None) => false,
       (Some(sealed), Some(plan)) => {
+        let lifetime_ms = if sealed.lifetime_ms > 0 {
+          sealed.lifetime_ms
+        } else {
+          PUSH_TOKEN_LIFETIME_MS
+        };
+        // Long before it expires, also when the gateway allows only short lifetimes.
+        let reseal_after_ms = i64::try_from(self.settings.push_reseal_after.as_millis())
+          .unwrap_or(i64::MAX)
+          .min(lifetime_ms / 4);
         sealed.server_id != plan.server_id
           || sealed.gateway_url != plan.gateway_url
-          || now.saturating_sub(sealed.sealed_at_ms)
-            >= i64::try_from(self.settings.push_reseal_after.as_millis()).unwrap_or(i64::MAX)
+          || now.saturating_sub(sealed.sealed_at_ms) >= reseal_after_ms
       },
       // The server started or stopped using a gateway.
       _ => true,
@@ -126,7 +143,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           &plan.public_key,
           provider.as_str(),
           &plan.server_id,
-          u64::try_from(sealed_at_ms + PUSH_TOKEN_LIFETIME_MS).unwrap_or(0),
+          u64::try_from(sealed_at_ms.saturating_add(plan.lifetime_ms)).unwrap_or(0),
           token,
         )
         .map_err(|_| CoreError::PushGateway("sealing the device token failed".into()))?;
@@ -135,6 +152,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           gateway_url: plan.gateway_url,
           server_id: plan.server_id,
           sealed_at_ms,
+          lifetime_ms: plan.lifetime_ms,
           blob: Base64Bytes::new(blob),
         };
         (registered, Some(sealed))
@@ -192,6 +210,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// What sealing a token for the server's gateway needs, or `None` when the provider goes to the
   /// push service directly (or the server is too old to say).
+  ///
+  /// An app built for a gateway (`maybe_push_gateway_url`, the store apps) never hands out its raw
+  /// APNs/FCM token: the server can't send to the push services without the publisher's
+  /// credentials anyway, and a raw token would let it seal tokens for itself at will, also after
+  /// the user left. A server that names no gateway then gets no registration at all.
   async fn gateway_plan(&self, provider: &PushProvider) -> Result<Option<GatewayPlan>, CoreError> {
     if !matches!(provider, PushProvider::Apns | PushProvider::Fcm) {
       return Ok(None);
@@ -203,6 +226,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) => return Err(error.into()),
     };
     let Some(binding) = binding.filter(|binding| binding.providers.contains(provider)) else {
+      if self.settings.maybe_push_gateway_url.is_some() {
+        return Err(CoreError::PushGateway(
+          "this server sends no pushes through the app's push gateway; the device token stays on the device"
+            .into(),
+        ));
+      }
       return Ok(None);
     };
     // The gateway the app was built for wins over the one the server names: a server can't make a
@@ -221,10 +250,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let public_key = <[u8; 32]>::try_from(info.token_key.public_key.as_slice())
       .map_err(|_| CoreError::PushGateway("the gateway's token key has the wrong length".into()))?;
+    // A day under the gateway's cap, so the device clock running a little ahead doesn't matter.
+    let gateway_cap_ms = i64::try_from(info.max_token_lifetime_secs.saturating_mul(1000))
+      .unwrap_or(i64::MAX)
+      .saturating_sub(GATEWAY_LIFETIME_MARGIN_MS);
+    let lifetime_ms = PUSH_TOKEN_LIFETIME_MS.min(gateway_cap_ms);
+    if lifetime_ms <= 0 {
+      return Err(CoreError::PushGateway(
+        "the gateway accepts no usable token lifetime".into(),
+      ));
+    }
     Ok(Some(GatewayPlan {
       gateway_url,
       server_id: binding.server_id,
       public_key,
+      lifetime_ms,
     }))
   }
 

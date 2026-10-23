@@ -75,7 +75,11 @@ any of them (or a copy of its database) could push to the device through any gat
   and known answer in the gateway repository's api.md §6 and the shared fixtures). The key comes from
   `GET /v1/info` of the gateway itself; a store app uses the gateway it was built for
   (`push_gateway_url` of the app config: Android `-Pteamcraft.pushGatewayUrl`, iOS
-  `TEAMCRAFT_PUSH_GATEWAY_URL`) and only falls back to the one the server names.
+  `TEAMCRAFT_PUSH_GATEWAY_URL`) and only falls back to the one the server names. A store app never hands
+  a raw APNs/FCM token to a server: if the server names no gateway (or none for that provider), the app
+  doesn't register at all, and an existing sealed registration is kept rather than replaced by a raw
+  token. Self-built apps without a built-in gateway take the server's gateway (a server operator who
+  builds the app trusts their own server) or, without one, register the raw token for direct sending.
 - **The server** stores and forwards the blob (`tcgw1:` + base64url) as the token of the registration.
   It accepts only sealed tokens for providers it sends through a gateway, and refuses them for providers it
   sends directly. A registration made before sealing existed (a raw token) is dead weight: the gateway
@@ -83,13 +87,17 @@ any of them (or a copy of its database) could push to the device through any gat
 - **The gateway** opens the blob and checks that the authenticated server is the one named in it, that it
   has not expired and has not been revoked.
 - **Renewal.** The app seals again after a week (it picks up a rotated gateway key; the token lives 30
-  days), when the server's ID or gateway changes, and on every start (`refresh_push`); the old blob is
+  days, or less when the gateway's `max_token_lifetime_secs` is lower; then it seals again after a
+  quarter of that), when the server's ID or gateway changes, and on every start (`refresh_push`); the old blob is
   revoked. When the user **leaves or removes the server** (sign-out, `unregister_push`), the app revokes
   the blob at the gateway (`POST /v1/tokens/revoke`), so the server can't push any more.
 
 `[push.gateway] accept_unbound_tokens = true` is a **transition** for old apps that don't seal yet: the
 server then accepts and sends raw tokens (the gateway has to allow them, `tokens.accept_unbound`). It is
-off by default; with it on, a raw token can be used by any server that learns it.
+off by default; with it on, a raw token can be used by any server that learns it. A raw token a server
+ever held stays usable to it even after the transition: the gateway's key is public, so the server can
+seal that token for itself. Keep the transition short; Android apps get a fresh FCM token when they switch
+to sealing, iOS tokens change only with a reinstall.
 
 ## 4. How answers map onto the server's push errors
 

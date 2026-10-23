@@ -338,8 +338,9 @@ impl From<GatewayFailure> for PushError {
   }
 }
 
-/// Maps a gateway error response. Only `token_gone` makes the server forget a registration (a
-/// bare 410 may come from a proxy in front of the gateway); a refusal of the server itself
+/// Maps a gateway error response. Only the gateway's token codes (`token_gone` and the sealed-token
+/// refusals below) make the server forget a registration (a bare 410 may come from a proxy in
+/// front of the gateway); a refusal of the server itself
 /// (blocked, bad signature, over quota) must never delete devices. Problems of one token
 /// (`invalid_request`, `token_rate_limited`) say nothing about the gateway and don't count
 /// against its health.
