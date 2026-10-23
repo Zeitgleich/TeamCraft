@@ -31,6 +31,7 @@ chrono-tz.workspace = true
 chrono.workspace = true
 axum.workspace = true
 figment.workspace = true
+httpdate.workspace = true
 jsonwebtoken.workspace = true
 lettre.workspace = true
 rand_core.workspace = true

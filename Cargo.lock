@@ -10390,6 +10390,7 @@ dependencies = [
  "chrono-tz",
  "figment",
  "futures-util",
+ "httpdate",
  "jsonwebtoken",
  "lettre",
  "p256",

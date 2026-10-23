@@ -28,7 +28,7 @@ use time::OffsetDateTime;
 use crate::meetings::caldav::{BusyPeriod, CalendarError, CalendarStore};
 use crate::meetings::mailer::{MailError, Mailer, OutgoingMail};
 use crate::meetings::{MeetingBackends, MeetingService};
-use crate::push::PushDispatcher;
+use crate::push::{PushDispatcher, spawn_retry_workers};
 use crate::rendezvous::RendezvousHub;
 use crate::router::router;
 use crate::runtime::mail_status::MailStatus;
@@ -186,6 +186,7 @@ pub struct TestApp {
   pub state: AppState,
   test_db: TestDatabase,
   server: JoinHandle<()>,
+  retry_workers: Vec<JoinHandle<()>>,
 }
 
 /// A person with the roles the identity provider would put in their token.
@@ -451,6 +452,8 @@ impl TestApp {
     settings.security.rate_limits.is_enabled = false;
     // Withdrawals coalesce for a moment only, so tests see them quickly.
     settings.push.dismiss_coalesce = Duration::from_millis(50);
+    // One retry worker per pool: hundreds of parallel test apps share the dev Postgres's connections.
+    settings.push.retry.workers = 1;
     customize(&mut settings);
 
     let keys = JwksCache::new(
@@ -525,6 +528,7 @@ impl TestApp {
       .await
       .unwrap();
     });
+    let retry_workers = spawn_retry_workers(&state);
     Some(Self {
       http: reqwest::Client::new(),
       base_url: format!("http://{addr}"),
@@ -532,7 +536,26 @@ impl TestApp {
       state,
       test_db,
       server,
+      retry_workers,
     })
+  }
+
+  /// Simulates `kill -9` and a restart: the server and its background tasks stop wherever they
+  /// are, Postgres loses all their connections (rolling back what was open), and a new process
+  /// starts on the same database with fresh memory and the given push dispatcher.
+  pub async fn kill_and_restart(&mut self, dispatcher: PushDispatcher) {
+    self.server.abort();
+    for worker in self.retry_workers.drain(..) {
+      worker.abort();
+    }
+    self.test_db.terminate_connections().await;
+    let mut state = self.state.clone();
+    state.database = self.test_db.reconnect().await;
+    state.push = Arc::new(dispatcher);
+    state.push_tracker = Arc::default();
+    self.state = state;
+    self.serve();
+    self.retry_workers = spawn_retry_workers(&self.state);
   }
 
   /// `true` if the table (e.g. a message partition) exists.
@@ -552,6 +575,11 @@ impl TestApp {
     customize(&mut settings);
     self.state.settings.reset(settings);
     self.server.abort();
+    self.serve();
+  }
+
+  /// Serves the state under a new address; `base_url` and `ws_url` change with it.
+  fn serve(&mut self) {
     let listener = bind_listener(([127, 0, 0, 1], 0).into()).unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(self.state.clone());
@@ -569,6 +597,9 @@ impl TestApp {
 
   pub async fn stop(self) {
     self.server.abort();
+    for worker in &self.retry_workers {
+      worker.abort();
+    }
     self.test_db.drop_database().await;
   }
 

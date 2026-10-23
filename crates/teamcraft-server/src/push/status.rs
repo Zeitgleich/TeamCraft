@@ -64,10 +64,10 @@ impl ProviderHealthTracker {
         health.success_count += 1;
         health.maybe_last_success_at = Some(now);
       },
-      Err(PushError::Rejected(_) | PushError::Unavailable(_)) if is_user_endpoint => {
+      Err(PushError::Rejected(_) | PushError::Unavailable { .. }) if is_user_endpoint => {
         health.endpoint_failure_count += 1;
       },
-      Err(error @ (PushError::Rejected(_) | PushError::Unavailable(_))) => {
+      Err(error @ (PushError::Rejected(_) | PushError::Unavailable { .. })) => {
         health.failure_count += 1;
         health.maybe_last_failure_at = Some(now);
         health.maybe_last_error = Some(error.to_string().chars().take(MAX_ERROR_CHARS).collect());
@@ -96,7 +96,7 @@ mod tests {
     tracker.record(
       "webpush",
       true,
-      &Err(PushError::Unavailable("timeout".into())),
+      &Err(PushError::unavailable("timeout")),
       UnixMillis(3),
     );
     let health = tracker.snapshot("webpush");

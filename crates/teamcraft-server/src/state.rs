@@ -163,12 +163,23 @@ pub struct PushTtls {
   pub test: std::time::Duration,
 }
 
-/// Retries of pushes that failed for a temporary reason.
+/// Retries of pushes that failed for a temporary reason, through the durable queue
+/// (notifications.md, "Mobile push delivery"). The wake-up's TTL bounds them all.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
+  /// Attempts after the first one; `0` sends once and gives up.
   pub max_retries: u32,
-  /// Wait before the first retry; doubles for each further one.
+  /// Wait before the first retry; doubles for each further one, with jitter.
   pub initial_delay: std::time::Duration,
+  /// The longest wait between two attempts (a push service's `Retry-After` may ask for more).
+  pub max_delay: std::time::Duration,
+  /// Workers per pool (APNs/FCM, and the endpoints users chose); each holds a database connection
+  /// while it sends.
+  pub workers: usize,
+  /// Wake-ups one device may have waiting; more are dropped until the queue drains.
+  pub max_queued_per_device: u32,
+  /// How often idle workers look for due wake-ups.
+  pub poll_interval: std::time::Duration,
 }
 
 impl PushTtls {
@@ -194,8 +205,12 @@ impl Default for PushSettings {
         test: Duration::from_secs(300),
       },
       retry: RetryPolicy {
-        max_retries: 2,
+        max_retries: 200,
         initial_delay: Duration::from_secs(2),
+        max_delay: Duration::from_secs(600),
+        workers: 2,
+        max_queued_per_device: 200,
+        poll_interval: Duration::from_secs(1),
       },
       test_interval: Duration::from_secs(10),
       max_rings_per_minute: 10,

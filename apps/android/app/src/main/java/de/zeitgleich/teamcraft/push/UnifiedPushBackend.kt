@@ -12,6 +12,7 @@ object UnifiedPushBackend : PushBackend {
     UnifiedPush.getDistributors(context).isNotEmpty()
 
   override fun register(context: Context) {
+    UnifiedPushRecovery.onRegisterRequested(context)
     if (UnifiedPush.getAckDistributor(context) == null) {
       UnifiedPush.getDistributors(context).firstOrNull()?.let { UnifiedPush.saveDistributor(context, it) }
     }
@@ -19,6 +20,7 @@ object UnifiedPushBackend : PushBackend {
   }
 
   override fun unregister(context: Context) {
+    UnifiedPushRecovery.onSelfUnregister(context, isStillWanted = false)
     if (UnifiedPush.getAckDistributor(context) != null) UnifiedPush.unregister(context)
   }
 
@@ -33,7 +35,10 @@ object UnifiedPushBackend : PushBackend {
   fun selectDistributor(context: Context, packageName: String) {
     if (packageName !in distributors(context) || packageName == UnifiedPush.getAckDistributor(context)) return
     // The old distributor stops delivering to us; the new one registers from scratch.
-    if (UnifiedPush.getAckDistributor(context) != null) UnifiedPush.unregister(context)
+    if (UnifiedPush.getAckDistributor(context) != null) {
+      UnifiedPushRecovery.onSelfUnregister(context, isStillWanted = true)
+      UnifiedPush.unregister(context)
+    }
     UnifiedPush.saveDistributor(context, packageName)
     UnifiedPush.register(context)
   }

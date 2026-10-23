@@ -150,6 +150,52 @@ Default grace delay 2 minutes (`[notifications] mobile_push_delay_secs`).
   no banner) — note what iOS displays.
 - [ ] CarPlay (if available): messages are announced.
 
+## 10. Outages and retries
+
+The server keeps wake-ups that failed for a temporary reason in a durable queue (notifications.md,
+"Retries"). The automated test `push_retry` covers a killed server against a fake gateway; this
+checks it end to end.
+
+- [ ] Block the server's way to the push gateway (firewall rule or wrong DNS entry for the gateway
+  host), B sends a DM: the admin console shows APNs/FCM as failing; nothing arrives.
+- [ ] Kill the server process (`kill -9`) while the gateway is blocked, start it again, unblock the
+  gateway: the DM arrives on the phone within a few minutes, once.
+- [ ] Block for longer than the message TTL (`[push] ttl_secs`, lowered for the test): after unblocking,
+  the stale wake-up never arrives.
+- [ ] A reads the DM on the desktop while the gateway is blocked; after unblocking the phone shows
+  nothing for it.
+- [ ] UnifiedPush build: stop the distributor app (force-stop) and start it again, or switch the phone
+  offline for ten minutes: the app registers again by itself (diagnostics show "registered" again
+  within minutes after the distributor or network is back; no user action).
+- [ ] UnifiedPush build with two distributors: uninstall the one in use; the app moves to the other by
+  itself and the test push works.
+
+## 11. Android device matrix (Doze and phone makers' battery managers)
+
+Phone makers change how Android treats apps in the background; this is where pushes get lost in
+practice (<https://dontkillmyapp.com>). For each phone run section 2 ("Phone locked, screen off",
+"App swiped away", "Doze", "untouched for 1 hour"), section 4 (ring with the app killed) and the
+UnifiedPush lines of section 10 where the UnifiedPush build applies. Use the app's default settings:
+the full flavor never asks for a battery exemption, so the result must hold without one.
+
+Fill in date, app version, OS/skin version and the result per cell; leave "needs device test" until a
+person has run it.
+
+| Maker / skin                       | Example model    | Android | FCM: locked       | FCM: killed       | FCM: 1 h idle     | Ring killed       | UnifiedPush       | Notes                               |
+|------------------------------------|------------------|---------|-------------------|-------------------|-------------------|-------------------|-------------------|-------------------------------------|
+| Google Pixel (stock)               | Pixel 8          | 15/16   | needs device test | needs device test | needs device test | needs device test | needs device test |                                     |
+| Samsung One UI                     | Galaxy S24 / A55 | 15/16   | needs device test | needs device test | needs device test | needs device test | needs device test |                                     |
+| Xiaomi HyperOS / MIUI              | Redmi Note 13    | 14/15   | needs device test | needs device test | needs device test | needs device test | needs device test |                                     |
+| OnePlus OxygenOS / Oppo ColorOS    | OnePlus 12       | 15      | needs device test | needs device test | needs device test | needs device test | needs device test |                                     |
+| Huawei EMUI (no Google services)   | P30              | 10–12   | n/a (no FCM)      | n/a (no FCM)      | n/a (no FCM)      | needs device test | needs device test |                                     |
+| Motorola (near stock)              | Moto G           | 14/15   | needs device test | needs device test | needs device test | needs device test | needs device test |                                     |
+| Fairphone / LineageOS / GrapheneOS | Fairphone 5      | 14/15   | needs device test | needs device test | needs device test | needs device test | needs device test | GrapheneOS: sandboxed Play services |
+
+What to note when a cell fails: the delay until the alert came (or "never"), whether opening the app
+brought it, the push health in the admin console (sent / failed counts), and the skin's battery
+setting for the app ("optimised", "restricted", "unrestricted"). A failure that only goes away with an
+exemption is documented in the user help for that maker, not worked around in the app.
+
 ## Result
 
 Note failures with their time stamps and the server's push health for the phone. File an issue per

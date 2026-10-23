@@ -1,0 +1,179 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, user_id, device_id, kind, conversation_id, message_id, sender_id, is_urgent,\n                thread_id, call_id, badge, sent_at_ms, attempts,\n                (EXTRACT(EPOCH FROM (expires_at - now())) * 1000)::bigint AS \"remaining_ms!\"\n         FROM push_retries\n         WHERE is_user_endpoint = $1 AND next_attempt_at <= now() AND expires_at > now()\n         ORDER BY next_attempt_at\n         LIMIT 1\n         FOR UPDATE SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "device_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "device_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "sender_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "sender_id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "is_urgent",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "is_urgent"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "call_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "call_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "badge",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "badge"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "sent_at_ms",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "sent_at_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "attempts",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "remaining_ms!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "607e2bd55382acb03470776f1211de639ea842de9ed100f6032750ff3b55f0ea"
+}

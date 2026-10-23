@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM push_retries\n         WHERE id IN (\n           SELECT id FROM push_retries\n           WHERE device_id = $1\n             AND ((kind = 'call' AND call_id = $2)\n               OR (kind IN ('message', 'mention') AND conversation_id = $3 AND message_id <= $4\n                   AND thread_id IS NOT DISTINCT FROM $5))\n           FOR UPDATE SKIP LOCKED)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9158b57358e163e73222d02bb05af1b4746f04133e51cfca37563870bf8b39ed"
+}

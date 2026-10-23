@@ -10,6 +10,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Added
 
+- **Durable push retries**: wake-ups that fail because a push service or the push gateway is down or
+  rate limited wait in the database and are tried again with backoff and jitter, honouring
+  `Retry-After`, until their TTL ends; a restart or a killed server loses none and sends none twice.
+  New settings `push.retry_max_delay_secs`, `push.retry_workers`, `push.retry_max_queued_per_device`,
+  `push.retry_poll_interval_ms`; `push.max_retries` now defaults to 200 (the TTL usually ends retries
+  first).
+- **Android (UnifiedPush)**: the app registers with the distributor again by itself after a failed
+  registration, a temporarily unavailable or uninstalled distributor.
 - **Runtime settings in the admin console**: brands (create, edit, delete, take over configured ones;
   logos, icons and favicons with dark variants in the object storage; colors with preview and
   contrast check; login texts in English and German; links; mail sender; host names limited to the

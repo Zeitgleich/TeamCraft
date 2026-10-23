@@ -160,7 +160,7 @@ mod apns {
     fake.set_reply(403, json!({"reason": "InvalidProviderToken"}));
     assert!(matches!(send().await, Err(PushError::Rejected(403))));
     fake.set_reply(503, json!({"reason": "ServiceUnavailable"}));
-    assert!(matches!(send().await, Err(PushError::Unavailable(_))));
+    assert!(matches!(send().await, Err(PushError::Unavailable { .. })));
     let health = dispatcher.health(&PushProvider::Apns);
     assert_eq!(health.failure_count, 2, "gone tokens are not the service's fault");
     assert!(health.is_failing());
@@ -327,7 +327,7 @@ mod fcm {
     fake.set_reply(400, json!({"error": {"status": "INVALID_ARGUMENT"}}));
     assert!(matches!(send().await, Err(PushError::Rejected(400))));
     fake.set_reply(429, json!({"error": {"status": "RESOURCE_EXHAUSTED"}}));
-    assert!(matches!(send().await, Err(PushError::Unavailable(_))));
+    assert!(matches!(send().await, Err(PushError::Unavailable { .. })));
   }
 
   #[tokio::test]
@@ -494,7 +494,7 @@ mod unified_push {
     fake.set_reply(410, Value::Null);
     assert!(matches!(send().await, Err(PushError::Gone)));
     fake.set_reply(503, Value::Null);
-    assert!(matches!(send().await, Err(PushError::Unavailable(_))));
+    assert!(matches!(send().await, Err(PushError::Unavailable { .. })));
     fake.set_reply(400, Value::Null);
     assert!(matches!(send().await, Err(PushError::Rejected(400))));
     // The endpoint is the user's: its failures never make UnifiedPush itself failing.

@@ -413,9 +413,16 @@ ttl_secs = 86400
 call_ttl_secs = 0
 dismiss_ttl_secs = 86400
 test_ttl_secs = 300
-# Temporary failures (5xx, timeouts) are tried again this often, waiting 2 s, then 4 s, ...
-max_retries = 2
+# Temporary failures (5xx, 429, timeouts) are tried again until the wake-up's TTL ends, at most
+# max_retries times, waiting 2 s, then 4 s, ... (with jitter) up to retry_max_delay_secs, or longer
+# when the push service asks for it (Retry-After). Retries wait in the database and survive a
+# restart; each retry worker holds a database connection while it sends.
+max_retries = 200
 retry_initial_delay_ms = 2000
+retry_max_delay_secs = 600
+retry_workers = 2
+retry_max_queued_per_device = 200
+retry_poll_interval_ms = 1000
 # The shortest time between two test pushes to one device (notification diagnostics).
 test_interval_secs = 10
 # Calls one user may push to other people's phones per minute (further rings reach open apps only).

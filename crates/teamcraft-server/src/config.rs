@@ -332,10 +332,21 @@ pub struct PushConfig {
   pub dismiss_ttl_secs: u64,
   /// How long a test push from the notification diagnostics may wait at the push service.
   pub test_ttl_secs: u64,
-  /// How often a push that failed for a temporary reason (5xx, timeout) is tried again. `0`: never.
+  /// How often a push that failed for a temporary reason (5xx, 429, timeout) is tried again, at most;
+  /// the wake-up's TTL usually ends the retries first. `0`: never. Retries wait in the database, so
+  /// they survive a restart.
   pub max_retries: u32,
-  /// Wait before the first retry; it doubles for each further one.
+  /// Wait before the first retry; it doubles for each further one (with jitter).
   pub retry_initial_delay_ms: u64,
+  /// The longest wait between two retries, unless the push service asks for longer (`Retry-After`).
+  pub retry_max_delay_secs: u64,
+  /// Retry workers per pool (APNs/FCM, and Web Push/UnifiedPush); each holds a database connection
+  /// while it sends.
+  pub retry_workers: usize,
+  /// Wake-ups one device may have waiting for a retry; further ones are dropped.
+  pub retry_max_queued_per_device: u32,
+  /// How often idle retry workers look for due wake-ups.
+  pub retry_poll_interval_ms: u64,
   /// The shortest time between two test pushes to one device.
   pub test_interval_secs: u64,
   /// Calls one user may ring other people's phones with per minute; further rings reach only
@@ -1263,8 +1274,12 @@ impl Default for PushConfig {
       call_ttl_secs: 0,
       dismiss_ttl_secs: 86_400,
       test_ttl_secs: 300,
-      max_retries: 2,
+      max_retries: 200,
       retry_initial_delay_ms: 2000,
+      retry_max_delay_secs: 600,
+      retry_workers: 2,
+      retry_max_queued_per_device: 200,
+      retry_poll_interval_ms: 1000,
       test_interval_secs: 10,
       max_rings_per_minute: 10,
       dismiss_coalesce_ms: 3000,
