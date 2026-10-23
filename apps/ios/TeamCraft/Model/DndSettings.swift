@@ -17,9 +17,16 @@ struct DndSchedule: Equatable {
   static let empty = DndSchedule(
     utcOffsetMinutes: 0, maybeTimeZone: nil, windows: [], allowUserIds: [], allowsUrgent: false)
 
-  /// Saved with the device's time zone and its current offset, so the server follows DST.
+  /// Saved with the device's time zone and its current offset, so the server follows DST. The
+  /// zone names a place much more precisely than an offset: it is only sent while there are
+  /// windows to evaluate.
   func stamped(timeZone: TimeZone, at date: Date) -> DndSchedule {
     var stamped = self
+    guard !windows.isEmpty else {
+      stamped.maybeTimeZone = nil
+      stamped.utcOffsetMinutes = 0
+      return stamped
+    }
     stamped.maybeTimeZone = timeZone.identifier
     stamped.utcOffsetMinutes = timeZone.secondsFromGMT(for: date) / 60
     return stamped

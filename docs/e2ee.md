@@ -516,6 +516,19 @@ Details:
 - The server decides *whether* to push using metadata it has anyway: membership, mute settings,
   attention (don't push to the phone while the user looks at a desktop), DND, and the mention list
   (§4.4). Details: notifications.md, "Push routing" and "Mobile push delivery".
+- **What this shows the server, beyond content-free metadata it had before:**
+  - *Attention:* desktop and web sessions report on change and every 30 s whether the user looks at
+    the app (focused, recent input, not idle, screen unlocked; never which window, what input or any
+    content). That is a timeline of when someone uses TeamCraft at a 30-second resolution, held in
+    memory only, not stored or logged. Organisations that must not have it (works councils,
+    employee-monitoring rules) should know it exists.
+  - *DND:* the weekly schedule, the allow list of people who break through, whether urgent messages
+    do, and the IANA time zone (sent only while the schedule has ranges) are stored on the server, so
+    that routing works with every device offline. The time zone says roughly where the user is.
+  - *Urgent breaks DND* (opt-in): any member who may post in a conversation can mark a message urgent;
+    with the option on, that reaches the user during DND.
+- A forged `dismiss` (the server knows the push key) can only remove notifications and set the badge;
+  it never shows anything.
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
   a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push) and
   `test` (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up

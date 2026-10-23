@@ -199,8 +199,8 @@ wire_enum! {
     Message => "message",
     /// A message that mentions the user, or arrives in a DM.
     Mention => "mention",
-    /// Someone calls the user (a ring). APNs delivers it through PushKit, Android shows a full-screen
-    /// incoming call (e2ee.md §7).
+    /// Someone calls the user (a ring). On iOS a mutable alert on the app's topic, Android shows a
+    /// full-screen incoming call (e2ee.md §7).
     Call => "call",
     /// The conversation was read on another device, or a ring ended: remove what was shown. Sent
     /// silently (APNs background push, FCM normal priority); never shows anything by itself.

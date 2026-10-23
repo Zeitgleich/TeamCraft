@@ -458,7 +458,18 @@ async fn hold_for_desktop(
       Err(error) => warn!(%error, "checking the read position failed; pushing anyway"),
     }
   }
-  send_to_offline_devices(&state, recipient.user, recipient.devices, &wake_up);
+  // Devices as they are now: one revoked (or re-registered) during the wait gets nothing.
+  let devices = match state.database.list_push_devices(recipient.user).await {
+    Ok(current) => current
+      .into_iter()
+      .filter(|device| recipient.devices.iter().any(|held| held.device == device.device))
+      .collect(),
+    Err(error) => {
+      warn!(%error, "reading the push devices failed; the held push is dropped");
+      return;
+    },
+  };
+  send_to_offline_devices(&state, recipient.user, devices, &wake_up);
 }
 
 /// A device with a live connection already got the event over the gateway.

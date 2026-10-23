@@ -49,9 +49,18 @@ final class DndScheduleCodingTests: XCTestCase {
   func testStampingSetsTheTimeZoneAndTodaysOffset() throws {
     let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
     // 2026-07-15 noon UTC: summer time.
-    let stamped = DndSchedule.empty.stamped(timeZone: berlin, at: Date(timeIntervalSince1970: 1_784_116_800))
+    var schedule = DndSchedule.empty
+    schedule.windows.append(.weeknights)
+    let stamped = schedule.stamped(timeZone: berlin, at: Date(timeIntervalSince1970: 1_784_116_800))
     XCTAssertEqual(stamped.maybeTimeZone, "Europe/Berlin")
     XCTAssertEqual(stamped.utcOffsetMinutes, 120)
+  }
+
+  func testWithoutWindowsNoTimeZoneIsSent() throws {
+    let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+    let stamped = DndSchedule.empty.stamped(timeZone: berlin, at: Date(timeIntervalSince1970: 1_784_116_800))
+    XCTAssertNil(stamped.maybeTimeZone)
+    XCTAssertEqual(stamped.utcOffsetMinutes, 0)
   }
 
   func testAtMostFourteenRanges() {

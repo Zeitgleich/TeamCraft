@@ -83,6 +83,11 @@ async fn deliver_with_retries(
         tokio::time::sleep(delay).await;
         delay = delay.saturating_mul(2);
         attempt += 1;
+        // Revoked or registered anew meanwhile: the old registration gets nothing more.
+        if !is_still_registered(state, user, device).await {
+          debug!(device_id = %target.device, "the device's registration changed; retry dropped");
+          return Err(PushError::Gone);
+        }
       },
       Err(error) => {
         state
@@ -92,6 +97,17 @@ async fn deliver_with_retries(
         return Err(error);
       },
     }
+  }
+}
+
+/// Whether the device still has this exact registration (not revoked, same token). A failed read
+/// counts as no: a retry is never worth sending to a device that may be gone.
+async fn is_still_registered(state: &AppState, user: UserId, device: &PushDeviceRow) -> bool {
+  match state.database.list_push_devices(user).await {
+    Ok(current) => current
+      .iter()
+      .any(|row| row.device == device.device && row.token == device.token),
+    Err(_) => false,
   }
 }
 
