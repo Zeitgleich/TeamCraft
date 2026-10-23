@@ -140,6 +140,7 @@ fn main() -> anyhow::Result<()> {
       shell_prefs::shell_prefs_get,
       shell_prefs::shell_prefs_set,
       tray::tray_update,
+      tray::set_zoom,
     ])
     .build(tauri::generate_context!())
     .context("failed to build the TeamCraft desktop shell")?

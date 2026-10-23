@@ -31,7 +31,8 @@
   --sb-hover: rgba(255, 255, 255, 0.07);
   --sb-current: #0b7f78;
   --sb-muted: #8793a8;
-  --badge-bg: #e4572e;
+  /* White text on it needs 4.5:1 (WCAG AA). */
+  --badge-bg: #c8441d;
 
   --lvl-debug: #7c8798;
   --lvl-info: #1b6fb4;
@@ -481,7 +482,8 @@ select.input {
   place-items: center;
   flex: none;
   border-radius: 50%;
-  background: hsl(var(--hue) 45% 38%);
+  /* Dark enough for white initials on every hue (at least 4.5:1). */
+  background: hsl(var(--hue) 45% 32%);
   color: #fff;
   font-weight: 600;
   user-select: none;
@@ -2298,7 +2300,7 @@ select.input {
 .effect-group {
   grid-column: 1 / -1;
   margin: 8px 0 0;
-  color: #9aa6ba;
+  color: var(--text-muted);
   font-size: 12px;
   font-weight: 600;
 }
@@ -4278,13 +4280,25 @@ select.input {
 .group-members { width: 100%; list-style: none; padding: 0 0 0 2rem; margin: 0; }
 .group-members li { display: flex; align-items: center; gap: .5rem; padding: .15rem 0; }
 .tabs { display: flex; gap: .25rem; }
-.tabs [role=tab][aria-selected=true] { font-weight: 600; text-decoration: underline; }
+.tabs [role=tab] {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+.tabs [role=tab][aria-selected=true] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
 
 /* Syntax highlighting (code blocks) */
-.md-code .tok-keyword { color: var(--tok-keyword, #8250df); font-weight: 600; }
+.md-code .tok-keyword { color: var(--tok-keyword, #7444cf); font-weight: 600; }
 .md-code .tok-string { color: var(--tok-string, #0a7d3a); }
 .md-code .tok-comment { color: var(--tok-comment, #6e7781); font-style: italic; }
-.md-code .tok-number { color: var(--tok-number, #b35900); }
+.md-code .tok-number { color: var(--tok-number, #a35200); }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .md-code { --tok-keyword: #d2a8ff; --tok-string: #7ee787; --tok-comment: #8b949e; --tok-number: #ffa657; }
 }

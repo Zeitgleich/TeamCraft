@@ -2,6 +2,7 @@
 
 use leptos::html;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::emoji_catalog::{search, shortcode};
 use crate::i18n::use_i18n;
@@ -21,6 +22,10 @@ pub fn EmojiPicker(
   anchor: web_sys::Element,
   on_pick: Callback<String>,
   on_close: Callback<()>,
+  /// Give the keyboard focus back to `anchor` when the picker goes away (the composer focuses its
+  /// input itself instead).
+  #[prop(default = true)]
+  returns_focus: bool,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -28,6 +33,16 @@ pub fn EmojiPicker(
   let active = RwSignal::new(0_usize);
   let input = NodeRef::<html::Input>::new();
   let (top, left) = placement(&anchor);
+  if returns_focus {
+    let anchor = StoredValue::new_local(anchor.clone());
+    on_cleanup(move || {
+      anchor.try_with_value(|anchor| {
+        if let Some(element) = anchor.dyn_ref::<web_sys::HtmlElement>() {
+          drop(element.focus());
+        }
+      });
+    });
+  }
 
   let items = Memo::new(move |_| {
     let query = query.get();
