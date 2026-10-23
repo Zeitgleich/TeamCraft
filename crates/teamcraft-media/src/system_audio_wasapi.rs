@@ -132,12 +132,9 @@ fn run_capture(
       .read_from_device_to_deque(&mut bytes)
       .map_err(wasapi_error)?;
     let whole = bytes.len() - bytes.len() % (CHANNELS * BYTES_PER_SAMPLE);
-    let interleaved: Vec<f32> = bytes
-      .drain(..whole)
-      .collect::<Vec<u8>>()
-      .chunks_exact(BYTES_PER_SAMPLE)
-      .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
-      .collect();
+    let raw: Vec<u8> = bytes.drain(..whole).collect();
+    let (frames, _) = raw.as_chunks::<BYTES_PER_SAMPLE>();
+    let interleaved: Vec<f32> = frames.iter().map(|sample| f32::from_le_bytes(*sample)).collect();
     if !samples.send(resampler.process(&interleaved)) {
       break;
     }

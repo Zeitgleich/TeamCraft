@@ -341,10 +341,8 @@ fn fit(display_width: u32, display_height: u32, format: CaptureFormat) -> (u32, 
 
 /// 32-bit float samples from bytes (ScreenCaptureKit delivers float PCM).
 fn to_f32(bytes: &[u8]) -> Vec<f32> {
-  bytes
-    .chunks_exact(4)
-    .map(|sample| f32::from_ne_bytes([sample[0], sample[1], sample[2], sample[3]]))
-    .collect()
+  let (samples, _) = bytes.as_chunks::<4>();
+  samples.iter().map(|sample| f32::from_ne_bytes(*sample)).collect()
 }
 
 /// One interleaved stereo signal from either one interleaved buffer or one buffer per channel.
