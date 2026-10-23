@@ -63,6 +63,7 @@ class TeamCraftApplication : Application() {
           if (core.accountState() is AccountState.Ready) {
             core.start()
             graph.calls.start()
+            graph.push.refresh()
           }
         }
       }
