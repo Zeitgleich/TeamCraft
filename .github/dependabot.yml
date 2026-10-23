@@ -27,7 +27,7 @@ updates:
         update-types: [minor, patch]
     # teamcraft-crypto keeps the RustCrypto stack on the versions openmls_rust_crypto uses, so it
     # isn't built twice (crates/teamcraft-crypto/Cargo.toml). Lift these with the openmls upgrade
-    # that moves them (#124 has the state of each). Only breaking bumps are ignored: for 0.x crates
+    # that moves them (#163 tracks each). Only breaking bumps are ignored: for 0.x crates
     # Dependabot calls 0.10 -> 0.11 "minor", so those ignore minor too; patch releases (and security
     # fixes) still come through. x25519-dalek is not listed: hpke-rs links both 2 and 3 already.
     ignore:
