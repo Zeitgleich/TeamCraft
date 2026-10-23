@@ -56,7 +56,7 @@ work stream).
 | Links in messages not tappable                                                            | Android, iOS | done   |
 | Link previews not tappable                                                                | Android      | done   |
 | No swipe-to-reply                                                                         | Android      | done   |
-| Swipe-to-reply (iOS has reply in the context menu now; a drag in a `ScrollView` needs a device to tune) | iOS | open |
+| Swipe-to-reply (drag right; vertical drags keep scrolling)                          | iOS          | done   |
 | No reply at all                                                                           | iOS          | done   |
 | No double-tap quick reaction                                                              | Android, iOS | done   |
 | Own reactions not highlighted                                                             | Android      | done   |
@@ -102,8 +102,8 @@ work stream).
 |----------------------------------------------------------------------------------|--------------|--------|
 | No app lock (biometrics or device screen lock, delay configurable)               | Android, iOS | done   |
 | App switcher shows chats                                                         | iOS          | done (option) |
-| Settings are one long scrolling page; group into sub-pages                       | Android      | open   |
-| Dynamic color (Material You) as an option next to the TeamCraft theme             | Android      | open   |
+| Settings were one long page: now a hub with Notifications, Chats, Privacy, Devices; whole rows toggle | Android | done |
+| Dynamic color (Material You) as an option next to the TeamCraft theme             | Android      | done   |
 | After a server restart clients never got the live gateway back (stale session resumed forever) | all | done (#92) |
 | Font scale 200 %: chat list, conversation, composer checked, nothing cut off      | Android      | done   |
 | No Android logs from the Rust core (`tracing` goes nowhere on Android)            | Android      | open: made the send bug hard to find |

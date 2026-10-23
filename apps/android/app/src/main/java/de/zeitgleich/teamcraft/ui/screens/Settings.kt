@@ -2,6 +2,9 @@ package de.zeitgleich.teamcraft.ui.screens
 
 import android.app.Activity
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.ListItem
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -53,6 +56,18 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushService
 
+/** The settings' pages; the hub lists them, each opens on top of it. */
+private enum class SettingsPage(val title: Int, val summary: Int) {
+  Notifications(R.string.push_title, R.string.settings_notifications_summary),
+  Chats(R.string.settings_chats_title, R.string.settings_chats_summary),
+  Security(R.string.settings_security_title, R.string.settings_security_summary),
+  Devices(R.string.settings_devices_title, R.string.settings_devices_summary),
+}
+
+/**
+ * Settings as a hub: the user's name, presence and status on top, then one entry per page
+ * (notifications, chats, privacy and security, devices) and sign-out, instead of one long page.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
@@ -62,80 +77,110 @@ fun SettingsScreen(
   onDnd: () -> Unit = {},
   onDiagnostics: () -> Unit = {},
 ) {
-  var presence by rememberSaveable { mutableStateOf(Presence.ONLINE) }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.settings_title), maybeOnBack = onBack) }) { padding ->
+  var maybePage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+  BackHandler(enabled = maybePage != null) { maybePage = null }
+  val page = maybePage
+  Scaffold(
+    topBar = {
+      ChromeTopBar(
+        title = stringResource(page?.title ?: R.string.settings_title),
+        maybeOnBack = { if (page != null) maybePage = null else onBack() },
+      )
+    },
+  ) { padding ->
     Column(
       Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      Text(account.displayName, style = MaterialTheme.typography.titleLarge)
-
-      Heading(R.string.presence_title)
-      FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        for ((choice, label) in PRESENCE_CHOICES) {
-          FilterChip(
-            selected = presence == choice,
-            onClick = {
-              presence = choice
-              viewModel.setPresence(choice)
-            },
-            label = { Text(stringResource(label)) },
-          )
-        }
-      }
-
-      CustomStatusSection(viewModel)
-
-      HorizontalDivider()
-      Heading(R.string.push_title)
-      NotificationSettingsSection(viewModel)
-      Heading(R.string.mention_title)
-      MentionSettingsSection(viewModel)
-      val service = viewModel.pushService()
-      Text(
-        stringResource(
-          when (service) {
-            PushService.FCM -> R.string.push_fcm
-            PushService.UNIFIED_PUSH -> R.string.push_unifiedpush
-            // APNs is the iOS app's service; Android never registers with it.
-            PushService.APNS, null -> R.string.push_none
-          },
-        ),
-      )
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = onDnd) { Text(stringResource(R.string.dnd_title)) }
-        OutlinedButton(onClick = onDiagnostics) { Text(stringResource(R.string.diagnostics_title)) }
-      }
-
-      HorizontalDivider()
-      Heading(R.string.search_prefetch_title)
-      SearchPrefetchSection(viewModel.segmentPrefetch)
-
-      HorizontalDivider()
-      Heading(R.string.fingerprint_title)
-      Text(account.identityFingerprint, fontFamily = FontFamily.Monospace)
-      Text(stringResource(R.string.fingerprint_hint), style = MaterialTheme.typography.bodySmall)
-
-      KeyChanges(viewModel)
-
-      HorizontalDivider()
-      ApproveDevice(viewModel)
-
-      HorizontalDivider()
-      ChangePassphrase(viewModel)
-
-      HorizontalDivider()
-      SecureScreenSetting()
-      AppLockSetting()
-      SendWithEnterSetting()
-      ShareTypingSetting()
-
-      HorizontalDivider()
-      OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {
-        Text(stringResource(R.string.sign_out))
+      when (page) {
+        null -> SettingsHub(viewModel, account, onOpen = { maybePage = it })
+        SettingsPage.Notifications -> NotificationsPage(viewModel, onDnd, onDiagnostics)
+        SettingsPage.Chats -> ChatsPage(viewModel)
+        SettingsPage.Security -> SecurityPage(viewModel, account)
+        SettingsPage.Devices -> ApproveDevice(viewModel)
       }
     }
   }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SettingsHub(viewModel: MainViewModel, account: AppState.Ready, onOpen: (SettingsPage) -> Unit) {
+  var presence by rememberSaveable { mutableStateOf(Presence.ONLINE) }
+  Text(account.displayName, style = MaterialTheme.typography.titleLarge)
+  Heading(R.string.presence_title)
+  FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    for ((choice, label) in PRESENCE_CHOICES) {
+      FilterChip(
+        selected = presence == choice,
+        onClick = {
+          presence = choice
+          viewModel.setPresence(choice)
+        },
+        label = { Text(stringResource(label)) },
+      )
+    }
+  }
+  CustomStatusSection(viewModel)
+  HorizontalDivider()
+  Column {
+    for (entry in SettingsPage.entries) {
+      ListItem(
+        headlineContent = { Text(stringResource(entry.title)) },
+        supportingContent = { Text(stringResource(entry.summary)) },
+        trailingContent = { Text("›", style = MaterialTheme.typography.titleLarge) },
+        modifier = Modifier.clickable { onOpen(entry) },
+      )
+    }
+  }
+  HorizontalDivider()
+  OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {
+    Text(stringResource(R.string.sign_out))
+  }
+}
+
+@Composable
+private fun NotificationsPage(viewModel: MainViewModel, onDnd: () -> Unit, onDiagnostics: () -> Unit) {
+  NotificationSettingsSection(viewModel)
+  Heading(R.string.mention_title)
+  MentionSettingsSection(viewModel)
+  Text(
+    stringResource(
+      when (viewModel.pushService()) {
+        PushService.FCM -> R.string.push_fcm
+        PushService.UNIFIED_PUSH -> R.string.push_unifiedpush
+        // APNs is the iOS app's service; Android never registers with it.
+        PushService.APNS, null -> R.string.push_none
+      },
+    ),
+  )
+  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    OutlinedButton(onClick = onDnd) { Text(stringResource(R.string.dnd_title)) }
+    OutlinedButton(onClick = onDiagnostics) { Text(stringResource(R.string.diagnostics_title)) }
+  }
+}
+
+@Composable
+private fun ChatsPage(viewModel: MainViewModel) {
+  SendWithEnterSetting()
+  ShareTypingSetting()
+  DynamicColorSetting()
+  HorizontalDivider()
+  Heading(R.string.search_prefetch_title)
+  SearchPrefetchSection(viewModel.segmentPrefetch)
+}
+
+@Composable
+private fun SecurityPage(viewModel: MainViewModel, account: AppState.Ready) {
+  Heading(R.string.fingerprint_title)
+  Text(account.identityFingerprint, fontFamily = FontFamily.Monospace)
+  Text(stringResource(R.string.fingerprint_hint), style = MaterialTheme.typography.bodySmall)
+  KeyChanges(viewModel)
+  HorizontalDivider()
+  SecureScreenSetting()
+  AppLockSetting()
+  HorizontalDivider()
+  ChangePassphrase(viewModel)
 }
 
 /** This device approves a new one: enter its code, compare the short codes, confirm. */
@@ -305,18 +350,15 @@ private fun SecureScreenSetting() {
   val context = LocalContext.current
   val prefs = remember { ScreenPrefs.prefs(context) }
   var isSecure by remember { mutableStateOf(prefs.isSecureScreen) }
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    Switch(checked = isSecure, onCheckedChange = {
-      isSecure = it
-      prefs.setSecureScreen(it)
-      (context as? Activity)?.let { activity ->
-        if (it) {
-          activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        } else {
-          activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        }
+  SettingSwitch(R.string.secure_screen, isSecure) {
+    isSecure = it
+    prefs.setSecureScreen(it)
+    (context as? Activity)?.let { activity ->
+      if (it) {
+        activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+      } else {
+        activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
       }
-    })
-    Text(stringResource(R.string.secure_screen), modifier = Modifier.padding(start = 8.dp))
+    }
   }
 }

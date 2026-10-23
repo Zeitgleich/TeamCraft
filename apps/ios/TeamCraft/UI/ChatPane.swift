@@ -192,8 +192,12 @@ struct ChatPane: View {
       displayNames: displayNames
     )
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
-    return
+    return SwipeToReply(isEnabled: threadId == nil && !message.isPending) {
+      maybeReplying = message
+      isComposerFocused = true
+    } content: {
       row
+    }
       .padding(.top, isContinuation ? 0 : 8)
       .background(highlight)
       .contentShape(Rectangle())
@@ -789,5 +793,46 @@ struct EmojiSuggestionBar: View {
         }
       }
     }
+  }
+}
+
+/// Drag a message to the right to reply to it, as in most messengers. Vertical drags keep
+/// scrolling: only a mostly horizontal drag moves the message.
+struct SwipeToReply<Content: View>: View {
+  let isEnabled: Bool
+  let onReply: () -> Void
+  @ViewBuilder let content: () -> Content
+
+  @State private var offset: CGFloat = 0
+  @State private var isPastThreshold = false
+  private static var threshold: CGFloat { 64 }
+
+  var body: some View {
+    content()
+      .offset(x: offset)
+      .background(alignment: .leading) {
+        Image(systemName: "arrowshape.turn.up.left.fill")
+          .foregroundStyle(Theme.accent)
+          .opacity(Double(min(offset / Self.threshold, 1)))
+          .padding(.leading, 4)
+          .accessibilityHidden(true)
+      }
+      .simultaneousGesture(drag, including: isEnabled ? .all : .subviews)
+  }
+
+  private var drag: some Gesture {
+    DragGesture(minimumDistance: 20)
+      .onChanged { value in
+        guard value.translation.width > 0, abs(value.translation.width) > abs(value.translation.height) * 2 else { return }
+        offset = min(value.translation.width, Self.threshold * 1.5)
+        let isPast = offset >= Self.threshold
+        if isPast && !isPastThreshold { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        isPastThreshold = isPast
+      }
+      .onEnded { _ in
+        if isPastThreshold { onReply() }
+        isPastThreshold = false
+        withAnimation(.spring(duration: 0.25)) { offset = 0 }
+      }
   }
 }

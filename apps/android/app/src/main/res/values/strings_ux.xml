@@ -80,4 +80,14 @@
   <string name="image_save">Save</string>
   <string name="image_saved">Saved to Pictures/TeamCraft</string>
   <string name="image_save_failed">The picture couldn\'t be saved.</string>
+
+  <!-- Settings pages -->
+  <string name="settings_notifications_summary">Push, mentions, do not disturb</string>
+  <string name="settings_chats_title">Chats and appearance</string>
+  <string name="settings_chats_summary">Composer, typing, colors, search</string>
+  <string name="settings_security_title">Privacy and security</string>
+  <string name="settings_security_summary">Security code, app lock, screenshots, passphrase</string>
+  <string name="settings_devices_title">Devices</string>
+  <string name="settings_devices_summary">Link a new device</string>
+  <string name="dynamic_color">Use the colors of my wallpaper</string>
 </resources>
