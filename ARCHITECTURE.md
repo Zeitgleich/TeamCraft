@@ -274,7 +274,9 @@ guest  = "external"
 
 ### 5.3 Presence
 
-- Each device reports `active` / `idle` over the gateway; the server aggregates per user
+- Each device reports `active` / `idle` over the gateway (desktop and web also report *attention*:
+  focused, recent input, not idle, unlocked; on change and every 30 s, e2ee.md §7); the server
+  aggregates per user
   (online > away > offline) and merges manual states (DND, appear offline, in a call, in a meeting).
 - "In a meeting" comes from CalCraft free/busy; "in a call" from the SFU roster.
 - Presence also drives push routing (no phone push while the desktop is active).

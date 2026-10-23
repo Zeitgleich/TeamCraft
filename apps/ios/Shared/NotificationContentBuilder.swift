@@ -168,8 +168,10 @@ struct NotificationContentBuilder {
       personHandle: handle, nameComponents: nil, displayName: text.senderName, image: nil,
       contactIdentifier: nil, customIdentifier: senderId)
     let group = text.maybeConversationTitle.map { INSpeakableString(spokenPhrase: $0) }
+    // No message text: the intent is donated to the system (Siri suggestions, search), which must
+    // not keep decrypted content. The notification shows the text from its own body.
     return INSendMessageIntent(
-      recipients: nil, outgoingMessageType: .outgoingMessageText, content: text.text,
+      recipients: nil, outgoingMessageType: .outgoingMessageText, content: nil,
       speakableGroupName: group, conversationIdentifier: notification.conversationId,
       serviceName: nil, sender: sender, attachments: nil)
   }
