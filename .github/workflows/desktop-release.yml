@@ -162,19 +162,77 @@ jobs:
           PKG_CONFIG_ALLOW_CROSS: "1"
       - name: Bundle GStreamer into the app
         run: apps/desktop/packaging/macos/bundle-gstreamer.sh patch target/universal-apple-darwin/release/teamcraft-desktop
-      - name: Build dmg
+      # The app only: the dmg is made from the signed app below, so nothing touches the app after
+      # it is signed.
+      - name: Build the app
         working-directory: apps/desktop
         run: >
           cargo tauri bundle --config tauri.models.conf.json --config tauri.gstreamer.conf.json
-          --target universal-apple-darwin --bundles dmg
-        # Signing and notarization are left out on purpose (the dmg is unsigned). To enable them,
-        # add these repository secrets and pass them as `env`, as described in the Tauri macOS guide:
-        #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
-        #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+          --target universal-apple-darwin --bundles app
+      # The bundler copies the framework without its symlinks; a framework with duplicated version
+      # directories can't be sealed. ditto copies it as built.
+      - name: Put the slim GStreamer framework into the app
+        run: |
+          app="$(find target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)"
+          rm -rf "$app/Contents/Frameworks/GStreamer.framework"
+          ditto target/gstreamer-framework/GStreamer.framework "$app/Contents/Frameworks/GStreamer.framework"
+          echo "APP=$app" >> "$GITHUB_ENV"
+      # Developer ID signing and notarization, only when the repository has the secrets; otherwise
+      # the app is signed ad hoc (docs/release.md, "Opening the unsigned macOS app").
+      - name: Signing identity (optional)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "No Developer ID certificate: signing ad hoc."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          echo "MACOS_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+      - name: Sign the app (inside out) and verify the signature
+        run: apps/desktop/packaging/macos/sign-app.sh "$APP"
+      - name: Notarize the app (optional)
+        if: env.MACOS_SIGNING_IDENTITY != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/app.zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$APP"
+          MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"
+      - name: Build the dmg and verify the app inside it
+        run: |
+          version="$(scripts/check-versions.sh)"
+          mkdir -p target/dmg
+          apps/desktop/packaging/macos/make-dmg.sh "$APP" "target/dmg/TeamCraft_${version}_universal.dmg"
+      - name: Notarize the dmg (optional)
+        if: env.MACOS_SIGNING_IDENTITY != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          dmg="$(ls target/dmg/*.dmg)"
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$dmg"
+          spctl --assess -vvv --type open --context context:primary-signature "$dmg"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-universal
-          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: target/dmg/*.dmg
           if-no-files-found: error
 
   windows:

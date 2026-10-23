@@ -45,9 +45,16 @@ previous release keep working.
 
 ## Known limitations
 
-- **Unsigned desktop builds**: the macOS dmg is neither signed nor notarized (open it with right-click
-  → Open, or `xattr -d com.apple.quarantine`), the Windows installers are not code-signed (SmartScreen
-  asks once). Verify them with the checksums and attestations below.
+- **Unsigned desktop builds**: the macOS app is signed ad hoc, not with a Developer ID, and not
+  notarized; the Windows installers are not code-signed (SmartScreen asks once: *More info* → *Run
+  anyway*). Verify the downloads with the checksums and attestations below. To open the macOS app the
+  first time:
+  1. Drag TeamCraft from the dmg to *Applications* and open it once; macOS refuses ("Apple could not
+     verify …").
+  2. Open *System Settings → Privacy & Security*, scroll to *Security*, click *Open Anyway* next to the
+     TeamCraft message and confirm with your password. (On macOS 14 right-click → *Open* in Finder
+     works too.)
+  3. Only if that button doesn't appear: `xattr -dr com.apple.quarantine /Applications/TeamCraft.app`.
 - **Android**: release APKs are only signed when the project's upload key is configured for the build;
   otherwise use the `-debug-signed` APKs for testing or sign the release APKs yourself. There is no
   Play Store or F-Droid listing yet.
