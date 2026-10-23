@@ -1448,3 +1448,5 @@ hover-card-local-time = { $time } Ortszeit
 hover-card-profile = Profil anzeigen
 channel-left-toast = Du hast { $name } verlassen
 shortcut-move-favorite = Fokussierten Favoriten nach oben oder unten verschieben
+composer-also-send = Auch an { $name } senden
+pins-jump = Zur Nachricht springen

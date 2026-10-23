@@ -106,12 +106,7 @@ fn PermalinkChip(link: String) -> impl IntoView {
       view! {
         <button
           class="md-link permalink-chip"
-          on:click=move |_| {
-            state.open_conversation(target.conversation);
-            if let Some(thread) = target.maybe_thread {
-              state.open_thread(target.conversation, thread);
-            }
-          }
+          on:click=move |_| state.open_message(target.conversation, target.message, target.maybe_thread)
         >
           <span translate="no">{i18n.t_with("permalink-label", &[("name", &name)])}</span>
         </button>

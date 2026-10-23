@@ -420,7 +420,7 @@ pub fn SavedView() -> impl IntoView {
         <For each=move || items.get() key=|item| (item.message.id, item.saved_at) let:item>
           {
             let message = item.message.clone();
-            let (conversation, id) = (message.conversation, message.id);
+            let (conversation, id, maybe_thread) = (message.conversation, message.id, message.maybe_thread);
             let author: Option<User> = state.read(|backend| backend.user(message.author));
             view! {
               <li class="saved-item">
@@ -431,7 +431,7 @@ pub fn SavedView() -> impl IntoView {
                 </div>
                 <div class="saved-body"><RichText body=message.body.clone() me=state.me().username /></div>
                 <div class="saved-actions">
-                  <button class="btn btn-small" on:click=move |_| state.open_conversation(conversation)>
+                  <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, maybe_thread)>
                     {move || i18n.t("saved-open")}
                   </button>
                   <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_saved(conversation, id, false))>
@@ -477,9 +477,14 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
                   <time>{format_date_time(message.sent_at, locale)}</time>
                 </div>
                 <div class="saved-body"><RichText body=message.body.clone() me=state.me().username /></div>
-                <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_pinned(conversation, id, false))>
-                  {move || i18n.t("action-unpin")}
-                </button>
+                <div class="saved-actions">
+                  <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, None)>
+                    {move || i18n.t("pins-jump")}
+                  </button>
+                  <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_pinned(conversation, id, false))>
+                    {move || i18n.t("action-unpin")}
+                  </button>
+                </div>
               </li>
             }
           }

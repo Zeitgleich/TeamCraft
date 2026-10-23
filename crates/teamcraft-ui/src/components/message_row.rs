@@ -640,6 +640,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       class="msg msg-user"
       class:msg-grouped=is_grouped
       class:msg-mine=is_mine
+      class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
       tabindex="-1"
       data-nav="row"

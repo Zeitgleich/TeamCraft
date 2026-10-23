@@ -20,6 +20,8 @@ use crate::settings::Settings;
 /// How many of the newest messages are searched for the first unread one.
 const UNREAD_SCAN_LIMIT: usize = 500;
 
+/// How long a message opened from search or a link stays highlighted.
+const HIGHLIGHT_DURATION: Duration = Duration::from_millis(2_500);
 /// How long a deleted message can be restored before it is deleted for everyone.
 const UNDO_WINDOW: Duration = Duration::from_secs(6);
 
@@ -167,6 +169,8 @@ pub struct AppState {
   pub unread_marker: RwSignal<Option<UnreadMarker>>,
   /// The first visible message of conversations the user left while scrolled up, to return there.
   pub scroll_anchors: StoredValue<HashMap<ConversationId, usize>>,
+  /// A message just opened from search, a link or the activity list; its row lights up briefly.
+  pub highlighted: RwSignal<Option<MessageId>>,
   /// A message the composer asked to edit (↑ in the empty composer); its row opens the editor.
   pub edit_request: RwSignal<Option<MessageId>>,
   pub settings: Settings,
@@ -200,6 +204,7 @@ impl AppState {
       jump_to_index: RwSignal::new(None),
       unread_marker: RwSignal::new(None),
       edit_request: RwSignal::new(None),
+      highlighted: RwSignal::new(None),
       scroll_anchors: StoredValue::new(HashMap::new()),
       settings,
     }
@@ -533,6 +538,7 @@ impl AppState {
     maybe_thread: Option<ThreadId>,
   ) {
     self.open_conversation(conversation);
+    self.highlight(message);
     if let Some(thread) = maybe_thread {
       self.open_thread(conversation, thread);
       return;
@@ -547,6 +553,20 @@ impl AppState {
     if let Some(index) = index {
       self.jump_to_index.set(Some((conversation, index)));
     }
+  }
+
+  /// Lights up a message for a moment so the eye finds it after a jump.
+  fn highlight(&self, message: MessageId) {
+    let state = *self;
+    self.highlighted.set(Some(message));
+    set_timeout(
+      move || {
+        if state.highlighted.get_untracked() == Some(message) {
+          state.highlighted.set(None);
+        }
+      },
+      HIGHLIGHT_DURATION,
+    );
   }
 
   pub fn open_meetings(&self) {

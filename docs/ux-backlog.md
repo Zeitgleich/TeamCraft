@@ -31,6 +31,10 @@ exists).
 | Shortcut overview (Ctrl/Cmd+/) is missing the newer shortcuts                                     | done   |
 | Ctrl/Cmd+F to search within the open conversation                                                 | done   |
 | Collapsed sidebar sections and spaces are expanded again after a reload                           | done   |
+| Search results and pinned/saved messages open the conversation but don't jump to the message      | done   |
+| A message opened from search, a link or Activity isn't highlighted                                | done   |
+| Message permalinks open the conversation at the bottom instead of at the message                  | done   |
+| Search results show direct messages as "# name"                                                   | done   |
 
 ## Composer and messages
 
@@ -47,6 +51,7 @@ exists).
 | No undo after deleting a message (it asked "Delete for everyone?" instead); now an Undo toast     | done   |
 | No undo after leaving a channel                                                                   | done   |
 | Messages in the outbox look sent; now "Sending…", then "Not sent yet, retrying"                   | done   |
+| Thread replies can't also be sent to the channel ("Also send to #channel")                        | done   |
 
 ## General and desktop
 
