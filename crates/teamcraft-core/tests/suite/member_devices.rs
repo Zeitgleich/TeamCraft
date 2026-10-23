@@ -198,6 +198,39 @@ async fn a_new_device_refuses_what_a_removed_member_signs_after_the_removal() {
   assert!(!laptop.texts(channel).contains(&"forged again".to_string()));
 }
 
+#[tokio::test]
+async fn messages_after_a_re_add_stay_visible_however_many_commits_follow() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, channel) = channel_with_history(&server).await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let mut dave = Peer::enroll(&server, "Dave").await;
+  let carol_id = carol.client.user_id();
+  phone.client.add_member(channel, carol_id).await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  phone.client.remove_member(channel, carol_id).await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  server.advance_clock(std::time::Duration::from_secs(10 * 60));
+  phone.client.add_member(channel, carol_id).await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  server.advance_clock(std::time::Duration::from_secs(10 * 60));
+  carol.client.send_text(channel, None, "back again").await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  // More commits after her message: they must not move the time she came back.
+  server.advance_clock(std::time::Duration::from_secs(10 * 60));
+  let dave_id = dave.client.user_id();
+  phone.client.add_member(channel, dave_id).await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  phone.client.remove_member(channel, dave_id).await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  phone.client.full_sync().await.unwrap();
+
+  assert!(phone.texts(channel).contains(&"back again".to_string()));
+  let mut laptop = Peer::enroll_as(phone.api.clone(), "Alice laptop").await;
+  laptop.client.full_sync().await.unwrap();
+  let texts = laptop.texts(channel);
+  assert!(texts.contains(&"back again".to_string()), "{texts:?}");
+}
+
 #[test]
 fn a_device_added_back_counts_again_but_not_for_its_time_away() {
   let absence = teamcraft_core::account_data::SenderAbsence {

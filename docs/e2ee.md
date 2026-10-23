@@ -259,8 +259,12 @@ verify yet it records that one sending device's key, if the sender's signed devi
 signature, never older than one seen before) names the device, and only if the sender is a member
 per the server or a device whose leaving time it knows. Every device runs this for messages it can't
 verify yet, not only new ones. Every device keeps, per conversation and device, when the device last
-left and last came back (server times of the commits) and refuses what it signed while out: after
-it left (with the slack) and before it came back. These records travel in the account data (§6.4):
+left and last came back (the server times of the removal commit and of the commit that added it
+back) and refuses what it signed while out: after it left (with the slack) and before it came back.
+Only the last absence is kept, so an earlier one is forgotten once the device leaves again. The
+message time compared is the server's message timestamp, which the signature doesn't cover (review
+A10): a server could re-date a message, but the check stops a removed device on its own. Push
+previews apply the same check. These records travel in the account data (§6.4):
 every device that processes a removal or a return records it there, shares what it has locally
 (also from before this version) at startup, at each full sync and before handing its key bag to a
 linked device, and takes the records of the others into its check for all conversations whenever it
@@ -656,8 +660,9 @@ restored together with them on a new device.
 - **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
-- **Removed senders.** When devices last left conversations and last came back, both in the server
-  times of the commits, so every device of the user refuses what they signed while out (§4.4).
+- **Removed senders.** When devices last left conversations and last came back (the removal commit
+  and the commit that added them back, server times; only the last absence), so every device of the
+  user refuses what they signed while out, by the server's message timestamp (§4.4).
   Merging keeps the later time of each, so a device's clock never decides. Never pruned yet (#186).
 - **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
   user looked at. Merging takes the later one, so reading on any device counts everywhere and never

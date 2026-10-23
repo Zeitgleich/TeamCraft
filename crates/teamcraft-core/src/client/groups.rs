@@ -921,9 +921,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // A member again (added back): what it signs from now on counts; what it signed while out
       // still doesn't.
       let key = format!("{conversation}/{user}/{device_id}");
+      // Only while it is out: the first commit (or welcome) that shows it again is the one that
+      // added it back; later ones must not move its return.
       if let Some(absence) = records::removed_sender(&self.store, &key)?
         && absence.left_at_ms <= at_ms
-        && absence.maybe_back_at_ms.is_none_or(|back| back < at_ms)
+        && absence
+          .maybe_back_at_ms
+          .is_none_or(|back| back < absence.left_at_ms)
       {
         records::merge_removed_sender(
           &self.store,

@@ -32,7 +32,7 @@ pub struct FlushReport {
 
 /// Messages a removed device sent shortly before its removal reached this device can carry a
 /// slightly later server time; they still count.
-const REMOVED_SENDER_GRACE_MS: i64 = 5 * 60 * 1000;
+pub(crate) const REMOVED_SENDER_GRACE_MS: i64 = 5 * 60 * 1000;
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes a text message to the store and the outbox, then tries to send it. Works offline: the

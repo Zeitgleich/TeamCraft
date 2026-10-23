@@ -46,7 +46,7 @@ pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
-pub(crate) use messaging::decrypt_content;
+pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
