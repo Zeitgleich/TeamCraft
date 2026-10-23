@@ -22,6 +22,8 @@ const OVERSCAN_PX: f64 = 700.0;
 const STICK_THRESHOLD_PX: f64 = 8.0;
 const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
 const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
+/// Measure passes after a jump that keep the target row in place while heights settle.
+const ALIGN_PASSES: u8 = 6;
 /// Space kept above the "New messages" divider when a conversation opens there.
 const DIVIDER_CONTEXT_PX: f64 = 48.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
@@ -133,6 +135,12 @@ pub fn MessageList(
     .get_untracked()
     .filter(|marker| marker.conversation == conversation)
     .map(|marker| marker.index);
+  // A jump to a message (search, link, activity) asked before this feed existed wins over both.
+  let maybe_jump = state
+    .jump_to_index
+    .get_untracked()
+    .filter(|(target, _)| *target == conversation)
+    .map(|(_, index)| index);
   // Otherwise return to where the reader was when they left this conversation scrolled up.
   let maybe_saved_anchor = maybe_marker
     .is_none()
@@ -142,8 +150,11 @@ pub fn MessageList(
         .with_value(|anchors| anchors.get(&conversation).copied())
     })
     .flatten();
-  let stick_to_bottom = RwSignal::new(maybe_marker.is_none() && maybe_saved_anchor.is_none());
+  let stick_to_bottom =
+    RwSignal::new(maybe_jump.is_none() && maybe_marker.is_none() && maybe_saved_anchor.is_none());
   let last_top = StoredValue::new(0.0_f64);
+  // Row to keep at the top while heights settle after a jump: (index, measure passes left).
+  let pending_align = StoredValue::new(maybe_jump.map(|index| (index, ALIGN_PASSES)));
   // The message count when the reader left the bottom (or where the unread ones began): what is
   // newer is announced on the "Jump to latest" bar.
   let away_from = RwSignal::new(maybe_marker);
@@ -155,7 +166,7 @@ pub fn MessageList(
     heights.with_value(|heights| compute_window(heights, scroll_top.get(), viewport.get()))
   });
 
-  // Jump to date: scroll so that the requested message is at the top.
+  // Jump to a message (date, search, link): it goes near the top, with a little context above.
   Effect::new(move |_| {
     let Some((target, index)) = state.jump_to_index.get() else {
       return;
@@ -165,8 +176,9 @@ pub fn MessageList(
     }
     let top: f32 = heights.with_value(|heights| heights.iter().take(index).sum());
     if let Some(element) = container.get_untracked() {
+      pending_align.set_value(Some((index, ALIGN_PASSES)));
       stick_to_bottom.set(false);
-      element.set_scroll_top(top as i32);
+      element.set_scroll_top((f64::from(top) - DIVIDER_CONTEXT_PX).max(0.0) as i32);
       scroll_top.set(f64::from(element.scroll_top()));
       last_top.set_value(f64::from(element.scroll_top()));
       layout_rev.update(|rev| *rev += 1);
@@ -237,7 +249,35 @@ pub fn MessageList(
       layout_rev.update(|rev| *rev += 1);
     }
   };
-  let schedule_measure = move || defer_while_alive(list_id, measure);
+  // After a jump the target row's real height and the rows above it are only known once rendered:
+  // keep it at the top for the next few measure passes.
+  let align_row = move || {
+    let Some((index, passes_left)) = pending_align.get_value() else {
+      return;
+    };
+    pending_align.set_value((passes_left > 1).then_some((index, passes_left - 1)));
+    let (Some(container_element), Some(rows_element)) = (container.get_untracked(), rows.get_untracked())
+    else {
+      return;
+    };
+    let Ok(Some(row)) = rows_element.query_selector(&format!("[data-idx=\"{index}\"]")) else {
+      return;
+    };
+    let offset = row.get_bounding_client_rect().top() - container_element.get_bounding_client_rect().top();
+    let delta = offset - DIVIDER_CONTEXT_PX;
+    if delta.abs() > 1.0 {
+      let corrected = f64::from(container_element.scroll_top()) + delta;
+      container_element.set_scroll_top(corrected.max(0.0) as i32);
+      scroll_top.set(f64::from(container_element.scroll_top()));
+      last_top.set_value(f64::from(container_element.scroll_top()));
+    }
+  };
+  let schedule_measure = move || {
+    defer_while_alive(list_id, move || {
+      measure();
+      align_row();
+    })
+  };
 
   // Re-measure whenever the rendered range changes.
   Effect::new(move |_| {
@@ -287,11 +327,16 @@ pub fn MessageList(
         });
         (total - top > height).then_some(top)
       });
-      let maybe_saved_top = maybe_saved_anchor.map(|index| {
+      let maybe_saved_top = maybe_jump.or(maybe_saved_anchor).map(|index| {
         let top: f32 = heights.with_value(|heights| heights.iter().take(index).sum());
         f64::from(top) + DIVIDER_CONTEXT_PX
       });
-      match maybe_divider_top.or(maybe_saved_top) {
+      let maybe_start = if maybe_jump.is_some() {
+        maybe_saved_top
+      } else {
+        maybe_divider_top.or(maybe_saved_top)
+      };
+      match maybe_start {
         Some(top) => {
           let top = (top - DIVIDER_CONTEXT_PX).max(0.0);
           element.set_scroll_top(top as i32);

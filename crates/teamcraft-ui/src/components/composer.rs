@@ -16,7 +16,7 @@ use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
-use crate::model::{MessageKind, User};
+use crate::model::{ConversationKind, MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
@@ -145,6 +145,17 @@ pub fn Composer(
   let conversation_name = StoredValue::new(conversation_name);
   let i18n = use_i18n();
   let state = use_app_state();
+  // Thread replies can also be posted to the conversation itself.
+  let also_send_to_channel = RwSignal::new(false);
+  let channel_name = move || {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .map(|conv| match conv.kind {
+        ConversationKind::Direct | ConversationKind::Group => conv.name,
+        _ => format!("#{}", conv.name),
+      })
+      .unwrap_or_default()
+  };
   let input = NodeRef::<html::Textarea>::new();
   let file_input = NodeRef::<html::Input>::new();
   let is_empty = RwSignal::new(true);
@@ -325,11 +336,12 @@ pub fn Composer(
         priority: MessagePriority::Normal,
         wants_acknowledgement: false,
         is_silent: false,
-        also_send_to_channel: false,
+        also_send_to_channel: maybe_thread.is_some() && also_send_to_channel.get_untracked(),
         files,
       });
     });
     element.set_value("");
+    also_send_to_channel.set(false);
     draft_generation.update(|generation| *generation += 1);
     state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
     suggestions.set(Vec::new());
@@ -870,12 +882,30 @@ pub fn Composer(
             >
               <span aria-hidden="true">"Aa"</span>
             </button>
-            <span class="composer-hint">
-              {move || match state.settings.send_mode.get() {
-                SendMode::Enter => i18n.t("composer-hint-enter"),
-                SendMode::CtrlEnter => i18n.t("composer-hint-ctrl-enter"),
-              }}
-            </span>
+            {if maybe_thread.is_some() {
+              // In a thread the hint makes room for "Also send to #channel" (Slack, Mattermost).
+              view! {
+                <label class="composer-hint also-send">
+                  <input
+                    type="checkbox"
+                    prop:checked=move || also_send_to_channel.get()
+                    on:change=move |ev| also_send_to_channel.set(event_target_checked(&ev))
+                  />
+                  <span>{move || i18n.t_with("composer-also-send", &[("name", &channel_name())])}</span>
+                </label>
+              }
+                .into_any()
+            } else {
+              view! {
+                <span class="composer-hint">
+                  {move || match state.settings.send_mode.get() {
+                    SendMode::Enter => i18n.t("composer-hint-enter"),
+                    SendMode::CtrlEnter => i18n.t("composer-hint-ctrl-enter"),
+                  }}
+                </span>
+              }
+                .into_any()
+            }}
             <button
               class="send-btn"
               disabled=move || is_empty.get() && attachments.with(Vec::is_empty)

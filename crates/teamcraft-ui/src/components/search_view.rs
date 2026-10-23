@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use crate::clock::format_date_time;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::model::ConversationKind;
 use crate::search::{SearchHit, TokenKind, parse_query};
 use crate::state::use_app_state;
 
@@ -268,11 +269,20 @@ fn HitCard(hit: SearchHit) -> impl IntoView {
   let conversation = hit.message.conversation;
   let maybe_thread = hit.message.maybe_thread;
   let is_reply = maybe_thread.is_some();
+  let message_id = hit.message.id;
+  // Channels read "# name"; direct and group messages are just the names.
+  let prefix = match state
+    .read(|backend| backend.conversation(conversation))
+    .map(|conv| conv.kind)
+  {
+    Some(ConversationKind::Direct | ConversationKind::Group) => "",
+    _ => "# ",
+  };
 
   view! {
     <li class="hit">
       <div class="hit-meta">
-        <strong translate="no">{format!("# {}", hit.conversation_name)}</strong>
+        <strong translate="no">{prefix}{hit.conversation_name}</strong>
         {hit.maybe_space_name.map(|space| view! { <span class="muted-text" translate="no">{space}</span> })}
         <span translate="no">{author}</span>
         <time class="muted-text">{when}</time>
@@ -286,7 +296,7 @@ fn HitCard(hit: SearchHit) -> impl IntoView {
           .collect_view()}
       </p>
       <div class="hit-actions">
-        <button class="btn btn-small" on:click=move |_| state.open_conversation(conversation)>
+        <button class="btn btn-small" on:click=move |_| state.open_message(conversation, message_id, None)>
           {move || i18n.t("search-open-conversation")}
         </button>
         {maybe_thread
@@ -294,10 +304,7 @@ fn HitCard(hit: SearchHit) -> impl IntoView {
             view! {
               <button
                 class="btn btn-small"
-                on:click=move |_| {
-                  state.open_conversation(conversation);
-                  state.open_thread(conversation, thread);
-                }
+                on:click=move |_| state.open_message(conversation, message_id, Some(thread))
               >
                 {move || i18n.t("search-open-thread")}
               </button>

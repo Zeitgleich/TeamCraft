@@ -4802,3 +4802,32 @@ select.input {
   gap: 6px;
   justify-content: flex-end;
 }
+
+/* A message opened from search, a link or the activity list lights up briefly. */
+.msg-highlight {
+  animation: msg-highlight 2.5s ease-out;
+}
+
+@keyframes msg-highlight {
+  0%,
+  40% {
+    background: var(--mention-bg);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-highlight {
+    animation: none;
+    background: var(--mention-bg);
+  }
+}
+
+.composer-hint.also-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
