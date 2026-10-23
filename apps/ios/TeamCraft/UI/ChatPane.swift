@@ -28,6 +28,9 @@ struct ChatPane: View {
   @State private var mentionNames: (usernames: Set<String>, me: String) = ([], "")
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
+  @State private var typingNames: [String] = []
+  @State private var maybeLastTypingNotified: Date?
+  @AppStorage("share_typing") private var isSharingTyping = true
   @FocusState private var isComposerFocused: Bool
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
@@ -41,6 +44,7 @@ struct ChatPane: View {
       await followTransfers()
     }
     .task { mentionNames = await model.mentionNames() }
+    .task(id: model.changeCount) { await followTyping() }
     .onAppear { model.visibleConversationId = conversation.id }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
@@ -52,6 +56,15 @@ struct ChatPane: View {
     VStack(spacing: 0) {
       OfflineBanner()
       messageList
+      if let line = typingText(typingNames) {
+        Text(line)
+          .font(.caption.italic())
+          .foregroundStyle(Theme.textMuted)
+          .lineLimit(1)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal)
+          .padding(.vertical, 2)
+      }
       Divider()
       composer
     }
@@ -198,6 +211,7 @@ struct ChatPane: View {
           }
           TextField("composer_hint", text: $draft, axis: .vertical)
             .focused($isComposerFocused)
+            .onChange(of: draft) { _, text in announceTyping(text) }
             .lineLimit(1...5)
             .padding(10)
             .background(Theme.surface)
@@ -314,6 +328,25 @@ struct ChatPane: View {
       }
       Button("delete", systemImage: "trash", role: .destructive) { maybeDeleting = message }
     }
+  }
+
+  /// Re-reads who types on every change (a typing frame is one) and every couple of seconds while
+  /// someone types, since indicators run out without an event.
+  private func followTyping() async {
+    typingNames = await model.typingNames(conversationId: conversation.id)
+    while !typingNames.isEmpty {
+      try? await Task.sleep(for: .seconds(2))
+      if Task.isCancelled { return }
+      typingNames = await model.typingNames(conversationId: conversation.id)
+    }
+  }
+
+  /// Tells the others that the user types, at most every few seconds and only if they share it.
+  private func announceTyping(_ text: String) {
+    guard isSharingTyping, maybeEditing == nil, shouldNotifyTyping(text, now: .now, lastNotified: maybeLastTypingNotified)
+    else { return }
+    maybeLastTypingNotified = .now
+    Task { await model.perform(.typing(conversationId: conversation.id)) }
   }
 
   /// Opens a message link: its thread here, or its conversation (the list switches to it).

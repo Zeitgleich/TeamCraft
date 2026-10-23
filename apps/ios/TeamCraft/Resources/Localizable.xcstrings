@@ -4697,6 +4697,22 @@
         }
       }
     },
+    "share_typing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show others when I'm typing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anderen zeigen, wenn ich schreibe"
+          }
+        }
+      }
+    },
     "sign_in": {
       "localizations": {
         "en": {
@@ -4773,6 +4789,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Thread"
+          }
+        }
+      }
+    },
+    "typing_one %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ is typing…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ schreibt …"
+          }
+        }
+      }
+    },
+    "typing_several": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Several people are typing…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mehrere Personen schreiben …"
+          }
+        }
+      }
+    },
+    "typing_two %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ and %2$@ are typing…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ und %2$@ schreiben …"
           }
         }
       }

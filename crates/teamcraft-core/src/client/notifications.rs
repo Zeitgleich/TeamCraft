@@ -2,6 +2,7 @@
 //! device's own push checks need (`push_guard`), and typing indicators.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -29,9 +30,44 @@ const TOKEN_ALGORITHM: &str = "hpke-x25519-hkdf-sha256-chacha20poly1305";
 pub const TYPING_TIMEOUT_MS: i64 = 6_000;
 
 /// Who is typing where, with the time the indicator was last refreshed. Ephemeral, not stored.
-#[derive(Debug, Default)]
-pub(crate) struct TypingState {
-  seen: HashMap<(ConversationId, UserId), i64>,
+/// Cloning shares it: a UI adapter keeps a clone to read while the sync loop owns the client.
+#[derive(Clone, Debug, Default)]
+pub struct TypingState {
+  seen: Arc<Mutex<HashMap<(ConversationId, UserId), i64>>>,
+}
+
+impl TypingState {
+  /// People other than `me` typing in a conversation at `now_ms`, sorted.
+  pub fn users(&self, conversation: ConversationId, me: UserId, now_ms: i64) -> Vec<UserId> {
+    let mut users: Vec<UserId> = self
+      .lock()
+      .iter()
+      .filter(|((typed_in, user), at)| {
+        *typed_in == conversation && *user != me && now_ms - **at < TYPING_TIMEOUT_MS
+      })
+      .map(|((_, user), _)| *user)
+      .collect();
+    users.sort();
+    users
+  }
+
+  pub(crate) fn note(&self, conversation: ConversationId, user: UserId, now_ms: i64) {
+    let mut seen = self.lock();
+    seen.insert((conversation, user), now_ms);
+    seen.retain(|_, at| now_ms - *at < TYPING_TIMEOUT_MS);
+  }
+
+  fn clear(&self, conversation: ConversationId, user: UserId) {
+    self.lock().remove(&(conversation, user));
+  }
+
+  fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(ConversationId, UserId), i64>> {
+    // A panic while holding the lock leaves a plain map behind; it stays usable.
+    self
+      .seen
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
 }
 
 /// How long a sealed device token stays valid at the gateway.
@@ -314,28 +350,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Other users currently typing in a conversation.
   pub fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
-    let now = self.now_ms();
-    let mut users: Vec<UserId> = self
+    self
       .typing
-      .seen
-      .iter()
-      .filter(|((typed_in, user), at)| {
-        *typed_in == conversation && *user != self.account.user_id && now - **at < TYPING_TIMEOUT_MS
-      })
-      .map(|((_, user), _)| *user)
-      .collect();
-    users.sort();
-    users
+      .users(conversation, self.account.user_id, self.now_ms())
+  }
+
+  /// The typing state, shared: a UI adapter reads it while the sync loop owns the client.
+  pub fn typing_state(&self) -> TypingState {
+    self.typing.clone()
   }
 
   pub(crate) fn note_typing(&mut self, conversation: ConversationId, user: UserId) {
-    let now = self.now_ms();
-    self.typing.seen.insert((conversation, user), now);
-    self.typing.seen.retain(|_, at| now - *at < TYPING_TIMEOUT_MS);
+    self.typing.note(conversation, user, self.now_ms());
   }
 
   /// A message from someone ends their typing indicator.
   pub(crate) fn clear_typing(&mut self, conversation: ConversationId, user: UserId) {
-    self.typing.seen.remove(&(conversation, user));
+    self.typing.clear(conversation, user);
   }
 }

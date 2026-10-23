@@ -73,6 +73,7 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -94,6 +95,9 @@ import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Mentions
 import de.zeitgleich.teamcraft.ui.PendingShare
+import de.zeitgleich.teamcraft.ui.TypingLine
+import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
+import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.sensitiveClip
 import uniffi.teamcraft_ffi.needsChannelConfirmation
 
@@ -153,6 +157,7 @@ fun ConversationScreen(
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
     )
+    TypingIndicator(viewModel, conversationId, snapshot, changes)
     if (conversation?.canPost != false) {
       Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot)
     } else {
@@ -211,6 +216,7 @@ fun ThreadScreen(
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
     )
+    TypingIndicator(viewModel, conversationId, snapshot, changes)
     Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot)
   }
 }
@@ -227,6 +233,36 @@ private fun FollowTransfers(extras: Map<String, MessageExtras>, reload: suspend 
       reload()
     }
   }
+}
+
+/**
+ * "Alice is typing…" above the composer. Re-read on every change (a typing frame is one) and
+ * every couple of seconds while someone types, since indicators run out without an event.
+ */
+@Composable
+private fun TypingIndicator(viewModel: MainViewModel, conversationId: String, snapshot: ChatSnapshot?, changes: Long) {
+  var typing by remember(conversationId) { mutableStateOf<List<String>>(emptyList()) }
+  LaunchedEffect(conversationId, changes) {
+    do {
+      typing = viewModel.readChat { query(ChatQueries.typingUsers(conversationId)).users } ?: emptyList()
+      if (typing.isNotEmpty()) delay(TYPING_POLL_MS)
+    } while (typing.isNotEmpty())
+  }
+  val text = when (val line = typingLine(typing.map { snapshot?.name(it).orEmpty() })) {
+    null -> return
+    is TypingLine.One -> stringResource(R.string.typing_one, line.name)
+    is TypingLine.Two -> stringResource(R.string.typing_two, line.first, line.second)
+    TypingLine.Several -> stringResource(R.string.typing_several)
+  }
+  Text(
+    text,
+    style = MaterialTheme.typography.labelMedium,
+    fontStyle = FontStyle.Italic,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    maxLines = 1,
+    overflow = TextOverflow.Ellipsis,
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+  )
 }
 
 /** Top bar, failure snackbar and the column the screens fill. */
@@ -668,6 +704,8 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
   val pickers = rememberAttachmentPickers(viewModel) { picked -> files = files + picked }
   val focus = remember { FocusRequester() }
   val isSendWithEnter = remember { ComposerPrefs.prefs(context).isSendWithEnter }
+  val isSharingTyping = remember { ComposerPrefs.prefs(context).isSharingTyping }
+  var maybeLastTypingAt by remember { mutableStateOf<Long?>(null) }
   LaunchedEffect(maybeReply) {
     // Replying starts typing right away.
     if (maybeReply != null) focus.requestFocus()
@@ -787,7 +825,14 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
       }
       OutlinedTextField(
         value = text,
-        onValueChange = { text = it },
+        onValueChange = {
+          text = it
+          val now = System.currentTimeMillis()
+          if (isSharingTyping && shouldNotifyTyping(it, now, maybeLastTypingAt)) {
+            maybeLastTypingAt = now
+            viewModel.act(ChatActions.typing(conversationId))
+          }
+        },
         placeholder = { Text(stringResource(R.string.composer_hint)) },
         modifier = Modifier
           .weight(1f)
@@ -900,6 +945,9 @@ private fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOpti
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
 }
+
+/** How often the typing line is re-read while someone types (indicators last 6 s). */
+private const val TYPING_POLL_MS = 2000L
 
 /** How often a running upload or download is re-read. */
 private const val TRANSFER_POLL_MS = 1000L

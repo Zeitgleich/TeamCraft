@@ -53,6 +53,10 @@ const PENDING_ID_BIT: i64 = 1 << 62;
 pub enum CoreCommand {
   /// New messages or reactions are in the outbox.
   FlushOutbox,
+  /// The user types in a conversation (sent on the gateway by the sync loop, throttled).
+  Typing {
+    conversation: ConversationId,
+  },
   MarkRead {
     conversation: ConversationId,
   },
@@ -240,6 +244,8 @@ pub struct CoreChatBackend<S> {
   me: UserId,
   clock: Box<dyn Clock>,
   commands: Rc<RefCell<Vec<CoreCommand>>>,
+  /// Who types where; shared with the client when [`Self::with_typing`] was given its state.
+  typing: crate::TypingState,
   /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
   pub(crate) requests: RefCell<crate::ui_people::RequestLog>,
   #[cfg(not(target_arch = "wasm32"))]
@@ -254,10 +260,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
       me,
       clock,
       commands: Rc::new(RefCell::new(Vec::new())),
+      typing: crate::TypingState::default(),
       requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
+  }
+
+  /// Reads typing indicators from the client's state ([`crate::Client::typing_state`]).
+  #[must_use]
+  pub fn with_typing(mut self, typing: crate::TypingState) -> Self {
+    self.typing = typing;
+    self
   }
 
   /// Takes the queued commands (the sync task runs them).
@@ -935,6 +949,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_first_unread(conversation)
   }
 
+  fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
+    self.typing.users(conversation, self.me, self.clock.now_ms())
+  }
+
+  fn notify_typing(&self, conversation: ConversationId) {
+    self.command(CoreCommand::Typing { conversation });
+  }
+
   fn retry_send(&self, conversation: ConversationId, message: MessageId) {
     self.ui_retry_send(conversation, message);
   }
@@ -1209,6 +1231,37 @@ mod tests {
     assert_eq!(
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
+    );
+  }
+
+  #[test]
+  fn typing_is_read_from_the_shared_state_and_announced_as_a_command() {
+    let me = id::<UserId>(1);
+    let colleague = id::<UserId>(2);
+    let conversation = id::<ConversationId>(10);
+    let typing = crate::TypingState::default();
+    let backend = CoreChatBackend::new(MemoryStore::new(), me, Box::new(ManualClock::new(10_000)))
+      .with_typing(typing.clone());
+
+    // What the client records from the gateway; the backend shares the same state.
+    typing.note(conversation, colleague, 9_000);
+    typing.note(conversation, me, 9_000);
+    assert_eq!(
+      backend.typing_users(conversation),
+      vec![colleague],
+      "never the user themself"
+    );
+    assert!(backend.typing_users(id::<ConversationId>(11)).is_empty());
+    typing.note(conversation, colleague, 10_000 - crate::client::TYPING_TIMEOUT_MS);
+    assert!(
+      backend.typing_users(conversation).is_empty(),
+      "indicators run out"
+    );
+
+    backend.notify_typing(conversation);
+    assert_eq!(
+      backend.drain_commands(),
+      vec![CoreCommand::Typing { conversation }]
     );
   }
 

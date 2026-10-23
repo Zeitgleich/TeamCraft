@@ -582,6 +582,16 @@ final class AppModel {
     await answer(.resolvePermalink(link: link))?.maybeTarget
   }
 
+  /// Names of the people typing in a conversation right now.
+  func typingNames(conversationId: String) async -> [String] {
+    guard let ids = await answer(.typingUsers(conversationId: conversationId))?.users, !ids.isEmpty else { return [] }
+    guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
+      return []
+    }
+    let names = Dictionary((people.users ?? []).map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+    return ids.map { names[$0] ?? "" }.filter { !$0.isEmpty }
+  }
+
   /// Who can be mentioned (lower-case usernames) and the user's own username, for highlighting.
   func mentionNames() async -> (usernames: Set<String>, me: String) {
     guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
