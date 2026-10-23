@@ -43,9 +43,9 @@ top bar on macOS. Users switch to the system title bar in Settings → Desktop (
 bar"); it applies at once on Windows and Linux and at the next start on macOS. A package or a
 machine policy can make the system title bar the default with `TEAMCRAFT_TITLE_BAR=system` (for
 Flatpak: `flatpak override --env=TEAMCRAFT_TITLE_BAR=system de.zeitgleich.teamcraft`); once the
-user has saved the desktop settings, the saved value wins. Windows 11 snap layouts don't open on hovering the custom maximize button
-(Tauri can't do that yet, tauri-apps/tauri#4531); Win+Z, Win+arrow keys and dragging to the screen
-edges work as usual.
+user has saved the desktop settings, the saved value wins. Windows 11 snap layouts don't open on
+hovering the custom maximize button (Tauri can't do that yet, tauri-apps/tauri#4531; tracked in
+#173); Win+Z, Win+arrow keys and dragging to the screen edges work as usual.
 
 ## Icons
 
