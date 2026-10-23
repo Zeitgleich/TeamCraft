@@ -382,6 +382,40 @@ pub fn NotificationsTab() -> impl IntoView {
       />
     </fieldset>
 
+    <fieldset class="settings-group">
+      <legend>{move || i18n.t("notif-calls-meetings")}</legend>
+      // Calls ring in the desktop app only; the browser has no call media.
+      <Show when=crate::auth::tauri::is_available fallback=|| ()>
+        <CheckField
+          label="notif-ringtone"
+          hint="notif-ringtone-hint"
+          value=Signal::derive(move || notes.get().plays_ringtone)
+          on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.plays_ringtone = value)))
+        />
+      </Show>
+      <SelectField
+        id="notif-meeting-reminder"
+        label="notif-meeting-reminder"
+        options=options(&["off", "1", "5", "10", "15"], "notif-meeting-reminder-")
+        value=Signal::derive(move || {
+          notes
+            .get()
+            .maybe_meeting_reminder_minutes
+            .map_or_else(|| "off".to_owned(), |minutes| minutes.to_string())
+        })
+        on_change=Callback::new(move |value: String| {
+          let maybe_minutes = value.parse::<u16>().ok();
+          edit(Box::new(move |n| n.maybe_meeting_reminder_minutes = maybe_minutes));
+        })
+        hint="notif-meeting-hint"
+      />
+      <CheckField
+        label="notif-meeting-start"
+        value=Signal::derive(move || notes.get().notifies_meeting_start)
+        on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.notifies_meeting_start = value)))
+      />
+    </fieldset>
+
     <DndEditor />
 
     <fieldset class="settings-group">

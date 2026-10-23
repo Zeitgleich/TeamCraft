@@ -30,7 +30,7 @@ web-sys = { version = "0.3", features = [
   "HtmlCollection", "KeyboardEvent", "MediaQueryList", "CssStyleDeclaration", "Node", "NodeList", "Storage", "Window",
   "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator", "ServiceWorkerContainer", "ServiceWorker", "MessageEvent", "ServiceWorkerRegistration", "Location", "History",
   "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
-  "BroadcastChannel", "StorageManager", "ServiceWorkerState", "VisibilityState",
+  "BroadcastChannel", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"

@@ -813,9 +813,30 @@ message-seen-by = Gesehen von { $names }
 
 notif-preview = Nachrichtentext in Desktop-Benachrichtigungen zeigen
 notif-preview-hint = Aus: Benachrichtigungen nennen nur, wer wo geschrieben hat.
+notif-calls-meetings = Anrufe und Besprechungen
+notif-ringtone = Klingelton für eingehende Anrufe abspielen
+notif-ringtone-hint = Über die Standard-Lautsprecher. Still bei „Nicht stören“, in stummgeschalteten Unterhaltungen und während eines Anrufs.
+notif-meeting-reminder = Vor einer Besprechung erinnern
+notif-meeting-reminder-off = Aus
+notif-meeting-reminder-1 = 1 Minute vorher
+notif-meeting-reminder-5 = 5 Minuten vorher
+notif-meeting-reminder-10 = 10 Minuten vorher
+notif-meeting-reminder-15 = 15 Minuten vorher
+notif-meeting-start = Benachrichtigen, wenn eine Besprechung beginnt
+notif-meeting-hint = Für Besprechungen, zu denen du eingeladen bist und die du nicht abgesagt hast. Jedes Gerät erinnert einmal.
 notify-in-channel = { $name } in { $channel }
 notify-new-message = Neue Nachricht
 notify-thread-reply = { $name } hat in einem Thread geantwortet
+notify-reply-placeholder = Antworten…
+notify-action-mark-read = Als gelesen markieren
+notify-missed-call = Verpasster Anruf
+notify-missed-call-from = { $name } hat angerufen
+notify-action-call-back = Zurückrufen
+notify-meeting-soon = { $minutes ->
+    [one] Besprechung in 1 Minute
+   *[other] Besprechung in { $minutes } Minuten
+}
+notify-meeting-now = Besprechung beginnt jetzt
 
 # ---- Meetings ----
 sidebar-meetings = Meetings

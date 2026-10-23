@@ -1,11 +1,9 @@
 use leptos::prelude::*;
 
 use crate::auth::tauri;
-use crate::calls::{CallKind, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::model::ConversationKind;
 use crate::state::use_app_state;
 
 /// Ringing card for an incoming call. It does not take focus from what the user is typing; screen
@@ -19,27 +17,13 @@ pub fn IncomingCallDialog() -> impl IntoView {
   move || {
     let incoming = call.incoming.get()?;
     let caller = state.read(|backend| backend.user(incoming.caller))?;
-    let conversation = state.read(|backend| backend.conversation(incoming.conversation));
-    let kind = match conversation.as_ref().map(|conv| conv.kind) {
-      Some(ConversationKind::Direct) | None => CallKind::Direct,
-      Some(_) => CallKind::Group,
-    };
-    let request = CallRequest {
-      conversation: incoming.conversation,
-      kind,
-    };
     let caller_name = caller.display_name.clone();
     let text = if incoming.with_video {
       i18n.t_with("incoming-video", &[("name", &caller_name)])
     } else {
       i18n.t_with("incoming-audio", &[("name", &caller_name)])
     };
-    let accept = move |with_video: bool| {
-      call.incoming.set(None);
-      call.is_camera_on.set(with_video);
-      state.open_conversation(request.conversation);
-      call.join(request);
-    };
+    let accept = move |with_video: bool| state.accept_call(incoming, with_video);
 
     Some(view! {
       <div class="incoming" role="alertdialog" aria-labelledby="incoming-title" aria-describedby="incoming-text">

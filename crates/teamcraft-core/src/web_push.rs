@@ -136,6 +136,12 @@ mod service_worker {
   const FALLBACK_TITLE: &str = "TeamCraft";
   /// Key of the conversation ID in a notification's `data`.
   const CONVERSATION_FIELD: &str = "conversation_id";
+  /// Key of the tag in the `data` of notifications the page showed (`teamcraft-ui`).
+  const TAG_FIELD: &str = "tag";
+  /// The action a plain click reports (`NotificationAction::Open` in `teamcraft-client-api`).
+  const CLICK_ACTION: &str = "default";
+  /// The one button that needs no window in front (`NotificationAction::MarkRead`).
+  const MARK_READ_ACTION: &str = "mark-read";
 
   /// The service worker's `push` handler: decrypts the wake-up and shows the notification.
   /// Browsers require a notification for every push, so failures still show one, without content.
@@ -157,15 +163,26 @@ mod service_worker {
   }
 
   /// The service worker's `notificationclick` handler: focuses an open app window and tells it which
-  /// conversation to show, or opens one.
+  /// conversation to show, or opens one. A button (or a click on a notification the page showed for
+  /// a call or meeting) goes to the page as a `notification_action` message with the notification's
+  /// tag; "mark as read" does so without bringing the window up.
   #[wasm_bindgen(js_name = handleNotificationClick)]
   pub async fn handle_notification_click(event: web_sys::NotificationEvent) -> Result<(), JsValue> {
     let notification = event.notification();
     notification.close();
-    let maybe_conversation =
-      js_sys::Reflect::get(&notification.data(), &JsValue::from_str(CONVERSATION_FIELD))
+    let data = notification.data();
+    let field = |key: &str| {
+      js_sys::Reflect::get(&data, &JsValue::from_str(key))
         .ok()
-        .and_then(|value| value.as_string());
+        .and_then(|value| value.as_string())
+    };
+    let maybe_conversation = field(CONVERSATION_FIELD);
+    let maybe_tag = field(TAG_FIELD);
+    // `NotificationEvent.action` is behind web-sys' unstable APIs; read the property directly.
+    let action = js_sys::Reflect::get(&event, &JsValue::from_str("action"))
+      .ok()
+      .and_then(|value| value.as_string())
+      .unwrap_or_default();
     let scope: ServiceWorkerGlobalScope = js_sys::global().unchecked_into();
     let clients = scope.clients();
     let query = web_sys::ClientQueryOptions::new();
@@ -176,8 +193,22 @@ mod service_worker {
       .unchecked_into();
     if let Some(window) = windows.iter().next() {
       let window: web_sys::WindowClient = window.unchecked_into();
-      if let Some(conversation) = &maybe_conversation {
-        let message = js_sys::Object::new();
+      let is_page_action = !action.is_empty() || (maybe_conversation.is_none() && maybe_tag.is_some());
+      let message = js_sys::Object::new();
+      if let (true, Some(tag)) = (is_page_action, &maybe_tag) {
+        let action = if action.is_empty() {
+          CLICK_ACTION
+        } else {
+          action.as_str()
+        };
+        js_sys::Reflect::set(&message, &"type".into(), &"notification_action".into())?;
+        js_sys::Reflect::set(&message, &TAG_FIELD.into(), &tag.into())?;
+        js_sys::Reflect::set(&message, &"action".into(), &action.into())?;
+        window.post_message(&message)?;
+        if action == MARK_READ_ACTION {
+          return Ok(());
+        }
+      } else if let Some(conversation) = &maybe_conversation {
         js_sys::Reflect::set(&message, &"type".into(), &"open_conversation".into())?;
         js_sys::Reflect::set(&message, &CONVERSATION_FIELD.into(), &conversation.into())?;
         window.post_message(&message)?;

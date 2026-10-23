@@ -14,7 +14,8 @@ use teamcraft_proto::{
 
 use crate::auth::fetch::fetch;
 use crate::auth::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator};
-use crate::clock::parse_local_datetime;
+use crate::clock::{now_ms, parse_local_datetime};
+use crate::meeting_reminders::ServerClock;
 use crate::model::{ConversationId, TimestampMs, UserId};
 
 /// Meetings that ended less than this long ago are still listed.
@@ -37,6 +38,13 @@ pub enum MeetingError {
   Unreadable(String),
 }
 
+/// The meetings of the caller and the server's clock when it answered.
+pub struct MeetingList {
+  pub meetings: Vec<MeetingResponse>,
+  /// `None` from servers that don't send their time.
+  pub maybe_clock: Option<ServerClock>,
+}
+
 /// Authenticated meeting calls of a signed-in member.
 #[derive(Clone)]
 pub struct MeetingsClient {
@@ -48,18 +56,25 @@ impl MeetingsClient {
     Self { auth }
   }
 
-  /// Upcoming and just-ended meetings of the caller, soonest first.
-  pub async fn list(&self, now: TimestampMs) -> Result<Vec<MeetingResponse>, MeetingError> {
+  /// Upcoming and just-ended meetings of the caller, soonest first, with the server's clock.
+  pub async fn list(&self, now: TimestampMs) -> Result<MeetingList, MeetingError> {
     let path = format!(
       "/api/v1/meetings?from={}&limit={LIST_LIMIT}",
       now - LIST_LOOKBACK_MS
     );
-    let mut meetings: Vec<MeetingResponse> = self
+    let sent_at = now_ms();
+    let response = self
       .call::<ListMeetingsResponse>(ApiMethod::Get, &path, None)
-      .await?
-      .meetings;
+      .await?;
+    let maybe_clock = response
+      .maybe_server_now
+      .map(|server_now| ServerClock::measured(server_now.0, sent_at, now_ms()));
+    let mut meetings = response.meetings;
     meetings.sort_by_key(|meeting| meeting.starts_at);
-    Ok(meetings)
+    Ok(MeetingList {
+      meetings,
+      maybe_clock,
+    })
   }
 
   pub async fn create(&self, request: &CreateMeetingRequest) -> Result<MeetingResponse, MeetingError> {
@@ -183,6 +198,8 @@ pub struct MeetingsHub {
   /// Why the last call failed, for a visible message.
   pub maybe_error: RwSignal<Option<String>>,
   pub is_loaded: RwSignal<bool>,
+  /// The server's clock as of the last list (meeting reminders run on it).
+  pub clock: RwSignal<ServerClock>,
 }
 
 impl MeetingsHub {
@@ -193,6 +210,7 @@ impl MeetingsHub {
       lobbies: RwSignal::new(Vec::new()),
       maybe_error: RwSignal::new(None),
       is_loaded: RwSignal::new(false),
+      clock: RwSignal::new(ServerClock::default()),
     }
   }
 
@@ -213,7 +231,13 @@ impl MeetingsHub {
   /// Reloads the list, then the lobbies of the meetings `me` hosts that use one.
   pub async fn refresh(&self, me: UserId, now: TimestampMs) {
     match self.client().list(now).await {
-      Ok(meetings) => {
+      Ok(MeetingList {
+        meetings,
+        maybe_clock,
+      }) => {
+        if let Some(clock) = maybe_clock {
+          self.clock.set(clock);
+        }
         self.maybe_error.set(None);
         self.meetings.set(meetings.clone());
         self.is_loaded.set(true);

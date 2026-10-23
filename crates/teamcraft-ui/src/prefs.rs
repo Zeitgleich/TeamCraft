@@ -217,7 +217,16 @@ pub struct NotificationPrefs {
   /// Per space, keyed by the space ID as text. Its channels follow it unless they have an entry of
   /// their own; "mute space" is an entry with the level `Nothing` or a mute time.
   pub spaces: BTreeMap<String, ConversationNotify>,
+  /// A ringtone plays on the default output while a call rings (notifications.md, "Calls").
+  pub plays_ringtone: bool,
+  /// Remind this many minutes before a meeting starts; `None`: no reminder before.
+  pub maybe_meeting_reminder_minutes: Option<u16>,
+  /// Remind when a meeting starts.
+  pub notifies_meeting_start: bool,
 }
+
+/// Default of "remind before a meeting" (notifications.md, "Meeting reminders").
+pub const DEFAULT_MEETING_REMINDER_MINUTES: u16 = 5;
 
 impl Default for NotificationPrefs {
   fn default() -> Self {
@@ -240,6 +249,9 @@ impl Default for NotificationPrefs {
       maybe_dnd_until: None,
       conversations: BTreeMap::new(),
       spaces: BTreeMap::new(),
+      plays_ringtone: true,
+      maybe_meeting_reminder_minutes: Some(DEFAULT_MEETING_REMINDER_MINUTES),
+      notifies_meeting_start: true,
     }
   }
 }
@@ -635,6 +647,24 @@ mod tests {
       "missing fields use their defaults"
     );
     assert_eq!(Preferences::from_json("not json"), Preferences::default());
+  }
+
+  #[test]
+  fn call_and_meeting_alerts_are_on_by_default_and_can_be_turned_off() {
+    let older = Preferences::from_json(r#"{"notifications":{"desktop":"all"}}"#).notifications;
+    assert!(older.plays_ringtone);
+    assert_eq!(
+      older.maybe_meeting_reminder_minutes,
+      Some(DEFAULT_MEETING_REMINDER_MINUTES)
+    );
+    assert!(older.notifies_meeting_start);
+    let off = Preferences::from_json(
+      r#"{"notifications":{"plays_ringtone":false,"maybe_meeting_reminder_minutes":null,"notifies_meeting_start":false}}"#,
+    )
+    .notifications;
+    assert!(!off.plays_ringtone);
+    assert_eq!(off.maybe_meeting_reminder_minutes, None);
+    assert!(!off.notifies_meeting_start);
   }
 
   #[test]
