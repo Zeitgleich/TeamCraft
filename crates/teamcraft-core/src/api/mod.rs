@@ -20,10 +20,11 @@ use teamcraft_proto::{
   DeviceListResponse, DeviceResponse, ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage,
   GetMeResponse, IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
-  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpacesResponse, MessageResponse,
-  MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
-  PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest, SpaceId,
-  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
+  ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest,
+  PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
+  UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -96,6 +97,10 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<ClaimKeyPackagesResponse, ApiError>>;
 
   fn list_spaces(&self) -> impl Future<Output = Result<ListSpacesResponse, ApiError>>;
+  fn list_space_members(
+    &self,
+    space: SpaceId,
+  ) -> impl Future<Output = Result<ListSpaceMembersResponse, ApiError>>;
   fn list_conversations(&self) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
   fn conversation(
     &self,
@@ -440,6 +445,10 @@ impl ApiError {
 
   pub fn is_not_found(&self) -> bool {
     matches!(self, Self::Status { status: 404, .. })
+  }
+
+  pub fn is_forbidden(&self) -> bool {
+    matches!(self, Self::Status { status: 403, .. })
   }
 
   /// Worth retrying later without changing the request (offline, server overloaded).

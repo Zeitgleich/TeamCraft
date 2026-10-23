@@ -13,8 +13,8 @@ use teamcraft_proto::{
   DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
   KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
   ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
+  MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
   RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
   UserId, UserSummary,
 };
@@ -245,6 +245,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn list_spaces(&self) -> Result<ListSpacesResponse, ApiError> {
     self.get("/spaces").await
+  }
+
+  async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
+    self.get(&format!("/spaces/{space}/members")).await
   }
 
   async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {

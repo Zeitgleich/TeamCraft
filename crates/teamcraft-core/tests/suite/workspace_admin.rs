@@ -224,6 +224,21 @@ async fn categories_invitations_and_external_badge() {
   assert!(alice_ui.has_external_people(channel));
 }
 
+#[tokio::test]
+async fn the_people_of_my_spaces_are_known_without_a_shared_conversation() {
+  let server = FakeServer::new();
+  let alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let _ = alice.space().await;
+
+  bob.client.full_sync().await.unwrap();
+
+  // A new member can find and message colleagues before sharing any conversation with them.
+  let bob_ui = backend_of(&bob);
+  let names: Vec<String> = bob_ui.users().into_iter().map(|user| user.display_name).collect();
+  assert!(names.contains(&"Alice".to_string()), "{names:?}");
+}
+
 async fn create_public_channel(peer: &mut Peer, space: SpaceId, name: &str) -> ConversationId {
   let ui = backend_of(peer);
   ui.create_channel_with(NewChannel {
