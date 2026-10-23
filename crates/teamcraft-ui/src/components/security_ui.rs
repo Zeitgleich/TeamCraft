@@ -13,8 +13,10 @@ use crate::security::group_fingerprint;
 use crate::state::{Overlay, use_app_state};
 
 /// Demo payload of the QR code: a rendezvous ID and a throw-away authentication key, no real secrets.
+#[cfg(feature = "demo")]
 const DEMO_LINK_URI: &str =
   "teamcraft://link?v=1&rv=7Qm2xD9aVt4cLw8e&ak=ZGVtby1rZXktbm90LWEtc2VjcmV0LTMyLWJ5dGVz";
+#[cfg(feature = "demo")]
 const DEMO_LINK_CODE: &str = "4 7 1 9";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,14 +108,46 @@ pub fn DeviceApprovalDialog() -> impl IntoView {
 }
 
 /// On the existing device: link a new device. With the desktop core this is the real flow (enter the
-/// new device's code, compare the short code, approve); without it the demo screen stays.
+/// new device's code, compare the short code, approve); without it linking is not possible here.
 #[component]
 pub fn LinkDeviceDialog() -> impl IntoView {
   if crate::auth::tauri::has_core() {
     view! { <ApproveLinkDialog /> }.into_any()
   } else {
-    view! { <DemoLinkDialog /> }.into_any()
+    view! { <LinkUnavailableDialog /> }.into_any()
   }
+}
+
+/// Without the client core (it did not start) there are no keys to hand over.
+#[cfg(not(feature = "demo"))]
+#[component]
+fn LinkUnavailableDialog() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <Modal labelled_by="link-title" class="modal-link">
+      <header class="modal-head">
+        <h2 id="link-title">{move || i18n.t("link-title")}</h2>
+        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <p class="muted-text">{move || i18n.t("link-unavailable")}</p>
+      <footer class="modal-foot">
+        <span class="grow"></span>
+        <button class="btn btn-primary" data-autofocus on:click=move |_| state.close_overlay()>
+          {move || i18n.t("close")}
+        </button>
+      </footer>
+    </Modal>
+  }
+}
+
+/// The demo build shows its pretend linking screen instead.
+#[cfg(feature = "demo")]
+#[component]
+fn LinkUnavailableDialog() -> impl IntoView {
+  view! { <DemoLinkDialog /> }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -248,6 +282,7 @@ fn ApproveLinkDialog() -> impl IntoView {
 }
 
 /// Demo screen of the browser-only build: a QR code that is not a real login.
+#[cfg(feature = "demo")]
 #[component]
 fn DemoLinkDialog() -> impl IntoView {
   let state = use_app_state();

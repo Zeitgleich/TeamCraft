@@ -1,9 +1,11 @@
-//! Composes a real chat backend with the parts that are still demo data.
+//! Composes the chat backend with the server's live state, the admin API and the desktop calls.
 //!
-//! The chat (spaces, conversations, messages) comes from `C`: the client core over the desktop
-//! bridge, or the REST reader of the browser build. Search, calls, administration and device security
-//! have no real backend yet and are answered by the mock, so every screen stays usable. The role
-//! comes from the account, so admins see the console (with demo data).
+//! The chat (spaces, conversations, messages, search, own devices, keys) comes from `C`: the client
+//! core over the desktop bridge or in the page, or the REST reader without a core. Live state
+//! (unread counts, threads, presence, receipts, announcements) comes from the server, the
+//! administration console from the admin API (admins and owners only), calls from the desktop shell.
+//! Whatever is missing answers empty: there is no demo data here (it only exists in development
+//! builds with the `demo` feature).
 
 use std::rc::Rc;
 use teamcraft_client_api::calls::OrgBackgroundRule;
@@ -36,7 +38,6 @@ use crate::calls::{
 };
 use crate::clock::now_ms;
 use crate::live::{LiveScope, LiveServer, POLL_INTERVAL_MS, thread_summary};
-use crate::mock::MockBackend;
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId, as_log_line,
@@ -51,36 +52,23 @@ use teamcraft_client_api::remote::CallAction;
 pub struct Hybrid<C> {
   chat: Rc<C>,
   role: Role,
-  mock: MockBackend,
   maybe_live: Option<LiveServer>,
   /// The administration console on the admin API; only for admins and owners.
   maybe_admin: Option<AdminLive>,
-  /// Calls of the desktop shell; without them the call screens run on demo data.
+  /// Calls of the desktop shell; without them the app offers no calls.
   maybe_calls: Option<RemoteCalls>,
 }
 
 impl<C: ChatBackend + 'static> Hybrid<C> {
-  /// Real calls from the desktop shell instead of the demo roster.
+  /// Calls through the desktop shell.
   #[must_use]
   pub fn with_calls(mut self, calls: RemoteCalls) -> Self {
     self.maybe_calls = Some(calls);
     self
   }
 
-  /// Chat only: whatever `chat` knows is all there is (demo and tests).
-  pub fn new(chat: C, role: Role, now: TimestampMs) -> Self {
-    Self {
-      chat: Rc::new(chat),
-      role,
-      mock: MockBackend::new(now),
-      maybe_live: None,
-      maybe_admin: None,
-      maybe_calls: None,
-    }
-  }
-
   /// Chat plus the server's live state (unread counts, threads, presence, receipts).
-  pub fn with_live(chat: C, role: Role, now: TimestampMs, auth: Rc<dyn Authenticator>) -> Self {
+  pub fn with_live(chat: C, role: Role, auth: Rc<dyn Authenticator>) -> Self {
     let chat = Rc::new(chat);
     let scope_chat = chat.clone();
     let scope = Rc::new(move || LiveScope {
@@ -95,7 +83,6 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
     Self {
       chat,
       role,
-      mock: MockBackend::new(now),
       maybe_live: Some(LiveServer::new(auth, scope)),
       maybe_admin,
       maybe_calls: None,
@@ -533,10 +520,7 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
   }
 
   fn current_announcement(&self) -> Option<AnnouncementResponse> {
-    match &self.maybe_live {
-      Some(live) => live.announcement(),
-      None => self.mock.announcement(),
-    }
+    self.maybe_live.as_ref().and_then(LiveServer::announcement)
   }
 
   fn dismiss_announcement(&self, id: teamcraft_proto::AnnouncementId) {
@@ -554,78 +538,64 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 }
 
 impl<C: ChatBackend> SearchBackend for Hybrid<C> {
-  /// Search needs decrypted messages: the client core answers from its local index; without one the
-  /// mock answers so the screens can be used.
+  /// Search needs decrypted messages: the client core answers from its local index. Without a core
+  /// (the REST reader) there is nothing to search.
   fn search(&self, query: &ParsedQuery) -> SearchResults {
-    match self.chat.search_backend() {
-      Some(real) => real.search(query),
-      None => self.mock.search(query),
-    }
+    self
+      .chat
+      .search_backend()
+      .map_or_else(SearchResults::default, |real| real.search(query))
   }
 
   fn recent_mentions(&self) -> Vec<SearchHit> {
-    match self.chat.search_backend() {
-      Some(real) => real.recent_mentions(),
-      None => self.mock.recent_mentions(),
-    }
+    self
+      .chat
+      .search_backend()
+      .map_or_else(Vec::new, SearchBackend::recent_mentions)
   }
 
   fn saved_searches(&self) -> Vec<SavedSearch> {
-    match self.chat.search_backend() {
-      Some(real) => real.saved_searches(),
-      None => self.mock.saved_searches(),
-    }
+    self
+      .chat
+      .search_backend()
+      .map_or_else(Vec::new, SearchBackend::saved_searches)
   }
 
   fn save_search(&self, name: &str, query: &str) {
-    match self.chat.search_backend() {
-      Some(real) => real.save_search(name, query),
-      None => self.mock.save_search(name, query),
+    if let Some(real) = self.chat.search_backend() {
+      real.save_search(name, query);
     }
   }
 
   fn delete_saved_search(&self, id: u64) {
-    match self.chat.search_backend() {
-      Some(real) => real.delete_saved_search(id),
-      None => self.mock.delete_saved_search(id),
+    if let Some(real) = self.chat.search_backend() {
+      real.delete_saved_search(id);
     }
   }
 }
 
 impl<C: ChatBackend> CallBackend for Hybrid<C> {
   fn media_devices(&self) -> MediaDevices {
-    match &self.maybe_calls {
-      Some(calls) => calls.devices(),
-      None => self.mock.media_devices(),
-    }
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or_else(MediaDevices::default, RemoteCalls::devices)
   }
 
   fn call_participants(&self, conversation: ConversationId) -> Vec<Participant> {
-    if let Some(calls) = &self.maybe_calls {
-      let me = self.chat.me().id;
-      return calls
-        .participants(conversation)
-        .into_iter()
-        .filter(|participant| participant.user != me)
-        .collect();
-    }
-    let members = self
-      .conversation(conversation)
-      .map(|conv| conv.member_ids)
-      .unwrap_or_default();
+    let Some(calls) = &self.maybe_calls else {
+      return Vec::new();
+    };
     let me = self.chat.me().id;
-    members
+    calls
+      .participants(conversation)
       .into_iter()
-      .filter(|member| *member != me)
-      .take(7)
-      .map(|user| Participant {
-        user,
-        is_muted: false,
-        is_camera_on: true,
-        has_hand_raised: false,
-        is_sharing_screen: false,
-      })
+      .filter(|participant| participant.user != me)
       .collect()
+  }
+
+  fn has_calls(&self) -> bool {
+    self.maybe_calls.is_some()
   }
 
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {
@@ -733,27 +703,26 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   fn admin_channels(&self) -> Vec<AdminChannel> {
     match &self.maybe_admin {
       Some(admin) => admin.channels(),
-      None => self.mock.admin_channels(),
+      None => Vec::new(),
     }
   }
 
   fn admin_users(&self) -> Vec<AdminUser> {
     match &self.maybe_admin {
       Some(admin) => admin.users(),
-      None => self.mock.admin_users(),
+      None => Vec::new(),
     }
   }
 
   fn workspace_policy(&self) -> (u64, WorkspacePolicy) {
     match &self.maybe_admin {
       Some(admin) => (admin.policy_version(), admin.policy()),
-      None => self.mock.workspace_policy(),
+      None => (0, WorkspacePolicy::default()),
     }
   }
 
   fn set_workspace_policy(&self, policy: WorkspacePolicy) {
     let Some(admin) = &self.maybe_admin else {
-      self.mock.set_workspace_policy(policy);
       return;
     };
     let (owners, admins) = admin.roster_candidates();
@@ -766,125 +735,113 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   fn admin_spaces(&self) -> Vec<AdminSpace> {
     match &self.maybe_admin {
       Some(admin) => admin.spaces(),
-      None => self.mock.admin_spaces(),
+      None => Vec::new(),
     }
   }
 
   fn permission_scheme(&self, maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
     match &self.maybe_admin {
       Some(admin) => admin.permission_scheme(maybe_space),
-      None => self.mock.permission_scheme(maybe_space),
+      None => PermissionSchemeResponse { roles: Vec::new() },
     }
   }
 
   fn change_permissions(&self, maybe_space: Option<SpaceId>, changes: Vec<SchemeChange>) {
-    match &self.maybe_admin {
-      Some(admin) => admin.change_permissions(maybe_space, changes),
-      None => self.mock.change_permissions(maybe_space, changes),
+    if let Some(admin) = &self.maybe_admin {
+      admin.change_permissions(maybe_space, changes);
     }
   }
 
   fn channel_moderation(&self, channel: ConversationId) -> ChannelModeration {
     match &self.maybe_admin {
       Some(admin) => admin.channel_moderation(channel),
-      None => self.mock.channel_moderation(channel),
+      None => ChannelModeration::default(),
     }
   }
 
   fn set_channel_moderation(&self, channel: ConversationId, moderation: ChannelModeration) {
-    match &self.maybe_admin {
-      Some(admin) => admin.set_channel_moderation(channel, moderation),
-      None => self.mock.set_channel_moderation(channel, moderation),
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_channel_moderation(channel, moderation);
     }
   }
 
   fn channel_member_candidates(&self, channel: ConversationId) -> Vec<UserId> {
     match &self.maybe_admin {
       Some(admin) => admin.channel_member_candidates(channel),
-      None => self.mock.channel_member_candidates(channel),
+      None => Vec::new(),
     }
   }
 
   fn assign_channel_owner(&self, channel: ConversationId, user: UserId) {
-    match &self.maybe_admin {
-      Some(admin) => admin.assign_channel_owner(channel, user),
-      None => self.mock.assign_channel_owner(channel, user),
+    if let Some(admin) = &self.maybe_admin {
+      admin.assign_channel_owner(channel, user);
     }
   }
 
   fn announcement(&self) -> Option<AnnouncementResponse> {
     match &self.maybe_admin {
       Some(admin) => admin.announcement(),
-      None => self.mock.announcement(),
+      None => None,
     }
   }
 
   fn set_announcement(&self, announcement: SetAnnouncementRequest) {
-    match &self.maybe_admin {
-      Some(admin) => admin.set_announcement(announcement),
-      None => self.mock.set_announcement(announcement),
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_announcement(announcement);
     }
   }
 
   fn clear_announcement(&self) {
-    match &self.maybe_admin {
-      Some(admin) => admin.clear_announcement(),
-      None => self.mock.clear_announcement(),
+    if let Some(admin) = &self.maybe_admin {
+      admin.clear_announcement();
     }
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
     match &self.maybe_admin {
       Some(admin) => admin.instance(),
-      None => self.mock.instance_status(),
+      None => None,
     }
   }
 
   fn audit_filter(&self) -> AuditFilter {
     match &self.maybe_admin {
       Some(admin) => admin.audit_filter(),
-      None => self.mock.audit_filter(),
+      None => AuditFilter::default(),
     }
   }
 
   fn set_audit_filter(&self, filter: AuditFilter) {
-    match &self.maybe_admin {
-      Some(admin) => admin.set_audit_filter(filter),
-      None => self.mock.set_audit_filter(filter),
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_audit_filter(filter);
     }
   }
 
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
-    match &self.maybe_admin {
-      Some(admin) => admin.set_channel_retention(channel, retention),
-      None => self.mock.set_channel_retention(channel, retention),
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_channel_retention(channel, retention);
     }
   }
 
   fn remove_device(&self, user: UserId, device: DeviceId) {
-    match &self.maybe_admin {
-      Some(admin) => admin.remove_device(user, device),
-      None => self.mock.remove_device(user, device),
+    if let Some(admin) = &self.maybe_admin {
+      admin.remove_device(user, device);
     }
   }
 
   fn set_user_active(&self, user: UserId, is_active: bool) {
-    match &self.maybe_admin {
-      Some(admin) => admin.set_user_active(user, is_active),
-      None => self.mock.set_user_active(user, is_active),
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_user_active(user, is_active);
     }
   }
 
-  fn start_org_recovery(&self, user: UserId) {
-    // Organization recovery needs the recovery key ceremony of the core; not wired into the console yet.
-    if self.maybe_admin.is_none() {
-      self.mock.start_org_recovery(user);
-    }
-  }
+  /// Organization recovery needs the recovery key ceremony of the core, which the console does not
+  /// drive yet; `can_start_org_recovery` keeps the button disabled.
+  fn start_org_recovery(&self, _user: UserId) {}
 
   fn admin_join_channel(&self, channel: ConversationId) -> SelfJoinOutcome {
     let Some(admin) = &self.maybe_admin else {
-      return self.mock.admin_join_channel(channel);
+      return SelfJoinOutcome::Disabled;
     };
     match admin.policy().admin_self_join {
       teamcraft_proto::AdminSelfJoin::Visible => {
@@ -901,7 +858,7 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   fn audit_log(&self) -> Vec<AuditEntry> {
     match &self.maybe_admin {
       Some(admin) => admin.audit(),
-      None => self.mock.audit_log(),
+      None => Vec::new(),
     }
   }
 
@@ -1070,11 +1027,15 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
 
 impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
   fn my_devices(&self) -> Vec<DeviceInfo> {
-    self.mock.my_devices()
+    self.chat.own_devices()
   }
 
   fn remove_my_device(&self, device: DeviceId) {
-    self.mock.remove_my_device(device);
+    self.chat.revoke_own_device(device);
+  }
+
+  fn refresh_my_devices(&self) {
+    self.chat.refresh_own_devices();
   }
 
   fn key_change(&self, conversation: ConversationId) -> Option<KeyChange> {
@@ -1101,19 +1062,16 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
     }
   }
 
+  /// Empty while the core has not reported its keys (or there is no core).
   fn my_identity_fingerprint(&self) -> String {
-    let keys = self.chat.security_keys();
-    if keys.my_fingerprint.is_empty() {
-      self.mock.my_identity_fingerprint()
-    } else {
-      keys.my_fingerprint
-    }
+    self.chat.security_keys().my_fingerprint
   }
 
   fn contact_verification(&self, user: UserId) -> crate::security::ContactVerification {
     let keys = self.chat.security_keys();
+    // No pinned key for this person yet: nothing to compare.
     let Some(contact) = keys.contacts.iter().find(|contact| contact.user == user) else {
-      return self.mock.contact_verification(user);
+      return crate::security::ContactVerification::default();
     };
     crate::security::ContactVerification {
       safety_number: crate::security::safety_number(&keys.my_fingerprint, &contact.fingerprint),
@@ -1123,13 +1081,13 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
 
   fn set_contact_verified(&self, user: UserId, is_verified: bool) {
     let keys = self.chat.security_keys();
-    match keys.contacts.iter().find(|contact| contact.user == user) {
+    // Without a pinned key there is nothing the mark could name.
+    if let Some(contact) = keys.contacts.iter().find(|contact| contact.user == user) {
       // The mark names the fingerprint it was made for, so a changed key is never shown as verified.
-      Some(contact) => store_string(
+      store_string(
         &verified_key(user),
         if is_verified { &contact.fingerprint } else { "" },
-      ),
-      None => self.mock.set_contact_verified(user, is_verified),
+      );
     }
   }
 }

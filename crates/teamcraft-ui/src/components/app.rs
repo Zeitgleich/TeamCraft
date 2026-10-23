@@ -54,7 +54,6 @@ use crate::components::workspace_dialogs::{
 };
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
-use crate::mock::MockBackend;
 use crate::model::TimestampMs;
 use crate::model::{ConversationId, SpaceId};
 use crate::navigation::Step;
@@ -63,7 +62,7 @@ use crate::notify_sync::NotificationSync;
 use crate::prefs::Zoom;
 use crate::reactive::use_interval;
 use crate::sections::badge_count;
-use crate::settings::{BackendMode, Settings, Theme};
+use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
 
 #[component]
@@ -90,13 +89,12 @@ pub fn App() -> impl IntoView {
     crate::bundle::watch(bundle.0);
   }
 
-  match BackendMode::load() {
-    BackendMode::Mock => {
-      let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(now_ms()));
-      view! { <Shell backend=backend settings=settings /> }.into_any()
-    },
-    BackendMode::Server => view! { <SessionGate settings=settings /> }.into_any(),
+  #[cfg(feature = "demo")]
+  if crate::settings::BackendMode::load() == crate::settings::BackendMode::Mock {
+    let backend: Rc<dyn Backend> = Rc::new(crate::mock::MockBackend::new(now_ms()));
+    return view! { <Shell backend=backend settings=settings /> }.into_any();
   }
+  view! { <SessionGate settings=settings /> }.into_any()
 }
 
 /// Everything after sign-in: the chat shell on top of a backend.

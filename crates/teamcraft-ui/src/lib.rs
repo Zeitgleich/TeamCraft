@@ -1,8 +1,14 @@
 //! TeamCraft UI: the Leptos application shared by the desktop (Tauri) and web builds.
 //!
-//! The UI talks to the rest of the client only through [`backend::ChatBackend`]; this crate currently
-//! ships a mock implementation ([`mock::MockBackend`]) so the shell can be developed and reviewed
-//! without a server.
+//! The UI talks to the rest of the client only through [`backend::ChatBackend`]. Demo data for
+//! development (`mock::MockBackend`) only exists with the `demo` feature and in tests; shipped builds
+//! always talk to a server.
+
+// Demo data must never reach a user: an optimized build with it fails here.
+#[cfg(all(feature = "demo", not(debug_assertions)))]
+compile_error!(
+  "the `demo` feature is for development builds only; release builds must not contain demo data"
+);
 
 // The backend traits and view models live in `teamcraft-client-api`; the old paths keep working.
 pub use teamcraft_client_api::{admin, backend, model, search, security};
@@ -29,6 +35,7 @@ pub mod live;
 pub mod markdown;
 pub mod meetings;
 pub mod mention;
+#[cfg(any(test, feature = "demo"))]
 pub mod mock;
 pub mod navigation;
 pub mod notifier;

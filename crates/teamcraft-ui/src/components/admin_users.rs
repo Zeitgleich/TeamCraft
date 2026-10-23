@@ -162,10 +162,19 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
   let confirm_deactivate = RwSignal::new(false);
   let recovery_started = RwSignal::new(false);
   let (_, policy) = state.read(|backend| backend.workspace_policy());
-  let can_recover = if entry.maybe_guest.is_some() {
+  let is_recovery_allowed = if entry.maybe_guest.is_some() {
     policy.org_recovery.is_enabled_for_guests
   } else {
     policy.org_recovery.is_enabled_for_members
+  };
+  let is_recovery_available = state.read(|backend| backend.can_start_org_recovery());
+  let can_recover = is_recovery_allowed && is_recovery_available;
+  let recovery_hint = if !is_recovery_allowed {
+    "admin-recovery-off"
+  } else if !is_recovery_available {
+    "admin-recovery-unavailable"
+  } else {
+    "admin-recovery-needs-second"
   };
   let is_active = entry.is_active;
 
@@ -254,7 +263,7 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
       <button
         class="btn"
         disabled=!can_recover
-        title=move || if can_recover { i18n.t("admin-recovery-needs-second") } else { i18n.t("admin-recovery-off") }
+        title=move || i18n.t(recovery_hint)
         on:click=move |_| {
           state.write(|backend| backend.start_org_recovery(user_id));
           recovery_started.set(true);

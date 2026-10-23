@@ -89,7 +89,8 @@ fn CallRow(call: CallHistoryItem) -> impl IntoView {
   let is_missed = call.direction == CallDirection::Missed;
   let is_ongoing = call.is_ongoing();
   let call = state.call;
-  let is_busy = move || call.phase.get() != CallPhase::Idle;
+  let has_calls = state.read(|backend| backend.has_calls());
+  let is_busy = move || !has_calls || call.phase.get() != CallPhase::Idle;
   let call_back = move |_| {
     call.prepare(
       CallRequest {
@@ -113,7 +114,12 @@ fn CallRow(call: CallHistoryItem) -> impl IntoView {
           {is_ongoing.then(|| view! { " · " <span>{move || i18n.t("calls-ongoing")}</span> })}
         </span>
       </span>
-      <button class="btn btn-small" disabled=is_busy on:click=call_back>
+      <button
+        class="btn btn-small"
+        disabled=is_busy
+        title=move || if has_calls { String::new() } else { i18n.t("calls-unavailable") }
+        on:click=call_back
+      >
         {move || i18n.t(if is_ongoing { "calls-join" } else { "calls-call-back" })}
       </button>
     </li>

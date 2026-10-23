@@ -1,8 +1,16 @@
 # teamcraft-ui
 
-Leptos (CSR) UI shared by the desktop app (`apps/desktop`, Tauri 2) and the web client. It currently
-runs on a **mock backend** with deterministic demo data, so the shell can be built and reviewed
-without a server.
+Leptos (CSR) UI shared by the desktop app (`apps/desktop`, Tauri 2) and the web client. It always
+signs in to a server. For UI work without a server there is a **mock backend** with deterministic demo
+data behind the development-only `demo` feature:
+
+```sh
+(cd crates/teamcraft-ui && trunk serve --features demo)   # then open /?backend=mock
+```
+
+The demo data never ships: an optimized (`--release`) build with `demo` fails to compile, release builds
+never enable it, and `scripts/check-no-demo-data.py` fails a release whose web bundle or desktop app
+contains demo fixtures.
 
 | Screen                          | Image                                                          |
 |---------------------------------|----------------------------------------------------------------|
@@ -36,7 +44,7 @@ without a server.
 | New login approval              | ![Device approval](docs/screenshots/device-approval.png)       |
 | QR device linking               | ![QR linking](docs/screenshots/device-link-qr.png)             |
 
-Screenshots are produced with Playwright against `trunk build --release` (English, 1360×840); the
+Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.
 
 The 50,000-line `#app-logs` channel (see `docs/screenshots/log-channel-dark.png`) keeps scrolling at
@@ -77,8 +85,7 @@ frame rate because only the visible rows are in the DOM.
 - **Search** (PLAN.md §7): `Ctrl/Cmd+Shift+F` or the sidebar item opens the search page: words, "phrases",
   `from:`, `in:`, `has:file`, `has:link`, `before:`, `after:`, `in-thread`, removable filter chips (unreadable
   filters are flagged), highlighted snippets, saved searches and recent mentions. The logic is in
-  `src/search.rs` behind `SearchBackend`; the mock answers today, `teamcraft-core` will answer from the local
-  index. `Ctrl+Enter` in the quick switcher searches for its text.
+  `src/search.rs` behind `SearchBackend`; `teamcraft-core` answers from its local index. `Ctrl+Enter` in the quick switcher searches for its text.
 - **Settings** (PLAN.md §4, §5): notifications (levels, push timing, keywords, highlight-only keywords, thread
   replies, DND schedule, per-conversation level and mute), display (density, status in messages), sidebar
   (sort, DM limit), language, privacy, devices and security (sign out devices, identity fingerprint, safety
@@ -86,8 +93,8 @@ frame rate because only the visible rows are in the DOM.
   document (`src/prefs.rs`); notification and privacy values are saved but enforced by the notification engine
   later, call and sidebar values already apply.
 
-Demo triggers: Settings > Advanced simulates an incoming call, a new login, the QR linking screen and
-a chat with a changed security key, standing in for events the server will send later.
+Demo triggers (`demo` builds only): Settings > Advanced simulates an incoming call, a new login, the QR
+linking screen and a chat with a changed security key.
 
 Shortcuts: `Ctrl/Cmd+K` switcher, `Ctrl/Cmd+,` settings, `Ctrl/Cmd+/` shortcuts, `Alt+Up/Down`
 previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
@@ -96,14 +103,14 @@ previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
 
 | Path                    | Content                                                                 |
 |-------------------------|-------------------------------------------------------------------------|
-| `src/mock.rs`           | `MockBackend`, demo data, lazily generated log channels                 |
+| `src/mock.rs`           | `MockBackend`, demo data (feature `demo` and tests only)                |
 | `src/remote_backend.rs` | `RemoteChat`: `ChatBackend` over the desktop shell's client core (IPC)  |
 | `src/admin_live.rs`     | Admin console on the admin API: channels, users, devices, audit, policy  |
 | `src/meetings.rs`       | Meetings REST client, schedule form logic, guest link parsing and client |
 | `src/live.rs`           | `LiveServer`: unread counts, followed threads, presence, receipts (REST)  |
 | `src/notify_sync.rs`    | Server-enforced notification settings in step with the preferences      |
 | `src/notifier.rs`       | Desktop notification policy and the watcher for new messages            |
-| `src/hybrid.rs`         | `Hybrid`: a real chat backend plus mock search, calls, admin, security  |
+| `src/hybrid.rs`         | `Hybrid`: chat backend plus live state, admin API and desktop calls     |
 | `src/server_backend.rs` | `RestChat`: web build, read-only chat over the REST API                 |
 | `src/web_core.rs`       | Web build: runs the client core in the page, answers the `core_*` commands |
 | `src/calls.rs`          | `CallState` (session state of the user's call)                          |
@@ -126,13 +133,14 @@ native side. After sign-in the webview:
 
 1. calls `core_start`; the answer is `needs_enrollment`, `ready` or `failed`;
 2. on first use shows the key setup screen (recovery passphrase, device name) and calls `core_enroll`;
-3. builds `Hybrid<RemoteChat>`: chat comes from the core, search, calls, admin and security stay mock.
+3. builds `Hybrid<RemoteChat>`: chat, search, own devices and keys come from the core, the admin console
+   from the admin API, calls from the shell.
 
 `ChatBackend` is synchronous but IPC is not, so `RemoteChat` keeps a mirror (snapshot plus pages of
 100 messages). A read miss returns an empty window, starts a load and re-renders when the page
 arrives. The shell emits `core-changed` after every sync step; the mirror refreshes then. Writes
 (`core_action`) go through the core, so they are encrypted, queued and sent by the sync loop.
-Settings > Data source still switches to the mock backend for demos.
+In `demo` builds, Settings > Data source switches to the mock backend.
 
 Local data lives in the app data dir (`<data>/core/<user>.db`); `TEAMCRAFT_DATA_DIR` overrides it.
 
@@ -203,7 +211,7 @@ second core (carol) that chats with her; `apps/desktop/dev/bridge-shim.js` imple
 docker compose -f docker-compose.dev.yml up -d              # dev stack; run teamcraft-server on :8081
 (cd crates/teamcraft-ui && trunk serve --port 8082)         # proxies /api to the server
 cargo test -p teamcraft-desktop --features integration -- --ignored serve_dev_bridge --nocapture
-# open http://localhost:8082/?backend=server with the shim injected (e.g. a Playwright init script)
+# open http://localhost:8082/ with the shim injected (e.g. a Playwright init script)
 ```
 
 Alice's recovery passphrase in the dev stack is `dev-stack core passphrase`. Dev tool only: no
@@ -247,16 +255,14 @@ compiler than the workspace baseline.
 
 ## Known gaps
 
-- Demo data is the default. The desktop build shows real encrypted chat (messages, send, reactions,
-  channels, DMs); the web build only lists conversations read-only. Search, calls, admin and
-  security are still mock on top of the core.
+- Calls need the desktop shell: the web build offers no call buttons and meetings open their chat
+  only.
 - The core integration test (`cargo test -p teamcraft-desktop --features integration core::`) needs a
   fresh dev database and must not run in parallel with the sign-in tests, which end alice's session.
 - No drafts per conversation, message editing, emoji picker, search results page or meetings.
 - Meetings: no edit dialog, no per-occurrence handling of recurring meetings and the guest page stops at
   "admitted" (no media in the browser build yet).
-- Calls are mocked: no real media, reactions in calls, recording or captions; own backgrounds cannot be
-  uploaded yet.
+- Calls: no reactions in calls, recording or captions; own backgrounds cannot be uploaded yet.
 - Admin: assigning owners, archiving, creating users and inviting guests, organization recovery and the
   CSV audit export are placeholders; storage size is unknown to the server (shown as 0).
 - Bookmarks bar is read-only; settings tabs for notifications and advanced are placeholders.

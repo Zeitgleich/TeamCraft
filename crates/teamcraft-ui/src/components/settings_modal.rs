@@ -1,7 +1,6 @@
 use leptos::prelude::*;
 
 use crate::auth::tauri;
-use crate::calls::IncomingCall;
 use crate::components::bundle_banner::AboutSection;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
@@ -11,10 +10,7 @@ use crate::components::settings_tabs::{
 use crate::components::update_notice::UpdatesSection;
 use crate::i18n::use_i18n;
 use crate::keys::{ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut, ShortcutList};
-use crate::model::id_from_raw;
-use crate::security::DeviceApproval;
-use crate::settings::BackendMode;
-use crate::state::{Overlay, use_app_state};
+use crate::state::use_app_state;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -135,15 +131,33 @@ pub fn SettingsModal() -> impl IntoView {
   }
 }
 
-/// Advanced settings. Until the real client core exists this tab also hosts the demo triggers that
-/// stand in for events from the server.
+/// Advanced settings: the desktop shell's options, updates and what is running.
 #[component]
 fn AdvancedTab() -> impl IntoView {
-  let state = use_app_state();
   let i18n = use_i18n();
   view! {
     {tauri::is_available().then(|| view! { <DesktopSection /> <UpdatesSection /> })}
     <p class="muted-text">{move || i18n.t("settings-advanced-stub")}</p>
+    {demo_tools()}
+    <AboutSection />
+  }
+}
+
+#[cfg(not(feature = "demo"))]
+fn demo_tools() -> impl IntoView {}
+
+/// Development builds only: the data source and triggers that stand in for events from the server.
+#[cfg(feature = "demo")]
+fn demo_tools() -> impl IntoView {
+  use crate::calls::IncomingCall;
+  use crate::model::id_from_raw;
+  use crate::security::DeviceApproval;
+  use crate::settings::BackendMode;
+  use crate::state::Overlay;
+
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
     <div class="field">
       <label for="setting-backend">{move || i18n.t("settings-backend")}</label>
       <select
@@ -171,7 +185,6 @@ fn AdvancedTab() -> impl IntoView {
       </select>
       <p class="muted-text small">{move || i18n.t("settings-backend-hint")}</p>
     </div>
-    <AboutSection />
     <h3 class="settings-heading">{move || i18n.t("settings-demo-title")}</h3>
     <p class="muted-text small">{move || i18n.t("settings-demo-hint")}</p>
     <div class="demo-actions">

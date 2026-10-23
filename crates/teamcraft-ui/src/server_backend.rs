@@ -3,7 +3,7 @@
 //!
 //! Spaces, conversations, members, users and presence come from the REST API. Messages are not
 //! available yet (they arrive end-to-end encrypted through `teamcraft-core`), so messages written
-//! here live in memory for the session. Calls, administration and device security still use the mock.
+//! here live in memory for the session. Search, own devices and keys need a core and answer empty here.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

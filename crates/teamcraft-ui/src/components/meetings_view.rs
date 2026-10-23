@@ -308,6 +308,10 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
 fn join_meeting(meeting: &MeetingResponse) {
   let state = use_app_state();
   state.open_conversation(meeting.conversation_id);
+  if !state.read(|backend| backend.has_calls()) {
+    state.show_toast(use_i18n().t("calls-unavailable"));
+    return;
+  }
   state.call.prepare(
     CallRequest {
       conversation: meeting.conversation_id,
