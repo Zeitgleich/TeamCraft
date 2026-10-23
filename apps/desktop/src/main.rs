@@ -141,3 +141,50 @@ fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>, tokens: TokenCache
     }
   });
 }
+
+#[cfg(test)]
+mod tests {
+  /// Tauri refuses an app command that has no permission once the app has an ACL manifest, and
+  /// nothing fails at build time: every registered command must be in `build.rs` and allowed in
+  /// the capability.
+  #[test]
+  fn every_registered_command_is_listed_and_allowed() {
+    let main = include_str!("main.rs");
+    let build = include_str!("../build.rs");
+    let capability: serde_json::Value =
+      serde_json::from_str(include_str!("../capabilities/default.json")).unwrap_or_default();
+    let allowed: Vec<String> = capability["permissions"]
+      .as_array()
+      .map(|list| {
+        list
+          .iter()
+          .filter_map(|value| value.as_str())
+          .map(str::to_owned)
+          .collect()
+      })
+      .unwrap_or_default();
+
+    let handler_start = main.find("generate_handler![").unwrap_or(0);
+    let handler = &main[handler_start..];
+    let handler = &handler[..handler.find(']').unwrap_or(handler.len())];
+    let registered: Vec<&str> = handler
+      .trim_start_matches("generate_handler![")
+      .split(',')
+      .filter_map(|path| path.trim().rsplit("::").next())
+      .filter(|name| !name.is_empty())
+      .collect();
+    assert!(registered.len() > 10, "could not read the handler list");
+
+    for command in registered {
+      assert!(
+        build.contains(&format!("\"{command}\"")),
+        "{command} is missing from build.rs"
+      );
+      let permission = format!("allow-{}", command.replace('_', "-"));
+      assert!(
+        allowed.contains(&permission),
+        "{permission} is missing from capabilities/default.json"
+      );
+    }
+  }
+}
