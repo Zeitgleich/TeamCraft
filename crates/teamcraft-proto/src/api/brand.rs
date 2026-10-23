@@ -28,6 +28,13 @@ pub struct BrandResponse {
   /// Stable identifier of the brand (`[a-z0-9-]`).
   pub id: String,
   pub display_name: String,
+  /// The organization behind the brand, for the footer of the sign-in page.
+  #[serde(
+    rename = "organization_name",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_organization_name: Option<String>,
   /// The brand's canonical origin, `https://<first host name>`. Informational.
   pub origin: String,
   /// Asset URLs relative to the server, by slot name. Slots without a file are absent.
@@ -121,6 +128,7 @@ mod tests {
     let brand = BrandResponse {
       id: "brand-a".into(),
       display_name: "Brand A".into(),
+      maybe_organization_name: None,
       origin: "https://chat.example.com".into(),
       assets: BTreeMap::from([("logo".to_owned(), "/api/v1/brand/assets/logo".to_owned())]),
       colors: BrandColors {

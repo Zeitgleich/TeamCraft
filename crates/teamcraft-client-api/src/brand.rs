@@ -174,6 +174,7 @@ mod tests {
     BrandResponse {
       id: "brand-a".into(),
       display_name: "Brand A".into(),
+      maybe_organization_name: None,
       origin: "https://chat.a.example.com".into(),
       assets: BTreeMap::from([
         ("logo".to_owned(), "/api/v1/brand/assets/logo".to_owned()),
