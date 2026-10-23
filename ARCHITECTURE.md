@@ -364,9 +364,11 @@ layer 2 takes over.
 idle UDP NAT mappings after about 30 s, some after 20 s), with a 10 s idle timeout. The native
 client watches the connection's received packet count (keep-alive answers count, so quiet calls
 are covered): nothing for 5 s, or nothing within 2 s after a network change, means the path is
-dead. Network changes come from the platforms: Android `ConnectivityManager` default-network
-callbacks, iOS `NWPathMonitor`, and on desktops a once-a-second lookup of the local address the
-system would use toward the SFU.
+dead. Network changes come from the same signal the gateway reconnects on (the core's
+`NetworkChanges`, one listener per platform): Android's default-network `NetworkCallback`, iOS's
+`NWPathMonitor`, the desktop's resume from suspend and the webview's `online`/visibility events.
+The desktop driver also looks up the local address the system would use toward the SFU once a
+second, which catches a network switch without a wake-up.
 
 **2. Rejoin.** The client opens a new connection with a fresh join token from `teamcraft-server`
 and joins again. The SFU tells a lost connection (idle timeout, reset) from a deliberate close (the
@@ -412,12 +414,12 @@ Settings → Chats).
   in a burst after a handover is skipped down to the target once it persists for half a second,
   instead of adding its length as latency for the rest of the call.
 
-| Platform | Network change                    | Migration | Rejoin            | UI while rejoining               |
-|----------|-----------------------------------|-----------|-------------------|----------------------------------|
-| Android  | `ConnectivityManager` callback    | yes       | yes, engine token | "Connection lost, reconnecting…" |
-| iOS      | `NWPathMonitor`                   | yes       | yes, engine token | "Connection lost, reconnecting…" |
-| Desktop  | route lookup toward the SFU (1 s) | yes       | yes, core token   | header status, tiles dimmed      |
-| Browser  | –                                 | no        | yes, page's token | (no browser call UI yet)         |
+| Platform | Network change                             | Migration | Rejoin            | UI while rejoining               |
+|----------|--------------------------------------------|-----------|-------------------|----------------------------------|
+| Android  | core signal (`NetworkCallback`)            | yes       | yes, engine token | "Connection lost, reconnecting…" |
+| iOS      | core signal (`NWPathMonitor`)              | yes       | yes, engine token | "Connection lost, reconnecting…" |
+| Desktop  | core signal (wake, webview) + route lookup | yes       | yes, core token   | header status, tiles dimmed      |
+| Browser  | –                                          | no        | yes, page's token | (no browser call UI yet)         |
 
 Tests: deterministic ones drive the SFU's rooms and real call engines in memory (lost connection,
 grace expiry, takeover, a lossy uplink) and the native client over loopback through a UDP relay

@@ -57,7 +57,6 @@ final class CallManager: NSObject, @unchecked Sendable {
   @ObservationIgnored private let controller = CXCallController()
   @ObservationIgnored private var maybeRegistry: PKPushRegistry?
   @ObservationIgnored private var maybeSession: CallSession?
-  @ObservationIgnored private var maybeNetworkWatcher: NetworkWatcher?
   @ObservationIgnored private var maybePendingAction: CXAction?
   @ObservationIgnored private var wantsJoin = false
   @ObservationIgnored private var isAudioActive = false
@@ -208,9 +207,6 @@ final class CallManager: NSObject, @unchecked Sendable {
         let session = try await AppModel.shared.joinCall(conversationId: call.conversationId)
         maybeSession = session
         session.setStatusSounds(sounds: CallStatusSoundsSetting.current.sounds)
-        let watcher = NetworkWatcher()
-        watcher.start { session.networkChanged() }
-        maybeNetworkWatcher = watcher
         session.setEncodedVideoListener(listener: self)
         if var current = activeCall {
           current.phase = .connected
@@ -267,8 +263,6 @@ final class CallManager: NSObject, @unchecked Sendable {
       self.isCameraOn = false
       self.wantsVideoStart = false
       self.maybeSession = nil
-      self.maybeNetworkWatcher?.stop()
-      self.maybeNetworkWatcher = nil
       self.wantsJoin = false
       self.isAudioActive = false
       self.activeCall = nil

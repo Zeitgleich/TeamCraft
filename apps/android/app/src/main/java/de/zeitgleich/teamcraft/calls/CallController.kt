@@ -53,7 +53,6 @@ class CallController(
   private val frames = MutableStateFlow<Map<UInt, Bitmap>>(emptyMap())
   private val speaker = MutableStateFlow(false)
   @Volatile private var maybeSession: CallSession? = null
-  @Volatile private var maybeNetworkWatcher: NetworkWatcher? = null
   @Volatile private var maybeTelecomJob: Job? = null
   @Volatile private var maybeTelecomCall: CallControlScope? = null
   @Volatile private var endpoints: List<CallEndpointCompat> = emptyList()
@@ -321,7 +320,6 @@ class CallController(
     }
     maybeSession = session
     session.setStatusSounds(CallSoundPrefs.prefs(context).statusSounds)
-    maybeNetworkWatcher = NetworkWatcher(context) { maybeSession?.networkChanged() }.also { it.start() }
     session.setVideoListener(Video())
     if (options.isMuted) session.setMuted(true)
     wantsCamera.value = options.isCameraOn
@@ -378,8 +376,6 @@ class CallController(
   }
 
   private fun leave() {
-    maybeNetworkWatcher?.stop()
-    maybeNetworkWatcher = null
     maybeSession?.let { session ->
       session.leave()
       session.close()

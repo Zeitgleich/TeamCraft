@@ -3,15 +3,17 @@
 //! its own. The app integrates the call with the platform (Android Telecom) and drives it through
 //! [`CallSession`]; [`CallListener`] tells it about rings and the call's state.
 //!
-//! Network changes: the app reports them with [`CallSession::network_changed`] (Android
-//! `ConnectivityManager` callbacks, iOS `NWPathMonitor`). The connection migrates to the new
-//! network, or the call rejoins with a fresh token from the engine thread; meanwhile the state is
-//! [`CallPhase::Reconnecting`].
+//! Network changes: the call listens to the same signal as the gateway (`TeamCraft::network_changed`,
+//! fed by Android's `NetworkCallback` and iOS's `NWPathMonitor`). The connection migrates to the
+//! new network, or the call rejoins with a fresh token from the engine thread; meanwhile the state
+//! is [`CallPhase::Reconnecting`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use futures_util::StreamExt;
 use teamcraft_core::client::CallKeySigner;
+use teamcraft_core::connection::NetworkChanges;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
@@ -38,8 +40,12 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use crate::engine::Job;
+
 use crate::error::TeamCraftError;
 use crate::video::{AppCamera, CameraFrame, CameraSlot, VideoFrameRgba, i420_to_rgba};
+
+/// The app's network changes, as the core hands them out.
+type NetworkChangeStream = futures_channel::mpsc::UnboundedReceiver<()>;
 
 /// Worker threads of a call's runtime: network and engine; audio has its own thread.
 const CALL_WORKER_THREADS: usize = 2;
@@ -217,7 +223,6 @@ enum Control {
   StopEncodedCamera,
   WatchEncodedVideo(MediaStreamId),
   UnwatchEncodedVideo(MediaStreamId),
-  NetworkChanged,
   SetStatusSounds(CallStatusSounds),
   Leave,
 }
@@ -285,13 +290,6 @@ impl CallSession {
   /// played. The call stays joined, so resuming is instant.
   pub fn set_held(&self, is_held: bool) {
     self.send(Control::SetHeld(is_held));
-  }
-
-  /// The phone's network changed (another network became the default, or the current one was
-  /// lost or changed its addresses). The call checks that its connection followed and rejoins
-  /// otherwise; while rejoining, it retries at once.
-  pub fn network_changed(&self) {
-    self.send(Control::NetworkChanged);
   }
 
   /// Which call status sounds play (the app's setting); call it after joining.
@@ -410,7 +408,9 @@ pub(crate) async fn join(
   preparation: CallPreparation,
   hub: CallHub,
   jobs: mpsc::UnboundedSender<Job>,
+  network: &NetworkChanges,
 ) -> Result<Arc<CallSession>, TeamCraftError> {
+  let network_rx = network.subscribe();
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
   let mut config = native_config(preparation)?;
@@ -463,7 +463,7 @@ pub(crate) async fn join(
           camera: thread_camera,
           hub: thread_hub,
         };
-        run_call(call, control_rx, &context, &mut state).await;
+        run_call(call, control_rx, network_rx, &context, &mut state).await;
       });
     });
   if let Err(error) = spawned {
@@ -489,6 +489,7 @@ struct CallContext {
 async fn run_call(
   mut call: NativeCall,
   mut controls: mpsc::UnboundedReceiver<Control>,
+  mut network: NetworkChangeStream,
   context: &CallContext,
   state: &mut CallStateInfo,
 ) {
@@ -506,7 +507,6 @@ async fn run_call(
           audio.is_muted = is_muted;
           call.set_muted(audio.is_silent());
         },
-        Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::SetStatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::SetHeld(is_held)) => {
           audio.is_held = is_held;
@@ -521,6 +521,8 @@ async fn run_call(
           context.hub.report(state.clone());
         },
       },
+      // The same signal the gateway reconnects on: the call checks its path or rejoins at once.
+      Some(()) = network.next() => call.network_changed(),
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
           encoded.report(context.own_device, &event);
@@ -589,7 +591,6 @@ async fn apply_control(
     | Control::StopEncodedCamera
     | Control::WatchEncodedVideo(_)
     | Control::UnwatchEncodedVideo(_)
-    | Control::NetworkChanged
     | Control::SetStatusSounds(_)
     | Control::Leave => {},
   }

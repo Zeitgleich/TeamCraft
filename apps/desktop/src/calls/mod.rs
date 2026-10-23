@@ -124,6 +124,7 @@ enum Control {
   StartScreenAudio(Box<dyn SystemAudioCapture>, oneshot::Sender<Result<(), String>>),
   StopScreenAudio,
   StatusSounds(CallStatusSounds),
+  NetworkChanged,
   Subscribe {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
@@ -371,6 +372,13 @@ impl CallHost {
 
   pub async fn set_deafened(&self, is_deafened: bool) {
     self.control(Control::Deafen(is_deafened)).await;
+  }
+
+  /// The network changed or the computer woke up (the same signal the gateway reconnects on): a
+  /// running call checks that its connection followed, and rejoins otherwise.
+  pub fn network_changed(self: &Arc<Self>) {
+    let host = Arc::clone(self);
+    tauri::async_runtime::spawn(async move { host.control(Control::NetworkChanged).await });
   }
 
   /// Remembers the status sounds setting for later calls and applies it to the running one.
@@ -769,6 +777,7 @@ async fn run_media(
         Some(Control::StopScreenAudio) => call.stop_screen_audio(),
         Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
+        Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::Leave) | None => break,
       },
       maybe_event = call.next_event() => match maybe_event {

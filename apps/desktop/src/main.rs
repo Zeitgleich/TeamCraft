@@ -209,6 +209,7 @@ fn watch_wake(app: &tauri::AppHandle) {
       .watch_wake(move || {
         tracing::info!("resumed from suspend");
         handle.state::<CoreHost>().network_changed();
+        handle.state::<Arc<CallHost>>().network_changed();
       })
       .await;
   });

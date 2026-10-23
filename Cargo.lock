@@ -10287,6 +10287,8 @@ dependencies = [
 name = "teamcraft-ffi"
 version = "1.0.0"
 dependencies = [
+ "futures-channel",
+ "futures-util",
  "rand_core 0.6.4",
  "reqwest",
  "serde",

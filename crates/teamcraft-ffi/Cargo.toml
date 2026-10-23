@@ -23,6 +23,9 @@ integration = []
 [dependencies]
 # Records sealed on plain SQLite (e2ee.md §9.2): SQLCipher can't link on Android.
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite"] }
+# The core's network-change stream, polled on the call thread (already in the tree via the core).
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 teamcraft-client-api = { path = "../teamcraft-client-api" }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 # Calls: the native call driver (WebTransport, Opus, audio devices; AAudio on Android).
