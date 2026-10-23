@@ -12,6 +12,7 @@ use crate::client::previews::queue_preview;
 use crate::client::{apply_control, forward_content, reply_ref, stored_account_data};
 use crate::link_preview::is_allowed;
 use crate::read_state;
+use crate::records;
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, Priority, StoredMessage,
 };
@@ -171,6 +172,27 @@ impl<S: LocalStore> CoreChatBackend<S> {
     );
   }
 
+  /// "Retry" on an own message the server rejected: back into the outbox's line.
+  pub(crate) fn ui_retry_send(&self, conversation: ConversationId, message: MessageId) {
+    let Some(target) = self.find_stored(conversation, message) else {
+      return;
+    };
+    match records::retry_failed(self.store_ref(), conversation, target.client_message_id) {
+      Ok(()) => self.command(CoreCommand::FlushOutbox),
+      Err(error) => tracing::error!(%error, "could not retry the message"),
+    }
+  }
+
+  /// "Delete" on an own message the server rejected.
+  pub(crate) fn ui_discard_unsent(&self, conversation: ConversationId, message: MessageId) {
+    let Some(target) = self.find_stored(conversation, message) else {
+      return;
+    };
+    if let Err(error) = records::discard_failed(self.store_ref(), conversation, target.client_message_id) {
+      tracing::error!(%error, "could not discard the message");
+    }
+  }
+
   pub(crate) fn ui_forward_message(
     &self,
     from: ConversationId,
@@ -315,6 +337,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
           _ => {},
         }
         extras.files = self.files_of(stored);
+        if stored.maybe_server_id.is_none() {
+          extras.is_send_failed = self.read(records::is_send_failed(
+            self.store_ref(),
+            conversation,
+            stored.client_message_id,
+          ));
+        }
         Some(extras)
       })
       .collect()

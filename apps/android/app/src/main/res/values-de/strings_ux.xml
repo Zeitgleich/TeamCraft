@@ -63,4 +63,9 @@
   <string name="sign_in_network">Der Anmeldeserver ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.</string>
   <string name="sign_in_rejected">Der Anmeldeserver hat die Anmeldung nicht angenommen. Versuche es erneut oder frag deine Administration.</string>
   <string name="enroll_working">Schlüssel werden eingerichtet …</string>
+
+  <!-- A message the server rejected -->
+  <string name="not_sent">Nicht gesendet</string>
+  <string name="not_sent_retry">Erneut senden</string>
+  <string name="not_sent_delete">Löschen</string>
 </resources>

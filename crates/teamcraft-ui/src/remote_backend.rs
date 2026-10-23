@@ -534,6 +534,20 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn retry_send(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::RetrySend {
+      conversation,
+      message,
+    });
+  }
+
+  fn discard_unsent(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::DiscardUnsent {
+      conversation,
+      message,
+    });
+  }
+
   fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
     match self.ask(ChatQuery::ConversationFiles { conversation }) {
       Some(ChatAnswer::Files { files }) => files,

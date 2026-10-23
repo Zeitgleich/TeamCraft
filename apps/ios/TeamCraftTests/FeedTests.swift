@@ -60,6 +60,14 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(links.map(\.absoluteString), ["https://example.com/a"])
   }
 
+  func testMessageLinksAndMentions() {
+    let body = "@alex see teamcraft:/c/12/m/34 and @me, @here; mail sam@example.com @nobody"
+    let text = messageText(body, usernames: ["alex", "sam"], myUsername: "Me")
+    XCTAssertEqual(text.runs.compactMap(\.link).map(\.absoluteString), ["teamcraft:/c/12/m/34"])
+    let mentioned = text.runs.filter { $0.inlinePresentationIntent == .stronglyEmphasized }.map { String(text[$0.range].characters) }
+    XCTAssertEqual(mentioned, ["@alex", "@me", "@here"])
+  }
+
   func testDirectMessagesByRecency() {
     func dm(_ id: String, _ name: String) -> ConversationItem {
       ConversationItem(
@@ -79,6 +87,18 @@ final class FeedTests: XCTestCase {
     let unread = try JSONSerialization.jsonObject(
       with: Data(ChatAction.markUnread(conversationId: "1", fromMessageId: "9").json.utf8)) as? [String: String]
     XCTAssertEqual(unread, ["action": "mark_unread", "conversation": "1", "from": "9"])
+  }
+
+  func testFailedSendActionsAndExtras() throws {
+    let retry = try JSONSerialization.jsonObject(
+      with: Data(ChatAction.retrySend(conversationId: "1", messageId: "9").json.utf8)) as? [String: String]
+    XCTAssertEqual(retry, ["action": "retry_send", "conversation": "1", "message": "9"])
+    let discard = try JSONSerialization.jsonObject(
+      with: Data(ChatAction.discardUnsent(conversationId: "1", messageId: "9").json.utf8)) as? [String: String]
+    XCTAssertEqual(discard, ["action": "discard_unsent", "conversation": "1", "message": "9"])
+    let failed = Wire.decode(MessageExtras.self, from: #"{"message":"9","is_send_failed":true}"#)
+    XCTAssertEqual(failed?.isSendFailed, true)
+    XCTAssertNil(Wire.decode(MessageExtras.self, from: #"{"message":"9"}"#)?.isSendFailed)
   }
 
   func testAppLockClock() {

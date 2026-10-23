@@ -74,6 +74,8 @@ final class AppModel {
   private(set) var changeCount = 0
   /// The conversation a notification asked to open.
   var openConversationId: String?
+  /// A message to show once its conversation is open (from a message link).
+  var focusMessageId: String?
   /// The conversation on screen; its notifications are not shown as banners.
   var visibleConversationId: String?
   private(set) var pushStatus: PushStatus = .unknown
@@ -573,6 +575,19 @@ final class AppModel {
   /// Joins the conversation's call (CallKit asked: answered, or started by the user).
   func joinCall(conversationId: String) async throws -> CallSession {
     try await core().joinCall(conversationId: conversationId)
+  }
+
+  /// Where a message link points, if this device is in that conversation and has the message.
+  func resolvePermalink(_ link: String) async -> PermalinkTarget? {
+    await answer(.resolvePermalink(link: link))?.maybeTarget
+  }
+
+  /// Who can be mentioned (lower-case usernames) and the user's own username, for highlighting.
+  func mentionNames() async -> (usernames: Set<String>, me: String) {
+    guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
+      return ([], "")
+    }
+    return (Set((people.users ?? []).map { $0.username.lowercased() }), people.me.username)
   }
 
   func conversationName(_ conversationId: String) async -> String {

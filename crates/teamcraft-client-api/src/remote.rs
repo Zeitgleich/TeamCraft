@@ -413,6 +413,14 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
   },
+  RetrySend {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  DiscardUnsent {
+    conversation: ConversationId,
+    message: MessageId,
+  },
   DownloadFile {
     conversation: ConversationId,
     message: MessageId,
@@ -564,6 +572,14 @@ impl ChatAction {
         conversation,
         message,
       } => backend.acknowledge(conversation, message),
+      Self::RetrySend {
+        conversation,
+        message,
+      } => backend.retry_send(conversation, message),
+      Self::DiscardUnsent {
+        conversation,
+        message,
+      } => backend.discard_unsent(conversation, message),
       Self::DownloadFile {
         conversation,
         message,
@@ -834,6 +850,31 @@ mod tests {
       r#"{"action":"post_message","conversation":"7","maybe_thread":null,"body":"hi"}"#
     );
     assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), action);
+  }
+
+  #[test]
+  fn failed_send_actions_are_tagged() {
+    let retry: ChatAction =
+      serde_json::from_str(r#"{"action":"retry_send","conversation":"7","message":"9"}"#).expect("parse");
+    assert_eq!(
+      retry,
+      ChatAction::RetrySend {
+        conversation: id_from_raw(7),
+        message: id_from_raw(9),
+      }
+    );
+    let discard: ChatAction =
+      serde_json::from_str(r#"{"action":"discard_unsent","conversation":"7","message":"9"}"#).expect("parse");
+    assert_eq!(
+      discard,
+      ChatAction::DiscardUnsent {
+        conversation: id_from_raw(7),
+        message: id_from_raw(9),
+      }
+    );
+    // Extras from an older core have no send state: not failed.
+    let extras: crate::actions::MessageExtras = serde_json::from_str(r#"{"message":"9"}"#).expect("parse");
+    assert!(!extras.is_send_failed);
   }
 
   #[test]

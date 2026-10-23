@@ -25,6 +25,9 @@ struct ChatPane: View {
   @State private var isAtBottom = true
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
+  @State private var mentionNames: (usernames: Set<String>, me: String) = ([], "")
+  @State private var maybeHighlighted: String?
+  @State private var isPermalinkMissing = false
   @FocusState private var isComposerFocused: Bool
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
@@ -32,6 +35,20 @@ struct ChatPane: View {
   private static let quickReaction = "👍"
 
   var body: some View {
+    screenWithDialogs
+    .task(id: model.changeCount) {
+      await reload()
+      await followTransfers()
+    }
+    .task { mentionNames = await model.mentionNames() }
+    .onAppear { model.visibleConversationId = conversation.id }
+    .onDisappear {
+      if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
+    }
+  }
+
+  /// The messages and the composer, with navigation and pickers.
+  private var screen: some View {
     VStack(spacing: 0) {
       OfflineBanner()
       messageList
@@ -57,6 +74,11 @@ struct ChatPane: View {
       result in
       Task { await attach(documents: result) }
     }
+  }
+
+  /// `screen` with its confirmations, alerts and the in-app handling of message links.
+  private var screenWithDialogs: some View {
+    screen
     .confirmationDialog("delete_confirm_title", isPresented: deletingBinding, titleVisibility: .visible, presenting: maybeDeleting) {
       message in
       Button("delete", role: .destructive) {
@@ -68,6 +90,15 @@ struct ChatPane: View {
     .alert("send_failed", isPresented: $isSendFailed) {
       Button("done", role: .cancel) {}
     }
+    .alert("permalink_unavailable", isPresented: $isPermalinkMissing) {
+      Button("done", role: .cancel) {}
+    }
+    // Message links open in the app; web links go to the browser as usual.
+    .environment(\.openURL, OpenURLAction { url in
+      guard url.scheme == "teamcraft" else { return .systemAction }
+      Task { await openPermalink(url.absoluteString) }
+      return .handled
+    })
     .alert("attachment_error_title", isPresented: attachmentErrorBinding, presenting: attachmentError) { _ in
       Button("done", role: .cancel) {}
     } message: { error in
@@ -76,14 +107,6 @@ struct ChatPane: View {
       case .unreadable: Text("attachment_unreadable")
       case .sendFailed: Text("attachment_send_failed")
       }
-    }
-    .task(id: model.changeCount) {
-      await reload()
-      await followTransfers()
-    }
-    .onAppear { model.visibleConversationId = conversation.id }
-    .onDisappear {
-      if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
     }
   }
 
@@ -96,17 +119,7 @@ struct ChatPane: View {
             case .day(let date):
               DayChip(date: date)
             case .entry(let message, let isContinuation):
-              MessageRow(
-                message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
-                isContinuation: isContinuation, showsThreadLink: threadId == nil,
-                onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) }
-              )
-              .padding(.top, isContinuation ? 0 : 8)
-              .contentShape(Rectangle())
-              .onTapGesture(count: 2) { react(message, Self.quickReaction) }
-              .contextMenu { menu(for: message) }
-              .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
-              .id(message.id)
+              entryRow(message, isContinuation: isContinuation)
             }
           }
           // Visible exactly while the user reads at the bottom.
@@ -127,8 +140,11 @@ struct ChatPane: View {
           .padding()
         }
       }
+      // A message link opened this conversation, or points into it: show the message.
+      .onChange(of: messages.map(\.id)) { _, _ in focusLinkedMessage(proxy) }
+      .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
       .onChange(of: messages.last?.id) { _, last in
-        guard last != nil else { return }
+        guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
         // Own messages always come into view; others' only while reading at the bottom.
         if isAtBottom || messages.last?.authorId == account.userId {
           withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
@@ -140,6 +156,26 @@ struct ChatPane: View {
   }
 
   private static let bottomId = "bottom"
+
+  /// One message with its gestures: double tap reacts, long press opens the menu.
+  private func entryRow(_ message: MessageItem, isContinuation: Bool) -> some View {
+    let row = MessageRow(
+      message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
+      isContinuation: isContinuation, showsThreadLink: threadId == nil,
+      onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
+      mentionNames: mentionNames
+    )
+    let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
+    return
+      row
+      .padding(.top, isContinuation ? 0 : 8)
+      .background(highlight)
+      .contentShape(Rectangle())
+      .onTapGesture(count: 2) { react(message, Self.quickReaction) }
+      .contextMenu { menu(for: message) }
+      .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
+      .id(message.id)
+  }
 
   @ViewBuilder
   private var composer: some View {
@@ -280,6 +316,32 @@ struct ChatPane: View {
     }
   }
 
+  /// Opens a message link: its thread here, or its conversation (the list switches to it).
+  private func openPermalink(_ link: String) async {
+    guard let target = await model.resolvePermalink(link) else {
+      isPermalinkMissing = true
+      return
+    }
+    model.focusMessageId = target.message
+    if target.conversation != conversation.id {
+      model.openConversationId = target.conversation
+    } else if let thread = target.maybeThread, thread != threadId {
+      maybeThread = ThreadTarget(threadId: thread)
+    }
+  }
+
+  /// Scrolls to the message a link pointed at, once it is loaded, and highlights it for a moment.
+  private func focusLinkedMessage(_ proxy: ScrollViewProxy) {
+    guard let focus = model.focusMessageId, messages.contains(where: { $0.id == focus }) else { return }
+    model.focusMessageId = nil
+    maybeHighlighted = focus
+    withAnimation { proxy.scrollTo(focus, anchor: .center) }
+    Task {
+      try? await Task.sleep(for: .seconds(2.5))
+      withAnimation { maybeHighlighted = nil }
+    }
+  }
+
   private func react(_ message: MessageItem, _ emoji: String) {
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
@@ -390,6 +452,7 @@ struct MessageRow: View {
   var isContinuation = false
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
+  var mentionNames: (usernames: Set<String>, me: String) = ([], "")
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
@@ -400,7 +463,7 @@ struct MessageRow: View {
         AvatarView(name: message.authorName)
       }
       VStack(alignment: .leading, spacing: 4) {
-        if !isContinuation || message.isPending || message.isEdited {
+        if !isContinuation || (message.isPending && !isSendFailed) || message.isEdited {
           HStack(spacing: 6) {
             if !isContinuation {
               Text(isMine ? String(localized: "you") : message.authorName).font(.subheadline.weight(.semibold))
@@ -408,16 +471,19 @@ struct MessageRow: View {
                 .font(.caption).foregroundStyle(Theme.textMuted)
             }
             if message.isEdited { Text("edited").font(.caption).foregroundStyle(Theme.textMuted) }
-            if message.isPending { Text("pending").font(.caption).foregroundStyle(Theme.textMuted) }
+            if message.isPending && !isSendFailed {
+              Text("pending").font(.caption).foregroundStyle(Theme.textMuted)
+            }
           }
         }
         if !message.body.isEmpty || files.isEmpty {
-          Text(linkedText(message.body))
+          Text(messageText(message.body, usernames: mentionNames.usernames, myUsername: mentionNames.me))
             .textSelection(.enabled)
             .padding(10)
             .background(isMine ? Theme.ownBubble : Theme.surface)
             .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
         }
+        if isSendFailed { notSentLine }
         ForEach(files) { file in AttachmentView(file: file) }
         if let preview = maybeExtras?.maybeLinkPreview { LinkPreviewCard(preview: preview) }
         if !message.reactions.isEmpty { reactions }
@@ -431,6 +497,23 @@ struct MessageRow: View {
   }
 
   private var files: [FileInfo] { maybeExtras?.files ?? [] }
+
+  private var isSendFailed: Bool { maybeExtras?.isSendFailed == true }
+
+  /// An own message the server rejected: say so, and offer to send it again or drop it.
+  private var notSentLine: some View {
+    HStack(spacing: 12) {
+      Label("not_sent", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(Theme.danger)
+      Button("not_sent_retry") {
+        Task { await model.perform(.retrySend(conversationId: message.conversationId, messageId: message.id)) }
+      }
+      .font(.caption.weight(.semibold))
+      Button("not_sent_delete", role: .destructive) {
+        Task { await model.perform(.discardUnsent(conversationId: message.conversationId, messageId: message.id)) }
+      }
+      .font(.caption.weight(.semibold))
+    }
+  }
 
   private var reactions: some View {
     HStack(spacing: 6) {

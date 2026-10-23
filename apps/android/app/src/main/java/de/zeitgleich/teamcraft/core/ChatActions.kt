@@ -107,6 +107,16 @@ object ChatActions {
     put("body", body)
   }
 
+  fun retrySend(conversation: String, message: String) = action("retry_send") {
+    put("conversation", conversation)
+    put("message", message)
+  }
+
+  fun discardUnsent(conversation: String, message: String) = action("discard_unsent") {
+    put("conversation", conversation)
+    put("message", message)
+  }
+
   fun acknowledge(conversation: String, message: String) = action("acknowledge") {
     put("conversation", conversation)
     put("message", message)

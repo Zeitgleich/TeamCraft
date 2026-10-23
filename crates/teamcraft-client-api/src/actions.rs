@@ -105,6 +105,10 @@ pub struct MessageExtras {
   /// What a system message reports, for events [`crate::model::SystemEvent`] doesn't cover.
   #[serde(default)]
   pub maybe_workspace_event: Option<WorkspaceEvent>,
+  /// An own message the server rejected: offer "retry" ([`crate::remote::ChatAction::RetrySend`])
+  /// or "delete" ([`crate::remote::ChatAction::DiscardUnsent`]) instead of "sending…" forever.
+  #[serde(default)]
+  pub is_send_failed: bool,
 }
 
 impl MessageExtras {
@@ -126,6 +130,7 @@ impl MessageExtras {
       files: Vec::new(),
       maybe_link_preview: None,
       maybe_workspace_event: None,
+      is_send_failed: false,
     }
   }
 }

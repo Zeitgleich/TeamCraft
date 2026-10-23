@@ -206,6 +206,10 @@ pub trait ChatBackend {
   fn open_dm(&self, _user: UserId) {}
   /// Confirms having read a message that asked for acknowledgement.
   fn acknowledge(&self, _conversation: ConversationId, _message: MessageId) {}
+  /// Sends an own message again that the server rejected.
+  fn retry_send(&self, _conversation: ConversationId, _message: MessageId) {}
+  /// Drops an own message the server rejected, instead of sending it again.
+  fn discard_unsent(&self, _conversation: ConversationId, _message: MessageId) {}
 
   // Files.
 

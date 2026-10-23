@@ -74,12 +74,12 @@ work stream).
 | Edit history, forward, pin, save, copy link, mark unread                                  | iOS          | open   |
 | Images as large previews; a tap downloads and then opens Quick Look (zoom, share, save)    | iOS          | done   |
 | Mention highlighting in message text                                                      | Android      | done   |
-| Mention highlighting in message text                                                      | iOS          | open   |
+| Mention highlighting in message text                                                      | iOS          | done   |
 | Emoji autocomplete (`:smile:`)                                                            | Android, iOS | open   |
 | Voice messages                                                                            | Android, iOS | open: core |
 | Image grid for several images in one message                                              | Android, iOS | open   |
 | Save an image to the gallery (the share sheet covers it for now)                          | Android      | open   |
-| A message that keeps failing shows "Sending…" forever; no retry or delete                 | Android, iOS | open: core reports outbox failures only in logs |
+| A message the server rejected showed "Sending…" forever; now "Not sent" with Retry/Delete | Android, iOS | done   |
 
 ## Sharing and navigation
 
@@ -89,7 +89,7 @@ work stream).
 | Share extension                                                                    | iOS          | open: needs an app extension target |
 | App shortcuts for recent conversations                                             | Android      | owner: push-quality (MessagingStyle conversation shortcuts) |
 | Message links in messages open the conversation at the message (in the app)        | Android      | done   |
-| Message links in messages                                                          | iOS          | open   |
+| Message links in messages open the conversation or thread at the message           | iOS          | done   |
 | Message links from other apps (`teamcraft:` deep links; decide with the launch-token rule) | Android, iOS | open |
 | Tablet / foldable two-pane layout                                                  | Android      | open   |
 | Open conversation lost after process death                                         | Android      | open   |

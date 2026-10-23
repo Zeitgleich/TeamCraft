@@ -53,5 +53,12 @@ class WireTest {
     val extras = answer.extras.single()
     assertTrue(extras.isPinned)
     assertEquals(0.25f, extras.files.single().transfer.maybeProgress!!, 0.001f)
+    assertTrue(!extras.isSendFailed)
+  }
+
+  @Test
+  fun aRejectedMessageDecodesAsFailed() {
+    val answer = decodeAnswer("""{"answer":"message_extras","extras":[{"message":"10","is_send_failed":true}]}""")
+    assertTrue(answer.extras.single().isSendFailed)
   }
 }
