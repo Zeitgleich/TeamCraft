@@ -173,9 +173,9 @@ key, fetches and decrypts the message and builds the notification itself.
 | FCM         | The FCM registration token                                        | Data-only message, key `w`: the sealed wake-up, base64url, no padding |
 | UnifiedPush | Web Push subscription JSON `{"endpoint", "keys": {p256dh, auth}}` | Web Push (RFC 8291) body = the sealed wake-up; the connector decrypts |
 
-The server's FCM and UnifiedPush senders are still stubs (`crates/teamcraft-server/src/push`).
-UnifiedPush can reuse the Web Push sender as is, since the token has the same shape; FCM needs the
-HTTP v1 API with the format above. Without either, notifications only appear while the app syncs.
+The server sends both (`crates/teamcraft-server/src/push`): UnifiedPush through its Web Push sender,
+since the token has the same shape, and FCM through the HTTP v1 API with the format above, directly
+(`[push.fcm]`, self-built apps) or through the push gateway (store apps, `docs/push-gateway.md`).
 
 Notifications use `MessagingStyle` (sender as `Person`, group conversations titled with the
 channel), category `MESSAGE`, and two actions that don't open the app: reply (`RemoteInput`,
