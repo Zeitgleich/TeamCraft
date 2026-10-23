@@ -197,6 +197,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
+        run: mkdir -p crates/teamcraft-ui/dist
+      # The desktop shell has macOS-only code (notification center, dock); the release build is the
+      # only other place it gets compiled for macOS.
+      - name: Clippy (desktop shell)
+        env:
+          SQLX_OFFLINE: "true"
+        run: cargo clippy -p teamcraft-desktop --all-targets -- -D warnings
       - name: Clippy (call media)
         run: cargo clippy -p teamcraft-media --all-targets --features native,avfoundation,screencapturekit,effects,openh264-source -- -D warnings
       - name: Test (call media)
