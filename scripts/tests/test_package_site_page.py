@@ -19,8 +19,10 @@ RELEASE_FILES = [
     "TeamCraft_1.0.1_arm64-setup.exe",
     "TeamCraft_1.0.1_x64_en-US.msi",
     "TeamCraft_1.0.1_arm64_en-US.msi",
-    "TeamCraft_1.0.1_universal.dmg",
-    "TeamCraft_1.0.1_universal.app.tar.gz",
+    "TeamCraft_1.0.1_x64.dmg",
+    "TeamCraft_1.0.1_aarch64.dmg",
+    "TeamCraft_1.0.1_x64.app.tar.gz",
+    "TeamCraft_1.0.1_aarch64.app.tar.gz",
     "TeamCraft_1.0.1_amd64.AppImage",
     "TeamCraft_1.0.1_aarch64.AppImage",
     "TeamCraft_1.0.1_amd64.deb",
@@ -45,7 +47,7 @@ class ClassifyAssetsTest(unittest.TestCase):
         self.assertEqual(kinds, {
             ("windows", "exe", "x64"), ("windows", "exe", "arm64"),
             ("windows", "msi", "x64"), ("windows", "msi", "arm64"),
-            ("macos", "dmg", "universal"),
+            ("macos", "dmg", "arm64"), ("macos", "dmg", "x64"),
             ("linux", "appimage", "x64"), ("linux", "appimage", "arm64"),
             ("linux", "deb", "x64"), ("linux", "deb", "arm64"),
             ("linux", "rpm", "x64"), ("linux", "rpm", "arm64"),
@@ -58,6 +60,14 @@ class ClassifyAssetsTest(unittest.TestCase):
         self.assertNotIn("TeamCraft_1.0.1_x64-setup.exe.sig", names)
         self.assertNotIn("teamcraft-android-1.0.1-full-debug-signed.apk", names)
         self.assertFalse(any(n.endswith((".json", ".tar.gz")) or n == "SHA256SUMS" for n in names))
+
+    def test_apple_silicon_comes_before_intel_and_x64_before_arm64_elsewhere(self):
+        downloads = page.classify_assets(assets(RELEASE_FILES), allow_debug=True)
+        self.assertEqual([d.arch for d in downloads if d.os == "macos"], ["arm64", "x64"])
+        self.assertEqual([d.arch for d in downloads if d.kind == "exe"], ["x64", "arm64"])
+
+    def test_universal_dmgs_are_no_longer_offered(self):
+        self.assertEqual(page.classify_assets(assets(["TeamCraft_1.0.0_universal.dmg"]), allow_debug=False), [])
 
     def test_unsigned_apks_are_never_offered(self):
         files = ["teamcraft-android-1.0.1-full-release-unsigned.apk"]
@@ -109,8 +119,29 @@ class RenderTest(unittest.TestCase):
     def test_downloads_link_the_release_assets(self):
         self.add_release("prerelease", "v1.0.0-rc.1")
         html = self.render()
-        self.assertIn(f"https://github.com/{REPO}/releases/download/v1.0.0-rc.1/TeamCraft_1.0.1_universal.dmg", html)
+        base = f"https://github.com/{REPO}/releases/download/v1.0.0-rc.1"
+        self.assertIn(f"{base}/TeamCraft_1.0.1_aarch64.dmg", html)
+        self.assertIn(f"{base}/TeamCraft_1.0.1_x64.dmg", html)
         self.assertNotIn(".sig\"", html)
+
+    def test_the_mac_card_offers_both_architectures_apple_silicon_highlighted(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        card = html[html.index('data-os="macos" aria-labelledby'):]
+        card = card[:card.index("</article>")]
+        apple = card.index('href="https://github.com/Example-Org/TeamCraft/releases/download/v1.0.0-rc.1/TeamCraft_1.0.1_aarch64.dmg"')
+        intel = card.index('TeamCraft_1.0.1_x64.dmg"')
+        self.assertLess(apple, intel)
+        self.assertEqual(card.count("button button-primary download choice"), 1)
+        self.assertLess(card.index("button-primary download choice"), apple)
+        self.assertLess(card.index("button-secondary download choice"), intel)
+        self.assertGreater(card.index("button-secondary download choice"), apple)
+        self.assertIn("Apple silicon</span>", card)
+        self.assertIn("M1 and newer", card)
+        self.assertIn("Intel</span>", card)
+        self.assertIn("Which Mac do I have?", card)
+        self.assertIn("macOS 14 or newer · Apple silicon and Intel", card)
+        self.assertNotIn("Also for", card)
 
     def test_fingerprint_and_store_link_come_from_the_environment(self):
         self.add_release("prerelease", "v1.0.0-rc.1")

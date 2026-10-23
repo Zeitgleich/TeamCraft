@@ -17,14 +17,15 @@ import re
 import sys
 import urllib.parse
 
-# Release asset name pattern -> updater targets it serves. The universal macOS app serves both
-# architectures.
+# Release asset name pattern -> updater targets it serves. The updater asks for the architecture it
+# runs as, so an install of the earlier universal macOS app updates to the build of its own Mac.
 TARGETS = [
     (re.compile(r"_x64-setup\.exe$"), ["windows-x86_64-nsis"]),
     (re.compile(r"_arm64-setup\.exe$"), ["windows-aarch64-nsis"]),
     (re.compile(r"_x64_[A-Za-z-]+\.msi$"), ["windows-x86_64-msi"]),
     (re.compile(r"_arm64_[A-Za-z-]+\.msi$"), ["windows-aarch64-msi"]),
-    (re.compile(r"_universal\.app\.tar\.gz$"), ["darwin-x86_64-app", "darwin-aarch64-app"]),
+    (re.compile(r"_x64\.app\.tar\.gz$"), ["darwin-x86_64-app"]),
+    (re.compile(r"_aarch64\.app\.tar\.gz$"), ["darwin-aarch64-app"]),
     (re.compile(r"_amd64\.AppImage$"), ["linux-x86_64-appimage"]),
     (re.compile(r"_aarch64\.AppImage$"), ["linux-aarch64-appimage"]),
 ]

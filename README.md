@@ -8,6 +8,9 @@ written in Rust. License: AGPL-3.0-or-later.
 - User and administrator guide: [docs/guide/index.md](docs/guide/index.md)
 - Run your own server: [Zeitgleich/teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)
   (Ansible playbook, rootless Podman) and [docs/operations.md](docs/operations.md)
+- Download the apps: the [package site](https://zeitgleich.github.io/TeamCraft/) or the
+  [releases](https://github.com/Zeitgleich/TeamCraft/releases) (Windows x64 and arm64; macOS 14 or newer
+  for Apple silicon or Intel; Linux x86_64 and aarch64; Android)
 - Releases and changes: [CHANGELOG.md](CHANGELOG.md), [docs/release.md](docs/release.md)
 - Rules for contributors and coding agents: [AGENTS.md](AGENTS.md)
 

@@ -21,7 +21,7 @@ digest:
 | Platform                        | File                                                            |
 |---------------------------------|-----------------------------------------------------------------|
 | Windows x64 / arm64             | `TeamCraft_*_x64-setup.exe` / `*_arm64-setup.exe` (or `.msi`)   |
-| macOS (Apple silicon and Intel) | `TeamCraft_*_universal.dmg`                                     |
+| macOS Apple silicon / Intel     | `TeamCraft_*_aarch64.dmg` / `TeamCraft_*_x64.dmg`               |
 | Linux x86_64 / aarch64          | `.deb`, `.rpm`, `.AppImage`, `teamcraft-desktop-<arch>.flatpak` |
 
 Windows, macOS and AppImage installs update themselves from here on. For deb and rpm, add the APT or

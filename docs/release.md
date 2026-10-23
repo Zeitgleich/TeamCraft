@@ -108,9 +108,9 @@ Dependabot's pull requests are left out. Edit the template when a known limitati
 | `teamcraft-source-X.Y.Z.{spdx,cdx}.json`                        | SBOMs of the source tree (Cargo, Gradle)         |
 | `TeamCraft_X.Y.Z_*.deb`, `.rpm`, `.AppImage`                    | `desktop-release.yml`, x86_64 and aarch64        |
 | `teamcraft-desktop-<arch>.flatpak`                              | `desktop-release.yml`                            |
-| `TeamCraft_X.Y.Z_universal.dmg`                                 | `desktop-release.yml`, unsigned                  |
+| `TeamCraft_X.Y.Z_{aarch64,x64}.dmg`                             | `desktop-release.yml`, Apple silicon and Intel   |
 | `TeamCraft_X.Y.Z_{x64,arm64}-setup.exe`, `.msi`                 | `desktop-release.yml`, unsigned                  |
-| `TeamCraft_X.Y.Z_universal.app.tar.gz`                          | `desktop-release.yml`, the macOS update archive  |
+| `TeamCraft_X.Y.Z_{aarch64,x64}.app.tar.gz`                      | `desktop-release.yml`, the macOS update archives |
 | `*.sig` next to the AppImages, installers and `.app.tar.gz`     | updater signatures (with the updater key only)   |
 | `latest.json`                                                   | updater manifest (`scripts/updater-manifest.py`) |
 | `teamcraft-web-X.Y.Z.tar.gz`                                    | the web client (`[web] static_dir`)              |

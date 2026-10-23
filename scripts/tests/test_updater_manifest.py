@@ -20,7 +20,8 @@ RELEASE_FILES = [
     "TeamCraft_1.0.1_arm64-setup.exe",
     "TeamCraft_1.0.1_x64_en-US.msi",
     "TeamCraft_1.0.1_arm64_en-US.msi",
-    "TeamCraft_1.0.1_universal.app.tar.gz",
+    "TeamCraft_1.0.1_aarch64.app.tar.gz",
+    "TeamCraft_1.0.1_x64.app.tar.gz",
     "TeamCraft_1.0.1_amd64.AppImage",
     "TeamCraft_1.0.1_aarch64.AppImage",
 ]
@@ -28,7 +29,8 @@ RELEASE_FILES = [
 OTHER_FILES = [
     "TeamCraft_1.0.1_amd64.deb",
     "TeamCraft-1.0.1-1.x86_64.rpm",
-    "TeamCraft_1.0.1_universal.dmg",
+    "TeamCraft_1.0.1_aarch64.dmg",
+    "TeamCraft_1.0.1_x64.dmg",
     "teamcraft-desktop-x86_64.flatpak",
     "SHA256SUMS",
 ]
@@ -69,11 +71,25 @@ class UpdaterManifestTest(unittest.TestCase):
             "TeamCraft_1.0.1_aarch64.AppImage",
         )
 
-    def test_the_universal_mac_app_serves_both_architectures(self):
+    # The universal app of earlier releases asks with the architecture it runs as (the updater's
+    # compile-time target of the running slice), so each Mac gets the build of its own architecture.
+    def test_each_mac_architecture_gets_its_own_app(self):
         self.release()
         platforms = self.build()["platforms"]
-        self.assertEqual(platforms["darwin-x86_64-app"], platforms["darwin-aarch64-app"])
-        self.assertTrue(platforms["darwin-aarch64-app"]["url"].endswith("_universal.app.tar.gz"))
+        self.assertEqual(platforms["darwin-aarch64-app"]["url"].rsplit("/", 1)[1], "TeamCraft_1.0.1_aarch64.app.tar.gz")
+        self.assertEqual(platforms["darwin-aarch64-app"]["signature"], "sig-of-TeamCraft_1.0.1_aarch64.app.tar.gz")
+        self.assertEqual(platforms["darwin-x86_64-app"]["url"].rsplit("/", 1)[1], "TeamCraft_1.0.1_x64.app.tar.gz")
+        self.assertEqual(platforms["darwin-x86_64-app"]["signature"], "sig-of-TeamCraft_1.0.1_x64.app.tar.gz")
+
+    def test_a_universal_mac_app_is_no_longer_an_update(self):
+        self.release(signed=["TeamCraft_1.0.1_universal.app.tar.gz"], unsigned=[])
+        with self.assertRaisesRegex(manifest.ManifestError, "no updater target uses it"):
+            self.build(require_all=False)
+
+    def test_a_release_with_one_mac_architecture_only_is_incomplete(self):
+        self.release(signed=[name for name in RELEASE_FILES if not name.endswith("_x64.app.tar.gz")])
+        with self.assertRaisesRegex(manifest.ManifestError, "missing update artifacts for darwin-x86_64-app$"):
+            self.build()
 
     def test_there_are_no_bare_os_arch_keys(self):
         self.release()
