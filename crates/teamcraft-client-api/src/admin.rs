@@ -115,12 +115,20 @@ pub enum AuditAction {
   PermissionsChanged,
   ModerationChanged,
   AnnouncementChanged,
+  /// A brand was created, changed, deleted, taken over or got a new image.
+  BrandChanged,
+  /// The mail server settings were changed, reset or tested.
+  MailSettingsChanged,
+  /// The calendar server settings were changed, reset or tested.
+  CalendarSettingsChanged,
+  /// Instance settings (limits, rules, mail texts, ...) were changed or reset.
+  SettingsChanged,
   /// Anything the console has no wording for yet; the detail carries the raw action name.
   Other,
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 21] = [
+  pub const ALL: [AuditAction; 25] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -141,6 +149,10 @@ impl AuditAction {
     Self::PermissionsChanged,
     Self::ModerationChanged,
     Self::AnnouncementChanged,
+    Self::BrandChanged,
+    Self::MailSettingsChanged,
+    Self::CalendarSettingsChanged,
+    Self::SettingsChanged,
     Self::Other,
   ];
 
@@ -166,9 +178,20 @@ impl AuditAction {
       Self::PermissionsChanged => "permissions-changed",
       Self::ModerationChanged => "moderation-changed",
       Self::AnnouncementChanged => "announcement-changed",
+      Self::BrandChanged => "brand-changed",
+      Self::MailSettingsChanged => "mail-settings-changed",
+      Self::CalendarSettingsChanged => "calendar-settings-changed",
+      Self::SettingsChanged => "settings-changed",
       Self::Other => "other",
     }
   }
+}
+
+/// Which connection a settings test checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTestKind {
+  Mail,
+  Calendar,
 }
 
 /// Why the policy form is read-only.
@@ -219,6 +242,14 @@ pub enum AdminSection {
   People,
   Announcement,
   Backgrounds,
+  /// Brands: host names, colors, images and texts per brand.
+  Brands,
+  /// The outgoing mail server.
+  Mail,
+  /// The calendar server meetings are written to.
+  Calendar,
+  /// Limits, rules and texts that used to need the configuration file.
+  Settings,
   Retention,
   /// How the desktop apps update (docs/updates.md §4.4).
   Updates,
@@ -228,7 +259,7 @@ pub enum AdminSection {
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 11] = [
+  pub const ALL: [AdminSection; 15] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -236,6 +267,10 @@ impl AdminSection {
     Self::People,
     Self::Announcement,
     Self::Backgrounds,
+    Self::Brands,
+    Self::Mail,
+    Self::Calendar,
+    Self::Settings,
     Self::Retention,
     Self::Updates,
     Self::Instance,
@@ -251,6 +286,10 @@ impl AdminSection {
       Self::People => "people",
       Self::Announcement => "announcement",
       Self::Backgrounds => "backgrounds",
+      Self::Brands => "brands",
+      Self::Mail => "mail",
+      Self::Calendar => "calendar",
+      Self::Settings => "settings",
       Self::Retention => "retention",
       Self::Updates => "updates",
       Self::Instance => "instance",

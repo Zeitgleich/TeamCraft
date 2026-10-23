@@ -7,6 +7,7 @@ use web_sys::{Headers, Request, RequestInit, RequestRedirect, Response};
 
 pub(crate) struct FetchResponse {
   pub status: u16,
+  pub maybe_content_type: Option<String>,
   pub body: Vec<u8>,
 }
 
@@ -40,8 +41,10 @@ pub(crate) async fn fetch(
   let buffer = JsFuture::from(response.array_buffer().map_err(describe)?)
     .await
     .map_err(describe)?;
+  let maybe_content_type = response.headers().get("Content-Type").ok().flatten();
   Ok(FetchResponse {
     status: response.status(),
+    maybe_content_type,
     body: Uint8Array::new(&buffer).to_vec(),
   })
 }

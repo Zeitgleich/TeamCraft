@@ -4,17 +4,20 @@
 use std::collections::HashMap;
 
 use teamcraft_proto::{
-  ALL_PERMISSIONS, AdminInstanceResponse, AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse,
-  ChannelModeration, GuestPolicy, HistoryPolicy, OverrideEffect, Permission, PermissionScheme,
-  PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role, SchemeChange,
-  SchemeOverride, SchemeRole, SchemeRoleResponse, SessionPolicy, SetAnnouncementRequest, SfuStatus,
-  StorageStatus, UnixMillis, WorkspacePolicy,
+  ALL_PERMISSIONS, AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse,
+  AdminMailSettingsResponse, AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse, BrandAssetSlot,
+  ChannelModeration, CreateBrandRequest, GuestPolicy, HistoryPolicy, OverrideEffect, Permission,
+  PermissionScheme, PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SchemeOverride,
+  SchemeRole, SchemeRoleResponse, SendTestMailRequest, SessionPolicy, SetAnnouncementRequest,
+  SettingsTestResponse, SfuStatus, StorageStatus, UnixMillis, UpdateBrandRequest,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use super::{MockBackend, dm_first, id_from_raw};
 use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, GuestInfo,
-  Retention, SelfJoinOutcome,
+  Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::backend::{AdminBackend, CallBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevice, MediaDevices, Participant};
@@ -42,6 +45,7 @@ pub(super) struct OpsState {
   next_audit_id: u64,
   acknowledged_key_changes: Vec<ConversationId>,
   verified_contacts: Vec<UserId>,
+  settings: super::settings_data::SettingsMock,
 }
 
 impl OpsState {
@@ -60,6 +64,7 @@ impl OpsState {
       acknowledged_key_changes: Vec::new(),
       // Sam was compared in person already.
       verified_contacts: vec![id_from_raw(2)],
+      settings: super::settings_data::SettingsMock::new(now),
     }
   }
 
@@ -327,6 +332,139 @@ impl AdminBackend for MockBackend {
       "announcement",
       "cleared",
     );
+  }
+
+  fn admin_brands(&self) -> Option<AdminBrandsResponse> {
+    Some(self.ops.borrow().settings.brands.clone())
+  }
+
+  fn create_brand(&self, request: CreateBrandRequest) {
+    let mut ops = self.ops.borrow_mut();
+    let id = request.id.clone();
+    ops.settings.create_brand(request);
+    ops.record(self.now, AuditAction::BrandChanged, &id, "created");
+  }
+
+  fn update_brand(&self, id: String, request: UpdateBrandRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.update_brand(&id, request);
+    ops.record(self.now, AuditAction::BrandChanged, &id, "updated");
+  }
+
+  fn delete_brand(&self, id: String) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.delete_brand(&id);
+    ops.record(self.now, AuditAction::BrandChanged, &id, "deleted");
+  }
+
+  fn take_over_brand(&self, id: String) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.take_over_brand(&id);
+    ops.record(self.now, AuditAction::BrandChanged, &id, "taken over");
+  }
+
+  fn upload_brand_asset(&self, id: String, slot: BrandAssetSlot, _bytes: Vec<u8>, _content_type: String) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.set_asset(&id, slot, true);
+    ops.record(self.now, AuditAction::BrandChanged, &id, "image set");
+  }
+
+  fn delete_brand_asset(&self, id: String, slot: BrandAssetSlot) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.set_asset(&id, slot, false);
+    ops.record(self.now, AuditAction::BrandChanged, &id, "image removed");
+  }
+
+  fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
+    Some(self.ops.borrow().settings.mail.clone())
+  }
+
+  fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.save_mail(request);
+    ops.record(self.now, AuditAction::MailSettingsChanged, "mail", "updated");
+  }
+
+  fn reset_mail_settings(&self) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.reset_mail(self.now);
+    ops.record(self.now, AuditAction::MailSettingsChanged, "mail", "reset");
+  }
+
+  fn send_test_mail(&self, _request: SendTestMailRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.last_test = Some((
+      SettingsTestKind::Mail,
+      SettingsTestResponse {
+        is_ok: true,
+        maybe_error: None,
+      },
+    ));
+    ops.record(self.now, AuditAction::MailSettingsChanged, "mail", "test sent");
+  }
+
+  fn calendar_settings(&self) -> Option<AdminCalendarSettingsResponse> {
+    Some(self.ops.borrow().settings.calendar.clone())
+  }
+
+  fn save_calendar_settings(&self, request: UpdateCalendarSettingsRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.save_calendar(request);
+    ops.record(
+      self.now,
+      AuditAction::CalendarSettingsChanged,
+      "calendar",
+      "updated",
+    );
+  }
+
+  fn reset_calendar_settings(&self) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.reset_calendar(self.now);
+    ops.record(
+      self.now,
+      AuditAction::CalendarSettingsChanged,
+      "calendar",
+      "reset",
+    );
+  }
+
+  fn test_calendar(&self) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.last_test = Some((
+      SettingsTestKind::Calendar,
+      SettingsTestResponse {
+        is_ok: true,
+        maybe_error: None,
+      },
+    ));
+    ops.record(
+      self.now,
+      AuditAction::CalendarSettingsChanged,
+      "calendar",
+      "tested",
+    );
+  }
+
+  fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
+    self.ops.borrow().settings.last_test.clone()
+  }
+
+  fn runtime_settings(&self) -> Option<RuntimeSettingsResponse> {
+    Some(self.ops.borrow().settings.runtime.clone())
+  }
+
+  fn save_runtime_settings(&self, section: RuntimeSettingsSection) {
+    let mut ops = self.ops.borrow_mut();
+    let name = section.key().as_str().to_owned();
+    ops.settings.save_runtime(section);
+    ops.record(self.now, AuditAction::SettingsChanged, &name, "updated");
+  }
+
+  fn reset_runtime_settings(&self, key: RuntimeSettingsKey) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.reset_runtime(key.clone());
+    ops.record(self.now, AuditAction::SettingsChanged, key.as_str(), "reset");
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {

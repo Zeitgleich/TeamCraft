@@ -52,6 +52,21 @@ pub struct ApiResponse {
   pub body: String,
 }
 
+/// A binary request body with its media type (brand images).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinaryBody {
+  pub content_type: String,
+  pub bytes: Vec<u8>,
+}
+
+/// Response of an authenticated API call whose body is not text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiBytes {
+  pub status: u16,
+  pub maybe_content_type: Option<String>,
+  pub body: Vec<u8>,
+}
+
 /// Performs login and authenticated API calls.
 ///
 /// API calls live on this trait, not on a token getter, so an implementation can keep the tokens out
@@ -98,6 +113,20 @@ pub trait Authenticator {
     Box::pin(async {
       Err(AuthError::Unsupported(
         "the tokens stay in the desktop shell".to_owned(),
+      ))
+    })
+  }
+
+  /// Like [`Self::api_request`] for bodies that are bytes: uploads of images and downloads of them.
+  fn api_request_bytes(
+    &self,
+    _method: ApiMethod,
+    _path: &str,
+    _maybe_body: Option<BinaryBody>,
+  ) -> LocalFuture<'_, Result<ApiBytes, AuthError>> {
+    Box::pin(async {
+      Err(AuthError::Unsupported(
+        "binary requests are not available here".to_owned(),
       ))
     })
   }

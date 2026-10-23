@@ -165,6 +165,8 @@ impl Rng {
 mod ops;
 #[path = "mock_search.rs"]
 mod search_impl;
+#[path = "mock_settings.rs"]
+mod settings_data;
 
 pub struct MockBackend {
   now: TimestampMs,

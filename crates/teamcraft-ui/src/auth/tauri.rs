@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use super::{ApiMethod, ApiResponse, AuthError, Authenticator, LocalFuture};
+use super::{ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture};
 use crate::model::ConversationId;
 
 /// Whether the page runs inside the desktop shell.
@@ -83,6 +83,49 @@ impl Authenticator for TauriAuth {
       })
     })
   }
+
+  fn api_request_bytes(
+    &self,
+    method: ApiMethod,
+    path: &str,
+    maybe_body: Option<BinaryBody>,
+  ) -> LocalFuture<'_, Result<ApiBytes, AuthError>> {
+    use base64::Engine;
+
+    let path = path.to_owned();
+    Box::pin(async move {
+      let invalid = |_| AuthError::InvalidResponse("could not build the request".to_owned());
+      let args = js_sys::Object::new();
+      let method = serde_json::to_value(method)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+      js_sys::Reflect::set(&args, &"method".into(), &method.into()).map_err(invalid)?;
+      js_sys::Reflect::set(&args, &"path".into(), &path.into()).map_err(invalid)?;
+      if let Some(body) = maybe_body {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&body.bytes);
+        js_sys::Reflect::set(&args, &"contentType".into(), &body.content_type.into()).map_err(invalid)?;
+        js_sys::Reflect::set(&args, &"bodyBase64".into(), &encoded.into()).map_err(invalid)?;
+      }
+      let value = invoke("api_request_bytes", args.into()).await?;
+      let response: ApiBytesPayload = serde_wasm_json(&value)?;
+      let body = base64::engine::general_purpose::STANDARD
+        .decode(response.body_base64)
+        .map_err(|_| AuthError::InvalidResponse("the body is not base64".to_owned()))?;
+      Ok(ApiBytes {
+        status: response.status,
+        maybe_content_type: response.content_type,
+        body,
+      })
+    })
+  }
+}
+
+#[derive(Deserialize)]
+struct ApiBytesPayload {
+  status: u16,
+  content_type: Option<String>,
+  body_base64: String,
 }
 
 #[derive(Deserialize)]
