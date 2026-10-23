@@ -91,7 +91,18 @@ exists; clients can still read what they have stored locally.
 - Never expose `/api/internal/` to the internet: it is for the SFU and the mail inbox handler, and is
   protected by bearer tokens, but there is no reason to publish it.
 - Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `4433` reachable
-  from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only.
+  from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only. Calls don't
+  work on networks that block outbound UDP (some corporate, hotel and guest networks); there is no
+  TCP fallback yet (ARCHITECTURE.md §6.6), so name the port in the instructions for users.
+- Keep the SFU's UDP port out of anything that tracks UDP "connections" by address and port (a
+  load balancer without QUIC connection-ID routing, a strict stateful firewall): when a client
+  changes networks its QUIC connection continues from a new address (connection migration,
+  ARCHITECTURE.md §6.5), and such a box would drop or misroute those packets. A plain DNAT/port
+  forward to one SFU is fine.
+- A participant whose connection is lost keeps their place in the call for
+  `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS` (default 30) while their app rejoins; a connection is lost
+  after `TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS` (default 10) without packets. Longer grace periods cover
+  longer outages (trains, lifts) but keep a departed participant listed as "reconnecting" longer.
 
 ## Backup and restore
 

@@ -298,7 +298,8 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - Desktop: `cpal` for audio I/O, `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
-  Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned.
+  Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned;
+  networks that block UDP: §6.6.
 - `MediaStreamTrackProcessor` (raw frames from the camera/mic track) is missing in Firefox: fall back to
   an `AudioWorklet` for audio and `<video>` → `VideoFrame` for video there. Codec availability (e.g.
   Opus in `AudioEncoder`) is checked at runtime with `isConfigSupported()`; fallback is a WASM Opus
@@ -332,7 +333,7 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Video effects** (background blur, background images, light correction) run on the sending device
   before encoding – the SFU only ever sees encrypted frames. Pipeline per platform: [PLAN.md](PLAN.md) §8.
 - Bandwidth estimation: transport-wide feedback over the signaling stream + QUIC congestion signals.
-- Codecs: Opus (audio, 48 kHz, DTX, in-band FEC); video AV1 or VP9 where hardware supports it, H.264 as fallback.
+- Codecs: Opus (audio, 48 kHz, DTX, in-band FEC planned for the measured uplink loss, §6.5); video AV1 or VP9 where hardware supports it, H.264 as fallback.
 - The server tells the SFU directly who may join which call (roster + short-lived join tokens); clients never decide that.
 
 ### 6.4 Meetings with CalCraft
@@ -344,6 +345,93 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 5. RSVPs (`method=REPLY`) are processed by CalCraft / an inbox handler and shown in TeamCraft.
 
 The meeting title, time and invitee list are **not** E2EE (they live in CalDAV and e-mail). Meeting chat is.
+
+### 6.5 Mobile networks and lost connections
+
+A call must survive a phone moving from Wi-Fi to LTE, a laptop changing networks and the
+short outages of a train ride. Two layers do that; the call only ends when both fail.
+
+**1. Connection migration (native clients).** The client's UDP socket is bound to the wildcard
+address, so after a network change its packets leave through the new route; quinn clients don't
+pin a source address. The SFU allows migration (`allow_migration`) and validates the new path
+(QUIC `PATH_CHALLENGE`), then sends there. The QUIC connection, the DAVE group, the RTP numbering
+and the jitter buffers carry on; the call loses what was in flight during the switch. `wtransport`
+0.7 doesn't expose quinn's `Endpoint::rebind` for clients, so the socket itself isn't replaced;
+when the new network can't reach the SFU from it (an IPv6-only network and an IPv4 SFU address),
+layer 2 takes over.
+
+**Noticing a dead path.** Clients and the SFU send QUIC keep-alives every 2 s (mobile carriers drop
+idle UDP NAT mappings after about 30 s, some after 20 s), with a 10 s idle timeout. The native
+client watches the connection's received packet count (keep-alive answers count, so quiet calls
+are covered): nothing for 5 s, or nothing within 2 s after a network change, means the path is
+dead. Network changes come from the platforms: Android `ConnectivityManager` default-network
+callbacks, iOS `NWPathMonitor`, and on desktops a once-a-second lookup of the local address the
+system would use toward the SFU.
+
+**2. Rejoin.** The client opens a new connection with a fresh join token from `teamcraft-server`
+and joins again. The SFU tells a lost connection (idle timeout, reset) from a deliberate close (the
+client leaving, a host control) and keeps a lost participant's slot – audio stream id, published
+tracks, subscriptions – for a grace period (default 30 s, `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS`,
+announced to clients in `joined`). Meanwhile the others see `participant_reconnecting`, not "left",
+and the server's roster (and ringing) doesn't change. A join of the same device takes the slot back
+(`participant_reconnected`), also over a connection the SFU still thinks alive, which is told
+`connection_replaced` and closed. Each connection has its own session id, so the cleanup of an old
+connection never touches the slot a newer one took over. DAVE re-keys: the group removes the lost
+device at once and adds it again with a new key package (e2ee.md §8). The client keeps its RTP
+numbering, own tracks, subscriptions and mute state, and reconciles everything else with the new
+`joined`. After the grace period the slot is released as a normal leave and the client ends the
+call ("connection lost"). Refused joins, removal or end by the host and `connection_replaced` are
+final: they are never answered with a rejoin. A locked meeting still lets a device of its roster
+back in.
+
+**Browsers** can't migrate a WebTransport session to another network; when it closes, the
+browser driver rejoins as above.
+
+**Media on bad links.**
+
+- Audio first: own video layers follow the uplink estimate (screen shares before cameras), keeping
+  48 kbit/s for the microphone (more while the screen's sound is shared); a layer comes back with a
+  15 % margin. The start estimate is a guess, so limits apply only after the estimator cut the rate.
+- Opus in-band FEC is planned for the measured uplink loss (5 % floor, 30 % cap; the native encoder
+  and WebCodecs' `packetlossperc`). Native receivers recover a lost packet from the next packet's FEC
+  data; WebCodecs can't, browsers conceal.
+- Jitter buffer: an outage drains it and it re-buffers to its target depth; a backlog that arrives
+  in a burst after a handover is skipped down to the target once it persists for half a second,
+  instead of adding its length as latency for the rest of the call.
+
+| Platform | Network change                    | Migration | Rejoin            | UI while rejoining               |
+|----------|-----------------------------------|-----------|-------------------|----------------------------------|
+| Android  | `ConnectivityManager` callback    | yes       | yes, engine token | "Connection lost, reconnecting…" |
+| iOS      | `NWPathMonitor`                   | yes       | yes, engine token | "Connection lost, reconnecting…" |
+| Desktop  | route lookup toward the SFU (1 s) | yes       | yes, core token   | header status, tiles dimmed      |
+| Browser  | –                                 | no        | yes, page's token | (no browser call UI yet)         |
+
+Tests: deterministic ones drive the SFU's rooms and real call engines in memory (lost connection,
+grace expiry, takeover, a lossy uplink) and the native client over loopback through a UDP relay
+that changes its address (migration) or drops everything (rejoin). Real radios:
+[docs/manual-tests/call-handover.md](docs/manual-tests/call-handover.md).
+
+### 6.6 Networks that block UDP
+
+Calls need UDP to the SFU's QUIC port (default 4433). Some corporate, hotel and guest networks
+block UDP or everything but 80/443 over TCP; there the WebTransport handshake fails and joining a
+call fails after the connection timeout. Chat is unaffected (HTTPS and WebSocket over TCP). There is
+no TCP fallback today.
+
+Options for a fallback, by fit with §6.1:
+
+- **WebTransport over HTTP/2** (IETF draft): the same API over TCP/TLS. Browser support is the
+  question – check the current state before relying on it; `wtransport` doesn't implement it.
+- **A TCP/TLS relay on 443 next to the SFU**: the client carries the signaling stream and the media
+  datagrams (length-prefixed frames) over one TLS connection – WebSocket in browsers, plain TLS in
+  native clients – and the relay hands them to the SFU as if they came over QUIC. Works everywhere
+  HTTPS works; costs head-of-line blocking on loss, so the relay drops media frames that wait too
+  long instead of queuing them. The SFU, DAVE and the engine stay as they are.
+- **TURN over TCP/TLS**: needs ICE, i.e. WebRTC – ruled out by §6.1.
+
+Recommendation: the TLS/WebSocket relay, tried by the client after QUIC fails or doesn't connect
+within a few seconds (happy-eyeballs style), with the relay's port behind the same reverse proxy as
+the server. Until then, operators document that calls need outbound UDP 4433 (docs/operations.md).
 
 ## 7. Clients
 

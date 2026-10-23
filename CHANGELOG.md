@@ -27,7 +27,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   channels, local accounts, mail and meeting texts). The configuration file stays the seed; every
   change is audit-logged and can be reset to the file's value
   ([docs/admin.md](docs/admin.md) §6).
-
+- **Calls survive network changes**: a phone moving from Wi-Fi to LTE or a laptop changing networks
+  stays in the call. Native apps keep their QUIC connection (connection migration); when that isn't
+  possible, or in the browser, the app rejoins with a fresh token while the SFU keeps its place for
+  30 s (`TEAMCRAFT_SFU_RECONNECT_GRACE_SECS`) and the others see "reconnecting". Android and iOS
+  report network changes to the call, desktops notice a new route themselves. On bad links video
+  layers give way to audio, Opus forward error correction follows the measured loss, and the jitter
+  buffer drops a handover backlog instead of keeping its delay ([ARCHITECTURE.md](ARCHITECTURE.md)
+  §6.5). Calls still need UDP; networks that block it are covered in §6.6.
 - **Desktop updates**: Windows, macOS and AppImage installs check for updates in the background,
   download and verify them (minisign, bound to the version) and install them on restart or quit,
   never during a call; Settings → Advanced → Updates offers automatic, notify only or off. deb and rpm installs

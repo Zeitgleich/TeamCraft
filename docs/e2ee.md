@@ -735,6 +735,19 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
+**Lost connections** (ARCHITECTURE.md §6.5). A QUIC connection that migrates to another network
+keeps its DAVE state; nothing changes for the keys. A connection the SFU loses (idle timeout) keeps
+the device's call slot for a grace period, but not its DAVE leaf: the SFU proposes removing the leaf
+at once, so the others move to an epoch the absent device has no keys for (it may be offline for
+good, or the loss may be someone cutting it off). When the device rejoins on a new connection, it
+discards its DAVE state and joins like a new member: a fresh P-256 key pair (step 1), a new call key
+binding (step 2), verification by the others (step 3) and a welcome. The same happens when a
+device's new connection replaces one the SFU still had: the old leaf is removed before the new one is
+added. Media from and to the device pauses until the welcome; there is no unencrypted interval. RTP
+sequence numbers and timestamps continue across the rejoin – they are unencrypted RTP header fields
+the SFU sees anyway, and DAVE's per-frame nonces come from the new epoch's ratchets, so nothing
+repeats.
+
 ### 8.1 Call backgrounds
 
 Backgrounds are composited on the sending device before encoding, so the SFU and other participants
