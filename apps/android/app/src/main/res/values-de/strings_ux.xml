@@ -88,4 +88,8 @@
   <string name="settings_devices_title">Geräte</string>
   <string name="settings_devices_summary">Neues Gerät verknüpfen</string>
   <string name="dynamic_color">Farben meines Hintergrundbilds verwenden</string>
+  <plurals name="chats_selected">
+    <item quantity="one">%d ausgewählt</item>
+    <item quantity="other">%d ausgewählt</item>
+  </plurals>
 </resources>

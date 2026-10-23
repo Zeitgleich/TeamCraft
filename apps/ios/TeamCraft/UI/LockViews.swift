@@ -35,7 +35,6 @@ struct DeviceSecuritySection: View {
   @AppStorage(AppLock.enabledKey) private var isLockEnabled = false
   @AppStorage(AppLock.lockAfterKey) private var lockAfterRaw = AppLock.defaultLockAfter.rawValue
   @AppStorage(AppLock.privacyCoverKey) private var isPrivacyCoverOn = false
-  @AppStorage("share_typing") private var isSharingTyping = true
 
   var body: some View {
     Section {
@@ -46,8 +45,7 @@ struct DeviceSecuritySection: View {
         }
       }
       // With app lock on the cover is always used; the switch only matters without it.
-      Toggle("privacy_cover", isOn: $isPrivacyCoverOn)
-      Toggle("share_typing", isOn: $isSharingTyping).disabled(isLockEnabled)
+      Toggle("privacy_cover", isOn: $isPrivacyCoverOn).disabled(isLockEnabled)
     } header: {
       Text("device_security_title")
     } footer: {

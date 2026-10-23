@@ -40,7 +40,8 @@ work stream).
 | Mute from the list (long-press → Notifications), shown right away (#99)            | Android      | done   |
 | Typing indicator ("Alice is typing…"), with a setting to not share one's own     | Android, iOS | done   |
 | Archive / hide a conversation from the list                                      | Android, iOS | open: core |
-| Multi-select (mark several read)                                                 | Android, iOS | open   |
+| Multi-select: long-press selects, then read/unread, favorite, notifications       | Android      | done   |
+| Multi-select in the chat list                                                    | iOS          | open   |
 
 ## Conversation
 
@@ -78,7 +79,7 @@ work stream).
 | Emoji autocomplete (`:tad` → 🎉) and `:)`/`:tada:` on send, catalog shared with desktop | Android, iOS | done   |
 | Voice messages                                                                            | Android, iOS | open: core |
 | Image grid for several images in one message                                              | Android      | done   |
-| Image grid for several images in one message                                              | iOS          | open   |
+| Image grid for several images in one message                                              | iOS          | done   |
 | Save an image to the gallery (Pictures/TeamCraft, Android 10+)                            | Android      | done   |
 | Picked attachments were lost when looking at another conversation before sending          | Android      | done   |
 | A message the server rejected showed "Sending…" forever; now "Not sent" with Retry/Delete | Android, iOS | done   |
