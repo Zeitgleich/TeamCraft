@@ -50,6 +50,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Senders this device has no verified key for yet (it isn't in the group, or just joined).
       self.learn_sender_keys(conversation.id).await?;
     }
+    // Removal times from before they travelled in the account data reach the other devices too.
+    self.share_removed_senders()?;
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;
     self.apply_pending_changes().await?;

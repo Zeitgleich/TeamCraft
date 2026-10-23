@@ -257,10 +257,12 @@ a message whose device key isn't known yet waits until it is. A device that isn'
 (a new device of a member) reads the history its key bag opens right away: for each message it can't
 verify yet it records that one sending device's key, if the sender's signed device list (identity
 signature, never older than one seen before) names the device, and only if the sender is a member
-per the server or a device whose leaving time it knows. Leaving times travel in the account data
-(§6.4): every device that processes a removal records it there, so a new device refuses a removed
-device's messages dated after its removal too. It can't know removals that none of the user's
-devices processed. Edits, deletes and reactions are
+per the server or a device whose leaving time it knows. Every device runs this for messages it can't
+verify yet, not only new ones. Leaving times travel in the account data (§6.4): every device that
+processes a removal records it there, and on each full sync shares the removals it recorded
+locally (also those from before this version), so a new device refuses a removed device's messages
+dated after its removal (and before it was added back) too. It can't know removals that none of
+the user's devices processed (or that only a device not updated yet knows). Edits, deletes and reactions are
 messages too, so nobody can change or delete someone else's message. A device that left a conversation
 (removed, or its user removed) can't add messages dated after it left (five minutes of slack for
 clocks). Messages from before signatures existed are refused unless the client setting
@@ -359,7 +361,10 @@ its own. See [admin.md](admin.md) §2.
   from an older client, or the device's floor may be stale) the device posts a device-add request
   into the group's queue (`TCDA`, the user ID): members who see it, also later when they come
   online, check that the user's signed device list names the sending device and add it to that
-  conversation's group like a colleague's new device. `GroupInfo` larger than
+  conversation's group like a colleague's new device. Nobody sends content keys after an external
+  join: the device has what the user's key bag holds; if that lacks the current key (the user's
+  other devices hadn't uploaded it yet) it can't read new messages until the key bag arrives
+  (#178). `GroupInfo` larger than
   `max_group_info_bytes` (client, 256 KiB) is not sent, and the server stores a commit without one
   that exceeds its payload limit; such groups use the request. A further device in a DM or group DM
   waits for a member as before. The server can still put a user who isn't in a group into a
@@ -648,8 +653,10 @@ restored together with them on a new device.
 - **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
-- **Removed senders.** When devices left conversations (the removal commit's server time), so a new
-  device refuses their later messages too (§4.4); a device added back again is a newer tombstone.
+- **Removed senders.** When devices left conversations and when they were added back, both in the
+  server times of the commits, so a new device refuses what they sign while out (§4.4). Merging
+  keeps the later time of each, so a device's clock never decides; a device is out while its last
+  removal is later than its last return. Never pruned yet (#186).
 - **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
   user looked at. Merging takes the later one, so reading on any device counts everywhere and never
   moves back. The feed itself is computed from decrypted messages on each device (notifications.md).

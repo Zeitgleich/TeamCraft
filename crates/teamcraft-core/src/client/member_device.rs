@@ -159,7 +159,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(response) => {
         self.persist_group(conversation)?;
         self.advance_cursor(conversation, &response.commit)?;
-        self.remember_member_keys(conversation, &directory)?;
+        self.remember_member_keys(
+          conversation,
+          &directory,
+          response.commit.id.snowflake().unix_millis(),
+        )?;
         self
           .store
           .delete(Table::AppliedChanges, &device_add_key(conversation))?;
@@ -234,18 +238,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.retry_undecrypted(conversation)
   }
 
+  /// Shares the removal times this device recorded locally (also by versions before they travelled
+  /// in the account data) with the user's other and future devices. Idempotent: only removals the
+  /// account data doesn't know yet, or later ones, change it.
+  pub(crate) fn share_removed_senders(&mut self) -> Result<(), CoreError> {
+    let removals: Vec<(String, i64)> = self
+      .store
+      .list(Table::RemovedSenders)?
+      .into_iter()
+      .filter_map(|(key, value)| Some((key, serde_json::from_slice::<i64>(&value).ok()?)))
+      .collect();
+    if removals.is_empty() {
+      return Ok(());
+    }
+    self.update_account_data(|data, _| {
+      removals.iter().fold(false, |changed, (key, left_at_ms)| {
+        data.note_removed_sender(key, *left_at_ms) | changed
+      })
+    })
+  }
+
   /// Takes the removal times the user's devices recorded in the account data (for devices this one
   /// never saw leave) into the local check of removed senders.
   fn apply_shared_removals(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let prefix = format!("{conversation}/");
     let data = self.account_data();
-    for (key, entry) in data
-      .removed_senders
-      .iter()
-      .filter(|(key, entry)| key.starts_with(&prefix) && !entry.is_removed)
-    {
-      if self.store.get(Table::RemovedSenders, key)?.is_none() {
-        records::put_json(&self.store, Table::RemovedSenders, key, &entry.value)?;
+    for key in data.removed_senders.keys().filter(|key| key.starts_with(&prefix)) {
+      if let Some(left_at_ms) = data.removed_sender(key)
+        && self.store.get(Table::RemovedSenders, key)?.is_none()
+      {
+        records::put_json(&self.store, Table::RemovedSenders, key, &left_at_ms)?;
       }
     }
     Ok(())

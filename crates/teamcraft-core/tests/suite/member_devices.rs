@@ -127,22 +127,55 @@ async fn group_information_from_before_a_removal_is_refused_whatever_epoch_the_s
 }
 
 #[tokio::test]
-async fn removal_times_travel_to_a_new_device() {
+async fn a_new_device_refuses_what_a_removed_member_signs_after_the_removal() {
   let server = FakeServer::new();
   let (mut phone, mut bob, channel) = channel_with_history(&server).await;
-  let bob_device = bob.client.device_id();
+  let mut carol = Peer::enroll(&server, "Carol").await;
   phone
     .client
-    .remove_member(channel, bob.client.user_id())
+    .add_member(channel, carol.client.user_id())
     .await
     .unwrap();
-  settle(&mut [&mut phone, &mut bob]).await;
-  phone.client.sync_account_data().await.unwrap();
-  // The phone recorded Bob's removal time in the account data; a new device takes it over, so
-  // messages Bob's device signs for a later time are refused there too.
-  let laptop = Peer::enroll_as(phone.api.clone(), "Alice laptop").await;
-  let key = format!("{channel}/{}/{bob_device}", bob.client.user_id());
-  assert!(laptop.client.account_data().removed_sender(&key).is_some());
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  carol.client.send_text(channel, None, "before").await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  phone
+    .client
+    .remove_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  // The phone recorded the removal as an older version: locally only. Its next sync shares it.
+  phone
+    .client
+    .update_account_data(|data, _| {
+      data.removed_senders.clear();
+      true
+    })
+    .unwrap();
+  phone.client.full_sync().await.unwrap();
+
+  // Later the server lists Carol as a member again and lets her post; she still has the key from
+  // before her removal. No member signed her back in.
+  server.advance_clock(std::time::Duration::from_secs(10 * 60));
+  bob
+    .api
+    .add_member(
+      channel,
+      &AddConversationMemberRequest {
+        user_id: carol.client.user_id(),
+        maybe_role: None,
+      },
+    )
+    .await
+    .unwrap();
+  carol.client.send_text(channel, None, "forged").await.unwrap();
+  let laptop_api = phone.api.clone();
+  let mut laptop = Peer::enroll_as(laptop_api, "Alice laptop").await;
+  laptop.client.full_sync().await.unwrap();
+  let texts = laptop.texts(channel);
+  assert!(texts.contains(&"before".to_string()), "{texts:?}");
+  assert!(!texts.contains(&"forged".to_string()), "{texts:?}");
 }
 
 #[tokio::test]
