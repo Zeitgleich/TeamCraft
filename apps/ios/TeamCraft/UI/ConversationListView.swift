@@ -6,6 +6,7 @@ struct ConversationListView: View {
   let account: Account
 
   @State private var conversations: [ConversationItem] = []
+  @State private var previews: [String: ChatPreview] = [:]
   @State private var selection: String?
   @State private var query = ""
   @State private var hits: [SearchHitItem] = []
@@ -43,7 +44,10 @@ struct ConversationListView: View {
       }
     }
     .searchable(text: $query, prompt: Text("search_hint"))
-    .task(id: model.changeCount) { conversations = await model.conversations() }
+    .task(id: model.changeCount) {
+      conversations = await model.conversations()
+      previews = await model.chatPreviews(conversations, myId: account.userId)
+    }
     .task(id: fullQuery) {
       // Debounced: a new keystroke cancels this task before the search runs.
       try? await Task.sleep(for: .milliseconds(250))
@@ -75,19 +79,58 @@ struct ConversationListView: View {
         selection = hit.message.conversationId
       }
     } else if conversations.isEmpty {
-      Text("no_conversations").foregroundStyle(Theme.textMuted)
+      ContentUnavailableView {
+        Label("no_conversations", systemImage: "bubble.left.and.bubble.right")
+      } description: {
+        Text("chats_empty_hint")
+      }
     } else {
       List(selection: $selection) {
-        ForEach(conversationSections(conversations)) { section in
+        ForEach(conversationSections(conversations, lastActivity: previews.mapValues(\.sentDate))) { section in
           Section(header: Text(title(of: section.title))) {
             ForEach(section.conversations, id: \.id) { conversation in
-              ConversationRow(conversation: conversation).tag(conversation.id)
+              ConversationRow(conversation: conversation, maybePreview: previews[conversation.id])
+                .tag(conversation.id)
+                .swipeActions(edge: .leading) { readButton(for: conversation) }
+                .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
+                .contextMenu {
+                  readButton(for: conversation)
+                  favoriteButton(for: conversation)
+                }
             }
           }
         }
       }
       .listStyle(.sidebar)
     }
+  }
+
+  /// Read when unread; otherwise unread again from the newest message.
+  @ViewBuilder
+  private func readButton(for conversation: ConversationItem) -> some View {
+    if conversation.unreadCount > 0 {
+      Button("chat_mark_read", systemImage: "envelope.open") {
+        Task { await model.markRead(conversationId: conversation.id) }
+      }
+      .tint(Theme.accent)
+    } else if let preview = previews[conversation.id] {
+      Button("chat_mark_unread", systemImage: "envelope.badge") {
+        Task {
+          await model.perform(.markUnread(conversationId: conversation.id, fromMessageId: preview.messageId))
+        }
+      }
+      .tint(Theme.accent)
+    }
+  }
+
+  private func favoriteButton(for conversation: ConversationItem) -> some View {
+    Button(
+      LocalizedStringKey(conversation.isFavorite ? "favorite_remove" : "favorite_add"),
+      systemImage: conversation.isFavorite ? "star.slash" : "star"
+    ) {
+      Task { await model.setFavorite(conversationId: conversation.id, isFavorite: !conversation.isFavorite) }
+    }
+    .tint(.orange)
   }
 
   private func title(of title: SectionTitle) -> LocalizedStringKey {
@@ -102,21 +145,67 @@ struct ConversationListView: View {
 
 struct ConversationRow: View {
   let conversation: ConversationItem
+  var maybePreview: ChatPreview?
+
+  private var isUnread: Bool { conversation.unreadCount > 0 }
 
   var body: some View {
     HStack(spacing: 10) {
       Image(systemName: icon).frame(width: 22).foregroundStyle(Theme.textMuted)
-      Text(conversation.name)
-        .fontWeight(conversation.unreadCount > 0 ? .semibold : .regular)
-        .lineLimit(1)
-      Spacer()
-      if conversation.mentionCount > 0 {
-        CountBadge(count: conversation.mentionCount, isMention: true)
-      } else if conversation.unreadCount > 0 {
-        CountBadge(count: conversation.unreadCount)
+      VStack(alignment: .leading, spacing: 2) {
+        HStack {
+          Text(conversation.name)
+            .fontWeight(isUnread ? .semibold : .regular)
+            .lineLimit(1)
+          if conversation.isMuted {
+            Image(systemName: "bell.slash").font(.caption).foregroundStyle(Theme.textMuted)
+              .accessibilityLabel(Text("chat_muted"))
+          }
+          Spacer()
+          if let preview = maybePreview {
+            Text(listTime(preview.sentDate))
+              .font(.caption)
+              .foregroundStyle(isUnread ? Theme.accent : Theme.textMuted)
+          }
+        }
+        HStack {
+          previewText
+            .font(.subheadline)
+            .foregroundStyle(isUnread ? Theme.text : Theme.textMuted)
+            .lineLimit(1)
+          Spacer()
+          if conversation.mentionCount > 0 {
+            CountBadge(count: conversation.mentionCount, isMention: true)
+          } else if isUnread {
+            CountBadge(count: conversation.unreadCount)
+          }
+        }
       }
     }
     .opacity(conversation.isMuted ? 0.6 : 1)
+  }
+
+  @ViewBuilder
+  private var previewText: some View {
+    if let preview = maybePreview {
+      switch (preview.sender, preview.content) {
+      case (_, .noText): Text("chat_preview_event")
+      case (.none, .text(let text)): Text(text)
+      case (.me, .text(let text)): Text("chat_preview_sender \(String(localized: "you")) \(text)")
+      case (.other(let name), .text(let text)): Text("chat_preview_sender \(name) \(text)")
+      }
+    } else {
+      Text(conversation.topic)
+    }
+  }
+
+  /// Today: the time; this week: the weekday; older: the date.
+  private func listTime(_ date: Date) -> String {
+    if Calendar.current.isDateInToday(date) { return date.formatted(date: .omitted, time: .shortened) }
+    if let days = Calendar.current.dateComponents([.day], from: date, to: .now).day, days < 7 {
+      return date.formatted(.dateTime.weekday(.abbreviated))
+    }
+    return date.formatted(date: .numeric, time: .omitted)
   }
 
   private var icon: String {
