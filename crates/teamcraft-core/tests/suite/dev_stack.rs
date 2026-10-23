@@ -169,8 +169,12 @@ async fn a_second_device_is_linked_through_the_relay() {
   );
   let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
-  phone.complete_link_approval(phone_side).await.unwrap();
-  let secrets = laptop_side.receive_secrets().await.unwrap();
+  let (approved, received) = tokio::join!(
+    phone.complete_link_approval(phone_side),
+    laptop_side.receive_secrets()
+  );
+  approved.unwrap();
+  let secrets = received.unwrap();
 
   let options = EnrollmentOptions {
     device_name: "alice linked laptop".into(),
@@ -256,9 +260,13 @@ async fn thread_updates_and_new_devices_follow_server_events() {
     NewDeviceLink::connect(&laptop_api, &offer),
     bob.start_link_approval(&code)
   );
-  bob.complete_link_approval(phone_side.unwrap()).await.unwrap();
+  let (approved, received) = tokio::join!(
+    bob.complete_link_approval(phone_side.unwrap()),
+    laptop_side.unwrap().receive_secrets()
+  );
+  approved.unwrap();
   let options = EnrollmentOptions {
-    secret: EnrollmentSecret::Linked(laptop_side.unwrap().receive_secrets().await.unwrap()),
+    secret: EnrollmentSecret::Linked(received.unwrap()),
     ..enroll_options("bob linked laptop")
   };
   let mut laptop = PendingEnrollment::new()

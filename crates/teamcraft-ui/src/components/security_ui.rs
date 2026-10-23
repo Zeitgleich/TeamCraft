@@ -230,7 +230,7 @@ fn ApproveLinkDialog() -> impl IntoView {
                   data-autofocus
                   autocomplete="off"
                   spellcheck="false"
-                  placeholder="tclink1:…"
+                  placeholder="tclink2:…"
                   prop:value=move || code.get()
                   on:input=move |ev| code.set(event_target_value(&ev))
                 />

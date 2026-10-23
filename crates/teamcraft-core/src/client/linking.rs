@@ -4,24 +4,38 @@
 //! it). It joins the server's relay with [`NewDeviceLink::connect`]; the existing device scans the
 //! code and joins with [`Client::start_link_approval`]. After the handshake both screens show the
 //! same short code; once the user confirmed it on the existing device,
-//! [`Client::complete_link_approval`] transfers the backup key and the key bag, and the new device
-//! enrolls with them ([`crate::EnrollmentOptions::maybe_linked`]).
+//! [`Client::complete_link_approval`] transfers the backup key and the key bag. The new device
+//! checks that the key bag opens and answers with a receipt; only that receipt makes the existing
+//! device report success, so a lost frame fails on both sides. The new device then enrolls with
+//! the secrets ([`crate::EnrollmentSecret::Linked`]).
+//!
+//! The protocol version is in the code itself (`tclink2`): a device that speaks another version
+//! refuses the code when it is scanned, before any key leaves the existing device.
 
+use std::time::Duration;
+
+use futures_util::future::{Either, select};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use teamcraft_crypto::key_bag::KeyBagBinding;
+use teamcraft_crypto::backup::BackupKey;
+use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBagBinding};
 use teamcraft_crypto::rendezvous::{Initiator, RendezvousChannel, RendezvousKey, Responder};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{Base64Bytes, RendezvousClientMessage, RendezvousServerMessage};
+use teamcraft_proto::{Base64Bytes, RendezvousClientMessage, RendezvousServerMessage, UserId};
 use zeroize::Zeroizing;
 
 use super::Client;
 use crate::api::{RendezvousConnection, RendezvousFrame, ServerApi};
 use crate::error::CoreError;
-use crate::records;
 use crate::store::LocalStore;
+use crate::{convert, platform, records};
 
-const OFFER_PREFIX: &str = "tclink1";
+/// Version of the linking protocol: 2 added the receipt.
+const LINK_PROTOCOL_VERSION: u32 = 2;
+const OFFER_PREFIX: &str = "tclink";
+/// How long the existing device waits for the receipt after sending the keys. The new device
+/// answers as soon as it opened the key bag, which takes well under a second.
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the QR code carries: where to meet (relay ID) and the handshake's authentication key.
 #[derive(Debug)]
@@ -43,6 +57,8 @@ pub struct LinkedSecrets {
 pub struct NewDeviceLink<R> {
   connection: R,
   channel: RendezvousChannel,
+  /// The account being linked, to check that the key bag opens before confirming it.
+  user: UserId,
 }
 
 /// The existing device's side after the handshake, waiting for the user to confirm the code.
@@ -53,10 +69,31 @@ pub struct LinkApproval<R> {
 
 #[derive(Serialize, Deserialize)]
 struct TransferPayload {
+  /// Missing in version 1.
+  #[serde(default = "first_version")]
+  version: u32,
   backup_key: Base64Bytes,
   encrypted_key_bag: Base64Bytes,
   key_bag_version: u64,
   wrapped_backup_keys: Base64Bytes,
+}
+
+/// The new device's answer to the transfer.
+#[derive(Serialize, Deserialize)]
+struct Receipt {
+  version: u32,
+  outcome: ReceiptOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReceiptOutcome {
+  /// The key bag opened with the transferred backup key.
+  Received,
+  /// The transfer arrived but didn't open.
+  Rejected,
+  #[serde(other)]
+  Unknown,
 }
 
 impl LinkOffer {
@@ -72,7 +109,7 @@ impl LinkOffer {
   /// The QR code text. Contains the authentication key: show it, never send it anywhere else.
   pub fn to_code(&self) -> String {
     format!(
-      "{OFFER_PREFIX}:{}:{}",
+      "{OFFER_PREFIX}{LINK_PROTOCOL_VERSION}:{}:{}",
       self.rendezvous_id,
       hex(self.key.expose_secret())
     )
@@ -81,9 +118,12 @@ impl LinkOffer {
   pub fn parse(code: &str) -> Result<Self, CoreError> {
     let invalid = || CoreError::Corrupt("not a device link code".into());
     let mut parts = code.trim().split(':');
-    if parts.next() != Some(OFFER_PREFIX) {
-      return Err(invalid());
-    }
+    let version = parts
+      .next()
+      .and_then(|prefix| prefix.strip_prefix(OFFER_PREFIX))
+      .and_then(|version| version.parse::<u32>().ok())
+      .ok_or_else(invalid)?;
+    check_version(version)?;
     let rendezvous_id = parts
       .next()
       .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -105,6 +145,7 @@ impl LinkOffer {
 impl<R: RendezvousConnection> NewDeviceLink<R> {
   /// Joins the relay and runs the handshake as initiator; returns once the existing device answered.
   pub async fn connect<A: ServerApi<Rendezvous = R>>(api: &A, offer: &LinkOffer) -> Result<Self, CoreError> {
+    let user = api.me().await?.id;
     let mut connection = join(api, offer).await?;
     let initiator = Initiator::new(&offer.key, &mut OsRng);
     let hello = next_binary(&mut connection).await?;
@@ -112,7 +153,11 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
     connection.send_binary(auth_hello).await?;
     let auth = next_binary(&mut connection).await?;
     let channel = awaiting.receive_auth(&auth).map_err(link_error)?;
-    Ok(Self { connection, channel })
+    Ok(Self {
+      connection,
+      channel,
+      user,
+    })
   }
 
   /// Show this; the user confirms it matches the code on the other device.
@@ -120,20 +165,59 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
     self.channel.short_code()
   }
 
-  /// Waits for the transfer the existing device sends after confirmation.
+  /// Waits for the transfer the existing device sends after confirmation, checks that the key bag
+  /// in it opens and confirms the receipt to the existing device.
   pub async fn receive_secrets(mut self) -> Result<LinkedSecrets, CoreError> {
     let frame = next_binary(&mut self.connection).await?;
     let plaintext = self.channel.open(&frame).map_err(link_error)?;
     let payload: TransferPayload = serde_json::from_slice(plaintext.expose_secret())
       .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    check_version(payload.version)?;
+    let secrets = match self.open_transfer(payload) {
+      Ok(secrets) => secrets,
+      Err(error) => {
+        self.send_receipt(ReceiptOutcome::Rejected).await;
+        return Err(error);
+      },
+    };
+    self.send_receipt(ReceiptOutcome::Received).await;
+    Ok(secrets)
+  }
+
+  /// The transferred secrets, if the key bag opens with them.
+  fn open_transfer(&self, payload: TransferPayload) -> Result<LinkedSecrets, CoreError> {
     let backup_secret = SymmetricKey::from_slice(payload.backup_key.as_slice())
       .ok_or_else(|| CoreError::Corrupt("bad backup key".into()))?;
+    EncryptedKeyBag::from_bytes(payload.encrypted_key_bag.as_slice())?.decrypt(
+      convert::user(self.user),
+      &BackupKey::from_key(backup_secret.duplicate()),
+      payload.wrapped_backup_keys.as_slice(),
+    )?;
     Ok(LinkedSecrets {
       backup_secret,
       encrypted_key_bag: payload.encrypted_key_bag.into_vec(),
       key_bag_version: payload.key_bag_version,
       wrapped_keys: payload.wrapped_backup_keys.into_vec(),
     })
+  }
+
+  /// Tells the existing device how the transfer went. A receipt that gets lost makes the existing
+  /// device report a failure although this one has the keys: the user links again, which is safe.
+  async fn send_receipt(&mut self, outcome: ReceiptOutcome) {
+    let receipt = Receipt {
+      version: LINK_PROTOCOL_VERSION,
+      outcome,
+    };
+    let sent = match serde_json::to_vec(&receipt) {
+      Ok(plaintext) => match self.channel.seal(&plaintext) {
+        Ok(frame) => self.connection.send_binary(frame).await.map_err(CoreError::from),
+        Err(error) => Err(link_error(error)),
+      },
+      Err(error) => Err(CoreError::Corrupt(error.to_string())),
+    };
+    if let Err(error) = sent {
+      tracing::warn!(%error, "could not confirm the device link transfer");
+    }
   }
 }
 
@@ -159,7 +243,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// After the user confirmed that both short codes match: sends the backup key and the current key
-  /// bag to the new device.
+  /// bag to the new device and waits for its receipt. Succeeds only once the new device confirmed
+  /// that the key bag opened.
   pub async fn complete_link_approval(
     &mut self,
     mut approval: LinkApproval<A::Rendezvous>,
@@ -179,6 +264,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &mut OsRng,
     )?;
     let payload = TransferPayload {
+      version: LINK_PROTOCOL_VERSION,
       backup_key: Base64Bytes::new(self.account.backup_secret.expose_secret().to_vec()),
       encrypted_key_bag: Base64Bytes::new(encrypted.to_bytes()?),
       key_bag_version: self.sync.key_bag_version,
@@ -188,7 +274,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Zeroizing::new(serde_json::to_vec(&payload).map_err(|error| CoreError::Corrupt(error.to_string()))?);
     let frame = approval.channel.seal(&plaintext).map_err(link_error)?;
     approval.connection.send_binary(frame).await?;
-    records::save_key_bag(&self.store, &self.account)
+    records::save_key_bag(&self.store, &self.account)?;
+    approval.wait_for_receipt().await
+  }
+}
+
+impl<R: RendezvousConnection> LinkApproval<R> {
+  /// The new device's receipt; a closed relay, a garbled frame or silence count as failure.
+  async fn wait_for_receipt(&mut self) -> Result<(), CoreError> {
+    let frame = {
+      let receive = Box::pin(next_binary(&mut self.connection));
+      let timeout = Box::pin(platform::sleep(RECEIPT_TIMEOUT));
+      match select(receive, timeout).await {
+        Either::Left((Ok(frame), _)) => frame,
+        Either::Left((Err(error), _)) => {
+          tracing::warn!(%error, "the device link ended without a receipt");
+          return Err(CoreError::LinkNotConfirmed);
+        },
+        Either::Right(((), _)) => return Err(CoreError::LinkNotConfirmed),
+      }
+    };
+    let plaintext = self
+      .channel
+      .open(&frame)
+      .map_err(|_| CoreError::LinkNotConfirmed)?;
+    let receipt: Receipt =
+      serde_json::from_slice(plaintext.expose_secret()).map_err(|_| CoreError::LinkNotConfirmed)?;
+    check_version(receipt.version)?;
+    match receipt.outcome {
+      ReceiptOutcome::Received => Ok(()),
+      ReceiptOutcome::Rejected => Err(CoreError::LinkRejected),
+      ReceiptOutcome::Unknown => Err(CoreError::LinkNotConfirmed),
+    }
   }
 }
 
@@ -229,6 +346,21 @@ async fn next_binary<R: RendezvousConnection>(connection: &mut R) -> Result<Vec<
   }
 }
 
+/// Both devices must speak the same linking version; anything else fails before keys are sent.
+fn check_version(theirs: u32) -> Result<(), CoreError> {
+  if theirs == LINK_PROTOCOL_VERSION {
+    return Ok(());
+  }
+  Err(CoreError::LinkVersionMismatch {
+    ours: LINK_PROTOCOL_VERSION,
+    theirs,
+  })
+}
+
+fn first_version() -> u32 {
+  1
+}
+
 fn link_error(error: teamcraft_crypto::rendezvous::RendezvousError) -> CoreError {
   CoreError::Gateway(format!("device link: {error}"))
 }
@@ -257,14 +389,57 @@ mod tests {
     let parsed = LinkOffer::parse(&offer.to_code()).unwrap();
     assert_eq!(parsed.rendezvous_id, offer.rendezvous_id);
     assert_eq!(parsed.key.expose_secret(), offer.key.expose_secret());
+    assert!(offer.to_code().starts_with("tclink2:"));
     for garbage in [
       "",
-      "tclink1",
-      "tclink2:00:00",
-      "tclink1:zz:00",
+      "tclink2",
+      "tclinkx:00:00",
+      "tclink2:zz:00",
       &format!("{}:extra", offer.to_code()),
     ] {
-      assert!(LinkOffer::parse(garbage).is_err(), "{garbage}");
+      assert!(
+        matches!(LinkOffer::parse(garbage), Err(CoreError::Corrupt(_))),
+        "{garbage}"
+      );
     }
+  }
+
+  #[test]
+  fn a_code_of_another_protocol_version_is_refused_clearly() {
+    let current = LinkOffer::generate().to_code();
+    for (prefix, theirs) in [("tclink1", 1), ("tclink3", 3)] {
+      let code = current.replacen("tclink2", prefix, 1);
+      assert!(matches!(
+        LinkOffer::parse(&code),
+        Err(CoreError::LinkVersionMismatch { ours: 2, theirs: found }) if found == theirs
+      ));
+    }
+  }
+
+  #[test]
+  fn a_version_one_transfer_has_no_version_field() {
+    let payload: TransferPayload = serde_json::from_str(
+      r#"{"backup_key":"","encrypted_key_bag":"","key_bag_version":1,"wrapped_backup_keys":""}"#,
+    )
+    .unwrap();
+    assert_eq!(payload.version, 1);
+    assert!(matches!(
+      check_version(payload.version),
+      Err(CoreError::LinkVersionMismatch { .. })
+    ));
+  }
+
+  #[test]
+  fn receipts_keep_their_wire_format() {
+    let receipt = Receipt {
+      version: 2,
+      outcome: ReceiptOutcome::Received,
+    };
+    assert_eq!(
+      serde_json::to_string(&receipt).unwrap(),
+      r#"{"version":2,"outcome":"received"}"#
+    );
+    let unknown: Receipt = serde_json::from_str(r#"{"version":2,"outcome":"later"}"#).unwrap();
+    assert_eq!(unknown.outcome, ReceiptOutcome::Unknown);
   }
 }

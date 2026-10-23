@@ -366,7 +366,9 @@ the same setup we use). Since TeamCraft is AGPL as well, we can reuse or port it
 
 Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
 
-- The new device draws `AK` and a relay ID and shows both (`tclink1:<id>:<AK>`). It is the
+- The new device draws `AK` and a relay ID and shows both (`tclink2:<id>:<AK>`; the digit is the
+  protocol version, and a device refuses a code of another version when it is scanned, before any
+  key leaves the existing device). It is the
   *initiator*; the existing device that scans is the *responder*.
 - `hello` (responder → initiator): challenge + a commitment `SHA-256(label ‖ ephemeral key)`,
   sealed with `HKDF(AK, "…rendezvous responder auth")`; `auth_hello` (initiator → responder): the
@@ -384,8 +386,14 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
 - Not a port of libthreema's `d2d_rendezvous`: its path nomination isn't needed with one relay, and
   the construction above uses only primitives already in the crate. It still needs the security
   review security.md asks for.
-- The transfer carries the backup key and the encrypted key bag; the new device then enrolls (§3.2)
-  and an existing member adds it to the groups.
+- The transfer carries the backup key and the encrypted key bag (and the protocol version). The new
+  device checks that the bag opens with the backup key and answers with a sealed **receipt**
+  (`received` or `rejected`); the existing device reports success only on `received`. A lost
+  transfer frame, a closed relay or 60 seconds without a receipt fail on the existing device, and the
+  new device fails because the transfer never arrives (the relay closes when the existing device
+  gives up). A lost receipt makes the existing device report a failure although the new device has
+  the keys; linking again is harmless. The new device then enrolls (§3.2) and an existing member
+  adds it to the groups.
 
 ## 6. Backup and recovery
 

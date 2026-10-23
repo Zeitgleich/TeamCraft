@@ -211,12 +211,12 @@ async fn link_new_device(
     NewDeviceLink::connect(&api, &offer),
     owner.client.start_link_approval(&code)
   );
-  owner
-    .client
-    .complete_link_approval(owner_side.unwrap())
-    .await
-    .unwrap();
-  let link_options = linked_options(new_side.unwrap().receive_secrets().await.unwrap());
+  let (approved, received) = tokio::join!(
+    owner.client.complete_link_approval(owner_side.unwrap()),
+    new_side.unwrap().receive_secrets()
+  );
+  approved.unwrap();
+  let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
     .complete(
       api,
