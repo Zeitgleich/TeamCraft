@@ -6,13 +6,17 @@
 #   scripts/package-site.sh fetch <work>          newest stable and newest release of any kind into
 #                                                 <work>/{stable,prerelease} (needs gh and REPO)
 #   scripts/package-site.sh build <work> <site>   the site from <work> (needs apt-ftparchive,
-#                                                 createrepo_c, rpmsign, gpg and the env below)
+#                                                 createrepo_c, rpmsign, gpg, python3 and the env
+#                                                 below), with the landing page
+#                                                 (scripts/package-site-page.py)
 #
 # Environment for build:
 #   GPG_KEY_ID          fingerprint of the repository key, already imported into gpg; empty: the
 #                       site gets the update manifests only, no APT/RPM repositories
 #   GPG_PASSPHRASE_FILE file with its passphrase (may be empty for a key without one)
 #   SITE_URL            where the site is served, e.g. https://example-org.github.io/TeamCraft
+#   REPO                owner/name of the GitHub repository (links on the landing page)
+#   PLAY_STORE_URL, APP_STORE_URL  store listings shown on the landing page when set
 set -euo pipefail
 
 fail() { echo "error: $*" >&2; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error::$*"; exit 1; }
@@ -63,6 +67,8 @@ PY
     echo "$channel: $tag"
     mkdir -p "$work/$channel"
     echo "$tag" > "$work/$channel/TAG"
+    # Release metadata and asset list for the landing page.
+    gh api "repos/$REPO/releases/tags/$tag" > "$work/$channel/release.json"
     gh release download "$tag" --repo "$REPO" --dir "$work/$channel" --pattern '*.deb' --pattern '*.rpm' --clobber
     # Releases without updater signatures have no manifest; the channel then has packages only.
     gh release download "$tag" --repo "$REPO" --dir "$work/$channel" --pattern 'latest.json' --clobber \
@@ -104,7 +110,8 @@ build() {
     fi
   done
   [ "$built" = 1 ] || fail "no release to publish in $work"
-  write_index "$site"
+  "$(dirname "$0")/package-site-page.py" render --work "$work" --site "$site" --site-url "$SITE_URL" \
+    --repo "${REPO:-Zeitgleich/TeamCraft}"
 }
 
 # One suite per channel; packages in pool/<tag>/ (a candidate and its release carry the same
@@ -165,23 +172,5 @@ sign() {
     --local-user "$GPG_KEY_ID" "$@"
 }
 
-write_index() {
-  local site="$1"
-  cat > "$site/index.html" <<EOF
-<!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<title>TeamCraft packages</title>
-<h1>TeamCraft packages</h1>
-<p>APT and RPM repositories and the desktop update manifests of TeamCraft.
-Setup: <a href="https://github.com/${REPO:-Zeitgleich/TeamCraft}/blob/main/docs/updates.md">docs/updates.md</a>.</p>
-<ul>
-<li><a href="teamcraft-archive-keyring.asc">Repository key</a></li>
-<li><a href="rpm/stable/teamcraft.repo">teamcraft.repo</a> (Fedora, RHEL, openSUSE)</li>
-<li>APT: <code>deb [signed-by=/usr/share/keyrings/teamcraft-archive-keyring.gpg] $SITE_URL/apt stable main</code></li>
-</ul>
-</html>
-EOF
-}
 
 main "$@"

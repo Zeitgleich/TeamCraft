@@ -1,7 +1,7 @@
-# Package site (docs/updates.md §5): when a release is published, rebuilds the GitHub Pages site
-# with the desktop update manifests per channel (updates/{stable,prerelease}/latest.json) and the
-# signed APT and RPM repositories, from the newest published stable release and the newest
-# published release of any kind. Stateless: every run rebuilds everything from the releases.
+# Package site (docs/updates.md §5): when a release is published (or by hand), rebuilds the GitHub
+# Pages site: the landing page with the downloads, the desktop update manifests per channel
+# (updates/{stable,prerelease}/latest.json) and the signed APT and RPM repositories, from the newest
+# published stable release and the newest published release of any kind. Stateless: every run rebuilds everything from the releases.
 #
 # One-time setup: Settings > Pages > Source: GitHub Actions; the secrets LINUX_REPO_GPG_PRIVATE_KEY
 # (armored) and LINUX_REPO_GPG_PASSPHRASE. Without the key the site has the manifests only.
@@ -58,7 +58,15 @@ jobs:
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
           REPO: ${{ github.repository }}
+          # Store listings for the landing page; repository variables, unset until published.
+          PLAY_STORE_URL: ${{ vars.PLAY_STORE_URL }}
+          APP_STORE_URL: ${{ vars.APP_STORE_URL }}
         run: scripts/package-site.sh build "$RUNNER_TEMP/work" "$RUNNER_TEMP/site"
+      # Installed clients and the setup snippets use these paths: no page may link a missing file.
+      - name: Check the site's links
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: scripts/package-site-page.py check --site "$RUNNER_TEMP/site" --site-url "$SITE_URL"
       # The signatures must verify with the key the site publishes.
       - name: Verify the site
         working-directory: ${{ runner.temp }}/site
