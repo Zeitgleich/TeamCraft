@@ -78,6 +78,11 @@ impl BrowserSession {
     }
   }
 
+  /// Opens another tab of the same browser (same profile and origin storage) at `url`.
+  pub async fn new_page(&self, url: &str) -> Page {
+    self.browser.new_page(url).await.expect("opening a page")
+  }
+
   pub async fn close(mut self) {
     let _ = self.browser.close().await;
     let _ = self.browser.wait().await;
