@@ -431,6 +431,31 @@ mod tests {
     );
   }
 
+  /// Against the session's real notification server: `dbus-run-session` with a server running (CI
+  /// has none). `cargo test -p teamcraft-desktop -- --ignored freedesktop`
+  #[tokio::test]
+  #[ignore = "needs a D-Bus session with a notification server"]
+  async fn a_live_server_shows_replaces_and_closes() {
+    let buses = Buses::default();
+    let buttons = [("accept-audio", "Accept"), ("decline", "Decline")];
+    let mut call = notification(&buttons, None);
+    call.title = "Incoming call";
+    call.body = "Bob is calling you";
+    call.category = "call.incoming";
+    call.is_ringing = true;
+    let id = buses.notify(&call).await.expect("a notification server answers");
+    call.replaces_id = id;
+    call.body = "Bob is still calling you";
+    assert_eq!(buses.notify(&call).await, Some(id), "replaced in place");
+    let message = notification(&[("mark-read", "Mark as read")], Some("Reply…"));
+    let other = buses.notify(&message).await.expect("a second notification");
+    assert_ne!(other, id);
+    if std::env::var_os("TEAMCRAFT_KEEP_NOTIFICATIONS").is_none() {
+      buses.close(id).await;
+      buses.close(other).await;
+    }
+  }
+
   fn notification<'a>(
     actions: &'a [(&'a str, &'a str)],
     maybe_reply_placeholder: Option<&'a str>,
