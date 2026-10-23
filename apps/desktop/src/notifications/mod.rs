@@ -340,10 +340,13 @@ mod tests {
     let applications = dir.join("applications");
     std::fs::create_dir_all(&applications).unwrap();
     let candidates = ["de.zeitgleich.teamcraft".to_owned(), "TeamCraft".to_owned()];
-    assert_eq!(installed_entry(&candidates, &[applications.clone()]), None);
+    assert_eq!(
+      installed_entry(&candidates, std::slice::from_ref(&applications)),
+      None
+    );
     std::fs::write(applications.join("TeamCraft.desktop"), "[Desktop Entry]\n").unwrap();
     assert_eq!(
-      installed_entry(&candidates, &[applications.clone()]).as_deref(),
+      installed_entry(&candidates, std::slice::from_ref(&applications)).as_deref(),
       Some("TeamCraft")
     );
     std::fs::write(
