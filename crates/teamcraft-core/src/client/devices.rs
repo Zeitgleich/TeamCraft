@@ -88,6 +88,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         device_id: convert::device(self.account.device_id),
         signing_key: self.account.device.public_keys().signing_key,
       };
+      // The server picks device IDs. One that already names another device (or a revoked one)
+      // would make this device sign that device out of the list: refuse it.
+      let is_taken = devices
+        .iter()
+        .any(|entry| entry.device_id == own.device_id && entry.signing_key != own.signing_key)
+        || maybe_current
+          .as_ref()
+          .is_some_and(|current| current.is_revoked(own.device_id));
+      if is_taken {
+        return Err(CoreError::DeviceIdTaken(self.account.device_id));
+      }
       devices.retain(|entry| entry.device_id != own.device_id);
       devices.push(own);
       let revoked: Vec<_> = revoked.iter().copied().map(convert::device).collect();

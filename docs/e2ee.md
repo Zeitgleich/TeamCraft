@@ -127,7 +127,9 @@ restart) finishes the job (`teamcraft-core::client::enroll`):
 4. **The account is stored locally** only now, marked as unfinished, with the wrapped backup keys
    it uploaded.
 5. **Key packages and the signed device list** are published; an unfinished account does this
-   first on its next sync, then clears the mark.
+   first on its next sync, then clears the mark. The server picks device IDs, so a device refuses
+   an ID that the signed list already gives another key or lists as revoked: signing the list
+   would otherwise drop that device.
 
 A device that finds no key bag on the server for an account it already uses refuses to upload one
 with no wraps (`KeyBagMissing`): such a bag could never be recovered. The user sets a recovery

@@ -63,6 +63,9 @@ pub enum CoreError {
   /// The new device received the transfer but could not open the key bag in it.
   #[error("the new device could not open the keys it received; link it again")]
   LinkRejected,
+  /// The server gave this device the ID of another (or a revoked) device of the user.
+  #[error("the server assigned device ID {0}, which the signed device list gives another device")]
+  DeviceIdTaken(DeviceId),
   /// The server offered a key bag older than one this device already saw.
   #[error("the server offered key bag {offered}, older than {seen} seen before")]
   KeyBagRollback { seen: u64, offered: u64 },

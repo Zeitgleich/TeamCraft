@@ -138,6 +138,19 @@ async fn a_lost_key_bag_is_not_replaced_by_one_without_recovery() {
   assert!(server.key_bag_of(me).is_none());
 }
 
+#[tokio::test]
+async fn a_device_id_of_another_device_is_refused() {
+  let server = FakeServer::new();
+  let phone = Peer::enroll(&server, "Owner").await;
+  let me = phone.client.user_id();
+  let list_before = server.device_list_of(me).unwrap();
+  // The server hands the laptop the phone's ID: signing the device list would drop the phone.
+  server.force_next_device_id(phone.client.device_id());
+  let error = enroll(&phone.api, &Arc::new(MemoryStore::new())).await.err();
+  assert!(matches!(error, Some(CoreError::DeviceIdTaken(_))), "{error:?}");
+  assert_eq!(server.device_list_of(me).unwrap(), list_before);
+}
+
 /// One enrollment attempt with the passphrase.
 async fn enroll(api: &FakeServerApi, store: &Arc<MemoryStore>) -> Result<TestClient, CoreError> {
   PendingEnrollment::new()
