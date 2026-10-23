@@ -137,18 +137,24 @@ harmless; rows without an object show up as failed downloads.
    entered again), identity provider reachable.
 3. Bridges: restore their database file (it holds the bot's keys) or re-enroll them with their
    passphrase (the bot's backup key is on the server, so a lost bridge database is recoverable).
-4. Clients reconnect and resume; devices whose rows were lost re-register.
+4. Clients reconnect and run a full sync; devices whose rows were lost re-register.
 
 ## Upgrades
 
 - Images are pinned by digest in the deployment; build or pull the new ones, never `latest`.
 - Migrations are forward-only and run automatically when the server starts. **Take a database backup
   first.** There is no downgrade: to go back, restore the backup and start the old version.
-- Order: database backup, new `teamcraft-server` (one instance first, then the rest; instances may
-  run two adjacent versions side by side while rolling), then `teamcraft-sfu`, then bridges. The
-  SFU verifies join tokens the server signs; the token format is versioned with the server.
-- A restarting server drops WebSocket connections; clients resume with their session and sequence
-  number within `[gateway] resume_window_secs`, otherwise they run a full sync. Calls in progress
+- Run exactly **one** `teamcraft-server` instance. Gateway sessions, presence, device-linking relays,
+  rate limits and the call roster live in the server's memory, and there is no bus between instances
+  yet: events published on one instance never reach clients connected to another. Upgrade by
+  replacing the instance (a short interruption), not by rolling several.
+- Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges. The SFU
+  verifies join tokens the server signs; the token format is versioned with the server. An old
+  server binary refuses to start against a database migrated by a newer one.
+- A restarting server drops WebSocket connections and forgets their sessions: every client
+  reconnects (with backoff) and runs a full sync, so expect a burst of API traffic right after the
+  restart. A reverse proxy in front must keep idle WebSockets open for at least 60 s (clients send a
+  heartbeat every 25 s). Calls in progress
   live in the SFU and survive a server restart (the server's call roster is in memory and starts empty;
   it is filled by the SFU's participant reports once the SFU sends them).
 - Check `docs/` and the release notes for configuration changes before upgrading. The server rejects
