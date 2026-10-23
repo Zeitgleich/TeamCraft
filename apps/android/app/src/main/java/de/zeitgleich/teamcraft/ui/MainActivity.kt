@@ -4,21 +4,31 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.mutableStateOf
+import androidx.fragment.app.FragmentActivity
+import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.notifications.LaunchToken
+import de.zeitgleich.teamcraft.security.AppLockPrefs
+import de.zeitgleich.teamcraft.security.AppLockState
 import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
+import de.zeitgleich.teamcraft.security.promptUnlock
+import de.zeitgleich.teamcraft.ui.screens.LockScreen
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 
-class MainActivity : ComponentActivity() {
+/** A [FragmentActivity] because the app lock's system prompt needs one. */
+class MainActivity : FragmentActivity() {
   private val viewModel: MainViewModel by viewModels()
   /** A conversation to open, from a notification tap. */
   private val openConversation = mutableStateOf<String?>(null)
+  /** Text or files another app shared, until the user picked a conversation. */
+  private val share = mutableStateOf<SharedContent?>(null)
+  private val isLocked = mutableStateOf(false)
 
   private val loginLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
     viewModel.completeLogin(result.data)
@@ -30,25 +40,58 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     if (prefs(this).isSecureScreen) window.setFlags(FLAG_SECURE, FLAG_SECURE)
+    // Locked at a cold start; a rotation or a recreated activity keeps the unlocked state.
+    isLocked.value = AppLockPrefs.prefs(this).isEnabled && !isUnlockedInProcess
+    if (!isLocked.value) isUnlockedInProcess = true
     openConversation.value = conversationToOpen(intent)
+    share.value = sharedContent(intent, packageName)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
     setContent {
       TeamCraftTheme {
-        AppRoot(
-          viewModel = viewModel,
-          maybeConversationToOpen = openConversation.value,
-          onConversationOpened = { openConversation.value = null },
-          onLogin = { intent -> loginLauncher.launch(intent) },
-        )
+        if (isLocked.value) {
+          LockScreen(onUnlock = ::unlock)
+        } else {
+          AppRoot(
+            viewModel = viewModel,
+            maybeConversationToOpen = openConversation.value,
+            onConversationOpened = { openConversation.value = null },
+            maybeShare = share.value,
+            onShareHandled = { share.value = null },
+            onLogin = { intent -> loginLauncher.launch(intent) },
+          )
+        }
       }
     }
+  }
+
+  override fun onStart() {
+    super.onStart()
+    val lock = AppLockPrefs.prefs(this)
+    if (lockState.shouldLockOnForeground(lock.isEnabled, lock.lockAfter)) {
+      isUnlockedInProcess = false
+      isLocked.value = true
+    }
+  }
+
+  override fun onStop() {
+    super.onStop()
+    // Not while only a configuration change (rotation) stops the activity.
+    if (!isChangingConfigurations) lockState.onBackground()
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     conversationToOpen(intent)?.let { openConversation.value = it }
+    sharedContent(intent, packageName)?.let { share.value = it }
+  }
+
+  private fun unlock() {
+    promptUnlock(this, getString(R.string.app_lock_prompt)) {
+      isUnlockedInProcess = true
+      isLocked.value = false
+    }
   }
 
   /** The conversation of one of the app's own notifications, or nothing (other apps' intents). */
@@ -60,5 +103,9 @@ class MainActivity : ComponentActivity() {
   companion object {
     const val EXTRA_CONVERSATION_ID = "conversation_id"
     const val EXTRA_LAUNCH_TOKEN = "launch_token"
+
+    /** Per process, so the lock outlives the activity (recreated in the background, rotated). */
+    private val lockState = AppLockState(SystemClock::elapsedRealtime)
+    private var isUnlockedInProcess = false
   }
 }

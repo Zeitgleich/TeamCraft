@@ -1,20 +1,10 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.text.format.DateUtils
-import android.text.format.Formatter
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -28,8 +18,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -42,10 +34,10 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -67,12 +59,19 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -86,16 +85,15 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Conversation
-import de.zeitgleich.teamcraft.core.FileInfo
-import de.zeitgleich.teamcraft.core.LinkPreview
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
+import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Mentions
+import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.sensitiveClip
-import uniffi.teamcraft_ffi.isOpenableLink
 import uniffi.teamcraft_ffi.needsChannelConfirmation
 
 /** Quick reactions in the action sheet. */
@@ -126,6 +124,7 @@ fun ConversationScreen(
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
   }
+  FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(conversationId, messages.size) { viewModel.markRead(conversationId) }
   val conversation = snapshot?.conversation(conversationId)
   ChatScaffold(
@@ -146,6 +145,7 @@ fun ConversationScreen(
       extras = extras,
       maybeFirstUnread = maybeFirstUnread,
       onOpenThread = onOpenThread,
+      maybeOnReply = { message -> ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty()) },
       modifier = Modifier.weight(1f),
     )
     if (conversation?.canPost != false) {
@@ -173,6 +173,7 @@ fun ThreadScreen(viewModel: MainViewModel, conversationId: String, threadId: Str
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     isFollowed = viewModel.readChat { query(ChatQueries.isThreadFollowed(conversationId, threadId)).value } ?: false
   }
+  FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(threadId, messages.size) { viewModel.act(ChatActions.markThreadRead(conversationId, threadId)) }
   ChatScaffold(
     viewModel = viewModel,
@@ -193,9 +194,24 @@ fun ThreadScreen(viewModel: MainViewModel, conversationId: String, threadId: Str
       extras = extras,
       maybeFirstUnread = null,
       onOpenThread = null,
+      maybeOnReply = null,
       modifier = Modifier.weight(1f),
     )
     Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot)
+  }
+}
+
+/**
+ * While a file uploads or downloads, re-reads every second: the core reports a transfer's end in
+ * the store but not every chunk, so progress and the finished download would not show otherwise.
+ */
+@Composable
+private fun FollowTransfers(extras: Map<String, MessageExtras>, reload: suspend () -> Unit) {
+  LaunchedEffect(extras) {
+    while (extras.values.any { extra -> extra.files.any { it.transfer.isMoving } }) {
+      delay(TRANSFER_POLL_MS)
+      reload()
+    }
   }
 }
 
@@ -222,7 +238,10 @@ private fun ChatScaffold(
     topBar = { ChromeTopBar(title = title, maybeSubtitle = maybeSubtitle, maybeOnBack = onBack, actions = actions) },
     snackbarHost = { SnackbarHost(snackbars) },
   ) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding).imePadding(), content = content)
+    Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
+      OfflineBanner()
+      content()
+    }
   }
 }
 
@@ -385,18 +404,6 @@ private fun BookmarkRow(bookmark: Bookmark, onClick: () -> Unit) {
   }
 }
 
-/** Opens a bookmark: web links only (the shared rule), since any member can set bookmarks. */
-private fun openLink(context: Context, url: String) {
-  if (!isOpenableLink(url)) return
-  try {
-    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-  } catch (failure: ActivityNotFoundException) {
-    // No app handles the link; nothing sensible to open, so leave it.
-  } catch (failure: SecurityException) {
-    // The handling app refused to be started from here; leave it.
-  }
-}
-
 @Composable
 private fun PinnedBanner(message: Message) {
   Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
@@ -410,6 +417,7 @@ private fun PinnedBanner(message: Message) {
   }
 }
 
+/** The feed plus the long-press action sheet of the selected message. */
 @Composable
 private fun MessageList(
   viewModel: MainViewModel,
@@ -419,29 +427,21 @@ private fun MessageList(
   extras: Map<String, MessageExtras>,
   maybeFirstUnread: String?,
   onOpenThread: ((String) -> Unit)?,
+  maybeOnReply: ((Message) -> Unit)?,
   modifier: Modifier,
 ) {
-  val listState = rememberLazyListState()
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
-  LaunchedEffect(messages.size) {
-    if (messages.isEmpty()) return@LaunchedEffect
-    val unreadIndex = maybeFirstUnread?.let { id -> messages.indexOfFirst { it.id == id } } ?: -1
-    listState.scrollToItem(if (unreadIndex >= 0) unreadIndex else messages.lastIndex)
-  }
-  LazyColumn(modifier.fillMaxWidth(), state = listState) {
-    items(messages, key = { it.id }) { message ->
-      if (message.id == maybeFirstUnread) UnreadDivider()
-      MessageRow(
-        viewModel = viewModel,
-        message = message,
-        maybeExtras = extras[message.id],
-        snapshot = snapshot,
-        onOpenThread = onOpenThread,
-        onLongPress = { maybeSelected = message },
-      )
-      HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-    }
-  }
+  MessageFeed(
+    viewModel = viewModel,
+    snapshot = snapshot,
+    messages = messages,
+    extras = extras,
+    maybeFirstUnread = maybeFirstUnread,
+    onOpenThread = onOpenThread,
+    maybeOnReply = maybeOnReply,
+    onLongPress = { maybeSelected = it },
+    modifier = modifier,
+  )
   maybeSelected?.let { message ->
     MessageActions(
       viewModel = viewModel,
@@ -455,182 +455,11 @@ private fun MessageList(
   }
 }
 
-@Composable
-private fun UnreadDivider() {
-  Text(
-    stringResource(R.string.new_messages),
-    color = MaterialTheme.colorScheme.error,
-    style = MaterialTheme.typography.labelSmall,
-    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-  )
-}
-
-@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
-@Composable
-fun MessageRow(
-  viewModel: MainViewModel,
-  message: Message,
-  maybeExtras: MessageExtras?,
-  snapshot: ChatSnapshot?,
-  onOpenThread: ((String) -> Unit)?,
-  onLongPress: () -> Unit,
-) {
-  val context = LocalContext.current
-  val isMine = message.author == snapshot?.me?.id
-  Column(
-    Modifier
-      .fillMaxWidth()
-      .combinedClickable(onClick = {}, onLongClick = onLongPress)
-      .padding(horizontal = 16.dp, vertical = 8.dp),
-  ) {
-    maybeExtras?.maybeForwarded?.let { forwarded ->
-      Text(
-        stringResource(R.string.forwarded_from, forwarded.authorName),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
-    maybeExtras?.maybeReply?.let { reply ->
-      Text(
-        "↪ ${snapshot?.name(reply.author) ?: ""}: ${reply.excerpt}",
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
-    Row(verticalAlignment = Alignment.Bottom) {
-      Text(
-        if (isMine) stringResource(R.string.you) else snapshot?.name(message.author).orEmpty(),
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(end = 8.dp),
-      )
-      Text(
-        if (message.isPending) {
-          stringResource(R.string.pending)
-        } else {
-          DateUtils.formatDateTime(context, message.sentAt, DateUtils.FORMAT_SHOW_TIME)
-        },
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-      if (maybeExtras?.isPinned == true) Text(" 📌", style = MaterialTheme.typography.bodySmall)
-      if (maybeExtras?.priority == "urgent") {
-        Text(" " + stringResource(R.string.priority_urgent), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
-      } else if (maybeExtras?.priority == "important") {
-        Text(" " + stringResource(R.string.priority_important), color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelSmall)
-      }
-    }
-    when {
-      maybeExtras?.isDeleted == true -> Text(stringResource(R.string.message_deleted), fontStyle = FontStyle.Italic)
-      message.maybeSystemEvent != null || maybeExtras?.maybeWorkspaceEvent != null ->
-        Text(systemText(message, maybeExtras, snapshot), fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      message.body.isNotEmpty() -> Text(message.body + if (message.isEdited) " " + stringResource(R.string.edited) else "")
-    }
-    maybeExtras?.files?.forEach { file -> FileRow(viewModel, file) }
-    maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it) }
-    if (message.reactions.isNotEmpty()) {
-      FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (reaction in message.reactions) {
-          AssistChip(
-            onClick = { viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji)) },
-            label = { Text("${reaction.emoji} ${reaction.count}") },
-          )
-        }
-      }
-    }
-    if (maybeExtras?.wantsAcknowledgement == true) {
-      val count = maybeExtras.acknowledgedBy.size
-      Text(
-        pluralStringResource(R.plurals.acknowledged_by, count, count),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
-    if (onOpenThread != null && message.replyCount > 0) {
-      Text(
-        pluralStringResource(R.plurals.replies, message.replyCount, message.replyCount),
-        color = MaterialTheme.colorScheme.primary,
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier.clickable { onOpenThread(message.id) }.padding(top = 4.dp),
-      )
-    }
-  }
-}
-
-@Composable
-private fun systemText(message: Message, maybeExtras: MessageExtras?, snapshot: ChatSnapshot?): String {
-  val who = snapshot?.name(message.author).orEmpty()
-  val event = message.maybeSystemEvent?.toString().orEmpty()
-  val workspace = maybeExtras?.maybeWorkspaceEvent?.get("event")?.toString()?.trim('"').orEmpty()
-  return when {
-    event.contains("Joined") -> stringResource(R.string.event_joined, who)
-    event.contains("Left") -> stringResource(R.string.event_left, who)
-    event.contains("Renamed") -> stringResource(R.string.event_renamed, who)
-    event.contains("TopicChanged") -> stringResource(R.string.event_topic, who)
-    workspace == "archived" -> stringResource(R.string.event_archived, who)
-    workspace == "made_private" -> stringResource(R.string.event_private, who)
-    workspace == "made_public" -> stringResource(R.string.event_public, who)
-    else -> stringResource(R.string.event_changed, who)
-  }
-}
-
-@Composable
-private fun FileRow(viewModel: MainViewModel, file: FileInfo) {
-  val context = LocalContext.current
-  Column(
-    Modifier
-      .padding(top = 4.dp)
-      .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-      .clickable {
-        val path = file.transfer.path
-        if (file.transfer.state == "local" && path != null) {
-          openFile(context, File(path), file.mediaType)
-        } else {
-          viewModel.act(ChatActions.download(file.conversation, file.message))
-        }
-      }
-      .padding(8.dp),
-  ) {
-    file.thumbnailBytes()?.let { bytes ->
-      BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { bitmap ->
-        Image(bitmap.asImageBitmap(), contentDescription = file.fileName, modifier = Modifier.heightIn(max = 160.dp))
-      }
-    }
-    Text("📎 ${file.fileName} · ${Formatter.formatShortFileSize(context, file.sizeBytes)}")
-    file.transfer.maybeProgress?.let { progress ->
-      LinearProgressIndicator(progress = { progress }, modifier = Modifier.width(160.dp).padding(top = 4.dp))
-    }
-    if (file.transfer.state == "failed") {
-      Text(stringResource(R.string.file_failed), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
-    }
-  }
-}
-
 /** Opens a decrypted download in another app through the FileProvider. */
 fun openFile(context: Context, file: File, mediaType: String) {
   val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
   val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mediaType).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
   runCatching { context.startActivity(Intent.createChooser(intent, file.name)) }
-}
-
-@Composable
-private fun LinkPreviewCard(preview: LinkPreview) {
-  Column(
-    Modifier
-      .padding(top = 4.dp)
-      .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-      .padding(8.dp),
-  ) {
-    preview.imageBytes()?.let { bytes ->
-      BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { bitmap ->
-        Image(bitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.heightIn(max = 120.dp))
-      }
-    }
-    preview.maybeSiteName?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
-    preview.maybeTitle?.let { Text(it, fontWeight = FontWeight.Bold) }
-    preview.maybeDescription?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 3) }
-  }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -649,6 +478,7 @@ private fun MessageActions(
   val isMine = message.author == snapshot?.me?.id
   var isEditing by remember { mutableStateOf(false) }
   var isForwarding by remember { mutableStateOf(false) }
+  var isConfirmingDelete by remember { mutableStateOf(false) }
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
       FlowRow(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -669,10 +499,7 @@ private fun MessageActions(
       }
       if (isMine && maybeExtras?.isDeleted != true) {
         SheetItem(R.string.action_edit) { isEditing = true }
-        SheetItem(R.string.action_delete) {
-          viewModel.act(ChatActions.delete(conversationId, message.id))
-          onDismiss()
-        }
+        SheetItem(R.string.action_delete) { isConfirmingDelete = true }
       }
       SheetItem(R.string.action_forward) { isForwarding = true }
       SheetItem(if (maybeExtras?.isPinned == true) R.string.action_unpin else R.string.action_pin) {
@@ -716,6 +543,20 @@ private fun MessageActions(
         }
       }
     }
+  }
+  if (isConfirmingDelete) {
+    AlertDialog(
+      onDismissRequest = { isConfirmingDelete = false },
+      title = { Text(stringResource(R.string.delete_confirm_title)) },
+      text = { Text(stringResource(R.string.delete_confirm_text)) },
+      confirmButton = {
+        TextButton(onClick = {
+          viewModel.act(ChatActions.delete(conversationId, message.id))
+          onDismiss()
+        }) { Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error) }
+      },
+      dismissButton = { TextButton(onClick = { isConfirmingDelete = false }) { Text(stringResource(R.string.cancel)) } },
+    )
   }
   if (isEditing) {
     TextDialog(
@@ -790,7 +631,7 @@ object ReplyTarget {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThread: String?, snapshot: ChatSnapshot?) {
-  val scope = rememberCoroutineScope()
+  val context = LocalContext.current
   var text by rememberSaveable(conversationId, maybeThread) { mutableStateOf("") }
   var isDraftLoaded by remember(conversationId, maybeThread) { mutableStateOf(false) }
   var files by remember(conversationId, maybeThread) { mutableStateOf<List<PickedFile>>(emptyList()) }
@@ -801,13 +642,29 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
   var isOptionsOpen by remember { mutableStateOf(false) }
   val replyTarget by ReplyTarget.current.collectAsState()
   val maybeReply = replyTarget?.takeIf { it.conversation == conversationId && maybeThread == null }
-  val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
-    scope.launch { files = files + uris.mapNotNull { viewModel.importFile(it) } }
+  val pickers = rememberAttachmentPickers(viewModel) { picked -> files = files + picked }
+  val focus = remember { FocusRequester() }
+  val isSendWithEnter = remember { ComposerPrefs.prefs(context).isSendWithEnter }
+  LaunchedEffect(maybeReply) {
+    // Replying starts typing right away.
+    if (maybeReply != null) focus.requestFocus()
   }
   LaunchedEffect(conversationId, maybeThread) {
     // A draft from this or another device of the user.
     if (text.isEmpty()) text = viewModel.readChat { query(ChatQueries.draft(conversationId, maybeThread)).maybeBody }.orEmpty()
     isDraftLoaded = true
+  }
+  val maybePendingShare by PendingShare.current.collectAsState()
+  LaunchedEffect(maybePendingShare, isDraftLoaded) {
+    // Text and files shared from another app land in the composer; the user sends them.
+    val share = maybePendingShare?.takeIf { it.conversation == conversationId && maybeThread == null } ?: return@LaunchedEffect
+    if (!isDraftLoaded) return@LaunchedEffect
+    val imported = share.content.uris.mapNotNull { viewModel.importFile(it) }
+    text = listOf(text, share.content.text).filter { it.isNotBlank() }.joinToString("\n")
+    files = files + imported
+    // Cleared last: clearing restarts this effect, which would cancel the import.
+    PendingShare.current.value = null
+    focus.requestFocus()
   }
   LaunchedEffect(text) {
     if (!isDraftLoaded) return@LaunchedEffect
@@ -849,6 +706,11 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
       },
       dismissButton = { TextButton(onClick = { isConfirmingChannel = false }) { Text(stringResource(R.string.cancel)) } },
     )
+  }
+  val canSend = text.isNotBlank() || files.isNotEmpty()
+  fun trySend() {
+    val confirmOver = viewModel.confirmChannelOver().toUInt()
+    if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) isConfirmingChannel = true else send()
   }
   Column(Modifier.fillMaxWidth()) {
     if (maybeQuery != null) {
@@ -897,43 +759,95 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
       Text(flags.joinToString(" · "), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp))
     }
     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-      IconButton(onClick = { picker.launch("*/*") }) {
+      IconButton(onClick = { isOptionsOpen = true }) {
         Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.attach))
       }
       OutlinedTextField(
         value = text,
         onValueChange = { text = it },
         placeholder = { Text(stringResource(R.string.composer_hint)) },
-        modifier = Modifier.weight(1f),
+        modifier = Modifier
+          .weight(1f)
+          .focusRequester(focus)
+          .onPreviewKeyEvent { event ->
+            // Hardware keyboards: Enter sends when the user chose so; Shift+Enter is a new line.
+            val isSendKey = isSendWithEnter && event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed
+            if (isSendKey && canSend) trySend()
+            isSendKey
+          },
         maxLines = 6,
+        keyboardOptions = KeyboardOptions(
+          capitalization = KeyboardCapitalization.Sentences,
+          imeAction = if (isSendWithEnter) ImeAction.Send else ImeAction.Default,
+        ),
+        keyboardActions = KeyboardActions(onSend = { if (canSend) trySend() }),
       )
-      Column {
-        IconButton(onClick = { isOptionsOpen = true }) {
-          Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.send_options))
-        }
-        DropdownMenu(expanded = isOptionsOpen, onDismissRequest = { isOptionsOpen = false }) {
-          DropdownMenuItem(text = { Text(stringResource(R.string.priority_normal)) }, onClick = { priority = "normal"; isOptionsOpen = false })
-          DropdownMenuItem(text = { Text(stringResource(R.string.priority_important)) }, onClick = { priority = "important"; isOptionsOpen = false })
-          DropdownMenuItem(text = { Text(stringResource(R.string.priority_urgent)) }, onClick = { priority = "urgent"; isOptionsOpen = false })
-          DropdownMenuItem(text = { Text(stringResource(R.string.option_acknowledge)) }, onClick = { wantsAcknowledgement = !wantsAcknowledgement; isOptionsOpen = false })
-          DropdownMenuItem(text = { Text(stringResource(R.string.option_silent)) }, onClick = { isSilent = !isSilent; isOptionsOpen = false })
-          if (maybeThread != null) {
-            DropdownMenuItem(text = { Text(stringResource(R.string.option_also_to_channel)) }, onClick = { alsoToChannel = !alsoToChannel; isOptionsOpen = false })
-          }
-        }
-      }
-      IconButton(
-        onClick = {
-          val confirmOver = viewModel.confirmChannelOver().toUInt()
-          if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) isConfirmingChannel = true else send()
-        },
-        enabled = text.isNotBlank() || files.isNotEmpty(),
-      ) {
+      IconButton(onClick = { if (canSend) trySend() }, enabled = canSend) {
         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
       }
     }
   }
+  if (isOptionsOpen) {
+    AttachSheet(pickers, onDismiss = { isOptionsOpen = false }) {
+      SendOptionsSection(
+        priority = priority,
+        onPriority = { priority = it },
+        wantsAcknowledgement = wantsAcknowledgement,
+        onAcknowledgement = { wantsAcknowledgement = it },
+        isSilent = isSilent,
+        onSilent = { isSilent = it },
+        maybeAlsoToChannel = alsoToChannel.takeIf { maybeThread != null },
+        onAlsoToChannel = { alsoToChannel = it },
+      )
+    }
+  }
 }
+
+/** Priority, read confirmation, silent and "also send to channel", in the composer's "+" sheet. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SendOptionsSection(
+  priority: String,
+  onPriority: (String) -> Unit,
+  wantsAcknowledgement: Boolean,
+  onAcknowledgement: (Boolean) -> Unit,
+  isSilent: Boolean,
+  onSilent: (Boolean) -> Unit,
+  maybeAlsoToChannel: Boolean?,
+  onAlsoToChannel: (Boolean) -> Unit,
+) {
+  HorizontalDivider(Modifier.padding(vertical = 8.dp))
+  Text(
+    stringResource(R.string.send_options),
+    style = MaterialTheme.typography.titleSmall,
+    modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+  )
+  FlowRow(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    for ((value, label) in PRIORITIES) {
+      FilterChip(selected = priority == value, onClick = { onPriority(value) }, label = { Text(stringResource(label)) })
+    }
+  }
+  OptionSwitch(R.string.option_acknowledge, wantsAcknowledgement, onAcknowledgement)
+  OptionSwitch(R.string.option_silent, isSilent, onSilent)
+  maybeAlsoToChannel?.let { OptionSwitch(R.string.option_also_to_channel, it, onAlsoToChannel) }
+}
+
+@Composable
+private fun OptionSwitch(label: Int, isOn: Boolean, onChange: (Boolean) -> Unit) {
+  Row(
+    Modifier.fillMaxWidth().toggleable(value = isOn, onValueChange = onChange).padding(horizontal = 24.dp, vertical = 8.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(stringResource(label), modifier = Modifier.weight(1f))
+    Switch(checked = isOn, onCheckedChange = null)
+  }
+}
+
+private val PRIORITIES = listOf(
+  "normal" to R.string.priority_normal,
+  "important" to R.string.priority_important,
+  "urgent" to R.string.priority_urgent,
+)
 
 /** Before a call: join with the camera on or muted. */
 @Composable
@@ -963,6 +877,9 @@ private fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOpti
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
 }
+
+/** How often a running upload or download is re-read. */
+private const val TRANSFER_POLL_MS = 1000L
 
 /** Drafts are saved (and synced to the user's other devices) after typing pauses this long. */
 private const val DRAFT_SAVE_DELAY_MS = 800L

@@ -161,6 +161,8 @@ data class FileTransfer(
   val path: String? = null,
   val reason: String? = null,
 ) {
+  val isMoving: Boolean get() = state == "uploading" || state == "downloading"
+
   /** 0..1 while uploading or downloading. */
   val maybeProgress: Float?
     get() = if ((state == "uploading" || state == "downloading") && totalBytes > 0) doneBytes.toFloat() / totalBytes else null

@@ -112,6 +112,7 @@ targets:
         ITSAppUsesNonExemptEncryption: true
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls."
         NSCameraUsageDescription: "TeamCraft uses the camera for video calls."
+        NSFaceIDUsageDescription: "TeamCraft uses Face ID to unlock the app when the app lock is on."
         NSUserActivityTypes: [INSendMessageIntent, INStartCallIntent]
         # CFBundleURLTypes: the OIDC redirect (ASWebAuthenticationSession handles it itself, but a
         # registered scheme keeps the dev realm's redirect URI valid on every iOS version).

@@ -101,7 +101,7 @@ composer-markdown-hint = **bold**  _italic_  `code`  ```code block```
 ## Messages
 message-edited = (edited)
 message-actions = Message actions
-action-react = React with 👍
+action-react = Add reaction
 action-reply = Reply in thread
 reaction-label = { $emoji } reaction, { $count } people
 badge-bot = BOT
@@ -1418,3 +1418,24 @@ space-unmute = Unmute { $name }
 sidebar-all-spaces = All spaces
 settings-sidebar-grouped = Show all spaces in one sidebar
 settings-sidebar-grouped-hint = Lists the channels of every space, grouped by space, instead of using the space switcher.
+
+## Daily-use improvements (docs/ux-backlog.md)
+new-messages = New messages
+jump-to-latest-new = { $count ->
+    [one] 1 new message
+   *[other] { $count } new messages
+  }
+sidebar-mark-all-read = Mark all as read
+settings-zoom = Size of the interface
+settings-zoom-percent = { $percent } %
+settings-zoom-hint = Also with Ctrl/Cmd + Plus, Minus and 0.
+shortcut-next-unread = Previous or next unread conversation
+shortcut-zoom = Zoom in, zoom out, reset
+action-react-with = React with { $emoji }
+emoji-picker-title = Emoji
+emoji-search = Search emoji
+emoji-recent = Recently used first
+emoji-none = No emoji found
+offline-banner = You are offline. The app reconnects on its own when the network is back.
+shortcut-search-here = Search in this conversation
+drop-files-here = Drop files to attach them

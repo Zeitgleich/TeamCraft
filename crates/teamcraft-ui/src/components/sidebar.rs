@@ -9,14 +9,29 @@ use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationKind, PresenceStatus, SpaceId};
 use crate::sections::{GroupedSidebar, SectionKind, SpaceGroup, build_grouped, build_sections};
+use crate::settings::{load_json, store_json};
 use crate::state::{MainView, Overlay, use_app_state};
+
+/// Sidebar sections and spaces the user collapsed, remembered on this device.
+const KEY_COLLAPSED_SECTIONS: &str = "teamcraft.sidebar_collapsed";
+const KEY_COLLAPSED_SPACES: &str = "teamcraft.sidebar_collapsed_spaces";
 
 /// Channel sidebar: search, threads, then the categories of the current space.
 #[component]
 pub fn Sidebar() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let collapsed = RwSignal::new(HashSet::<SectionKind>::new());
+  let collapsed = RwSignal::new(
+    load_json::<Vec<String>>(KEY_COLLAPSED_SECTIONS)
+      .unwrap_or_default()
+      .iter()
+      .filter_map(|slug| SectionKind::from_slug(slug))
+      .collect::<HashSet<SectionKind>>(),
+  );
+  Effect::new(move |_| {
+    let slugs: Vec<&str> = collapsed.with(|set| set.iter().map(|kind| kind.slug()).collect());
+    store_json(KEY_COLLAPSED_SECTIONS, &slugs);
+  });
 
   let space_name = Memo::new(move |_| {
     let space = state.space.get();
@@ -60,7 +75,9 @@ pub fn Sidebar() -> impl IntoView {
       list
     })
   });
-  let collapsed_spaces = RwSignal::new(HashSet::<SpaceId>::new());
+  let collapsed_spaces =
+    RwSignal::new(load_json::<HashSet<SpaceId>>(KEY_COLLAPSED_SPACES).unwrap_or_default());
+  Effect::new(move |_| collapsed_spaces.with(|set| store_json(KEY_COLLAPSED_SPACES, set)));
   let show_all_dms = RwSignal::new(false);
   // Conversations with the notification settings applied: one muted there (or through its space)
   // looks muted here too.
@@ -372,24 +389,40 @@ fn SidebarSection(
   let unread_hidden: u32 = conversations.iter().map(|conv| conv.mention_count).sum();
   let list_id = format!("sb-{}", kind.slug());
 
+  let state = use_app_state();
   view! {
     <section class="sb-section">
-      <button
-        class="sb-section-head"
-        aria-expanded=move || (!is_collapsed()).to_string()
-        aria-controls=list_id.clone()
-        on:click=move |_| {
-          collapsed.update(|set| {
-            if !set.remove(&kind) {
-              set.insert(kind);
+      <div class="sb-section-row">
+        <button
+          class="sb-section-head"
+          aria-expanded=move || (!is_collapsed()).to_string()
+          aria-controls=list_id.clone()
+          on:click=move |_| {
+            collapsed.update(|set| {
+              if !set.remove(&kind) {
+                set.insert(kind);
+              }
+            });
+          }
+        >
+          <Icon name=IconName::ChevronDown class="chevron" />
+          <span>{move || i18n.t(kind.title_key())}</span>
+          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count">{unread_hidden}</span> })}
+        </button>
+        {(kind == SectionKind::Unreads)
+          .then(|| {
+            view! {
+              <button
+                class="icon-btn icon-btn-small sb-section-action"
+                aria-label=move || i18n.t("sidebar-mark-all-read")
+                title=move || i18n.t("sidebar-mark-all-read")
+                on:click=move |_| state.mark_all_read()
+              >
+                <Icon name=IconName::Check />
+              </button>
             }
-          });
-        }
-      >
-        <Icon name=IconName::ChevronDown class="chevron" />
-        <span>{move || i18n.t(kind.title_key())}</span>
-        {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count">{unread_hidden}</span> })}
-      </button>
+          })}
+      </div>
       <ul id=list_id hidden=is_collapsed>
         {conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
       </ul>

@@ -7,14 +7,16 @@ use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::channel_view::DroppedFiles;
 use crate::components::composer_commands::{self, Notice, Outcome};
+use crate::components::emoji_picker::EmojiPicker;
 use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::mention::{self, TriggerKind};
-use crate::model::User;
 use crate::model::{ConversationId, ThreadId};
+use crate::model::{MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
@@ -25,7 +27,10 @@ const DRAFT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(8
 
 /// Tallest the input grows before it scrolls.
 const MAX_INPUT_HEIGHT_PX: i32 = 220;
-const PLACEHOLDER_EMOJI: &str = "🙂";
+/// How many of the newest messages ↑ searches for the user's last one.
+const EDIT_LAST_SCAN: usize = 50;
+/// The newest messages that are certainly rendered while the feed follows the bottom.
+const ON_SCREEN_ROWS: usize = 3;
 
 /// A file chosen, dropped or pasted that is read into memory and waits for the send.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -386,6 +391,46 @@ pub fn Composer(
     save_draft();
   };
 
+  // ↑ in the empty composer edits the user's newest message here (Slack, Teams, Mattermost).
+  let edit_last_message = move || -> bool {
+    let me = state.me().id;
+    let found = state.read(|backend| match maybe_thread {
+      Some(thread) => backend
+        .thread(conversation, thread)
+        .into_iter()
+        .rev()
+        .find(|message| {
+          message.author == me && message.kind == MessageKind::User && message.maybe_thread.is_some()
+        })
+        .map(|message| (message.id, None)),
+      None => {
+        let count = backend.message_count(conversation);
+        let start = count.saturating_sub(EDIT_LAST_SCAN);
+        backend
+          .messages(conversation, start, count - start)
+          .into_iter()
+          .enumerate()
+          .rev()
+          .find(|(_, message)| message.author == me && message.kind == MessageKind::User)
+          .map(|(offset, message)| (message.id, Some(start + offset)))
+      },
+    });
+    let Some((message, maybe_index)) = found else {
+      return false;
+    };
+    // The newest rows are on screen while following; older ones are scrolled to so their row exists.
+    if let Some(index) = maybe_index
+      && state
+        .read(|backend| backend.message_count(conversation))
+        .saturating_sub(index)
+        > ON_SCREEN_ROWS
+    {
+      state.jump_to_index.set(Some((conversation, index)));
+    }
+    state.edit_request.set(Some(message));
+    true
+  };
+
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
     if ev.is_composing() {
       return;
@@ -423,6 +468,18 @@ pub fn Composer(
         },
         _ => {},
       }
+    }
+    if ev.key() == "ArrowUp"
+      && !ev.shift_key()
+      && !ev.alt_key()
+      && !ev.ctrl_key()
+      && !ev.meta_key()
+      && is_empty.get_untracked()
+      && attachments.with_untracked(Vec::is_empty)
+      && edit_last_message()
+    {
+      ev.prevent_default();
+      return;
     }
     if ev.key() != "Enter" {
       return;
@@ -511,7 +568,20 @@ pub fn Composer(
       element.set_value("");
     }
   };
+  // Drops anywhere on the conversation arrive through the channel view (main composer only).
+  if maybe_thread.is_none()
+    && let Some(DroppedFiles(dropped)) = use_context::<DroppedFiles>()
+  {
+    Effect::new(move |_| {
+      let files = dropped.get();
+      if !files.is_empty() {
+        dropped.set(Vec::new());
+        add_files(files);
+      }
+    });
+  }
   let on_drop = move |ev: web_sys::DragEvent| {
+    // Marks the drop as handled, so the conversation around doesn't attach the files a second time.
     ev.prevent_default();
     is_drag_over.set(false);
     if let Some(files) = ev.data_transfer().and_then(|transfer| transfer.files()) {
@@ -519,21 +589,49 @@ pub fn Composer(
     }
   };
   let on_paste = move |ev: web_sys::ClipboardEvent| {
-    let Some(files) = ev.clipboard_data().and_then(|data| data.files()) else {
+    let Some(data) = ev.clipboard_data() else {
       return;
     };
-    if files.length() > 0 {
+    if let Some(files) = data.files()
+      && files.length() > 0
+    {
       ev.prevent_default();
       add_files((0..files.length()).filter_map(|i| files.item(i)).collect());
+      return;
+    }
+    // A URL pasted over selected text links the text instead of replacing it.
+    let (Ok(pasted), Some(element)) = (data.get_data("text/plain"), input.get_untracked()) else {
+      return;
+    };
+    let start = element.selection_start().ok().flatten().unwrap_or(0) as usize;
+    let end = element.selection_end().ok().flatten().unwrap_or(0) as usize;
+    if let Some((text, cursor)) = mention::link_over_selection(&element.value(), start, end, &pasted) {
+      ev.prevent_default();
+      element.set_value(&text);
+      drop(element.set_selection_range(cursor as u32, cursor as u32));
+      is_empty.set(false);
+      resize();
+      save_draft();
     }
   };
 
-  let insert_emoji = move |_| {
-    if let Some(element) = input.get_untracked() {
-      element.set_value(&format!("{}{PLACEHOLDER_EMOJI}", element.value()));
-      is_empty.set(false);
-      drop(element.focus());
-    }
+  let maybe_emoji_anchor = RwSignal::new_local(None::<web_sys::Element>);
+  // The picker takes the focus; the textarea keeps its selection, so the emoji lands at the cursor.
+  let insert_emoji = move |emoji: String| {
+    maybe_emoji_anchor.set(None);
+    let Some(element) = input.get_untracked() else {
+      return;
+    };
+    let value = element.value();
+    let start = element.selection_start().ok().flatten().unwrap_or(0) as usize;
+    let end = element.selection_end().ok().flatten().unwrap_or(0) as usize;
+    let (text, cursor) = mention::replace_selection(&value, start, end, &emoji);
+    element.set_value(&text);
+    drop(element.focus());
+    drop(element.set_selection_range(cursor as u32, cursor as u32));
+    is_empty.set(false);
+    resize();
+    save_draft();
   };
 
   view! {
@@ -706,10 +804,30 @@ pub fn Composer(
               class="icon-btn"
               aria-label=move || i18n.t("composer-emoji")
               title=move || i18n.t("composer-emoji")
-              on:click=insert_emoji
+              aria-haspopup="dialog"
+              aria-expanded=move || maybe_emoji_anchor.with(Option::is_some).to_string()
+              on:click=move |ev| maybe_emoji_anchor.set(Some(event_target::<web_sys::Element>(&ev)))
             >
               <Icon name=IconName::Smile />
             </button>
+            {move || {
+              maybe_emoji_anchor
+                .get()
+                .map(|anchor| {
+                  view! {
+                    <EmojiPicker
+                      anchor=anchor
+                      on_pick=Callback::new(insert_emoji)
+                      on_close=Callback::new(move |()| {
+                        maybe_emoji_anchor.set(None);
+                        if let Some(element) = input.get_untracked() {
+                          drop(element.focus());
+                        }
+                      })
+                    />
+                  }
+                })
+            }}
             <button
               type="button"
               class="icon-btn"

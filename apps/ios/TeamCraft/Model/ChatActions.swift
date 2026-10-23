@@ -11,6 +11,8 @@ enum ChatAction {
   case setActivity(isIdle: Bool)
   case sendMessage(SendRequest)
   case downloadFile(conversationId: String, messageId: String)
+  /// Unread again from `fromMessageId` on (account data, synced to the user's devices).
+  case markUnread(conversationId: String, fromMessageId: String)
 
   /// The wire form.
   var json: String {
@@ -37,25 +39,28 @@ enum ChatAction {
       object = ["action": "send_message", "message": request.object]
     case .downloadFile(let conversation, let message):
       object = ["action": "download_file", "conversation": conversation, "message": message]
+    case .markUnread(let conversation, let message):
+      object = ["action": "mark_unread", "conversation": conversation, "from": message]
     }
     return jsonText(object)
   }
 }
 
-/// A message with files (`OutgoingMessage` of the core). Plain text without files goes through
+/// A message with files or a reply (`OutgoingMessage` of the core). Plain text goes through
 /// `TeamCraft.sendMessage` instead.
 struct SendRequest: Equatable {
   var conversationId: String
   var maybeThreadId: String?
   var body: String
   var files: [PickedFile] = []
+  var maybeReplyToId: String?
 
   var object: [String: Any] {
     [
       "conversation": conversationId,
       "maybe_thread": maybeThreadId.map { $0 as Any } ?? NSNull(),
       "body": body,
-      "maybe_reply_to": NSNull(),
+      "maybe_reply_to": maybeReplyToId.map { $0 as Any } ?? NSNull(),
       "priority": "normal",
       "wants_acknowledgement": false,
       "is_silent": false,

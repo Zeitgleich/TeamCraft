@@ -31,6 +31,7 @@ use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::offline_banner::OfflineBanner;
 use crate::components::profile_views::{EditProfileDialog, UserProfileDialog};
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
@@ -53,8 +54,10 @@ use crate::meetings::parse_guest_link;
 use crate::mock::MockBackend;
 use crate::model::TimestampMs;
 use crate::model::{ConversationId, SpaceId};
+use crate::navigation::Step;
 use crate::notifier::{NotificationTitle, Notifier, ReadWatcher, all_conversations, notifications_for};
 use crate::notify_sync::NotificationSync;
+use crate::prefs::Zoom;
 use crate::reactive::use_interval;
 use crate::settings::{BackendMode, Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
@@ -67,6 +70,7 @@ pub fn App() -> impl IntoView {
   Effect::new(move |_| i18n.set_locale(settings.locale.get()));
   apply_theme(settings.theme);
   apply_density(settings);
+  apply_zoom(settings);
   apply_language_attribute();
   crate::brand::provide_brand(settings);
 
@@ -146,6 +150,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     </a>
     <div class="app">
       <BundleBanner />
+      <OfflineBanner />
       <AnnouncementBanner />
       <TopBar />
       <div class="app-body">
@@ -267,9 +272,43 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
       return;
     }
   }
+  if modifier
+    && !ev.alt_key()
+    && let Some(change) = zoom_change(&key)
+  {
+    ev.prevent_default();
+    state
+      .settings
+      .prefs
+      .update(|prefs| prefs.display.zoom = change(prefs.display.zoom));
+    return;
+  }
+  // Ctrl/Cmd+F searches the open conversation (as in Slack and Teams), Ctrl/Cmd+Shift+F everything.
+  if modifier && !ev.shift_key() && !ev.alt_key() && key == "f" {
+    ev.prevent_default();
+    let maybe_scope = state
+      .current_conversation_id()
+      .and_then(|id| state.read(|backend| backend.conversation(id)))
+      .filter(|conversation| !conversation.name.contains(char::is_whitespace))
+      .map(|conversation| format!("in:#{} ", conversation.name));
+    state.open_search(maybe_scope.as_deref());
+    return;
+  }
   if modifier && ev.shift_key() && !ev.alt_key() && key == "f" {
     ev.prevent_default();
     state.open_search(None);
+    return;
+  }
+  if ev.alt_key() && ev.shift_key() && !modifier {
+    let maybe_step = match ev.code().as_str() {
+      "ArrowUp" => Some(Step::Previous),
+      "ArrowDown" => Some(Step::Next),
+      _ => None,
+    };
+    if let Some(step) = maybe_step {
+      ev.prevent_default();
+      state.step_unread(step);
+    }
     return;
   }
   if ev.alt_key() && !modifier {
@@ -296,6 +335,16 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
     && state.panel.get_untracked() != SidePanel::Closed
   {
     state.panel.set(SidePanel::Closed);
+  }
+}
+
+/// Ctrl/Cmd with `+` / `=` zooms in, `-` zooms out, `0` resets (as in browsers).
+fn zoom_change(key: &str) -> Option<fn(Zoom) -> Zoom> {
+  match key {
+    "+" | "=" => Some(Zoom::larger),
+    "-" | "_" => Some(Zoom::smaller),
+    "0" => Some(|_| Zoom::DEFAULT),
+    _ => None,
   }
 }
 
@@ -336,6 +385,29 @@ fn apply_density(settings: Settings) {
       && root.set_attribute("data-density", density.slug()).is_err()
     {
       tracing::debug!("could not apply density attribute");
+    }
+  });
+}
+
+/// Scales the whole interface with CSS `zoom` on `<html>` (all sizes are in pixels).
+fn apply_zoom(settings: Settings) {
+  Effect::new(move |_| {
+    let percent = settings.prefs.get().display.zoom.percent();
+    let Some(root) = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|doc| doc.document_element())
+      .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+      return;
+    };
+    let style = root.style();
+    let result = if percent == Zoom::DEFAULT.percent() {
+      style.remove_property("zoom").map(drop)
+    } else {
+      style.set_property("zoom", &format!("{percent}%"))
+    };
+    if result.is_err() {
+      tracing::debug!("could not apply zoom");
     }
   });
 }

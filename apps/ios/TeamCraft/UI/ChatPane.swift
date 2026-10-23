@@ -20,8 +20,16 @@ struct ChatPane: View {
   @State private var isPickingDocument = false
   @State private var photoSelection: [PhotosPickerItem] = []
   @State private var isShowingFiles = false
+  @State private var maybeReplying: MessageItem?
+  @State private var maybeDeleting: MessageItem?
+  @State private var isAtBottom = true
+  @State private var newBelowCount = 0
+  @State private var isSendFailed = false
+  @FocusState private var isComposerFocused: Bool
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
+  /// The reaction a double tap toggles, as in most chat apps.
+  private static let quickReaction = "👍"
 
   var body: some View {
     VStack(spacing: 0) {
@@ -48,6 +56,17 @@ struct ChatPane: View {
       result in
       Task { await attach(documents: result) }
     }
+    .confirmationDialog("delete_confirm_title", isPresented: deletingBinding, titleVisibility: .visible, presenting: maybeDeleting) {
+      message in
+      Button("delete", role: .destructive) {
+        Task { await model.perform(.deleteMessage(conversationId: conversation.id, messageId: message.id)) }
+      }
+    } message: { _ in
+      Text("delete_confirm_text")
+    }
+    .alert("send_failed", isPresented: $isSendFailed) {
+      Button("done", role: .cancel) {}
+    }
     .alert("attachment_error_title", isPresented: attachmentErrorBinding, presenting: attachmentError) { _ in
       Button("done", role: .cancel) {}
     } message: { error in
@@ -70,29 +89,62 @@ struct ChatPane: View {
   private var messageList: some View {
     ScrollViewReader { proxy in
       ScrollView {
-        LazyVStack(alignment: .leading, spacing: 10) {
-          ForEach(messages, id: \.id) { message in
-            MessageRow(
-              message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
-              showsThreadLink: threadId == nil,
-              onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) }
-            )
-            .contextMenu { menu(for: message) }
-            .id(message.id)
+        LazyVStack(alignment: .leading, spacing: 4) {
+          ForEach(feedItems(messages)) { item in
+            switch item {
+            case .day(let date):
+              DayChip(date: date)
+            case .entry(let message, let isContinuation):
+              MessageRow(
+                message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
+                isContinuation: isContinuation, showsThreadLink: threadId == nil,
+                onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) }
+              )
+              .padding(.top, isContinuation ? 0 : 8)
+              .contentShape(Rectangle())
+              .onTapGesture(count: 2) { react(message, Self.quickReaction) }
+              .contextMenu { menu(for: message) }
+              .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
+              .id(message.id)
+            }
           }
+          // Visible exactly while the user reads at the bottom.
+          Color.clear.frame(height: 1).id(Self.bottomId)
+            .onAppear {
+              isAtBottom = true
+              newBelowCount = 0
+            }
+            .onDisappear { isAtBottom = false }
         }
         .padding()
       }
+      .overlay(alignment: .bottomTrailing) {
+        if !isAtBottom {
+          JumpDownButton(count: newBelowCount) {
+            withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+          }
+          .padding()
+        }
+      }
       .onChange(of: messages.last?.id) { _, last in
-        if let last { withAnimation { proxy.scrollTo(last, anchor: .bottom) } }
+        guard last != nil else { return }
+        // Own messages always come into view; others' only while reading at the bottom.
+        if isAtBottom || messages.last?.authorId == account.userId {
+          withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+        } else {
+          newBelowCount += 1
+        }
       }
     }
   }
+
+  private static let bottomId = "bottom"
 
   @ViewBuilder
   private var composer: some View {
     if conversation.canPost {
       VStack(alignment: .leading, spacing: 6) {
+        if let replying = maybeReplying { replyBar(replying) }
         if !attachments.isEmpty { attachmentChips }
         HStack(alignment: .bottom, spacing: 8) {
           if maybeEditing != nil {
@@ -108,6 +160,7 @@ struct ChatPane: View {
             .accessibilityLabel(Text("attach"))
           }
           TextField("composer_hint", text: $draft, axis: .vertical)
+            .focused($isComposerFocused)
             .lineLimit(1...5)
             .padding(10)
             .background(Theme.surface)
@@ -123,6 +176,22 @@ struct ChatPane: View {
     } else {
       Text("read_only_channel").font(.footnote).foregroundStyle(Theme.textMuted).padding()
     }
+  }
+
+  /// The message being answered, with a way out.
+  private func replyBar(_ message: MessageItem) -> some View {
+    HStack {
+      Rectangle().fill(Theme.accent).frame(width: 3)
+      VStack(alignment: .leading, spacing: 2) {
+        Text("replying_to \(message.authorName)").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+        Text(oneLine(message.body)).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
+      }
+      Spacer()
+      Button { maybeReplying = nil } label: { Image(systemName: "xmark.circle.fill") }
+        .foregroundStyle(Theme.textMuted)
+        .accessibilityLabel(Text("cancel"))
+    }
+    .frame(maxHeight: 40)
   }
 
   /// The picked files waiting to be sent, each removable.
@@ -145,6 +214,10 @@ struct ChatPane: View {
 
   private var canSubmit: Bool {
     !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (maybeEditing == nil && !attachments.isEmpty)
+  }
+
+  private var deletingBinding: Binding<Bool> {
+    Binding(get: { maybeDeleting != nil }, set: { if !$0 { maybeDeleting = nil } })
   }
 
   private var attachmentErrorBinding: Binding<Bool> {
@@ -188,7 +261,11 @@ struct ChatPane: View {
       }
     }
     if threadId == nil {
-      Button("reply_in_thread", systemImage: "arrowshape.turn.up.left") {
+      Button("reply", systemImage: "arrowshape.turn.up.left") {
+        maybeReplying = message
+        isComposerFocused = true
+      }
+      Button("reply_in_thread", systemImage: "bubble.left.and.bubble.right") {
         maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id)
       }
     }
@@ -198,11 +275,7 @@ struct ChatPane: View {
         maybeEditing = message
         draft = message.body
       }
-      Button("delete", systemImage: "trash", role: .destructive) {
-        Task {
-          await model.perform(.deleteMessage(conversationId: conversation.id, messageId: message.id))
-        }
-      }
+      Button("delete", systemImage: "trash", role: .destructive) { maybeDeleting = message }
     }
   }
 
@@ -219,16 +292,28 @@ struct ChatPane: View {
       draft = ""
       maybeEditing = nil
       await model.perform(.editMessage(conversationId: conversation.id, messageId: editing.id, body: body))
-    } else if attachments.isEmpty {
+    } else if attachments.isEmpty && maybeReplying == nil {
       guard !body.isEmpty else { return }
       draft = ""
-      await model.send(conversationId: conversation.id, threadId: threadId, body: body)
+      if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
+        // Nothing was sent: the text stays for another try.
+        draft = body
+        isSendFailed = true
+      }
     } else {
       let files = attachments
+      let replying = maybeReplying
       draft = ""
       attachments = []
-      let request = SendRequest(conversationId: conversation.id, maybeThreadId: threadId, body: body, files: files)
-      if !(await model.performChecked(.sendMessage(request))) { attachmentError = .sendFailed }
+      maybeReplying = nil
+      let request = SendRequest(
+        conversationId: conversation.id, maybeThreadId: threadId, body: body, files: files,
+        maybeReplyToId: replying?.id)
+      if !(await model.performChecked(.sendMessage(request))) {
+        draft = body
+        maybeReplying = replying
+        if files.isEmpty { isSendFailed = true } else { attachmentError = .sendFailed }
+      }
     }
     await reload()
   }
@@ -301,22 +386,32 @@ struct MessageRow: View {
   let message: MessageItem
   let maybeExtras: MessageExtras?
   let isMine: Bool
+  var isContinuation = false
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
-      AvatarView(name: message.authorName)
+      if isContinuation {
+        // Keeps follow-ups aligned under the first message of the block.
+        Color.clear.frame(width: 36, height: 1)
+      } else {
+        AvatarView(name: message.authorName)
+      }
       VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 6) {
-          Text(isMine ? String(localized: "you") : message.authorName).font(.subheadline.weight(.semibold))
-          Text(Date(timeIntervalSince1970: TimeInterval(message.sentAtMs) / 1000), style: .time)
-            .font(.caption).foregroundStyle(Theme.textMuted)
-          if message.isEdited { Text("edited").font(.caption).foregroundStyle(Theme.textMuted) }
-          if message.isPending { Text("pending").font(.caption).foregroundStyle(Theme.textMuted) }
+        if !isContinuation || message.isPending || message.isEdited {
+          HStack(spacing: 6) {
+            if !isContinuation {
+              Text(isMine ? String(localized: "you") : message.authorName).font(.subheadline.weight(.semibold))
+              Text(message.sentDate, style: .time)
+                .font(.caption).foregroundStyle(Theme.textMuted)
+            }
+            if message.isEdited { Text("edited").font(.caption).foregroundStyle(Theme.textMuted) }
+            if message.isPending { Text("pending").font(.caption).foregroundStyle(Theme.textMuted) }
+          }
         }
         if !message.body.isEmpty || files.isEmpty {
-          Text(message.body)
+          Text(linkedText(message.body))
             .textSelection(.enabled)
             .padding(10)
             .background(isMine ? Theme.ownBubble : Theme.surface)
@@ -356,5 +451,48 @@ struct MessageRow: View {
         .buttonStyle(.plain)
       }
     }
+  }
+}
+
+/// A date above the first message of each day.
+struct DayChip: View {
+  let date: Date
+
+  var body: some View {
+    Text(label)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(Theme.textMuted)
+      .padding(.horizontal, 12).padding(.vertical, 4)
+      .background(Theme.surface)
+      .clipShape(Capsule())
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 6)
+  }
+
+  private var label: String {
+    if Calendar.current.isDateInToday(date) { return String(localized: "day_today") }
+    if Calendar.current.isDateInYesterday(date) { return String(localized: "day_yesterday") }
+    return date.formatted(.dateTime.weekday(.wide).day().month(.wide))
+  }
+}
+
+/// Back to the newest message, with how many arrived below.
+struct JumpDownButton: View {
+  let count: Int
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      Image(systemName: "chevron.down")
+        .font(.body.weight(.semibold))
+        .frame(width: 40, height: 40)
+        .background(.regularMaterial)
+        .clipShape(Circle())
+        .overlay(alignment: .topTrailing) {
+          if count > 0 { CountBadge(count: UInt32(min(count, 999))).offset(x: 6, y: -6) }
+        }
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(count > 0 ? Text("jump_down_new \(count)") : Text("jump_down"))
   }
 }

@@ -101,7 +101,7 @@ composer-markdown-hint = **fett**  _kursiv_  `Code`  ```Codeblock```
 ## Nachrichten
 message-edited = (bearbeitet)
 message-actions = Nachrichtenaktionen
-action-react = Mit 👍 reagieren
+action-react = Reaktion hinzufügen
 action-reply = Im Thread antworten
 reaction-label = Reaktion { $emoji }, { $count } Personen
 badge-bot = BOT
@@ -1418,3 +1418,24 @@ space-unmute = Stummschaltung von { $name } aufheben
 sidebar-all-spaces = Alle Bereiche
 settings-sidebar-grouped = Alle Bereiche in einer Seitenleiste zeigen
 settings-sidebar-grouped-hint = Listet die Kanäle aller Bereiche nach Bereich gruppiert, statt den Bereichswechsler zu verwenden.
+
+## Daily-use improvements (docs/ux-backlog.md)
+new-messages = Neue Nachrichten
+jump-to-latest-new = { $count ->
+    [one] 1 neue Nachricht
+   *[other] { $count } neue Nachrichten
+  }
+sidebar-mark-all-read = Alle als gelesen markieren
+settings-zoom = Größe der Oberfläche
+settings-zoom-percent = { $percent } %
+settings-zoom-hint = Auch mit Strg/Cmd + Plus, Minus und 0.
+shortcut-next-unread = Vorherige oder nächste ungelesene Unterhaltung
+shortcut-zoom = Vergrößern, verkleinern, zurücksetzen
+action-react-with = Mit { $emoji } reagieren
+emoji-picker-title = Emoji
+emoji-search = Emoji suchen
+emoji-recent = Zuletzt verwendete zuerst
+emoji-none = Kein Emoji gefunden
+offline-banner = Du bist offline. Die App verbindet sich von selbst wieder, sobald das Netzwerk zurück ist.
+shortcut-search-here = In dieser Unterhaltung suchen
+drop-files-here = Dateien hier ablegen, um sie anzuhängen

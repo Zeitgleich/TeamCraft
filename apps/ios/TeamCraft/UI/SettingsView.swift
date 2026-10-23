@@ -90,6 +90,7 @@ struct SettingsView: View {
           case .unknown: Button("push_enable") { Task { await model.enablePush() } }
           }
         }
+        DeviceSecuritySection()
         Section {
           Button("sign_out", role: .destructive) {
             Task {

@@ -23,6 +23,7 @@ import de.zeitgleich.teamcraft.push.UnifiedPushBackend
 import de.zeitgleich.teamcraft.push.UnifiedPushStatus
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.ConversationItem
+import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
@@ -144,6 +145,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   suspend fun conversations(): List<ConversationItem> = read { conversations() } ?: emptyList()
+
+  /**
+   * The newest message of each conversation, for the chat list. Reads the local store only (one
+   * small window per conversation); names come from the snapshot.
+   */
+  suspend fun chatPreviews(conversations: List<ConversationItem>): Map<String, ChatListEntry> {
+    val snapshot = readChat { snapshot() } ?: return emptyMap()
+    return conversations.mapNotNull { conversation ->
+      val latest = readChat { latest(conversation.id, 1).messages.lastOrNull() } ?: return@mapNotNull null
+      val preview = chatPreview(
+        message = latest,
+        myId = snapshot.me.id,
+        authorName = snapshot.name(latest.author),
+        isOneToOne = conversation.kind == ConversationKind.DIRECT,
+      )
+      conversation.id to ChatListEntry(preview, latest.id)
+    }.toMap()
+  }
 
   suspend fun messages(conversationId: String): List<MessageItem> =
     read { messages(conversationId, MESSAGE_PAGE.toUInt()) } ?: emptyList()

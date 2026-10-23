@@ -1,6 +1,166 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "app_lock": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App lock (Face ID, Touch ID or passcode)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App-Sperre (Face ID, Touch ID oder Code)"
+          }
+        }
+      }
+    },
+    "app_lock_after": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lock again after"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erneut sperren nach"
+          }
+        }
+      }
+    },
+    "app_lock_fifteen_minutes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 minutes"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 Minuten"
+          }
+        }
+      }
+    },
+    "app_lock_five_minutes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5 minutes"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5 Minuten"
+          }
+        }
+      }
+    },
+    "app_lock_immediately": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Immediately"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sofort"
+          }
+        }
+      }
+    },
+    "app_lock_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft is locked"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft ist gesperrt"
+          }
+        }
+      }
+    },
+    "app_lock_one_minute": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 minute"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 Minute"
+          }
+        }
+      }
+    },
+    "app_lock_prompt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock TeamCraft"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft entsperren"
+          }
+        }
+      }
+    },
+    "app_lock_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set up a passcode on this device to use the app lock."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Richte auf diesem Gerät einen Code ein, um die App-Sperre zu nutzen."
+          }
+        }
+      }
+    },
+    "app_lock_unlock": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperren"
+          }
+        }
+      }
+    },
     "app_name": {
       "localizations": {
         "en": {
@@ -633,6 +793,102 @@
         }
       }
     },
+    "chat_mark_read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as read"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als gelesen markieren"
+          }
+        }
+      }
+    },
+    "chat_mark_unread": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as unread"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als ungelesen markieren"
+          }
+        }
+      }
+    },
+    "chat_muted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Muted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stummgeschaltet"
+          }
+        }
+      }
+    },
+    "chat_preview_event": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conversation updated"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unterhaltung geändert"
+          }
+        }
+      }
+    },
+    "chat_preview_sender %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@: %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@: %2$@"
+          }
+        }
+      }
+    },
+    "chats_empty_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join a channel or start a direct message to get going."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tritt einem Kanal bei oder starte eine Direktnachricht."
+          }
+        }
+      }
+    },
     "chats_title": {
       "localizations": {
         "en": {
@@ -777,6 +1033,38 @@
         }
       }
     },
+    "day_today": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Today"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Heute"
+          }
+        }
+      }
+    },
+    "day_yesterday": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yesterday"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gestern"
+          }
+        }
+      }
+    },
     "delete": {
       "localizations": {
         "en": {
@@ -789,6 +1077,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Löschen"
+          }
+        }
+      }
+    },
+    "delete_confirm_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "It is removed for everyone in the conversation."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sie wird für alle in der Unterhaltung entfernt."
+          }
+        }
+      }
+    },
+    "delete_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete this message?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachricht löschen?"
+          }
+        }
+      }
+    },
+    "device_security_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät"
           }
         }
       }
@@ -2473,6 +2809,38 @@
         }
       }
     },
+    "favorite_add": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add to favorites"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zu Favoriten hinzufügen"
+          }
+        }
+      }
+    },
+    "favorite_remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove from favorites"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus Favoriten entfernen"
+          }
+        }
+      }
+    },
     "favorites": {
       "localizations": {
         "en": {
@@ -2613,6 +2981,62 @@
           "stringUnit": {
             "state": "translated",
             "value": "Dein Sicherheitscode"
+          }
+        }
+      }
+    },
+    "jump_down": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jump to the newest message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zur neuesten Nachricht springen"
+          }
+        }
+      }
+    },
+    "jump_down_new %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld newer message, jump down"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld newer messages, jump down"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld neuere Nachricht, nach unten springen"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld neuere Nachrichten, nach unten springen"
+                }
+              }
+            }
           }
         }
       }
@@ -3385,6 +3809,22 @@
         }
       }
     },
+    "privacy_cover": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide chats in the app switcher"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chats im App-Umschalter verbergen"
+          }
+        }
+      }
+    },
     "push_denied_open_settings": {
       "localizations": {
         "en": {
@@ -3461,6 +3901,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reagieren"
+          }
+        }
+      }
+    },
+    "react_quick %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "React with %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit %@ reagieren"
           }
         }
       }
@@ -3633,6 +4089,22 @@
         }
       }
     },
+    "reply": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reply"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Antworten"
+          }
+        }
+      }
+    },
     "reply_in_thread": {
       "localizations": {
         "en": {
@@ -3645,6 +4117,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Im Thread antworten"
+          }
+        }
+      }
+    },
+    "replying_to %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Replying to %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Antwort an %@"
           }
         }
       }
@@ -4077,6 +4565,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Senden"
+          }
+        }
+      }
+    },
+    "send_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The message couldn't be sent. Your text is still there; try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Nachricht konnte nicht gesendet werden. Dein Text ist noch da; versuche es erneut."
           }
         }
       }

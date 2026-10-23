@@ -51,6 +51,7 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
+    .plugin(tauri_plugin_window_state::Builder::default().build())
     .manage(service)
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
