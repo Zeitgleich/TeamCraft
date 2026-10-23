@@ -82,6 +82,10 @@ pub enum CoreError {
   NoContentKey(ConversationId),
   #[error("gave up after {attempts} attempts: {reason}")]
   GaveUp { attempts: u32, reason: String },
+  /// The server's answer to this device's last commit is still unknown (lost on the way); no new
+  /// commit until it is resolved (e2ee.md §4.6).
+  #[error("the outcome of this device's last commit in conversation {0} is not known yet")]
+  CommitPending(ConversationId),
   #[error("gateway: {0}")]
   Gateway(String),
   /// A browser API failed or is missing (no service worker, permission denied, ...).
@@ -97,7 +101,11 @@ pub enum CoreError {
 impl CoreError {
   /// Worth retrying later without changes (offline, server overloaded).
   pub fn is_transient(&self) -> bool {
-    matches!(self, Self::Api(error) if error.is_transient())
+    match self {
+      Self::Api(error) => error.is_transient(),
+      Self::CommitPending(_) => true,
+      _ => false,
+    }
   }
 
   /// See [`ApiError::is_retry_later`].

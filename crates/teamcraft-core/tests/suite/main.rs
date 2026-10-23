@@ -17,6 +17,7 @@ mod key_packages;
 mod link_previews;
 mod linking;
 mod messages;
+mod mls_recovery;
 mod org_backgrounds;
 mod org_recovery;
 mod push;

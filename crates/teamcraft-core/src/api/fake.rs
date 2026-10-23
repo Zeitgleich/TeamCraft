@@ -146,6 +146,14 @@ struct State {
   clock_offset_ms: i64,
   /// Revoked devices stay listed with their key packages, as a stale or malicious server would.
   is_ignoring_revocations: bool,
+  /// The next commit of these users is stored and fanned out, but the answer is lost.
+  losing_commit_answers: HashSet<UserId>,
+  /// The next commit of these users is lost on the way (never stored).
+  dropping_commits: HashSet<UserId>,
+  /// These users get the next commit (of anyone) garbled, so their client refuses it.
+  garbling_next_commit_for: HashSet<UserId>,
+  /// MLS entries each user gets garbled (gateway and backlog alike).
+  garbled_entries: HashMap<UserId, HashSet<teamcraft_proto::MlsMessageId>>,
 }
 
 /// How an armed network cut ([`FakeServer::cut_network_after`]) hits the call it catches.
@@ -377,6 +385,23 @@ impl FakeServer {
     let by_ms = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
     let mut state = self.lock();
     state.clock_offset_ms = state.clock_offset_ms.saturating_add(by_ms);
+  }
+
+  /// The user's next commit is stored and fanned out, but the answer to the client is lost (a
+  /// timeout or a killed app right after sending).
+  pub fn lose_next_commit_answer(&self, user: UserId) {
+    self.lock().losing_commit_answers.insert(user);
+  }
+
+  /// The user's next commit is lost on the way: never stored, the client sees a network error.
+  pub fn drop_next_commit(&self, user: UserId) {
+    self.lock().dropping_commits.insert(user);
+  }
+
+  /// The next commit anyone makes reaches `user` garbled, so that client refuses it while the
+  /// others merge it: the device falls out of the group (a bug, a rolled-back store).
+  pub fn garble_next_commit_for(&self, user: UserId) {
+    self.lock().garbling_next_commit_for.insert(user);
   }
 
   /// From now on revoked devices stay listed and keep their key packages (a stale server).
@@ -1316,6 +1341,9 @@ impl ServerApi for FakeServerApi {
   ) -> Result<PostMlsCommitResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, request.device_id)?;
+      if state.dropping_commits.remove(&me) {
+        return Err(ApiError::Network("fake server: commit lost on the way".into()));
+      }
       let current_epoch = state.member_conversation(conversation, me)?.epoch;
       if request.epoch != current_epoch {
         return Err(ApiError::status(
@@ -1356,10 +1384,22 @@ impl ServerApi for FakeServerApi {
       entry.mls.push(commit.clone());
       let new_epoch = entry.epoch;
       let members: Vec<UserId> = entry.members.keys().copied().collect();
+      let garbled_for: Vec<UserId> = state.garbling_next_commit_for.drain().collect();
+      for user in &garbled_for {
+        state.garbled_entries.entry(*user).or_default().insert(commit_id);
+      }
+      let (garbled, plain): (Vec<UserId>, Vec<UserId>) =
+        members.into_iter().partition(|user| garbled_for.contains(user));
       state.publish(
-        members,
+        plain,
         &GatewayEvent::MlsMessage {
           message: commit.clone(),
+        },
+      );
+      state.publish(
+        garbled,
+        &GatewayEvent::MlsMessage {
+          message: garble(commit.clone()),
         },
       );
       for (maybe_owner, welcome) in welcomes {
@@ -1367,6 +1407,9 @@ impl ServerApi for FakeServerApi {
         if let Some(owner) = maybe_owner {
           state.publish([owner], &GatewayEvent::MlsMessage { message: welcome });
         }
+      }
+      if state.losing_commit_answers.remove(&me) {
+        return Err(ApiError::Network("fake server: the answer was lost".into()));
       }
       Ok(PostMlsCommitResponse { new_epoch, commit })
     })
@@ -1426,10 +1469,18 @@ impl ServerApi for FakeServerApi {
     self.with(|state, me| {
       let entry = state.member_conversation(conversation, me)?;
       let floor = entry.members.get(&me).map_or(0, |(_, floor)| *floor);
-      let visible = entry.mls.iter().filter(|message| {
-        message.id.snowflake().get() > floor && query.maybe_after.is_none_or(|after| message.id > after)
-      });
-      Ok(page(visible.cloned().collect(), query.maybe_limit, entry.epoch))
+      let maybe_garbled = state.garbled_entries.get(&me);
+      let visible = entry
+        .mls
+        .iter()
+        .filter(|message| {
+          message.id.snowflake().get() > floor && query.maybe_after.is_none_or(|after| message.id > after)
+        })
+        .map(|message| match maybe_garbled {
+          Some(garbled) if garbled.contains(&message.id) => garble(message.clone()),
+          _ => message.clone(),
+        });
+      Ok(page(visible.collect(), query.maybe_limit, entry.epoch))
     })
   }
 
@@ -2549,8 +2600,15 @@ impl FakeGateway {
 }
 
 impl State {
+  /// Time-sortable like the server's: the server's clock in the time bits, so clients reading an
+  /// ID's time get the server's time.
   fn next_id<T: Id>(&mut self) -> T {
-    self.next_id += 1;
+    let shift = teamcraft_proto::SNOWFLAKE_SEQUENCE_BITS + teamcraft_proto::SNOWFLAKE_WORKER_BITS;
+    let since_epoch = self
+      .now_ms()
+      .saturating_sub(teamcraft_proto::SNOWFLAKE_EPOCH_MS)
+      .max(0);
+    self.next_id = self.next_id.saturating_add(1).max(since_epoch << shift);
     T::from_snowflake(snowflake(self.next_id))
   }
 
@@ -2839,6 +2897,16 @@ impl KeyPackages {
         .is_some_and(|package| package.expires_at_ms > renew_before),
     }
   }
+}
+
+/// An MLS entry with its payload broken, as one client gets it ([`FakeServer::garble_next_commit_for`]).
+fn garble(mut message: MlsMessageResponse) -> MlsMessageResponse {
+  let mut payload = message.payload.into_vec();
+  if let Some(last) = payload.last_mut() {
+    *last ^= 0xff;
+  }
+  message.payload = Base64Bytes::new(payload);
+  message
 }
 
 /// Checks an uploaded package like the server and records its expiry on the fake's clock: the

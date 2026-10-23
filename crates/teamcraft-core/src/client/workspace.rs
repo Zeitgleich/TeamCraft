@@ -55,6 +55,32 @@ pub(crate) enum PendingChange {
     not_before_ms: i64,
     attempts: u32,
   },
+  /// A device fell out of the group and asked, with its signed request, to be added back
+  /// (e2ee.md §4.6). Staggered like [`Self::AddDevice`]; done once any member answered.
+  Rejoin {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    device_id: DeviceId,
+    request: Base64Bytes,
+    not_before_ms: i64,
+    attempts: u32,
+  },
+  /// Content keys this device still owes a member it added (the commit's answer was lost, or
+  /// sending them failed).
+  ShareHistory {
+    conversation_id: ConversationId,
+    share: SharedKeys,
+  },
+}
+
+/// Which content keys a new member gets after the commit that added them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SharedKeys {
+  /// Every key of the conversation ("share history").
+  FullHistory,
+  /// The current key only (history from the join on).
+  CurrentKey,
 }
 
 /// What became of a pending change in this round.
@@ -62,6 +88,13 @@ enum PendingOutcome {
   Done,
   /// Keep it, possibly updated (not due yet, or retried later).
   Later(PendingChange),
+}
+
+impl PendingChange {
+  /// Where a device's rejoin request waits ([`PendingChange::Rejoin`]).
+  pub(crate) fn rejoin_key(conversation: ConversationId, device: DeviceId) -> String {
+    format!("rejoin/{conversation}/{device}")
+  }
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -323,6 +356,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         device_id,
         ..
       } => format!("add_device/{conversation_id}/{device_id}"),
+      PendingChange::Rejoin {
+        conversation_id,
+        device_id,
+        ..
+      } => PendingChange::rejoin_key(*conversation_id, *device_id),
+      PendingChange::ShareHistory {
+        conversation_id,
+        share,
+      } => format!("share_history/{conversation_id}/{share:?}"),
     };
     records::put_json(&self.store, Table::PendingChanges, &key, &change)
   }
@@ -375,6 +417,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// How long this device waits before it adds back `device` (a rejoin): ranked among the group's
+  /// other devices like [`Self::queue_device_addition`], so normally one member commits.
+  pub(crate) fn commit_delay_ms(
+    &mut self,
+    conversation: ConversationId,
+    device: DeviceId,
+  ) -> Result<i64, CoreError> {
+    let members = self.group_or_error(conversation)?.members()?;
+    let mut candidates = Vec::with_capacity(members.len());
+    for member in &members {
+      let member_device = convert::device_from_crypto(member.device_id)?;
+      if member_device != device {
+        let member_user = convert::user_from_crypto(member.user_id)?;
+        candidates.push((member_device, self.is_probably_online(member_user)?));
+      }
+    }
+    let rank =
+      commit_rank(&candidates, self.account.device_id, device).min(self.settings.device_add_max_rank);
+    let stagger_ms = i64::try_from(self.settings.device_add_stagger.as_millis()).unwrap_or(i64::MAX);
+    Ok(stagger_ms.saturating_mul(i64::from(rank)))
+  }
+
   /// From the last presence the gateway reported; this device's own user counts as online.
   fn is_probably_online(&self, user: UserId) -> Result<bool, CoreError> {
     if user == self.account.user_id {
@@ -402,6 +466,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(PendingOutcome::Done);
       },
       PendingChange::AddDevice { .. } => return self.apply_device_addition(change).await,
+      PendingChange::Rejoin { .. } => return self.apply_rejoin(change).await,
+      PendingChange::ShareHistory {
+        conversation_id,
+        share,
+      } => {
+        if self.has_group(*conversation_id)? {
+          self.share_history(*conversation_id, *share).await?;
+        }
+        return Ok(PendingOutcome::Done);
+      },
     };
     self.commit_change(source.0, source.1).await?;
     Ok(PendingOutcome::Done)
@@ -453,6 +527,46 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       conversation_id: conversation,
       user_id: *user_id,
       device_id: *device_id,
+      not_before_ms: now.saturating_add(retry_ms),
+      attempts,
+    }))
+  }
+
+  /// Adds back a device that asked for it once due; retried while it has no key package or
+  /// another commit won, given up after `device_add_attempts`.
+  async fn apply_rejoin(&mut self, change: &PendingChange) -> Result<PendingOutcome, CoreError> {
+    let PendingChange::Rejoin {
+      conversation_id,
+      user_id,
+      device_id,
+      request,
+      not_before_ms,
+      attempts,
+    } = change
+    else {
+      return Ok(PendingOutcome::Done);
+    };
+    let now = self.now_ms();
+    if now < *not_before_ms {
+      return Ok(PendingOutcome::Later(change.clone()));
+    }
+    if self
+      .answer_rejoin(*conversation_id, *user_id, *device_id, request.as_slice())
+      .await?
+    {
+      return Ok(PendingOutcome::Done);
+    }
+    let attempts = attempts.saturating_add(1);
+    if attempts >= self.settings.device_add_attempts {
+      tracing::warn!(conversation_id = %conversation_id, "gave up adding back a device that fell out of the group");
+      return Ok(PendingOutcome::Done);
+    }
+    let retry_ms = i64::try_from(self.settings.device_add_stagger.as_millis()).unwrap_or(i64::MAX);
+    Ok(PendingOutcome::Later(PendingChange::Rejoin {
+      conversation_id: *conversation_id,
+      user_id: *user_id,
+      device_id: *device_id,
+      request: request.clone(),
       not_before_ms: now.saturating_add(retry_ms),
       attempts,
     }))

@@ -7,15 +7,18 @@ use rand_core::OsRng;
 use teamcraft_crypto::membership::{
   HistoryShare, MembershipAction, MembershipChange, SignedMembershipChange,
 };
-use teamcraft_crypto::mls::{CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent, MlsError};
+use teamcraft_crypto::mls::{
+  CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent, GroupMember, MembershipUpdate, MlsError,
+  RejoinRequest, SignedRejoinRequest,
+};
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, HistoryPolicy, ListMlsMessagesQuery, MlsMessageKind,
+  CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, ListMlsMessagesQuery, MlsMessageKind,
   MlsMessageResponse, MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
-use super::Client;
-use super::workspace::PendingChange;
+use super::workspace::{PendingChange, SharedKeys};
+use super::{Client, pending_post_key};
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
@@ -35,6 +38,31 @@ pub(crate) enum ChangeSource {
 
 /// Marks an MLS "proposal" entry that carries a signed admin change instead of an MLS proposal.
 pub(crate) const ADMIN_CHANGE_MAGIC: &[u8] = b"TCAC";
+/// Marks an MLS "proposal" entry that carries a device's signed request to be added back.
+pub(crate) const REJOIN_REQUEST_MAGIC: &[u8] = b"TCRJ";
+/// Rounds of "catch up, send the lost commit again" before [`Client::sync_mls`] leaves a commit
+/// pending for the next sync.
+const PENDING_COMMIT_ROUNDS: u32 = 3;
+
+/// This device's commit, merged: what it did and when the server stored it.
+struct OwnCommit {
+  update: MembershipUpdate,
+  at_ms: i64,
+}
+
+/// Where the queue left this device after one pass of [`Client::sync_mls`].
+struct CatchUp {
+  /// An entry from a later epoch came with every earlier one handled: this device missed or
+  /// refused a commit the others merged.
+  is_behind: bool,
+  current_epoch: u64,
+}
+
+/// That this device asked to be added back to a group, and when.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RejoinRecord {
+  requested_at_ms: i64,
+}
 
 /// The claimed key packages of one user that can go into a commit.
 #[derive(Default)]
@@ -220,6 +248,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Adds devices of current members that aren't in the group yet (a colleague's new laptop).
   /// These need no signed change: each device is cross-signed by its user (e2ee.md §4.6).
   pub async fn add_missing_devices(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
+    self.resolve_pending_commit(conversation).await?;
     let members = self.api.list_members(conversation).await?;
     let directory = self
       .trusted_directory(members.members.iter().map(|member| member.user.id))
@@ -254,7 +283,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .ok_or(CoreError::NoGroup(conversation))?;
     let output =
       group.commit_device_additions(&self.provider, &self.account.device, &key_packages, &directory)?;
-    if !self.post_commit(conversation, output, &recipients).await? {
+    if self
+      .post_commit(conversation, output, &recipients)
+      .await?
+      .is_none()
+    {
       return Err(CoreError::GaveUp {
         attempts: 1,
         reason: "another commit won the epoch".into(),
@@ -281,8 +314,41 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// Processes the conversation's MLS queue after the last entry this device handled.
+  /// Processes the conversation's MLS queue after the last entry this device handled. A commit of
+  /// this device whose answer was lost is merged when it shows up there, or sent again when the
+  /// server never got it. A device that can't follow the group any more asks to be added back
+  /// (e2ee.md §4.6).
   pub async fn sync_mls(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let mut catch_up = self.catch_up_mls(conversation).await?;
+    for _ in 0..PENDING_COMMIT_ROUNDS {
+      if catch_up.is_behind || !self.has_pending_commit(conversation)? {
+        break;
+      }
+      // Neither this commit nor another one for the epoch is in the queue: the server never got
+      // it. Another commit may win meanwhile; the next pass finds out.
+      self.post_pending_again(conversation).await?;
+      catch_up = self.catch_up_mls(conversation).await?;
+    }
+    if catch_up.is_behind {
+      return self.request_rejoin(conversation, catch_up.current_epoch).await;
+    }
+    if !self.has_pending_commit(conversation)? {
+      self.mls_current.insert(conversation);
+    }
+    Ok(())
+  }
+
+  /// Catches up the conversation's MLS queue once per gateway connection before the outbox sends
+  /// into it, so nothing goes out under a key that a member removed meanwhile still holds.
+  pub(crate) async fn ensure_mls_current(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.mls_current.contains(&conversation) || !self.has_group(conversation)? {
+      return Ok(());
+    }
+    self.sync_mls(conversation).await
+  }
+
+  /// One pass over the queue after the cursor.
+  async fn catch_up_mls(&mut self, conversation: ConversationId) -> Result<CatchUp, CoreError> {
     loop {
       let query = ListMlsMessagesQuery {
         maybe_after: self.sync.mls_cursors.get(&conversation).copied(),
@@ -291,14 +357,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let page = self.api.list_mls_messages(conversation, &query).await?;
       for message in &page.messages {
         if self.process_mls(message).await? == MlsProgress::NeedsBacklog {
-          // A later epoch than ours in the backlog means an earlier commit was rejected; this
-          // device can't follow the group any more until it is re-added (crate README).
+          // Every earlier entry was handled and the group is still an epoch behind: this device
+          // missed or refused a commit the others merged. The cursor stays: once the device is
+          // added back, the entries after its welcome are still to be read.
           tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, "MLS entry from a future epoch");
-          self.advance_cursor(conversation, message)?;
+          return Ok(CatchUp {
+            is_behind: true,
+            current_epoch: page.current_epoch,
+          });
         }
       }
       if !page.has_more || page.messages.is_empty() {
-        return Ok(());
+        return Ok(CatchUp {
+          is_behind: false,
+          current_epoch: page.current_epoch,
+        });
       }
     }
   }
@@ -317,6 +390,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           conversation_id: conversation,
           change: Base64Bytes::new(signed.to_vec()),
         })?;
+      }
+      if let Some(request) = message.payload.as_slice().strip_prefix(REJOIN_REQUEST_MAGIC)
+        && message.sender_device_id != self.account.device_id
+      {
+        self.note_rejoin_request(conversation, request).await?;
       }
       self.advance_cursor(conversation, message)?;
       return Ok(MlsProgress::Done);
@@ -351,7 +429,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     } else {
       self.pin_identities(users).await?
     };
-    let authority = self.group_authority(conversation)?;
+    // The server's time of the entry, the same for every member: merge decisions don't depend on
+    // the clock of the device that makes them (a skewed clock would split the group).
+    let at_ms = message.id.snowflake().unix_millis();
+    if message.kind == MlsMessageKind::Commit
+      && let Some(pending) = self.group_or_error(conversation)?.pending_commit()
+    {
+      if is_own && pending.is_commit(message.payload.as_slice()) {
+        // This device's commit, whose answer was lost: the server took it.
+        let update = self.merge_own_commit(conversation, message)?;
+        self.remember_member_keys(conversation, &directory)?;
+        if let Some(share) = self.after_own_commit(conversation, &update, at_ms)? {
+          self.queue_pending(PendingChange::ShareHistory {
+            conversation_id: conversation,
+            share,
+          })?;
+        }
+        return Ok(MlsProgress::Done);
+      }
+      // Another commit won the epoch.
+      self.discard_pending_commit(conversation)?;
+    }
+    let authority = self.group_authority(conversation, at_ms)?;
     let group = self
       .groups
       .get_mut(&conversation)
@@ -369,7 +468,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(GroupEvent::MembershipChanged(update)) => {
         if update.is_self_removed {
           self.drop_group(conversation)?;
+          if update.maybe_rejoined == Some(self.own_member()) {
+            // A member replaced this device's leaf; its welcome brings the new group.
+            records::put_json(
+              &self.store,
+              Table::AppliedChanges,
+              &rejoin_key(conversation),
+              &RejoinRecord {
+                requested_at_ms: self.now_ms(),
+              },
+            )?;
+          }
           return Ok(MlsProgress::Done);
+        }
+        if let Some(device) = update.maybe_rejoined {
+          // Somebody answered that device's request already.
+          self.forget_rejoin_request(conversation, device)?;
         }
         let is_from_join_add = matches!(
           update.maybe_change.as_ref().map(MembershipChange::action),
@@ -378,7 +492,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             ..
           })
         );
-        self.note_removed_senders(conversation, &update.removed)?;
+        self.note_removed_senders(conversation, &left_members(&update), at_ms)?;
+        // A rejoin too: the device added back takes the new epoch's key.
         if !update.removed.is_empty() || is_from_join_add {
           self.rotate_to_epoch_key(conversation)?;
         }
@@ -456,6 +571,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if !self.has_group(conversation)? {
         return Err(CoreError::NoGroup(conversation));
       }
+      self.resolve_pending_commit(conversation).await?;
       let members = self.api.list_members(conversation).await?;
       let mut users: Vec<UserId> = members.members.iter().map(|member| member.user.id).collect();
       users.push(convert::user_from_crypto(action.target_user())?);
@@ -486,7 +602,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
         ChangeSource::Delegated(signed) => (**signed).clone(),
       };
-      let authority = self.group_authority(conversation)?;
+      // This device's own decision to commit; the members check the commit at the server's time.
+      let authority = self.group_authority(conversation, self.now_ms())?;
       let group = self
         .groups
         .get_mut(&conversation)
@@ -515,46 +632,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error) => return Err(error.into()),
       };
       let is_founding_commit = group.epoch() == 0;
-      let removed: Vec<_> = group
-        .members()?
-        .into_iter()
-        .filter(|member| match action {
-          MembershipAction::RemoveUser { user_id } => member.user_id == user_id,
-          MembershipAction::RemoveDevice { user_id, device_id } => {
-            member.user_id == user_id && member.device_id == device_id
-          },
-          MembershipAction::AddUser { .. } => false,
-        })
-        .collect();
-      if self.post_commit(conversation, output, &recipients).await? {
-        self.note_removed_senders(conversation, &removed)?;
+      if let Some(own) = self.post_commit(conversation, output, &recipients).await? {
         self.remember_member_keys(conversation, &directory)?;
-        let bundle = match action {
-          MembershipAction::AddUser {
-            history: HistoryShare::Full,
-            ..
-          } => {
-            let bundle = ContentKeyBundle::full_history(
-              self.account.key_bag.ring_mut(convert::conversation(conversation)),
-              &mut OsRng,
-            );
-            self.persist_keys()?;
-            bundle
-          },
-          MembershipAction::AddUser {
-            history: HistoryShare::FromJoin,
-            ..
-          } => {
-            let key = self.rotate_to_epoch_key(conversation)?;
-            ContentKeyBundle::epoch_key(convert::conversation(conversation), key)
-          },
-          // Every remaining member derives the new key from the removal commit (e2ee.md §4.2).
-          MembershipAction::RemoveUser { .. } | MembershipAction::RemoveDevice { .. } => {
-            self.rotate_to_epoch_key(conversation)?;
-            return Ok(());
-          },
+        return match self.after_own_commit(conversation, &own.update, own.at_ms)? {
+          Some(share) => self.share_history_or_queue(conversation, share).await,
+          None => Ok(()),
         };
-        return self.send_bundle(conversation, &bundle).await;
       }
       if is_founding_commit {
         // Both sides founded the group (DM opened at once): theirs won, join it via welcome.
@@ -569,17 +652,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
-  /// Posts a staged commit. `Ok(false)` if another commit won the epoch (the commit is discarded).
+  /// Posts a staged commit and merges it once the server took it. `Ok(None)` if another commit won
+  /// the epoch (the commit is discarded). If the outcome is unknown (the answer was lost), the
+  /// commit stays pending and is merged when it shows up in the group's queue
+  /// ([`Self::sync_mls`]), so the device never falls an epoch behind its own commit (e2ee.md §4.6).
   async fn post_commit(
     &mut self,
     conversation: ConversationId,
     output: CommitOutput,
-    recipients: &[teamcraft_proto::DeviceId],
-  ) -> Result<bool, CoreError> {
-    let group = self
-      .groups
-      .get_mut(&conversation)
-      .ok_or(CoreError::NoGroup(conversation))?;
+    recipients: &[DeviceId],
+  ) -> Result<Option<OwnCommit>, CoreError> {
+    let epoch = self.group_or_error(conversation)?.epoch();
     let welcomes = match &output.maybe_welcome {
       Some(welcome) => recipients
         .iter()
@@ -592,27 +675,219 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let request = PostMlsCommitRequest {
       device_id: self.account.device_id,
-      epoch: group.epoch(),
+      epoch,
       commit: Base64Bytes::new(output.commit),
       welcomes,
     };
+    // Kept before sending, so a restart mid-request still finds the commit.
+    self.persist_group(conversation)?;
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &pending_post_key(conversation),
+      &request,
+    )?;
     match self.api.post_mls_commit(conversation, &request).await {
       Ok(response) => {
-        group.confirm_commit(&self.provider)?;
-        self.persist_group(conversation)?;
-        self.advance_cursor(conversation, &response.commit)?;
-        Ok(true)
+        let update = self.merge_own_commit(conversation, &response.commit)?;
+        Ok(Some(OwnCommit {
+          update,
+          at_ms: response.commit.id.snowflake().unix_millis(),
+        }))
+      },
+      Err(error) if error.is_epoch_conflict() => {
+        self.discard_pending_commit(conversation)?;
+        Ok(None)
+      },
+      Err(error) if error.is_transient() => {
+        tracing::warn!(conversation_id = %conversation, %error, "commit outcome unknown; kept until the group's queue shows it");
+        Err(error.into())
       },
       Err(error) => {
-        group.discard_commit(&self.provider)?;
-        self.persist_group(conversation)?;
-        if error.is_epoch_conflict() {
-          Ok(false)
-        } else {
-          Err(error.into())
-        }
+        // A definite refusal: the server didn't store it.
+        self.discard_pending_commit(conversation)?;
+        Err(error.into())
       },
     }
+  }
+
+  /// Settles a commit whose answer was lost before this device commits again: merged if the queue
+  /// shows it, discarded if another commit won, sent again if the server never got it.
+  async fn resolve_pending_commit(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if !self.has_pending_commit(conversation)? {
+      return Ok(());
+    }
+    self.sync_mls(conversation).await?;
+    if self.has_pending_commit(conversation)? {
+      return Err(CoreError::CommitPending(conversation));
+    }
+    Ok(())
+  }
+
+  /// Sends the pending commit again, exactly as before. Merged if the server takes it; on an epoch
+  /// conflict it stays pending, and the queue tells whether it was this commit or another.
+  async fn post_pending_again(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let Some(request) = records::get_json::<PostMlsCommitRequest>(
+      &self.store,
+      Table::AppliedChanges,
+      &pending_post_key(conversation),
+    )?
+    else {
+      // Nothing to send it with: drop it, the queue decides.
+      return self.discard_pending_commit(conversation);
+    };
+    match self.api.post_mls_commit(conversation, &request).await {
+      Ok(response) => {
+        let update = self.merge_own_commit(conversation, &response.commit)?;
+        let directory = self.member_directory(conversation).await?;
+        self.remember_member_keys(conversation, &directory)?;
+        let at_ms = response.commit.id.snowflake().unix_millis();
+        if let Some(share) = self.after_own_commit(conversation, &update, at_ms)? {
+          self.queue_pending(PendingChange::ShareHistory {
+            conversation_id: conversation,
+            share,
+          })?;
+        }
+        Ok(())
+      },
+      Err(error) if error.is_epoch_conflict() => Ok(()),
+      Err(error) if error.is_transient() => Err(error.into()),
+      Err(error) => {
+        self.discard_pending_commit(conversation)?;
+        Err(error.into())
+      },
+    }
+  }
+
+  /// Merges this device's pending commit, which the server stored as `entry`.
+  fn merge_own_commit(
+    &mut self,
+    conversation: ConversationId,
+    entry: &MlsMessageResponse,
+  ) -> Result<MembershipUpdate, CoreError> {
+    let group = self
+      .groups
+      .get_mut(&conversation)
+      .ok_or(CoreError::NoGroup(conversation))?;
+    let update = group.confirm_commit(&self.provider)?;
+    self.persist_group(conversation)?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
+    if let Some(device) = update.maybe_rejoined {
+      self.forget_rejoin_request(conversation, device)?;
+    }
+    self.advance_cursor(conversation, entry)?;
+    Ok(update)
+  }
+
+  fn discard_pending_commit(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let group = self
+      .groups
+      .get_mut(&conversation)
+      .ok_or(CoreError::NoGroup(conversation))?;
+    group.discard_commit(&self.provider)?;
+    self.persist_group(conversation)?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
+    Ok(())
+  }
+
+  fn has_pending_commit(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+    Ok(
+      self
+        .group(conversation)?
+        .is_some_and(|group| group.has_pending_commit()),
+    )
+  }
+
+  /// The local consequences of this device's merged commit, which the server stored at `at_ms`.
+  /// Returns the content keys the new member still needs.
+  fn after_own_commit(
+    &mut self,
+    conversation: ConversationId,
+    update: &MembershipUpdate,
+    at_ms: i64,
+  ) -> Result<Option<SharedKeys>, CoreError> {
+    self.note_removed_senders(conversation, &left_members(update), at_ms)?;
+    match update.maybe_change.as_ref().map(MembershipChange::action) {
+      Some(MembershipAction::AddUser {
+        history: HistoryShare::Full,
+        ..
+      }) => Ok(Some(SharedKeys::FullHistory)),
+      Some(MembershipAction::AddUser {
+        history: HistoryShare::FromJoin,
+        ..
+      }) => {
+        self.rotate_to_epoch_key(conversation)?;
+        Ok(Some(SharedKeys::CurrentKey))
+      },
+      // Every remaining member derives the new key from the removal commit (e2ee.md §4.2).
+      Some(MembershipAction::RemoveUser { .. } | MembershipAction::RemoveDevice { .. }) => {
+        self.rotate_to_epoch_key(conversation)?;
+        Ok(None)
+      },
+      // Everybody switches to the new epoch's key, which the device added back derives from its
+      // welcome. Keys of epochs it missed come only from the user's key bag, if another device
+      // of the user had them.
+      None if update.maybe_rejoined.is_some() => {
+        self.rotate_to_epoch_key(conversation)?;
+        Ok(None)
+      },
+      // Further devices of members: the user's key bag carries the history.
+      None => Ok(None),
+    }
+  }
+
+  /// Shares content keys after an addition now; offline, they are queued and sent later.
+  async fn share_history_or_queue(
+    &mut self,
+    conversation: ConversationId,
+    share: SharedKeys,
+  ) -> Result<(), CoreError> {
+    match self.share_history(conversation, share).await {
+      Err(error) if error.is_transient() => {
+        self.queue_pending(PendingChange::ShareHistory {
+          conversation_id: conversation,
+          share,
+        })?;
+        Err(error)
+      },
+      other => other,
+    }
+  }
+
+  /// Sends the content keys a new member needs to the group.
+  pub(crate) async fn share_history(
+    &mut self,
+    conversation: ConversationId,
+    share: SharedKeys,
+  ) -> Result<(), CoreError> {
+    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    let bundle = match share {
+      SharedKeys::FullHistory => {
+        let bundle = ContentKeyBundle::full_history(ring, &mut OsRng);
+        self.persist_keys()?;
+        bundle
+      },
+      SharedKeys::CurrentKey => {
+        let key = ring
+          .current()
+          .ok_or(CoreError::NoContentKey(conversation))?
+          .duplicate();
+        ContentKeyBundle::epoch_key(convert::conversation(conversation), key)
+      },
+    };
+    self.send_bundle(conversation, &bundle).await
+  }
+
+  /// Pinned identities of the conversation's members, to check the group's devices against.
+  async fn member_directory(&mut self, conversation: ConversationId) -> Result<PinnedDirectory, CoreError> {
+    let members = self.api.list_members(conversation).await?;
+    self
+      .pin_identities(members.members.iter().map(|member| member.user.id))
+      .await
   }
 
   /// Records the verified signing keys of the group's devices, which message signatures are
@@ -645,20 +920,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// Notes when devices left the conversation: messages they sign for a later time are refused.
+  /// Notes when devices left the conversation, at the server's time of the removal commit:
+  /// messages they sign for a later time are refused. Server times on both sides, so a skewed local
+  /// clock refuses nothing it shouldn't.
   fn note_removed_senders(
     &mut self,
     conversation: ConversationId,
-    removed: &[teamcraft_crypto::mls::GroupMember],
+    removed: &[GroupMember],
+    at_ms: i64,
   ) -> Result<(), CoreError> {
-    let now = self.now_ms();
     for member in removed {
       let key = format!(
         "{conversation}/{}/{}",
         convert::user_from_crypto(member.user_id)?,
         convert::device_from_crypto(member.device_id)?
       );
-      records::put_json(&self.store, Table::RemovedSenders, &key, &now)?;
+      records::put_json(&self.store, Table::RemovedSenders, &key, &at_ms)?;
     }
     Ok(())
   }
@@ -690,6 +967,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
+      self.resolve_pending_commit(conversation).await?;
       let group = self
         .groups
         .get_mut(&conversation)
@@ -716,8 +994,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub(crate) async fn join_from_welcome(&mut self, welcome: &MlsMessageResponse) -> Result<(), CoreError> {
     let conversation = welcome.conversation_id;
-    if self.has_group(conversation)? {
+    if self.is_welcome_outdated(conversation, welcome)? {
       return self.welcome_handled(welcome);
+    }
+    if self.has_group(conversation)? && !self.has_requested_rejoin(conversation)? {
+      // A welcome to a later epoch of a group this device follows: the queue decides first. A
+      // commit that replaced this device's leaf comes before its welcome and drops the group.
+      self.sync_mls(conversation).await?;
+      if self.is_welcome_outdated(conversation, welcome)? {
+        return self.welcome_handled(welcome);
+      }
+    }
+    let is_rejoin = self.has_requested_rejoin(conversation)?;
+    if self.has_group(conversation)? {
+      if !is_rejoin {
+        return self.welcome_handled(welcome);
+      }
+      // This device asked to be added back: the welcome replaces the group it can't follow.
+      self.drop_group(conversation)?;
     }
     let members = self.api.list_members(conversation).await?;
     let directory: PinnedDirectory = self
@@ -733,14 +1027,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // The joining epoch's key: the members switched to it if they shared history from the
         // join on; the committer's bundle says which key is current.
         let key = group.epoch_content_key(&self.provider)?;
-        self
-          .account
-          .key_bag
-          .ring_mut(convert::conversation(conversation))
-          .insert(key)?;
+        let key_id = key.id();
+        let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+        ring.insert(key)?;
+        if is_rejoin {
+          // The members switched to this epoch's key with the commit that added this device back;
+          // only members of the epoch can derive it (security review A5).
+          ring.set_current(key_id)?;
+        }
         self.persist_keys()?;
         self.groups.insert(conversation, group);
         self.persist_group(conversation)?;
+        self
+          .store
+          .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
         self.welcome_handled(welcome)?;
         self.remember_member_keys(conversation, &directory)?;
         // Everything up to the welcome belongs to epochs before we joined.
@@ -760,6 +1060,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.welcome_handled(welcome)
       },
     }
+  }
+
+  /// Whether this device's group is already at or past the welcome's epoch.
+  fn is_welcome_outdated(
+    &mut self,
+    conversation: ConversationId,
+    welcome: &MlsMessageResponse,
+  ) -> Result<bool, CoreError> {
+    Ok(
+      self
+        .group(conversation)?
+        .is_some_and(|group| welcome.epoch <= group.epoch()),
+    )
   }
 
   /// Moves the welcome cursor past `welcome` once it has been joined or definitely rejected. Only
@@ -859,7 +1172,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .collect()
   }
 
-  fn group_authority(&mut self, conversation: ConversationId) -> Result<WorkspaceAuthority, CoreError> {
+  /// Who may make signed changes in the group, with the signed roster's freshness judged at
+  /// `at_ms` (the server's time of the commit being checked).
+  fn group_authority(
+    &mut self,
+    conversation: ConversationId,
+    at_ms: i64,
+  ) -> Result<WorkspaceAuthority, CoreError> {
     let workspace = self.workspace()?;
     let group = self.group_or_error(conversation)?;
     let members: Vec<_> = group
@@ -876,7 +1195,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     });
     // A roster too old to trust (an owner's re-signing is overdue) grants no admin authority.
     let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    let admins: Vec<UserId> = if workspace.is_roster_fresh(self.now_ms(), max_age_ms) {
+    let admins: Vec<UserId> = if workspace.is_roster_fresh(at_ms, max_age_ms) {
       workspace.admins().collect()
     } else {
       tracing::warn!("the signed roster is stale; admins have no authority until an owner re-signs it");
@@ -947,6 +1266,194 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
+  /// This device fell out of the group: it asks the members, with a request it signs, to add it
+  /// back (e2ee.md §4.6). It keeps its old group until the welcome comes, and asks again after
+  /// [`ClientSettings::rejoin_retry`] if none does.
+  ///
+  /// [`ClientSettings::rejoin_retry`]: super::ClientSettings::rejoin_retry
+  async fn request_rejoin(
+    &mut self,
+    conversation: ConversationId,
+    current_epoch: u64,
+  ) -> Result<(), CoreError> {
+    let now = self.now_ms();
+    let retry_ms = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
+    if let Some(record) =
+      records::get_json::<RejoinRecord>(&self.store, Table::AppliedChanges, &rejoin_key(conversation))?
+      && now.saturating_sub(record.requested_at_ms) < retry_ms
+    {
+      return Ok(());
+    }
+    tracing::warn!(conversation_id = %conversation, "this device fell out of the MLS group; asking to be added back");
+    if self.has_pending_commit(conversation)? {
+      self.discard_pending_commit(conversation)?;
+    }
+    // A member needs a key package of this device to add it back.
+    if let Err(error) = self.top_up_key_packages().await {
+      tracing::debug!(%error, "key packages not topped up before asking to rejoin");
+    }
+    let signed = RejoinRequest::new(
+      convert::conversation(conversation),
+      current_epoch,
+      self.own_member(),
+      &mut OsRng,
+    )
+    .sign(&self.account.device, self.account.certificate.clone())?;
+    let mut payload = REJOIN_REQUEST_MAGIC.to_vec();
+    payload.extend_from_slice(&signed.to_bytes()?);
+    let request = PostMlsMessageRequest {
+      device_id: self.account.device_id,
+      epoch: current_epoch,
+      kind: MlsMessageKind::Proposal,
+      payload: Base64Bytes::new(payload),
+    };
+    match self.api.post_mls_message(conversation, &request).await {
+      Ok(stored) => self.advance_cursor(conversation, &stored)?,
+      // The group moved on meanwhile; the next sync asks for the new epoch.
+      Err(error) if error.is_epoch_conflict() => return Ok(()),
+      Err(error) => return Err(error.into()),
+    }
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &rejoin_key(conversation),
+      &RejoinRecord { requested_at_ms: now },
+    )
+  }
+
+  fn own_member(&self) -> GroupMember {
+    GroupMember {
+      user_id: convert::user(self.account.user_id),
+      device_id: convert::device(self.account.device_id),
+    }
+  }
+
+  fn has_requested_rejoin(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    Ok(
+      records::get_json::<RejoinRecord>(&self.store, Table::AppliedChanges, &rejoin_key(conversation))?
+        .is_some(),
+    )
+  }
+
+  /// Queues adding back a device that asked for it, if its request checks out here.
+  async fn note_rejoin_request(
+    &mut self,
+    conversation: ConversationId,
+    bytes: &[u8],
+  ) -> Result<(), CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
+    let signed = match SignedRejoinRequest::from_bytes(bytes) {
+      Ok(signed) => signed,
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "ignored a malformed rejoin request");
+        return Ok(());
+      },
+    };
+    let user = convert::user_from_crypto(signed.unverified().device().user_id)?;
+    let directory = self.pin_identities([user]).await?;
+    let member = match self
+      .group_or_error(conversation)?
+      .check_rejoin_request(&signed, &directory)
+    {
+      Ok(member) => member,
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "ignored a rejoin request");
+        return Ok(());
+      },
+    };
+    let device = convert::device_from_crypto(member.device_id)?;
+    let not_before_ms = self
+      .now_ms()
+      .saturating_add(self.commit_delay_ms(conversation, device)?);
+    self.queue_pending(PendingChange::Rejoin {
+      conversation_id: conversation,
+      user_id: user,
+      device_id: device,
+      request: Base64Bytes::new(bytes.to_vec()),
+      not_before_ms,
+      attempts: 0,
+    })
+  }
+
+  /// Answers a device's rejoin request: removes its old leaf and adds it from a fresh key
+  /// package. `Ok(true)` when done, here or by another member; `Ok(false)` to retry later.
+  pub(crate) async fn answer_rejoin(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    device: DeviceId,
+    request: &[u8],
+  ) -> Result<bool, CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(true);
+    }
+    // Another member may have answered meanwhile.
+    self.sync_mls(conversation).await?;
+    let key = PendingChange::rejoin_key(conversation, device);
+    if self.store.get(Table::PendingChanges, &key)?.is_none() {
+      return Ok(true);
+    }
+    self.resolve_pending_commit(conversation).await?;
+    let signed = SignedRejoinRequest::from_bytes(request)?;
+    let directory = self.trusted_directory([user]).await?;
+    let claim = ClaimKeyPackagesRequest {
+      conversation_id: conversation,
+      maybe_only_device_ids: Some(vec![device]),
+      exclude_device_ids: Vec::new(),
+    };
+    let claimed = match self.api.claim_key_packages(user, &claim).await {
+      Ok(claimed) => claimed,
+      Err(error) if error.error_code() == Some(&teamcraft_proto::ErrorCode::KeyPackageExhausted) => {
+        return Ok(false);
+      },
+      Err(error) => return Err(error.into()),
+    };
+    let Some(package) = claimed
+      .packages
+      .into_iter()
+      .find(|package| package.device_id == device)
+    else {
+      return Ok(false);
+    };
+    let group = self
+      .groups
+      .get_mut(&conversation)
+      .ok_or(CoreError::NoGroup(conversation))?;
+    let output = group.commit_rejoin(
+      &self.provider,
+      &self.account.device,
+      &signed,
+      package.key_package.as_slice(),
+      &directory,
+    )?;
+    let Some(own) = self.post_commit(conversation, output, &[device]).await? else {
+      return Ok(false);
+    };
+    if let Some(share) = self.after_own_commit(conversation, &own.update, own.at_ms)? {
+      self.queue_pending(PendingChange::ShareHistory {
+        conversation_id: conversation,
+        share,
+      })?;
+    }
+    tracing::info!(conversation_id = %conversation, device_id = %device, "added back a device that fell out of the group");
+    Ok(true)
+  }
+
+  fn forget_rejoin_request(
+    &mut self,
+    conversation: ConversationId,
+    device: GroupMember,
+  ) -> Result<(), CoreError> {
+    let device = convert::device_from_crypto(device.device_id)?;
+    self.store.delete(
+      Table::PendingChanges,
+      &PendingChange::rejoin_key(conversation, device),
+    )?;
+    Ok(())
+  }
+
   fn advance_cursor(
     &mut self,
     conversation: ConversationId,
@@ -968,4 +1475,19 @@ fn conversation_members(users: &[UserId], me: UserId) -> Vec<UserId> {
     .copied()
     .filter(|user| *user != me && seen.insert(*user))
     .collect()
+}
+
+/// Devices a commit took out of the group for good (a rejoining device stays).
+fn left_members(update: &MembershipUpdate) -> Vec<GroupMember> {
+  update
+    .removed
+    .iter()
+    .filter(|member| Some(**member) != update.maybe_rejoined)
+    .copied()
+    .collect()
+}
+
+/// Where this device notes that it asked to be added back to a group.
+pub(crate) fn rejoin_key(conversation: ConversationId) -> String {
+  format!("rejoin/{conversation}")
 }

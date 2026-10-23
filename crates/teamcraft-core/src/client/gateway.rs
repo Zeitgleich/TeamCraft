@@ -28,6 +28,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Connects the gateway, resuming the stored session if possible; a fresh session triggers a
   /// full sync. Process the returned connection with [`Self::pump`] or [`Self::run_gateway`].
   pub async fn connect_gateway(&mut self) -> Result<(A::Gateway, GatewayOutcome), CoreError> {
+    // Events may have been missed while disconnected: every group is caught up again before the
+    // outbox sends into it.
+    self.mls_current.clear();
     let mut connection = self.open_gateway().await?;
     // A resumed session skips the full sync; the own name may still be missing from older stores.
     self.refresh_own_summary().await;

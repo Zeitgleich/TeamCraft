@@ -11,6 +11,7 @@
 mod content_keys;
 mod credential;
 mod group;
+mod rejoin;
 
 use std::fmt;
 
@@ -23,7 +24,9 @@ use tls_codec::{Deserialize as _, Serialize as _};
 pub use content_keys::ContentKeyBundle;
 pub use group::{
   ChangeHistory, CommitOutput, ConversationGroup, GroupEvent, MAX_CHANGE_AGE_EPOCHS, MembershipUpdate,
+  PendingCommit,
 };
+pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
 
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};

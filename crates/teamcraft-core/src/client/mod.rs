@@ -53,7 +53,7 @@ pub use org_recovery::{SealedShare, recovery_request};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
 use teamcraft_crypto::membership::ChangeId;
-use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup};
+use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit};
 use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, UserId};
 
 use crate::api::ServerApi;
@@ -95,8 +95,12 @@ pub struct ClientSettings {
   /// good. Files elsewhere (a desktop user's own documents) are never deleted.
   pub maybe_upload_staging_dir: Option<std::path::PathBuf>,
   pub link_previews: previews::LinkPreviewSettings,
-  /// Checks before giving up on adding a new device that never uploads key packages.
+  /// Checks before giving up on adding a new device that never uploads key packages (also for
+  /// adding back a device that fell out of a group).
   pub device_add_attempts: u32,
+  /// A device that fell out of a group asks again to be added back after this long without a
+  /// welcome (e2ee.md §4.6).
+  pub rejoin_retry: std::time::Duration,
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
   /// long a new device waits when the first-ranked members are away (presence isn't per device).
   pub device_add_max_rank: u32,
@@ -129,6 +133,9 @@ pub struct Client<A, S> {
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
   last_key_package_check_ms: i64,
+  /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
+  /// sends into the others only after catching up (e2ee.md §4.6).
+  mls_current: std::collections::BTreeSet<ConversationId>,
 }
 
 impl Default for ClientSettings {
@@ -141,6 +148,7 @@ impl Default for ClientSettings {
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
+      rejoin_retry: std::time::Duration::from_secs(10 * 60),
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
       maybe_push_gateway_url: None,
@@ -187,6 +195,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_preview_fetcher,
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
+      mls_current: Default::default(),
     }))
   }
 
@@ -226,6 +235,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.group(conversation)?.is_some())
   }
 
+  /// The epoch of the conversation's MLS group on this device; `None` without a group.
+  pub fn mls_epoch(&mut self, conversation: ConversationId) -> Result<Option<u64>, CoreError> {
+    Ok(self.group(conversation)?.map(|group| group.epoch()))
+  }
+
   /// Users whose identity key changed since it was pinned (e2ee.md §1: "security key changed").
   pub fn changed_identities(&self) -> Result<Vec<UserId>, CoreError> {
     Ok(
@@ -249,11 +263,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Some(bytes) => ChangeHistory::from_bytes(bytes.as_slice())?,
         None => ChangeHistory::default(),
       };
+      let maybe_pending = records::get_json::<Base64Bytes>(
+        &self.store,
+        Table::AppliedChanges,
+        &pending_commit_key(conversation),
+      )?
+      .map(|bytes| PendingCommit::from_bytes(bytes.as_slice()))
+      .transpose()?;
       let maybe_group = ConversationGroup::load(
         &self.provider,
         convert::conversation(conversation),
         applied.into_iter().map(ChangeId::from_bytes),
         history,
+        maybe_pending,
       )?;
       match maybe_group {
         Some(group) => {
@@ -285,6 +307,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &history_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &pending_commit_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &groups::rejoin_key(conversation))?;
+    self.mls_current.remove(&conversation);
     records::save_mls_storage(&self.store, &self.provider)
   }
 
@@ -305,6 +337,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &history_key(conversation),
         &Base64Bytes::new(group.change_history().to_bytes()?),
       )?;
+      match group.pending_commit() {
+        Some(pending) => records::put_json(
+          &self.store,
+          Table::AppliedChanges,
+          &pending_commit_key(conversation),
+          &Base64Bytes::new(pending.to_bytes()?),
+        )?,
+        None => self
+          .store
+          .delete(Table::AppliedChanges, &pending_commit_key(conversation))?,
+      }
     }
     Ok(())
   }
@@ -432,4 +475,14 @@ impl<A, S> std::fmt::Debug for Client<A, S> {
 /// Where a group's change history (security review A3) is kept next to its applied change IDs.
 fn history_key(conversation: ConversationId) -> String {
   format!("history/{conversation}")
+}
+
+/// Where this device's commit that waits for the server's answer is kept (e2ee.md §4.6).
+fn pending_commit_key(conversation: ConversationId) -> String {
+  format!("pending_commit/{conversation}")
+}
+
+/// The request that posted the pending commit, to send it again if the server never got it.
+pub(crate) fn pending_post_key(conversation: ConversationId) -> String {
+  format!("pending_post/{conversation}")
 }

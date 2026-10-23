@@ -12,6 +12,7 @@ use tls_codec::{
 };
 
 use super::content_keys::ContentKeyBundle;
+use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
 use super::{CIPHERSUITE, GroupMember, MlsError, credential, validate_key_package};
 use crate::content_key::{ContentKey, ContentKeyId};
 use crate::domain;
@@ -25,6 +26,9 @@ use crate::secret::SymmetricKey;
 
 /// Prefix of MLS group IDs; the conversation ID follows as big-endian `u64`.
 const GROUP_ID_PREFIX: &[u8] = b"teamcraft/conversation/";
+/// Marks a commit's authenticated data as a [`SignedRejoinRequest`] (a signed membership change
+/// starts with its version byte, never with this).
+const REJOIN_AAD_MAGIC: &[u8] = b"TCRJ";
 /// How many epochs after signing a membership change may still be committed (if nothing changed its
 /// target user meanwhile). A constant rather than a setting: every member must decide the same way,
 /// or the group splits.
@@ -39,14 +43,20 @@ pub struct ConversationGroup {
   applied_changes: BTreeSet<ChangeId>,
   /// Which users signed changes touched recently, and since when this device knows the group.
   history: ChangeHistory,
-  maybe_pending: Option<PendingEffect>,
+  maybe_pending: Option<PendingCommit>,
 }
 
-/// What this device's pending commit does, recorded once it is confirmed.
-#[derive(Debug)]
-struct PendingEffect {
+/// This device's commit that waits for the server's answer, and what it does once merged. Persist
+/// it with the MLS state ([`ConversationGroup::pending_commit`], back through
+/// [`ConversationGroup::load`]): if the answer is lost, the commit is merged when it shows up in
+/// the group's queue, which takes its bytes (e2ee.md §4.6).
+#[derive(Clone, Debug, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct PendingCommit {
+  commit: Vec<u8>,
   maybe_change: Option<MembershipChange>,
   removed: Vec<GroupMember>,
+  /// The device a rejoin commit adds back, and the request it answers.
+  maybe_rejoin: Option<(GroupMember, ChangeId)>,
 }
 
 /// What this device saw of the group's signed changes, persisted with the MLS state: a change
@@ -91,10 +101,14 @@ pub enum GroupEvent {
 #[derive(Debug, Default)]
 pub struct MembershipUpdate {
   /// The signed change that authorized the commit; `None` for additions of devices of existing
-  /// members, which only need the user's cross-signature.
+  /// members, which only need the user's cross-signature, and for rejoins.
   pub maybe_change: Option<MembershipChange>,
   pub added: Vec<GroupMember>,
+  /// Includes a rejoining device's old leaf.
   pub removed: Vec<GroupMember>,
+  /// A device that asked to be added back and was ([`ConversationGroup::commit_rejoin`]): it is in
+  /// both `removed` (its old leaf) and `added`, and stays a member.
+  pub maybe_rejoined: Option<GroupMember>,
   pub is_self_removed: bool,
 }
 
@@ -167,17 +181,23 @@ impl ConversationGroup {
   /// Loads a group from the provider's storage, with the change IDs applied so far and the change
   /// history (persisted by the caller next to the MLS state). `None` if the provider has no state
   /// for the conversation.
+  /// `maybe_pending` is what [`Self::pending_commit`] returned before; it is dropped if the
+  /// provider's state has no pending commit.
   pub fn load(
     provider: &impl OpenMlsProvider,
     conversation_id: ConversationId,
     applied_changes: impl IntoIterator<Item = ChangeId>,
     history: ChangeHistory,
+    maybe_pending: Option<PendingCommit>,
   ) -> Result<Option<Self>, MlsError> {
     let maybe_group = MlsGroup::load(provider.storage(), &group_id(conversation_id))
       .map_err(|error| MlsError::openmls("loading group", error))?;
     Ok(maybe_group.map(|group| {
       let mut loaded = Self::from_group(conversation_id, group, history);
       loaded.applied_changes.extend(applied_changes);
+      if loaded.group.pending_commit().is_some() {
+        loaded.maybe_pending = maybe_pending;
+      }
       loaded
     }))
   }
@@ -206,6 +226,14 @@ impl ConversationGroup {
 
   pub fn has_pending_commit(&self) -> bool {
     self.group.pending_commit().is_some()
+  }
+
+  /// The pending commit and its effect; persist it with the MLS state.
+  pub fn pending_commit(&self) -> Option<&PendingCommit> {
+    self
+      .maybe_pending
+      .as_ref()
+      .filter(|_| self.group.pending_commit().is_some())
   }
 
   pub fn epoch(&self) -> u64 {
@@ -286,9 +314,11 @@ impl ConversationGroup {
     let result = self.stage_commit(provider, device, validated_key_packages, removed_leaves);
     self.group.set_aad(Vec::new());
     let output = result?;
-    self.maybe_pending = Some(PendingEffect {
+    self.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
       maybe_change: Some(change.clone()),
       removed: proposed.removed,
+      maybe_rejoin: None,
     });
     Ok(output)
   }
@@ -330,12 +360,62 @@ impl ConversationGroup {
     self.check_device_additions(&proposed)?;
     self.check_not_removed(&proposed)?;
     let output = self.stage_commit(provider, device, validated_key_packages, Vec::new())?;
-    self.maybe_pending = None;
+    self.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
+      maybe_change: None,
+      removed: Vec::new(),
+      maybe_rejoin: None,
+    });
     Ok(output)
   }
 
-  /// Merges the pending commit after the server accepted it.
-  pub fn confirm_commit(&mut self, provider: &impl OpenMlsProvider) -> Result<(), MlsError> {
+  /// Checks a device's request to be added back ([`super::rejoin`]): validly signed by that
+  /// device, which is a member here with the same signing key, for this group, fresh and not
+  /// answered before. Returns the device.
+  pub fn check_rejoin_request(
+    &self,
+    signed: &SignedRejoinRequest,
+    directory: &impl IdentityDirectory,
+  ) -> Result<GroupMember, MlsError> {
+    let verified = signed.verify(directory)?;
+    self.check_verified_rejoin(&verified)?;
+    Ok(verified.request().device())
+  }
+
+  /// Answers a device's rejoin request: one commit removes its old leaf and adds it from a fresh
+  /// key package, carrying the request as authenticated data. Membership stays the same.
+  pub fn commit_rejoin(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    signed: &SignedRejoinRequest,
+    key_package: &[u8],
+    directory: &impl IdentityDirectory,
+  ) -> Result<CommitOutput, MlsError> {
+    let verified = signed.verify(directory)?;
+    let (old_leaf, member) = self.check_verified_rejoin(&verified)?;
+    let (key_package, added) = validate_key_package(provider, key_package, directory)?;
+    if GroupMember::from(&added) != member {
+      return Err(MlsError::ChangeDoesNotMatchCommit);
+    }
+    let mut aad = REJOIN_AAD_MAGIC.to_vec();
+    aad.extend_from_slice(&signed.to_bytes()?);
+    self.group.set_aad(aad);
+    let result = self.stage_commit(provider, device, vec![key_package], vec![(old_leaf, member)]);
+    self.group.set_aad(Vec::new());
+    let output = result?;
+    self.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
+      maybe_change: None,
+      removed: vec![member],
+      maybe_rejoin: Some((member, verified.request().request_id())),
+    });
+    Ok(output)
+  }
+
+  /// Merges the pending commit after the server accepted it (or it showed up in the group's
+  /// queue, [`PendingCommit::is_commit`]). Returns what it changed.
+  pub fn confirm_commit(&mut self, provider: &impl OpenMlsProvider) -> Result<MembershipUpdate, MlsError> {
     if self.group.pending_commit().is_none() {
       return Err(MlsError::NoPendingCommit);
     }
@@ -344,10 +424,22 @@ impl ConversationGroup {
       .group
       .merge_pending_commit(provider)
       .map_err(|error| MlsError::openmls("merging own commit", error))?;
-    if let Some(effect) = self.maybe_pending.take() {
-      self.record_commit(effect.maybe_change.as_ref(), &effect.removed, epoch);
+    let Some(pending) = self.maybe_pending.take() else {
+      // Invariant: every commit function records its effect; a commit staged by an older version
+      // only lacks the bookkeeping.
+      return Ok(MembershipUpdate::default());
+    };
+    self.record_commit(pending.maybe_change.as_ref(), &pending.removed, epoch);
+    if let Some((_, request_id)) = pending.maybe_rejoin {
+      self.applied_changes.insert(request_id);
     }
-    Ok(())
+    Ok(MembershipUpdate {
+      maybe_change: pending.maybe_change,
+      added: pending.maybe_rejoin.iter().map(|(member, _)| *member).collect(),
+      removed: pending.removed,
+      maybe_rejoined: pending.maybe_rejoin.map(|(member, _)| member),
+      is_self_removed: false,
+    })
   }
 
   /// Drops the pending commit, e.g. because another member's commit for this epoch won.
@@ -405,7 +497,7 @@ impl ConversationGroup {
         Ok(GroupEvent::ContentKeys { sender, bundle })
       },
       ProcessedMessageContent::StagedCommitMessage(staged) => {
-        let update =
+        let (update, maybe_request_id) =
           self.authorize_commit(&staged, sender_index, &authenticated_data, directory, authority)?;
         let epoch = self.epoch();
         self
@@ -413,6 +505,9 @@ impl ConversationGroup {
           .merge_staged_commit(provider, *staged)
           .map_err(|error| MlsError::openmls("merging commit", error))?;
         self.record_commit(update.maybe_change.as_ref(), &update.removed, epoch);
+        if let Some(request_id) = maybe_request_id {
+          self.applied_changes.insert(request_id);
+        }
         Ok(GroupEvent::MembershipChanged(update))
       },
       _ => Err(MlsError::UnexpectedMessage("standalone proposals are not used")),
@@ -521,7 +616,8 @@ impl ConversationGroup {
     })
   }
 
-  /// TeamCraft's rules for accepting another member's commit (e2ee.md §4.6, admin.md §2.3).
+  /// TeamCraft's rules for accepting another member's commit (e2ee.md §4.6, admin.md §2.3). Also
+  /// returns the ID of the rejoin request a rejoin commit answers.
   fn authorize_commit(
     &self,
     staged: &StagedCommit,
@@ -529,8 +625,24 @@ impl ConversationGroup {
     authenticated_data: &[u8],
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
-  ) -> Result<MembershipUpdate, MlsError> {
+  ) -> Result<(MembershipUpdate, Option<ChangeId>), MlsError> {
     let proposed = self.verify_commit_contents(staged, sender_index, directory)?;
+    if let Some(request) = authenticated_data.strip_prefix(REJOIN_AAD_MAGIC) {
+      let verified = SignedRejoinRequest::from_bytes(request)?.verify(directory)?;
+      let (_, member) = self.check_verified_rejoin(&verified)?;
+      let added: Vec<GroupMember> = proposed.added.iter().map(GroupMember::from).collect();
+      if added != [member] || proposed.removed != [member] {
+        return Err(MlsError::ChangeDoesNotMatchCommit);
+      }
+      let update = MembershipUpdate {
+        maybe_change: None,
+        added,
+        removed: proposed.removed,
+        maybe_rejoined: Some(member),
+        is_self_removed: staged.self_removed(),
+      };
+      return Ok((update, Some(verified.request().request_id())));
+    }
     let maybe_change = if authenticated_data.is_empty() {
       if !proposed.removed.is_empty() {
         return Err(MlsError::MissingSignedChange);
@@ -543,12 +655,45 @@ impl ConversationGroup {
       self.check_change_matches(verified.change(), &proposed)?;
       Some(verified.change().clone())
     };
-    Ok(MembershipUpdate {
+    let update = MembershipUpdate {
       maybe_change,
       added: proposed.added.iter().map(GroupMember::from).collect(),
       removed: proposed.removed,
+      maybe_rejoined: None,
       is_self_removed: staged.self_removed(),
-    })
+    };
+    Ok((update, None))
+  }
+
+  /// The group-side checks of a verified rejoin request; returns the device's current leaf.
+  fn check_verified_rejoin(
+    &self,
+    verified: &VerifiedRejoinRequest,
+  ) -> Result<(LeafNodeIndex, GroupMember), MlsError> {
+    let request = verified.request();
+    self.ensure_conversation(request.conversation_id())?;
+    if self.applied_changes.contains(&request.request_id()) {
+      return Err(MlsError::ReplayedChange(request.request_id()));
+    }
+    let current = self.epoch();
+    if request.epoch() > current || current - request.epoch() > MAX_CHANGE_AGE_EPOCHS {
+      return Err(MlsError::StaleChange {
+        signed_epoch: request.epoch(),
+        current_epoch: current,
+      });
+    }
+    let member = request.device();
+    for leaf in self.group.members() {
+      if credential::member_of(&leaf.credential)? == member {
+        // The very key the device signs its leaf with signed the request.
+        verified
+          .device()
+          .ensure_signing_key(leaf.signature_key.as_slice())
+          .map_err(MlsError::InvalidCredential)?;
+        return Ok((leaf.index, member));
+      }
+    }
+    Err(MlsError::ChangeDoesNotMatchCommit)
   }
 
   /// Verifies every credential the commit introduces and collects its membership effect.
@@ -702,6 +847,22 @@ impl ConversationGroup {
     } else {
       Err(MlsError::MissingSignedChange)
     }
+  }
+}
+
+impl PendingCommit {
+  pub fn to_bytes(&self) -> Result<Vec<u8>, MlsError> {
+    Ok(self.tls_serialize_detached()?)
+  }
+
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, MlsError> {
+    Ok(Self::tls_deserialize_exact_bytes(bytes)?)
+  }
+
+  /// Whether `bytes`, an entry of the group's queue, is this commit (the server accepted it, even
+  /// if its answer never arrived).
+  pub fn is_commit(&self, bytes: &[u8]) -> bool {
+    self.commit == bytes
   }
 }
 
