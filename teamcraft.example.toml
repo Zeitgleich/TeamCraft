@@ -267,7 +267,8 @@ auth_failures_per_minute = 30
 # The web client: the `trunk build` output of crates/teamcraft-ui, served at `/` (unknown paths get
 # index.html, `/api/...` stays the API, `/f/<id>` is the share-link download page). Assets with a
 # content hash in their name are cached forever; everything gets the CSP below plus nosniff and
-# no-referrer. Without static_dir only the API is served.
+# no-referrer. Precompressed `<file>.br` / `<file>.gz` next to a file (the release tarball has them) are
+# sent to browsers that accept them. Without static_dir only the API is served.
 [web]
 # static_dir = "/srv/teamcraft/web"
 # content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; ...; connect-src {connect_src}; ..."
