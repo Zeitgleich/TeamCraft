@@ -130,7 +130,7 @@ on real devices.
 
 | Topic                | Target                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 |----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Attention            | A desktop or web session is attentive only while its window is focused and visible, the user gave input within `attention_input_secs` (default 120 s), the OS idle time is below that, and the screen is not locked. It reports `attention` on change and every 30 s while attentive; the server forgets a report after `notifications.attention_lease_secs` (default 75 s), so a crashed or sleeping desktop stops holding pushes back. |
+| Attention            | A desktop or web session is attentive only while its window is focused and visible, the user gave input within `attention_input_secs` (default 120 s), the OS idle time is below that, and the screen is not locked. It reports `attention` on change only ("away" once it lasted a minute); its gateway heartbeats renew the report, which the server forgets after `notifications.attention_lease_secs` (default 75 s), so a crashed or sleeping desktop stops holding pushes back. Users and admins can turn it off (then an active desktop holds pushes as presence does). |
 | Grace delay          | While a desktop is attentive, phone pushes wait `notifications.mobile_push_delay_secs` (default 120 s) and go out only if the message is still unread. Reading on the desktop meanwhile drops them.                                                                                                                                                                                                                                      |
 | Read elsewhere       | Reading a conversation (or a thread) on any device sends a `dismiss` wake-up to the user's other phones that were pushed for it: Android cancels the notification, iOS removes delivered notifications of that thread and updates the badge (silent background push). The web service worker closes its notification for the conversation.                                                                                               |
 | Calls                | A ring sends a `call` wake-up (high priority, TTL = ring timeout) to every device without a live connection; iOS as a mutable alert on the app's topic (the NSE hands it to CallKit once the filtering entitlement is granted, until then an "incoming call" alert), Android as a full-screen incoming-call notification on the "calls" channel. The end of the ring sends `dismiss` with the call ID.                                   |
@@ -150,17 +150,23 @@ on real devices.
 `push::routing` decides, `push::delivery` sends (priority and TTL by kind, retries), `push::tracker`
 remembers per process which devices show what (for withdrawals and rings) and the delivery counts.
 
-| Setting                                           | Default     | Meaning                                                               |
-|---------------------------------------------------|-------------|-----------------------------------------------------------------------|
-| `notifications.mobile_push_delay_secs`            | 120         | Grace delay while a desktop is attentive; `0` sends nothing meanwhile |
-| `notifications.attention_lease_secs`              | 75          | How long an `attention` report counts without being repeated          |
-| `push.ttl_secs`                                   | 86400       | TTL of message and mention wake-ups                                   |
-| `push.call_ttl_secs`                              | 0           | TTL of rings; `0` uses `[calls] ring_timeout_secs`                    |
-| `push.dismiss_ttl_secs` / `push.test_ttl_secs`    | 86400 / 300 | TTL of withdrawals and test pushes                                    |
-| `push.max_retries`, `push.retry_initial_delay_ms` | 2, 2000     | Retries after temporary failures, doubling the wait, within the TTL   |
-| `push.test_interval_secs`                         | 10          | Shortest time between two test pushes to one device                   |
+| Setting                                           | Default     | Meaning                                                                         |
+|---------------------------------------------------|-------------|---------------------------------------------------------------------------------|
+| `notifications.mobile_push_delay_secs`            | 120         | Grace delay while a desktop is attentive; `0` sends nothing meanwhile           |
+| `notifications.attention_lease_secs`              | 75          | How long an `attention` report counts without being repeated                    |
+| `notifications.is_desktop_attention_enabled`      | true        | Off: sessions report no attention; an active desktop holds pushes like presence |
+| `notifications.max_held_pushes_per_user`          | 100         | Held pushes per user; beyond that the oldest goes out at once                   |
+| `push.ttl_secs`                                   | 86400       | TTL of message and mention wake-ups                                             |
+| `push.call_ttl_secs`                              | 0           | TTL of rings; `0` uses `[calls] ring_timeout_secs`                              |
+| `push.dismiss_ttl_secs` / `push.test_ttl_secs`    | 86400 / 300 | TTL of withdrawals and test pushes                                              |
+| `push.max_retries`, `push.retry_initial_delay_ms` | 2, 2000     | Retries after temporary failures, doubling the wait, within the TTL             |
+| `push.test_interval_secs`                         | 10          | Shortest time between two test pushes to one device                             |
+| `push.max_rings_per_minute`                       | 10          | Rings one caller may push per minute (further rings reach open apps only)       |
+| `push.dismiss_coalesce_ms`                        | 3000        | Withdrawals for one conversation within this time go out as one                 |
 
-A held push goes out early when the desktop stops being attentive (report `false`, connection closed).
+Held pushes sit in one queue per user (at most `max_held_pushes_per_user`), worked off by one task per
+user that the hub wakes only for that user. A held push goes out early when the desktop stops being
+attentive (report `false`, connection closed).
 A withdrawal goes only to devices that were pushed for the conversation (or thread) and whose newest
 pushed message is now read; after a server restart nothing is withdrawn for earlier pushes. The tracker
 is per process like the gateway hub: with several instances, a read on one instance withdraws only
@@ -174,9 +180,11 @@ diagnostics record when the last push arrived and how long it took.
 
 **Attention (desktop and web).** `teamcraft_ui::attention` decides: window focused, page visible,
 in-app input within the device setting `notifications.attention_input_secs` (default 120 s), OS idle
-below it, screen not locked. Sessions report every change, repeat it every 30 s while attentive, send
-`false` on page hide (best effort; the lease covers a lost frame) and repeat their last report after
-a reconnect.
+below it, screen not locked. Sessions report changes only, "away" once it lasted
+`ATTENTION_AWAY_DELAY_SECS` (60 s), send `false` at once on page hide (best effort; the lease covers a
+lost frame) and when the user turns the setting off, and repeat their last report after a reconnect.
+The server renews an attentive report on every gateway heartbeat, keeps it in memory only and never
+logs it.
 
 | Platform | OS idle                              | Screen lock                                    | Withdraw notifications read elsewhere    |
 |----------|--------------------------------------|------------------------------------------------|------------------------------------------|
@@ -187,6 +195,9 @@ a reconnect.
 
 Desktop and web withdraw their own notifications by conversation tag when a conversation becomes read
 or is opened, also service-worker notifications still on screen when the page loads.
+
+**Urgent and DND.** With "urgent messages break through" on, an urgent message reaches the user during
+DND only in DMs and group DMs by default (`urgent_scope: direct`); `everywhere` includes channels.
 
 **DND editing.** The allow list and the urgent setting are stored even with the schedule off (a
 schedule without windows), so they apply to manual DND. Quick DND (1 h, tomorrow 08:00, custom) is

@@ -13,6 +13,7 @@ use teamcraft_core::records;
 use teamcraft_core::store::{LocalStore as _, Table};
 use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
+use teamcraft_proto::Id as _;
 use teamcraft_proto::{
   ConversationId, ConversationResponse, DndSchedule, MessageId, NotificationSettings, PresenceState,
   PushKind, PushMode, PushProvider, PushWakeUp, TestPushOutcome, UnixMillis,
@@ -37,6 +38,41 @@ async fn a_withdrawal_fetches_and_shows_nothing() {
   assert_eq!(preview.content, PreviewContent::Unavailable);
   assert_eq!(preview.wake_up.kind, PushKind::Dismiss);
   assert_eq!(preview.wake_up.maybe_badge, Some(3));
+  settle(&mut [&mut bob]).await;
+}
+
+#[tokio::test]
+async fn a_ring_in_a_known_conversation_is_verified_so_it_can_be_answered() {
+  let (server, alice, mut bob, channel) = channel_with_two().await;
+  let ring = PushWakeUp {
+    kind: PushKind::Call,
+    maybe_message_id: None,
+    maybe_call_id: Some(teamcraft_proto::CallId::from_snowflake(
+      teamcraft_proto::Snowflake::new(77).unwrap(),
+    )),
+    ..wake_up(
+      &alice,
+      channel,
+      MessageId::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap()),
+    )
+  };
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &seal(&server, &bob, &ring))
+    .await
+    .unwrap();
+  assert!(preview.is_conversation_verified);
+  // A ring naming a conversation this device doesn't know stays unverified.
+  let stranger = PushWakeUp {
+    conversation_id: ConversationId::from_snowflake(teamcraft_proto::Snowflake::new(999_999).unwrap()),
+    ..ring
+  };
+  let preview = push_preview(
+    bob.store.as_ref(),
+    Some(&bob.api),
+    &seal(&server, &bob, &stranger),
+  )
+  .await
+  .unwrap();
+  assert!(!preview.is_conversation_verified);
   settle(&mut [&mut bob]).await;
 }
 
@@ -99,7 +135,7 @@ async fn a_muted_conversation_stays_silent_on_the_device() {
 async fn the_dnd_schedule_from_the_server_is_checked_again_with_its_overrides() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;
   let message = alice_says(&mut alice, channel, "during lunch").await;
-  // 11:00-13:00 local on Mondays; urgent messages may break through.
+  // 11:00-13:00 local on Mondays; urgent messages may break through, also in channels.
   let schedule = DndSchedule {
     windows: vec![teamcraft_proto::DndWindow {
       weekdays: vec![teamcraft_proto::Weekday::Monday],
@@ -107,6 +143,8 @@ async fn the_dnd_schedule_from_the_server_is_checked_again_with_its_overrides() 
       end_minute: 13 * 60,
     }],
     allows_urgent: true,
+    // The test conversation is a channel; urgent ones break through only in DMs by default.
+    urgent_scope: teamcraft_proto::UrgentScope::Everywhere,
     ..DndSchedule::default()
   };
   server.set_notification_settings(
@@ -116,6 +154,7 @@ async fn the_dnd_schedule_from_the_server_is_checked_again_with_its_overrides() 
       push_mode: PushMode::AwayOnly,
       send_read_receipts: true,
       maybe_dnd_schedule: Some(schedule),
+      maybe_uses_desktop_attention: None,
     },
   );
   bob.client.refresh_notification_settings().await.unwrap();

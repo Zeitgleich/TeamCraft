@@ -559,7 +559,7 @@ fn watch_activity(state: AppState) {
   // The window goes away: the server should not wait for the lease to run out.
   {
     let watch = watch.clone();
-    on_window("pagehide", move || watch.report(false));
+    on_window("pagehide", move || watch.leave());
   }
   watch.check();
   use_interval(ACTIVITY_CHECK_MS, move || {
@@ -602,6 +602,12 @@ impl ActivityWatch {
   }
 
   fn check(&self) {
+    let notes = self.state.settings.prefs.get_untracked().notifications;
+    // The user (or the instance) doesn't want attention used: tell the server once, then nothing.
+    if !notes.uses_desktop_attention {
+      self.leave();
+      return;
+    }
     let maybe_os = self.maybe_os.get();
     let signals = AttentionSignals {
       is_focused: window_has_focus(),
@@ -612,19 +618,21 @@ impl ActivityWatch {
         .map(Duration::from_millis),
       is_screen_locked: maybe_os.is_some_and(|os| os.is_locked),
     };
-    let input_secs = self
-      .state
-      .settings
-      .prefs
-      .get_untracked()
-      .notifications
-      .attention_input_secs;
-    let window = Duration::from_secs(u64::from(input_secs));
+    let window = Duration::from_secs(u64::from(notes.attention_input_secs));
     self.report(is_attentive(&signals, now_ms(), window));
   }
 
   fn report(&self, is_attentive: bool) {
     let maybe_due = self.reporter.borrow_mut().next(is_attentive, now_ms());
+    self.send(maybe_due);
+  }
+
+  fn leave(&self) {
+    let maybe_due = self.reporter.borrow_mut().leave();
+    self.send(maybe_due);
+  }
+
+  fn send(&self, maybe_due: Option<bool>) {
     if let Some(is_attentive) = maybe_due {
       self.state.read(|backend| backend.set_attention(is_attentive));
     }

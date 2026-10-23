@@ -16,8 +16,9 @@ use crate::{
   SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
 };
 
-/// How often an attentive client repeats [`GatewayClientMessage::Attention`].
-pub const ATTENTION_REFRESH_SECS: u64 = 30;
+/// How long a client waits before it reports that the user stopped being attentive, so the server
+/// learns coarse transitions, not a timeline of every glance away.
+pub const ATTENTION_AWAY_DELAY_SECS: u64 = 60;
 
 /// Frames sent by the client.
 #[derive(Clone, Serialize, Deserialize)]
@@ -47,8 +48,9 @@ pub enum GatewayClientMessage {
     activity: DeviceActivity,
   },
   /// Whether the user is looking at this desktop or web session right now: window focused and
-  /// visible, recent input, screen not locked (notifications.md, "Attention"). Repeated every
-  /// [`ATTENTION_REFRESH_SECS`] while attentive; the server forgets a report that is not refreshed.
+  /// visible, recent input, screen not locked (notifications.md, "Attention"). Sent on changes only
+  /// ("away" after [`ATTENTION_AWAY_DELAY_SECS`]) and only where the user's notification settings say
+  /// `uses_desktop_attention`; the session's heartbeats keep an attentive report alive.
   Attention {
     is_attentive: bool,
   },

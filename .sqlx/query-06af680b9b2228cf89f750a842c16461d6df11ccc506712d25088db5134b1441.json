@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.user_id,\n                -- A conversation the member never configured follows their setting for its space.\n                CASE WHEN m.notification_overridden OR sm.notification_level IS NULL\n                     THEN m.notification_level ELSE sm.notification_level END AS \"notification_level!\",\n                CASE WHEN m.notification_overridden THEN m.muted_until\n                     ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,\n                u.presence_pref, u.dnd_until,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.dnd_schedule,\n                tf.user_id IS NOT NULL AS \"is_following_thread!\",\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN conversations c ON c.id = m.conversation_id\n         LEFT JOIN space_members sm ON sm.space_id = c.space_id AND sm.user_id = m.user_id\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         LEFT JOIN threads_followed tf ON tf.user_id = u.id AND tf.conversation_id = m.conversation_id\n                                      AND tf.thread_id = $3 AND tf.state = 'following'\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
+  "query": "SELECT m.user_id,\n                -- A conversation the member never configured follows their setting for its space.\n                CASE WHEN m.notification_overridden OR sm.notification_level IS NULL\n                     THEN m.notification_level ELSE sm.notification_level END AS \"notification_level!\",\n                CASE WHEN m.notification_overridden THEN m.muted_until\n                     ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,\n                u.presence_pref, u.dnd_until,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.dnd_schedule, s.uses_desktop_attention,\n                tf.user_id IS NOT NULL AS \"is_following_thread!\",\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN conversations c ON c.id = m.conversation_id\n         LEFT JOIN space_members sm ON sm.space_id = c.space_id AND sm.user_id = m.user_id\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         LEFT JOIN threads_followed tf ON tf.user_id = u.id AND tf.conversation_id = m.conversation_id\n                                      AND tf.thread_id = $3 AND tf.state = 'following'\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
   "describe": {
     "columns": [
       {
@@ -67,12 +67,23 @@
       },
       {
         "ordinal": 7,
+        "name": "uses_desktop_attention",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "uses_desktop_attention"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "is_following_thread!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "device_id",
         "type_info": "Int8",
         "origin": {
@@ -83,7 +94,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "push_provider!",
         "type_info": "Text",
         "origin": {
@@ -94,7 +105,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "push_token!",
         "type_info": "Text",
         "origin": {
@@ -105,7 +116,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "push_key!",
         "type_info": "Bytea",
         "origin": {
@@ -131,6 +142,7 @@
       true,
       null,
       true,
+      true,
       null,
       false,
       true,
@@ -138,5 +150,5 @@
       true
     ]
   },
-  "hash": "cfd98573db53860661a7e7f64601d615d44d90d981691511f7332db4f6fe69ab"
+  "hash": "06af680b9b2228cf89f750a842c16461d6df11ccc506712d25088db5134b1441"
 }

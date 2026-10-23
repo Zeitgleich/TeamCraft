@@ -517,16 +517,21 @@ Details:
   attention (don't push to the phone while the user looks at a desktop), DND, and the mention list
   (§4.4). Details: notifications.md, "Push routing" and "Mobile push delivery".
 - **What this shows the server, beyond content-free metadata it had before:**
-  - *Attention:* desktop and web sessions report on change and every 30 s whether the user looks at
-    the app (focused, recent input, not idle, screen unlocked; never which window, what input or any
-    content). That is a timeline of when someone uses TeamCraft at a 30-second resolution, held in
-    memory only, not stored or logged. Organisations that must not have it (works councils,
-    employee-monitoring rules) should know it exists.
+  - *Attention:* desktop and web sessions tell the server whether the user looks at the app (focused,
+    recent input, not idle, screen unlocked; never which window, what input or any content). They
+    report transitions only, and "away" only once it lasted a minute, so short glances away never
+    reach the server; the gateway heartbeats keep an attentive report alive as a lease. The server
+    learns coarse "at the desktop / not at the desktop" periods, held in memory only, never stored or
+    logged. Users turn it off in their notification settings ("Use desktop activity to hold phone
+    notifications"), admins for the whole instance (`[notifications] is_desktop_attention_enabled`);
+    without it a connected, active desktop holds phone pushes back as presence already did.
+    Organisations with works councils or employee-monitoring rules should decide on it.
   - *DND:* the weekly schedule, the allow list of people who break through, whether urgent messages
     do, and the IANA time zone (sent only while the schedule has ranges) are stored on the server, so
     that routing works with every device offline. The time zone says roughly where the user is.
-  - *Urgent breaks DND* (opt-in): any member who may post in a conversation can mark a message urgent;
-    with the option on, that reaches the user during DND.
+  - *Urgent breaks DND* (opt-in): with the option on, an urgent message reaches the user during DND, by
+    default only in DMs and group DMs (`urgent_scope: direct`), so not everybody in a big channel can
+    wake them; `everywhere` widens it. People on the allow list break through anyway.
 - A forged `dismiss` (the server knows the push key) can only remove notifications and set the badge;
   it never shows anything.
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or

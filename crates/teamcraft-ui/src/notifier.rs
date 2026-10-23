@@ -12,7 +12,7 @@ use crate::clock::{local_utc_offset_minutes, now_ms};
 use teamcraft_client_api::actions::MessagePriority;
 pub use teamcraft_client_api::notify::needs_channel_confirmation;
 use teamcraft_client_api::notify::{self, MentionRules};
-use teamcraft_proto::PushContentMode;
+use teamcraft_proto::{DndCandidate, PushContentMode};
 
 use crate::model::{
   Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, ThreadId, User, UserId,
@@ -125,9 +125,16 @@ fn is_silenced_by_dnd(input: &PolicyInput) -> bool {
     maybe_time_zone: None,
   };
   let maybe_schedule = dnd_to_server(&input.prefs.dnd, &zone, None);
-  let lets_through = maybe_schedule
-    .as_ref()
-    .is_some_and(|schedule| schedule.lets_through(input.sender, input.is_urgent));
+  let lets_through = maybe_schedule.as_ref().is_some_and(|schedule| {
+    schedule.lets_through(DndCandidate {
+      sender: input.sender,
+      is_urgent: input.is_urgent,
+      is_direct: matches!(
+        input.conversation.kind,
+        ConversationKind::Direct | ConversationKind::Group
+      ),
+    })
+  });
   if lets_through {
     return false;
   }

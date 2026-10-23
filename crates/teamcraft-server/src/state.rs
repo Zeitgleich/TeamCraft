@@ -110,6 +110,10 @@ pub struct PushSettings {
   pub retry: RetryPolicy,
   /// The shortest time between two test pushes to one device.
   pub test_interval: std::time::Duration,
+  /// Rings one caller may push per minute.
+  pub max_rings_per_minute: u32,
+  /// How long withdrawals for one conversation are collected before one goes out.
+  pub dismiss_coalesce: std::time::Duration,
   pub allow_private_endpoints: bool,
 }
 
@@ -157,6 +161,8 @@ impl Default for PushSettings {
         initial_delay: Duration::from_secs(2),
       },
       test_interval: Duration::from_secs(10),
+      max_rings_per_minute: 10,
+      dismiss_coalesce: Duration::from_millis(3000),
       allow_private_endpoints: false,
     }
   }

@@ -7,18 +7,17 @@ use std::time::Duration;
 
 use teamcraft_db::{DueReminder, PushDeviceRow, PushRecipientRow};
 use teamcraft_proto::{
-  CallId, ConversationId, ConversationKind, DeviceId, DndSchedule, Id, MessageId, NotificationLevel,
-  PushKind, PushMode, PushProvider, PushWakeUp, Snowflake, TestPushOutcome, TestPushResponse, ThreadId,
-  UserId,
+  CallId, ConversationId, ConversationKind, DeviceId, DndCandidate, DndSchedule, Id, MessageId,
+  NotificationLevel, PushKind, PushMode, PushProvider, PushWakeUp, Snowflake, TestPushOutcome,
+  TestPushResponse, ThreadId, UserId,
 };
 use time::OffsetDateTime;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use super::delivery::{self, can_dismiss};
 use super::sender::{PushError, now_millis};
-use super::tracker::{DeliveryEvent, Ring};
+use super::tracker::{DeliveryEvent, DismissKey, HeldPush, Holding, Ring};
 use crate::gateway::ActiveDevices;
 use crate::services::notifications;
 use crate::state::AppState;
@@ -220,7 +219,15 @@ async fn push_to_recipient(
     is_mentioned: event.mentioned.contains(&recipient.user),
     is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
     is_integration: event.is_integration,
-    is_dnd: is_dnd(&recipient, now, event.sender, event.is_urgent),
+    is_dnd: is_dnd(
+      &recipient,
+      now,
+      DndCandidate {
+        sender: event.sender,
+        is_urgent: event.is_urgent,
+        is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
+      },
+    ),
     is_followed_thread: recipient.is_following_thread,
     always_pushes: always_pushes(&recipient),
     attention: attention(state, &recipient),
@@ -252,7 +259,7 @@ async fn push_to_recipient(
     Timing::Now => send_to_offline_devices(state, recipient.user, recipient.devices, &wake_up),
     Timing::AfterGrace => {
       let grace = Duration::from_secs(state.settings.notifications.mobile_push_delay_secs);
-      tokio::spawn(hold_for_desktop(state.clone(), recipient, wake_up, grace));
+      hold_for_desktop(state, recipient, wake_up, grace);
     },
   }
 }
@@ -260,6 +267,13 @@ async fn push_to_recipient(
 /// Rings the members of a DM or group DM (except the caller) on every device without a live
 /// connection; devices with one get the gateway's `call_ring`.
 pub async fn notify_ring(state: AppState, conversation: ConversationId, call: CallId, caller: UserId) {
+  if !state
+    .push_tracker
+    .try_start_ring(caller, state.settings.push.max_rings_per_minute)
+  {
+    warn!(user_id = %caller, "too many rings in a minute; no ring pushes for this call");
+    return;
+  }
   let recipients = match state
     .database
     .list_push_recipients(conversation, caller, None)
@@ -274,7 +288,18 @@ pub async fn notify_ring(state: AppState, conversation: ConversationId, call: Ca
   let now = OffsetDateTime::now_utc();
   let mut targets = Vec::new();
   for recipient in recipients {
-    let verdict = decide_ring(is_muted(&recipient, now), is_dnd(&recipient, now, caller, false));
+    let verdict = decide_ring(
+      is_muted(&recipient, now),
+      is_dnd(
+        &recipient,
+        now,
+        DndCandidate {
+          sender: caller,
+          is_urgent: false,
+          is_direct: true,
+        },
+      ),
+    );
     if let Err(skip) = verdict {
       debug!(user_id = %recipient.user, ?skip, "no ring push");
       if skip == Skip::DoNotDisturb {
@@ -353,14 +378,27 @@ pub async fn dismiss_read(
   maybe_thread: Option<ThreadId>,
   up_to: MessageId,
 ) {
-  let devices: HashSet<DeviceId> = state
+  let devices = state
     .push_tracker
-    .take_read(user, conversation, maybe_thread, up_to)
-    .into_iter()
-    .collect();
+    .take_read(user, conversation, maybe_thread, up_to);
   if devices.is_empty() {
     return;
   }
+  // Reading moves forward in bursts (scrolling, several devices): one withdrawal per device and
+  // conversation for the burst, naming the newest message read.
+  let key = DismissKey {
+    user,
+    conversation,
+    maybe_thread,
+  };
+  if !state.push_tracker.queue_dismiss(key, up_to, devices) {
+    return;
+  }
+  tokio::time::sleep(state.settings.push.dismiss_coalesce).await;
+  let Some((up_to, devices)) = state.push_tracker.take_dismiss(key) else {
+    return;
+  };
+  let devices: HashSet<DeviceId> = devices.into_iter().collect();
   let maybe_badge = match state.database.push_badge_count(user).await {
     Ok(count) => Some(count),
     Err(error) => {
@@ -422,27 +460,61 @@ pub async fn send_test(
   })
 }
 
-/// Waits while the user looks at a desktop: until the grace delay is over or the desktop stops being
-/// attentive. Then pushes the phones if the message is still unread.
-async fn hold_for_desktop(
-  state: AppState,
-  recipient: PushRecipientRow,
-  wake_up: PushWakeUp,
-  grace: Duration,
-) {
-  let deadline = Instant::now() + grace;
-  let mut lost = state.hub.subscribe_attention_lost();
+/// Holds a push while the user looks at a desktop: in the user's queue, which one worker per user
+/// works off.
+fn hold_for_desktop(state: &AppState, recipient: PushRecipientRow, wake_up: PushWakeUp, grace: Duration) {
+  let user = recipient.user;
+  let push = HeldPush {
+    recipient,
+    wake_up,
+    due: Instant::now() + grace,
+  };
+  match state
+    .push_tracker
+    .hold(push, state.settings.notifications.max_held_pushes_per_user)
+  {
+    Holding::StartWorker => {
+      tokio::spawn(work_held(state.clone(), user));
+    },
+    Holding::Queued => {},
+    Holding::Overflow(oldest) => {
+      let state = state.clone();
+      tokio::spawn(async move { release_held(&state, *oldest).await });
+    },
+  }
+}
+
+/// Sends the user's held pushes when they are due, or all at once when no desktop of the user is
+/// attentive any more (the hub wakes only this user's worker).
+async fn work_held(state: AppState, user: UserId) {
+  let watcher = state.hub.watch_attention(user);
+  let mut is_release_all = false;
   loop {
+    let (due, maybe_next) = state.push_tracker.take_held(user, Instant::now(), is_release_all);
+    for push in due {
+      release_held(&state, push).await;
+    }
+    // The watcher stays registered: a worker for the user's next held push uses it again.
+    let Some(next) = maybe_next else {
+      return;
+    };
     tokio::select! {
-      () = tokio::time::sleep_until(deadline) => break,
-      result = lost.recv() => match result {
-        Ok(user) if user == recipient.user && attention(&state, &recipient) != Attention::DesktopAttentive => break,
-        Ok(_) | Err(RecvError::Lagged(_)) => {},
-        // The hub is gone: the server shuts down.
-        Err(RecvError::Closed) => return,
+      () = tokio::time::sleep_until(next) => is_release_all = false,
+      () = watcher.notified() => {
+        is_release_all = state
+          .push_tracker
+          .held_recipient(user)
+          .is_none_or(|recipient| attention(&state, &recipient) != Attention::DesktopAttentive);
       },
     }
   }
+}
+
+/// Pushes a held message to the phones if it is still unread.
+async fn release_held(state: &AppState, push: HeldPush) {
+  let HeldPush {
+    recipient, wake_up, ..
+  } = push;
   if let Some(message) = wake_up.maybe_message_id {
     match state
       .database
@@ -451,7 +523,7 @@ async fn hold_for_desktop(
     {
       Ok(true) => {
         debug!(user_id = %recipient.user, "the message was read meanwhile; no push to the phone");
-        record_all(&state, &recipient, DeliveryEvent::HeldForDesktop);
+        record_all(state, &recipient, DeliveryEvent::HeldForDesktop);
         return;
       },
       Ok(false) => {},
@@ -469,7 +541,7 @@ async fn hold_for_desktop(
       return;
     },
   };
-  send_to_offline_devices(&state, recipient.user, devices, &wake_up);
+  send_to_offline_devices(state, recipient.user, devices, &wake_up);
 }
 
 /// A device with a live connection already got the event over the gateway.
@@ -540,12 +612,17 @@ fn attention(state: &AppState, recipient: &PushRecipientRow) -> Attention {
 }
 
 fn active_devices(state: &AppState, recipient: &PushRecipientRow) -> ActiveDevices {
-  state.hub.active_devices(recipient.user, |device| {
-    recipient
-      .devices
-      .iter()
-      .any(|registered| registered.device == device && is_mobile(&registered.provider))
-  })
+  let uses_attention = notifications::uses_desktop_attention(state, recipient.maybe_uses_desktop_attention);
+  state.hub.active_devices(
+    recipient.user,
+    |device| {
+      recipient
+        .devices
+        .iter()
+        .any(|registered| registered.device == device && is_mobile(&registered.provider))
+    },
+    uses_attention,
+  )
 }
 
 fn is_mobile(provider: &PushProvider) -> bool {
@@ -562,11 +639,11 @@ fn is_muted(recipient: &PushRecipientRow, now: OffsetDateTime) -> bool {
 }
 
 /// DND, manual or scheduled, unless an override (allowed sender, urgent message) lets this through.
-fn is_dnd(recipient: &PushRecipientRow, now: OffsetDateTime, sender: UserId, is_urgent: bool) -> bool {
+fn is_dnd(recipient: &PushRecipientRow, now: OffsetDateTime, message: DndCandidate) -> bool {
   let maybe_schedule = schedule(recipient);
   if maybe_schedule
     .as_ref()
-    .is_some_and(|schedule| schedule.lets_through(sender, is_urgent))
+    .is_some_and(|schedule| schedule.lets_through(message))
   {
     return false;
   }
@@ -799,7 +876,7 @@ mod tests {
   }
 
   mod do_not_disturb {
-    use teamcraft_proto::{DndWindow, Weekday};
+    use teamcraft_proto::{DndWindow, UrgentScope, Weekday};
 
     use super::*;
 
@@ -816,40 +893,40 @@ mod tests {
         ..recipient("dnd", None)
       };
       let sender = user(2);
-      assert!(is_dnd(&at(None), now, sender, false));
-      assert!(is_dnd(&at(Some(60)), now, sender, false));
-      assert!(!is_dnd(&at(Some(-60)), now, sender, false));
-      assert!(!is_dnd(&recipient("auto", None), now, sender, false));
+      assert!(is_dnd(&at(None), now, msg(sender, false)));
+      assert!(is_dnd(&at(Some(60)), now, msg(sender, false)));
+      assert!(!is_dnd(&at(Some(-60)), now, msg(sender, false)));
+      assert!(!is_dnd(&recipient("auto", None), now, msg(sender, false)));
     }
 
     #[test]
     fn the_schedule_silences_everybody_but_allowed_senders() {
       let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
       let scheduled = recipient("auto", Some(night_shift(None)));
-      assert!(is_dnd(&scheduled, now, user(2), false));
-      assert!(!is_dnd(&scheduled, now, user(3), false));
+      assert!(is_dnd(&scheduled, now, msg(user(2), false)));
+      assert!(!is_dnd(&scheduled, now, msg(user(3), false)));
       let evening = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT - 5 * 3600).unwrap();
-      assert!(!is_dnd(&scheduled, evening, user(2), false));
+      assert!(!is_dnd(&scheduled, evening, msg(user(2), false)));
     }
 
     #[test]
     fn overrides_apply_to_manual_dnd_too() {
       let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT - 12 * 3600).unwrap();
       let manual = recipient("dnd", Some(night_shift(None)));
-      assert!(is_dnd(&manual, now, user(2), false));
-      assert!(!is_dnd(&manual, now, user(3), false));
+      assert!(is_dnd(&manual, now, msg(user(2), false)));
+      assert!(!is_dnd(&manual, now, msg(user(3), false)));
     }
 
     #[test]
     fn urgent_messages_break_through_when_the_user_allows_it() {
       let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
       let strict = recipient("dnd", Some(night_shift(None)));
-      assert!(is_dnd(&strict, now, user(2), true));
+      assert!(is_dnd(&strict, now, msg(user(2), true)));
       let mut schedule: DndSchedule = serde_json::from_str(&night_shift(None)).unwrap();
       schedule.allows_urgent = true;
       let lenient = recipient("dnd", Some(serde_json::to_string(&schedule).unwrap()));
-      assert!(!is_dnd(&lenient, now, user(2), true));
-      assert!(is_dnd(&lenient, now, user(2), false));
+      assert!(!is_dnd(&lenient, now, msg(user(2), true)));
+      assert!(is_dnd(&lenient, now, msg(user(2), false)));
     }
 
     #[test]
@@ -864,22 +941,19 @@ mod tests {
       assert!(is_dnd(
         &berlin,
         summer_evening(20) + time::Duration::minutes(30),
-        user(2),
-        false
+        msg(user(2), false)
       ));
       assert!(!is_dnd(
         &berlin,
         summer_evening(19) + time::Duration::minutes(30),
-        user(2),
-        false
+        msg(user(2), false)
       ));
       // Without the zone, the stale offset puts the start an hour late.
       let fixed = recipient("auto", Some(night_shift(None)));
       assert!(!is_dnd(
         &fixed,
         summer_evening(20) + time::Duration::minutes(30),
-        user(2),
-        false
+        msg(user(2), false)
       ));
     }
 
@@ -895,7 +969,7 @@ mod tests {
     fn an_unreadable_schedule_does_not_silence() {
       let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
       let broken = recipient("auto", Some("{not json".into()));
-      assert!(!is_dnd(&broken, now, user(2), false));
+      assert!(!is_dnd(&broken, now, msg(user(2), false)));
     }
 
     /// 22:00-07:00 local every day, user 3 allowed, stored with a +60 offset.
@@ -919,8 +993,17 @@ mod tests {
         }],
         allow_user_ids: vec![user(3)],
         allows_urgent: false,
+        urgent_scope: UrgentScope::Direct,
       })
       .unwrap()
+    }
+
+    fn msg(sender: UserId, is_urgent: bool) -> DndCandidate {
+      DndCandidate {
+        sender,
+        is_urgent,
+        is_direct: true,
+      }
     }
 
     fn user(raw: i64) -> UserId {
@@ -937,6 +1020,7 @@ mod tests {
         push_mode: "away_only".into(),
         maybe_dnd_schedule,
         is_following_thread: false,
+        maybe_uses_desktop_attention: None,
         devices: Vec::new(),
       }
     }

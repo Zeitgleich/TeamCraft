@@ -2664,5 +2664,6 @@ fn default_notification_settings() -> NotificationSettings {
     push_mode: PushMode::AwayOnly,
     send_read_receipts: true,
     maybe_dnd_schedule: None,
+    maybe_uses_desktop_attention: None,
   }
 }

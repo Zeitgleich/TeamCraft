@@ -100,6 +100,16 @@ pub async fn push_preview<A: ServerApi>(
     (PushKind::Message | PushKind::Mention, Some(message_id)) => {
       preview_content(store, maybe_api, &wake_up, message_id).await
     },
+    // A ring names no message; answering joins that conversation's call, which the server controls
+    // anyway. It counts as verified when this device knows the conversation as one it is in, so the
+    // apps offer answer and decline.
+    (PushKind::Call, _) => (
+      PreviewContent::Unavailable,
+      false,
+      maybe_conversation
+        .as_ref()
+        .is_some_and(|conversation| conversation.maybe_my_membership.is_some()),
+    ),
     _ => (PreviewContent::Unavailable, false, false),
   };
   let preview = PushPreview {

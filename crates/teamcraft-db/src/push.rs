@@ -28,6 +28,8 @@ pub struct PushRecipientRow {
   pub maybe_dnd_schedule: Option<String>,
   /// The user follows the thread of the message being routed.
   pub is_following_thread: bool,
+  /// The user lets desktop attention hold phone pushes back (`None`: never chose, so yes).
+  pub maybe_uses_desktop_attention: Option<bool>,
   pub devices: Vec<PushDeviceRow>,
 }
 
@@ -48,7 +50,7 @@ impl Database {
                 CASE WHEN m.notification_overridden THEN m.muted_until
                      ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,
                 u.presence_pref, u.dnd_until,
-                COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.dnd_schedule,
+                COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.dnd_schedule, s.uses_desktop_attention,
                 tf.user_id IS NOT NULL AS "is_following_thread!",
                 d.id AS device_id, d.push_provider AS "push_provider!", d.push_token AS "push_token!",
                 d.push_key AS "push_key!"
@@ -89,6 +91,7 @@ impl Database {
           push_mode: row.push_mode,
           maybe_dnd_schedule: row.dnd_schedule,
           is_following_thread: row.is_following_thread,
+          maybe_uses_desktop_attention: row.uses_desktop_attention,
           devices: vec![device],
         }),
       }

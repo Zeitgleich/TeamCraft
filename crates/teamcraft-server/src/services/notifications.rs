@@ -50,11 +50,18 @@ pub async fn put_settings(
     .map(serde_json::to_string)
     .transpose()
     .map_err(|error| ApiError::Internal(format!("serializing the DND schedule failed: {error}")))?;
+  let previous = state
+    .database
+    .get_user_notification_settings(caller.user.id)
+    .await?;
   let stored = StoredUserSettings {
     maybe_auto_follow_mentioned_threads: Some(request.auto_follow_mentioned_threads),
     push_mode: request.push_mode.as_str().to_owned(),
     maybe_send_read_receipts: Some(request.send_read_receipts),
     maybe_dnd_schedule,
+    maybe_uses_desktop_attention: request
+      .maybe_uses_desktop_attention
+      .or(previous.maybe_uses_desktop_attention),
   };
   state
     .database
@@ -262,6 +269,12 @@ pub fn utc_offset_at(schedule: &DndSchedule, unix_seconds: i64) -> i16 {
     .unwrap_or(schedule.utc_offset_minutes)
 }
 
+/// Whether desktop attention holds the user's phone pushes back: the instance allows it and the user
+/// did not turn it off.
+pub fn uses_desktop_attention(state: &AppState, maybe_choice: Option<bool>) -> bool {
+  state.settings.notifications.is_desktop_attention_enabled && maybe_choice.unwrap_or(true)
+}
+
 /// Whether a conversation is muted by time at `now`.
 pub fn is_muted(maybe_muted_until: Option<OffsetDateTime>, now: OffsetDateTime) -> bool {
   maybe_muted_until.is_some_and(|until| until > now)
@@ -284,6 +297,7 @@ fn settings_response(
     push_mode: PushMode::from(stored.push_mode.clone()),
     send_read_receipts: receipts_enabled(state, stored),
     maybe_dnd_schedule,
+    maybe_uses_desktop_attention: Some(uses_desktop_attention(state, stored.maybe_uses_desktop_attention)),
   })
 }
 

@@ -6,12 +6,13 @@
 //! In memory and per process, like the gateway hub: after a restart nothing is withdrawn for pushes
 //! sent before it, which costs a stale notification, never a missing one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use teamcraft_db::PushRecipientRow;
 use teamcraft_proto::{
-  CallId, ConversationId, DeviceId, MessageId, PushDeliveryCounts, ThreadId, UnixMillis, UserId,
+  CallId, ConversationId, DeviceId, MessageId, PushDeliveryCounts, PushWakeUp, ThreadId, UnixMillis, UserId,
 };
 use tokio::time::Instant;
 
@@ -19,6 +20,8 @@ use tokio::time::Instant;
 const MAX_SHOWN_ENTRIES: usize = 100_000;
 /// Rings kept at most (each is short-lived; this only bounds a flood).
 const MAX_RINGS: usize = 10_000;
+/// Withdrawals waiting to be coalesced at most.
+const MAX_PENDING_DISMISSALS: usize = 10_000;
 /// Devices whose counts are kept at most.
 const MAX_HEALTH_DEVICES: usize = 100_000;
 
@@ -39,11 +42,39 @@ pub enum DeliveryEvent {
   HeldForDesktop,
 }
 
+/// A push held back while the user looks at a desktop (notifications.md, "Grace delay").
+#[derive(Debug, Clone)]
+pub struct HeldPush {
+  pub recipient: PushRecipientRow,
+  pub wake_up: PushWakeUp,
+  /// When it goes out if the desktop stays attentive.
+  pub due: Instant,
+}
+
+/// What [`PushTracker::hold`] did with a push.
+#[derive(Debug)]
+pub enum Holding {
+  /// Queued; nobody works this user's queue yet: start a worker.
+  StartWorker,
+  /// Queued behind others; the running worker handles it.
+  Queued,
+  /// The user's queue is full: this push (the oldest) goes out now instead.
+  Overflow(Box<HeldPush>),
+}
+
 /// Devices that rang for one call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ring {
   pub conversation: ConversationId,
   pub targets: Vec<(UserId, DeviceId)>,
+}
+
+/// One user's notifications of a conversation's top-level messages or of one of its threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DismissKey {
+  pub user: UserId,
+  pub conversation: ConversationId,
+  pub maybe_thread: Option<ThreadId>,
 }
 
 /// Where a notification is shown: a conversation's top-level messages or one of its threads.
@@ -68,6 +99,12 @@ struct Inner {
   rings: HashMap<CallId, (Ring, Instant)>,
   health: HashMap<DeviceId, (UserId, PushDeliveryCounts)>,
   last_test: HashMap<DeviceId, Instant>,
+  /// Withdrawals waiting for the end of a reading burst: the newest message read and the devices.
+  pending_dismissals: HashMap<DismissKey, (MessageId, Vec<DeviceId>)>,
+  /// Held pushes per user, oldest first (all have the same grace delay, so also soonest due first).
+  held: HashMap<UserId, VecDeque<HeldPush>>,
+  /// When each caller's recent rings were pushed (within the last minute).
+  rings_by_caller: HashMap<UserId, Vec<Instant>>,
 }
 
 impl PushTracker {
@@ -136,6 +173,97 @@ impl PushTracker {
     read
   }
 
+  /// Holds a push in the user's queue, at most `max_per_user`.
+  pub fn hold(&self, push: HeldPush, max_per_user: usize) -> Holding {
+    let mut inner = self.lock();
+    let user = push.recipient.user;
+    match inner.held.get_mut(&user) {
+      None => {
+        inner.held.insert(user, VecDeque::from([push]));
+        Holding::StartWorker
+      },
+      Some(queue) => {
+        queue.push_back(push);
+        if queue.len() > max_per_user.max(1)
+          && let Some(oldest) = queue.pop_front()
+        {
+          return Holding::Overflow(Box::new(oldest));
+        }
+        Holding::Queued
+      },
+    }
+  }
+
+  /// Takes the user's held pushes that are due at `now` (all of them with `is_release_all`), and
+  /// when the next one is due. `None` means the queue is empty and gone: the worker stops.
+  pub fn take_held(
+    &self,
+    user: UserId,
+    now: Instant,
+    is_release_all: bool,
+  ) -> (Vec<HeldPush>, Option<Instant>) {
+    let mut inner = self.lock();
+    let Some(queue) = inner.held.get_mut(&user) else {
+      return (Vec::new(), None);
+    };
+    let mut due = Vec::new();
+    while queue
+      .front()
+      .is_some_and(|push| is_release_all || push.due <= now)
+    {
+      if let Some(push) = queue.pop_front() {
+        due.push(push);
+      }
+    }
+    let maybe_next = queue.front().map(|push| push.due);
+    if maybe_next.is_none() {
+      inner.held.remove(&user);
+    }
+    (due, maybe_next)
+  }
+
+  /// The recipient of the user's oldest held push (what attention is judged by).
+  pub fn held_recipient(&self, user: UserId) -> Option<PushRecipientRow> {
+    self
+      .lock()
+      .held
+      .get(&user)
+      .and_then(|queue| queue.front())
+      .map(|push| push.recipient.clone())
+  }
+
+  /// Adds a withdrawal to the pending one for `key`; `true` if none was pending (the caller then sends
+  /// it after the coalescing delay with [`Self::take_dismiss`]).
+  pub fn queue_dismiss(&self, key: DismissKey, up_to: MessageId, devices: Vec<DeviceId>) -> bool {
+    let mut inner = self.lock();
+    if inner.pending_dismissals.len() >= MAX_PENDING_DISMISSALS
+      && !inner.pending_dismissals.contains_key(&key)
+    {
+      // A flood bound: this withdrawal goes out on its own instead of joining a batch.
+      return true;
+    }
+    match inner.pending_dismissals.get_mut(&key) {
+      Some((newest, pending)) => {
+        *newest = (*newest).max(up_to);
+        for device in devices {
+          if !pending.contains(&device) {
+            pending.push(device);
+          }
+        }
+        false
+      },
+      None => {
+        inner.pending_dismissals.insert(key, (up_to, devices));
+        true
+      },
+    }
+  }
+
+  /// The pending withdrawal for `key`, if any.
+  pub fn take_dismiss(&self, key: DismissKey) -> Option<(MessageId, Vec<DeviceId>)> {
+    self.lock().pending_dismissals.remove(&key)
+  }
+
   /// Remembers which devices ring for the call.
   pub fn record_ring(&self, call: CallId, ring: Ring) {
     let now = Instant::now();
@@ -150,6 +278,24 @@ impl PushTracker {
       inner.rings.remove(&oldest);
     }
     inner.rings.insert(call, (ring, now));
+  }
+
+  /// Whether a ring from `caller` may push now: at most `max_per_minute` per caller, so somebody
+  /// starting and cancelling calls can't keep other people's phones ringing. If so, it is counted.
+  pub fn try_start_ring(&self, caller: UserId, max_per_minute: u32) -> bool {
+    let now = Instant::now();
+    let minute = Duration::from_secs(60);
+    let mut inner = self.lock();
+    inner
+      .rings_by_caller
+      .retain(|_, times| times.iter().any(|at| now.duration_since(*at) < minute));
+    let times = inner.rings_by_caller.entry(caller).or_default();
+    times.retain(|at| now.duration_since(*at) < minute);
+    if times.len() >= usize::try_from(max_per_minute).unwrap_or(usize::MAX) {
+      return false;
+    }
+    times.push(now);
+    true
   }
 
   /// The devices that rang for the call; `None` once taken (the ring ends only once).
@@ -295,6 +441,98 @@ mod tests {
   }
 
   #[test]
+  fn withdrawals_of_a_burst_are_coalesced_to_the_newest_message() {
+    let tracker = PushTracker::default();
+    let key = DismissKey {
+      user: user(1),
+      conversation: conversation(1),
+      maybe_thread: None,
+    };
+    assert!(tracker.queue_dismiss(key, message(10), vec![device(1)]));
+    assert!(!tracker.queue_dismiss(key, message(12), vec![device(2)]));
+    assert!(!tracker.queue_dismiss(key, message(11), vec![device(1)]));
+    assert_eq!(
+      tracker.take_dismiss(key),
+      Some((message(12), vec![device(1), device(2)]))
+    );
+    assert_eq!(tracker.take_dismiss(key), None);
+  }
+
+  mod held {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_users_held_pushes_come_out_when_due_or_all_at_once() {
+      let tracker = PushTracker::default();
+      let start = Instant::now();
+      assert!(matches!(
+        tracker.hold(held(1, start + secs(10)), 5),
+        Holding::StartWorker
+      ));
+      assert!(matches!(
+        tracker.hold(held(1, start + secs(20)), 5),
+        Holding::Queued
+      ));
+      assert!(matches!(
+        tracker.hold(held(2, start + secs(10)), 5),
+        Holding::StartWorker
+      ));
+
+      let (due, next) = tracker.take_held(user(1), start + secs(15), false);
+      assert_eq!(due.len(), 1);
+      assert_eq!(next, Some(start + secs(20)));
+      let (due, next) = tracker.take_held(user(1), start + secs(15), true);
+      assert_eq!((due.len(), next), (1, None));
+      // The queue is gone: the next hold starts a new worker.
+      assert!(matches!(
+        tracker.hold(held(1, start + secs(30)), 5),
+        Holding::StartWorker
+      ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_queue_sends_its_oldest_push_at_once() {
+      let tracker = PushTracker::default();
+      let start = Instant::now();
+      tracker.hold(held(1, start + secs(1)), 2);
+      tracker.hold(held(1, start + secs(2)), 2);
+      match tracker.hold(held(1, start + secs(3)), 2) {
+        Holding::Overflow(oldest) => assert_eq!(oldest.due, start + secs(1)),
+        other => panic!("{other:?}"),
+      }
+    }
+
+    fn secs(n: u64) -> Duration {
+      Duration::from_secs(n)
+    }
+
+    fn held(user_raw: i64, due: Instant) -> HeldPush {
+      HeldPush {
+        recipient: PushRecipientRow {
+          user: user(user_raw),
+          notification_level: teamcraft_proto::NotificationLevel::All,
+          presence_pref: "auto".into(),
+          maybe_dnd_until: None,
+          maybe_muted_until: None,
+          push_mode: "away_only".into(),
+          maybe_dnd_schedule: None,
+          is_following_thread: false,
+          maybe_uses_desktop_attention: None,
+          devices: Vec::new(),
+        },
+        wake_up: PushWakeUp::for_message(
+          teamcraft_proto::PushKind::Mention,
+          conversation(1),
+          message(1),
+          user(9),
+          false,
+        ),
+        due,
+      }
+    }
+  }
+
+  #[test]
   fn a_ring_ends_once() {
     let tracker = PushTracker::default();
     let call = CallId::from_snowflake(Snowflake::new(3).unwrap());
@@ -320,6 +558,20 @@ mod tests {
     assert_eq!((one.sent, one.failed, one.suppressed_dnd), (1, 1, 1));
     assert_eq!(one.maybe_last_sent_at, Some(UnixMillis(5)));
     assert_eq!(one.maybe_last_failed_at, Some(UnixMillis(6)));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn rings_are_limited_per_caller_and_minute() {
+    let tracker = PushTracker::default();
+    assert!(tracker.try_start_ring(user(1), 2));
+    assert!(tracker.try_start_ring(user(1), 2));
+    assert!(!tracker.try_start_ring(user(1), 2));
+    assert!(
+      tracker.try_start_ring(user(2), 2),
+      "other callers are not affected"
+    );
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(tracker.try_start_ring(user(1), 2));
   }
 
   #[tokio::test(start_paused = true)]

@@ -323,6 +323,11 @@ pub struct PushConfig {
   pub retry_initial_delay_ms: u64,
   /// The shortest time between two test pushes to one device.
   pub test_interval_secs: u64,
+  /// Calls one user may ring other people's phones with per minute; further rings reach only
+  /// devices with a live connection.
+  pub max_rings_per_minute: u32,
+  /// Withdrawals for one conversation that come within this time go out as one (reading in bursts).
+  pub dismiss_coalesce_ms: u64,
   pub request_timeout_secs: u64,
   /// Pushes sent in parallel, per pool: APNs and FCM share one, Web Push and UnifiedPush (endpoints
   /// users chose) another.
@@ -938,9 +943,16 @@ pub struct NotificationsConfig {
   /// pushes to their phones wait this long and are sent only if the message is still unread. `0`
   /// never sends them while the desktop is attentive.
   pub mobile_push_delay_secs: u64,
-  /// How long an "attentive" report of a desktop or web session counts. Clients repeat it every 30
-  /// seconds; a session that stops (sleep, crash, lost network) no longer holds pushes back.
+  /// Off: desktop and web sessions are told not to report attention and the server ignores such
+  /// reports; a connected, active desktop holds phone pushes back as presence would (works councils
+  /// may want this; notifications.md, "Attention").
+  pub is_desktop_attention_enabled: bool,
+  /// How long an "attentive" report of a desktop or web session counts. The session's gateway
+  /// heartbeats renew it, so keep it above twice `[gateway] heartbeat_interval_secs`; a session that
+  /// stops (sleep, crash, lost network) no longer holds pushes back.
   pub attention_lease_secs: u64,
+  /// Pushes held for an attentive desktop per user at most; beyond that the oldest goes out at once.
+  pub max_held_pushes_per_user: usize,
   /// E-mail digest of missed mentions.
   pub email_digest: EmailDigestConfig,
 }
@@ -1231,6 +1243,8 @@ impl Default for PushConfig {
       max_retries: 2,
       retry_initial_delay_ms: 2000,
       test_interval_secs: 10,
+      max_rings_per_minute: 10,
+      dismiss_coalesce_ms: 3000,
       request_timeout_secs: 10,
       max_concurrent_sends: 32,
       max_concurrent_sends_per_user: 4,
@@ -1285,7 +1299,9 @@ impl Default for NotificationsConfig {
       urgent_max_pushes: 5,
       urgent_scheduler_interval_secs: 15,
       mobile_push_delay_secs: 120,
+      is_desktop_attention_enabled: true,
       attention_lease_secs: 75,
+      max_held_pushes_per_user: 100,
       email_digest: EmailDigestConfig::default(),
     }
   }

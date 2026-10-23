@@ -446,6 +446,8 @@ impl TestApp {
     // Tests make many requests (and fail many authentications) from one address; the ones about
     // rate limits switch the limits on again.
     settings.security.rate_limits.is_enabled = false;
+    // Withdrawals coalesce for a moment only, so tests see them quickly.
+    settings.push.dismiss_coalesce = Duration::from_millis(50);
     customize(&mut settings);
 
     let keys = JwksCache::new(

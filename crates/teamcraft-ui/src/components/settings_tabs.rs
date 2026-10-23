@@ -293,6 +293,12 @@ pub fn NotificationsTab() -> impl IntoView {
         })
         hint="notif-attention-input-hint"
       />
+      <CheckField
+        label="notif-uses-attention"
+        hint="notif-uses-attention-hint"
+        value=Signal::derive(move || notes.get().uses_desktop_attention)
+        on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.uses_desktop_attention = value)))
+      />
     </fieldset>
 
     <fieldset class="settings-group">

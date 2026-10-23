@@ -13,8 +13,8 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ConversationId, ConversationResponse, MessageId, NotificationLevel, NotificationSettings, PresenceState,
-  PushKind, PushWakeUp, TestPushResponse,
+  ConversationId, ConversationResponse, DndCandidate, MessageId, NotificationLevel, NotificationSettings,
+  PresenceState, PushKind, PushWakeUp, TestPushResponse,
 };
 
 use crate::api::ServerApi;
@@ -134,8 +134,16 @@ pub fn local_suppression(
   let maybe_settings: Option<NotificationSettings> =
     records::get_json(store, Table::Account, NOTIFICATION_SETTINGS_RECORD)?;
   let maybe_schedule = maybe_settings.and_then(|settings| settings.maybe_dnd_schedule);
+  // DMs and group DMs have participants; channels don't.
+  let is_direct = maybe_conversation
+    .as_ref()
+    .is_some_and(|conversation| !conversation.participants.is_empty());
   let lets_through = match (&maybe_schedule, wake_up.maybe_sender_id) {
-    (Some(schedule), Some(sender)) => schedule.lets_through(sender, wake_up.is_urgent),
+    (Some(schedule), Some(sender)) => schedule.lets_through(DndCandidate {
+      sender,
+      is_urgent: wake_up.is_urgent,
+      is_direct,
+    }),
     _ => false,
   };
   if lets_through {

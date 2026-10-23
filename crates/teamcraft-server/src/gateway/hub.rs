@@ -1,18 +1,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use teamcraft_proto::{
   CustomStatus, DeviceActivity, DeviceId, GatewayEvent, GatewayServerMessage, PresenceState, UserId,
 };
 use time::OffsetDateTime;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 /// Frames queued per connection before it is considered too slow and dropped (it can resume).
 const CHANNEL_CAPACITY: usize = 1024;
-/// Attention changes buffered for listeners (held phone pushes) before the slowest misses some.
-const ATTENTION_CHANNEL_CAPACITY: usize = 256;
 
 /// Registry of gateway sessions and their event buffers.
 ///
@@ -39,8 +37,10 @@ impl Default for PresenceSnapshot {
 pub struct Hub {
   options: HubOptions,
   inner: Mutex<Inner>,
-  /// Users whose desktop or web session stopped being attentive (held phone pushes go out then).
-  attention_lost: broadcast::Sender<UserId>,
+  /// Per user with held phone pushes: woken when a desktop or web session of that user stops being
+  /// attentive (the held pushes go out then). Only that user's waiter wakes. One entry per user who
+  /// ever had a held push since the start, so bounded by the users.
+  attention_watchers: Mutex<HashMap<UserId, Arc<Notify>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -134,11 +134,10 @@ struct Session {
 
 impl Hub {
   pub fn new(options: HubOptions) -> Self {
-    let (attention_lost, _) = broadcast::channel(ATTENTION_CHANNEL_CAPACITY);
     Self {
       options,
       inner: Mutex::new(Inner::default()),
-      attention_lost,
+      attention_watchers: Mutex::default(),
     }
   }
 
@@ -292,14 +291,43 @@ impl Hub {
     }
   }
 
-  /// Listens for users whose desktop or web session stopped being attentive.
-  pub fn subscribe_attention_lost(&self) -> broadcast::Receiver<UserId> {
-    self.attention_lost.subscribe()
+  /// A heartbeat of the session: an attentive report stays valid for another lease. Sessions don't
+  /// repeat their report, so the server learns transitions only.
+  pub fn renew_attention(&self, session_id: &str) {
+    let now = Instant::now();
+    if let Some(session) = self.lock().sessions.get_mut(session_id)
+      && let Attention::Attentive { .. } = session.attention
+    {
+      session.attention = Attention::Attentive {
+        until: now + self.options.attention_lease,
+      };
+      session.last_active_at = now;
+    }
+  }
+
+  /// What wakes when a desktop or web session of `user` stops being attentive. A loss that happens
+  /// while nobody waits is kept as one permit, so a waiter that comes late still wakes.
+  pub fn watch_attention(&self, user: UserId) -> Arc<Notify> {
+    self
+      .attention_watchers
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .entry(user)
+      .or_default()
+      .clone()
   }
 
   fn announce_attention_lost(&self, user: UserId) {
-    // Nobody listening (no held pushes) is fine.
-    let _ = self.attention_lost.send(user);
+    let maybe_watcher = self
+      .attention_watchers
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .get(&user)
+      .cloned();
+    // Nobody watching (no held pushes) is fine.
+    if let Some(watcher) = maybe_watcher {
+      watcher.notify_one();
+    }
   }
 
   /// Notes that the device shows signs of life (it typed, it asked for something).
@@ -345,8 +373,15 @@ impl Hub {
       .collect()
   }
 
-  /// Which kinds of device of the user are in use. `is_mobile` tells phones from the rest.
-  pub fn active_devices(&self, user: UserId, is_mobile: impl Fn(DeviceId) -> bool) -> ActiveDevices {
+  /// Which kinds of device of the user are in use. `is_mobile` tells phones from the rest. Without
+  /// `uses_attention` (the user or the instance turned it off) a desktop counts by its activity, as
+  /// presence does.
+  pub fn active_devices(
+    &self,
+    user: UserId,
+    is_mobile: impl Fn(DeviceId) -> bool,
+    uses_attention: bool,
+  ) -> ActiveDevices {
     let now = Instant::now();
     let inner = self.lock();
     let mut active = ActiveDevices::default();
@@ -361,6 +396,7 @@ impl Hub {
         active.is_mobile_active |= session.activity == DeviceActivity::Active;
       } else {
         active.is_desktop_attentive |= match session.attention {
+          _ if !uses_attention => session.activity == DeviceActivity::Active,
           Attention::NeverReported => session.activity == DeviceActivity::Active,
           Attention::Attentive { until } => until > now,
           Attention::Away => false,
@@ -781,14 +817,71 @@ mod tests {
       let hub = Hub::new(OPTIONS);
       let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
       hub.set_attention(&desktop.session_id, true);
-      assert!(hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(
+        hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
       tokio::time::advance(Duration::from_secs(74)).await;
-      assert!(hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(
+        hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
       tokio::time::advance(Duration::from_secs(2)).await;
-      assert!(!hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(
+        !hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
       // Repeating the report renews it.
       hub.set_attention(&desktop.session_id, true);
-      assert!(hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(
+        hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeats_renew_an_attentive_report_but_never_make_one() {
+      let hub = Hub::new(OPTIONS);
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_attention(&desktop.session_id, true);
+      for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(30)).await;
+        hub.renew_attention(&desktop.session_id);
+      }
+      assert!(
+        hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
+      hub.set_attention(&desktop.session_id, false);
+      hub.renew_attention(&desktop.session_id);
+      assert!(
+        !hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_attention_a_desktop_counts_by_its_activity() {
+      let hub = Hub::new(OPTIONS);
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_attention(&desktop.session_id, false);
+      assert!(
+        hub
+          .active_devices(user(1), desktop_only, false)
+          .is_desktop_attentive
+      );
+      hub.set_activity(&desktop.session_id, DeviceActivity::Idle);
+      assert!(
+        !hub
+          .active_devices(user(1), desktop_only, false)
+          .is_desktop_attentive
+      );
     }
 
     #[tokio::test(start_paused = true)]
@@ -796,40 +889,64 @@ mod tests {
       let hub = Hub::new(OPTIONS);
       let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
       hub.set_attention(&desktop.session_id, false);
-      assert!(!hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(
+        !hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
     }
 
     #[tokio::test(start_paused = true)]
     async fn clients_that_never_report_attention_fall_back_to_their_activity() {
       let hub = Hub::new(OPTIONS);
       let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
-      assert!(hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(
+        hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
       hub.set_activity(&desktop.session_id, DeviceActivity::Idle);
-      assert!(!hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(
+        !hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
     }
 
     #[tokio::test(start_paused = true)]
     async fn phones_count_by_activity_not_attention() {
       let hub = Hub::new(OPTIONS);
       let _phone = hub.open_session(user(1), device(2), DeviceActivity::Active);
-      let active = hub.active_devices(user(1), |device| device == super::device(2));
+      let active = hub.active_devices(user(1), |device| device == super::device(2), true);
       assert!(active.is_mobile_active);
       assert!(!active.is_desktop_attentive);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn losing_attention_or_the_connection_is_announced() {
+    async fn losing_attention_or_the_connection_wakes_only_that_users_watcher() {
       let hub = Hub::new(OPTIONS);
-      let mut lost = hub.subscribe_attention_lost();
+      let watcher = hub.watch_attention(user(1));
+      let other = hub.watch_attention(user(2));
       let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
       hub.set_attention(&desktop.session_id, true);
-      assert!(lost.try_recv().is_err());
+      assert!(!is_woken(&watcher).await);
       hub.set_attention(&desktop.session_id, false);
-      assert_eq!(lost.try_recv().unwrap(), user(1));
+      assert!(is_woken(&watcher).await);
       hub.set_attention(&desktop.session_id, true);
       hub.detach(&desktop.session_id);
-      assert_eq!(lost.try_recv().unwrap(), user(1));
-      assert!(!hub.active_devices(user(1), desktop_only).is_desktop_attentive);
+      assert!(is_woken(&watcher).await);
+      assert!(!is_woken(&other).await, "other users' waiters stay asleep");
+      assert!(
+        !hub
+          .active_devices(user(1), desktop_only, true)
+          .is_desktop_attentive
+      );
+    }
+
+    async fn is_woken(watcher: &Notify) -> bool {
+      tokio::time::timeout(Duration::from_millis(10), watcher.notified())
+        .await
+        .is_ok()
     }
   }
 

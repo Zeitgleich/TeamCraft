@@ -1594,6 +1594,87 @@ mod attention {
   }
 
   #[tokio::test]
+  async fn users_who_turn_attention_off_are_held_by_presence_only() {
+    let recorder = Recorder::default();
+    let Some(app) = start_with_grace(&recorder, 1).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let reply = app
+      .put(
+        &s.carol,
+        "/me/notification-settings",
+        json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
+               "uses_desktop_attention": false}),
+      )
+      .await;
+    assert_eq!(reply.body["uses_desktop_attention"], false, "{}", reply.body);
+    // A later write that doesn't name the setting keeps it.
+    let kept = app
+      .put(
+        &s.carol,
+        "/me/notification-settings",
+        json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true}),
+      )
+      .await;
+    assert_eq!(kept.body["uses_desktop_attention"], false, "{}", kept.body);
+
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    // The report is ignored: the active desktop holds the push as presence would.
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+      recorder.seen.lock().unwrap().is_empty(),
+      "held by the active desktop"
+    );
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_instance_without_attention_says_so_and_ignores_reports() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| {
+        settings.notifications.mobile_push_delay_secs = 1;
+        settings.notifications.is_desktop_attention_enabled = false;
+      },
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    let settings = app.get(&s.carol, "/me/notification-settings").await;
+    assert_eq!(
+      settings.body["uses_desktop_attention"], false,
+      "{}",
+      settings.body
+    );
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+      recorder.seen.lock().unwrap().is_empty(),
+      "held by the active desktop"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn closing_the_desktop_releases_a_held_push() {
     let recorder = Recorder::default();
     let Some(app) = start_with_grace(&recorder, 30).await else {
@@ -1748,6 +1829,8 @@ mod dnd_overrides {
             "windows": [],
             "allow_user_ids": [],
             "allows_urgent": allows_urgent,
+            // The scene is a channel; DMs are the default scope.
+            "urgent_scope": "everywhere",
           },
         }),
       )
@@ -1793,6 +1876,42 @@ mod dnd_overrides {
     let pushes = recorder.wait_for(1).await;
     assert_eq!(pushes.len(), 1, "{pushes:?}");
     assert!(pushes[0].wake_up.is_urgent);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn urgent_messages_in_channels_break_through_only_where_the_user_widened_it() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    app.put(&s.carol, "/me/presence", json!({"manual": "dnd"})).await;
+    let put = |scope: &'static str| {
+      json!({
+        "auto_follow_mentioned_threads": true,
+        "push_mode": "away_only",
+        "send_read_receipts": true,
+        "dnd_schedule": {"utc_offset_minutes": 0, "windows": [], "allow_user_ids": [],
+                         "allows_urgent": true, "urgent_scope": scope},
+      })
+    };
+    assert_eq!(
+      app
+        .put(&s.carol, "/me/notification-settings", put("direct"))
+        .await
+        .status,
+      StatusCode::OK
+    );
+    urgent_mention(&app, &s, 1, true).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "a channel is not a DM");
+    assert_eq!(
+      app
+        .put(&s.carol, "/me/notification-settings", put("everywhere"))
+        .await
+        .status,
+      StatusCode::OK
+    );
+    urgent_mention(&app, &s, 2, true).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1);
     app.stop().await;
   }
 
@@ -1872,6 +1991,36 @@ MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
     let pushes = recorder.wait_for(2).await;
     assert_eq!(kinds(&pushes), vec![PushKind::Call, PushKind::Dismiss]);
     assert_eq!(pushes[1].wake_up.maybe_call_id.unwrap().to_string(), call);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_caller_ringing_too_often_reaches_open_apps_only() {
+    let recorder = Recorder::default();
+    let Some(app) =
+      TestApp::start_with_calls_and_push(&calls_config(), SIGNING_KEY_PEM, recorder.dispatcher()).await
+    else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    let dm = app.post(&alice, "/dms", json!({"user_id": carol_id})).await.id();
+    let alice_device = register_device(&app, &alice).await;
+    register_push_device(&app, &carol, "fcm").await;
+    let alice_id = user_id(&app, &alice).await;
+    // Ring, hang up, ring again: the default allows 10 a minute.
+    for _ in 0..11 {
+      let call = join_token(&app, &alice, &dm, &alice_device).await;
+      report(&app, "joined", &call, &alice_id, &alice_device).await;
+      report(&app, "left", &call, &alice_id, &alice_device).await;
+    }
+    let rings = recorder
+      .wait_for(30)
+      .await
+      .iter()
+      .filter(|push| push.wake_up.kind == PushKind::Call)
+      .count();
+    assert_eq!(rings, 10);
     app.stop().await;
   }
 

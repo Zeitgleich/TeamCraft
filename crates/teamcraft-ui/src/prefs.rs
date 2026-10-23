@@ -195,6 +195,9 @@ pub struct NotificationPrefs {
   /// This session counts as attentive (holding phone pushes back) only with input in the app within
   /// this many seconds (notifications.md, "Attention").
   pub attention_input_secs: u32,
+  /// Report whether the user looks at this session at all (the user's choice, synced through the
+  /// server's notification settings; off also where the instance turned it off).
+  pub uses_desktop_attention: bool,
   pub first_name_is_mention: bool,
   pub channel_mentions_notify: bool,
   /// Show the message text in desktop notifications (off: only who wrote where).
@@ -224,6 +227,7 @@ impl Default for NotificationPrefs {
       push_when: PushWhen::AwayOrOffline,
       push_delay_minutes: 2,
       attention_input_secs: DEFAULT_ATTENTION_INPUT_SECS,
+      uses_desktop_attention: true,
       first_name_is_mention: true,
       channel_mentions_notify: true,
       show_preview: true,

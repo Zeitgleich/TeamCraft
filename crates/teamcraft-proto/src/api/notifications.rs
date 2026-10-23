@@ -71,21 +71,50 @@ pub struct DndSchedule {
   /// People whose messages still notify during DND (for example a manager).
   #[serde(default)]
   pub allow_user_ids: Vec<UserId>,
-  /// Messages the sender marked urgent still notify during DND.
+  /// Messages the sender marked urgent still notify during DND (where `urgent_scope` says).
   #[serde(default)]
   pub allows_urgent: bool,
+  /// Where an urgent message may break through DND: only in DMs and group DMs unless the user
+  /// widens it, so anybody in a big channel can't wake them up.
+  #[serde(default)]
+  pub urgent_scope: UrgentScope,
+}
+
+wire_enum! {
+  /// Where urgent messages break through DND (with `allows_urgent`).
+  #[derive(Default)]
+  pub enum UrgentScope {
+    /// DMs and group DMs only (the default).
+    #[default]
+    Direct => "direct",
+    /// Every conversation, channels included.
+    Everywhere => "everywhere",
+  }
+}
+
+/// What DND's overrides need to know about one message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DndCandidate {
+  pub sender: UserId,
+  pub is_urgent: bool,
+  /// A DM or group DM.
+  pub is_direct: bool,
 }
 
 impl DndSchedule {
-  /// Whether DND, scheduled or manual, lets this message through anyway.
-  pub fn lets_through(&self, sender: UserId, is_urgent: bool) -> bool {
-    self.allow_user_ids.contains(&sender) || (self.allows_urgent && is_urgent)
+  /// Whether DND, scheduled or manual, lets this message through anyway: an allowed sender, or an
+  /// urgent message where the user lets urgent ones through.
+  pub fn lets_through(&self, message: DndCandidate) -> bool {
+    let is_urgent_allowed = self.allows_urgent
+      && message.is_urgent
+      && (message.is_direct || self.urgent_scope == UrgentScope::Everywhere);
+    self.allow_user_ids.contains(&message.sender) || is_urgent_allowed
   }
 
-  /// Whether the windows silence a message from `sender` at `unix_seconds`, given the user's UTC
-  /// offset at that moment.
-  pub fn silences(&self, unix_seconds: i64, offset_minutes: i16, sender: UserId, is_urgent: bool) -> bool {
-    !self.lets_through(sender, is_urgent) && self.is_active_at(unix_seconds, offset_minutes)
+  /// Whether the windows silence the message at `unix_seconds`, given the user's UTC offset at that
+  /// moment.
+  pub fn silences(&self, unix_seconds: i64, offset_minutes: i16, message: DndCandidate) -> bool {
+    !self.lets_through(message) && self.is_active_at(unix_seconds, offset_minutes)
   }
 
   /// Whether `unix_seconds` falls into one of the windows, given the user's UTC offset at that moment.
@@ -120,6 +149,16 @@ pub struct NotificationSettings {
   pub send_read_receipts: bool,
   #[serde(rename = "dnd_schedule", default, skip_serializing_if = "Option::is_none")]
   pub maybe_dnd_schedule: Option<DndSchedule>,
+  /// Desktop and web sessions report whether the user looks at them, so phone pushes wait while
+  /// they do (notifications.md, "Attention"). Reads: whether that is in effect (the user's choice
+  /// and the instance's switch); clients that read `false` report nothing. Writes: absent keeps the
+  /// stored choice.
+  #[serde(
+    rename = "uses_desktop_attention",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_uses_desktop_attention: Option<bool>,
 }
 
 /// `GET`/`PUT /api/v1/conversations/{id}/notification-settings`; `PUT` replaces both fields.
@@ -283,8 +322,8 @@ mod tests {
     let mut schedule = night_shift(vec![Weekday::Monday]);
     schedule.allow_user_ids = vec![manager];
     let night = MONDAY_MIDNIGHT + 23 * HOUR;
-    assert!(!schedule.silences(night, 0, manager, false));
-    assert!(schedule.silences(night, 0, other, false));
+    assert!(!schedule.silences(night, 0, candidate(manager, false, false)));
+    assert!(schedule.silences(night, 0, candidate(other, false, false)));
   }
 
   #[test]
@@ -292,10 +331,22 @@ mod tests {
     let sender = UserId::from_snowflake(Snowflake::new(8).unwrap());
     let mut schedule = night_shift(vec![Weekday::Monday]);
     let night = MONDAY_MIDNIGHT + 23 * HOUR;
-    assert!(schedule.silences(night, 0, sender, true));
+    assert!(schedule.silences(night, 0, candidate(sender, true, true)));
     schedule.allows_urgent = true;
-    assert!(!schedule.silences(night, 0, sender, true));
-    assert!(schedule.silences(night, 0, sender, false));
+    assert!(!schedule.silences(night, 0, candidate(sender, true, true)));
+    assert!(schedule.silences(night, 0, candidate(sender, false, true)));
+    // In a channel only when the user widened it.
+    assert!(schedule.silences(night, 0, candidate(sender, true, false)));
+    schedule.urgent_scope = UrgentScope::Everywhere;
+    assert!(!schedule.silences(night, 0, candidate(sender, true, false)));
+  }
+
+  fn candidate(sender: UserId, is_urgent: bool, is_direct: bool) -> DndCandidate {
+    DndCandidate {
+      sender,
+      is_urgent,
+      is_direct,
+    }
   }
 
   #[test]
@@ -311,7 +362,7 @@ mod tests {
     };
     assert_eq!(
       serde_json::to_string(&schedule).unwrap(),
-      r#"{"utc_offset_minutes":60,"time_zone":"Europe/Berlin","windows":[],"allow_user_ids":[],"allows_urgent":true}"#
+      r#"{"utc_offset_minutes":60,"time_zone":"Europe/Berlin","windows":[],"allow_user_ids":[],"allows_urgent":true,"urgent_scope":"direct"}"#
     );
   }
 
@@ -322,6 +373,7 @@ mod tests {
       push_mode: PushMode::AwayOnly,
       send_read_receipts: false,
       maybe_dnd_schedule: None,
+      maybe_uses_desktop_attention: None,
     };
     assert_eq!(
       serde_json::to_string(&settings).unwrap(),

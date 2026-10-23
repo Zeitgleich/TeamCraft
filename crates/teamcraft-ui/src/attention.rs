@@ -3,12 +3,13 @@
 //! While a session is attentive the server holds phone pushes back for the grace delay, so the report
 //! must be honest: focused and visible window, recent input in the app, little OS idle time and an
 //! unlocked screen. [`is_attentive`] is the rule; [`AttentionReporter`] decides when a report goes
-//! out (every change, and every [`ATTENTION_REFRESH_SECS`] while attentive, because the server forgets
-//! a report that is not refreshed). Both are pure; the browser wiring lives in `components::app`.
+//! out: changes only, and "away" only once it lasted [`ATTENTION_AWAY_DELAY_SECS`], so the server
+//! learns coarse transitions, not a timeline (e2ee.md §7). The session's gateway heartbeats keep an
+//! attentive report alive. Both are pure; the browser wiring lives in `components::app`.
 
 use std::time::Duration;
 
-use teamcraft_proto::ATTENTION_REFRESH_SECS;
+use teamcraft_proto::ATTENTION_AWAY_DELAY_SECS;
 
 use crate::model::TimestampMs;
 
@@ -32,13 +33,9 @@ pub struct AttentionSignals {
 /// Decides when the session reports its attention.
 #[derive(Debug, Default)]
 pub struct AttentionReporter {
-  maybe_last: Option<Report>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Report {
-  is_attentive: bool,
-  sent_at: TimestampMs,
+  maybe_reported: Option<bool>,
+  /// Since when the user is not attentive while the last report still says attentive.
+  maybe_away_since: Option<TimestampMs>,
 }
 
 /// The rule: every condition has to hold, an unknown OS idle time counts as no objection.
@@ -50,25 +47,47 @@ pub fn is_attentive(signals: &AttentionSignals, now: TimestampMs, input_window: 
 }
 
 impl AttentionReporter {
-  /// The report to send now, if any: the first one, every change, and a refresh while attentive.
+  /// The report to send now, if any: the first state, becoming attentive at once, and being away
+  /// once it lasted the away delay.
   pub fn next(&mut self, is_attentive: bool, now: TimestampMs) -> Option<bool> {
-    let is_due = match self.maybe_last {
-      None => true,
-      Some(last) if last.is_attentive != is_attentive => true,
-      Some(last) => is_attentive && now.saturating_sub(last.sent_at) >= refresh_ms(),
-    };
-    if is_due {
-      self.maybe_last = Some(Report {
-        is_attentive,
-        sent_at: now,
-      });
+    match self.maybe_reported {
+      None => self.send(is_attentive),
+      Some(reported) if reported == is_attentive => {
+        self.maybe_away_since = None;
+        None
+      },
+      Some(_) if is_attentive => self.send(true),
+      Some(_) => {
+        let since = *self.maybe_away_since.get_or_insert(now);
+        (now.saturating_sub(since) >= away_delay_ms())
+          .then(|| self.send(false))
+          .flatten()
+      },
     }
-    is_due.then_some(is_attentive)
+  }
+
+  /// The session goes away (window closed, attention turned off): "not attentive" now, unless that
+  /// is what the server already knows.
+  pub fn leave(&mut self) -> Option<bool> {
+    (self.maybe_reported != Some(false))
+      .then(|| self.send(false))
+      .flatten()
+  }
+
+  /// The last report a reconnected gateway should hear again.
+  pub fn last_report(&self) -> Option<bool> {
+    self.maybe_reported
+  }
+
+  fn send(&mut self, is_attentive: bool) -> Option<bool> {
+    self.maybe_reported = Some(is_attentive);
+    self.maybe_away_since = None;
+    Some(is_attentive)
   }
 }
 
-fn refresh_ms() -> i64 {
-  i64::try_from(ATTENTION_REFRESH_SECS).unwrap_or(i64::MAX) * MS_PER_SECOND
+fn away_delay_ms() -> i64 {
+  i64::try_from(ATTENTION_AWAY_DELAY_SECS).unwrap_or(i64::MAX) * MS_PER_SECOND
 }
 
 #[cfg(test)]
@@ -156,38 +175,50 @@ mod tests {
     }
 
     #[test]
-    fn changes_are_reported_right_away() {
-      let mut reporter = AttentionReporter::default();
-      reporter.next(true, NOW);
-      assert_eq!(reporter.next(false, NOW + 1), Some(false));
-      assert_eq!(reporter.next(true, NOW + 2), Some(true));
-    }
-
-    #[test]
-    fn an_attentive_session_refreshes_every_thirty_seconds() {
-      let mut reporter = AttentionReporter::default();
-      reporter.next(true, NOW);
-      assert_eq!(reporter.next(true, NOW + 29_999), None);
-      assert_eq!(reporter.next(true, NOW + 30_000), Some(true));
-      assert_eq!(reporter.next(true, NOW + 45_000), None);
-      assert_eq!(reporter.next(true, NOW + 60_000), Some(true));
-    }
-
-    #[test]
-    fn an_inattentive_session_stays_quiet_once_reported() {
+    fn becoming_attentive_is_reported_at_once() {
       let mut reporter = AttentionReporter::default();
       reporter.next(false, NOW);
+      assert_eq!(reporter.next(true, NOW + 1), Some(true));
+    }
+
+    #[test]
+    fn being_away_is_reported_only_once_it_lasted_a_minute() {
+      let mut reporter = AttentionReporter::default();
+      reporter.next(true, NOW);
+      assert_eq!(reporter.next(false, NOW + 1_000), None);
+      assert_eq!(reporter.next(false, NOW + 60_999), None);
+      assert_eq!(reporter.next(false, NOW + 61_000), Some(false));
       assert_eq!(reporter.next(false, NOW + 600_000), None);
     }
 
     #[test]
-    fn the_refresh_counts_from_the_last_change() {
+    fn a_short_glance_away_is_never_reported() {
       let mut reporter = AttentionReporter::default();
       reporter.next(true, NOW);
-      reporter.next(false, NOW + 20_000);
-      reporter.next(true, NOW + 25_000);
-      assert_eq!(reporter.next(true, NOW + 50_000), None);
-      assert_eq!(reporter.next(true, NOW + 55_000), Some(true));
+      reporter.next(false, NOW + 1_000);
+      assert_eq!(reporter.next(true, NOW + 30_000), None);
+      // The away time starts again from the next glance.
+      assert_eq!(reporter.next(false, NOW + 40_000), None);
+      assert_eq!(reporter.next(false, NOW + 99_999), None);
+      assert_eq!(reporter.next(false, NOW + 100_000), Some(false));
+    }
+
+    #[test]
+    fn an_attentive_session_sends_nothing_more() {
+      let mut reporter = AttentionReporter::default();
+      reporter.next(true, NOW);
+      for minute in 1..30 {
+        assert_eq!(reporter.next(true, NOW + minute * 60_000), None);
+      }
+    }
+
+    #[test]
+    fn leaving_reports_away_at_once_but_only_once() {
+      let mut reporter = AttentionReporter::default();
+      reporter.next(true, NOW);
+      assert_eq!(reporter.leave(), Some(false));
+      assert_eq!(reporter.leave(), None);
+      assert_eq!(reporter.last_report(), Some(false));
     }
   }
 

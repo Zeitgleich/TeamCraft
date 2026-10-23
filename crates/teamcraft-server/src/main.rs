@@ -710,6 +710,8 @@ fn push_settings(config: &Config) -> PushSettings {
       initial_delay: Duration::from_millis(push.retry_initial_delay_ms),
     },
     test_interval: Duration::from_secs(push.test_interval_secs),
+    max_rings_per_minute: push.max_rings_per_minute,
+    dismiss_coalesce: Duration::from_millis(push.dismiss_coalesce_ms),
     allow_private_endpoints: push.allow_private_endpoints,
   }
 }

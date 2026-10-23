@@ -229,6 +229,8 @@ pub fn apply_global(prefs: &mut Preferences, server: &NotificationSettings) {
     |schedule| dnd_from_server(schedule, &notes.dnd),
   );
   prefs.privacy.share_read_receipts = server.send_read_receipts;
+  // Servers from before the setting say nothing: attention is used there.
+  prefs.notifications.uses_desktop_attention = server.maybe_uses_desktop_attention.unwrap_or(true);
 }
 
 /// Local preferences as server settings; fields the UI has no control for come from `previous`.
@@ -246,6 +248,7 @@ pub fn global_from_prefs(
     },
     send_read_receipts: prefs.privacy.share_read_receipts,
     maybe_dnd_schedule: dnd_to_server(&notes.dnd, zone, previous.maybe_dnd_schedule.as_ref()),
+    maybe_uses_desktop_attention: Some(notes.uses_desktop_attention),
   }
 }
 
@@ -311,6 +314,10 @@ pub fn dnd_to_server(dnd: &DndSchedule, zone: &LocalZone, previous: Option<&DndW
       .take(MAX_DND_ALLOWED_USERS)
       .collect(),
     allows_urgent: dnd.allows_urgent,
+    // Not edited here yet: keep what another device chose.
+    urgent_scope: previous
+      .map(|previous| previous.urgent_scope.clone())
+      .unwrap_or_default(),
   })
 }
 
@@ -469,7 +476,9 @@ mod tests {
           windows: vec![night(WORKDAYS.to_vec()), weekend_afternoon()],
           allow_user_ids: vec![crate::model::id_from_raw(5)],
           allows_urgent: true,
+          urgent_scope: teamcraft_proto::UrgentScope::Direct,
         }),
+        maybe_uses_desktop_attention: Some(true),
       };
       apply_global(&mut prefs, &server);
       assert_eq!(prefs.notifications.push_when, PushWhen::Always);
@@ -600,6 +609,7 @@ mod tests {
         push_mode: PushMode::AwayOnly,
         send_read_receipts: true,
         maybe_dnd_schedule: None,
+        maybe_uses_desktop_attention: None,
       };
       apply_global(&mut prefs, &server);
       let dnd = &prefs.notifications.dnd;
