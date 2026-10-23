@@ -2,11 +2,14 @@
 #![allow(clippy::unwrap_used, dead_code)]
 
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
-use teamcraft_core::clock::{Clock, ManualClock};
+#[cfg(not(target_arch = "wasm32"))]
+use teamcraft_core::clock::Clock;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
@@ -176,6 +179,8 @@ pub fn linked_options(secrets: teamcraft_core::client::LinkedSecrets) -> Enrollm
   }
 }
 
+// Native only: the browser tests have no tokio.
+#[cfg(not(target_arch = "wasm32"))]
 /// Wall-clock time that follows tokio's (paused) clock, so a runner's deadlines and its sleeps
 /// agree. The wall clock can also jump ahead on its own, as it does when a laptop wakes up (tokio's
 /// clock is monotonic and stands still during sleep).
@@ -184,10 +189,12 @@ pub struct TokioClock {
   jumped_ms: Arc<AtomicI64>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Moves a [`TokioClock`]'s wall clock ahead.
 #[derive(Clone)]
 pub struct ClockJump(Arc<AtomicI64>);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TokioClock {
   pub fn new() -> (Self, ClockJump) {
     let jumped_ms = Arc::new(AtomicI64::new(0));
@@ -199,6 +206,7 @@ impl TokioClock {
   }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Clock for TokioClock {
   fn now_ms(&self) -> i64 {
     1_800_000_000_000
@@ -207,6 +215,7 @@ impl Clock for TokioClock {
   }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ClockJump {
   pub fn forward(&self, duration: std::time::Duration) {
     self
