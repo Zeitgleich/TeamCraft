@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 
-use crate::bundle::{Bundle, BundleState};
+use crate::bundle::{Bundle, BundleState, Release, ReleaseUpdate, apply_update};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 
@@ -30,6 +30,32 @@ pub fn BundleBanner() -> impl IntoView {
           <span class="small mono" translate="no">{detail}</span>
         </div>
       }
+    })
+  }
+}
+
+/// "A new version is ready, reload" (browser): a new release never replaces the running page on its
+/// own, so the user decides when (docs/e2ee.md §9.3).
+#[component]
+pub fn ReleaseBanner() -> impl IntoView {
+  let i18n = use_i18n();
+  let release = use_context::<Release>();
+  move || {
+    let text = match release?.0.get() {
+      ReleaseUpdate::Current => return None,
+      ReleaseUpdate::Ready => i18n.t("release-ready"),
+      ReleaseUpdate::TooOld { minimum_version } => {
+        i18n.t_with("release-too-old", &[("version", &minimum_version)])
+      },
+    };
+    Some(view! {
+      <div class="update-banner" role="status">
+        <Icon name=IconName::Download />
+        <span>{text}</span>
+        <button class="btn btn-primary btn-small" on:click=move |_| apply_update()>
+          {move || i18n.t("release-reload")}
+        </button>
+      </div>
     })
   }
 }

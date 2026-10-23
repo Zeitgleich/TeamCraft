@@ -17,7 +17,7 @@ use crate::components::activity_view::ActivityView;
 use crate::components::admin_console::AdminConsole;
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bookmarks::BookmarksDialog;
-use crate::components::bundle_banner::BundleBanner;
+use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::calls_view::CallsView;
@@ -87,8 +87,11 @@ pub fn App() -> impl IntoView {
   // What the service worker says about the code that is running (docs/e2ee.md §9.3).
   let bundle = crate::bundle::Bundle(RwSignal::new(crate::bundle::BundleState::Unknown));
   provide_context(bundle);
+  let release = crate::bundle::Release(RwSignal::new(crate::bundle::ReleaseUpdate::Current));
+  provide_context(release);
   if !tauri::is_available() {
     crate::bundle::watch(bundle.0);
+    crate::bundle::watch_releases(release.0);
   }
 
   #[cfg(feature = "demo")]
@@ -159,6 +162,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       // One grid row for all banners, so the top bar and the body keep their own rows.
       <div class="app-banners" node_ref=banners>
         <BundleBanner />
+        <ReleaseBanner />
         <OfflineBanner />
         <StorageBanner />
         <AnnouncementBanner />

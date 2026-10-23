@@ -875,6 +875,13 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   The app is served from that cache, never from the network. An update that does not verify is dropped: the previous verified version keeps
   running and the pages are told, so the UI warns (and shows the key's fingerprint on the About
   screen). A worker the browser stopped restores what it verified from a cache before answering.
+- **Updates.** A verified update installs in the background but does not take over open pages: it
+  waits until the user reloads (the page offers "a new version is ready") or every tab closed. Each
+  page is served from the release it was loaded with (the worker remembers the release per page),
+  and a release's cache is deleted only once no page uses it, so a page never loads files of two
+  releases. Pages call `registration.update()` when they become visible, come back online and
+  hourly, at most every 15 minutes, and ask `GET /api/v1/client-compatibility`; a version the server
+  no longer supports asks for the reload too.
 - **Push code.** The service worker needs Rust for push (§7: open the sealed wake-up, read the store,
   build the notification). A worker cannot verify scripts it loads with `importScripts`, so
   `scripts/finish-sw.sh` (a Trunk hook) inlines the JS glue into `sw.js`, and the worker reads the wasm
