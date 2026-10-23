@@ -2,9 +2,9 @@ use leptos::prelude::*;
 
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
-use crate::components::sidebar::shortcut_label;
 use crate::components::status_menu::StatusMenu;
 use crate::i18n::use_i18n;
+use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::state::{Overlay, use_app_state};
 
 /// Global header: search, help and the account/status menu.
@@ -23,7 +23,7 @@ pub fn TopBar() -> impl IntoView {
       <button class="search-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
         <Icon name=IconName::Search />
         <span>{move || i18n.t("search-placeholder")}</span>
-        <kbd>{shortcut_label("K")}</kbd>
+        <ShortcutKeys shortcut=QUICK_SWITCHER />
       </button>
       <div class="top-actions">
         <button

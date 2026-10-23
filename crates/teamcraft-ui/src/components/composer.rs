@@ -14,6 +14,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
+use crate::keys::t_with_shortcuts;
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
 use crate::model::{ConversationKind, MessageKind, User};
@@ -900,8 +901,8 @@ pub fn Composer(
               view! {
                 <span class="composer-hint">
                   {move || match state.settings.send_mode.get() {
-                    SendMode::Enter => i18n.t("composer-hint-enter"),
-                    SendMode::CtrlEnter => i18n.t("composer-hint-ctrl-enter"),
+                    SendMode::Enter => t_with_shortcuts(i18n, "composer-hint-enter"),
+                    SendMode::CtrlEnter => t_with_shortcuts(i18n, "composer-hint-ctrl-enter"),
                   }}
                 </span>
               }

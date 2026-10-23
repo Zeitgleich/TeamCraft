@@ -94,8 +94,8 @@ composer-remove-attachment = Remove attachment
 composer-attach = Attach files
 composer-emoji = Add emoji
 composer-send = Send message
-composer-hint-enter = Enter to send, Shift+Enter for a new line
-composer-hint-ctrl-enter = Ctrl+Enter to send, Enter for a new line
+composer-hint-enter = Enter to send, { $newline } for a new line
+composer-hint-ctrl-enter = { $send } to send, Enter for a new line
 composer-markdown-hint = **bold**  _italic_  `code`  ```code block```
 
 ## Messages
@@ -160,8 +160,8 @@ settings-theme-light = Light
 settings-theme-dark = Dark
 settings-language = Language
 settings-send-mode = Send messages with
-settings-send-enter = Enter (Shift+Enter for a new line)
-settings-send-ctrl-enter = Ctrl+Enter (Enter for a new line)
+settings-send-enter = Enter ({ $newline } for a new line)
+settings-send-ctrl-enter = { $send } (Enter for a new line)
 settings-join-leave = Show join and leave messages
 settings-unreads-group = Group unread channels at the top of the sidebar
 settings-advanced-stub = Advanced settings will appear here.
@@ -1448,7 +1448,7 @@ jump-to-latest-new = { $count ->
 sidebar-mark-all-read = Mark all as read
 settings-zoom = Size of the interface
 settings-zoom-percent = { $percent } %
-settings-zoom-hint = Also with Ctrl/Cmd + Plus, Minus and 0.
+settings-zoom-hint = Also with { $modifier } + Plus, Minus and 0.
 shortcut-next-unread = Previous or next unread conversation
 shortcut-zoom = Zoom in, zoom out, reset
 action-react-with = React with { $emoji }
@@ -1765,3 +1765,15 @@ settings-f-update_subject = Update, subject
 settings-f-update_body = Update, text
 settings-f-cancellation_subject = Cancellation, subject
 settings-f-cancellation_body = Cancellation, text
+
+## Key names in keyboard shortcuts (the caps shown on a keyboard)
+key-ctrl = Ctrl
+key-shift = Shift
+key-alt = Alt
+key-command = Command
+key-option = Option
+key-enter = Enter
+key-escape = Esc
+key-up = Up arrow
+key-down = Down arrow
+key-plus-word = plus

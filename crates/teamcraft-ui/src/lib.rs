@@ -24,6 +24,7 @@ pub mod groups;
 pub mod highlight;
 pub mod hybrid;
 pub mod i18n;
+pub mod keys;
 pub mod live;
 pub mod markdown;
 pub mod meetings;
