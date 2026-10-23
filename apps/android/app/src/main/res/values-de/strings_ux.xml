@@ -78,4 +78,14 @@
   <string name="image_save">Speichern</string>
   <string name="image_saved">In Bilder/TeamCraft gespeichert</string>
   <string name="image_save_failed">Das Bild konnte nicht gespeichert werden.</string>
+
+  <!-- Settings pages -->
+  <string name="settings_notifications_summary">Push, Erwähnungen, Nicht stören</string>
+  <string name="settings_chats_title">Chats und Darstellung</string>
+  <string name="settings_chats_summary">Eingabe, Schreibanzeige, Farben, Suche</string>
+  <string name="settings_security_title">Datenschutz und Sicherheit</string>
+  <string name="settings_security_summary">Sicherheitscode, App-Sperre, Bildschirmfotos, Passphrase</string>
+  <string name="settings_devices_title">Geräte</string>
+  <string name="settings_devices_summary">Neues Gerät verknüpfen</string>
+  <string name="dynamic_color">Farben meines Hintergrundbilds verwenden</string>
 </resources>

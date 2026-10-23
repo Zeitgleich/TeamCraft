@@ -5,12 +5,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,6 +29,7 @@ import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.security.LockAfter
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
+import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 
 /** App lock on or off, and after how long in the background it locks again. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -36,18 +41,11 @@ fun AppLockSetting() {
   var isEnabled by remember { mutableStateOf(prefs.isEnabled) }
   var lockAfter by remember { mutableStateOf(prefs.lockAfter) }
   Column {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Switch(
-        checked = isEnabled,
-        enabled = isAvailable || isEnabled,
-        onCheckedChange = {
-          isEnabled = it
-          prefs.setEnabled(it)
-          // Notifications already shown follow the new setting at once.
-          TeamCraftApplication.graph(context).notifier.repostAll()
-        },
-      )
-      Text(stringResource(R.string.app_lock), modifier = Modifier.padding(start = 8.dp))
+    SettingSwitch(R.string.app_lock, isEnabled, isEnabled = isAvailable || isEnabled) {
+      isEnabled = it
+      prefs.setEnabled(it)
+      // Notifications already shown follow the new setting at once.
+      TeamCraftApplication.graph(context).notifier.repostAll()
     }
     if (!isAvailable) {
       Text(
@@ -80,13 +78,20 @@ fun ShareTypingSetting() {
   val context = LocalContext.current
   val prefs = remember { ComposerPrefs.prefs(context) }
   var isOn by remember { mutableStateOf(prefs.isSharingTyping) }
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    Switch(checked = isOn, onCheckedChange = {
-      isOn = it
-      prefs.setSharingTyping(it)
-    })
-    Text(stringResource(R.string.share_typing), modifier = Modifier.padding(start = 8.dp))
+  SettingSwitch(R.string.share_typing, isOn) {
+    isOn = it
+    prefs.setSharingTyping(it)
   }
+}
+
+/** The wallpaper's colors instead of TeamCraft's (Android 12+). */
+@Composable
+fun DynamicColorSetting() {
+  if (!AppearancePrefs.isSupported) return
+  val context = LocalContext.current
+  val prefs = remember { AppearancePrefs.prefs(context) }
+  val isOn by prefs.isDynamicColor.collectAsState()
+  SettingSwitch(R.string.dynamic_color, isOn, onChange = prefs::setDynamicColor)
 }
 
 /** Enter sends (hardware keyboards); Shift+Enter is a new line then. */
@@ -95,12 +100,9 @@ fun SendWithEnterSetting() {
   val context = LocalContext.current
   val prefs = remember { ComposerPrefs.prefs(context) }
   var isOn by remember { mutableStateOf(prefs.isSendWithEnter) }
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    Switch(checked = isOn, onCheckedChange = {
-      isOn = it
-      prefs.setSendWithEnter(it)
-    })
-    Text(stringResource(R.string.send_with_enter), modifier = Modifier.padding(start = 8.dp))
+  SettingSwitch(R.string.send_with_enter, isOn) {
+    isOn = it
+    prefs.setSendWithEnter(it)
   }
 }
 
@@ -110,3 +112,18 @@ private val LOCK_AFTER_CHOICES = listOf(
   LockAfter.FiveMinutes to R.string.app_lock_five_minutes,
   LockAfter.FifteenMinutes to R.string.app_lock_fifteen_minutes,
 )
+
+/** A switch with its label; the whole row toggles it (a bigger target than the switch alone). */
+@Composable
+fun SettingSwitch(label: Int, isOn: Boolean, isEnabled: Boolean = true, onChange: (Boolean) -> Unit) {
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .toggleable(value = isOn, enabled = isEnabled, role = Role.Switch, onValueChange = onChange)
+      .padding(vertical = 4.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Switch(checked = isOn, onCheckedChange = null, enabled = isEnabled)
+    Text(stringResource(label), modifier = Modifier.padding(start = 8.dp))
+  }
+}

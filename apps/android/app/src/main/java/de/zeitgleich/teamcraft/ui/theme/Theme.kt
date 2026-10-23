@@ -1,10 +1,18 @@
 package de.zeitgleich.teamcraft.ui.theme
 
+import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
@@ -69,9 +77,16 @@ val LocalTeamCraftColors = staticCompositionLocalOf { LightExtra }
 @Composable
 fun TeamCraftTheme(content: @Composable () -> Unit) {
   val isDark = isSystemInDarkTheme()
-  androidx.compose.runtime.CompositionLocalProvider(
-    LocalTeamCraftColors provides if (isDark) DarkExtra else LightExtra,
-  ) {
-    MaterialTheme(colorScheme = if (isDark) Dark else Light, content = content)
+  val context = LocalContext.current
+  val isDynamic by remember { AppearancePrefs.prefs(context).isDynamicColor }.collectAsState()
+  val scheme = when {
+    // The wallpaper's colors (Material You); the dark chrome and badges stay TeamCraft's.
+    isDynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+      if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    isDark -> Dark
+    else -> Light
+  }
+  CompositionLocalProvider(LocalTeamCraftColors provides if (isDark) DarkExtra else LightExtra) {
+    MaterialTheme(colorScheme = scheme, content = content)
   }
 }
