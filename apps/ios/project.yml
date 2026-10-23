@@ -169,6 +169,8 @@ targets:
           NSExtensionPointIdentifier: com.apple.usernotifications.service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
         NSUserActivityTypes: [INSendMessageIntent]
+        # Read by NotificationService.swift: whether an empty content drops a notification.
+        TCNotificationFiltering: $(NSE_NOTIFICATION_FILTERING)
         TCAppGroupId: $(APP_GROUP_ID)
         TCKeychainAccessGroup: $(KEYCHAIN_ACCESS_GROUP)
         TCServerURL: $(TEAMCRAFT_SERVER_URL)

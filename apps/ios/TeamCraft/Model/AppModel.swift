@@ -89,6 +89,7 @@ final class AppModel {
   @ObservationIgnored private var maybeCore: TeamCraft?
   @ObservationIgnored private var isSyncing = false
   @ObservationIgnored private var maybePushToken: String?
+  @ObservationIgnored private var maybeReconcile: Task<Void, Never>?
 
   private init() {}
 
@@ -101,7 +102,7 @@ final class AppModel {
   /// Opens the stored session, if any. Safe to call more than once.
   func bootstrap() async {
     guard case .starting = phase else { return }
-    storeChanges.observe { [weak self] in self?.changeCount += 1 }
+    storeChanges.observe { [weak self] in self?.storeDidChange() }
     // Copies of picked files older than a week were uploaded long ago.
     container.pruneUploads(olderThan: 7 * 24 * 3600)
     await refreshAccountState()
@@ -371,6 +372,7 @@ final class AppModel {
   func sceneBecameActive() async {
     guard case .ready = phase else { return }
     await startSyncing()
+    await reconcileNotifications()
   }
 
   func sceneEnteredBackground() async {
@@ -404,27 +406,149 @@ final class AppModel {
     await registerPushIfNeeded(token: token)
   }
 
-  /// A notification's tap or action (reply, mark as read).
+  /// Whether this device's push token is registered with the server (diagnostics).
+  var isPushTokenRegistered: Bool {
+    UserDefaults.standard.string(forKey: Self.pushTokenKey) != nil
+  }
+
+  /// A notification's tap or action (reply, mark as read, answer or decline a call).
   /// The conversation ID comes from the notification, which a forged push could fill: it is only
   /// acted on if the local store knows that conversation (the extension sets it from the decrypted
   /// payload, and drops it when it decrypted nothing).
-  /// Reply and mark-as-read also need the extension's tag over the ID (`NotificationAuthenticator`):
-  /// the server can show an alert without the extension, naming a conversation the user is in.
-  func handle(notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?)
-    async
-  {
-    guard await conversations().contains(where: { $0.id == conversationId }) else { return }
+  /// Reply, mark-as-read and answer also need the extension's tag over the ID
+  /// (`NotificationAuthenticator`): the server can show an alert without the extension, naming a
+  /// conversation the user is in.
+  func handle(
+    notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?,
+    maybeThreadId: String? = nil, notificationId: String? = nil
+  ) async {
+    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else { return }
     let isAuthentic = NotificationAuthenticator().isValid(tag: tag, for: conversationId)
     switch identifier {
     case NotificationCategories.replyAction:
       if isAuthentic, let replyText, !replyText.isEmpty {
-        await send(conversationId: conversationId, threadId: nil, body: replyText)
+        await send(conversationId: conversationId, threadId: maybeThreadId, body: replyText)
       }
     case NotificationCategories.markReadAction:
       if isAuthentic { await markRead(conversationId: conversationId) }
+    case NotificationCategories.answerCallAction:
+      removeDelivered(notificationId)
+      openConversationId = conversationId
+      if isAuthentic { calls.startCall(conversationId: conversationId, displayName: conversation.name) }
+    case NotificationCategories.declineCallAction:
+      // There is no decline call in the core yet: the ring stops here, the caller rings on.
+      removeDelivered(notificationId)
     default:
       openConversationId = conversationId
     }
+  }
+
+  /// Opens a sealed wake-up with the core in this process (a silent push, a VoIP push, or one the
+  /// extension couldn't open because the app held the store). `nil` if it can't be read.
+  func openPush(_ sealed: Data) async -> PushNotification? {
+    guard let core = try? core() else { return nil }
+    // In the foreground the app holds the lock already; otherwise take it like the extension does.
+    let needsLock = !isSyncing
+    if needsLock {
+      let lock = processLock
+      guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return nil }
+    }
+    defer { if needsLock && !isSyncing { processLock.release() } }
+    return try? await core.notificationForPush(payload: sealed, utcOffsetMinutes: PushClock.utcOffsetMinutes())
+  }
+
+  /// A background (`content-available`) push: a `dismiss` removes what was read or ended elsewhere
+  /// and sets the badge.
+  func handleBackgroundPush(_ userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+    guard let sealed = PushPayload.sealedBytes(from: userInfo) else { return .noData }
+    guard let notification = await openPush(sealed) else { return .failed }
+    switch notification.kind {
+    case .dismiss:
+      await DeliveredNotifications.apply(dismiss: notification)
+      if notification.maybeCallId != nil {
+        calls.endRinging(conversationId: notification.conversationId, maybeCallId: notification.maybeCallId)
+      }
+      return .newData
+    case .message, .call, .test, .unknown:
+      // Not sent as background pushes; only the badge is taken.
+      await DeliveredNotifications.setBadge(notification.maybeBadge)
+      return .noData
+    }
+  }
+
+  /// The system asks the foreground app how to present a notification. One the extension built is
+  /// shown unless its conversation is on screen; one it couldn't open (the app held the store) still
+  /// has the sealed wake-up, which the app opens and shows itself.
+  func presentation(for notification: UNNotification) async -> UNNotificationPresentationOptions {
+    let content = notification.request.content
+    guard let sealed = PushPayload.sealedBytes(from: content.userInfo) else {
+      let conversationId = content.userInfo[NotificationCategories.conversationKey] as? String
+      return conversationId != nil && conversationId == visibleConversationId ? [] : [.banner, .sound, .list]
+    }
+    guard let opened = await openPush(sealed) else { return [.banner, .sound, .list] }
+    await present(opened, base: content)
+    return []
+  }
+
+  // MARK: Delivered notifications and badge
+
+  /// The store changed (this process's core, or the extension): screens re-read, and notifications of
+  /// conversations that are read now go.
+  private func storeDidChange() {
+    changeCount += 1
+    guard maybeReconcile == nil else { return }
+    maybeReconcile = Task { [weak self] in
+      // Coalesces a burst of changes (a sync delivers many) into one pass.
+      try? await Task.sleep(for: .milliseconds(500))
+      await self?.reconcileNotifications()
+      self?.maybeReconcile = nil
+    }
+  }
+
+  /// Removes notifications of conversations the core reports fully read and sets the badge from the
+  /// local unread state (while the app is open; in the background the wake-ups carry the badge).
+  func reconcileNotifications() async {
+    guard case .ready = phase, UIApplication.shared.applicationState != .background else { return }
+    let all = await conversations()
+    let read = Set(all.filter { $0.unreadCount == 0 && $0.mentionCount == 0 }.map(\.id))
+    await DeliveredNotifications.removeRead(conversations: read)
+    let summaries = all.map {
+      UnreadSummary(
+        isDirectMessage: $0.kind == .direct || $0.kind == .group, unreadCount: $0.unreadCount,
+        mentionCount: $0.mentionCount)
+    }
+    await DeliveredNotifications.setBadge(UInt32(BadgeCount.local(summaries)))
+  }
+
+  /// Shows a push the app opened itself in the foreground, by the same rules as the extension (the
+  /// app can drop a notification, so it behaves as with the filtering entitlement).
+  private func present(_ notification: PushNotification, base: UNNotificationContent) async {
+    let builder = NotificationContentBuilder(strings: .localized)
+    let flags = PushFlags(notification)
+    let maybeContent: UNNotificationContent?
+    switch PushPresentation.of(flags, canFilter: true) {
+    case .message, .quietMessage:
+      guard notification.conversationId != visibleConversationId else { return }
+      await DeliveredNotifications.removeEarlier(of: notification)
+      maybeContent = builder.message(for: notification, presentation: .message, base: base).content
+    case .test:
+      maybeContent = builder.test(for: notification, base: base)
+    case .callKit, .callAlert:
+      // The open app rings through the gateway (`onIncomingCall`); nothing to add.
+      maybeContent = nil
+    case .drop, .quietGeneric:
+      if notification.kind == .dismiss { await DeliveredNotifications.apply(dismiss: notification) }
+      maybeContent = nil
+    }
+    await DeliveredNotifications.setBadge(flags.maybeBadge)
+    guard let content = maybeContent else { return }
+    let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+    try? await UNUserNotificationCenter.current().add(request)
+  }
+
+  private func removeDelivered(_ maybeIdentifier: String?) {
+    guard let identifier = maybeIdentifier else { return }
+    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
   }
 
   // MARK: Calls
@@ -447,7 +571,7 @@ final class AppModel {
     let opened = try factory.open(
       account: account, createKey: true,
       listener: ClosureEventListener { [weak self] in
-        Task { @MainActor in self?.changeCount += 1 }
+        Task { @MainActor in self?.storeDidChange() }
       })
     maybeCore = opened
     return opened
