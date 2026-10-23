@@ -90,4 +90,8 @@
   <string name="settings_devices_title">Devices</string>
   <string name="settings_devices_summary">Link a new device</string>
   <string name="dynamic_color">Use the colors of my wallpaper</string>
+  <plurals name="chats_selected">
+    <item quantity="one">%d selected</item>
+    <item quantity="other">%d selected</item>
+  </plurals>
 </resources>

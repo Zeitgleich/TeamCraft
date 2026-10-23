@@ -1,5 +1,7 @@
 import SwiftUI
 
+/// Settings as a hub, like the Android app: name, presence and status on top, then one page each
+/// for notifications, chats, privacy and security and devices, and sign-out.
 struct SettingsView: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
@@ -9,8 +11,6 @@ struct SettingsView: View {
   @State private var statusEmoji = ""
   @State private var statusText = ""
   @State private var statusExpiry = StatusExpiryValue.never
-  @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
-  @State private var isPrefetchLoaded = false
 
   var body: some View {
     NavigationStack {
@@ -31,66 +31,21 @@ struct SettingsView: View {
             if let choice = PresenceChoice(rawValue: raw) { Task { await model.setPresence(choice.presence) } }
           }
         }
-        Section("custom_status_title") {
-          TextField("custom_status_emoji", text: $statusEmoji)
-          TextField("custom_status_text", text: $statusText)
-          Picker("custom_status_expiry", selection: $statusExpiry) {
-            ForEach(StatusExpiryValue.allCases) { expiry in Text(expiry.title).tag(expiry) }
-          }
-          Button("custom_status_save") {
-            let status = CustomStatusValue(emoji: statusEmoji, text: statusText, expiry: statusExpiry)
-            Task { await model.perform(.setCustomStatus(status)) }
-          }
-          .disabled(statusEmoji.isEmpty && statusText.isEmpty)
-          Button("custom_status_clear", role: .destructive) {
-            statusEmoji = ""
-            statusText = ""
-            Task { await model.perform(.setCustomStatus(nil)) }
-          }
-        }
+        customStatusSection
         Section {
-          NavigationLink("approve_title") { ApproveLinkView() }
-        } header: {
-          Text("devices_title")
-        }
-        Section {
-          Text(account.identityFingerprint)
-            .font(.system(.footnote, design: .monospaced))
-            .textSelection(.enabled)
-        } header: {
-          Text("fingerprint_title")
-        } footer: {
-          Text("fingerprint_hint")
-        }
-        Section {
-          NavigationLink("dnd_title") { DndSettingsView() }
-          NavigationLink("rules_title") { NotificationRulesView() }
-          NavigationLink("diagnostics_title") { NotificationDiagnosticsView(account: account) }
-        } header: {
-          Text("notifications_title")
-        }
-        Section {
-          Picker("prefetch_title", selection: $prefetch) {
-            Text("prefetch_off").tag(SegmentPrefetchMode.off)
-            Text("prefetch_unmetered").tag(SegmentPrefetchMode.unmeteredOnly)
-            Text("prefetch_always").tag(SegmentPrefetchMode.always)
+          NavigationLink { NotificationsSettingsPage(account: account) } label: {
+            SettingsEntry(title: "notifications_title", summary: "settings_notifications_summary", icon: "bell")
           }
-        } header: {
-          Text("search_title")
-        } footer: {
-          Text("prefetch_hint")
-        }
-        Section("push_title") {
-          switch model.pushStatus {
-          case .enabled: Label("push_registered", systemImage: "checkmark.circle")
-          case .denied:
-            Button("push_denied_open_settings") {
-              if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-            }
-          case .unknown: Button("push_enable") { Task { await model.enablePush() } }
+          NavigationLink { ChatsSettingsPage() } label: {
+            SettingsEntry(title: "settings_chats_title", summary: "settings_chats_summary", icon: "bubble.left.and.bubble.right")
+          }
+          NavigationLink { SecuritySettingsPage(account: account) } label: {
+            SettingsEntry(title: "settings_security_title", summary: "settings_security_summary", icon: "lock.shield")
+          }
+          NavigationLink { ApproveLinkView() } label: {
+            SettingsEntry(title: "devices_title", summary: "settings_devices_summary", icon: "iphone")
           }
         }
-        DeviceSecuritySection()
         Section {
           Button("sign_out", role: .destructive) {
             Task {
@@ -100,19 +55,136 @@ struct SettingsView: View {
           }
         }
       }
-      .task {
-        prefetch = await model.segmentPrefetch()
-        isPrefetchLoaded = true
-      }
-      .onChange(of: prefetch) { _, mode in
-        if isPrefetchLoaded { Task { await model.setSegmentPrefetch(mode) } }
-      }
       .navigationTitle("settings_title")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } }
       }
     }
+  }
+
+  private var customStatusSection: some View {
+    Section("custom_status_title") {
+      TextField("custom_status_emoji", text: $statusEmoji)
+      TextField("custom_status_text", text: $statusText)
+      Picker("custom_status_expiry", selection: $statusExpiry) {
+        ForEach(StatusExpiryValue.allCases) { expiry in Text(expiry.title).tag(expiry) }
+      }
+      Button("custom_status_save") {
+        let status = CustomStatusValue(emoji: statusEmoji, text: statusText, expiry: statusExpiry)
+        Task { await model.perform(.setCustomStatus(status)) }
+      }
+      .disabled(statusEmoji.isEmpty && statusText.isEmpty)
+      Button("custom_status_clear", role: .destructive) {
+        statusEmoji = ""
+        statusText = ""
+        Task { await model.perform(.setCustomStatus(nil)) }
+      }
+    }
+  }
+}
+
+/// One entry of the settings hub: what the page is and what it holds.
+private struct SettingsEntry: View {
+  let title: LocalizedStringKey
+  let summary: LocalizedStringKey
+  let icon: String
+
+  var body: some View {
+    Label {
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+        Text(summary).font(.caption).foregroundStyle(Theme.textMuted)
+      }
+    } icon: {
+      Image(systemName: icon)
+    }
+  }
+}
+
+/// Push, do not disturb, the mention rules and the diagnostics.
+private struct NotificationsSettingsPage: View {
+  @Environment(AppModel.self) private var model
+  let account: Account
+
+  var body: some View {
+    Form {
+      Section("push_title") {
+        switch model.pushStatus {
+        case .enabled: Label("push_registered", systemImage: "checkmark.circle")
+        case .denied:
+          Button("push_denied_open_settings") {
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+          }
+        case .unknown: Button("push_enable") { Task { await model.enablePush() } }
+        }
+      }
+      Section {
+        NavigationLink("dnd_title") { DndSettingsView() }
+        NavigationLink("rules_title") { NotificationRulesView() }
+        NavigationLink("diagnostics_title") { NotificationDiagnosticsView(account: account) }
+      }
+    }
+    .navigationTitle("notifications_title")
+    .navigationBarTitleDisplayMode(.inline)
+  }
+}
+
+/// Typing indicator and the search download.
+private struct ChatsSettingsPage: View {
+  @Environment(AppModel.self) private var model
+  @AppStorage("share_typing") private var isSharingTyping = true
+  @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
+  @State private var isPrefetchLoaded = false
+
+  var body: some View {
+    Form {
+      Section {
+        Toggle("share_typing", isOn: $isSharingTyping)
+      }
+      Section {
+        Picker("prefetch_title", selection: $prefetch) {
+          Text("prefetch_off").tag(SegmentPrefetchMode.off)
+          Text("prefetch_unmetered").tag(SegmentPrefetchMode.unmeteredOnly)
+          Text("prefetch_always").tag(SegmentPrefetchMode.always)
+        }
+      } header: {
+        Text("search_title")
+      } footer: {
+        Text("prefetch_hint")
+      }
+    }
+    .task {
+      prefetch = await model.segmentPrefetch()
+      isPrefetchLoaded = true
+    }
+    .onChange(of: prefetch) { _, mode in
+      if isPrefetchLoaded { Task { await model.setSegmentPrefetch(mode) } }
+    }
+    .navigationTitle("settings_chats_title")
+    .navigationBarTitleDisplayMode(.inline)
+  }
+}
+
+/// The security code, the app lock and the app switcher cover.
+private struct SecuritySettingsPage: View {
+  let account: Account
+
+  var body: some View {
+    Form {
+      Section {
+        Text(account.identityFingerprint)
+          .font(.system(.footnote, design: .monospaced))
+          .textSelection(.enabled)
+      } header: {
+        Text("fingerprint_title")
+      } footer: {
+        Text("fingerprint_hint")
+      }
+      DeviceSecuritySection()
+    }
+    .navigationTitle("settings_security_title")
+    .navigationBarTitleDisplayMode(.inline)
   }
 }
 

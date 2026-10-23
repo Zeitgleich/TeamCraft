@@ -2,6 +2,14 @@ package de.zeitgleich.teamcraft.ui.screens
 
 import android.content.Context
 import android.text.format.DateUtils
+import androidx.activity.compose.BackHandler
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.semantics.selected
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -26,8 +34,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -69,6 +75,8 @@ import de.zeitgleich.teamcraft.ui.PreviewContent
 import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.SectionTitle
 import de.zeitgleich.teamcraft.ui.sections
+import de.zeitgleich.teamcraft.ui.toggled
+import de.zeitgleich.teamcraft.ui.selectionActions
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
@@ -84,6 +92,10 @@ fun ChatListScreen(
 ) {
   var conversations by remember { mutableStateOf<List<ConversationItem>?>(null) }
   var previews by remember { mutableStateOf<Map<String, ChatListEntry>>(emptyMap()) }
+  // Long-press starts selecting several conversations, as in WhatsApp; back or ✕ ends it.
+  var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
+  var maybeNotifying by remember { mutableStateOf<String?>(null) }
+  BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
   LaunchedEffect(Unit) {
     // Every read finishes before the next starts: while syncing, changes come faster than a full
     // pass over all conversations, and restarting on each would never show the previews.
@@ -95,17 +107,28 @@ fun ChatListScreen(
   }
   Scaffold(
     topBar = {
-      ChromeTopBar(
-        title = stringResource(R.string.chats_title),
-        actions = {
-          IconButton(onClick = onSearch) {
-            Icon(Icons.Filled.Search, contentDescription = stringResource(R.string.search))
-          }
-          IconButton(onClick = onSettings) {
-            Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.settings_title))
-          }
-        },
-      )
+      val selected = conversations.orEmpty().filter { it.id in selection }
+      if (selected.isNotEmpty()) {
+        SelectionTopBar(
+          viewModel = viewModel,
+          selected = selected,
+          previews = previews,
+          onNotifications = { maybeNotifying = it },
+          onDone = { selection = emptyList() },
+        )
+      } else {
+        ChromeTopBar(
+          title = stringResource(R.string.chats_title),
+          actions = {
+            IconButton(onClick = onSearch) {
+              Icon(Icons.Filled.Search, contentDescription = stringResource(R.string.search))
+            }
+            IconButton(onClick = onSettings) {
+              Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.settings_title))
+            }
+          },
+        )
+      }
     },
   ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
@@ -134,7 +157,12 @@ fun ChatListScreen(
                 conversation = conversation,
                 maybeEntry = previews[conversation.id],
                 isSelected = conversation.id == maybeSelectedId,
-                onClick = { onOpen(conversation.id) },
+                isChecked = conversation.id in selection,
+                isSelecting = selection.isNotEmpty(),
+                onClick = {
+                  if (selection.isEmpty()) onOpen(conversation.id) else selection = toggled(selection, conversation.id)
+                },
+                onLongPress = { selection = toggled(selection, conversation.id) },
               )
             }
           }
@@ -142,6 +170,8 @@ fun ChatListScreen(
       }
     }
   }
+  // Mute or change notifications without opening the conversation.
+  maybeNotifying?.let { id -> ConversationNotificationsDialog(viewModel, id) { maybeNotifying = null } }
 }
 
 @Composable
@@ -188,15 +218,18 @@ private fun SwipeableConversationRow(
   conversation: ConversationItem,
   maybeEntry: ChatListEntry?,
   isSelected: Boolean,
+  isChecked: Boolean,
+  isSelecting: Boolean,
   onClick: () -> Unit,
+  onLongPress: () -> Unit,
 ) {
   val haptics = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val actions = rowActions(viewModel, conversation, maybeEntry)
-  var isNotifying by remember { mutableStateOf(false) }
   val state = rememberSwipeToDismissBoxState()
   SwipeToDismissBox(
     state = state,
+    gesturesEnabled = !isSelecting,
     enableDismissFromStartToEnd = actions.toggleRead != null,
     backgroundContent = { SwipeBackground(state.dismissDirection, conversation, isUnread = actions.isUnread) },
     onDismiss = { direction ->
@@ -210,10 +243,8 @@ private fun SwipeableConversationRow(
       scope.launch { state.reset() }
     },
   ) {
-    ConversationRow(conversation, maybeEntry, actions, isSelected, onClick, onNotifications = { isNotifying = true })
+    ConversationRow(conversation, maybeEntry, actions, isSelected, isChecked, onClick, onLongPress)
   }
-  // Mute or change notifications without opening the conversation.
-  if (isNotifying) ConversationNotificationsDialog(viewModel, conversation.id) { isNotifying = false }
 }
 
 /** What can be done with a row, shared by swipe, menu and accessibility. */
@@ -276,11 +307,11 @@ private fun ConversationRow(
   maybeEntry: ChatListEntry?,
   actions: RowActions,
   isSelected: Boolean,
+  isChecked: Boolean,
   onClick: () -> Unit,
-  onNotifications: () -> Unit,
+  onLongPress: () -> Unit,
 ) {
   val haptics = LocalHapticFeedback.current
-  var isMenuOpen by remember { mutableStateOf(false) }
   val readLabel = stringResource(if (actions.isUnread) R.string.chat_mark_read else R.string.chat_mark_unread)
   val favoriteLabel = stringResource(if (conversation.isFavorite) R.string.favorite_remove else R.string.favorite_add)
   Box {
@@ -288,14 +319,21 @@ private fun ConversationRow(
       modifier = Modifier
         .fillMaxWidth()
         // The open conversation, when it shows next to the list (two panes).
-        .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.background)
+        .background(
+          when {
+            isChecked -> MaterialTheme.colorScheme.secondaryContainer
+            isSelected -> MaterialTheme.colorScheme.primaryContainer
+            else -> MaterialTheme.colorScheme.background
+          },
+        )
         .combinedClickable(
           onClick = onClick,
           onLongClick = {
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            isMenuOpen = true
+            onLongPress()
           },
         )
+        .semantics { selected = isChecked }
         .semantics {
           customActions = listOfNotNull(
             actions.toggleRead?.let { toggle -> CustomAccessibilityAction(readLabel) { toggle(); true } },
@@ -305,27 +343,11 @@ private fun ConversationRow(
         .padding(horizontal = 16.dp, vertical = 10.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      ConversationAvatar(conversation)
+      if (isChecked) CheckedAvatar() else ConversationAvatar(conversation)
       Column(Modifier.weight(1f).padding(start = 12.dp)) {
         TitleLine(conversation, maybeEntry)
         PreviewLine(conversation, maybeEntry)
       }
-    }
-    DropdownMenu(expanded = isMenuOpen, onDismissRequest = { isMenuOpen = false }) {
-      actions.toggleRead?.let { toggle ->
-        DropdownMenuItem(text = { Text(readLabel) }, onClick = {
-          isMenuOpen = false
-          toggle()
-        })
-      }
-      DropdownMenuItem(text = { Text(favoriteLabel) }, onClick = {
-        isMenuOpen = false
-        actions.toggleFavorite()
-      })
-      DropdownMenuItem(text = { Text(stringResource(R.string.notifications_conversation)) }, onClick = {
-        isMenuOpen = false
-        onNotifications()
-      })
     }
   }
 }
@@ -472,3 +494,57 @@ private val QUICK_ROUTES = listOf(
   "browse" to R.string.browse_title,
   "meetings" to R.string.meetings_title,
 )
+
+/** Instead of the title while conversations are selected: how many, and what to do with them. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SelectionTopBar(
+  viewModel: MainViewModel,
+  selected: List<ConversationItem>,
+  previews: Map<String, ChatListEntry>,
+  onNotifications: (String) -> Unit,
+  onDone: () -> Unit,
+) {
+  val actions = selectionActions(selected)
+  TopAppBar(
+    title = { Text(pluralStringResource(R.plurals.chats_selected, selected.size, selected.size)) },
+    navigationIcon = {
+      IconButton(onClick = onDone) { Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.cancel)) }
+    },
+    actions = {
+      TextButton(onClick = {
+        for (conversation in selected) {
+          if (actions.isMarkingRead) {
+            viewModel.markRead(conversation.id)
+          } else {
+            previews[conversation.id]?.let { viewModel.act(ChatActions.markUnread(conversation.id, it.lastMessageId)) }
+          }
+        }
+        onDone()
+      }) { Text(stringResource(if (actions.isMarkingRead) R.string.chat_mark_read else R.string.chat_mark_unread)) }
+      IconButton(onClick = {
+        for (conversation in selected) viewModel.act(ChatActions.setFavorite(conversation.id, actions.isAddingFavorite))
+        onDone()
+      }) {
+        Icon(
+          Icons.Filled.Star,
+          contentDescription = stringResource(if (actions.isAddingFavorite) R.string.favorite_add else R.string.favorite_remove),
+        )
+      }
+      actions.maybeSingle?.let { id ->
+        IconButton(onClick = {
+          onNotifications(id)
+          onDone()
+        }) { Icon(Icons.Filled.Notifications, contentDescription = stringResource(R.string.notifications_conversation)) }
+      }
+    },
+  )
+}
+
+/** The avatar of a selected conversation: a check mark. */
+@Composable
+private fun CheckedAvatar() {
+  Box(Modifier.size(40.dp).background(MaterialTheme.colorScheme.primary, CircleShape), contentAlignment = Alignment.Center) {
+    Icon(Icons.Filled.Done, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
+  }
+}
