@@ -56,6 +56,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ios
+          # Only main saves (the repository's 10 GB cache budget); pull requests restore main's cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Rust core as XCFramework and Swift bindings
         # Debug profile: much faster to build than release, and the tests never run the core.
         run: apps/ios/scripts/build-xcframework.sh --debug
