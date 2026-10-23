@@ -926,6 +926,7 @@ select.input {
 /* ---- Message list ---- */
 
 .message-list-wrap {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -4638,4 +4639,72 @@ select.input {
   margin: 2px 0 4px;
   font-size: 13px;
   font-weight: 600;
+}
+
+/* Placeholder for a message that is still loading. */
+.msg-skeleton {
+  display: flex;
+  gap: 12px;
+  padding: 8px 16px;
+}
+
+.skeleton-avatar,
+.skeleton-lines span {
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.skeleton-avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+}
+
+.skeleton-lines {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.skeleton-lines span {
+  height: 10px;
+  width: 30%;
+}
+
+.skeleton-lines span + span {
+  width: 65%;
+}
+
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-avatar,
+  .skeleton-lines span {
+    animation: none;
+  }
+}
+
+/* The day of the top message while scrolled up (the dividers scroll away with their rows). */
+.floating-day {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 5;
+  transform: translateX(-50%);
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.12);
+  pointer-events: none;
 }

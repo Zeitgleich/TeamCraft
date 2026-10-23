@@ -18,7 +18,7 @@ exists).
 | After sending, the feed stops a few pixels short of the new message (the last line is cut off)    | done  |
 | The scroll position of a conversation is lost when switching away and back                        | done  |
 | Long messages and code blocks are not collapsed                                                   | done  |
-| Sticky date headers while scrolling                                                               | open  |
+| The day of the top message while scrolling up (floating date)                                     | done  |
 
 ## Navigation and keyboard
 
@@ -58,7 +58,7 @@ exists).
 | Clicking an author name does nothing; it now opens the profile card (local time, status, message) | done  |
 | Hover card on names (without a click)                                                             | open  |
 | Drag to reorder favourites; custom sidebar sections exist as categories but can't be reordered    | open  |
-| Loading skeletons while a conversation's history loads                                            | open  |
+| Loading skeletons while a conversation's history loads                                            | done  |
 
 ## Bugs found on the way
 
