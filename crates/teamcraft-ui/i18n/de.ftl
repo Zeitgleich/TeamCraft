@@ -1439,3 +1439,5 @@ emoji-none = Kein Emoji gefunden
 offline-banner = Du bist offline. Die App verbindet sich von selbst wieder, sobald das Netzwerk zurück ist.
 shortcut-search-here = In dieser Unterhaltung suchen
 drop-files-here = Dateien hier ablegen, um sie anzuhängen
+message-show-more = Mehr anzeigen
+message-show-less = Weniger anzeigen

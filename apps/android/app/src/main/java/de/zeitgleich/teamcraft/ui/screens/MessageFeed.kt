@@ -8,6 +8,7 @@ import android.net.Uri
 import android.text.format.DateUtils
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -91,6 +92,7 @@ import java.io.File
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
@@ -102,11 +104,16 @@ import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.feedItems
-import de.zeitgleich.teamcraft.ui.findLinks
+import de.zeitgleich.teamcraft.ui.TextSpan
+import de.zeitgleich.teamcraft.ui.textSpans
+import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.isOpenableLink
 
 /** The reaction a double tap toggles, as in most chat apps. */
 private const val QUICK_REACTION = "👍"
+
+/** How long a message opened from a link stays highlighted. */
+private const val HIGHLIGHT_MS = 2500L
 
 /** How far a message is dragged to the right before letting go replies to it. */
 private val SWIPE_REPLY_THRESHOLD = 72.dp
@@ -127,6 +134,8 @@ fun MessageFeed(
   maybeOnReply: ((Message) -> Unit)?,
   onLongPress: (Message) -> Unit,
   modifier: Modifier = Modifier,
+  maybeFocusMessage: String? = null,
+  onOpenPermalink: (String) -> Unit = {},
 ) {
   // Newest first in a reversed list: the bottom stays anchored when the keyboard opens.
   val items = remember(messages, maybeFirstUnread) { feedItems(messages, maybeFirstUnread).asReversed() }
@@ -136,6 +145,13 @@ fun MessageFeed(
   var maybeLastMessageId by remember { mutableStateOf<String?>(null) }
   var maybeViewed by remember { mutableStateOf<ViewedImage?>(null) }
   var maybeWaitingFor by remember { mutableStateOf<String?>(null) }
+  var maybeHighlighted by remember(maybeFocusMessage) { mutableStateOf(maybeFocusMessage) }
+  LaunchedEffect(maybeHighlighted) {
+    if (maybeHighlighted != null) {
+      delay(HIGHLIGHT_MS)
+      maybeHighlighted = null
+    }
+  }
   val isAtBottom by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 8 } }
   val belowCount by remember(items) { derivedStateOf { items.messagesBefore(listState.firstVisibleItemIndex) } }
   LaunchedEffect(items) {
@@ -143,8 +159,13 @@ fun MessageFeed(
     val newest = messages.last()
     if (!hasScrolledInitially) {
       hasScrolledInitially = true
+      // A message link opens at its message; otherwise at the first unread one.
+      val focusIndex = maybeFocusMessage?.let { id -> items.indexOfFirst { it is FeedItem.Entry && it.message.id == id } } ?: -1
       val unreadIndex = items.indexOf(FeedItem.Unread)
-      if (unreadIndex > 0) showAtTop(listState, unreadIndex)
+      when {
+        focusIndex >= 0 -> showAtTop(listState, focusIndex)
+        unreadIndex > 0 -> showAtTop(listState, unreadIndex)
+      }
     } else if (newest.id != maybeLastMessageId && (isAtBottom || newest.author == snapshot?.me?.id)) {
       // Own messages always come into view; others' only while reading at the bottom.
       listState.animateScrollToItem(0)
@@ -186,6 +207,8 @@ fun MessageFeed(
               onOpenFile = onOpenFile,
               onLongPress = { onLongPress(item.message) },
               maybeOnReply = maybeOnReply,
+              isHighlighted = item.message.id == maybeHighlighted,
+              onOpenPermalink = onOpenPermalink,
             )
           }
         }
@@ -342,6 +365,8 @@ private fun MessageRow(
   onOpenFile: (FileInfo) -> Unit,
   onLongPress: () -> Unit,
   maybeOnReply: ((Message) -> Unit)?,
+  isHighlighted: Boolean,
+  onOpenPermalink: (String) -> Unit,
 ) {
   if (message.maybeSystemEvent != null || maybeExtras?.maybeWorkspaceEvent != null) {
     // Joins, renames and the like: a quiet centered line, not a post.
@@ -364,7 +389,12 @@ private fun MessageRow(
   Column(
     Modifier
       .fillMaxWidth()
-      .background(MaterialTheme.colorScheme.background)
+      .background(
+        animateColorAsState(
+          if (isHighlighted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.background,
+          label = "highlight",
+        ).value,
+      )
       .combinedClickable(
         onClick = {},
         onDoubleClick = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) },
@@ -417,7 +447,8 @@ private fun MessageRow(
     maybeExtras?.maybeReply?.let { reply -> ReplyQuote(snapshot?.name(reply.author).orEmpty(), reply.excerpt) }
     when {
       maybeExtras?.isDeleted == true -> Text(stringResource(R.string.message_deleted), fontStyle = FontStyle.Italic)
-      message.body.isNotEmpty() && !isOnlyFileLabel(message.body, maybeExtras) -> MessageText(message, context)
+      message.body.isNotEmpty() && !isOnlyFileLabel(message.body, maybeExtras) ->
+        MessageText(message, snapshot, onOpenPermalink)
     }
     maybeExtras?.files?.forEach { file -> FileAttachment(file, onOpenFile) }
     maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it) }
@@ -483,14 +514,26 @@ private fun ReplyQuote(author: String, excerpt: String) {
   }
 }
 
-/** The body with tappable web links (only those the shared rule allows to open). */
+/**
+ * The body with tappable web links (only those the shared rule allows to open), message links that
+ * open in the app, and highlighted mentions (stronger for the user's own name).
+ */
 @Composable
-private fun MessageText(message: Message, context: Context) {
-  val linkColor = MaterialTheme.colorScheme.primary
+private fun MessageText(message: Message, snapshot: ChatSnapshot?, onOpenPermalink: (String) -> Unit) {
+  val context = LocalContext.current
+  val style = SpanColors(
+    link = MaterialTheme.colorScheme.primary,
+    mention = MaterialTheme.colorScheme.primary,
+    mentionMe = LocalTeamCraftColors.current.mentionText,
+    mentionMeBackground = LocalTeamCraftColors.current.mentionBackground,
+  )
   val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant
   val edited = if (message.isEdited) " " + stringResource(R.string.edited) else ""
-  val text = remember(message.body, edited, linkColor, mutedColor) {
-    linkified(message.body, linkColor) { url -> openLink(context, url) }.let { body ->
+  val usernames = remember(snapshot) { snapshot?.users.orEmpty().map { it.username.lowercase() }.toSet() }
+  val myUsername = snapshot?.me?.username.orEmpty()
+  val text = remember(message.body, edited, style, mutedColor, usernames, myUsername) {
+    val spans = textSpans(message.body, usernames, myUsername)
+    styled(message.body, spans, style, onOpenWeb = { url -> openLink(context, url) }, onOpenPermalink = onOpenPermalink).let { body ->
       if (edited.isEmpty()) body else buildAnnotatedString {
         append(body)
         pushStyle(SpanStyle(color = mutedColor, fontStyle = FontStyle.Italic))
@@ -502,20 +545,36 @@ private fun MessageText(message: Message, context: Context) {
   Text(text)
 }
 
-private fun linkified(body: String, color: Color, onOpen: (String) -> Unit): AnnotatedString =
+private data class SpanColors(val link: Color, val mention: Color, val mentionMe: Color, val mentionMeBackground: Color)
+
+private fun styled(
+  body: String,
+  spans: List<TextSpan>,
+  colors: SpanColors,
+  onOpenWeb: (String) -> Unit,
+  onOpenPermalink: (String) -> Unit,
+): AnnotatedString =
   buildAnnotatedString {
     append(body)
-    for (range in findLinks(body)) {
-      val url = body.substring(range)
-      if (!isOpenableLink(url)) continue
-      addLink(
-        LinkAnnotation.Clickable(
-          tag = url,
-          styles = TextLinkStyles(SpanStyle(color = color, textDecoration = TextDecoration.Underline)),
-        ) { onOpen(url) },
-        range.first,
-        range.last + 1,
-      )
+    val linkStyle = TextLinkStyles(SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline))
+    for (span in spans) {
+      val end = span.range.last + 1
+      when (span) {
+        is TextSpan.WebLink -> if (isOpenableLink(span.url)) {
+          addLink(LinkAnnotation.Clickable(tag = span.url, styles = linkStyle) { onOpenWeb(span.url) }, span.range.first, end)
+        }
+        is TextSpan.Permalink ->
+          addLink(LinkAnnotation.Clickable(tag = span.link, styles = linkStyle) { onOpenPermalink(span.link) }, span.range.first, end)
+        is TextSpan.Mention -> addStyle(
+          if (span.isMe) {
+            SpanStyle(color = colors.mentionMe, background = colors.mentionMeBackground, fontWeight = FontWeight.Bold)
+          } else {
+            SpanStyle(color = colors.mention, fontWeight = FontWeight.Bold)
+          },
+          span.range.first,
+          end,
+        )
+      }
     }
   }
 

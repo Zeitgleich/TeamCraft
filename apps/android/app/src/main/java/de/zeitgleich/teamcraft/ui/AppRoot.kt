@@ -12,6 +12,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import kotlinx.coroutines.launch
+import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
 import de.zeitgleich.teamcraft.ui.screens.FilesScreen
@@ -87,6 +88,19 @@ private fun ReadyNavigation(
   onShareHandled: () -> Unit,
 ) {
   val navigation = rememberNavController()
+  val scope = rememberCoroutineScope()
+  // A message link in a message: open its conversation (or thread) at the message, if readable here.
+  val openPermalink: (String) -> Unit = { link ->
+    scope.launch {
+      val maybeTarget = viewModel.resolvePermalink(link)
+      when {
+        maybeTarget == null -> viewModel.showFailure(R.string.permalink_unavailable)
+        maybeTarget.maybeThread != null ->
+          navigation.navigate("thread/${maybeTarget.conversation}/${maybeTarget.maybeThread}?focus=${maybeTarget.message}")
+        else -> navigation.navigate("conversation/${maybeTarget.conversation}?focus=${maybeTarget.message}")
+      }
+    }
+  }
   LaunchedEffect(maybeConversationToOpen) {
     maybeConversationToOpen?.let {
       navigation.navigate("conversation/$it")
@@ -107,8 +121,8 @@ private fun ReadyNavigation(
       )
     }
     composable(
-      "conversation/{id}",
-      arguments = listOf(navArgument("id") { type = NavType.StringType }),
+      "conversation/{id}?focus={focus}",
+      arguments = listOf(navArgument("id") { type = NavType.StringType }, focusArgument()),
     ) { entry ->
       val conversationId = entry.arguments?.getString("id").orEmpty()
       ConversationScreen(
@@ -117,13 +131,16 @@ private fun ReadyNavigation(
         onOpenThread = { threadId -> navigation.navigate("thread/$conversationId/$threadId") },
         onOpenFiles = { navigation.navigate("files/$conversationId") },
         onBack = { navigation.popBackStack() },
+        maybeFocusMessage = entry.arguments?.getString("focus"),
+        onOpenPermalink = openPermalink,
       )
     }
     composable(
-      "thread/{conversation}/{thread}",
+      "thread/{conversation}/{thread}?focus={focus}",
       arguments = listOf(
         navArgument("conversation") { type = NavType.StringType },
         navArgument("thread") { type = NavType.StringType },
+        focusArgument(),
       ),
     ) { entry ->
       ThreadScreen(
@@ -131,6 +148,8 @@ private fun ReadyNavigation(
         conversationId = entry.arguments?.getString("conversation").orEmpty(),
         threadId = entry.arguments?.getString("thread").orEmpty(),
         onBack = { navigation.popBackStack() },
+        maybeFocusMessage = entry.arguments?.getString("focus"),
+        onOpenPermalink = openPermalink,
       )
     }
     composable("search") {
@@ -208,4 +227,11 @@ private fun ReadyNavigation(
       PushBatteryScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
     }
   }
+}
+
+/** The message to open a conversation or thread at (from a message link); absent otherwise. */
+private fun focusArgument() = navArgument("focus") {
+  type = NavType.StringType
+  nullable = true
+  defaultValue = null
 }

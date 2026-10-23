@@ -8,11 +8,10 @@
 #
 #   podman build -f containers/ci.Containerfile -t teamcraft-ci .
 #
-# The base image is pinned by digest (the multi-arch index of rust:1.99.1-trixie); bump it
-# deliberately: `podman pull <image>` and copy the new digest.
+# The base image is pinned by tag and multi-arch index digest; Dependabot bumps both. By hand:
+# `docker buildx imagetools inspect <image>`, the top-level Digest.
 
-ARG RUST_IMAGE=docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc
-FROM ${RUST_IMAGE}
+FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc
 
 # Packages, grouped by what needs them:
 #  - cmake, libclang-dev, pkg-config: codec and bindgen builds (opusic-sys, pipewire bindings)

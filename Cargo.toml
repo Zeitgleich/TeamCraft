@@ -9,7 +9,7 @@ version = "1.0.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Zeitgleich/TeamCraft"
-rust-version = "1.85"
+rust-version = "1.99"
 publish = false
 
 [workspace.lints.rust]
@@ -76,7 +76,7 @@ chrono-tz = { version = "0.10", default-features = false }
 chrono = { version = "0.4", default-features = false }
 
 # Encoding
-base64 = "0.22"
+base64 = "0.23"
 
 # Randomness (already in the tree through jsonwebtoken and reqwest)
 aws-lc-rs = "1"

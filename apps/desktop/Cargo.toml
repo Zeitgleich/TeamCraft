@@ -7,7 +7,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 # Leptos 0.8.2x and Tauri 2 need a newer compiler than the workspace baseline.
-rust-version = "1.88"
+rust-version.workspace = true
 
 [lints]
 workspace = true

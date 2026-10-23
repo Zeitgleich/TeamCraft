@@ -62,6 +62,13 @@ final class NotificationService: UNNotificationServiceExtension {
       return builder.generic(from: original, keepsSealed: true)
     }
     let flags = PushFlags(notification)
+    // App lock on: the lock screen must not show what the locked app hides. Calls still ring.
+    if SharedContainer().isAppLockOn && notification.kind == .message
+      && !(flags.isDuplicate || flags.maybeSuppression != nil)
+    {
+      await DeliveredNotifications.setBadge(flags.maybeBadge)
+      return builder.generic(from: original)
+    }
     let presentation = PushPresentation.of(flags, canFilter: canFilter)
     switch presentation {
     case .message, .quietMessage:

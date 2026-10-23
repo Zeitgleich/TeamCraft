@@ -5,14 +5,11 @@
 # `--format docker` keeps the HEALTHCHECK instruction (the OCI image format has none); orchestrators
 # that run the image should configure the same command themselves: `teamcraft-sfu healthcheck`.
 #
-# Base images are pinned by digest so builds are reproducible; bump them deliberately
-# with the multi-arch index digest
+# Base images are pinned by tag and multi-arch index digest so builds are reproducible. Dependabot
+# bumps both in the FROM lines; by hand, take the index digest
 # (`docker buildx imagetools inspect <image>`, the top-level Digest), never a single-platform one.
 
-ARG RUST_IMAGE=docker.io/library/rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
-ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
-
-FROM ${RUST_IMAGE} AS build
+FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
 ENV CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_RELEASE_STRIP=symbols
 WORKDIR /src
@@ -25,7 +22,7 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
     cargo build --release --locked -p teamcraft-sfu --bin teamcraft-sfu \
  && install -D target/release/teamcraft-sfu /out/teamcraft-sfu
 
-FROM ${RUNTIME_IMAGE}
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:83b9b50586253821cf63ffcec87d3d94265a093ad30da232039af962dd8f4edf
 LABEL org.opencontainers.image.title="teamcraft-sfu" \
       org.opencontainers.image.description="TeamCraft WebTransport SFU for calls" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \

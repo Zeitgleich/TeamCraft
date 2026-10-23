@@ -33,6 +33,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   picker.
   Licences and sources: `assets/backgrounds/SOURCES.md`.
 
+### Changed
+
+- The server, SFU and bridge images are built on Debian 13 (trixie) and run on distroless
+  `cc-debian13`; dependencies and the dev stack (Keycloak 26.8, Garage 2.4.1, Mailpit 1.32) are
+  current.
+
 ### Fixed
 
 - `PUT /me/profile` accepted time zones that are not IANA names; it now checks the name.

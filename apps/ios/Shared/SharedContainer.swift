@@ -6,6 +6,7 @@ import Foundation
 struct SharedContainer {
   private static let activeAccountKey = "activeAccount"
   private static let displayNameKey = "displayName"
+  private static let appLockKey = "appLockEnabled"
 
   let environment: AppEnvironment
   private let fileManager: FileManager
@@ -67,6 +68,13 @@ struct SharedContainer {
   /// Settings both processes read (which account is signed in).
   var defaults: UserDefaults {
     UserDefaults(suiteName: environment.appGroupId) ?? .standard
+  }
+
+  /// Whether app lock is on. The notification extension reads it: with app lock on, notifications
+  /// say only that something arrived, never who or what (as on Android).
+  var isAppLockOn: Bool {
+    get { defaults.bool(forKey: Self.appLockKey) }
+    nonmutating set { defaults.set(newValue, forKey: Self.appLockKey) }
   }
 
   /// The OIDC subject of the signed-in account; separates databases on one device.

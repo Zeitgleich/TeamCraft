@@ -39,7 +39,7 @@ class MainActivity : FragmentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
-    if (prefs(this).isSecureScreen) window.setFlags(FLAG_SECURE, FLAG_SECURE)
+    applyScreenPrivacy()
     // Locked at a cold start; a rotation or a recreated activity keeps the unlocked state.
     isLocked.value = AppLockPrefs.prefs(this).isEnabled && !isUnlockedInProcess
     if (!isLocked.value) isUnlockedInProcess = true
@@ -71,8 +71,11 @@ class MainActivity : FragmentActivity() {
     val lock = AppLockPrefs.prefs(this)
     if (lockState.shouldLockOnForeground(lock.isEnabled, lock.lockAfter)) {
       isUnlockedInProcess = false
-      isLocked.value = true
     }
+    // Every instance follows the process-wide state: a second activity (a share or a notification
+    // in a new task) that was created unlocked must not stay open after another one locked.
+    if (lock.isEnabled && !isUnlockedInProcess) isLocked.value = true
+    applyScreenPrivacy()
   }
 
   override fun onStop() {
@@ -85,6 +88,18 @@ class MainActivity : FragmentActivity() {
     super.onNewIntent(intent)
     conversationToOpen(intent)?.let { openConversation.value = it }
     sharedContent(intent, packageName)?.let { share.value = it }
+  }
+
+  /**
+   * Screenshots off when the user asked for it. With the app lock on, the recents thumbnail is
+   * hidden too, so the locked app doesn't show the last conversation in the app switcher.
+   */
+  private fun applyScreenPrivacy() {
+    val isLockOn = AppLockPrefs.prefs(this).isEnabled
+    val isRecentsHidingAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    if (isRecentsHidingAvailable) setRecentsScreenshotEnabled(!isLockOn)
+    val isSecure = prefs(this).isSecureScreen || (isLockOn && !isRecentsHidingAvailable)
+    if (isSecure) window.addFlags(FLAG_SECURE) else window.clearFlags(FLAG_SECURE)
   }
 
   private fun unlock() {

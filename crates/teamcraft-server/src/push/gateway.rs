@@ -153,10 +153,10 @@ impl GatewayClient {
   async fn register_once(&self) -> Result<(), PushError> {
     let started = Instant::now();
     let mut retry_at = self.registration.lock().await;
-    if let Some(at) = *retry_at {
-      if at > started {
-        return Err(PushError::Rejected(401));
-      }
+    if let Some(at) = *retry_at
+      && at > started
+    {
+      return Err(PushError::Rejected(401));
     }
     match self.register().await {
       Ok(()) => {

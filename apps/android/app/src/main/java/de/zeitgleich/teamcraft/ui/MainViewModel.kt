@@ -5,7 +5,10 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.system.Os
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
@@ -18,9 +21,12 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.push.UnifiedPushBackend
 import de.zeitgleich.teamcraft.push.UnifiedPushStatus
+import net.openid.appauth.AuthorizationException
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
@@ -75,7 +81,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       graph.auth.completeLogin(result)
       loadAccountState()
     } catch (failure: Exception) {
-      AppState.SignedOut(R.string.sign_in_failed)
+      AppState.SignedOut(signInError(failure))
     }
   }
 
@@ -195,6 +201,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /** Shows a message once, like a failed action. */
+  fun showFailure(@StringRes message: Int) {
+    failures.value = message
+  }
+
+  /** Where a message link points, if this device is in that conversation and has the message. */
+  suspend fun resolvePermalink(link: String): PermalinkTarget? =
+    readChat { query(ChatQueries.resolvePermalink(link)).maybeTarget }
+
   fun failureShown() {
     failures.value = null
   }
@@ -222,19 +237,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** Copies a picked document into the account's staging folder so the core can read and encrypt it. */
   suspend fun importFile(uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
-    val resolver = getApplication<Application>().contentResolver
-    val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-      if (cursor.moveToFirst()) cursor.getString(0) else null
-    } ?: "file"
-    val type = resolver.getType(uri) ?: "application/octet-stream"
+    val app = getApplication<Application>()
+    val resolver = app.contentResolver
+    // Picker and share URIs come from other apps; none may point into the app's private files.
+    if (!isForeignContent(uri.scheme, uri.authority, app.packageName) || isPrivateFile(uri)) {
+      return@withContext null
+    }
+    val name = runCatching {
+      resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getString(0) else null
+      }
+    }.getOrNull()?.let(::cleanFileName)?.takeIf { it.isNotBlank() } ?: "file"
+    val type = runCatching { resolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
+    stage(name, type) { resolver.openInputStream(uri) }
+  }
+
+  /** A photo the camera wrote into the app's cache. */
+  suspend fun importPhoto(photo: File): PickedFile? = withContext(Dispatchers.IO) {
+    stage(photo.name, "image/jpeg") { photo.inputStream() }
+  }
+
+  /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */
+  private fun stage(name: String, type: String, open: () -> InputStream?): PickedFile? {
     // The core deletes the copy once it is uploaded (or failed for good).
-    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
-    runCatching {
-      resolver.openInputStream(uri)?.use { input -> target.outputStream().use { input.copyTo(it) } }
-        ?: return@withContext null
-      PickedFile(fileName = name, mediaType = type, path = target.absolutePath)
-    }.getOrNull()
+    val isCopied = runCatching {
+      open()?.use { input -> target.outputStream().use { copyAtMost(input, it, MAX_IMPORT_BYTES) } } ?: false
+    }.getOrDefault(false)
+    if (!isCopied) {
+      target.delete()
+      return null
+    }
+    return PickedFile(fileName = name, mediaType = type, path = target.absolutePath)
+  }
+
+  /**
+   * The provider handed out a descriptor of a file inside the app's own data (a provider of another
+   * app can't, but a misconfigured or spoofed own one could). Pipes and other apps' files pass.
+   */
+  private fun isPrivateFile(uri: Uri): Boolean {
+    val app = getApplication<Application>()
+    val maybePath = runCatching {
+      app.contentResolver.openFileDescriptor(uri, "r")?.use { Os.readlink("/proc/self/fd/${it.fd}") }
+    }.getOrNull() ?: return false
+    return maybePath.contains("/${app.packageName}/")
   }
 
   /** Joins (or starts) a conversation's call, e.g. a meeting's. */
@@ -316,6 +363,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   companion object {
     const val MESSAGE_PAGE = 200
 
+    /** Why signing in failed, in words the user can act on; nothing when they cancelled it. */
+    @StringRes
+    fun signInError(failure: Exception): Int? = when {
+      failure is AuthorizationException && failure.code == AuthorizationException.GeneralErrors.USER_CANCELED_AUTH_FLOW.code -> null
+      failure is IllegalStateException && failure.message == "login cancelled" -> null
+      failure is AuthorizationException && failure.code == AuthorizationException.GeneralErrors.NETWORK_ERROR.code ->
+        R.string.sign_in_network
+      failure is java.io.IOException -> R.string.sign_in_network
+      failure is AuthorizationException && failure.type == AuthorizationException.TYPE_OAUTH_TOKEN_ERROR -> R.string.sign_in_rejected
+      failure is TeamCraftException.Network -> R.string.sign_in_network
+      else -> R.string.sign_in_failed
+    }
+
     @StringRes
     fun errorText(failure: TeamCraftException): Int = when (failure) {
       is TeamCraftException.Network -> R.string.error_network
@@ -326,3 +386,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 }
+
+/**
+ * Largest file the app copies in for sending. The server enforces its own (smaller) limit; this
+ * only keeps a hostile or endless provider from filling the device.
+ */
+private const val MAX_IMPORT_BYTES = 4L * 1024 * 1024 * 1024
+
+/** Copies `input` to `output`; false (and stops) once more than `maxBytes` arrived. */
+internal fun copyAtMost(input: InputStream, output: OutputStream, maxBytes: Long): Boolean {
+  val buffer = ByteArray(64 * 1024)
+  var total = 0L
+  while (true) {
+    val count = input.read(buffer)
+    if (count < 0) return true
+    total += count
+    if (total > maxBytes) return false
+    output.write(buffer, 0, count)
+  }
+}
+
+/** A provider's display name without control or direction-override characters (spoofed extensions). */
+internal fun cleanFileName(name: String): String =
+  name.filterNot { it.isISOControl() || it in BIDI_CONTROLS }.trim().take(MAX_FILE_NAME_CHARS)
+
+private const val MAX_FILE_NAME_CHARS = 255
+private const val BIDI_CONTROLS = "\u061C\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069"

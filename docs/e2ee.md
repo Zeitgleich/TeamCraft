@@ -722,6 +722,14 @@ Plaintext outside the sealed store, and how long it lives:
   copy once its upload finished or failed for good, and the folder is wiped at sign-out.
 - Notifications show what the workspace policy allows (§7) and are removed at sign-out.
 
+**App lock (Android and iOS, optional).** A biometric or device-passcode gate in front of the app, and
+the app switcher shows a cover instead of the chats while it is on. It is a gate in the user interface
+only: the database key is protected the same way with or without it (it must open for push wake-ups
+while the phone is locked), so it protects against someone holding the unlocked phone, not against
+anyone who can read the app's storage. On iOS, while it is on, notifications say only that something
+arrived (no sender, no text; calls still ring); Android always shows a generic version on the lock
+screen. Switching it off or lengthening its delay asks again (iOS).
+
 ### 9.3 Web client integrity (implemented)
 
 The server serves the web client's code, so a compromised server could serve a client that leaks

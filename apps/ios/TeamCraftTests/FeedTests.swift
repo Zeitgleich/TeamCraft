@@ -83,14 +83,17 @@ final class FeedTests: XCTestCase {
 
   func testAppLockClock() {
     var clock = AppLockClock()
-    let start = Date(timeIntervalSince1970: 1000)
+    let start = ContinuousClock.now
     XCTAssertFalse(clock.shouldLock(at: start, isEnabled: true, lockAfter: .immediately), "no background phase")
     clock.didEnterBackground(at: start)
-    XCTAssertFalse(clock.shouldLock(at: start.addingTimeInterval(59), isEnabled: true, lockAfter: .oneMinute))
+    XCTAssertFalse(clock.shouldLock(at: start.advanced(by: .seconds(59)), isEnabled: true, lockAfter: .oneMinute))
     clock.didEnterBackground(at: start)
-    XCTAssertTrue(clock.shouldLock(at: start.addingTimeInterval(60), isEnabled: true, lockAfter: .oneMinute))
-    XCTAssertFalse(clock.shouldLock(at: start.addingTimeInterval(60), isEnabled: true, lockAfter: .oneMinute), "used up")
+    XCTAssertTrue(clock.shouldLock(at: start.advanced(by: .seconds(60)), isEnabled: true, lockAfter: .oneMinute))
+    XCTAssertFalse(clock.shouldLock(at: start.advanced(by: .seconds(60)), isEnabled: true, lockAfter: .oneMinute), "used up")
     clock.didEnterBackground(at: start)
-    XCTAssertFalse(clock.shouldLock(at: start.addingTimeInterval(3600), isEnabled: false, lockAfter: .immediately))
+    XCTAssertFalse(clock.shouldLock(at: start.advanced(by: .seconds(3600)), isEnabled: false, lockAfter: .immediately))
+    // Going backwards (impossible on this clock) locks rather than not.
+    clock.didEnterBackground(at: start.advanced(by: .seconds(100)))
+    XCTAssertTrue(clock.shouldLock(at: start, isEnabled: true, lockAfter: .fifteenMinutes))
   }
 }

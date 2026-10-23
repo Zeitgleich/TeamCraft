@@ -59,4 +59,10 @@
   <string name="app_lock_locked">TeamCraft is locked</string>
   <string name="app_lock_unlock">Unlock</string>
   <string name="send_with_enter">Send with Enter (hardware keyboard)</string>
+
+  <!-- Message links and sign-in -->
+  <string name="permalink_unavailable">That message isn\'t available on this device.</string>
+  <string name="sign_in_network">Can\'t reach the sign-in server. Check your connection and try again.</string>
+  <string name="sign_in_rejected">The sign-in server didn\'t accept the sign-in. Try again, or ask your admin.</string>
+  <string name="enroll_working">Setting up keys…</string>
 </resources>

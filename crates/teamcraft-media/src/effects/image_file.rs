@@ -4,6 +4,7 @@
 
 use jpeg_encoder::{ColorType, Encoder};
 use zune_jpeg::JpegDecoder;
+use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 use zune_png::PngDecoder;
@@ -38,22 +39,20 @@ impl BackgroundImage {
       .png_set_add_alpha_channel(true)
       .png_set_strip_to_8bit(true);
     let (pixels, width, height) = if file.starts_with(&[0xff, 0xd8, 0xff]) {
-      let mut decoder = JpegDecoder::new_with_options(file, options);
+      let mut decoder = JpegDecoder::new_with_options(ZCursor::new(file), options);
       decoder.decode_headers().map_err(file_error)?;
       check_pixels(decoder.dimensions())?;
       let pixels = decoder.decode().map_err(file_error)?;
       let (width, height) = decoder.dimensions().ok_or_else(|| file_error("no dimensions"))?;
       (pixels, width, height)
     } else if file.starts_with(b"\x89PNG\r\n\x1a\n") {
-      let mut decoder = PngDecoder::new_with_options(file, options);
+      let mut decoder = PngDecoder::new_with_options(ZCursor::new(file), options);
       decoder.decode_headers().map_err(file_error)?;
-      check_pixels(decoder.get_dimensions())?;
+      check_pixels(decoder.dimensions())?;
       let pixels = decoder.decode_raw().map_err(file_error)?;
-      let (width, height) = decoder
-        .get_dimensions()
-        .ok_or_else(|| file_error("no dimensions"))?;
+      let (width, height) = decoder.dimensions().ok_or_else(|| file_error("no dimensions"))?;
       let colorspace = decoder
-        .get_colorspace()
+        .colorspace()
         .ok_or_else(|| file_error("no colour space"))?;
       (to_rgba(pixels, colorspace)?, width, height)
     } else {
@@ -145,11 +144,15 @@ fn to_rgba(pixels: Vec<u8>, colorspace: ColorSpace) -> Result<Vec<u8>, EffectsEr
   let rgba = match colorspace {
     ColorSpace::RGBA => pixels,
     ColorSpace::RGB => pixels
-      .chunks_exact(3)
+      .as_chunks::<3>()
+      .0
+      .iter()
       .flat_map(|p| [p[0], p[1], p[2], 255])
       .collect(),
     ColorSpace::LumaA => pixels
-      .chunks_exact(2)
+      .as_chunks::<2>()
+      .0
+      .iter()
       .flat_map(|p| [p[0], p[0], p[0], p[1]])
       .collect(),
     ColorSpace::Luma => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
@@ -180,7 +183,9 @@ mod tests {
     assert!(
       decoded
         .rgba()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .all(|pixel| pixel[0].abs_diff(120) <= 3)
     );
   }

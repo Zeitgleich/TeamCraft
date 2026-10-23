@@ -93,13 +93,13 @@ openh264 = { version = "0.9.9", optional = true, default-features = false, featu
 # Cisco ships the OpenH264 binaries bzip2-compressed (pure-Rust decoder, MIT/Apache-2.0).
 bzip2 = { version = "0.6.1", optional = true }
 # MJPEG camera frames (many USB cameras only deliver 720p+ as MJPEG): pure-Rust JPEG decoder.
-zune-jpeg = { version = "0.4.21", optional = true }
+zune-jpeg = { version = "0.5.15", optional = true }
 # Hardware encoding (feature `gstreamer`): safe GStreamer bindings, MIT/Apache-2.0.
 gstreamer = { version = "0.25.4", optional = true }
 gstreamer-app = { version = "0.25.2", optional = true }
 gstreamer-video = { version = "0.25.4", optional = true }
 # The user's background pictures (PNG; JPEG through zune-jpeg): pure Rust, MIT/Apache-2.0/Zlib.
-zune-png = { version = "0.4.10", optional = true }
+zune-png = { version = "0.5.2", optional = true }
 # JPEG for webviews without WebCodecs (decoded remote video re-encoded): pure Rust, MIT/Apache-2.0.
 jpeg-encoder = { version = "0.7.1", optional = true }
 # Effects: GPU access (MIT/Apache-2.0), plain-old-data casts for its buffers, and a oneshot for

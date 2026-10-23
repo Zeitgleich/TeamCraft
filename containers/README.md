@@ -20,11 +20,12 @@ the images are distroless and contain no `curl` or shell.
 
 ## Properties
 
-- Multi-stage: the Rust image builds, the final stage is `gcr.io/distroless/cc-debian12:nonroot`
-  (glibc, no shell, no package manager), 35-50 MB. The bridge uses `distroless/base-debian12` instead:
-  its SQLCipher database links the system libcrypto.
+- Multi-stage: `rust:<version>-trixie` builds, the final stage is `gcr.io/distroless/cc-debian13:nonroot`
+  (Debian 13 glibc, libgcc_s and OpenSSL 3, no shell, no package manager), 35-50 MB. Build and
+  runtime come from the same Debian release, so the bridge's SQLCipher links the libcrypto it finds.
 - Both base images are **pinned by digest** in the Containerfiles. Bump them deliberately
-  (`podman pull <image>`, copy `podman image inspect --format '{{.Digest}}'`).
+  with the multi-arch index digest (`skopeo inspect --raw docker://<image> | sha256sum`, or
+  `docker buildx imagetools inspect <image>`), never a single-platform one.
 - Run as UID/GID **65532**, write nothing to disk, so `--read-only`, `--cap-drop all` and
   `--security-opt no-new-privileges` work. Nothing needs a tmpfs.
 - Build uses `--locked`, `SQLX_OFFLINE=true` (the committed `.sqlx/` data) and ignores

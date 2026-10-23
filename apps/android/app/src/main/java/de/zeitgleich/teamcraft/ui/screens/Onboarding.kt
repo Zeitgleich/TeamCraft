@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -27,6 +28,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -77,6 +79,7 @@ fun EnrollScreen(
 ) {
   var passphrase by remember { mutableStateOf("") }
   var repeated by remember { mutableStateOf("") }
+  val keyboard = LocalSoftwareKeyboardController.current
   val maybeProblem = when {
     passphrase.length < MIN_PASSPHRASE_LENGTH -> R.string.passphrase_too_short
     !hasExistingIdentity && passphrase != repeated -> R.string.passphrases_differ
@@ -111,11 +114,20 @@ fun EnrollScreen(
     val shownError = maybeError ?: maybeProblem.takeIf { passphrase.isNotEmpty() }
     shownError?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
     Button(
-      onClick = { onEnroll(passphrase) },
+      onClick = {
+        // The keyboard would hide the progress; the key derivation takes a few seconds.
+        keyboard?.hide()
+        onEnroll(passphrase)
+      },
       enabled = !isBusy && maybeProblem == null,
       modifier = Modifier.fillMaxWidth(),
     ) {
-      Text(stringResource(if (hasExistingIdentity) R.string.recover_button else R.string.enroll_button))
+      if (isBusy) {
+        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        Text(stringResource(R.string.enroll_working), modifier = Modifier.padding(start = 8.dp))
+      } else {
+        Text(stringResource(if (hasExistingIdentity) R.string.recover_button else R.string.enroll_button))
+      }
     }
     if (hasExistingIdentity) {
       OutlinedButton(onClick = onLink, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) {
@@ -125,7 +137,6 @@ fun EnrollScreen(
         Text(stringResource(R.string.org_recovery_instead))
       }
     }
-    if (isBusy) CircularProgressIndicator()
   }
 }
 

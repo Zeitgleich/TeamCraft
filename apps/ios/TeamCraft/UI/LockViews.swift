@@ -38,18 +38,62 @@ struct DeviceSecuritySection: View {
 
   var body: some View {
     Section {
-      Toggle("app_lock", isOn: $isLockEnabled).disabled(!AppLock.isAvailable && !isLockEnabled)
+      Toggle("app_lock", isOn: lockBinding).disabled(!AppLock.isAvailable && !isLockEnabled)
       if isLockEnabled {
-        Picker("app_lock_after", selection: $lockAfterRaw) {
+        Picker("app_lock_after", selection: lockAfterBinding) {
           ForEach(LockAfter.allCases) { choice in Text(title(of: choice)).tag(choice.rawValue) }
         }
       }
-      Toggle("privacy_cover", isOn: $isPrivacyCoverOn)
+      // With app lock on the cover is always used; the switch only matters without it.
+      Toggle("privacy_cover", isOn: $isPrivacyCoverOn).disabled(isLockEnabled)
     } header: {
       Text("device_security_title")
     } footer: {
       if !AppLock.isAvailable { Text("app_lock_unavailable") }
     }
+  }
+
+  /// Switching the lock on is free; switching it off asks for Face ID / Touch ID or the passcode,
+  /// so someone holding the unlocked phone can't remove it for later.
+  private var lockBinding: Binding<Bool> {
+    Binding(
+      get: { isLockEnabled },
+      set: { isOn in
+        guard !isOn else {
+          setLock(true)
+          return
+        }
+        Task { @MainActor in
+          if await AppLock.confirmChange(reason: String(localized: "app_lock_confirm_change")) {
+            setLock(false)
+          }
+        }
+      })
+  }
+
+  /// A shorter delay is free; a longer one asks, like switching the lock off.
+  private var lockAfterBinding: Binding<String> {
+    Binding(
+      get: { lockAfterRaw },
+      set: { raw in
+        let current = LockAfter(rawValue: lockAfterRaw) ?? AppLock.defaultLockAfter
+        let chosen = LockAfter(rawValue: raw) ?? AppLock.defaultLockAfter
+        guard chosen.seconds > current.seconds else {
+          lockAfterRaw = raw
+          return
+        }
+        Task { @MainActor in
+          if await AppLock.confirmChange(reason: String(localized: "app_lock_confirm_change")) {
+            lockAfterRaw = raw
+          }
+        }
+      })
+  }
+
+  private func setLock(_ isOn: Bool) {
+    isLockEnabled = isOn
+    // The notification extension follows it (generic notifications while the lock is on).
+    SharedContainer().isAppLockOn = isOn
   }
 
   private func title(of choice: LockAfter) -> LocalizedStringKey {
@@ -58,6 +102,22 @@ struct DeviceSecuritySection: View {
     case .oneMinute: return "app_lock_one_minute"
     case .fiveMinutes: return "app_lock_five_minutes"
     case .fifteenMinutes: return "app_lock_fifteen_minutes"
+    }
+  }
+}
+
+/// A thin bar while the device is offline: new messages wait, sent ones stay in the outbox.
+struct OfflineBanner: View {
+  private let network = NetworkMonitor.shared
+
+  var body: some View {
+    if !network.isOnline {
+      Text("offline_banner")
+        .font(.footnote)
+        .foregroundStyle(Theme.danger)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal).padding(.vertical, 6)
+        .background(Theme.danger.opacity(0.12))
     }
   }
 }

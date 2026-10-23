@@ -9,6 +9,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::clock::format_date;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
 use crate::i18n::use_i18n;
@@ -326,6 +327,18 @@ pub fn MessageList(
       }
     });
   });
+  // While reading older messages, the day of the top message floats over the feed.
+  let floating_day = Memo::new(move |_| {
+    if stick_to_bottom.get() || is_log {
+      return None;
+    }
+    let first = window.get().first_visible;
+    let locale = i18n.locale().tag();
+    state
+      .read(|backend| backend.messages(conversation, first, 1))
+      .first()
+      .map(|message| format_date(message.sent_at, locale))
+  });
   let new_below = move || away_from.get().map_or(0, |from| count.get().saturating_sub(from));
   // Rows grow after they were measured (reactions, edits, late-loading content). While following,
   // stay at the bottom so the newest line is never cut off.
@@ -369,6 +382,7 @@ pub fn MessageList(
 
   view! {
     <div class="message-list-wrap">
+      {move || floating_day.get().map(|label| view! { <div class="floating-day" aria-hidden="true">{label}</div> })}
       <div
         class="message-list"
         class:log-view=is_log
@@ -463,7 +477,17 @@ fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl In
           <span>{move || i18n.t("new-messages")}</span>
         </div>
       </Show>
-      {move || data.get().map(|(message, maybe_prev)| view! { <MessageRow message=message maybe_prev=maybe_prev /> })}
+      {move || match data.get() {
+        Some((message, maybe_prev)) => view! { <MessageRow message=message maybe_prev=maybe_prev /> }.into_any(),
+        // Still loading (or decrypting): a placeholder instead of a gap.
+        None => view! {
+          <div class="msg-skeleton" aria-hidden="true">
+            <span class="skeleton-avatar"></span>
+            <span class="skeleton-lines"><span></span><span></span></span>
+          </div>
+        }
+          .into_any(),
+      }}
     </div>
   }
 }

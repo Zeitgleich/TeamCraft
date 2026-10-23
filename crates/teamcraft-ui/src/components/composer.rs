@@ -38,6 +38,8 @@ struct PendingFile {
   name: String,
   media_type: String,
   bytes: Vec<u8>,
+  /// Object URL of an image for the thumbnail in the chip; revoked when the file leaves the list.
+  maybe_preview_url: Option<String>,
 }
 
 /// One line in the picker under the input.
@@ -167,9 +169,26 @@ pub fn Composer(
       .get()
       .into_iter()
       .enumerate()
-      .map(|(index, file)| (index, file.name))
-      .collect::<Vec<(usize, String)>>()
+      .map(|(index, file)| (index, file.name, file.maybe_preview_url))
+      .collect::<Vec<(usize, String, Option<String>)>>()
   };
+  // Thumbnails of files that were removed or sent free their object URL.
+  Effect::new(move |previous: Option<Vec<String>>| {
+    let current: Vec<String> = attachments.with(|list| {
+      list
+        .iter()
+        .filter_map(|file| file.maybe_preview_url.clone())
+        .collect()
+    });
+    for url in previous
+      .unwrap_or_default()
+      .iter()
+      .filter(|url| !current.contains(url))
+    {
+      drop(web_sys::Url::revoke_object_url(url));
+    }
+    current
+  });
 
   // Drafts sync across devices: restore once the stored one arrives, store while typing.
   let is_draft_restored = RwSignal::new(false);
@@ -543,11 +562,16 @@ pub fn Composer(
             } else {
               file.type_()
             };
+            let maybe_preview_url = media_type
+              .starts_with("image/")
+              .then(|| web_sys::Url::create_object_url_with_blob(&file).ok())
+              .flatten();
             attachments.update(|list| {
               list.push(PendingFile {
                 name: file.name(),
                 media_type,
                 bytes,
+                maybe_preview_url,
               })
             });
           },
@@ -654,12 +678,17 @@ pub fn Composer(
       >
         <Show when=move || !attachments.with(Vec::is_empty) fallback=|| ()>
           <ul class="attachment-chips" aria-label=move || i18n.t("composer-attachments")>
-            <For each=attachment_list key=|(i, name)| (*i, name.clone()) let:item>
+            <For each=attachment_list key=|(i, name, _)| (*i, name.clone()) let:item>
               {
-                let (index, name) = item;
+                let (index, name, maybe_preview_url) = item;
+                let leading_is_image = maybe_preview_url.is_some();
+                let leading = match maybe_preview_url {
+                  Some(url) => view! { <img class="chip-thumb" src=url alt="" /> }.into_any(),
+                  None => view! { <Icon name=IconName::File /> }.into_any(),
+                };
                 view! {
-                  <li class="chip">
-                    <Icon name=IconName::File />
+                  <li class="chip" class:chip-image=leading_is_image>
+                    {leading}
                     <span class="chip-name">{name}</span>
                     <button
                       class="icon-btn icon-btn-small"

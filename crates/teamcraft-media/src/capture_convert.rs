@@ -5,6 +5,7 @@
 //! Odd widths or heights lose their last column or row (I420 needs even dimensions).
 
 use zune_jpeg::JpegDecoder;
+use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
@@ -167,7 +168,7 @@ fn rgb32(data: &[u8], stride: usize, width: usize, height: usize, order: [usize;
 
 fn decode_mjpeg(data: &[u8], timestamp_us: u64) -> Result<VideoFrame, CaptureError> {
   let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
-  let mut decoder = JpegDecoder::new_with_options(data, options);
+  let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
   let pixels = decoder
     .decode()
     .map_err(|error| CaptureError::Device(format!("MJPEG: {error:?}")))?;
