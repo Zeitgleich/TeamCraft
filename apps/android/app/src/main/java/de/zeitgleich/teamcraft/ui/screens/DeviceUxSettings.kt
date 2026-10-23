@@ -74,6 +74,21 @@ fun AppLockSetting() {
   }
 }
 
+/** Whether others see "… is typing" while the user writes. */
+@Composable
+fun ShareTypingSetting() {
+  val context = LocalContext.current
+  val prefs = remember { ComposerPrefs.prefs(context) }
+  var isOn by remember { mutableStateOf(prefs.isSharingTyping) }
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    Switch(checked = isOn, onCheckedChange = {
+      isOn = it
+      prefs.setSharingTyping(it)
+    })
+    Text(stringResource(R.string.share_typing), modifier = Modifier.padding(start = 8.dp))
+  }
+}
+
 /** Enter sends (hardware keyboards); Shift+Enter is a new line then. */
 @Composable
 fun SendWithEnterSetting() {

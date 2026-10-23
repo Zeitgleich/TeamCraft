@@ -89,6 +89,12 @@ pub trait ChatBackend {
   fn seen_by(&self, _conversation: ConversationId, _message: MessageId) -> Vec<UserId> {
     Vec::new()
   }
+  /// Other people typing in a conversation right now (the indicator lasts a few seconds).
+  fn typing_users(&self, _conversation: ConversationId) -> Vec<UserId> {
+    Vec::new()
+  }
+  /// The user types in a conversation: tell the other members (the core throttles).
+  fn notify_typing(&self, _conversation: ConversationId) {}
 
   /// Whether this backend holds the keys to sign workspace policy and add the admin to channels
   /// (the client core on the desktop; the browser build has none).

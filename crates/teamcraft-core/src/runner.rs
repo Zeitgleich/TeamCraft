@@ -30,7 +30,14 @@ pub struct SyncRunner<A: ServerApi, S> {
   reconnect_at_ms: i64,
   last_heartbeat_ms: i64,
   last_account_sync_ms: i64,
+  /// When the user's typing was last announced, to send at most one per [`TYPING_INTERVAL_MS`].
+  #[cfg(feature = "ui")]
+  last_typing: Option<(teamcraft_proto::ConversationId, i64)>,
 }
+
+/// The server forwards one typing frame per 3 s and conversation; sending more is wasted.
+#[cfg(feature = "ui")]
+const TYPING_INTERVAL_MS: i64 = 3_000;
 
 /// Timing of the runner. Configurable; the defaults suit desktop and browser alike.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +109,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       reconnect_at_ms: i64::MIN,
       last_heartbeat_ms: i64::MIN,
       last_account_sync_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      last_typing: None,
     };
     (runner, RunnerHandle { sender })
   }
@@ -162,6 +171,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   async fn on_command(&mut self, command: RunnerCommand) {
     match command {
       RunnerCommand::Flush => {},
+      #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::Typing { conversation }) => {
+        self.announce_typing(conversation).await;
+        // Nothing to flush: typing changes no stored state.
+        return;
+      },
       #[cfg(feature = "ui")]
       RunnerCommand::Ui(command) => {
         if let Err(error) = self.client.run_ui_command(command).await {
@@ -246,6 +261,26 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       Ok(report) if report.sent > 0 => self.changed(),
       Ok(_) => {},
       Err(error) => tracing::debug!(%error, "outbox flush did not finish"),
+    }
+  }
+
+  /// Tells the other members that the user types, at most once per [`TYPING_INTERVAL_MS`] and
+  /// conversation; offline, it is dropped (a late indicator would be wrong).
+  #[cfg(feature = "ui")]
+  async fn announce_typing(&mut self, conversation: teamcraft_proto::ConversationId) {
+    let now = self.client.now_ms();
+    if self
+      .last_typing
+      .is_some_and(|(last, at)| last == conversation && now.saturating_sub(at) < TYPING_INTERVAL_MS)
+    {
+      return;
+    }
+    let Some(connection) = self.maybe_gateway.as_mut() else {
+      return;
+    };
+    self.last_typing = Some((conversation, now));
+    if let Err(error) = connection.send(&Client::<A, S>::typing_frame(conversation)).await {
+      tracing::debug!(%error, "typing not announced");
     }
   }
 

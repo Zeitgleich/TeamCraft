@@ -417,6 +417,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
   },
+  /// The user is typing (send while the text changes; the core throttles to one per few seconds).
+  Typing {
+    conversation: ConversationId,
+  },
   DiscardUnsent {
     conversation: ConversationId,
     message: MessageId,
@@ -576,6 +580,7 @@ impl ChatAction {
         conversation,
         message,
       } => backend.retry_send(conversation, message),
+      Self::Typing { conversation } => backend.notify_typing(conversation),
       Self::DiscardUnsent {
         conversation,
         message,
@@ -685,6 +690,9 @@ pub enum ChatQuery {
   SeenBy {
     conversation: ConversationId,
     message: MessageId,
+  },
+  TypingUsers {
+    conversation: ConversationId,
   },
   HasExternalPeople {
     conversation: ConversationId,
@@ -809,6 +817,9 @@ impl ChatQuery {
       Self::IsThreadFollowed { conversation, thread } => ChatAnswer::Flag {
         value: backend.is_thread_followed(conversation, thread),
       },
+      Self::TypingUsers { conversation } => ChatAnswer::Users {
+        users: backend.typing_users(conversation),
+      },
       Self::SeenBy {
         conversation,
         message,
@@ -850,6 +861,26 @@ mod tests {
       r#"{"action":"post_message","conversation":"7","maybe_thread":null,"body":"hi"}"#
     );
     assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), action);
+  }
+
+  #[test]
+  fn typing_action_and_query_are_tagged() {
+    let typing: ChatAction =
+      serde_json::from_str(r#"{"action":"typing","conversation":"7"}"#).expect("parse");
+    assert_eq!(
+      typing,
+      ChatAction::Typing {
+        conversation: id_from_raw(7)
+      }
+    );
+    let query: ChatQuery =
+      serde_json::from_str(r#"{"kind":"typing_users","conversation":"7"}"#).expect("parse");
+    assert_eq!(
+      query,
+      ChatQuery::TypingUsers {
+        conversation: id_from_raw(7)
+      }
+    );
   }
 
   #[test]
