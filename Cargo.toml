@@ -115,3 +115,13 @@ incremental = false
 
 [profile.dev.package."*"]
 debug = false
+
+# The web client's wasm (crates/teamcraft-ui and teamcraft-web-sw, built by trunk; index.html selects
+# it): the download is what users wait for, so size wins over speed. Measured in the PR that added it.
+[profile.web-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

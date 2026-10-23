@@ -11,7 +11,7 @@
       "cwd": "../../crates/teamcraft-ui"
     },
     "beforeBuildCommand": {
-      "script": "CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=true trunk build --release",
+      "script": "trunk build --release",
       "cwd": "../../crates/teamcraft-ui"
     }
   },

@@ -21,7 +21,7 @@ docker run --rm \
     export PATH=/cache/cargo/bin:\$PATH
     rustup target add wasm32-unknown-unknown
     command -v trunk >/dev/null || cargo install --locked trunk@${TRUNK_VERSION}
-    # Same size settings as tauri.conf.json's beforeBuildCommand.
-    CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=true trunk build --release
+    # Size settings: the web-release profile (Cargo.toml), selected by index.html.
+    trunk build --release
   "
 echo "UI bundle: ${REPO}/crates/teamcraft-ui/dist"

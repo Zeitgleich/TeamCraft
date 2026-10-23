@@ -21,3 +21,5 @@ awk -v init="$init" '
   { print }
 ' "$index" > "$index.tmp"
 mv "$index.tmp" "$index"
+# The loading screen's initializer is now in init.js (it needs this file to exist).
+sh "$(dirname "$0")/finish-loader.sh"
