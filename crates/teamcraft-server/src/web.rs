@@ -4,6 +4,9 @@
 //! - Unknown paths get `index.html` (client-side routing); unknown `/api/...` paths stay 404.
 //! - Files whose name carries a content hash (`app-3f2a9c1b7d4e5f60.wasm`, as trunk writes them) are
 //!   cached for a year; `index.html` and everything else must be revalidated.
+//! - Precompressed variants next to a file (`<file>.br`, `<file>.gz`, written by
+//!   `scripts/compress-web.sh` for the release) are served by `Accept-Encoding`, with the original
+//!   file's `Content-Type` and `Vary: Accept-Encoding`; without them the file is sent as it is.
 //! - Every response carries the configured `Content-Security-Policy` and the usual protective
 //!   headers. Scripts and styles are same-origin only, so there are no inline scripts to allow;
 //!   trunk's `integrity` attributes (SRI) on the assets work unchanged.
@@ -36,6 +39,7 @@ const NEVER_STORE: &str = "no-store";
 const INDEX: &str = "index.html";
 const DOWNLOAD_PAGE: &str = "download.html";
 const SRI_OPEN: &str = "{{sri:";
+const MIN_HASH_DIGITS: usize = 12;
 
 /// The fallback router: static files if a directory is configured, plain 404 otherwise.
 pub fn router(config: &WebConfig) -> Router {
@@ -212,7 +216,8 @@ fn is_loader_script(path: &str) -> bool {
   matches!(path.rsplit('/').next(), Some("init.js" | "sw.js"))
 }
 
-/// Whether the file name ends in a hash before the extension: `name-<16 or more hex digits>.ext`.
+/// Whether the file name ends in a hash before the extension: `name-<12 or more hex digits>.ext`.
+/// Trunk writes a 64-bit hash without leading zeros, so it is not always 16 digits long.
 fn has_content_hash(path: &str) -> bool {
   let name = Path::new(path)
     .file_name()
@@ -230,12 +235,14 @@ fn has_content_hash(path: &str) -> bool {
   let stem = stem.strip_suffix("_bg").unwrap_or(stem);
   stem
     .rsplit_once('-')
-    .is_some_and(|(_, hash)| hash.len() >= 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    .is_some_and(|(_, hash)| hash.len() >= MIN_HASH_DIGITS && hash.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  const WASM: &str = "teamcraft-ui-7fbbbce19979f91_bg.wasm";
 
   #[test]
   fn hashed_assets_are_recognized() {
@@ -244,6 +251,9 @@ mod tests {
       "/assets/teamcraft-ui-3f2a9c1b7d4e5f60_bg.wasm",
       "/teamcraft-ui-3f2a9c1b7d4e5f60.css",
       "/a-0123456789abcdef0123.wasm",
+      // A hash with a leading zero digit dropped (trunk 0.22).
+      "/teamcraft-ui-7fbbbce19979f91_bg.wasm",
+      "/teamcraft-ui-7fbbbce19979f91_bg.wasm.br",
     ] {
       assert!(has_content_hash(hashed), "{hashed}");
     }
@@ -253,10 +263,66 @@ mod tests {
       "/app.js",
       "/app-v2.js",
       "/app-xyz.js",
+      "/app-deadbeef.js",
       "/dir/",
       "/",
     ] {
       assert!(!has_content_hash(plain), "{plain}");
     }
+  }
+
+  /// The release ships `<file>.br` and `<file>.gz` (scripts/compress-web.sh); the browser gets the best
+  /// one it accepts, labelled as the original file.
+  #[tokio::test]
+  async fn precompressed_assets_are_served_by_accept_encoding() {
+    let dir = std::env::temp_dir().join(format!("teamcraft-web-compressed-{}", std::process::id()));
+    drop(std::fs::remove_dir_all(&dir));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(INDEX), "<!doctype html>").unwrap();
+    std::fs::write(dir.join(WASM), b"\0asm\x01\0\0\0").unwrap();
+    std::fs::write(dir.join(format!("{WASM}.br")), b"brotli").unwrap();
+    std::fs::write(dir.join(format!("{WASM}.gz")), b"gzip").unwrap();
+    let base = serve(router(&WebConfig {
+      maybe_static_dir: Some(dir.clone()),
+      ..WebConfig::default()
+    }))
+    .await;
+    let client = reqwest::Client::new();
+    for (accept, encoding, body) in [
+      ("br, gzip", "br", b"brotli".as_slice()),
+      ("gzip, deflate", "gzip", b"gzip".as_slice()),
+      ("identity", "", b"\0asm\x01\0\0\0".as_slice()),
+    ] {
+      let response = client
+        .get(format!("{base}/{WASM}"))
+        .header("accept-encoding", accept)
+        .send()
+        .await
+        .unwrap();
+      let header = |name: &str| {
+        response
+          .headers()
+          .get(name)
+          .and_then(|value| value.to_str().ok())
+          .unwrap_or("")
+          .to_owned()
+      };
+      assert_eq!(header("content-encoding"), encoding, "{accept}");
+      assert_eq!(header("content-type"), "application/wasm", "{accept}");
+      assert_eq!(header("vary"), "accept-encoding", "{accept}");
+      assert_eq!(header("cache-control"), IMMUTABLE, "{accept}");
+      assert_eq!(response.bytes().await.unwrap().as_ref(), body, "{accept}");
+    }
+    drop(std::fs::remove_dir_all(&dir));
+  }
+
+  /// Serves `router` on a local port and returns its base URL.
+  async fn serve(router: Router) -> String {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+      .await
+      .unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    format!("http://{address}")
   }
 }

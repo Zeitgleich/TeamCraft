@@ -392,7 +392,9 @@ jobs:
             -o -name '*.app.tar.gz' -o -name '*.sig' \
             -o -name '*.apk' -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
           # The web client: the same trunk build the desktop app embeds, served by the server
-          # ([web] static_dir).
+          # ([web] static_dir), plus precompressed .br/.gz variants the server picks by Accept-Encoding.
+          command -v brotli >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q brotli; }
+          scripts/compress-web.sh artifacts/ui-dist
           tar -C artifacts/ui-dist -czf "dist/teamcraft-web-${VERSION}.tar.gz" .
           cat artifacts/release-image-*/*.image > dist/images.txt
           # The desktop updater's manifest; every platform must be signed or none (docs/updates.md §3).

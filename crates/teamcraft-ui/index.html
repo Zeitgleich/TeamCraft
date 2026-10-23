@@ -6,15 +6,33 @@
     <meta name="color-scheme" content="light dark" />
     <title>TeamCraft</title>
     <link data-trunk rel="css" href="style/main.css" />
+    <link data-trunk rel="css" href="style/loader.css" />
     <!-- The brand of the host name this page is served from (colors only; docs/branding.md §4). After main.css so it wins. 404 in the desktop shell, which applies the brand from code. -->
     <link rel="stylesheet" href="/api/v1/brand/theme.css" />
     <link data-trunk rel="copy-file" href="sw.js" />
     <!-- Thumbnails of the photo backgrounds, loaded lazily by the picker (the full pictures are only in the desktop app). -->
     <link data-trunk rel="copy-dir" href="../../assets/backgrounds/thumbs" data-target-path="backgrounds" />
-    <!-- Set data-wasm-opt="s" (or remove the attribute) in release builds to shrink the bundle with binaryen. -->
-    <link data-trunk rel="rust" data-bin="teamcraft-ui" data-wasm-opt="0" />
+    <!-- wasm-opt only runs in release builds; the features are what rustc enables for wasm32 by default.
+         loader.js drives the loading screen below. -->
+    <link data-trunk rel="rust" data-bin="teamcraft-ui" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" data-initializer="loader.js" />
     <!-- The service worker's Rust half (push wake-ups); scripts/finish-sw.sh inlines it into sw.js. -->
-    <link data-trunk rel="rust" href="../teamcraft-web-sw/Cargo.toml" data-type="worker" data-bindgen-target="no-modules" data-wasm-opt="0" />
+    <link data-trunk rel="rust" href="../teamcraft-web-sw/Cargo.toml" data-type="worker" data-bindgen-target="no-modules" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
   </head>
-  <body></body>
+  <body>
+    <!-- The loading screen: plain HTML and CSS (style/loader.css), so it shows before any script runs.
+         loader.js adds progress, the cached brand and errors, and removes it once the app is mounted. -->
+    <div id="tc-loader" class="tc-loader" role="status" aria-busy="true">
+      <div class="tc-loader-mark" aria-hidden="true">
+        <span class="tc-loader-dot"></span><span class="tc-loader-dot"></span><span class="tc-loader-dot"></span>
+        <img class="tc-loader-logo" alt="" hidden />
+      </div>
+      <div class="tc-loader-name"></div>
+      <div class="tc-loader-bar" aria-hidden="true"><div class="tc-loader-progress"></div></div>
+      <div class="tc-loader-error" role="alert" hidden>
+        <p class="tc-loader-error-title"></p>
+        <p class="tc-loader-error-body"></p>
+        <button type="button" class="tc-loader-retry"></button>
+      </div>
+    </div>
+  </body>
 </html>

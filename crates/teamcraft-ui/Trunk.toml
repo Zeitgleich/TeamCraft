@@ -12,7 +12,9 @@ open = false
 [[proxy]]
 backend = "http://127.0.0.1:8081/api/"
 
-# The server's Content-Security-Policy forbids inline scripts, so the loader goes into its own file.
+# The server's Content-Security-Policy forbids inline scripts, so the loader goes into its own file;
+# the same hook then fills in the loading screen's generated values (scripts/finish-loader.sh).
+# Hooks of one stage run at the same time, so steps that depend on each other share a hook.
 [[hooks]]
 stage = "post_build"
 command = "sh"

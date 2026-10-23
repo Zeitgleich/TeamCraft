@@ -182,7 +182,15 @@ and it serves the app with its Content-Security-Policy (no inline scripts or sty
 (`scripts/externalize-init.sh`) moves the loader script into `init.js`, and all dynamic styles are set
 through the CSSOM (`style:prop=`), so the default policy needs no `unsafe-inline`. `sw.js` is copied to
 the root and registered in the browser (not in the desktop shell); it wakes the app for pushes and, until
-the worker can open sealed payloads, shows a generic notification. Browser login needs the server's
+the worker can open sealed payloads, shows a generic notification.
+
+`index.html` carries a loading screen in plain HTML and CSS (`style/loader.css`), painted before any
+script runs. `loader.js` is the Trunk initializer: it adds the cached brand and theme, the download
+progress and an error with a retry button, and fades the screen out once the app is mounted. Its texts
+are the `loader-*` messages of `i18n/*.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
+`init.js` together with the size of the built wasm. Release builds use the `web-release` Cargo profile
+(size over speed) and `wasm-opt -Oz`; the release tarball adds `.br`/`.gz` variants
+(`scripts/compress-web.sh`), which the server serves by `Accept-Encoding`. Browser login needs the server's
 origin registered as a redirect URI of the identity provider's client.
 
 ### Try it without the desktop window

@@ -748,8 +748,12 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   worker (`teamcraft-web-sw_bg.wasm`).
 - **Verifying service worker.** On install and on every update `sw.js` fetches `release.json`,
   checks the signature against the pinned key, fetches every listed file, compares the hashes and only
-  then stores the files in a versioned cache and activates. The app is served from that cache, never
-  from the network. An update that does not verify is dropped: the previous verified version keeps
+  then stores the files in a versioned cache and activates. Files may come from the browser's HTTP
+  cache or, unchanged, from the previous verified version's cache, so an update downloads only what
+  changed; the hash check is the same for every source, and a mismatch is fetched once more from the
+  network before the update is dropped. Precompressed responses (`.br`/`.gz` next to the files) arrive
+  decoded, so the hashes are those of the files as built; the variants are not part of the manifest.
+  The app is served from that cache, never from the network. An update that does not verify is dropped: the previous verified version keeps
   running and the pages are told, so the UI warns (and shows the key's fingerprint on the About
   screen). A worker the browser stopped restores what it verified from a cache before answering.
 - **Push code.** The service worker needs Rust for push (§7: open the sealed wake-up, read the store,

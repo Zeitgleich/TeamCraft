@@ -6,6 +6,12 @@ cancel = Cancel
 save = Save
 close = Close
 
+## Loading screen (index.html, before the app runs; scripts/finish-loader.sh copies these into init.js)
+loader-loading = Loading
+loader-failed-title = The app could not be loaded
+loader-failed-body = Check your connection, then try again.
+loader-retry = Try again
+
 ## Top bar and account menu
 search-placeholder = Search channels and people
 account-menu-label = Account menu for { $name }, status { $status }

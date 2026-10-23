@@ -1,10 +1,4 @@
 {
-  "build": {
-    "beforeBuildCommand": {
-      "script": "set CARGO_PROFILE_RELEASE_OPT_LEVEL=s&& set CARGO_PROFILE_RELEASE_LTO=true&& trunk build --release",
-      "cwd": "../../crates/teamcraft-ui"
-    }
-  },
   "bundle": {
     "windows": {
       "webviewInstallMode": {

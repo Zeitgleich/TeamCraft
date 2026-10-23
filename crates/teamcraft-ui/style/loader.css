@@ -1,0 +1,204 @@
+/* The loading screen of index.html: painted before any script runs, removed by loader.js once the
+   app is mounted. Colours come from main.css (and the server's theme.css, so the brand applies);
+   the fallbacks only matter if main.css is still missing. Nothing here may depend on JS. */
+
+.tc-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 24px;
+  background: var(--bg, #f6f7f9);
+  color: var(--text, #1b2230);
+  font: 14px/1.45 var(--font-ui, system-ui, sans-serif);
+  transition: opacity 180ms ease-out;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tc-loader {
+    background: var(--bg, #0f141d);
+    color: var(--text, #e6eaf1);
+  }
+}
+
+.tc-loader.is-done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The mark: three chat dots on the accent colour, or the brand's icon once loader.js knows it. */
+.tc-loader-mark {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  background: var(--accent, #0b7f78);
+  box-shadow: 0 6px 20px rgba(16, 24, 40, 0.16);
+}
+
+.tc-loader-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--on-accent, #ffffff);
+  animation: tc-loader-bounce 1.2s ease-in-out infinite;
+}
+
+.tc-loader-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.tc-loader-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.tc-loader.has-logo .tc-loader-mark {
+  background: none;
+  box-shadow: none;
+}
+
+.tc-loader.has-logo .tc-loader-dot {
+  display: none;
+}
+
+.tc-loader-logo {
+  max-width: 64px;
+  max-height: 64px;
+}
+
+.tc-loader-name {
+  min-height: 1.45em;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Indeterminate until the download size is known, then the share of the wasm already loaded. */
+.tc-loader-bar {
+  position: relative;
+  width: 180px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--surface-3, rgba(127, 127, 127, 0.25));
+}
+
+.tc-loader-progress {
+  position: absolute;
+  inset: 0;
+  background: var(--accent, #0b7f78);
+  transform-origin: left center;
+  transform: translateX(-100%) scaleX(0.4);
+  animation: tc-loader-sweep 1.4s ease-in-out infinite;
+}
+
+.tc-loader.has-progress .tc-loader-progress {
+  animation: none;
+  transform: scaleX(var(--tc-loader-progress, 0));
+  transition: transform 120ms linear;
+}
+
+/* Downloaded, now compiling and starting: the bar is full and pulses. */
+.tc-loader.is-starting .tc-loader-progress {
+  transform: none;
+  animation: tc-loader-pulse 1.2s ease-in-out infinite;
+}
+
+.tc-loader-error {
+  max-width: 360px;
+  text-align: center;
+}
+
+.tc-loader-error[hidden],
+.tc-loader-logo[hidden] {
+  display: none;
+}
+
+.tc-loader.has-failed .tc-loader-bar,
+.tc-loader.has-failed .tc-loader-dot {
+  display: none;
+}
+
+.tc-loader-error-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.tc-loader-error-body {
+  margin: 0 0 16px;
+  color: var(--text-muted, #566175);
+}
+
+.tc-loader-retry {
+  padding: 7px 16px;
+  border: 0;
+  border-radius: var(--radius-sm, 5px);
+  background: var(--accent, #0b7f78);
+  color: var(--on-accent, #ffffff);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tc-loader-retry:hover {
+  background: var(--accent-strong, #096c66);
+}
+
+.tc-loader-retry:focus-visible {
+  outline: 2px solid var(--focus, #0b7f78);
+  outline-offset: 2px;
+}
+
+@keyframes tc-loader-bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.55;
+  }
+  40% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
+
+@keyframes tc-loader-sweep {
+  0% {
+    transform: translateX(-100%) scaleX(0.4);
+  }
+  100% {
+    transform: translateX(250%) scaleX(0.4);
+  }
+}
+
+@keyframes tc-loader-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-loader-dot,
+  .tc-loader-progress,
+  .tc-loader.is-starting .tc-loader-progress {
+    animation: none;
+  }
+
+  .tc-loader-progress {
+    transform: none;
+    opacity: 0.6;
+  }
+}
