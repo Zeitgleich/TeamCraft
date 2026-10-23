@@ -113,6 +113,10 @@ pub enum MlsError {
   /// was lost, or state this device lost). It has to be added back instead.
   #[error("this device is in the group already")]
   AlreadyInGroup,
+  /// Joining by external commit: the group information is older than an epoch this user's devices
+  /// already saw (a server handing out an old one).
+  #[error("group information for epoch {epoch} is older than epoch {floor} seen before")]
+  StaleGroupInfo { epoch: u64, floor: u64 },
   #[error("encoding failed: {0}")]
   Encoding(#[from] tls_codec::Error),
 }

@@ -254,10 +254,13 @@ member wrote this". Every message is therefore also signed by the sending device
 the associated data, nonce and ciphertext. Receivers check it against the signing key from the
 device's verified certificate (recorded from the MLS group members and the user's signed device list);
 a message whose device key isn't known yet waits until it is. A device that isn't in the group yet
-(a new device of a member) records the keys of the senders' signed device lists and reads the
-history its key bag opens right away; until it is in the group it doesn't know when devices left the
-conversation earlier, so a removed device's message dated after its removal (which the server would
-have to accept) could show there. Edits, deletes and reactions are
+(a new device of a member) reads the history its key bag opens right away: for each message it can't
+verify yet it records that one sending device's key, if the sender's signed device list (identity
+signature, never older than one seen before) names the device, and only if the sender is a member
+per the server or a device whose leaving time it knows. Leaving times travel in the account data
+(§6.4): every device that processes a removal records it there, so a new device refuses a removed
+device's messages dated after its removal too. It can't know removals that none of the user's
+devices processed. Edits, deletes and reactions are
 messages too, so nobody can change or delete someone else's message. A device that left a conversation
 (removed, or its user removed) can't add messages dated after it left (five minutes of slack for
 clocks). Messages from before signatures existed are refused unless the client setting
@@ -332,24 +335,35 @@ its own. See [admin.md](admin.md) §2.
   in the group joins without waiting for anybody, with an MLS **external commit** from the group's
   `GroupInfo`. Every committer sends the `GroupInfo` of the epoch its commit starts (signed by the
   committer, with ratchet tree and external public key) along with the commit; the server keeps the
-  newest one and serves it to members for the current epoch only. The joiner verifies every leaf of
-  that tree against the pinned identities (as for a welcome) and joins only if its user is in the
-  tree and the device isn't. That the `GroupInfo` is current is the server's word, so it could hand
-  out an old one whose tree still holds a member removed since, and fork the new device into a group
-  with that member. The user's devices therefore record in their account data (in the key bag,
-  rollback-protected, §6.4) the epoch of every content key switch in each conversation (removals,
-  "from join" additions, rejoins), and a new device refuses a `GroupInfo` older than that; it waits
-  for a member instead. Members merge an external commit only if it carries nothing but the
+  newest one and serves it to members for the current epoch only (or a member publishes it for the
+  current epoch when a device asks and none is there). The joiner verifies every leaf of that tree
+  against the pinned identities (as for a welcome) and joins only if its user is in the tree and
+  the device isn't. That the `GroupInfo` is current is the server's word, so it could hand out an
+  old one whose tree still holds a member removed since, and fork the new device into a group with
+  that member. The user's devices therefore record in their account data (§6.4) the epoch of every
+  content key switch in each conversation (removals, "from join" additions, rejoins); the joiner
+  compares the epoch inside the signed `GroupInfo` (not the server's envelope) with that floor and
+  refuses an older one. The floor is only as fresh as what the server let the user's devices see:
+  a removal commit withheld from all of them isn't in it, and a key bag the server serves (on
+  recovery with the passphrase, a passkey or the organization) may be an old one. A device enrolled
+  that way therefore never joins by external commit; only a device that got the key bag from
+  another device of the user over the link (§5) does. The others wait for a member. Members merge an external commit only if it carries nothing but the
   external init (no removals, no authenticated data), its new leaf's certificate verifies against the
-  pinned identity, the user's signed device list names the device, the user already has a device in
-  the group and the device wasn't revoked from it: the same rule as an unsigned device addition, so
-  who may add whom doesn't change. The device's own credential is what authorizes it; nobody else
+  pinned identity, the user's signed device list names the device (failing closed: a user without a
+  verified list can't add devices this way), the user already has a device in the group and the
+  device wasn't revoked from it: the rule of an unsigned device addition, stricter on the device
+  list, so who may add whom doesn't change. The device's own credential is what authorizes it; nobody else
   can join this way. openmls merges an external commit at once, so the joiner forgets the group if
   the server refuses it; if the answer was lost and the server took it, the next try finds its
   device in the tree and asks to be added back (below). Without a `GroupInfo` (the last commit came
-  from an older client) the device posts a device-add request into the group's queue (`TCDA`, the
-  user ID): members who see it, also later when they come online, add it like a colleague's new
-  device, checked against the signed device list. The app shows "waiting for another device" until
+  from an older client, or the device's floor may be stale) the device posts a device-add request
+  into the group's queue (`TCDA`, the user ID): members who see it, also later when they come
+  online, check that the user's signed device list names the sending device and add it to that
+  conversation's group like a colleague's new device. `GroupInfo` larger than
+  `max_group_info_bytes` (client, 256 KiB) is not sent, and the server stores a commit without one
+  that exceeds its payload limit; such groups use the request. A further device in a DM or group DM
+  waits for a member as before. The server can still put a user who isn't in a group into a
+  conversation so that the device asks with a signed self-add (as before this change). The app shows "waiting for another device" until
   then. Neither way announces a join: the user was a member all along.
 - **Exception: a device added back.** A device that fell out of the group (see below) can ask to be
   added back with a request it signs with its device key: conversation, the group's epoch on the
@@ -634,6 +648,8 @@ restored together with them on a new device.
 - **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
+- **Removed senders.** When devices left conversations (the removal commit's server time), so a new
+  device refuses their later messages too (§4.4); a device added back again is a newer tombstone.
 - **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
   user looked at. Merging takes the later one, so reading on any device counts everywhere and never
   moves back. The feed itself is computed from decrypted messages on each device (notifications.md).

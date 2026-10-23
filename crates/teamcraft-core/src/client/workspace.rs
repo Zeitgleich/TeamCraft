@@ -375,46 +375,50 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// would hold everybody up); the delay is capped, so a new device waits at most
   /// `device_add_max_rank` × `device_add_stagger`.
   pub(crate) fn queue_device_addition(&mut self, user: UserId, device: DeviceId) -> Result<(), CoreError> {
-    if device == self.account.device_id {
+    let conversations: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
+    for conversation in conversations {
+      self.queue_device_addition_in(conversation, user, device)?;
+    }
+    Ok(())
+  }
+
+  /// [`Self::queue_device_addition`] for one conversation: if this device is in its group, the
+  /// user has a device there and `device` isn't one yet.
+  pub(crate) fn queue_device_addition_in(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    device: DeviceId,
+  ) -> Result<(), CoreError> {
+    if device == self.account.device_id || !self.has_group(conversation)? {
       return Ok(());
     }
     let crypto_user = convert::user(user);
+    let members = self.group_or_error(conversation)?.members()?;
+    if !members.iter().any(|member| member.user_id == crypto_user) {
+      return Ok(());
+    }
+    let mut candidates = Vec::with_capacity(members.len());
+    for member in &members {
+      let member_device = convert::device_from_crypto(member.device_id)?;
+      if member_device == device {
+        // Already in the group.
+        return Ok(());
+      }
+      let member_user = convert::user_from_crypto(member.user_id)?;
+      candidates.push((member_device, self.is_probably_online(member_user)?));
+    }
     let now = self.now_ms();
     let stagger_ms = i64::try_from(self.settings.device_add_stagger.as_millis()).unwrap_or(i64::MAX);
-    let conversations: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
-    for conversation in conversations {
-      if !self.has_group(conversation)? {
-        continue;
-      }
-      let members = self.group_or_error(conversation)?.members()?;
-      if !members.iter().any(|member| member.user_id == crypto_user) {
-        continue;
-      }
-      let mut candidates = Vec::with_capacity(members.len());
-      for member in &members {
-        let member_device = convert::device_from_crypto(member.device_id)?;
-        if member_device == device {
-          // Already in the group.
-          candidates.clear();
-          break;
-        }
-        let member_user = convert::user_from_crypto(member.user_id)?;
-        candidates.push((member_device, self.is_probably_online(member_user)?));
-      }
-      if candidates.is_empty() {
-        continue;
-      }
-      let rank =
-        commit_rank(&candidates, self.account.device_id, device).min(self.settings.device_add_max_rank);
-      self.queue_pending(PendingChange::AddDevice {
-        conversation_id: conversation,
-        user_id: user,
-        device_id: device,
-        not_before_ms: now.saturating_add(stagger_ms.saturating_mul(i64::from(rank))),
-        attempts: 0,
-      })?;
-    }
-    Ok(())
+    let rank =
+      commit_rank(&candidates, self.account.device_id, device).min(self.settings.device_add_max_rank);
+    self.queue_pending(PendingChange::AddDevice {
+      conversation_id: conversation,
+      user_id: user,
+      device_id: device,
+      not_before_ms: now.saturating_add(stagger_ms.saturating_mul(i64::from(rank))),
+      attempts: 0,
+    })
   }
 
   /// How long this device waits before it adds back `device` (a rejoin): ranked among the group's

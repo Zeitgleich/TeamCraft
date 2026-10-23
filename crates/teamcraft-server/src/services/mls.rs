@@ -35,8 +35,14 @@ pub async fn post_commit(
   for welcome in &request.welcomes {
     check_payload(state, &welcome.welcome)?;
   }
-  if let Some(group_info) = &request.maybe_group_info {
-    check_payload(state, group_info)?;
+  // Group information too large to keep is dropped, never the commit: removals must go through.
+  let max_payload = limits.max_mls_payload_bytes;
+  let maybe_group_info = request
+    .maybe_group_info
+    .as_ref()
+    .filter(|info| !info.is_empty() && info.len() <= max_payload);
+  if request.maybe_group_info.is_some() && maybe_group_info.is_none() {
+    tracing::debug!(conversation_id = %conversation, "commit stored without its group information");
   }
 
   // Welcomes go to devices of members only, one per device.
@@ -89,7 +95,7 @@ pub async fn post_commit(
       request.device_id,
       &commit,
       &welcomes,
-      request.maybe_group_info.as_ref().map(Base64Bytes::as_slice),
+      maybe_group_info.map(Base64Bytes::as_slice),
     )
     .await?;
   let new_epoch = match outcome {

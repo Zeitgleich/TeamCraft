@@ -208,15 +208,18 @@ impl ConversationGroup {
   /// Joins the group of a conversation whose user already has a device in it, from the group's
   /// information, with an MLS external commit (e2ee.md §4.6). Every leaf of the group is verified
   /// against the pinned identities, as when joining from a welcome; this device must not be in the
-  /// group yet and its user must be. openmls merges an external commit at once, so the group is in
-  /// the new epoch already: if the server doesn't take the commit, [`Self::delete`] the group and
-  /// try again.
+  /// group yet and its user must be. `min_epoch` is the newest epoch this user's devices saw the
+  /// content key switch in: the signed epoch of the group information must not be older (a server
+  /// could hand out an old one whose tree still holds a removed member). openmls merges an external
+  /// commit at once, so the group is in the new epoch already: if the server doesn't take the
+  /// commit, [`Self::delete`] the group and try again.
   pub fn join_external(
     provider: &impl OpenMlsProvider,
     device: &DeviceKeyPair,
     certificate: &SignedDeviceCertificate,
     group_info: &[u8],
     conversation_id: ConversationId,
+    min_epoch: u64,
     directory: &impl IdentityDirectory,
   ) -> Result<(Self, CommitOutput), MlsError> {
     let MlsMessageBodyIn::GroupInfo(info) = MlsMessageIn::tls_deserialize_exact(group_info)?.extract() else {
@@ -248,7 +251,18 @@ impl ConversationGroup {
       ..ChangeHistory::default()
     };
     let joined = Self::from_group(conversation_id, group, history);
-    if let Err(error) = joined.check_external_join(certificate, directory) {
+    // The epoch from the signed group context (openmls checked the group info's signature and the
+    // tree against it); the joiner is one past it.
+    let info_epoch = joined.epoch().saturating_sub(1);
+    let checked = if info_epoch < min_epoch {
+      Err(MlsError::StaleGroupInfo {
+        epoch: info_epoch,
+        floor: min_epoch,
+      })
+    } else {
+      joined.check_external_join(certificate, directory)
+    };
+    if let Err(error) = checked {
       // Nothing was sent yet: forget the group again.
       joined.delete(provider)?;
       return Err(error);
@@ -799,7 +813,8 @@ impl ConversationGroup {
       .update_path_leaf_node()
       .ok_or(MlsError::UnexpectedMessage("external commit without a leaf"))?;
     let device = credential::verify(leaf.credential(), leaf.signature_key().as_slice(), directory)?;
-    if !directory.is_active_device(&device) {
+    // Fails closed: nobody vouches for this device but its user's signed device list.
+    if !directory.is_listed_device(&device) {
       return Err(MlsError::InactiveDevice(device.device_id()));
     }
     let joiner = GroupMember::from(&device);

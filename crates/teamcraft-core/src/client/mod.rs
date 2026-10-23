@@ -103,6 +103,9 @@ pub struct ClientSettings {
   /// A device that fell out of a group asks again to be added back after this long without a
   /// welcome (e2ee.md §4.6).
   pub rejoin_retry: std::time::Duration,
+  /// Larger MLS group information is not sent with a commit (it would push the commit over the
+  /// server's payload limit); a further device then waits for a member instead.
+  pub max_group_info_bytes: usize,
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
   /// long a new device waits when the first-ranked members are away (presence isn't per device).
   pub device_add_max_rank: u32,
@@ -135,6 +138,9 @@ pub struct Client<A, S> {
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
   last_key_package_check_ms: i64,
+  /// When this device last tried to join each conversation's group as a further device (backs
+  /// off while waiting for a member).
+  member_join_attempts: HashMap<ConversationId, i64>,
   /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
   /// sends into the others only after catching up (e2ee.md §4.6).
   mls_current: std::collections::BTreeSet<ConversationId>,
@@ -151,6 +157,7 @@ impl Default for ClientSettings {
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
+      max_group_info_bytes: 256 * 1024,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
       maybe_push_gateway_url: None,
@@ -198,6 +205,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      member_join_attempts: HashMap::new(),
     }))
   }
 

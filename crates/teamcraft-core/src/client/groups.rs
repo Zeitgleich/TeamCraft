@@ -402,7 +402,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .strip_prefix(super::member_device::DEVICE_ADD_REQUEST_MAGIC)
         && message.sender_device_id != self.account.device_id
       {
-        self.note_device_add_request(message.sender_device_id, user)?;
+        self
+          .note_device_add_request(conversation, message.sender_device_id, user)
+          .await?;
       }
       self.advance_cursor(conversation, message)?;
       return Ok(MlsProgress::Done);
@@ -686,7 +688,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       epoch,
       commit: Base64Bytes::new(output.commit),
       welcomes,
-      maybe_group_info: output.maybe_group_info.map(Base64Bytes::new),
+      // A very large group's information is left out rather than making the commit too large.
+      maybe_group_info: output
+        .maybe_group_info
+        .filter(|info| info.len() <= self.settings.max_group_info_bytes)
+        .map(Base64Bytes::new),
     };
     // Kept before sending, so a restart mid-request still finds the commit.
     self.persist_group(conversation)?;
@@ -914,10 +920,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let user = convert::user_from_crypto(device.user_id())?;
       let device_id = convert::device_from_crypto(device.device_id())?;
       // A member again (added back): its new messages count.
-      self.store.delete(
-        Table::RemovedSenders,
-        &format!("{conversation}/{user}/{device_id}"),
-      )?;
+      let key = format!("{conversation}/{user}/{device_id}");
+      if self.store.get(Table::RemovedSenders, &key)?.is_some() {
+        self.store.delete(Table::RemovedSenders, &key)?;
+        self.update_account_data(|data, now| data.clear_removed_sender(&key, now))?;
+      }
       if records::device_signing_key(&self.store, user, device_id)?.as_ref() != Some(device.signing_key()) {
         records::put_device_signing_key(&self.store, user, device_id, device.signing_key())?;
         is_new = true;
@@ -945,6 +952,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         convert::device_from_crypto(member.device_id)?
       );
       records::put_json(&self.store, Table::RemovedSenders, &key, &at_ms)?;
+      // The user's other (and future) devices refuse its later messages too.
+      self.update_account_data(|data, now| data.note_removed_sender(&key, at_ms, now))?;
     }
     Ok(())
   }

@@ -1141,6 +1141,7 @@ mod external_join {
       &carol_phone.user.certificate,
       &group_info,
       CONVERSATION,
+      0,
       &world.directory,
     )
     .unwrap();
@@ -1187,6 +1188,7 @@ mod external_join {
       &world.bob.user.certificate,
       &group_info,
       CONVERSATION,
+      0,
       &world.directory,
     );
     assert!(matches!(result, Err(MlsError::MissingSignedChange)));
@@ -1210,6 +1212,7 @@ mod external_join {
       &world.carol.user.certificate,
       &group_info,
       CONVERSATION,
+      0,
       &world.directory,
     );
     assert!(again.is_err());
@@ -1220,9 +1223,71 @@ mod external_join {
       &carol_phone.user.certificate,
       &group_info,
       ConversationId::new(43),
+      0,
       &world.directory,
     );
     assert!(matches!(wrong_conversation, Err(MlsError::UnexpectedMessage(_))));
+  }
+
+  #[test]
+  fn group_information_older_than_the_users_floor_is_refused() {
+    let world = World::new();
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let group_info = world
+      .alice_group
+      .export_group_info(&world.alice.provider, &world.alice.user.device)
+      .unwrap();
+    // The signed epoch counts, whatever the server claims around it.
+    let result = ConversationGroup::join_external(
+      &carol_phone.provider,
+      &carol_phone.user.device,
+      &carol_phone.user.certificate,
+      &group_info,
+      CONVERSATION,
+      world.alice_group.epoch() + 1,
+      &world.directory,
+    );
+    assert!(matches!(result, Err(MlsError::StaleGroupInfo { .. })));
+    // Nothing of the group stays behind on the device.
+    assert!(
+      ConversationGroup::load(
+        &carol_phone.provider,
+        CONVERSATION,
+        [],
+        ChangeHistory::default(),
+        None
+      )
+      .unwrap()
+      .is_none()
+    );
+  }
+
+  #[test]
+  fn members_refuse_a_device_no_signed_device_list_names() {
+    let mut world = World::new();
+    let carol_phone = Client::from_user(world.carol.user.new_device(301));
+    let group_info = world
+      .alice_group
+      .export_group_info(&world.alice.provider, &world.alice.user.device)
+      .unwrap();
+    let commit = raw_external_commit(&carol_phone, &group_info);
+    let unlisted = Unlisted(&world.directory);
+    let epoch = world.carol_group.epoch();
+    let result =
+      world
+        .carol_group
+        .process_message(&world.carol.provider, &commit, &unlisted, &world.authority);
+    assert!(matches!(result, Err(MlsError::InactiveDevice(_))));
+    assert_eq!(world.carol_group.epoch(), epoch);
+  }
+
+  /// A directory that knows the identities but no device list (the server 404s them).
+  struct Unlisted<'a>(&'a TestDirectory);
+
+  impl IdentityDirectory for Unlisted<'_> {
+    fn pinned_identity(&self, user_id: UserId) -> Option<crate::identity::IdentityPublicKey> {
+      self.0.pinned_identity(user_id)
+    }
   }
 
   /// An external commit built with openmls directly, without TeamCraft's checks.

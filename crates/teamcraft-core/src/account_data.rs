@@ -52,6 +52,12 @@ pub struct AccountData {
   /// a group that still holds a removed member (e2ee.md §4.6). Only grows.
   #[serde(default)]
   pub group_epochs: BTreeMap<String, u64>,
+  /// When devices left conversations (the removal commit's server time), keyed
+  /// `conversation/user/device`, as one of the user's devices processed it: a new device of the user
+  /// refuses messages they sign for a later time too (e2ee.md §4.4). A device added back again is a
+  /// newer tombstone.
+  #[serde(default)]
+  pub removed_senders: BTreeMap<String, Stamped<i64>>,
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
@@ -132,6 +138,7 @@ impl AccountData {
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
     merge_map(&mut self.backgrounds, &other.backgrounds);
+    merge_map(&mut self.removed_senders, &other.removed_senders);
     for (conversation, epoch) in &other.group_epochs {
       let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);
       *entry = (*entry).max(*epoch);
@@ -172,6 +179,51 @@ impl AccountData {
     self
       .backgrounds
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+    self
+      .removed_senders
+      .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+  }
+
+  /// When the device `key` (`conversation/user/device`) left its conversation, if it did.
+  pub fn removed_sender(&self, key: &str) -> Option<i64> {
+    self
+      .removed_senders
+      .get(key)
+      .filter(|entry| !entry.is_removed)
+      .map(|entry| entry.value)
+  }
+
+  /// Records that a device left a conversation at `left_at_ms`; returns whether that changed
+  /// anything.
+  pub fn note_removed_sender(&mut self, key: &str, left_at_ms: i64, now_ms: i64) -> bool {
+    if self.removed_sender(key) == Some(left_at_ms) {
+      return false;
+    }
+    self.removed_senders.insert(
+      key.to_string(),
+      Stamped {
+        value: left_at_ms,
+        updated_at_ms: now_ms,
+        is_removed: false,
+      },
+    );
+    true
+  }
+
+  /// The device is a member again; returns whether a removal was recorded.
+  pub fn clear_removed_sender(&mut self, key: &str, now_ms: i64) -> bool {
+    let Some(left_at_ms) = self.removed_sender(key) else {
+      return false;
+    };
+    self.removed_senders.insert(
+      key.to_string(),
+      Stamped {
+        value: left_at_ms,
+        updated_at_ms: now_ms,
+        is_removed: true,
+      },
+    );
+    true
   }
 
   /// The newest epoch in which the user's devices switched the conversation's content key; 0 if

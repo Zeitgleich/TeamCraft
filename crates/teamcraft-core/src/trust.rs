@@ -78,6 +78,13 @@ impl IdentityDirectory for PinnedDirectory {
       .get(&device.user_id())
       .is_none_or(|list| list.is_active(device))
   }
+
+  fn is_listed_device(&self, device: &VerifiedDevice) -> bool {
+    self
+      .device_lists
+      .get(&device.user_id())
+      .is_some_and(|list| list.is_active(device))
+  }
 }
 
 impl WorkspaceAuthority {

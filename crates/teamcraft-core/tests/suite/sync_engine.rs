@@ -477,9 +477,9 @@ async fn second_device_recovers_identity_and_history() {
     laptop.client.identity_fingerprint(),
     alice.client.identity_fingerprint()
   );
-  // The laptop joins the group by itself (external commit as a further device of a member).
+  // Her phone adds the laptop to the group; no admin signature needed for own devices.
+  assert_eq!(alice.client.add_missing_devices(channel).await.unwrap(), 1);
   settle(&mut [&mut alice, &mut bob, &mut laptop]).await;
-  assert_eq!(alice.client.add_missing_devices(channel).await.unwrap(), 0);
   assert!(laptop.client.has_group(channel).unwrap());
 
   laptop.client.load_older_messages(channel).await.unwrap();

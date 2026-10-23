@@ -129,6 +129,21 @@ mod group_info {
     assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.body);
     assert_eq!(app.get(&g.carol, &path).await.body["epoch"], 2);
 
+    // Too large to keep: the commit goes through without it.
+    let big = "x".repeat(2 * 1024 * 1024);
+    let third = app
+      .post(
+        &g.carol,
+        &format!("/conversations/{}/mls/commits", g.channel),
+        json!({"device_id": g.carol_device, "epoch": 2, "commit": b64("commit-2"), "group_info": b64(&big)}),
+      )
+      .await;
+    assert_eq!(third.status, StatusCode::CREATED, "{}", third.body);
+    assert_eq!(
+      app.get(&g.carol, &path).await.error_code(),
+      "mls_group_info_not_found"
+    );
+
     // Not for outsiders.
     let erin = member("erin");
     register_device(&app, &erin).await;

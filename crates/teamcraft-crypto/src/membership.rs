@@ -33,6 +33,14 @@ pub trait IdentityDirectory {
     let _ = device;
     true
   }
+
+  /// Like [`Self::is_active_device`], but fails closed: only a device that a verified signed
+  /// device list names counts. Required where nobody else vouches for the device (a device joining
+  /// a group on its own, e2ee.md §4.6).
+  fn is_listed_device(&self, device: &VerifiedDevice) -> bool {
+    let _ = device;
+    false
+  }
 }
 
 /// Decides whether a user may make a membership change in a conversation (admin.md §2.3).
@@ -542,6 +550,11 @@ pub(crate) mod tests {
   impl IdentityDirectory for TestDirectory {
     fn pinned_identity(&self, user_id: UserId) -> Option<IdentityPublicKey> {
       self.0.get(&user_id).copied()
+    }
+
+    /// Every test device counts as named in its user's signed device list.
+    fn is_listed_device(&self, _device: &VerifiedDevice) -> bool {
+      true
     }
   }
 
