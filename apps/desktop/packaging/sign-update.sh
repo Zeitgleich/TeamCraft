@@ -19,12 +19,15 @@ fail() { echo "error: $*" >&2; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error::$*
 version="$1"
 shift
 config="$(dirname "$0")/../tauri.conf.json"
+# Windows runners have `python`; a `python3` there may be the Microsoft Store stub.
+python=python3
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) python=python ;; esac
 
 if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   warn "TAURI_SIGNING_PRIVATE_KEY is not set: update artifacts stay unsigned and the release gets no latest.json (docs/updates.md §7)"
   exit 0
 fi
-pubkey="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["plugins"]["updater"]["pubkey"].strip())' "$config")"
+pubkey="$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))["plugins"]["updater"]["pubkey"].strip())' "$config")"
 [ -n "$pubkey" ] || fail "the signing key is set but plugins.updater.pubkey in tauri.conf.json is empty: paste the public key (docs/updates.md §7)"
 
 for file in "$@"; do
@@ -33,7 +36,7 @@ for file in "$@"; do
   cargo tauri signer sign --app-version "$version" "$file"
   [ -s "$file.sig" ] || fail "no signature was written for $file"
   # The key ID in the signature must be the public key's, or no installed app could verify it.
-  python3 - "$pubkey" "$file.sig" <<'PY' || fail "$file.sig was made with a key that does not match plugins.updater.pubkey"
+  "$python" - "$pubkey" "$file.sig" <<'PY' || fail "$file.sig was made with a key that does not match plugins.updater.pubkey"
 import base64, sys
 def key_id(encoded):
     text = base64.b64decode(encoded).decode()
