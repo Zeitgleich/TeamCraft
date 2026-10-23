@@ -86,7 +86,7 @@ class NotificationsOnDeviceTest {
   @Test
   fun aRingShowsAnIncomingCallUntilCancelled() {
     val ringer = IncomingCallNotifier(context)
-    ringer.show(IncomingRing(CONVERSATION, maybeCallId = "77", displayName = "planning", maybeCallerName = "Alice"))
+    ringer.show(IncomingRing(CONVERSATION, maybeCallId = "77", displayName = "planning", maybeCallerName = "Alice", isVerified = true))
     val ring = system.activeNotifications.firstOrNull { it.notification.channelId == NotificationChannels.INCOMING_CALLS }
     assertNotNull(ring)
     assertEquals(Notification.CATEGORY_CALL, ring!!.notification.category)

@@ -105,7 +105,13 @@ class CallController(
     val current = ringing.value
     if (current != null) {
       // The gateway and a wake-up may report the same ring; another conversation's waits.
-      current.merged(incoming)?.let { ringing.value = it }
+      val maybeMerged = current.merged(incoming) ?: return
+      ringing.value = maybeMerged
+      // The device verified the ring only now: offer answering from here on.
+      if (maybeMerged.isVerified && !current.isVerified) {
+        incomingNotifier.show(maybeMerged)
+        reportToTelecom(maybeMerged)
+      }
       return
     }
     ringing.value = incoming
@@ -115,6 +121,11 @@ class CallController(
       delay(IncomingCallNotifier.RING_TIMEOUT_MS)
       if (ringing.value?.conversationId == incoming.conversationId) endRing()
     }
+    if (incoming.isVerified) reportToTelecom(incoming)
+  }
+
+  /** Lets headsets, car kits and Android Auto answer; only for rings the device verified. */
+  private fun reportToTelecom(incoming: IncomingRing) {
     scope.launch {
       try {
         registerWithTelecom()
@@ -336,8 +347,11 @@ class CallController(
   }
 
   private suspend fun displayNameOf(conversationId: String): String =
+    conversationNameOf(conversationId) ?: context.getString(R.string.app_name)
+
+  /** The name of a conversation this device knows; `null` for one it doesn't. */
+  private suspend fun conversationNameOf(conversationId: String): String? =
     runCatching { core.core().conversations().firstOrNull { it.id == conversationId }?.name }.getOrNull()
-      ?: context.getString(R.string.app_name)
 
   private fun showCall() {
     // The previous call's ended state would close the screen right away.
@@ -381,8 +395,16 @@ class CallController(
 
     override fun onIncomingCall(call: IncomingCallInfo) {
       scope.launch {
-        val displayName = displayNameOf(call.conversationId)
-        ring(IncomingRing(call.conversationId, maybeCallId = null, displayName = displayName, maybeCallerName = null))
+        val maybeName = conversationNameOf(call.conversationId)
+        ring(
+          IncomingRing(
+            call.conversationId,
+            maybeCallId = null,
+            displayName = maybeName ?: context.getString(R.string.app_name),
+            maybeCallerName = null,
+            isVerified = maybeName != null,
+          ),
+        )
       }
     }
 

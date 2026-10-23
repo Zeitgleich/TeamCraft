@@ -10,6 +10,11 @@ data class IncomingRing(
   /** The conversation's name, or the caller's for a DM. */
   val displayName: String,
   val maybeCallerName: String?,
+  /**
+   * The device knows the conversation as one it is in. Otherwise the ring is only the server's word:
+   * it alerts, but offers no answer (no full-screen screen, no Telecom call), as on iOS.
+   */
+  val isVerified: Boolean,
 ) {
   /**
    * Whether a `dismiss` wake-up for `callId` ends this ring. Only the same call: a late dismissal
@@ -19,5 +24,5 @@ data class IncomingRing(
 
   /** What a second ring report does to this one: the same conversation adds the call's ID. */
   fun merged(other: IncomingRing): IncomingRing? =
-    if (other.conversationId == conversationId) copy(maybeCallId = maybeCallId ?: other.maybeCallId) else null
+    if (other.conversationId == conversationId) copy(maybeCallId = maybeCallId ?: other.maybeCallId, isVerified = isVerified || other.isVerified) else null
 }

@@ -32,6 +32,13 @@ class IncomingRingTest {
     assertNull(ring(maybeCallId = null).merged(ring(maybeCallId = "7", conversationId = "2")))
   }
 
-  private fun ring(maybeCallId: String?, conversationId: String = "1") =
-    IncomingRing(conversationId, maybeCallId, displayName = "planning", maybeCallerName = "Alice")
+  @Test
+  fun aVerifiedReportOfTheSameRingVerifiesIt() {
+    val unverified = ring(maybeCallId = "7", isVerified = false)
+    assertTrue(unverified.merged(ring(maybeCallId = null))?.isVerified == true)
+    assertFalse(unverified.merged(ring(maybeCallId = "7", isVerified = false))?.isVerified == true)
+  }
+
+  private fun ring(maybeCallId: String?, conversationId: String = "1", isVerified: Boolean = true) =
+    IncomingRing(conversationId, maybeCallId, displayName = "planning", maybeCallerName = "Alice", isVerified = isVerified)
 }

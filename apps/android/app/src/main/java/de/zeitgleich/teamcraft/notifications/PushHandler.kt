@@ -51,6 +51,7 @@ class PushHandler(
       maybeCallId = maybeCallId,
       displayName = displayName,
       maybeCallerName = notification.maybeSenderName?.takeIf { it.isNotBlank() },
+      isVerified = notification.isConversationVerified,
     )
   }
 }
