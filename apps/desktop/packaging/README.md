@@ -55,8 +55,9 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
   its plugin added to `PLUGINS`. Compile- and link-checked in CI only; whether the relocated framework finds its plugins at
   runtime needs a real Mac, and without it video falls back to OpenH264. The disable-library-validation
   entitlement is for the bundled framework.
-- Signing and notarization are not configured. The release workflow builds an unsigned dmg; the
-  `APPLE_*` secrets it would need are listed in the workflow file.
+- The app is signed inside out and checked before the dmg is made from it (`macos/sign-app.sh`,
+  `macos/make-dmg.sh`, `macos/verify-app.sh`): ad hoc without a Developer ID, with it (secrets listed in
+  `docs/release.md`) also notarized and stapled.
 
 ## Release workflow
 

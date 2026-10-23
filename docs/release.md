@@ -133,15 +133,39 @@ Dependabot's pull requests are left out. Edit the template when a known limitati
 Images are pushed with the workflow's `GITHUB_TOKEN`; the packages inherit the repository's visibility
 on first push, change it under the organization's *Packages* settings if they should be public.
 
+### The macOS app's signature
+
+The release job builds the app, signs it inside out (`apps/desktop/packaging/macos/sign-app.sh`:
+every library and plugin of the bundled GStreamer framework, the framework, then the app with
+`Entitlements.plist`) and only then packs the dmg (`make-dmg.sh`). It fails when the signature is
+broken (`verify-app.sh`: `codesign --verify --deep --strict` and `spctl`), on the app and again on the
+app inside the mounted dmg. A broken or missing seal is what Gatekeeper calls "damaged"; an intact
+ad-hoc signature gets the normal "could not verify" prompt instead.
+
+With the secrets `APPLE_CERTIFICATE` (the Developer ID Application certificate as base64 .p12),
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` (an app-specific
+password) and `APPLE_TEAM_ID`, the same job signs with the Developer ID, with hardened runtime and
+timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to accept them.
+
+### Opening the unsigned macOS app
+
+1. Drag TeamCraft from the dmg to *Applications* and open it once; macOS refuses ("Apple could not
+   verify …").
+2. *System Settings → Privacy & Security*, section *Security*: *Open Anyway*, confirm with the password.
+   On macOS 14, right-click → *Open* in Finder also works.
+3. Only if that doesn't appear: `xattr -dr com.apple.quarantine /Applications/TeamCraft.app`.
+
+"TeamCraft is damaged and can't be opened" means a broken signature: report it, don't work around it.
+
 ### Signing the platform packages
 
-| Artifact | Status                                                                                   |
-|----------|------------------------------------------------------------------------------------------|
-| Android  | Release APKs signed with the upload key when its secrets exist (below), else `-unsigned` |
-| macOS    | Unsigned, not notarized; the secrets it would need are listed in `desktop-release.yml`   |
-| Windows  | Not code-signed (`apps/desktop/packaging/windows/README.md`)                             |
-| iOS      | Not built: build and sign it with your own Apple team (`apps/ios/README.md`)             |
-| Linux    | Packages are unsigned; checksums and attestations cover them                             |
+| Artifact | Status                                                                                     |
+|----------|--------------------------------------------------------------------------------------------|
+| Android  | Release APKs signed with the upload key when its secrets exist (below), else `-unsigned`   |
+| macOS    | Ad-hoc signed, not notarized; Developer ID signing and notarization with the secrets above |
+| Windows  | Not code-signed (`apps/desktop/packaging/windows/README.md`)                               |
+| iOS      | Not built: build and sign it with your own Apple team (`apps/ios/README.md`)               |
+| Linux    | Packages are unsigned; checksums and attestations cover them                               |
 
 Upload key secrets: `ANDROID_UPLOAD_KEYSTORE_BASE64` (the keystore file, base64),
 `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD`.
