@@ -81,6 +81,18 @@ impl Database {
       .transpose()
   }
 
+  /// Deletes attachments that were announced before `before` but never completed, returning their
+  /// object keys: their upload URLs have expired, so nothing can finish them any more.
+  pub async fn sweep_unfinished_attachments(&self, before: OffsetDateTime) -> Result<Vec<String>, DbError> {
+    let keys = sqlx::query_scalar!(
+      "DELETE FROM attachments WHERE completed_at IS NULL AND created_at < $1 RETURNING s3_key",
+      before,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    Ok(keys)
+  }
+
   pub async fn complete_attachment(&self, id: AttachmentId) -> Result<(), DbError> {
     sqlx::query!(
       "UPDATE attachments SET completed_at = COALESCE(completed_at, now()) WHERE id = $1",

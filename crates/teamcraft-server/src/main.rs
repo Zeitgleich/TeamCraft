@@ -39,7 +39,7 @@ use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
-  backgrounds, brands, calendar_settings, email_digest, guests, mail_settings, oidc, retention,
+  attachments, backgrounds, brands, calendar_settings, email_digest, guests, mail_settings, oidc, retention,
   runtime_settings, urgent,
 };
 use teamcraft_server::state::{
@@ -257,7 +257,8 @@ async fn run() -> anyhow::Result<()> {
   Ok(())
 }
 
-/// Removes deleted and abandoned call backgrounds once their upload URLs have expired.
+/// Removes deleted and abandoned call backgrounds and unfinished attachments once their upload URLs
+/// have expired.
 fn spawn_background_sweeper(state: AppState) {
   tokio::spawn(async move {
     let mut interval = tokio::time::interval(BACKGROUND_SWEEP_INTERVAL);
@@ -268,6 +269,11 @@ fn spawn_background_sweeper(state: AppState) {
         Ok(0) => {},
         Ok(swept) => info!(swept, "swept deleted call backgrounds"),
         Err(error) => warn!(%error, "sweeping call backgrounds failed"),
+      }
+      match attachments::sweep_unfinished(&state, cutoff).await {
+        Ok(0) => {},
+        Ok(swept) => info!(swept, "swept unfinished attachments"),
+        Err(error) => warn!(%error, "sweeping unfinished attachments failed"),
       }
     }
   });
