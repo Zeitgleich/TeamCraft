@@ -17,6 +17,7 @@ pub mod clock;
 pub mod components;
 pub mod diff;
 pub mod emoji;
+pub mod emoji_catalog;
 pub mod groups;
 pub mod highlight;
 pub mod hybrid;
@@ -26,6 +27,7 @@ pub mod markdown;
 pub mod meetings;
 pub mod mention;
 pub mod mock;
+pub mod navigation;
 pub mod notifier;
 pub mod notify_sync;
 pub mod prefs;
@@ -68,4 +70,30 @@ fn register_service_worker() {
       tracing::debug!(?error, "no service worker");
     }
   });
+}
+
+#[cfg(test)]
+mod tests {
+  /// An unclosed block swallows every rule after it without any error from the build.
+  #[test]
+  fn stylesheet_blocks_are_balanced() {
+    let css = include_str!("../style/main.css");
+    let mut depth = 0_i32;
+    let mut line = 1;
+    let mut in_comment = false;
+    let mut chars = css.chars().peekable();
+    while let Some(character) = chars.next() {
+      match character {
+        '\n' => line += 1,
+        '/' if !in_comment && chars.peek() == Some(&'*') => in_comment = true,
+        '*' if in_comment && chars.peek() == Some(&'/') => in_comment = false,
+        '{' if !in_comment => depth += 1,
+        '}' if !in_comment => depth -= 1,
+        _ => {},
+      }
+      // More closing than opening braces so far: a stray `}`.
+      assert!(depth >= 0, "unexpected `}}` at line {line}");
+    }
+    assert_eq!(depth, 0, "unclosed block in style/main.css");
+  }
 }

@@ -5,6 +5,7 @@ use teamcraft_proto::HistoryPolicy;
 
 use crate::clock::{format_time, format_time_seconds, local_day};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::emoji_picker::EmojiPicker;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::MessageMenu;
@@ -15,7 +16,10 @@ use crate::state::use_app_state;
 
 /// Messages by the same author closer together than this share one header.
 const GROUP_WINDOW_MS: i64 = 5 * 60_000;
-const QUICK_REACTION: &str = "👍";
+/// Quick reactions on hover until the user has used emoji of their own.
+const DEFAULT_QUICK_REACTIONS: [&str; 3] = ["👍", "❤️", "😂"];
+/// How many quick reactions the hover toolbar shows.
+const QUICK_REACTION_COUNT: usize = 3;
 
 /// One message in the channel feed or in a thread. The caller recreates it when the message changes.
 #[component]
@@ -217,6 +221,21 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       .find(|extras| extras.message == message_id)
   });
   let is_editing = RwSignal::new(false);
+  // ↑ in the empty composer asks this row to open its editor.
+  Effect::new(move |_| {
+    if state.edit_request.get() == Some(message_id) && is_mine {
+      state.edit_request.set(None);
+      is_editing.set(true);
+    }
+  });
+  let edit_input = NodeRef::<leptos::html::Textarea>::new();
+  Effect::new(move |_| {
+    if let Some(element) = edit_input.get() {
+      drop(element.focus());
+      let end = element.value().encode_utf16().count() as u32;
+      drop(element.set_selection_range(end, end));
+    }
+  });
 
   let gutter = match (is_grouped, author.clone()) {
     (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
@@ -361,13 +380,50 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
   });
 
   let message_for_menu = message.clone();
+  let maybe_picker_anchor = RwSignal::new_local(None::<web_sys::Element>);
+  let react = move |emoji: &str| {
+    state.settings.remember_emoji(emoji);
+    state.write(|backend| backend.toggle_reaction(conversation, message_id, emoji));
+  };
+  let quick_reactions = move || {
+    let mut list = state.settings.recent_emoji.get();
+    for emoji in DEFAULT_QUICK_REACTIONS {
+      if !list.iter().any(|recent| recent == emoji) {
+        list.push(emoji.to_owned());
+      }
+    }
+    list.truncate(QUICK_REACTION_COUNT);
+    list
+  };
   let actions = view! {
     <div class="msg-actions" role="toolbar" aria-label=move || i18n.t("message-actions")>
+      <For each=quick_reactions key=|emoji| emoji.clone() let:emoji>
+        {
+          let emoji_for_label = emoji.clone();
+          let label = move || i18n.t_with("action-react-with", &[("emoji", &emoji_for_label)]);
+          let chosen = emoji.clone();
+          view! {
+            <button
+              class="icon-btn quick-reaction"
+              aria-label=label.clone()
+              title=label
+              on:click=move |_| react(&chosen)
+            >
+              {emoji}
+            </button>
+          }
+        }
+      </For>
       <button
         class="icon-btn"
         aria-label=move || i18n.t("action-react")
         title=move || i18n.t("action-react")
-        on:click=move |_| state.write(|backend| backend.toggle_reaction(conversation, message_id, QUICK_REACTION))
+        aria-haspopup="dialog"
+        aria-expanded=move || maybe_picker_anchor.with(Option::is_some).to_string()
+        on:click=move |ev| {
+          let maybe_button = event_target::<web_sys::Element>(&ev);
+          maybe_picker_anchor.set(Some(maybe_button));
+        }
       >
         <Icon name=IconName::Smile />
       </button>
@@ -420,6 +476,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
             <textarea
               class="input"
               rows="3"
+              node_ref=edit_input
               aria-label=i18n.t("action-edit")
               prop:value=move || edit_draft.get()
               on:input=move |ev| edit_draft.set(event_target_value(&ev))
@@ -466,6 +523,23 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
         </div> {attachments} {acknowledge} {reaction_chips} {replies}
       </div>
       {actions}
+      // Outside the toolbar, which is only shown while the message is hovered or focused.
+      {move || {
+        maybe_picker_anchor
+          .get()
+          .map(|anchor| {
+            view! {
+              <EmojiPicker
+                anchor=anchor
+                on_pick=Callback::new(move |emoji: String| {
+                  maybe_picker_anchor.set(None);
+                  state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji));
+                })
+                on_close=Callback::new(move |()| maybe_picker_anchor.set(None))
+              />
+            }
+          })
+      }}
     </div>
   }
 }

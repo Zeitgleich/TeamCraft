@@ -365,6 +365,8 @@ pub struct DisplayPrefs {
   pub density: Density,
   /// The custom status emoji of the author next to the name in messages.
   pub show_status_in_messages: bool,
+  /// Size of the whole interface, Ctrl/Cmd + `+` / `-` / `0`.
+  pub zoom: Zoom,
 }
 
 impl Default for DisplayPrefs {
@@ -372,7 +374,62 @@ impl Default for DisplayPrefs {
     Self {
       density: Density::Comfortable,
       show_status_in_messages: true,
+      zoom: Zoom::DEFAULT,
     }
+  }
+}
+
+/// Interface zoom in percent, one of [`Zoom::STEPS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "u16", into = "u16")]
+pub struct Zoom(u16);
+
+impl From<u16> for Zoom {
+  fn from(percent: u16) -> Self {
+    Self::from_percent(percent)
+  }
+}
+
+impl From<Zoom> for u16 {
+  fn from(zoom: Zoom) -> Self {
+    zoom.0
+  }
+}
+
+impl Zoom {
+  pub const STEPS: [u16; 8] = [67, 80, 90, 100, 110, 125, 150, 175];
+  pub const DEFAULT: Zoom = Zoom(100);
+
+  /// The nearest step to a stored or typed value.
+  pub fn from_percent(percent: u16) -> Self {
+    let nearest = Self::STEPS
+      .into_iter()
+      .min_by_key(|step| step.abs_diff(percent))
+      .unwrap_or(100);
+    Self(nearest)
+  }
+
+  pub fn percent(self) -> u16 {
+    self.0
+  }
+
+  pub fn larger(self) -> Self {
+    Self(
+      Self::STEPS
+        .into_iter()
+        .find(|step| *step > self.0)
+        .unwrap_or(self.0),
+    )
+  }
+
+  pub fn smaller(self) -> Self {
+    Self(
+      Self::STEPS
+        .into_iter()
+        .rev()
+        .find(|step| *step < self.0)
+        .unwrap_or(self.0),
+    )
   }
 }
 
@@ -465,6 +522,31 @@ impl Preferences {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn zoom_steps_and_clamps() {
+    assert_eq!(Zoom::DEFAULT.larger().percent(), 110);
+    assert_eq!(Zoom::DEFAULT.smaller().percent(), 90);
+    assert_eq!(Zoom::from_percent(175).larger().percent(), 175);
+    assert_eq!(Zoom::from_percent(10).percent(), 67);
+    assert_eq!(Zoom::from_percent(67).smaller().percent(), 67);
+    assert_eq!(Zoom::from_percent(104).percent(), 100);
+  }
+
+  #[test]
+  fn zoom_is_stored_as_a_number() {
+    let prefs = Preferences::from_json(r#"{"display":{"zoom":125}}"#);
+    assert_eq!(prefs.display.zoom.percent(), 125);
+    // Values that are not a step snap to the nearest one.
+    assert_eq!(
+      Preferences::from_json(r#"{"display":{"zoom":3}}"#)
+        .display
+        .zoom
+        .percent(),
+      67
+    );
+    assert!(Preferences::default().to_json().contains(r#""zoom":100"#));
+  }
 
   #[test]
   fn defaults_round_trip_through_json() {

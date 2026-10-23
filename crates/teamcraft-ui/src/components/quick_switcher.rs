@@ -4,11 +4,13 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationKind};
+use crate::navigation::fuzzy_score;
 use crate::state::use_app_state;
 
 const MAX_RESULTS: usize = 12;
 
-/// Ctrl/Cmd+K: jump to any conversation by typing a part of its name.
+/// Ctrl/Cmd+K: jump to any conversation by typing some letters of its name; recently visited ones
+/// come first.
 #[component]
 pub fn QuickSwitcher() -> impl IntoView {
   let state = use_app_state();
@@ -18,7 +20,7 @@ pub fn QuickSwitcher() -> impl IntoView {
 
   let results = Memo::new(move |_| {
     let needle = query.get().trim().to_lowercase();
-    let (mut list, spaces) = state.read(|backend| {
+    let (list, spaces) = state.read(|backend| {
       let spaces = backend.spaces();
       let mut list: Vec<Conversation> = Vec::new();
       for space in &spaces {
@@ -27,15 +29,32 @@ pub fn QuickSwitcher() -> impl IntoView {
       list.extend(backend.direct_conversations());
       (list, spaces)
     });
-    list.retain(|conv| needle.is_empty() || conv.name.to_lowercase().contains(&needle));
-    // Unread first, then prefix matches, then alphabetical: what people usually want sits on top.
-    list.sort_by_key(|conv| {
-      (
-        conv.unread_count == 0,
-        !conv.name.to_lowercase().starts_with(&needle),
-        conv.name.to_lowercase(),
-      )
-    });
+    let recent = state.settings.recent_conversations.get();
+    let current = state.current_conversation_id();
+    let mut ranked: Vec<(u32, usize, bool, String, Conversation)> = list
+      .into_iter()
+      .filter_map(|conv| {
+        let score = fuzzy_score(&needle, &conv.name)?;
+        // Recently visited first; the open conversation is where the user already is, so it goes last.
+        let recency = if Some(conv.id) == current {
+          usize::MAX
+        } else {
+          recent
+            .iter()
+            .position(|id| *id == conv.id)
+            .unwrap_or(usize::MAX - 1)
+        };
+        Some((
+          score,
+          recency,
+          conv.unread_count == 0,
+          conv.name.to_lowercase(),
+          conv,
+        ))
+      })
+      .collect();
+    ranked.sort_by(|a, b| (a.0, a.1, a.2, &a.3).cmp(&(b.0, b.1, b.2, &b.3)));
+    let mut list: Vec<Conversation> = ranked.into_iter().map(|entry| entry.4).collect();
     list.truncate(MAX_RESULTS);
     list
       .into_iter()

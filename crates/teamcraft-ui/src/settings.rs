@@ -4,6 +4,8 @@
 use leptos::prelude::*;
 
 use crate::i18n::Locale;
+use crate::model::ConversationId;
+use crate::navigation::push_recent;
 use crate::prefs::Preferences;
 use crate::sections::SidebarOptions;
 
@@ -14,6 +16,12 @@ const KEY_UNREADS_GROUP: &str = "teamcraft.unreads_group";
 const KEY_SHOW_JOIN_LEAVE: &str = "teamcraft.show_join_leave";
 const KEY_BACKEND: &str = "teamcraft.backend";
 const KEY_PREFS: &str = "teamcraft.prefs";
+const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
+const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
+/// Conversations the quick switcher remembers as recently visited.
+const MAX_RECENT_CONVERSATIONS: usize = 20;
+/// Emoji the pickers offer as recently used.
+pub const MAX_RECENT_EMOJI: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
@@ -121,6 +129,10 @@ pub struct Settings {
   pub show_join_leave: RwSignal<bool>,
   /// Notifications, privacy, calls, display and sidebar options (one JSON document).
   pub prefs: RwSignal<Preferences>,
+  /// Recently opened conversations, newest first (the quick switcher lists them first).
+  pub recent_conversations: RwSignal<Vec<ConversationId>>,
+  /// Recently used emoji, newest first (reactions and the composer's picker).
+  pub recent_emoji: RwSignal<Vec<String>>,
 }
 
 impl Settings {
@@ -135,6 +147,18 @@ impl Settings {
     }
   }
 
+  pub fn remember_conversation(&self, conversation: ConversationId) {
+    self
+      .recent_conversations
+      .update(|list| push_recent(list, conversation, MAX_RECENT_CONVERSATIONS));
+  }
+
+  pub fn remember_emoji(&self, emoji: &str) {
+    self
+      .recent_emoji
+      .update(|list| push_recent(list, emoji.to_owned(), MAX_RECENT_EMOJI));
+  }
+
   /// Loads stored preferences and keeps them stored whenever they change.
   pub fn load() -> Self {
     let settings = Self {
@@ -144,6 +168,8 @@ impl Settings {
       show_unreads_group: RwSignal::new(load(KEY_UNREADS_GROUP, parse_bool).unwrap_or(true)),
       show_join_leave: RwSignal::new(load(KEY_SHOW_JOIN_LEAVE, parse_bool).unwrap_or(true)),
       prefs: RwSignal::new(load(KEY_PREFS, |text| Some(Preferences::from_json(text))).unwrap_or_default()),
+      recent_conversations: RwSignal::new(load(KEY_RECENT_CONVERSATIONS, from_json).unwrap_or_default()),
+      recent_emoji: RwSignal::new(load(KEY_RECENT_EMOJI, from_json).unwrap_or_default()),
     };
     persist(KEY_THEME, settings.theme, |theme| theme.slug().to_owned());
     persist(KEY_LOCALE, settings.locale, |locale| locale.tag().to_owned());
@@ -155,8 +181,21 @@ impl Settings {
       value.to_string()
     });
     persist(KEY_PREFS, settings.prefs, |prefs| prefs.to_json());
+    persist(KEY_RECENT_CONVERSATIONS, settings.recent_conversations, |list| {
+      to_json(&list)
+    });
+    persist(KEY_RECENT_EMOJI, settings.recent_emoji, |list| to_json(&list));
     settings
   }
+}
+
+fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
+  serde_json::from_str(text).ok()
+}
+
+fn to_json<T: serde::Serialize>(value: &T) -> String {
+  // Lists of IDs and strings always serialize; an empty list is the safe fallback.
+  serde_json::to_string(value).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -198,6 +237,19 @@ pub fn load_string(key: &str) -> Option<String> {
     .ok()
     .flatten()
     .filter(|value| !value.is_empty())
+}
+
+/// Reads a JSON value from `localStorage`; missing or unreadable values are `None`.
+pub fn load_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+  load_string(key).and_then(|text| from_json(&text))
+}
+
+/// Writes a JSON value to `localStorage`; failures only mean it will not persist.
+pub fn store_json<T: serde::Serialize>(key: &str, value: &T) {
+  match serde_json::to_string(value) {
+    Ok(text) => store_string(key, &text),
+    Err(error) => tracing::debug!(key, %error, "could not encode value"),
+  }
 }
 
 /// Writes a raw string setting to `localStorage`; failures only mean it will not persist.

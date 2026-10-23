@@ -1,5 +1,6 @@
 //! Shared application state, provided through Leptos context.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use leptos::prelude::*;
@@ -8,10 +9,14 @@ use crate::admin::AdminSection;
 use crate::backend::Backend;
 use crate::calls::CallState;
 use crate::model::{Conversation, ConversationId, MessageId, SpaceId, ThreadId, User, UserId, id_from_raw};
+use crate::navigation::{Step, divider_index, next_unread};
 use crate::reactive::get_if_observed;
 use crate::sections::build_sections;
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
+
+/// How many of the newest messages are searched for the first unread one.
+const UNREAD_SCAN_LIMIT: usize = 500;
 
 /// A message the user is replying to with a quote.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +25,14 @@ pub struct ReplyTarget {
   pub message: MessageId,
   pub author_name: String,
   pub excerpt: String,
+}
+
+/// Where the unread messages began when a conversation was opened: the feed shows a "New messages"
+/// divider above this message index and starts there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnreadMarker {
+  pub conversation: ConversationId,
+  pub index: usize,
 }
 
 /// What fills the main column.
@@ -123,6 +136,12 @@ pub struct AppState {
   pub jump_to_latest: RwSignal<u64>,
   /// A request to scroll a conversation's feed to a message index (jump to date).
   pub jump_to_index: RwSignal<Option<(ConversationId, usize)>>,
+  /// The "New messages" position of the open conversation, taken before it was marked as read.
+  pub unread_marker: RwSignal<Option<UnreadMarker>>,
+  /// The first visible message of conversations the user left while scrolled up, to return there.
+  pub scroll_anchors: StoredValue<HashMap<ConversationId, usize>>,
+  /// A message the composer asked to edit (↑ in the empty composer); its row opens the editor.
+  pub edit_request: RwSignal<Option<MessageId>>,
   pub settings: Settings,
 }
 
@@ -149,6 +168,9 @@ impl AppState {
       pending_open: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
+      unread_marker: RwSignal::new(None),
+      edit_request: RwSignal::new(None),
+      scroll_anchors: StoredValue::new(HashMap::new()),
       settings,
     }
   }
@@ -244,11 +266,73 @@ impl AppState {
     {
       self.panel.set(SidePanel::Closed);
     }
+    if self.view.get_untracked() != MainView::Conversation(id) {
+      self.unread_marker.set(self.unread_marker_for(&conversation));
+      self.settings.remember_conversation(id);
+    }
     self.view.set(MainView::Conversation(id));
     self.overlay.set(Overlay::None);
     if conversation.unread_count > 0 || conversation.mention_count > 0 {
       self.write(|backend| backend.mark_read(id));
     }
+  }
+
+  /// Where the "New messages" divider of a conversation goes, before opening marks it as read.
+  fn unread_marker_for(&self, conversation: &Conversation) -> Option<UnreadMarker> {
+    let unread = conversation.unread_count as usize;
+    if unread == 0 {
+      return None;
+    }
+    let id = conversation.id;
+    let (count, maybe_first, tail_start, tail_ids) = self.backend.with_value(|backend| {
+      let count = backend.message_count(id);
+      let tail_len = unread.saturating_mul(2).clamp(1, UNREAD_SCAN_LIMIT).min(count);
+      let tail_start = count - tail_len;
+      let tail_ids: Vec<MessageId> = backend
+        .messages(id, tail_start, tail_len)
+        .into_iter()
+        .map(|message| message.id)
+        .collect();
+      (count, backend.first_unread(id), tail_start, tail_ids)
+    });
+    divider_index(count, unread, tail_start, &tail_ids, maybe_first).map(|index| UnreadMarker {
+      conversation: id,
+      index,
+    })
+  }
+
+  /// Opens the previous or next conversation with unread messages in the sidebar (wrapping).
+  pub fn step_unread(&self, step: Step) {
+    let list: Vec<(ConversationId, bool)> = self
+      .navigable_conversations()
+      .into_iter()
+      .map(|conversation| {
+        let is_unread =
+          conversation.mention_count > 0 || (conversation.unread_count > 0 && !conversation.is_muted);
+        (conversation.id, is_unread)
+      })
+      .collect();
+    if let Some(target) = next_unread(&list, self.current_conversation_id(), step) {
+      self.open_conversation(target);
+    }
+  }
+
+  /// Marks every conversation of the current space (and the direct messages) as read.
+  pub fn mark_all_read(&self) {
+    let unread: Vec<ConversationId> = self
+      .navigable_conversations()
+      .into_iter()
+      .filter(|conversation| conversation.unread_count > 0 || conversation.mention_count > 0)
+      .map(|conversation| conversation.id)
+      .collect();
+    if unread.is_empty() {
+      return;
+    }
+    self.write(|backend| {
+      for conversation in unread {
+        backend.mark_read(conversation);
+      }
+    });
   }
 
   pub fn open_admin(&self, section: AdminSection) {
