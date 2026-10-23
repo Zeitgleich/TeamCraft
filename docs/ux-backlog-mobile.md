@@ -38,7 +38,7 @@ work stream).
 | No offline indicator; nothing explains why new messages don't arrive             | Android      | done   |
 | Offline banner                                                                   | iOS          | done   |
 | Mute from the list (needs the per-conversation notification setting)             | Android, iOS | owner: push-quality |
-| Typing indicator (the core tracks typing; the FFI doesn't expose it)             | Android, iOS | open: FFI |
+| Typing indicator ("Alice is typing…"), with a setting to not share one's own     | Android, iOS | done   |
 | Archive / hide a conversation from the list                                      | Android, iOS | open: core |
 | Multi-select (mark several read)                                                 | Android, iOS | open   |
 
@@ -103,4 +103,5 @@ work stream).
 | Settings are one long scrolling page; group into sub-pages                       | Android      | open   |
 | Dynamic color (Material You) as an option next to the TeamCraft theme             | Android      | open   |
 | Font scale: fixed heights cut text at 200 % (badges, chips)                       | Android      | open   |
+| After a server restart clients never got the live gateway back (stale session resumed forever) | all | done (#92) |
 | No Android logs from the Rust core (`tracing` goes nowhere on Android)            | Android      | open: made the send bug hard to find |

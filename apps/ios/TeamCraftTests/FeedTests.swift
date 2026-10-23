@@ -101,6 +101,19 @@ final class FeedTests: XCTestCase {
     XCTAssertNil(Wire.decode(MessageExtras.self, from: #"{"message":"9"}"#)?.isSendFailed)
   }
 
+  func testTypingIsAnnouncedAtMostEveryFewSeconds() {
+    let start = Date(timeIntervalSince1970: 1000)
+    XCTAssertTrue(shouldNotifyTyping("h", now: start, lastNotified: nil))
+    XCTAssertFalse(shouldNotifyTyping("he", now: start.addingTimeInterval(typingNotifyInterval - 0.1), lastNotified: start))
+    XCTAssertTrue(shouldNotifyTyping("hel", now: start.addingTimeInterval(typingNotifyInterval), lastNotified: start))
+    XCTAssertFalse(shouldNotifyTyping("  ", now: start, lastNotified: nil))
+    XCTAssertNil(typingText([]))
+    XCTAssertNotNil(typingText(["Alex", "Bo", "Cy"]))
+    let typing = try? JSONSerialization.jsonObject(
+      with: Data(ChatAction.typing(conversationId: "1").json.utf8)) as? [String: String]
+    XCTAssertEqual(typing, ["action": "typing", "conversation": "1"])
+  }
+
   func testAppLockClock() {
     var clock = AppLockClock()
     let start = ContinuousClock.now

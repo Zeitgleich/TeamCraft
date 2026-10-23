@@ -107,6 +107,8 @@ object ChatActions {
     put("body", body)
   }
 
+  fun typing(conversation: String) = action("typing") { put("conversation", conversation) }
+
   fun retrySend(conversation: String, message: String) = action("retry_send") {
     put("conversation", conversation)
     put("message", message)
@@ -217,6 +219,8 @@ object ChatQueries {
   }
 
   fun resolvePermalink(link: String) = query("resolve_permalink") { put("link", link) }
+
+  fun typingUsers(conversation: String) = query("typing_users") { put("conversation", conversation) }
 
   fun firstUnread(conversation: String) = query("first_unread") { put("conversation", conversation) }
 

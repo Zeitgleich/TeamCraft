@@ -645,11 +645,10 @@ impl Engine {
   fn adopt(&mut self, mut client: CoreClient) {
     self.attach_call_sink(&mut client);
     self.identity_fingerprint = client.identity_fingerprint();
-    self.maybe_backend = Some(CoreChatBackend::new(
-      self.store.clone(),
-      client.user_id(),
-      Box::new(SystemClock),
-    ));
+    self.maybe_backend = Some(
+      CoreChatBackend::new(self.store.clone(), client.user_id(), Box::new(SystemClock))
+        .with_typing(client.typing_state()),
+    );
     self.client = ClientSlot::Idle(Box::new(client));
   }
 

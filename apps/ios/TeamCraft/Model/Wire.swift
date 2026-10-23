@@ -87,12 +87,15 @@ struct ChatAnswer: Decodable, Sendable {
   let files: [FileInfo]?
   let maybeBytes: Int64?
   let maybeTarget: PermalinkTarget?
+  let users: [String]?
 }
 
 /// The people part of the core's chat snapshot: who can be mentioned.
 struct PeopleSnapshot: Decodable, Sendable {
   struct Person: Decodable, Sendable {
+    let id: String
     let username: String
+    let displayName: String
   }
 
   let me: Person

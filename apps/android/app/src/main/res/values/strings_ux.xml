@@ -70,4 +70,10 @@
   <string name="not_sent">Not sent</string>
   <string name="not_sent_retry">Retry</string>
   <string name="not_sent_delete">Delete</string>
+
+  <!-- Typing indicator -->
+  <string name="typing_one">%1$s is typing…</string>
+  <string name="typing_two">%1$s and %2$s are typing…</string>
+  <string name="typing_several">Several people are typing…</string>
+  <string name="share_typing">Show others when I\'m typing</string>
 </resources>

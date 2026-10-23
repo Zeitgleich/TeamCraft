@@ -47,7 +47,7 @@ pub use messaging::FlushReport;
 pub(crate) use messaging::decrypt_content;
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
-pub use notifications::TYPING_TIMEOUT_MS;
+pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
 #[cfg(not(target_arch = "wasm32"))]
