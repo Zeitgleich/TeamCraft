@@ -20,13 +20,17 @@ import de.zeitgleich.teamcraft.notifications.PushStats
 import de.zeitgleich.teamcraft.notifications.ReadWatcher
 import de.zeitgleich.teamcraft.push.PushManager
 import de.zeitgleich.teamcraft.search.SegmentPrefetch
+import de.zeitgleich.teamcraft.server.ManagedConfig
+import de.zeitgleich.teamcraft.server.ServerStore
 import de.zeitgleich.teamcraft.ui.NetworkWatcher
 import uniffi.teamcraft_ffi.AccountState
 
 /** Process-wide objects, shared by the activity, receivers and services. */
 class AppGraph(context: Context) {
   val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-  val auth = AuthRepository(context)
+  val servers = ServerStore(context)
+  val managedConfig = ManagedConfig(context)
+  val auth = AuthRepository(context, servers)
   val core = CoreRepository(context, auth)
   val notifier = MessageNotifier(context)
   val mentionPrefs = MentionPrefs(context)
@@ -46,6 +50,9 @@ class TeamCraftApplication : Application() {
   override fun onCreate() {
     super.onCreate()
     graph = AppGraph(this)
+    // Before anything opens a session or a store: builds with a baked-in server kept them unkeyed.
+    graph.servers.migrateLegacyLayout()
+    graph.scope.launch(Dispatchers.IO) { graph.servers.removeLegacyTrash() }
     graph.segmentPrefetch.schedule()
     graph.readWatcher.start()
     graph.network.start()

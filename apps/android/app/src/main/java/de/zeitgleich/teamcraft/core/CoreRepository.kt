@@ -13,6 +13,7 @@ import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
+import de.zeitgleich.teamcraft.server.StoragePaths
 import uniffi.teamcraft_ffi.AppConfig
 import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.EventListener
@@ -20,8 +21,9 @@ import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TokenProvider
 
 /**
- * Owns the Rust client core ([TeamCraft]) of the signed-in account. The database key is 32 random
- * bytes sealed with a Keystore key (e2ee.md §9.2); tokens come from [AuthRepository].
+ * Owns the Rust client core ([TeamCraft]) of the signed-in account on the active server. The
+ * database key is 32 random bytes sealed with a Keystore key (e2ee.md §9.2); tokens come from
+ * [AuthRepository]. Store and key are kept per server and account ([StoragePaths]).
  */
 class CoreRepository(private val context: Context, private val auth: AuthRepository) {
   private val lock = Mutex()
@@ -42,18 +44,21 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
     maybeCore?.networkChanged()
   }
 
-  /** The core of the signed-in account, opened on first use. */
+  /** The core of the signed-in account, opened on first use (and again after a server change). */
   suspend fun core(): TeamCraft = lock.withLock {
-    val account = auth.account ?: throw IllegalStateException("not signed in")
+    val server = auth.server ?: throw IllegalStateException("no server")
+    val subject = auth.account ?: throw IllegalStateException("not signed in")
+    val storageKey = server.address.storageKey
+    val account = "${server.address.origin} $subject"
     maybeCore?.takeIf { maybeAccount == account }?.let { return it }
     maybeCore?.close()
     val core = withContext(Dispatchers.IO) {
       TeamCraft(
         AppConfig(
-          serverUrl = BuildConfig.SERVER_URL,
-          dataDir = File(context.filesDir, "store").absolutePath,
-          account = storeName(account),
-          databaseKey = databaseKey(account),
+          serverUrl = server.address.origin,
+          dataDir = File(context.filesDir, StoragePaths.storeDir(storageKey)).absolutePath,
+          account = StoragePaths.storeName(subject),
+          databaseKey = databaseKey(storageKey, subject),
           pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
         ),
         Tokens(auth),
@@ -77,8 +82,8 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
     connection.value = null
   }
 
-  private fun databaseKey(account: String): ByteArray =
-    SealedFile(File(context.filesDir, "keys/${storeName(account)}.key"), KeystoreBox(DATABASE_KEY_ALIAS))
+  private fun databaseKey(storageKey: String, subject: String): ByteArray =
+    SealedFile(File(context.filesDir, StoragePaths.databaseKeyFile(storageKey, subject)), KeystoreBox(DATABASE_KEY_ALIAS))
       .readOrCreate(DATABASE_KEY_LENGTH)
 
   private class Tokens(private val auth: AuthRepository) : TokenProvider {
@@ -89,12 +94,8 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
     override fun onChange() = onChange.invoke()
   }
 
-  companion object {
-    private const val DATABASE_KEY_ALIAS = "teamcraft_database"
-    private const val DATABASE_KEY_LENGTH = 32
-
-    /** A file-name-safe name for an OIDC subject (UUIDs pass unchanged). */
-    fun storeName(subject: String): String =
-      subject.map { if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_' }.joinToString("")
+  private companion object {
+    const val DATABASE_KEY_ALIAS = "teamcraft_database"
+    const val DATABASE_KEY_LENGTH = 32
   }
 }

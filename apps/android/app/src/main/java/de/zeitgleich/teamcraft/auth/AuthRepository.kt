@@ -27,57 +27,74 @@ import net.openid.appauth.connectivity.DefaultConnectionBuilder
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
+import de.zeitgleich.teamcraft.server.ServerStore
+import de.zeitgleich.teamcraft.server.StoragePaths
+import de.zeitgleich.teamcraft.server.isPlainHttpAllowed
+import uniffi.teamcraft_ffi.StoredServer
 
 /**
- * OIDC login with AppAuth (authorization code + PKCE) against the configured issuer. The session
- * (refresh token included) is kept sealed with a Keystore key; the Rust core asks for access tokens
- * through [accessToken].
+ * OIDC login with AppAuth (authorization code + PKCE) against the active server's identity provider,
+ * as the server announced it (`StoredServer`: issuer, client, scopes). The session (refresh token
+ * included) is kept sealed with a Keystore key, one file per server; the Rust core asks for access
+ * tokens through [accessToken].
  */
-class AuthRepository(context: Context) {
-  private val sessionFile = SealedFile(
-    File(context.filesDir, "auth/session.bin"),
-    KeystoreBox(SESSION_KEY_ALIAS),
-  )
-  private val service = AuthorizationService(
-    context,
-    AppAuthConfiguration.Builder()
-      .setConnectionBuilder(DevAwareConnectionBuilder)
-      // AppAuth rejects ID tokens of a plain-HTTP issuer; the development stack's Keycloak is one.
-      .setSkipIssuerHttpsCheck(isDevIssuer(BuildConfig.OIDC_ISSUER))
-      .build(),
-  )
-  private var state: AuthState = loadState()
-  private val signedIn = MutableStateFlow(state.isAuthorized)
+class AuthRepository(private val context: Context, private val servers: ServerStore) {
+  private val signedIn = MutableStateFlow(false)
+  private var isLoaded = false
+  private var maybeSession: Session? = null
 
   /** Whether a session exists (it may still need a refresh). */
-  val isSignedIn: StateFlow<Boolean> = signedIn
+  val isSignedIn: StateFlow<Boolean>
+    get() {
+      session()
+      return signedIn
+    }
+
+  /** The server the app signs in to; `null` until the user picked one. */
+  val server: StoredServer?
+    get() = session()?.server
 
   /** The account key for local data: the OIDC subject. */
   val account: String?
-    get() = state.parsedIdToken?.subject
+    get() = synchronized(this) { session()?.state?.parsedIdToken?.subject }
+
+  /**
+   * Switches to [maybeServer]'s session (signed in if one is stored for it), or to none. The
+   * previous server's session file stays; signing out removes it.
+   */
+  fun activate(maybeServer: StoredServer?) {
+    synchronized(this) {
+      maybeSession?.service?.dispose()
+      maybeSession = maybeServer?.let(::open)
+      isLoaded = true
+      signedIn.value = maybeSession?.state?.isAuthorized == true
+    }
+  }
 
   /** The intent that opens the browser for login (PKCE is added by AppAuth). */
   suspend fun loginIntent(): Intent {
-    val configuration = discover()
+    val session = session() ?: throw IllegalStateException("no server")
+    val configuration = discover(session)
     val request = AuthorizationRequest.Builder(
       configuration,
-      BuildConfig.OIDC_CLIENT_ID,
+      session.server.clientId,
       ResponseTypeValues.CODE,
       Uri.parse(BuildConfig.OIDC_REDIRECT_URI),
     )
-      .setScopes("openid", "profile", "email")
+      .setScopes(session.server.scopes)
       .build()
-    return service.getAuthorizationRequestIntent(request)
+    return session.service.getAuthorizationRequestIntent(request)
   }
 
   /** Completes the login with the browser's answer. */
   suspend fun completeLogin(result: Intent?) {
+    val session = session() ?: throw IllegalStateException("no server")
     val response = result?.let { AuthorizationResponse.fromIntent(it) }
     val error = result?.let { AuthorizationException.fromIntent(it) }
     val fresh = AuthState(response, error)
     if (response == null) throw error ?: IllegalStateException("login cancelled")
     val tokens = suspendCancellableCoroutine { continuation ->
-      service.performTokenRequest(response.createTokenExchangeRequest()) { tokenResponse, exception ->
+      session.service.performTokenRequest(response.createTokenExchangeRequest()) { tokenResponse, exception ->
         if (tokenResponse != null) {
           continuation.resume(tokenResponse)
         } else {
@@ -86,8 +103,12 @@ class AuthRepository(context: Context) {
       }
     }
     fresh.update(tokens, null)
-    synchronized(this) { state = fresh }
-    persist()
+    synchronized(this) {
+      // The user changed the server while the browser was open: this login is for the old one.
+      check(maybeSession === session) { "server changed during login" }
+      session.state = fresh
+    }
+    persist(session)
     signedIn.value = true
   }
 
@@ -96,41 +117,73 @@ class AuthRepository(context: Context) {
    * at most [REFRESH_TIMEOUT_SECONDS]: called on the Rust engine thread, never on the UI thread.
    */
   fun accessToken(): String? {
-    val current = synchronized(this) { state }
+    val session = session() ?: return null
+    val current = synchronized(this) { session.state }
     if (!current.isAuthorized) return null
     if (!current.needsTokenRefresh) return current.accessToken
     return runBlocking {
-      withTimeoutOrNull(TimeUnit.SECONDS.toMillis(REFRESH_TIMEOUT_SECONDS)) { refresh(current) }
+      withTimeoutOrNull(TimeUnit.SECONDS.toMillis(REFRESH_TIMEOUT_SECONDS)) { refresh(session, current) }
     }
   }
 
+  /** Ends the active server's session; the server stays selected. */
   fun signOut() {
-    synchronized(this) { state = AuthState() }
-    sessionFile.delete()
-    signedIn.value = false
+    session()?.let(::signOut)
   }
 
   fun dispose() {
-    service.dispose()
+    synchronized(this) { maybeSession?.service?.dispose() }
   }
 
-  private suspend fun refresh(current: AuthState): String? =
+  private fun signOut(session: Session) {
+    synchronized(this) { session.state = AuthState() }
+    session.file.delete()
+    if (maybeSession === session) signedIn.value = false
+  }
+
+  /** The active server's session, opened from the stored server on first use. */
+  private fun session(): Session? = synchronized(this) {
+    if (!isLoaded) {
+      maybeSession = servers.active()?.let(::open)
+      isLoaded = true
+      signedIn.value = maybeSession?.state?.isAuthorized == true
+    }
+    maybeSession
+  }
+
+  private fun open(server: StoredServer): Session {
+    val isInsecureHttpAllowed = BuildConfig.DEBUG
+    val connections = DevAwareConnectionBuilder(isInsecureHttpAllowed)
+    val issuer = Uri.parse(server.issuer)
+    val service = AuthorizationService(
+      context,
+      AppAuthConfiguration.Builder()
+        .setConnectionBuilder(connections)
+        // AppAuth rejects ID tokens of a plain-HTTP issuer; a development stack's Keycloak is one.
+        .setSkipIssuerHttpsCheck(issuer.scheme == "http" && isPlainHttpAllowed(issuer.host, isInsecureHttpAllowed))
+        .build(),
+    )
+    val file = SealedFile(File(context.filesDir, StoragePaths.sessionFile(server.address.storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
+    return Session(server, file, service, connections, loadState(file))
+  }
+
+  private suspend fun refresh(session: Session, current: AuthState): String? =
     suspendCancellableCoroutine { continuation ->
-      current.performActionWithFreshTokens(service) { accessToken, _, exception ->
+      current.performActionWithFreshTokens(session.service) { accessToken, _, exception ->
         if (exception != null && exception.type == AuthorizationException.TYPE_OAUTH_TOKEN_ERROR) {
           // The refresh token is no longer valid: the user has to sign in again.
-          signOut()
+          signOut(session)
         } else {
-          persist()
+          persist(session)
         }
         continuation.resume(accessToken)
       }
     }
 
-  private suspend fun discover(): AuthorizationServiceConfiguration =
+  private suspend fun discover(session: Session): AuthorizationServiceConfiguration =
     suspendCancellableCoroutine { continuation ->
       AuthorizationServiceConfiguration.fetchFromIssuer(
-        Uri.parse(BuildConfig.OIDC_ISSUER),
+        Uri.parse(session.server.issuer),
         { configuration, exception ->
           if (configuration != null) {
             continuation.resume(configuration)
@@ -138,28 +191,40 @@ class AuthRepository(context: Context) {
             continuation.resumeWithException(exception ?: IllegalStateException("no OIDC configuration"))
           }
         },
-        DevAwareConnectionBuilder,
+        session.connections,
       )
     }
 
-  private fun loadState(): AuthState =
+  private fun loadState(file: SealedFile): AuthState =
     try {
-      sessionFile.read()?.let { AuthState.jsonDeserialize(it.decodeToString()) } ?: AuthState()
+      file.read()?.let { AuthState.jsonDeserialize(it.decodeToString()) } ?: AuthState()
     } catch (unreadable: Exception) {
       // A session sealed under a lost Keystore key (app data restored, key reset): sign in again.
-      sessionFile.delete()
+      file.delete()
       AuthState()
     }
 
-  private fun persist() {
-    val json = synchronized(this) { state.jsonSerializeString() }
-    sessionFile.write(json.encodeToByteArray())
+  private fun persist(session: Session) {
+    val json = synchronized(this) { session.state.jsonSerializeString() }
+    session.file.write(json.encodeToByteArray())
   }
 
-  /** HTTPS everywhere, plain HTTP only to the development stack (as network_security_config). */
-  private object DevAwareConnectionBuilder : ConnectionBuilder {
+  /** One server's session: its sealed file, AppAuth service and current state. */
+  private class Session(
+    val server: StoredServer,
+    val file: SealedFile,
+    val service: AuthorizationService,
+    val connections: ConnectionBuilder,
+    var state: AuthState,
+  )
+
+  /**
+   * HTTPS everywhere; plain HTTP only to the device itself, or anywhere in development builds
+   * (as `network_security_config.xml` of the build type).
+   */
+  private class DevAwareConnectionBuilder(private val isInsecureHttpAllowed: Boolean) : ConnectionBuilder {
     override fun openConnection(uri: Uri): HttpURLConnection {
-      if (uri.scheme == "http" && uri.host in DEV_HOSTS) {
+      if (uri.scheme == "http" && isPlainHttpAllowed(uri.host, isInsecureHttpAllowed)) {
         return (URL(uri.toString()).openConnection() as HttpURLConnection).apply {
           connectTimeout = TimeUnit.SECONDS.toMillis(15).toInt()
           readTimeout = TimeUnit.SECONDS.toMillis(10).toInt()
@@ -173,8 +238,5 @@ class AuthRepository(context: Context) {
   private companion object {
     const val SESSION_KEY_ALIAS = "teamcraft_session"
     const val REFRESH_TIMEOUT_SECONDS = 10L
-    val DEV_HOSTS = setOf("10.0.2.2", "127.0.0.1", "localhost")
-
-    fun isDevIssuer(issuer: String): Boolean = Uri.parse(issuer).let { it.scheme == "http" && it.host in DEV_HOSTS }
   }
 }

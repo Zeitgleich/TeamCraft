@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Managed configuration (Android Enterprise): an organization's device management names the
+     server and may lock it (README.md "Server address"). The keys are a contract with MDMs: don't
+     rename them. -->
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+  <restriction
+    android:key="server_url"
+    android:title="@string/restriction_server_url_title"
+    android:description="@string/restriction_server_url_description"
+    android:restrictionType="string" />
+  <restriction
+    android:key="lock_server"
+    android:title="@string/restriction_lock_server_title"
+    android:description="@string/restriction_lock_server_description"
+    android:restrictionType="bool"
+    android:defaultValue="false" />
+</restrictions>

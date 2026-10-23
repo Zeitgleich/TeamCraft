@@ -8,8 +8,10 @@ import android.os.Build
 import android.provider.OpenableColumns
 import android.system.Os
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
@@ -29,8 +31,18 @@ import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.push.UnifiedPushBackend
 import de.zeitgleich.teamcraft.push.UnifiedPushStatus
+import de.zeitgleich.teamcraft.server.ServerInfoAnswer
+import de.zeitgleich.teamcraft.server.ServerInfoClient
+import de.zeitgleich.teamcraft.server.ServerLock
+import de.zeitgleich.teamcraft.server.ServerStart
+import de.zeitgleich.teamcraft.server.decideServerStart
+import de.zeitgleich.teamcraft.server.isRetryableWhenOnline
+import de.zeitgleich.teamcraft.server.isServerAllowed
+import de.zeitgleich.teamcraft.server.serverEntryErrorText
+import de.zeitgleich.teamcraft.server.transportErrorText
 import net.openid.appauth.AuthorizationException
 import uniffi.teamcraft_ffi.AccountState
+import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.LoginBrand
@@ -39,12 +51,25 @@ import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.SearchHitItem
+import uniffi.teamcraft_ffi.ServerEntryException
+import uniffi.teamcraft_ffi.StoredServer
+import uniffi.teamcraft_ffi.checkServerInfo
+import uniffi.teamcraft_ffi.normalizeServerAddress
 import uniffi.teamcraft_ffi.TeamCraftException
 import uniffi.teamcraft_ffi.TestPushResult
 
 /** What the app shows at the top level. */
 sealed interface AppState {
   data object Starting : AppState
+
+  /**
+   * No server yet, or the user wants another: ask for its address. [prefill] is what was tried
+   * last (or the managed server); with [isLocked] the organization fixed the server.
+   */
+  data class NeedsServer(val prefill: String, @StringRes val maybeError: Int? = null, val isLocked: Boolean = false) : AppState
+
+  /** The server answered and passed the checks: show who it is before signing in. */
+  data class ConfirmServer(val checked: CheckedServer) : AppState
   data class SignedOut(@StringRes val maybeError: Int? = null) : AppState
   data class NeedsEnrollment(val hasExistingIdentity: Boolean, @StringRes val maybeError: Int? = null) : AppState
   data class LinkingThisDevice(val code: String, val maybeShortCode: String? = null) : AppState
@@ -73,30 +98,111 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The last action that failed, as a message to show once. */
   val lastFailure: StateFlow<Int?> = failures
 
-  private val brandStore = BrandStore(application, BuildConfig.SERVER_URL)
+  @Volatile private var maybeBrandStore: BrandStore? = null
   private val brand = MutableStateFlow<LoginBrand?>(null)
 
   /** The server's brand for the sign-in screen; the cached one first, then the server's answer. */
   val loginBrand: StateFlow<LoginBrand?> = brand
 
-  /** The server the app signs in to, as the sign-in screen names it. */
-  val serverHost: String = Uri.parse(BuildConfig.SERVER_URL).host ?: BuildConfig.SERVER_URL
+  private val activeServer = MutableStateFlow<StoredServer?>(null)
+
+  /** The server the app signs in to; the sign-in screen names its host. */
+  val server: StateFlow<StoredServer?> = activeServer
+
+  private var maybeLock: ServerLock? = null
+  private val serverLocked = MutableStateFlow(false)
+
+  /** The organization fixed the server (managed configuration): no "Change server". */
+  val isServerLocked: StateFlow<Boolean> = serverLocked
 
   init {
     refresh()
-    viewModelScope.launch {
-      brand.value = withContext(Dispatchers.IO) { brandStore.cached() }
-      brand.value = brandStore.refresh()
+    retryServerWhenOnline()
+  }
+
+  fun brandLogo(isDark: Boolean): Bitmap? = maybeBrandStore?.logo(isDark)
+
+  /**
+   * Decides where the app starts: the stored server, the managed (or build default) server to
+   * confirm, or the server entry. The managed configuration is read again every time.
+   */
+  fun refresh() = launchBusy {
+    val maybePreset = withContext(Dispatchers.IO) { graph.managedConfig.preset() }
+    val lock = maybePreset?.takeIf { it.isLocked }?.let {
+      ServerLock(it.address, withContext(Dispatchers.Default) { normalizedOrigin(it.address) })
+    }
+    maybeLock = lock
+    serverLocked.value = lock != null
+    // The first read opens the stored server and session: files and the core's checks.
+    val maybeStored = withContext(Dispatchers.IO) { graph.auth.server }
+    val start = decideServerStart(maybeStored?.address?.origin, maybePreset, lock)
+    when {
+      maybeStored != null && start is ServerStart.UseStored -> {
+        showServer(maybeStored)
+        state.value = if (!graph.auth.isSignedIn.value) AppState.SignedOut() else loadAccountState()
+      }
+      maybeStored != null && start is ServerStart.ReplaceStored -> {
+        // The organization locked another server: this account can't stay on the device.
+        endSession()
+        graph.servers.forget(maybeStored.address.origin)
+        forgetActiveServer()
+        checkServer(start.address)
+      }
+      start is ServerStart.CheckPreset -> checkServer(start.preset.address)
+      else -> state.value = AppState.NeedsServer(prefill = "")
     }
   }
 
-  fun brandLogo(isDark: Boolean): Bitmap? = brandStore.logo(isDark)
+  /** The user entered (or pasted) a server address. */
+  fun submitServer(input: String) = launchBusy { checkServer(input) }
 
-  fun refresh() = launchBusy {
-    state.value = if (!graph.auth.isSignedIn.value) AppState.SignedOut() else loadAccountState()
+  /**
+   * The user confirmed the server: it becomes the account's. True when the browser sign-in
+   * should follow; false when a session for it exists already (or nothing was to confirm).
+   */
+  suspend fun confirmServer(): Boolean {
+    val current = state.value as? AppState.ConfirmServer ?: return false
+    val server = current.checked.server
+    graph.servers.save(server)
+    withContext(Dispatchers.IO) { graph.auth.activate(server) }
+    showServer(server)
+    if (!graph.auth.isSignedIn.value) {
+      state.value = AppState.SignedOut()
+      return true
+    }
+    launchBusy { state.value = loadAccountState() }
+    return false
   }
 
-  suspend fun loginIntent(): Intent = graph.auth.loginIntent()
+  /** From the confirmation: back to the entry for a different address. */
+  fun useAnotherServer() {
+    if (state.value !is AppState.ConfirmServer || maybeLock != null) return
+    state.value = AppState.NeedsServer(prefill = "")
+  }
+
+  /**
+   * From the sign-in screen: forget the server's profile and enter another one. The account's
+   * local data stays, keyed by the server, for when the user comes back to it.
+   */
+  fun changeServer() = launchBusy {
+    if (maybeLock != null || graph.auth.isSignedIn.value) return@launchBusy
+    graph.auth.server?.let { graph.servers.forget(it.address.origin) }
+    graph.core.close()
+    forgetActiveServer()
+    state.value = AppState.NeedsServer(prefill = "")
+  }
+
+  /**
+   * The browser intent for signing in; null (with the reason on the sign-in screen) when the
+   * identity provider can't be reached.
+   */
+  suspend fun loginIntent(): Intent? =
+    try {
+      graph.auth.loginIntent()
+    } catch (failure: Exception) {
+      state.value = AppState.SignedOut(signInError(failure) ?: R.string.sign_in_failed)
+      null
+    }
 
   fun completeLogin(result: Intent?) = launchBusy {
     state.value = try {
@@ -159,16 +265,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * decrypted downloads and staged uploads, and the push registration. The sealed store stays.
    */
   fun signOut() = launchBusy {
-    // Wake-ups that arrive from now on show nothing; notifications are cleared last, when no
-    // core can be opened any more to post new ones.
-    graph.push.beginSignOut()
-    graph.calls.hangUp()
-    graph.push.unregister()
-    runCatching { graph.core.core().deletePlaintextFiles() }
-    graph.core.close()
-    graph.auth.signOut()
-    graph.notifier.clearAll()
-    graph.pushStats.clear()
+    endSession()
     state.value = AppState.SignedOut()
   }
 
@@ -347,6 +444,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.scope.launch { runCatching { graph.core.core().cancelDeviceLinkApproval() } }
   }
 
+  private suspend fun endSession() {
+    // Wake-ups that arrive from now on show nothing; notifications are cleared last, when no
+    // core can be opened any more to post new ones.
+    graph.push.beginSignOut()
+    graph.calls.hangUp()
+    graph.push.unregister()
+    runCatching { graph.core.core().deletePlaintextFiles() }
+    graph.core.close()
+    graph.auth.signOut()
+    graph.notifier.clearAll()
+    graph.pushStats.clear()
+  }
+
+  /**
+   * Normalises [input], asks the server for its settings and checks them; shows the confirmation
+   * or why it failed. A locked configuration refuses other servers before contacting them.
+   */
+  private suspend fun checkServer(input: String) {
+    val isLocked = maybeLock != null
+    state.value = try {
+      val address = withContext(Dispatchers.Default) { normalizeServerAddress(input, ALLOW_INSECURE_HTTP) }
+      if (!isServerAllowed(address.origin, maybeLock)) {
+        AppState.NeedsServer(input, R.string.server_error_locked, isLocked)
+      } else {
+        val answer = ServerInfoClient.fetch(address.serverInfoUrl)
+        val checked = withContext(Dispatchers.Default) { checkAnswer(address.origin, answer) }
+        previewBrand(checked)
+        AppState.ConfirmServer(checked)
+      }
+    } catch (failure: ServerEntryException) {
+      AppState.NeedsServer(input, serverEntryErrorText(failure), isLocked)
+    } catch (failure: IOException) {
+      AppState.NeedsServer(input, transportErrorText(failure, graph.network.isOnline.value), isLocked)
+    }
+  }
+
+  private fun checkAnswer(origin: String, answer: ServerInfoAnswer): CheckedServer =
+    checkServerInfo(
+      origin = origin,
+      // HttpURLConnection reports -1 for an answer that isn't HTTP; the core rejects that as well.
+      status = answer.status.coerceIn(0, UShort.MAX_VALUE.toInt()).toUShort(),
+      contentType = answer.maybeContentType,
+      body = answer.body,
+      clientVersion = BuildConfig.VERSION_NAME,
+      redirectUri = BuildConfig.OIDC_REDIRECT_URI,
+      allowInsecureHttp = ALLOW_INSECURE_HTTP,
+      language = Locale.getDefault().toLanguageTag(),
+    )
+
+  /** The managed server's origin for the lock; null when the configured address is invalid. */
+  private fun normalizedOrigin(address: String): String? =
+    try {
+      normalizeServerAddress(address, ALLOW_INSECURE_HTTP).origin
+    } catch (invalid: ServerEntryException) {
+      null
+    }
+
+  /**
+   * Offline or unreachable at the entry: try the same address again as soon as the device has a
+   * validated connection, so the user doesn't have to notice and tap retry.
+   */
+  private fun retryServerWhenOnline() = viewModelScope.launch {
+    graph.network.isOnline.collect { isOnline ->
+      val current = state.value as? AppState.NeedsServer ?: return@collect
+      val maybeError = current.maybeError
+      if (isOnline && !busy.value && maybeError != null && isRetryableWhenOnline(maybeError)) {
+        submitServer(current.prefill)
+      }
+    }
+  }
+
+  /** The confirmation screen shows the brand the server announced; logos follow when fetched. */
+  private fun previewBrand(checked: CheckedServer) {
+    val address = checked.server.address
+    val store = BrandStore(getApplication(), address.origin, address.storageKey)
+    maybeBrandStore = store
+    brand.value = checked.maybeBrand
+    viewModelScope.launch {
+      val maybeFresh = store.refresh()
+      if (maybeBrandStore === store) brand.value = maybeFresh ?: checked.maybeBrand
+    }
+  }
+
+  /** The active server's brand: the cached one at once, then the server's answer. */
+  private fun showServer(server: StoredServer) {
+    activeServer.value = server
+    val address = server.address
+    if (maybeBrandStore?.let { it.origin == address.origin } != true) {
+      maybeBrandStore = BrandStore(getApplication(), address.origin, address.storageKey)
+      brand.value = null
+    }
+    val store = maybeBrandStore ?: return
+    viewModelScope.launch {
+      val maybeCached = withContext(Dispatchers.IO) { store.cached() }
+      if (maybeBrandStore === store && maybeCached != null) brand.value = maybeCached
+      val maybeFresh = store.refresh()
+      if (maybeBrandStore === store) brand.value = maybeFresh
+    }
+  }
+
+  private fun forgetActiveServer() {
+    graph.auth.activate(null)
+    activeServer.value = null
+    maybeBrandStore = null
+    brand.value = null
+  }
+
   private suspend fun loadAccountState(): AppState =
     try {
       when (val account = graph.core.core().accountState()) {
@@ -384,6 +588,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   companion object {
     const val MESSAGE_PAGE = 200
+
+    /** Plain HTTP to other hosts than the device itself only in development builds. */
+    private val ALLOW_INSECURE_HTTP = BuildConfig.DEBUG
 
     /** Why signing in failed, in words the user can act on; nothing when they cancelled it. */
     @StringRes
