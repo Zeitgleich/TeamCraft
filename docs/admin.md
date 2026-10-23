@@ -299,7 +299,8 @@ Groups that are stored and reset as a whole:
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |
 | `limits`         | attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
 | `integration`    | default retention of integration channels                                                                                                     |
-| `local_accounts` | second factor required, activation and session lifetime, failed attempts, lockout                                                             |
+| `local_accounts` | on/off (off: the form disappears, `/auth/local/*` answers 403 `local_accounts_disabled`, sessions end), second factor required, activation and session lifetime, failed attempts, lockout |
+| `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link                       |
 | `mail_texts`     | invitation and activation mail                                                                                                                |
 | `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
 
@@ -327,5 +328,5 @@ nothing. Brands, mail and calendar are server-side presentation and transport fo
 | `[push]` credentials and the push gateway URL and key             | the store apps register against the gateway of their publisher; changing it re-registers every phone |
 | `[calls]` SFU URL, signing key, tokens                            | shared with the SFU's own configuration                                                              |
 | `[meetings]` base URL, guest token secret, inbox token            | secrets shared with other components, and the base of every join link                                |
-| `[local_accounts]` on/off and session secret                      | the password hashing setup is built at start                                                         |
+| `[local_accounts]` availability and session secret                | the password hashing setup is built at start; the console switches configured accounts off and on    |
 | `[secrets]`                                                       | the key that protects the console's passwords cannot live next to them                               |

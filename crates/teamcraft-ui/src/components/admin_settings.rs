@@ -8,8 +8,8 @@ use teamcraft_proto::{
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
-  CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, list_text, parse_list,
-  parse_scaled,
+  CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, is_web_url, list_text,
+  parse_list, parse_scaled,
 };
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
@@ -20,7 +20,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 9] = [
+const GROUPS: [&str; 10] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -28,9 +28,12 @@ const GROUPS: [&str; 9] = [
   "limits",
   "integration",
   "local_accounts",
+  "sign_in_page",
   "mail_texts",
   "meeting_mail",
 ];
+/// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
+const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
 
 /// How a field is edited and checked.
 #[derive(Clone, Copy)]
@@ -46,6 +49,12 @@ enum Kind {
   Area,
   /// Space or channel IDs.
   IdList,
+  /// The sign-in methods in order, one of [`METHOD_CHOICES`].
+  Methods,
+  /// One language's entry of a text map (`help_text.de`); empty means none.
+  MapText,
+  /// An https link that may be empty (none).
+  Link,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +95,13 @@ const fn text(id: &'static str) -> FieldDef {
 
 const fn area(id: &'static str) -> FieldDef {
   FieldDef { id, kind: Kind::Area }
+}
+
+const fn map_text(id: &'static str) -> FieldDef {
+  FieldDef {
+    id,
+    kind: Kind::MapText,
+  }
 }
 
 const SECONDS: &str = "settings-unit-seconds";
@@ -143,11 +159,24 @@ const LIMITS: &[FieldDef] = &[
 ];
 const INTEGRATION: &[FieldDef] = &[amount("default_retention_days", 1, U32_MAX, DAYS)];
 const LOCAL_ACCOUNTS: &[FieldDef] = &[
+  flag("is_enabled"),
   flag("require_totp"),
   amount("activation_ttl_hours", 1, U32_MAX, HOURS),
   amount("session_ttl_hours", 1, U32_MAX, HOURS),
   count("max_failed_attempts"),
   amount("lockout_secs", MINUTE, U64_MAX, MINUTES),
+];
+const SIGN_IN_PAGE: &[FieldDef] = &[
+  FieldDef {
+    id: "methods",
+    kind: Kind::Methods,
+  },
+  map_text("help_text.en"),
+  map_text("help_text.de"),
+  FieldDef {
+    id: "help_link",
+    kind: Kind::Link,
+  },
 ];
 const MAIL_TEXTS: &[FieldDef] = &[
   text("invite_subject"),
@@ -288,8 +317,8 @@ fn FieldRow(
   show_errors: RwSignal<bool>,
 ) -> impl IntoView {
   let id = field.id;
-  let dom_id = format!("settings-{slug}-{id}");
-  let label = leak_key(format!("settings-f-{id}"));
+  let dom_id = format!("settings-{slug}-{}", id.replace('.', "-"));
+  let label = leak_key(label_key(id));
   let value = Signal::derive(move || draft.with(|values| values.get(id).cloned().unwrap_or_default()));
   let on_input = Callback::new(move |text: String| {
     draft.update(|values| {
@@ -327,10 +356,38 @@ fn FieldRow(
       <TextField id=leak_key(dom_id) label=label value=value on_input=on_input error=error />
     }
     .into_any(),
-    Kind::Area => view! {
+    Kind::Area | Kind::MapText => view! {
       <TextAreaField id=leak_key(dom_id) label=label rows=3 value=value on_input=on_input error=error />
     }
     .into_any(),
+    Kind::Link => view! {
+      <TextField id=leak_key(dom_id) label=label input_type="url" placeholder="https://help.example.com" value=value on_input=on_input error=error />
+    }
+    .into_any(),
+    Kind::Methods => {
+      let i18n = use_i18n();
+      let dom_id = leak_key(dom_id);
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {METHOD_CHOICES
+              .into_iter()
+              .map(|choice| {
+                let key = method_choice_key(choice);
+                view! { <option value=choice selected=move || value.get() == choice>{move || i18n.t(key)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
     Kind::IdList => view! {
       <TextAreaField
         id=leak_key(dom_id)
@@ -343,6 +400,21 @@ fn FieldRow(
       />
     }
     .into_any(),
+  }
+}
+
+/// The i18n key of a field's label (Fluent names have no dots).
+fn label_key(id: &str) -> String {
+  format!("settings-f-{}", id.replace('.', "-"))
+}
+
+/// The i18n key of a choice of sign-in methods.
+fn method_choice_key(choice: &str) -> &'static str {
+  match choice {
+    "local,sso" => "settings-methods-local-sso",
+    "sso" => "settings-methods-sso",
+    "local" => "settings-methods-local",
+    _ => "settings-methods-sso-local",
   }
 }
 
@@ -361,6 +433,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "limits" => LIMITS,
     "integration" => INTEGRATION,
     "local_accounts" => LOCAL_ACCOUNTS,
+    "sign_in_page" => SIGN_IN_PAGE,
     "mail_texts" => MAIL_TEXTS,
     "meeting_mail" => MEETING_MAIL,
     _ => &[],
@@ -377,6 +450,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::Limits => serde_json::to_value(&response.limits),
     RuntimeSettingsKey::Integration => serde_json::to_value(&response.integration),
     RuntimeSettingsKey::LocalAccounts => serde_json::to_value(&response.local_accounts),
+    RuntimeSettingsKey::SignInPage => serde_json::to_value(&response.sign_in_page),
     RuntimeSettingsKey::MailTexts => serde_json::to_value(&response.mail_texts),
     RuntimeSettingsKey::MeetingMail => serde_json::to_value(&response.meeting_mail),
     _ => return None,
@@ -389,8 +463,16 @@ fn to_values(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> Va
   let json = group_json(key, response).unwrap_or(Value::Null);
   fields_of(key.as_str())
     .iter()
-    .map(|field| (field.id, value_text(field.kind, json.get(field.id))))
+    .map(|field| (field.id, value_text(field.kind, lookup(&json, field.id))))
     .collect()
+}
+
+/// A field's value in the group's JSON; `map.key` reaches into an object.
+fn lookup<'a>(json: &'a Value, id: &str) -> Option<&'a Value> {
+  match id.split_once('.') {
+    Some((map, key)) => json.get(map)?.get(key),
+    None => json.get(id),
+  }
 }
 
 fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
@@ -403,7 +485,17 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
       .as_u64()
       .map(|raw| format_scaled(raw, scale))
       .unwrap_or_default(),
-    Kind::Text | Kind::Area => value.as_str().unwrap_or_default().to_owned(),
+    Kind::Text | Kind::Area | Kind::MapText | Kind::Link => value.as_str().unwrap_or_default().to_owned(),
+    Kind::Methods => value
+      .as_array()
+      .map(|methods| {
+        methods
+          .iter()
+          .filter_map(Value::as_str)
+          .collect::<Vec<_>>()
+          .join(",")
+      })
+      .unwrap_or_default(),
     Kind::IdList => {
       let items: Vec<String> = value
         .as_array()
@@ -427,8 +519,21 @@ fn check(key: &RuntimeSettingsKey, values: &Values) -> Result<RuntimeSettingsSec
   for field in fields_of(key.as_str()) {
     let typed = values.get(field.id).map(String::as_str).unwrap_or_default();
     match field_json(field.kind, typed) {
-      Ok(value) => {
-        object.insert(field.id.to_owned(), value);
+      // Empty optional values are left out (none).
+      Ok(Value::Null) => {},
+      Ok(value) => match field.id.split_once('.') {
+        Some((map, key)) => {
+          if let Some(entries) = object
+            .entry(map.to_owned())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+          {
+            entries.insert(key.to_owned(), value);
+          }
+        },
+        None => {
+          object.insert(field.id.to_owned(), value);
+        },
       },
       Err(message) => errors.push((field.id, message)),
     }
@@ -448,6 +553,22 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
       _ => Err("admin-error-number"),
     },
     Kind::Text | Kind::Area => Ok(Value::String(typed.trim_end().to_owned())),
+    Kind::MapText => Ok(match typed.trim() {
+      "" => Value::Null,
+      text => Value::String(text.to_owned()),
+    }),
+    Kind::Link => match typed.trim() {
+      "" => Ok(Value::Null),
+      link if link.starts_with("https://") && is_web_url(link) => Ok(Value::String(link.to_owned())),
+      _ => Err("admin-error-url"),
+    },
+    Kind::Methods => {
+      let choice = METHOD_CHOICES
+        .into_iter()
+        .find(|choice| *choice == typed)
+        .unwrap_or(METHOD_CHOICES[0]);
+      Ok(json!(choice.split(',').collect::<Vec<_>>()))
+    },
     Kind::IdList => {
       let items = parse_list(typed);
       if items.iter().all(|item| item.parse::<Snowflake>().is_ok()) {
@@ -542,6 +663,50 @@ mod tests {
   }
 
   #[test]
+  fn the_sign_in_page_maps_methods_help_texts_and_the_link() {
+    let values = typed(&[
+      ("methods", "local,sso"),
+      ("help_text.en", "Call 1234."),
+      ("help_text.de", "  "),
+      ("help_link", ""),
+    ]);
+    let Ok(RuntimeSettingsSection::SignInPage(page)) = check(&kind("sign_in_page"), &values) else {
+      panic!("valid");
+    };
+    assert_eq!(
+      page.methods,
+      [
+        teamcraft_proto::SignInMethod::Local,
+        teamcraft_proto::SignInMethod::Sso
+      ]
+    );
+    assert_eq!(page.help_text.len(), 1);
+    assert_eq!(page.help_text["en"], "Call 1234.");
+    assert!(page.maybe_help_link.is_none());
+
+    let response_json =
+      json!({"methods": ["sso"], "help_text": {"de": "Hilfe"}, "help_link": "https://help.example.com"});
+    assert_eq!(
+      value_text(Kind::Methods, lookup(&response_json, "methods")),
+      "sso"
+    );
+    assert_eq!(
+      value_text(Kind::MapText, lookup(&response_json, "help_text.de")),
+      "Hilfe"
+    );
+    assert_eq!(
+      value_text(Kind::MapText, lookup(&response_json, "help_text.en")),
+      ""
+    );
+
+    let bad_link = typed(&[("methods", "sso"), ("help_link", "http://help.example.com")]);
+    assert_eq!(
+      check(&kind("sign_in_page"), &bad_link).err(),
+      Some(vec![("help_link", "admin-error-url")])
+    );
+  }
+
+  #[test]
   fn too_large_counts_are_refused_before_sending() {
     let values = typed(&[("default_retention_days", "99999999999")]);
     assert_eq!(
@@ -572,9 +737,13 @@ mod tests {
       keys.push(format!("settings-group-{slug}"));
       keys.push(format!("settings-group-{slug}-hint"));
       for field in fields_of(slug) {
-        keys.push(format!("settings-f-{}", field.id));
+        keys.push(label_key(field.id));
       }
     }
+    for choice in METHOD_CHOICES {
+      keys.push(method_choice_key(choice).into());
+    }
+    keys.push("admin-error-url".into());
     for locale in [Locale::En, Locale::De] {
       for key in &keys {
         assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");

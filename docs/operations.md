@@ -220,6 +220,14 @@ optionally lock the apps to it:
 With a preconfigured server the app checks it on first start and goes straight to the confirmation.
 `lock_server` hides "Change server" and drops an account of another server.
 
+**The sign-in page.** Every client renders the same page from `server-info`: a prominent "Sign in
+with <provider>" button, and the e-mail and password form of local accounts inline, in the order the
+admin console sets (Admin → Settings → Sign-in page: SSO and local, local first, SSO only, local
+only; help text and help link). The provider name and its icon are brand settings (Admin → Brands:
+"Sign-in provider" and the "Sign-in provider icon" image). Local accounts need `[local_accounts]` with
+a session secret in the configuration; the console switches them off and on (Settings → Local
+accounts).
+
 ## Push notifications
 
 Push wakes sleeping phones and browsers. The payload is sealed with a per-device key (e2ee.md §7), so

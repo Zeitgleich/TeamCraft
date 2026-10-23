@@ -297,6 +297,15 @@ auth_failures_per_minute = 30
 # share_page_dir = "/srv/teamcraft/share-page"
 # share_page_content_security_policy = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; ..."
 
+# What the sign-in page offers; the admin console changes it at runtime (Settings -> Sign-in page).
+# The provider name and icon of the SSO button are brand settings (`sso_label`, `sso_icon`).
+[sign_in_page]
+# "sso" and "local" in display order; "local" only shows while local accounts are enabled.
+methods = ["sso", "local"]
+# Optional: help below the form per language, and an https help page.
+# help_text = { en = "Problems signing in? Call 1234.", de = "Probleme bei der Anmeldung? Ruf 1234 an." }
+# help_link = "https://help.example.com/sign-in"
+
 # Brands (docs/branding.md): one server under several host names, each with its own name, logo, colors,
 # login text, links and e-mail identity. Without [[brands]] the server has one built-in brand "TeamCraft".
 # A brand is presentation only: users, spaces and permissions are the same behind every host name.
