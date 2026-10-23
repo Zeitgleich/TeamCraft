@@ -104,6 +104,8 @@ struct State {
   signed_out_users: HashSet<UserId>,
   /// Heartbeats received, to check that a busy client keeps sending them.
   heartbeats: u64,
+  /// A malicious server: the next registered device gets this ID instead of a fresh one.
+  maybe_forced_device_id: Option<DeviceId>,
   /// A network cut armed per user: after the given number of calls, the next one fails.
   network_cuts: HashMap<UserId, (u32, NetworkCut)>,
   next_connection: u64,
@@ -278,6 +280,11 @@ impl FakeServer {
   /// `cut` says and the user stays offline until [`Self::set_offline`] brings them back.
   pub fn cut_network_after(&self, user: UserId, calls: u32, cut: NetworkCut) {
     self.lock().network_cuts.insert(user, (calls, cut));
+  }
+
+  /// Hands the next registered device the ID `id` (of another device), as a malicious server might.
+  pub fn force_next_device_id(&self, id: DeviceId) {
+    self.lock().maybe_forced_device_id = Some(id);
   }
 
   /// The next `count` binary frames sent over any relay are lost.
@@ -595,7 +602,10 @@ impl ServerApi for FakeServerApi {
 
   async fn register_device(&self, request: &RegisterDeviceRequest) -> Result<DeviceResponse, ApiError> {
     self.with(|state, me| {
-      let id = state.next_id();
+      let id = match state.maybe_forced_device_id.take() {
+        Some(forced) => forced,
+        None => state.next_id(),
+      };
       let response = DeviceResponse {
         id,
         name: request.name.clone(),
