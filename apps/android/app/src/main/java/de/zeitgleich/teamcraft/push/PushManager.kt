@@ -30,6 +30,9 @@ class PushManager(
   /** Wake-ups being opened, by payload: a hand-over to [WakeUpWork] waits for the same run. */
   private val running = ConcurrentHashMap<String, Deferred<Unit>>()
 
+  /** A token whose registration failed (server unreachable): retried on the next foreground. */
+  @Volatile private var maybePendingToken: Pair<PushService, String>? = null
+
   /** Set while (and after) signing out: wake-ups arriving then show nothing. */
   @Volatile private var isSigningOut = false
 
@@ -57,10 +60,32 @@ class PushManager(
   }
 
   fun onToken(service: PushService, token: String) {
-    scope.launch {
-      runCatching { core.core().registerPush(service, token) }
-        .onFailure { Log.w(TAG, "push registration failed: ${it.javaClass.simpleName}") }
+    scope.launch { registerToken(service, token) }
+  }
+
+  /**
+   * The app came to the foreground: retries a registration that failed, otherwise seals the
+   * registered token again when that is due (it is sealed for one server and expires). Without
+   * this, a token rotated while the server was unreachable, or an expired seal, left push broken
+   * until the next sign-in.
+   */
+  suspend fun refresh() {
+    val pending = maybePendingToken
+    if (pending != null) {
+      registerToken(pending.first, pending.second)
+      return
     }
+    runCatching { core.core().refreshPush() }
+      .onFailure { Log.w(TAG, "push refresh failed: ${it.javaClass.simpleName}") }
+  }
+
+  private suspend fun registerToken(service: PushService, token: String) {
+    runCatching { core.core().registerPush(service, token) }
+      .onSuccess { maybePendingToken = null }
+      .onFailure {
+        maybePendingToken = service to token
+        Log.w(TAG, "push registration failed: ${it.javaClass.simpleName}")
+      }
   }
 
   /**

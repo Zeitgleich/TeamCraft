@@ -2,6 +2,7 @@
 //! key, decryption of incoming messages and paged history (e2ee.md §4.1, §4.4).
 
 use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::key_bag::KeyBag;
 use teamcraft_crypto::message::{
   EncryptedMessage, MessageContext, MessageError, decrypt_message, decrypt_unsigned_message, encrypt_message,
@@ -160,7 +161,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       match self.send_entry(&entry).await {
         Ok(true) => report.sent += 1,
         Ok(false) => report.pending += 1,
-        Err(error) if error.is_transient() => {
+        Err(error) if error.is_retry_later() => {
           is_offline = true;
           report.pending += 1;
         },
@@ -302,6 +303,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           &content,
           message.id.snowflake().unix_millis(),
         )?;
+        apply_early_controls(&self.store, conversation, message.client_message_id)?;
         self
           .store
           .delete(Table::Undecrypted, &undecrypted_key(&message))?;
@@ -505,8 +507,8 @@ pub(crate) fn apply_control(
     _ => return Ok(()),
   };
   let Some(mut stored) = store.message(conversation, target)? else {
-    // TODO(ordering): a control that arrives before its target is kept but not applied later.
-    return Ok(());
+    // History loads newest first, so edits, deletions and pins arrive before their target there.
+    return keep_early_control(store, conversation, target, sender, content, at_ms);
   };
   if matches!(stored.content, MessageContent::Deleted) {
     return Ok(());
@@ -536,6 +538,61 @@ pub(crate) fn apply_control(
   }
   store.upsert_message(&stored)?;
   Ok(())
+}
+
+/// An edit, deletion or pin that arrived before the message it changes, kept in
+/// [`Table::SyncState`] until that message arrives.
+#[derive(Serialize, Deserialize)]
+struct EarlyControl {
+  sender: UserId,
+  content: MessageContent,
+  at_ms: i64,
+}
+
+fn keep_early_control(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  target: ClientMessageId,
+  sender: UserId,
+  content: &MessageContent,
+  at_ms: i64,
+) -> Result<(), CoreError> {
+  let key = early_controls_key(conversation, target);
+  let mut early: Vec<EarlyControl> = records::get_json(store, Table::SyncState, &key)?.unwrap_or_default();
+  early.push(EarlyControl {
+    sender,
+    content: content.clone(),
+    at_ms,
+  });
+  records::put_json(store, Table::SyncState, &key, &early)
+}
+
+/// Applies the controls that arrived before `target`, in the order they were sent.
+fn apply_early_controls(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  target: ClientMessageId,
+) -> Result<(), CoreError> {
+  let key = early_controls_key(conversation, target);
+  let Some(mut early) = records::get_json::<Vec<EarlyControl>>(store, Table::SyncState, &key)? else {
+    return Ok(());
+  };
+  store.delete(Table::SyncState, &key)?;
+  early.sort_by_key(|control| control.at_ms);
+  for control in early {
+    apply_control(
+      store,
+      conversation,
+      control.sender,
+      &control.content,
+      control.at_ms,
+    )?;
+  }
+  Ok(())
+}
+
+fn early_controls_key(conversation: ConversationId, target: ClientMessageId) -> String {
+  format!("early-controls/{conversation}/{target}")
 }
 
 /// Where a conversation's bookmarks bar is kept: the newest `Bookmarks` message that was applied.

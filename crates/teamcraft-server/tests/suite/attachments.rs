@@ -121,6 +121,49 @@ async fn the_upload_url_only_accepts_the_announced_size() {
 }
 
 #[tokio::test]
+async fn abandoned_uploads_are_swept_and_free_their_slot() {
+  let Some(app) =
+    TestApp::start_with_storage(|settings| settings.limits.max_pending_attachments_per_user = 1).await
+  else {
+    return;
+  };
+  // A fresh user per run: the test database is shared and outlives the run.
+  let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+  let erin = member(&format!("erin-{nanos}"));
+  let channel = channel_with(&app, &[&erin]).await;
+
+  // The client uploaded, then lost the network before completing, and gave up.
+  let abandoned = announce(&app, &erin, &channel, BLOB.len()).await;
+  assert_eq!(
+    upload(&app, abandoned["upload_url"].as_str().unwrap(), BLOB).await,
+    StatusCode::OK
+  );
+  let blocked = app
+    .post(
+      &erin,
+      "/attachments",
+      json!({"conversation_id": channel, "size_bytes": BLOB.len()}),
+    )
+    .await;
+  assert_eq!(blocked.status, StatusCode::CONFLICT, "{}", blocked.body);
+
+  // Once its upload URL has expired, the sweeper removes it and its object.
+  let id = abandoned["id"].as_str().unwrap().parse().unwrap();
+  let record = app.state.database.get_attachment(id).await.unwrap().unwrap();
+  // Just after this attachment, so unfinished uploads of tests running in parallel stay.
+  let cutoff = record.created_at + time::Duration::milliseconds(1);
+  let swept = teamcraft_server::services::attachments::sweep_unfinished(&app.state, cutoff)
+    .await
+    .unwrap();
+  assert!(swept >= 1);
+  let store = app.state.maybe_blob_store.clone().unwrap();
+  assert!(store.object_size(&record.s3_key).await.unwrap().is_none());
+  assert!(app.state.database.get_attachment(id).await.unwrap().is_none());
+  announce(&app, &erin, &channel, BLOB.len()).await;
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn only_the_uploader_completes_and_only_members_download() {
   let app = app!();
   let (carol, dave, erin) = (member("carol"), member("dave"), member("erin"));

@@ -220,6 +220,65 @@ async fn outbox_survives_being_offline() {
 }
 
 #[tokio::test]
+async fn a_welcome_that_arrives_during_a_network_error_is_joined_later() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "flaky")
+    .await
+    .unwrap();
+
+  // The welcome arrives on the gateway, but REST fails while Bob joins.
+  server.set_rest_failing(bob.client.user_id(), true);
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  // Every event fails on its REST call; the welcome among them is consumed.
+  let mut failures = 0;
+  while bob.client.pump(&mut bob.gateway).await.is_err() {
+    failures += 1;
+    assert!(failures < 10, "events keep failing");
+  }
+  assert!(failures > 0);
+
+  // Once the network is back, the welcome is fetched again and joined.
+  server.set_rest_failing(bob.client.user_id(), false);
+  bob.client.sync_welcomes().await.unwrap();
+  alice
+    .client
+    .send_text(channel, None, "welcome after all")
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(bob.texts(channel), vec!["welcome after all"]);
+}
+
+#[tokio::test]
+async fn an_expired_token_keeps_queued_messages_pending() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "after sleep")
+    .await
+    .unwrap();
+
+  // The laptop woke up and the access token expired before the app refreshed it.
+  server.set_signed_out(alice.client.user_id(), true);
+  let _ = alice.client.send_text(channel, None, "first").await;
+  let _ = alice.client.send_text(channel, None, "second").await;
+  let report = alice.client.flush_outbox().await.unwrap();
+  assert_eq!((report.pending, report.failed), (2, 0));
+
+  server.set_signed_out(alice.client.user_id(), false);
+  assert_eq!(alice.client.flush_outbox().await.unwrap().sent, 2);
+}
+
+#[tokio::test]
 async fn gateway_resumes_and_falls_back_to_full_sync() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
@@ -264,6 +323,42 @@ async fn gateway_resumes_and_falls_back_to_full_sync() {
     bob.texts(channel),
     vec!["while you were away", "after the restart"]
   );
+}
+
+#[tokio::test]
+async fn a_full_sync_that_fails_is_repeated_on_the_next_connect() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "gap")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  // A server restart, and the sync after the new session breaks off.
+  server.expire_sessions();
+  server.drop_gateways(bob.client.user_id());
+  alice
+    .client
+    .send_text(channel, None, "missed during the restart")
+    .await
+    .unwrap();
+  server.set_rest_failing(bob.client.user_id(), true);
+  assert!(bob.client.connect_gateway().await.is_err());
+
+  // The next connect must not resume the half-synced session: it syncs again.
+  server.set_rest_failing(bob.client.user_id(), false);
+  let (gateway, outcome) = bob.client.connect_gateway().await.unwrap();
+  assert_eq!(outcome, GatewayOutcome::Fresh);
+  bob.gateway = gateway;
+  assert_eq!(bob.texts(channel), vec!["missed during the restart"]);
 }
 
 #[tokio::test]
@@ -365,6 +460,30 @@ async fn second_device_recovers_identity_and_history() {
     .unwrap();
   settle(&mut [&mut alice, &mut bob, &mut laptop]).await;
   assert_eq!(laptop.texts(channel), vec!["old news", "welcome, laptop"]);
+}
+
+#[tokio::test]
+async fn history_on_a_new_device_shows_edits_and_deletions() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "history")
+    .await
+    .unwrap();
+  let draft = alice.client.send_text(channel, None, "draft").await.unwrap();
+  alice.client.edit_message(channel, draft, "final").await.unwrap();
+  alice.client.send_text(channel, None, "keep").await.unwrap();
+  let oops = alice.client.send_text(channel, None, "oops").await.unwrap();
+  alice.client.delete_message(channel, oops).await.unwrap();
+  alice.client.upload_key_bag().await.unwrap();
+
+  // History arrives newest first, so the edit and the deletion come before their targets.
+  let mut laptop = Peer::enroll_as(alice.api.clone(), "Alice laptop").await;
+  alice.client.add_missing_devices(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut laptop]).await;
+  laptop.client.load_older_messages(channel).await.unwrap();
+  assert_eq!(laptop.texts(channel), vec!["final", "keep"]);
 }
 
 #[tokio::test]

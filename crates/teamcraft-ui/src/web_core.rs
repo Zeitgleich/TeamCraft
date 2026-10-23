@@ -369,6 +369,9 @@ struct Core {
   status: CoreStatus,
   backoff: Duration,
   reconnect_at_ms: i64,
+  /// When the next tick is due. A deadline rather than a fresh sleep per wake-up, so a busy
+  /// connection or a chatty UI can't postpone heartbeats until the server drops the connection.
+  next_tick_ms: i64,
   last_heartbeat_ms: i64,
   last_account_sync_ms: i64,
   link: Option<LinkRun>,
@@ -403,6 +406,7 @@ impl Core {
       status: CoreStatus::NotStarted,
       backoff: RECONNECT_MIN,
       reconnect_at_ms: i64::MIN,
+      next_tick_ms: i64::MIN,
       last_heartbeat_ms: i64::MIN,
       last_account_sync_ms: i64::MIN,
       link: None,
@@ -431,6 +435,7 @@ impl Core {
   }
 
   async fn next_wake(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Wake {
+    let until_tick_ms = self.next_tick_ms.saturating_sub(now_ms()).max(0);
     let Self { gateway, link, .. } = self;
     let frame = Box::pin(async {
       match gateway {
@@ -444,7 +449,9 @@ impl Core {
         None => std::future::pending().await,
       }
     });
-    let tick = Box::pin(platform::sleep(TICK));
+    let tick = Box::pin(platform::sleep(Duration::from_millis(
+      until_tick_ms.unsigned_abs(),
+    )));
     let other = select(select(frame, linked), tick);
     match select(requests.next(), other).await {
       Either::Left((request, _)) => Wake::Request(request),
@@ -983,6 +990,7 @@ impl Core {
 
   async fn on_tick(&mut self) {
     let now = now_ms();
+    self.next_tick_ms = now.saturating_add(millis(TICK));
     if now.saturating_sub(self.last_heartbeat_ms) >= millis(HEARTBEAT)
       && let Some(connection) = self.gateway.as_mut()
     {

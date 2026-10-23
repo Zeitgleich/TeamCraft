@@ -2,6 +2,8 @@
 //! (tokio-tungstenite on native targets, the browser's `WebSocket` in wasm).
 
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder, Response};
 use serde::Serialize;
@@ -49,6 +51,23 @@ use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversa
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
+use crate::clock::{Clock, SystemClock};
+
+/// How long a TCP and TLS (or WebSocket) handshake may take.
+#[cfg(not(target_arch = "wasm32"))]
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Keepalive probes and HTTP/2 pings on open connections, below the idle timeout of common proxies.
+#[cfg(not(target_arch = "wasm32"))]
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+#[cfg(not(target_arch = "wasm32"))]
+const KEEPALIVE_RETRIES: u32 = 3;
+/// How long sent data may stay unacknowledged before the connection counts as dead.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const UNACKNOWLEDGED_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Silence after which the gateway connection counts as dead: two heartbeat intervals (25 s, plus
+/// up to one runner tick) and room for a slow round trip.
+const GATEWAY_SILENCE_LIMIT_MS: i64 = 50_000;
 
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
 pub trait AccessTokenSource {
@@ -69,10 +88,7 @@ pub struct HttpServerApi<T> {
 impl<T: AccessTokenSource> HttpServerApi<T> {
   /// `base_url` without trailing slash, e.g. `https://chat.example.com`.
   pub fn new(base_url: impl Into<String>, tokens: T) -> Self {
-    #[cfg(target_os = "android")]
-    let client = super::tls::http_client();
-    #[cfg(not(target_os = "android"))]
-    let client = reqwest::Client::new();
+    let client = http_client();
     let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
@@ -884,12 +900,23 @@ async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<
 #[cfg(not(target_arch = "wasm32"))]
 pub struct HttpGateway {
   socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+  liveness: Liveness,
 }
 
 /// The gateway WebSocket in the browser.
 #[cfg(target_arch = "wasm32")]
 pub struct HttpGateway {
   socket: BrowserSocket,
+  liveness: Liveness,
+}
+
+/// When the server was last heard from. Every client heartbeat is answered, so a connection that
+/// stays silent for [`GATEWAY_SILENCE_LIMIT_MS`] is dead even if the socket never reports an error
+/// (a half-open TCP connection after a network change). Wall-clock time on purpose: after a laptop
+/// sleeps, the jump marks the connection as stale at once.
+#[derive(Clone, Copy, Debug)]
+struct Liveness {
+  last_heard_ms: i64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -897,6 +924,7 @@ impl HttpGateway {
   async fn connect(url: &str) -> Result<Self, ApiError> {
     Ok(Self {
       socket: connect_websocket(url).await?,
+      liveness: Liveness::new(SystemClock.now_ms()),
     })
   }
 }
@@ -907,6 +935,7 @@ impl GatewayConnection for HttpGateway {
     use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::Message;
 
+    self.liveness.check(SystemClock.now_ms())?;
     let text = serde_json::to_string(message).map_err(|error| ApiError::Decode(error.to_string()))?;
     self
       .socket
@@ -920,7 +949,9 @@ impl GatewayConnection for HttpGateway {
     use tokio_tungstenite::tungstenite::Message;
 
     loop {
-      match self.socket.next().await? {
+      let frame = self.socket.next().await?;
+      self.liveness.heard(SystemClock.now_ms());
+      match frame {
         Ok(Message::Text(text)) => {
           return Some(
             serde_json::from_str(text.as_str()).map_err(|error| ApiError::Decode(error.to_string())),
@@ -940,6 +971,7 @@ impl HttpGateway {
   async fn connect(url: &str) -> Result<Self, ApiError> {
     Ok(Self {
       socket: BrowserSocket::connect(url).await?,
+      liveness: Liveness::new(SystemClock.now_ms()),
     })
   }
 }
@@ -947,13 +979,16 @@ impl HttpGateway {
 #[cfg(target_arch = "wasm32")]
 impl GatewayConnection for HttpGateway {
   async fn send(&mut self, message: &GatewayClientMessage) -> Result<(), ApiError> {
+    self.liveness.check(SystemClock.now_ms())?;
     let text = serde_json::to_string(message).map_err(|error| ApiError::Decode(error.to_string()))?;
     self.socket.send_text(&text)
   }
 
   async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
     loop {
-      match self.socket.next().await? {
+      let frame = self.socket.next().await?;
+      self.liveness.heard(SystemClock.now_ms());
+      match frame {
         Ok(SocketFrame::Text(text)) => {
           return Some(serde_json::from_str(&text).map_err(|error| ApiError::Decode(error.to_string())));
         },
@@ -962,6 +997,31 @@ impl GatewayConnection for HttpGateway {
         Err(error) => return Some(Err(error)),
       }
     }
+  }
+}
+
+impl Liveness {
+  fn new(now_ms: i64) -> Self {
+    Self {
+      last_heard_ms: now_ms,
+    }
+  }
+
+  fn heard(&mut self, now_ms: i64) {
+    self.last_heard_ms = now_ms;
+  }
+
+  /// Fails once the server has been silent for too long, so the caller reconnects as it does after
+  /// any failed send.
+  fn check(&self, now_ms: i64) -> Result<(), ApiError> {
+    let silent_ms = now_ms.saturating_sub(self.last_heard_ms);
+    if silent_ms > GATEWAY_SILENCE_LIMIT_MS {
+      return Err(ApiError::Network(format!(
+        "no frame from the gateway for {} s",
+        silent_ms / 1000
+      )));
+    }
+    Ok(())
   }
 }
 
@@ -1071,6 +1131,44 @@ impl fmt::Debug for HttpRendezvous {
   }
 }
 
+/// The HTTP client of the native apps. reqwest has no timeouts by default, so a request on a
+/// connection that died silently (Wi-Fi to mobile handover, laptop sleep) would hang until the
+/// kernel gives up, which takes many minutes. There is deliberately no total or read timeout: a big
+/// upload on a slow link is slow, not dead. Instead a connection is dropped when it stops making
+/// progress (robustness.md, "Network loss and change").
+#[cfg(not(target_arch = "wasm32"))]
+fn http_client() -> reqwest::Client {
+  let builder = reqwest::Client::builder()
+    .connect_timeout(CONNECT_TIMEOUT)
+    .tcp_keepalive(KEEPALIVE_INTERVAL)
+    .tcp_keepalive_interval(KEEPALIVE_INTERVAL)
+    .tcp_keepalive_retries(KEEPALIVE_RETRIES)
+    .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
+    .http2_keep_alive_timeout(KEEPALIVE_INTERVAL)
+    .http2_keep_alive_while_idle(true);
+  // Data that the peer doesn't acknowledge for this long means the connection is gone, even while a
+  // request is in flight (keepalive probes only run on an idle socket).
+  #[cfg(any(target_os = "android", target_os = "linux"))]
+  let builder = builder.tcp_user_timeout(UNACKNOWLEDGED_TIMEOUT);
+  #[cfg(target_os = "android")]
+  let builder = builder.tls_backend_preconfigured((*super::tls::client_config()).clone());
+  match builder.build() {
+    Ok(client) => client,
+    // Only a reqwest/rustls version mismatch can cause this; the default client still works for
+    // plain HTTP (development) and reports TLS errors per request.
+    Err(error) => {
+      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
+      reqwest::Client::new()
+    },
+  }
+}
+
+/// The browser's `fetch` has its own timeouts and connection handling.
+#[cfg(target_arch = "wasm32")]
+fn http_client() -> reqwest::Client {
+  reqwest::Client::new()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 type NativeSocket =
   tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1079,8 +1177,11 @@ type NativeSocket =
 async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
   // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
-  let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector)
+  let connecting = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector);
+  // A black-holed server would otherwise stall the caller's loop (outbox, heartbeats) for minutes.
+  let (socket, _) = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
     .await
+    .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
     .map_err(|error| ApiError::Network(error.to_string()))?;
   Ok(socket)
 }
@@ -1192,6 +1293,50 @@ mod tests {
       api.connect_gateway().await,
       Err(ApiError::InsecureServerUrl(_))
     ));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_server_that_never_answers_the_websocket_handshake_times_out() {
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // Accepts the TCP connection and then stays silent, like a black-holed proxy.
+    tokio::spawn(async move {
+      let (_socket, _) = listener.accept().await.unwrap();
+      std::future::pending::<()>().await;
+    });
+    // Paused time jumps ahead while everything waits, so the timeout fires without a real wait.
+    let result = connect_websocket(&format!("ws://{address}/api/v1/gateway")).await;
+    assert!(matches!(result, Err(ApiError::Network(message)) if message.contains("timed out")));
+  }
+
+  mod liveness {
+    use super::*;
+
+    #[test]
+    fn a_connection_that_hears_heartbeat_acks_stays_alive() {
+      let mut liveness = Liveness::new(0);
+      for now_ms in (25_000..=250_000).step_by(30_000) {
+        assert!(liveness.check(now_ms).is_ok(), "{now_ms}");
+        liveness.heard(now_ms + 200);
+      }
+    }
+
+    #[test]
+    fn a_silent_connection_is_dead_after_the_limit() {
+      let liveness = Liveness::new(0);
+      assert!(liveness.check(GATEWAY_SILENCE_LIMIT_MS).is_ok());
+      assert!(matches!(
+        liveness.check(GATEWAY_SILENCE_LIMIT_MS + 1),
+        Err(ApiError::Network(_))
+      ));
+    }
+
+    #[test]
+    fn a_wall_clock_jump_after_sleep_marks_the_connection_dead() {
+      let liveness = Liveness::new(1_000_000);
+      // The laptop slept over the weekend; the first heartbeat after waking fails at once.
+      assert!(liveness.check(1_000_000 + 2 * 86_400_000).is_err());
+    }
   }
 
   #[test]

@@ -1362,8 +1362,10 @@ impl Default for RendezvousConfig {
   fn default() -> Self {
     Self {
       ttl_secs: 300,
-      max_frame_bytes: 16 * 1024,
-      max_total_bytes: 256 * 1024,
+      // The linking transfer is one frame holding the whole key bag (up to
+      // `limits.max_key_bag_bytes`, base64 in JSON); 16 KiB failed for ordinary accounts.
+      max_frame_bytes: 2 * 1024 * 1024,
+      max_total_bytes: 3 * 1024 * 1024,
       max_pending_frames: 8,
       max_per_user: 5,
       join_timeout_secs: 10,
@@ -1557,6 +1559,16 @@ mod tests {
   }
 
   #[test]
+  fn a_linking_frame_holds_the_largest_key_bag() {
+    let max_key_bag = LimitsConfig::default().max_key_bag_bytes;
+    // Base64 in a JSON payload, plus the wrapped backup keys and the channel's sealing.
+    let transfer = max_key_bag * 4 / 3 + 64 * 1024;
+    let rendezvous = RendezvousConfig::default();
+    assert!(rendezvous.max_frame_bytes >= transfer);
+    assert!(rendezvous.max_total_bytes >= transfer + 64 * 1024);
+  }
+
+  #[test]
   fn example_file_parses_and_matches_the_defaults() {
     let text = include_str!("../../../teamcraft.example.toml");
     let config = Config::from_toml(text).unwrap();
@@ -1576,6 +1588,10 @@ mod tests {
     assert_eq!(
       config.rendezvous.max_total_bytes,
       RendezvousConfig::default().max_total_bytes
+    );
+    assert_eq!(
+      config.rendezvous.max_frame_bytes,
+      RendezvousConfig::default().max_frame_bytes
     );
     assert_eq!(config.server.listen_addr, ServerConfig::default().listen_addr);
   }

@@ -19,6 +19,23 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::BlobStore;
 
+/// Removes attachments whose upload never completed and whose upload URL expired before `before`
+/// (see [`super::backgrounds::sweep_cutoff`]), with any object a late upload left behind. Without
+/// this, every upload that a client gave up on (a flaky network retries with a new attachment)
+/// counted against `max_pending_attachments_per_user` forever and eventually blocked all uploads.
+pub async fn sweep_unfinished(state: &AppState, before: OffsetDateTime) -> Result<usize, ApiError> {
+  let Some(store) = state.maybe_blob_store.as_ref() else {
+    return Ok(0);
+  };
+  let keys = state.database.sweep_unfinished_attachments(before).await?;
+  for key in &keys {
+    if let Err(error) = store.delete_object(key).await {
+      warn!(%error, "deleting an unfinished attachment object failed");
+    }
+  }
+  Ok(keys.len())
+}
+
 pub async fn create_attachment(
   state: &AppState,
   caller: &AuthenticatedUser,

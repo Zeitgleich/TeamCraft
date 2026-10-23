@@ -18,23 +18,6 @@ pub(crate) fn client_config() -> Arc<ClientConfig> {
   CONFIG.get_or_init(build_client_config).clone()
 }
 
-/// An HTTP client that trusts the Mozilla roots.
-#[cfg(target_os = "android")]
-pub(crate) fn http_client() -> reqwest::Client {
-  match reqwest::Client::builder()
-    .tls_backend_preconfigured((*client_config()).clone())
-    .build()
-  {
-    Ok(client) => client,
-    // Only a reqwest/rustls version mismatch can cause this; the default client still works for
-    // plain HTTP (development) and reports TLS errors per request.
-    Err(error) => {
-      tracing::error!(%error, "TLS configuration rejected, using the default HTTP client");
-      reqwest::Client::new()
-    },
-  }
-}
-
 fn build_client_config() -> Arc<ClientConfig> {
   let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
   let builder = match ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions() {
