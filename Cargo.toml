@@ -9,7 +9,9 @@ version = "1.0.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Zeitgleich/TeamCraft"
-rust-version = "1.99"
+# The Flatpak build uses the GNOME SDK's rust-stable extension, which trails the newest stable
+# release by about one version; the toolchain itself (rust-toolchain.toml) stays current.
+rust-version = "1.98"
 publish = false
 
 [workspace.lints.rust]
