@@ -1,0 +1,43 @@
+# Warms the Rust build cache of the desktop release jobs on `main`. Release runs start from a tag and
+# can only restore caches saved on the tag or the default branch, so without this every release
+# compiled all dependencies from scratch (#176). It runs desktop-release.yml itself in its
+# compile-only mode, so the cache keys, toolchains, flags and features are exactly the release's.
+#
+# rust-cache keeps the compiled dependencies, not the workspace crates, and its key covers the
+# lockfile, the manifests, the toolchain and the compiler flags. Hence the path filter: other changes
+# would not change what is cached. The nightly run catches a new stable Rust and changes pushed with
+# `[skip ci]`; when the key already exists it only restores the cache (which also keeps it from
+# expiring) and skips the compile.
+name: Desktop cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".cargo/config.toml"
+      - "rust-toolchain*"
+      - ".github/workflows/desktop-cache.yml"
+      - ".github/workflows/desktop-release.yml"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# One warm-up at a time; a running one finishes (a cancelled one would save nothing), and only the
+# newest queued one is kept.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # The Linux jobs run in the CI image on GHCR.
+  packages: read
+
+jobs:
+  desktop:
+    name: Desktop
+    uses: ./.github/workflows/desktop-release.yml
+    with:
+      warm-cache: true
