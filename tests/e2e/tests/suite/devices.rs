@@ -33,8 +33,13 @@ async fn a_linked_device_shares_the_identity_and_joins_the_channels() {
   );
   let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
-  carol.client.complete_link_approval(phone_side).await.unwrap();
-  let secrets = laptop_side.receive_secrets().await.unwrap();
+  // The phone reports success only once the laptop confirmed the transfer: both run at once.
+  let (approved, received) = tokio::join!(
+    carol.client.complete_link_approval(phone_side),
+    laptop_side.receive_secrets()
+  );
+  approved.unwrap();
+  let secrets = received.unwrap();
 
   let options = teamcraft_core::EnrollmentOptions {
     secret: teamcraft_core::EnrollmentSecret::Linked(secrets),
