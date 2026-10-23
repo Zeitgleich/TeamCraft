@@ -1039,13 +1039,13 @@ mod tests {
     #[tokio::test]
     async fn a_local_sign_in_replaces_a_stored_refresh_token() {
       let store = MemoryStore::default();
-      store.save(SERVER, "refresh").await.unwrap();
+      store.save(&config().token_key(), "refresh").await.unwrap();
       let service = AuthService::new(Some(config()), store).unwrap();
       service
         .adopt_local(&config(), session("fresh", 3_600_000))
         .await
         .unwrap();
-      assert!(service.store.load(SERVER).await.unwrap().is_none());
+      assert!(service.store.load(&config().token_key()).await.unwrap().is_none());
       assert_eq!(service.bearer_token().await.unwrap(), "fresh");
     }
 

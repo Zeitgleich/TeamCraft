@@ -21,6 +21,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   New settings `[oidc] app_scopes` and `app_redirect_uris`
   ([docs/operations.md](docs/operations.md) "Server address in the apps"). The web client now signs
   in with the server's announced settings too.
+- **New sign-in page on every client**: a prominent "Sign in with <provider>" button and the e-mail,
+  password and one-time code form of local accounts inline (no hidden guest link), with an "or"
+  divider, password reveal, help text and link, in light and dark and on phones. Admins choose the
+  methods and their order, the help text and link (Settings → Sign-in page), the provider name and
+  icon per brand, and switch local accounts off and on at runtime (sign-in then answers 403
+  `local_accounts_disabled` and their sessions end). Everything is announced in
+  `GET /api/v1/server-info`. The desktop, Android and iOS apps now sign local accounts in too.
 - **Durable push retries**: wake-ups that fail because a push service or the push gateway is down or
   rate limited wait in the database and are tried again with backoff and jitter, honouring
   `Retry-After`, until their TTL ends; a restart or a killed server loses none and sends none twice.
