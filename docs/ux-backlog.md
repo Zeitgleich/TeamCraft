@@ -113,7 +113,8 @@ exists).
 ## Already in place (checked)
 
 Draft per conversation and thread, Shift+Enter / configurable send key, @-mention, `:emoji:` and `/command`
-autocomplete with the keyboard, formatting toolbar, Alt+↑/↓ between conversations, Esc closes panels,
+autocomplete with the keyboard, formatting toolbar, Alt+↑/↓ between conversations (of the space, or of
+the direct messages page), Esc closes panels, direct messages on their own page (rail entry on top),
 unread bold and mention badges in the sidebar, muted spaces greyed, collapsible sidebar sections,
 status menu with presets and expiry, copy link to a message, permalinks, image gallery, jump to date,
 dark / light / system theme, compact density, `prefers-reduced-motion`, focus rings, modal focus trap.

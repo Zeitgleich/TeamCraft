@@ -28,6 +28,24 @@ thread mentions. Messages of the user themselves, thread replies (they count in 
 messages from before the user joined are not counted. The read position is
 `PUT /conversations/{id}/read-position`.
 
+### Where the counts show
+
+DMs and group DMs live outside spaces (their `space_id` is null), so no space counts them:
+
+| Place                                   | Counts                                                                                     |
+|-----------------------------------------|--------------------------------------------------------------------------------------------|
+| Space rail entry of a space             | Mentions in the space's channels; a dot for other unread messages in channels not muted    |
+| Direct messages entry (top of the rail) | Unread messages of all DMs and group DMs plus mentions; muted ones count only mentions     |
+| "Unreads" group of a space's sidebar    | That space's channels only                                                                 |
+| App badge (dock, taskbar, tray)         | Mentions everywhere plus unread DMs and group DMs (`badge_count`)                          |
+| Mobile chat list tabs                   | "Spaces": mentions (a dot for other unread messages); "Direct messages": as the rail entry |
+
+The direct messages page (desktop and web) lists every DM and group DM, newest message first (or by
+name), favorites on top, with presence, a filter and "New message" for one person (a DM) or several (a
+group DM, `POST /group-dms`). Its sort order and the number of conversations shown before "show more"
+are options of that page; conversations with unread messages always stay visible. Android and iOS
+show the same list as a "Direct messages" tab next to "Spaces".
+
 ## Preferences
 
 | What                              | Where                                                   |

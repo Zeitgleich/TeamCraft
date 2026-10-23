@@ -7,8 +7,8 @@ import uniffi.teamcraft_ffi.ConversationKind
 
 class ConversationSectionsTest {
   @Test
-  fun favoritesSpacesThenDirectMessages() {
-    val result = sections(
+  fun channelsByFavoritesThenSpaceWithoutDirectMessages() {
+    val result = channelSections(
       listOf(
         item("1", "zeta", ConversationKind.PUBLIC, space = "Project B"),
         item("2", "alpha", ConversationKind.PRIVATE, space = "Project A"),
@@ -18,24 +18,50 @@ class ConversationSectionsTest {
       ),
     )
     assertEquals(
-      listOf(
-        SectionTitle.Favorites,
-        SectionTitle.Space("Project A"),
-        SectionTitle.Space("Project B"),
-        SectionTitle.DirectMessages,
-      ),
+      listOf(SectionTitle.Favorites, SectionTitle.Space("Project A"), SectionTitle.Space("Project B")),
       result.map { it.title },
     )
     assertEquals(listOf("alpha", "Beta"), result[1].conversations.map { it.name })
   }
 
   @Test
-  fun emptySectionsAreLeftOut() {
-    assertEquals(emptyList<Section>(), sections(emptyList()))
-    assertEquals(
-      listOf(SectionTitle.DirectMessages),
-      sections(listOf(item("1", "Carol", ConversationKind.GROUP))).map { it.title },
+  fun directMessagesNewestFirstWithFavoritesOnTop() {
+    val result = directSections(
+      listOf(
+        item("1", "Amy", ConversationKind.DIRECT),
+        item("2", "zed", ConversationKind.DIRECT),
+        item("3", "Amy, Bob", ConversationKind.GROUP, isFavorite = true),
+        item("4", "general", ConversationKind.PUBLIC, space = "Project A"),
+        item("5", "bob", ConversationKind.DIRECT),
+      ),
+      lastActivity = mapOf("1" to 10L, "2" to 30L, "4" to 99L),
     )
+    assertEquals(listOf(SectionTitle.Favorites, SectionTitle.DirectMessages), result.map { it.title })
+    assertEquals(listOf("zed", "Amy", "bob"), result[1].conversations.map { it.name })
+  }
+
+  @Test
+  fun directMessagesFilterIgnoresCase() {
+    val list = listOf(item("1", "Amy", ConversationKind.DIRECT), item("2", "Bob", ConversationKind.DIRECT))
+    assertEquals(listOf("Amy"), directSections(list, filter = " aM").flatMap { it.conversations }.map { it.name })
+    assertEquals(emptyList<Section>(), directSections(list, filter = "nobody"))
+  }
+
+  @Test
+  fun emptySectionsAreLeftOut() {
+    assertEquals(emptyList<Section>(), channelSections(emptyList()))
+    assertEquals(emptyList<Section>(), channelSections(listOf(item("1", "Carol", ConversationKind.GROUP))))
+  }
+
+  @Test
+  fun badgesSkipMutedUnreadButCountMentions() {
+    val badge = tabBadge(
+      listOf(
+        item("1", "Amy", ConversationKind.DIRECT, unread = 2u),
+        item("2", "Bob", ConversationKind.DIRECT, unread = 5u, mentions = 1u, isMuted = true),
+      ),
+    )
+    assertEquals(TabBadge(mentions = 1, unread = 2), badge)
   }
 
   private fun item(
@@ -44,6 +70,9 @@ class ConversationSectionsTest {
     kind: ConversationKind,
     space: String? = null,
     isFavorite: Boolean = false,
+    unread: UInt = 0u,
+    mentions: UInt = 0u,
+    isMuted: Boolean = false,
   ) = ConversationItem(
     id = id,
     maybeSpaceId = space?.let { "s-$it" },
@@ -51,10 +80,10 @@ class ConversationSectionsTest {
     kind = kind,
     name = name,
     topic = "",
-    unreadCount = 0u,
-    mentionCount = 0u,
+    unreadCount = unread,
+    mentionCount = mentions,
     isFavorite = isFavorite,
-    isMuted = false,
+    isMuted = isMuted,
     canPost = true,
   )
 }

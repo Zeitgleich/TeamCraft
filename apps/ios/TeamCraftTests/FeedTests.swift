@@ -74,7 +74,7 @@ final class FeedTests: XCTestCase {
         id: id, maybeSpaceId: nil, maybeSpaceName: nil, kind: .direct, name: name, topic: "", unreadCount: 0,
         mentionCount: 0, isFavorite: false, isMuted: false, canPost: true)
     }
-    let sections = conversationSections(
+    let sections = directSections(
       [dm("1", "Alex"), dm("2", "Bo"), dm("3", "Cy")],
       lastActivity: ["3": Date(timeIntervalSince1970: 30), "1": Date(timeIntervalSince1970: 10)])
     XCTAssertEqual(sections.first?.conversations.map(\.name), ["Cy", "Alex", "Bo"])

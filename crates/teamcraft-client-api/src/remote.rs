@@ -964,6 +964,18 @@ mod tests {
   }
 
   #[test]
+  fn group_dm_action_lists_the_people() {
+    let action: ChatAction =
+      serde_json::from_str(r#"{"action":"open_group_dm","users":["2","3"]}"#).expect("parse");
+    assert_eq!(
+      action,
+      ChatAction::OpenGroupDm {
+        users: vec![id_from_raw(2), id_from_raw(3)]
+      }
+    );
+  }
+
+  #[test]
   fn typing_action_and_query_are_tagged() {
     let typing: ChatAction =
       serde_json::from_str(r#"{"action":"typing","conversation":"7"}"#).expect("parse");

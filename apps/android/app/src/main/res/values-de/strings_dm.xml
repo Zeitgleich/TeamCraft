@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The direct messages tab: DMs and group DMs live outside spaces. -->
+<resources>
+  <string name="chats_tab_spaces">Spaces</string>
+  <string name="chats_no_channels">Noch keine Kanäle. Durchsuche die Kanäle deiner Spaces, um einem beizutreten.</string>
+  <string name="chat_tab_new">%1$s, neue Nachrichten</string>
+  <plurals name="chat_tab_unread">
+    <item quantity="one">%1$s, %2$d ungelesen</item>
+    <item quantity="other">%1$s, %2$d ungelesen</item>
+  </plurals>
+  <string name="dm_new">Neue Nachricht</string>
+  <string name="dm_filter">Direktnachrichten filtern</string>
+  <string name="dm_filter_empty">Keine Direktnachricht passt.</string>
+  <string name="dm_empty">Direktnachrichten mit einer oder mehreren Personen erscheinen hier. Sie gehören zu keinem Space.</string>
+  <string name="dm_pick_hint">Eine Person für eine Direktnachricht, mehrere für eine Gruppe.</string>
+  <string name="dm_start">Unterhaltung öffnen</string>
+  <string name="dm_start_group">Gruppe starten</string>
+  <string name="clear">Leeren</string>
+  <string name="presence_peer_offline">Offline</string>
+</resources>

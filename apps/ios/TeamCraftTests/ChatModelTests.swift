@@ -5,28 +5,50 @@ import XCTest
 final class ChatModelTests: XCTestCase {
   private func item(
     _ id: String, _ name: String, kind: ConversationKind = .public, space: String? = nil,
-    favorite: Bool = false
+    favorite: Bool = false, unread: UInt32 = 0, mentions: UInt32 = 0, muted: Bool = false
   ) -> ConversationItem {
     ConversationItem(
       id: id, maybeSpaceId: space, maybeSpaceName: space, kind: kind, name: name, topic: "",
-      unreadCount: 0, mentionCount: 0, isFavorite: favorite, isMuted: false, canPost: true)
+      unreadCount: unread, mentionCount: mentions, isFavorite: favorite, isMuted: muted, canPost: true)
   }
 
-  func testSectionsOrderFavoritesSpacesAndDirectMessages() {
-    let sections = conversationSections([
+  func testChannelSectionsOrderFavoritesAndSpacesWithoutDirectMessages() {
+    let sections = channelSections([
       item("1", "random", space: "Team B"),
       item("2", "general", space: "Team A"),
       item("3", "Sam", kind: .direct),
       item("4", "announcements", space: "Team A", favorite: true),
       item("5", "loose"),
     ])
-    XCTAssertEqual(sections.map(\.title), [.favorites, .space("Team A"), .space("Team B"), .channels, .directMessages])
+    XCTAssertEqual(sections.map(\.title), [.favorites, .space("Team A"), .space("Team B"), .channels])
     XCTAssertEqual(sections[0].conversations.map(\.id), ["4"])
-    XCTAssertEqual(sections[4].conversations.map(\.id), ["3"])
+  }
+
+  func testDirectSectionsFavoritesFirstAndFiltered() {
+    let list = [
+      item("1", "Sam", kind: .direct),
+      item("2", "Sam, Alex", kind: .group, favorite: true),
+      item("3", "general", space: "Team A"),
+      item("4", "Kim", kind: .direct),
+    ]
+    let sections = directSections(list)
+    XCTAssertEqual(sections.map(\.title), [.favorites, .directMessages])
+    XCTAssertEqual(sections[1].conversations.map(\.name), ["Kim", "Sam"])
+    XCTAssertEqual(directSections(list, filter: " sAm").flatMap(\.conversations).map(\.id), ["2", "1"])
   }
 
   func testEmptySectionsAreLeftOut() {
-    XCTAssertTrue(conversationSections([]).isEmpty)
+    XCTAssertTrue(channelSections([]).isEmpty)
+    XCTAssertTrue(directSections([]).isEmpty)
+    XCTAssertTrue(channelSections([item("1", "Sam", kind: .group)]).isEmpty)
+  }
+
+  func testTabBadgeSkipsMutedUnreadButCountsMentions() {
+    let badge = TabBadge([
+      item("1", "Sam", kind: .direct, unread: 2),
+      item("2", "Kim", kind: .direct, unread: 5, mentions: 1, muted: true),
+    ])
+    XCTAssertEqual(badge, TabBadge(mentions: 1, unread: 2))
   }
 
   func testActionsSerializeToTheCoreSchema() throws {

@@ -18,13 +18,23 @@ class BrowseTest {
       Conversation(id = "10", kind = "Group", name = "Trio", memberIds = listOf(ME, ALICE, BOB)),
       Conversation(id = "11", kind = "Direct", name = "Alice", memberIds = listOf(ME, ALICE)),
     )
-    assertEquals("11", directWith(snapshot, ALICE))
+    assertEquals("11", directWith(snapshot, listOf(ALICE)))
   }
 
   @Test
   fun aGroupWithThePersonIsNoDirectConversation() {
     val snapshot = snapshot(Conversation(id = "10", kind = "Group", name = "Trio", memberIds = listOf(ME, ALICE, BOB)))
-    assertNull(directWith(snapshot, BOB))
+    assertNull(directWith(snapshot, listOf(BOB)))
+  }
+
+  @Test
+  fun findsTheGroupWithExactlyThesePeople() {
+    val snapshot = snapshot(
+      Conversation(id = "10", kind = "Group", name = "Trio", memberIds = listOf(ME, ALICE, BOB)),
+      Conversation(id = "11", kind = "Direct", name = "Alice", memberIds = listOf(ME, ALICE)),
+    )
+    assertEquals("10", directWith(snapshot, listOf(BOB, ALICE, ME)))
+    assertNull(directWith(snapshot, listOf(BOB, ALICE, "4")))
   }
 
   private fun snapshot(vararg conversations: Conversation) = ChatSnapshot(

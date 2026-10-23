@@ -324,6 +324,7 @@ pub fn NewMessageDialog() -> impl IntoView {
     users.retain(|user| user.id != me && !user.is_bot && !picked.contains(&user.id));
     people_matching(users, &filter.get())
   });
+  let input = NodeRef::<leptos::html::Input>::new();
   let start = move || {
     let users: Vec<UserId> = chosen.with_untracked(|list| list.iter().map(|user| user.id).collect());
     if users.is_empty() {
@@ -335,13 +336,27 @@ pub fn NewMessageDialog() -> impl IntoView {
   let pick = move |user: User| {
     chosen.update(|list| list.push(user));
     filter.set(String::new());
+    // Back to the search field for the next person.
+    if let Some(element) = input.get_untracked() {
+      drop(element.focus());
+    }
+  };
+  // Enter picks the first match while searching, and opens the conversation otherwise.
+  let submit = move || {
+    let maybe_first = (!filter.get_untracked().trim().is_empty())
+      .then(|| candidates.get_untracked().into_iter().next())
+      .flatten();
+    match maybe_first {
+      Some(user) => pick(user),
+      None => start(),
+    }
   };
 
   view! {
     <Modal labelled_by="new-message-title" class="modal-small">
       <form on:submit=move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        start();
+        submit();
       }>
         <header class="modal-head">
           <h2 id="new-message-title">{move || i18n.t("dm-new")}</h2>
@@ -378,6 +393,7 @@ pub fn NewMessageDialog() -> impl IntoView {
           <label class="visually-hidden" for="new-message-filter">{move || i18n.t("dm-new-filter")}</label>
           <input
             id="new-message-filter"
+            node_ref=input
             class="input"
             data-autofocus
             autocomplete="off"
@@ -414,7 +430,7 @@ pub fn NewMessageDialog() -> impl IntoView {
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
-          <button type="submit" class="btn btn-primary" prop:disabled=move || chosen.with(Vec::is_empty)>
+          <button type="button" class="btn btn-primary" prop:disabled=move || chosen.with(Vec::is_empty) on:click=move |_| start()>
             {move || {
               if chosen.with(|list| list.len() > 1) { i18n.t("dm-new-start-group") } else { i18n.t("dm-new-start") }
             }}
