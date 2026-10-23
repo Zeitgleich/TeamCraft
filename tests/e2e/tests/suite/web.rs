@@ -7,14 +7,18 @@
 use std::time::{Duration, Instant};
 
 use chromiumoxide::page::Page;
-use teamcraft_e2e::browser::{BrowserSession, web_dir};
+use teamcraft_e2e::browser::{BrowserSession, WebPortLease, lease_web_port, web_dir};
 use teamcraft_e2e::peer::PASSPHRASE;
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::ConversationId;
 
-const WEB_ORIGIN: &str = "http://127.0.0.1:8082";
-static PORT_8082: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) const WEB_ORIGIN: &str = "http://127.0.0.1:8082";
+/// The default policy only lets pages talk to https: and wss: origins; the dev Keycloak is plain http.
+pub(crate) const TEST_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
+  style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
+  connect-src 'self' http://127.0.0.1:8080 ws: wss: https:; worker-src 'self' blob:; \
+  frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -352,7 +356,7 @@ struct Rig {
   alice: Peer,
   carol: Peer,
   channel: ConversationId,
-  _turn: tokio::sync::MutexGuard<'static, ()>,
+  _turn: WebPortLease,
 }
 
 impl Rig {
@@ -363,17 +367,12 @@ impl Rig {
       eprintln!("skipping: no web build (tests/e2e/web/build.sh)");
       return None;
     };
-    // The default policy only lets pages talk to https: and wss: origins; the dev Keycloak is plain http.
-    let policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
-    img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
-    connect-src 'self' http://127.0.0.1:8080 ws: wss: https:; worker-src 'self' blob:; \
-    frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
     let builder = Stack::builder()
       .with_port(8082)
       .with_web_dir(web_dir)
-      .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", policy);
+      .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP);
     // One test at a time owns the port.
-    let turn = PORT_8082.lock().await;
+    let turn = lease_web_port().await;
     let stack = builder.start().await?;
     let browser = BrowserSession::launch().await?;
 
@@ -430,7 +429,7 @@ impl Rig {
 }
 
 /// Signs in through Keycloak's login page and unlocks the account's keys on this new browser.
-async fn sign_in_as_alice(page: &Page) {
+pub(crate) async fn sign_in_as_alice(page: &Page) {
   // The UI follows the browser language; pin English before the app loads (same origin).
   page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
   page

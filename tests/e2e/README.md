@@ -87,12 +87,14 @@ full-page screenshot to `target/e2e-artifacts/<test>.png`.
 `tests/e2e/web/build.sh` builds `crates/teamcraft-ui` with `trunk build --release` in a container
 (`web/Containerfile`: `rust:1.99.1-trixie`, the `wasm32-unknown-unknown` target and trunk, which
 downloads the `wasm-bindgen` version of `Cargo.lock`) into `target/e2e-web`. Cargo's registry and the
-build output are kept in the Docker volumes `teamcraft-e2e-web-cargo` and `teamcraft-e2e-web-target` so
-reruns are incremental (`docker volume rm` them to reclaim the disk space). The server under test serves
+build output are kept in the Docker volumes `teamcraft-e2e-web-cargo` and `teamcraft-e2e-web-target-<id>`
+(one per checkout, which are all mounted at the same path) so reruns are incremental (`docker volume rm`
+them to reclaim the disk space). The server under test serves
 that directory as its web client (`[web] static_dir`).
 
 The dev realm registers `http://127.0.0.1:8082/*` as the web client's redirect URI, so the browser tests
-start their server on **port 8082** (and take turns). Its default Content-Security-Policy allows only
+start their server on **port 8082** and take turns, also across test processes and checkouts (a lock
+file in the temp directory). Its default Content-Security-Policy allows only
 `https:` for `connect-src`; the tests widen it to the plain-http dev Keycloak.
 
 ## Running by hand

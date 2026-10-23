@@ -41,6 +41,8 @@ impl BrowserSession {
       .arg("--lang=en-US")
       .arg("--accept-lang=en-US")
       .window_size(1360, 840)
+      // Page scripts that wait for the app (perf.rs) may take longer than the 30 s default.
+      .request_timeout(std::time::Duration::from_secs(300))
       .build()
       .expect("browser config");
     let (browser, mut handler) = Browser::launch(config).await.expect("launching the browser");
@@ -83,11 +85,50 @@ impl BrowserSession {
     self.browser.new_page(url).await.expect("opening a page")
   }
 
+  /// The browser's own profile directory: every process of this browser has it on its command line
+  /// (see [`crate::resources::ProcessUsage::of_matching`]).
+  pub fn profile_dir(&self) -> &std::path::Path {
+    &self.profile
+  }
+
   pub async fn close(mut self) {
     let _ = self.browser.close().await;
     let _ = self.browser.wait().await;
     self.handler.abort();
     let _ = std::fs::remove_dir_all(&self.profile);
+  }
+}
+
+/// Exclusive use of the web client's port 8082 (the redirect URI the dev realm registers) for as
+/// long as it is held, across every test process on the machine: other checkouts run the suite
+/// too, and a second server on the port fails to start.
+pub struct WebPortLease {
+  _turn: tokio::sync::MutexGuard<'static, ()>,
+  _file: std::fs::File,
+}
+
+static WEB_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Waits until no other test (in this process or another) uses port 8082.
+pub async fn lease_web_port() -> WebPortLease {
+  let turn = WEB_PORT.lock().await;
+  let path = std::env::temp_dir().join("teamcraft-e2e-web-port.lock");
+  let file = std::fs::File::options()
+    .create(true)
+    .truncate(false)
+    .write(true)
+    .open(&path)
+    .expect("opening the port lock file");
+  // An advisory lock, released when the file is closed (also when the test process dies).
+  let file = tokio::task::spawn_blocking(move || {
+    file.lock().expect("locking the port lock file");
+    file
+  })
+  .await
+  .expect("waiting for the port lock");
+  WebPortLease {
+    _turn: turn,
+    _file: file,
   }
 }
 
