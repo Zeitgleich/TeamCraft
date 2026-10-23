@@ -5,13 +5,21 @@ use wasm_bindgen::JsCast;
 use teamcraft_proto::Role;
 
 use crate::admin::AdminSection;
+use crate::clock::{
+  format_date_time, format_local_datetime_input, format_time, local_day, now_ms, parse_local_datetime,
+  tomorrow_at,
+};
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
-use crate::model::{CustomStatus, PresenceStatus, StatusExpiry};
+use crate::model::{CustomStatus, PresenceStatus, StatusExpiry, TimestampMs};
 use crate::session::use_session;
 use crate::state::{Overlay, use_app_state};
+
+/// "Until tomorrow morning" means 08:00 local time.
+const MORNING_MINUTE: u16 = 8 * 60;
+const MS_PER_HOUR: TimestampMs = 3_600_000;
 
 /// Presets an admin can configure later; the label is an i18n key.
 const STATUS_PRESETS: [(&str, &str); 4] = [
@@ -58,10 +66,39 @@ pub fn StatusMenu() -> impl IntoView {
     }
   };
 
-  let set_presence = move |presence: PresenceStatus| {
-    state.write(|backend| backend.set_presence(presence));
+  let set_presence_until = move |presence: PresenceStatus, maybe_until: Option<TimestampMs>| {
+    state.write(|backend| backend.set_presence_until(presence, maybe_until));
+    let maybe_dnd_until = maybe_until.filter(|_| presence == PresenceStatus::DoNotDisturb);
+    state
+      .settings
+      .prefs
+      .update(|prefs| prefs.notifications.maybe_dnd_until = maybe_dnd_until);
     state.close_overlay();
     focus_account_button();
+  };
+  let set_presence = move |presence: PresenceStatus| set_presence_until(presence, None);
+  let is_dnd = Memo::new(move |_| me.get().presence == PresenceStatus::DoNotDisturb);
+  let dnd_until_label = move || {
+    let until = state.settings.prefs.get().notifications.maybe_dnd_until?;
+    let now = now_ms();
+    if !is_dnd.get() || until <= now {
+      return None;
+    }
+    let locale = i18n.locale().tag();
+    let time = if local_day(until) == local_day(now) {
+      format_time(until, locale)
+    } else {
+      format_date_time(until, locale)
+    };
+    Some(i18n.t_with("presence-dnd-until", &[("time", &time)]))
+  };
+  let is_custom_open = RwSignal::new(false);
+  let custom_until = RwSignal::new(format_local_datetime_input(now_ms() + MS_PER_HOUR));
+  let set_custom = move || {
+    if let Some(until) = parse_local_datetime(&custom_until.get_untracked()).filter(|until| *until > now_ms())
+    {
+      set_presence_until(PresenceStatus::DoNotDisturb, Some(until));
+    }
   };
 
   view! {
@@ -124,6 +161,60 @@ pub fn StatusMenu() -> impl IntoView {
           }
         })
         .collect_view()}
+      <div class="menu-sub" role="group" aria-label=move || i18n.t("presence-dnd")>
+        {move || dnd_until_label().map(|label| view! { <div class="menu-user-sub">{label}</div> })}
+        <button
+          class="menu-item"
+          role="menuitem"
+          tabindex="-1"
+          on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + MS_PER_HOUR))
+        >
+          <span class="menu-label">{move || i18n.t("presence-dnd-for-hour")}</span>
+        </button>
+        <button
+          class="menu-item"
+          role="menuitem"
+          tabindex="-1"
+          on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(tomorrow_at(now_ms(), MORNING_MINUTE)))
+        >
+          <span class="menu-label">{move || i18n.t("presence-dnd-until-morning")}</span>
+        </button>
+        <button
+          class="menu-item"
+          role="menuitem"
+          tabindex="-1"
+          aria-expanded=move || is_custom_open.get().to_string()
+          on:click=move |_| is_custom_open.update(|is_open| *is_open = !*is_open)
+        >
+          <span class="menu-label">{move || i18n.t("presence-dnd-custom")}</span>
+        </button>
+        <Show when=move || is_custom_open.get() fallback=|| ()>
+          <div class="field-row menu-custom-until">
+            <label class="visually-hidden" for="dnd-custom-until">{move || i18n.t("presence-dnd-custom-label")}</label>
+            <input
+              id="dnd-custom-until"
+              class="input grow"
+              type="datetime-local"
+              prop:value=move || custom_until.get()
+              on:input=move |ev| custom_until.set(event_target_value(&ev))
+              on:keydown=move |ev: web_sys::KeyboardEvent| {
+                if ev.key() == "Enter" {
+                  ev.prevent_default();
+                  set_custom();
+                }
+              }
+            />
+            <button type="button" class="btn" on:click=move |_| set_custom()>
+              {move || i18n.t("presence-dnd-custom-set")}
+            </button>
+          </div>
+        </Show>
+        <Show when=move || is_dnd.get() fallback=|| ()>
+          <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| set_presence(PresenceStatus::Online)>
+            <span class="menu-label">{move || i18n.t("presence-dnd-end")}</span>
+          </button>
+        </Show>
+      </div>
       <div class="menu-sep" role="separator"></div>
       <Show when=move || is_admin.get() fallback=|| ()>
         <button

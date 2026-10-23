@@ -3776,6 +3776,43 @@ select.input {
   margin-bottom: 8px;
 }
 
+.dnd-times {
+  align-items: flex-end;
+}
+
+.dnd-ranges {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+
+.dnd-range {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.dnd-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+}
+
+/* Quick do-not-disturb choices under the presence list. */
+.menu-sub .menu-item {
+  padding-left: 36px;
+  min-height: 30px;
+}
+
+.menu-sub .menu-user-sub {
+  padding: 2px 36px;
+}
+
+.menu-custom-until {
+  padding: 4px 14px 4px 36px;
+  gap: 6px;
+}
+
 .conversation-notify {
   max-height: 260px;
   margin-bottom: 12px;

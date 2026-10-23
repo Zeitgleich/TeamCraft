@@ -28,6 +28,14 @@ pub fn local_utc_offset_minutes(ts: TimestampMs) -> i16 {
   i16::try_from(local_offset_ms(ts) / MS_PER_MINUTE).unwrap_or(0)
 }
 
+/// The next time the local clock shows `minute_of_day` on the following day ("tomorrow 08:00").
+pub fn tomorrow_at(ts: TimestampMs, minute_of_day: u16) -> TimestampMs {
+  let midnight = end_of_local_day(ts);
+  let guess = midnight + i64::from(minute_of_day) * MS_PER_MINUTE;
+  // A daylight saving change between midnight and then moves the wall clock.
+  guess - (local_offset_ms(guess) - local_offset_ms(midnight))
+}
+
 /// Start of the next local day (midnight in the user's time zone).
 pub fn end_of_local_day(ts: TimestampMs) -> TimestampMs {
   (local_day(ts) + 1) * MS_PER_DAY - local_offset_ms(ts)
@@ -337,6 +345,12 @@ pub fn time_zone_names() -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn tomorrow_morning_is_on_the_next_day() {
+    let afternoon = 1_792_828_800_000 + 7 * 3_600_000;
+    assert_eq!(tomorrow_at(afternoon, 8 * 60), 1_792_828_800_000 + 24 * 3_600_000);
+  }
 
   #[test]
   fn relative_units_scale_with_distance() {

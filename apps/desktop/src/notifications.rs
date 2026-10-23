@@ -1,8 +1,16 @@
 //! System notifications. The webview decides *whether* to notify (it holds the decrypted messages and
-//! the user's preferences); this command only displays the result.
+//! the user's preferences); these commands only display and withdraw the result.
+//!
+//! A notification can carry a tag (the conversation ID): a newer one with the same tag replaces it,
+//! and `withdraw_notifications` removes it once the conversation was read. On Linux both go through
+//! the freedesktop notification service directly. The notification plugin can neither replace nor
+//! remove a shown notification on macOS and Windows, so there they stay until the user dismisses them.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 #[derive(Debug, Serialize)]
@@ -11,8 +19,107 @@ pub struct NotifyError {
   message: String,
 }
 
+/// Shown notifications by tag (Linux; IDs of the notification service).
+#[derive(Default)]
+pub struct ShownNotifications {
+  by_tag: Mutex<HashMap<String, u32>>,
+}
+
 #[tauri::command]
-pub fn notify_user(app: AppHandle, title: String, body: Option<String>) -> Result<(), NotifyError> {
+pub async fn notify_user(
+  app: AppHandle,
+  shown: State<'_, ShownNotifications>,
+  probe: State<'_, crate::attention::OsProbe>,
+  title: String,
+  body: Option<String>,
+  tag: Option<String>,
+) -> Result<(), NotifyError> {
+  #[cfg(target_os = "linux")]
+  if notify_freedesktop(&app, &shown, &probe, &title, body.as_deref(), tag.as_deref()).await {
+    return Ok(());
+  }
+  #[cfg(not(target_os = "linux"))]
+  let _ = (shown, probe, tag);
+  notify_plugin(&app, title, body)
+}
+
+/// Removes the notifications with these tags where the platform allows (Linux).
+#[tauri::command]
+pub async fn withdraw_notifications(
+  shown: State<'_, ShownNotifications>,
+  probe: State<'_, crate::attention::OsProbe>,
+  tags: Vec<String>,
+) -> Result<(), ()> {
+  let ids: Vec<u32> = {
+    let mut by_tag = shown
+      .by_tag
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tags.iter().filter_map(|tag| by_tag.remove(tag)).collect()
+  };
+  #[cfg(target_os = "linux")]
+  {
+    let buses = probe.buses();
+    for id in ids {
+      buses.close(id).await;
+    }
+  }
+  #[cfg(not(target_os = "linux"))]
+  let _ = (ids, probe);
+  Ok(())
+}
+
+/// Shows (or replaces) a notification through the freedesktop service; false if there is none.
+#[cfg(target_os = "linux")]
+async fn notify_freedesktop(
+  app: &AppHandle,
+  shown: &ShownNotifications,
+  probe: &crate::attention::OsProbe,
+  title: &str,
+  maybe_body: Option<&str>,
+  maybe_tag: Option<&str>,
+) -> bool {
+  let replaces_id = maybe_tag.map_or(0, |tag| {
+    shown
+      .by_tag
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(tag)
+      .copied()
+      .unwrap_or(0)
+  });
+  let config = app.config();
+  let app_name = config
+    .product_name
+    .clone()
+    .unwrap_or_else(|| "TeamCraft".to_owned());
+  // The icon the plugin uses too: the executable's name, which the package installs as icon name.
+  let app_icon = std::env::current_exe()
+    .ok()
+    .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+    .unwrap_or_default();
+  let notification = crate::freedesktop::DesktopNotification {
+    app_name: &app_name,
+    app_icon: &app_icon,
+    desktop_entry: &config.identifier,
+    title,
+    body: maybe_body.unwrap_or_default(),
+    replaces_id,
+  };
+  let Some(id) = probe.buses().notify(&notification).await else {
+    return false;
+  };
+  if let Some(tag) = maybe_tag {
+    shown
+      .by_tag
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(tag.to_owned(), id);
+  }
+  true
+}
+
+fn notify_plugin(app: &AppHandle, title: String, body: Option<String>) -> Result<(), NotifyError> {
   let notification = app.notification();
   if notification.permission_state().map_err(to_error)? != PermissionState::Granted
     && notification.request_permission().map_err(to_error)? != PermissionState::Granted

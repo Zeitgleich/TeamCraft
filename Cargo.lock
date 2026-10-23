@@ -10052,6 +10052,7 @@ dependencies = [
  "futures-util",
  "keyring",
  "oauth2",
+ "objc2-core-graphics",
  "pollster",
  "reqwest",
  "secrecy",
@@ -10075,6 +10076,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "user-idle-time",
+ "zbus",
 ]
 
 [[package]]
@@ -11491,6 +11494,16 @@ dependencies = [
  "serde",
  "unic-ucd-ident",
  "url",
+]
+
+[[package]]
+name = "user-idle-time"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "657ffe01f35a35308c81110e56aedc4bd83788e5c4ac54679c85b0e0b47e49ca"
+dependencies = [
+ "anyhow",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

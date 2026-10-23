@@ -1,10 +1,13 @@
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use leptos::ev;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::attention::{AttentionReporter, AttentionSignals, is_attentive};
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallEvent;
@@ -48,8 +51,9 @@ use crate::components::workspace_dialogs::{
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
 use crate::mock::MockBackend;
+use crate::model::TimestampMs;
 use crate::model::{ConversationId, SpaceId};
-use crate::notifier::{NotificationTitle, Notifier, notifications_for};
+use crate::notifier::{NotificationTitle, Notifier, ReadWatcher, all_conversations, notifications_for};
 use crate::notify_sync::NotificationSync;
 use crate::reactive::use_interval;
 use crate::settings::{BackendMode, Settings, Theme};
@@ -126,7 +130,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if tauri::is_available() {
     connect_calls(state);
   }
-  watch_idle(state);
+  watch_activity(state);
   // Call defaults follow the settings (and set the initial state of the call session).
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
@@ -360,10 +364,21 @@ fn initial_location(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> 
 /// Desktop only: new mentions and DMs become system notifications, decided by the user's preferences.
 fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
   let notifier = Notifier::default();
+  let read_watcher = ReadWatcher::default();
   let settings = state.settings;
   Effect::new(move |_| {
     // Reading through the state subscribes to every backend change.
     let found = state.read(|backend| notifier.collect(backend));
+    let read = state.read(|backend| {
+      let unread: Vec<(ConversationId, u32)> = all_conversations(backend)
+        .iter()
+        .map(|conversation| (conversation.id, conversation.unread_count))
+        .collect();
+      read_watcher.newly_read(&unread)
+    });
+    if !read.is_empty() {
+      leptos::task::spawn_local(async move { tauri::withdraw_notifications(&read).await });
+    }
     if found.is_empty() {
       return;
     }
@@ -371,9 +386,13 @@ fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
     let current = state.current_conversation_id();
     let has_focus = window_has_focus();
     let notifications = state.read(|backend| {
-      notifications_for(found, &prefs, backend, |conversation| {
-        has_focus && current == Some(conversation)
-      })
+      notifications_for(
+        found,
+        &prefs,
+        backend,
+        |conversation| has_focus && current == Some(conversation),
+        prefs.maybe_dnd_until,
+      )
     });
     for notification in notifications {
       let is_generic = notification.title == NotificationTitle::Generic;
@@ -389,7 +408,16 @@ fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
       let body = notification
         .body
         .or_else(|| (!is_generic).then(|| i18n.t("notify-new-message")));
-      leptos::task::spawn_local(async move { tauri::notify(&title, body.as_deref()).await });
+      let conversation = notification.conversation;
+      leptos::task::spawn_local(async move {
+        tauri::notify_conversation(conversation, &title, body.as_deref()).await;
+      });
+    }
+  });
+  // Opening a conversation withdraws its notifications, also those of thread replies.
+  Effect::new(move |_| {
+    if let Some(conversation) = state.current_conversation_id() {
+      leptos::task::spawn_local(async move { tauri::withdraw_notifications(&[conversation]).await });
     }
   });
 }
@@ -490,43 +518,144 @@ fn connect_calls(state: AppState) {
   });
 }
 
-/// How often the idle check runs.
-const IDLE_CHECK_MS: u64 = 10_000;
+/// How often idle time, OS state and attention are checked (events re-check at once).
+const ACTIVITY_CHECK_MS: u64 = 5_000;
 /// How often `/remind` reminders are checked.
 const REMINDER_CHECK_MS: u64 = 15_000;
 const MS_PER_MINUTE: f64 = 60_000.0;
 
-/// No input for the configured time marks this device idle (the server then shows the user as
-/// away); the next input marks it active again. The setting is Privacy > "Away after".
-fn watch_idle(state: AppState) {
-  let last_input = std::rc::Rc::new(std::cell::Cell::new(js_sys::Date::now()));
-  let is_idle = std::rc::Rc::new(std::cell::Cell::new(false));
-  let mark_active: std::rc::Rc<dyn Fn()> = {
-    let (last_input, is_idle) = (last_input.clone(), is_idle.clone());
-    std::rc::Rc::new(move || {
-      last_input.set(js_sys::Date::now());
-      if is_idle.replace(false) {
-        state.read(|backend| backend.set_activity(false));
+/// What the activity watcher keeps between events.
+struct ActivityWatch {
+  state: AppState,
+  last_input_at: Cell<TimestampMs>,
+  is_idle: Cell<bool>,
+  maybe_os: Cell<Option<tauri::OsAttention>>,
+  reporter: RefCell<AttentionReporter>,
+}
+
+/// Two reports from the same input: no input for "Away after" marks this device idle (the server
+/// shows the user as away), and attention (focused, visible, recent input, OS not idle, screen not
+/// locked) tells the server to hold phone pushes back (notifications.md, "Attention").
+fn watch_activity(state: AppState) {
+  let watch = Rc::new(ActivityWatch {
+    state,
+    last_input_at: Cell::new(now_ms()),
+    is_idle: Cell::new(false),
+    maybe_os: Cell::new(None),
+    reporter: RefCell::new(AttentionReporter::default()),
+  });
+  for event in ["pointermove", "pointerdown", "keydown", "touchstart", "wheel"] {
+    let watch = watch.clone();
+    on_window(event, move || watch.on_input());
+  }
+  for event in ["focus", "blur", "pageshow"] {
+    let watch = watch.clone();
+    on_window(event, move || watch.check());
+  }
+  {
+    let watch = watch.clone();
+    on_document("visibilitychange", move || watch.check());
+  }
+  // The window goes away: the server should not wait for the lease to run out.
+  {
+    let watch = watch.clone();
+    on_window("pagehide", move || watch.report(false));
+  }
+  watch.check();
+  use_interval(ACTIVITY_CHECK_MS, move || {
+    watch.check_idle();
+    watch.check();
+    let watch = watch.clone();
+    leptos::task::spawn_local(async move {
+      if let Some(os) = tauri::os_attention().await {
+        watch.maybe_os.set(Some(os));
+        watch.check();
       }
-    })
-  };
-  let (on_move, on_press, on_key, on_touch) = (
-    mark_active.clone(),
-    mark_active.clone(),
-    mark_active.clone(),
-    mark_active,
-  );
-  let _ = window_event_listener(ev::pointermove, move |_| on_move());
-  let _ = window_event_listener(ev::pointerdown, move |_| on_press());
-  let _ = window_event_listener(ev::keydown, move |_| on_key());
-  let _ = window_event_listener(ev::touchstart, move |_| on_touch());
-  use_interval(IDLE_CHECK_MS, move || {
-    let Some(minutes) = state.settings.prefs.get_untracked().privacy.away_after_minutes else {
+    });
+  });
+}
+
+impl ActivityWatch {
+  fn on_input(&self) {
+    self.last_input_at.set(now_ms());
+    if self.is_idle.replace(false) {
+      self.state.read(|backend| backend.set_activity(false));
+    }
+    self.check();
+  }
+
+  fn check_idle(&self) {
+    let Some(minutes) = self
+      .state
+      .settings
+      .prefs
+      .get_untracked()
+      .privacy
+      .away_after_minutes
+    else {
       return;
     };
-    let idle_for = js_sys::Date::now() - last_input.get();
-    if idle_for >= f64::from(minutes) * MS_PER_MINUTE && !is_idle.replace(true) {
-      state.read(|backend| backend.set_activity(true));
+    let idle_for = (now_ms() - self.last_input_at.get()) as f64;
+    if idle_for >= f64::from(minutes) * MS_PER_MINUTE && !self.is_idle.replace(true) {
+      self.state.read(|backend| backend.set_activity(true));
     }
-  });
+  }
+
+  fn check(&self) {
+    let maybe_os = self.maybe_os.get();
+    let signals = AttentionSignals {
+      is_focused: window_has_focus(),
+      is_visible: is_document_visible(),
+      last_input_at: self.last_input_at.get(),
+      maybe_os_idle: maybe_os
+        .and_then(|os| os.maybe_idle_ms)
+        .map(Duration::from_millis),
+      is_screen_locked: maybe_os.is_some_and(|os| os.is_locked),
+    };
+    let input_secs = self
+      .state
+      .settings
+      .prefs
+      .get_untracked()
+      .notifications
+      .attention_input_secs;
+    let window = Duration::from_secs(u64::from(input_secs));
+    self.report(is_attentive(&signals, now_ms(), window));
+  }
+
+  fn report(&self, is_attentive: bool) {
+    let maybe_due = self.reporter.borrow_mut().next(is_attentive, now_ms());
+    if let Some(is_attentive) = maybe_due {
+      self.state.read(|backend| backend.set_attention(is_attentive));
+    }
+  }
+}
+
+fn on_window(event: &str, callback: impl Fn() + 'static) {
+  let Some(window) = web_sys::window() else { return };
+  listen_on(&window, event, callback);
+}
+
+fn on_document(event: &str, callback: impl Fn() + 'static) {
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  listen_on(&document, event, callback);
+}
+
+fn listen_on(target: &web_sys::EventTarget, event: &str, callback: impl Fn() + 'static) {
+  let listener = Closure::<dyn Fn()>::new(callback);
+  if target
+    .add_event_listener_with_callback(event, listener.as_ref().unchecked_ref())
+    .is_ok()
+  {
+    // Lives as long as the page.
+    listener.forget();
+  }
+}
+
+fn is_document_visible() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .is_some_and(|document| !document.hidden())
 }

@@ -2,7 +2,7 @@
 
 use teamcraft_client_api::model::PresenceStatus;
 use teamcraft_proto::{
-  ManualPresence, SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest,
+  ManualPresence, SetPresenceRequest, SetReadPositionRequest, UnixMillis, UpdateConversationMemberRequest,
 };
 
 use super::Client;
@@ -58,7 +58,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .await?;
         self.refresh_conversation(conversation).await
       },
-      CoreCommand::SetPresence { presence } => {
+      CoreCommand::SetPresence {
+        presence,
+        maybe_until,
+      } => {
         let manual = match presence {
           PresenceStatus::Online | PresenceStatus::Away => ManualPresence::Auto,
           PresenceStatus::DoNotDisturb => ManualPresence::DoNotDisturb,
@@ -68,8 +71,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self
             .api
             .set_presence(&SetPresenceRequest {
+              // Only do-not-disturb ends by itself.
+              maybe_until: maybe_until
+                .filter(|_| manual == ManualPresence::DoNotDisturb)
+                .map(UnixMillis),
               manual,
-              maybe_until: None,
             })
             .await?,
         )
