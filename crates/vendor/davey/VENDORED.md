@@ -40,6 +40,11 @@ The first commit adding this directory is the unmodified crate (its `Cargo.toml.
 4. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` and `upstream-web-time.patch` (changes 1 and 2 without the
    `[workspace]` table, relative to the upstream repository), `.gitignore` (standalone `Cargo.lock`
    and `target/`).
+5. Known-answer tests (issue #124, captured before the dependency upgrade in change 6):
+   `src/cryptor/aead_cipher.rs` checks the truncated-tag AES-128-GCM against fixed values (they
+   match a standard AES-128-GCM with the tag cut to 8 bytes) and rejects a tampered tag;
+   `src/cryptor/hash_ratchet.rs` also checks ratchet generation 1, which runs the 32-byte secret
+   derivation of `mlspp_crypto.rs`.
 
 No other source changes. `cargo test` and `cargo clippy` pass on the copy.
 
