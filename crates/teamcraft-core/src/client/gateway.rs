@@ -222,6 +222,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       GatewayEvent::DeviceAdd { user_id, device_id } => self.queue_device_addition(user_id, device_id),
       GatewayEvent::ThreadUpdate { .. } => self.refresh_read_state().await,
+      GatewayEvent::NotificationSettingsUpdate => self.refresh_notification_settings().await,
       GatewayEvent::ReadReceipt {
         conversation_id,
         user_id,

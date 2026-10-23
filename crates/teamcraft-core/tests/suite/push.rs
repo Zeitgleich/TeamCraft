@@ -170,6 +170,10 @@ fn wake_up_for(
     maybe_message_id: Some(message),
     maybe_sender_id: Some(alice.client.user_id()),
     is_urgent: false,
+    maybe_thread_id: None,
+    maybe_call_id: None,
+    maybe_badge: None,
+    maybe_sent_at: None,
   };
   seal_wakeup(
     &key,

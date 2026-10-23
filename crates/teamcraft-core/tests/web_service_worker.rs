@@ -74,6 +74,10 @@ async fn service_worker_previews_a_push_from_the_encrypted_store() {
     maybe_message_id: Some(message_id),
     maybe_sender_id: Some(alice.user_id()),
     is_urgent: false,
+    maybe_thread_id: None,
+    maybe_call_id: None,
+    maybe_badge: None,
+    maybe_sent_at: None,
   };
   let sealed = seal_wakeup(
     &SymmetricKey::from_slice(push_key.as_slice()).unwrap(),

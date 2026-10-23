@@ -95,4 +95,61 @@ impl Database {
     }
     Ok(recipients)
   }
+
+  /// The user's devices with a push registration (not revoked), by device ID.
+  pub async fn list_push_devices(&self, user: UserId) -> Result<Vec<PushDeviceRow>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT id, push_provider AS "push_provider!", push_token AS "push_token!", push_key AS "push_key!"
+         FROM devices
+         WHERE user_id = $1 AND revoked_at IS NULL AND push_provider IS NOT NULL
+           AND push_token IS NOT NULL AND push_key IS NOT NULL
+         ORDER BY id"#,
+      to_db(user),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(PushDeviceRow {
+          device: from_db(row.id)?,
+          provider: PushProvider::from(row.push_provider),
+          token: row.push_token,
+          push_key: row.push_key,
+        })
+      })
+      .collect()
+  }
+
+  /// What the app icon badge of the user shows (notifications.md, "Badge"): conversations with an
+  /// unread mention or an unread message in a DM or group DM, plus followed threads with an unread
+  /// mention. Each conversation and thread counts once, however much is unread in it.
+  pub async fn push_badge_count(&self, user: UserId) -> Result<u32, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT
+           (SELECT COUNT(*) FROM memberships ms
+            JOIN conversations c ON c.id = ms.conversation_id
+            WHERE ms.user_id = $1
+              AND EXISTS (
+                SELECT 1 FROM messages m
+                WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL
+                  AND m.sender_user_id <> ms.user_id
+                  AND m.id > COALESCE(ms.last_read_message_id, 0)
+                  AND m.id >= tc_snowflake_floor(ms.joined_at)
+                  AND (c.kind IN ('dm', 'group') OR ms.user_id = ANY(m.mentioned_user_ids))))
+         + (SELECT COUNT(*) FROM threads_followed tf
+            WHERE tf.user_id = $1 AND tf.state = 'following'
+              AND EXISTS (
+                SELECT 1 FROM messages m
+                WHERE m.conversation_id = tf.conversation_id AND m.thread_id = tf.thread_id
+                  AND m.sender_user_id <> tf.user_id
+                  AND m.id > COALESCE(tf.last_read_message_id, 0)
+                  AND tf.user_id = ANY(m.mentioned_user_ids)))
+           AS "badge!""#,
+      to_db(user),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(u32::try_from(row.badge).unwrap_or(u32::MAX))
+  }
 }

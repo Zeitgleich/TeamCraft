@@ -9,12 +9,13 @@ use crate::handlers::{
   acknowledge_message_handler, add_conversation_member_handler, add_space_member_handler,
   add_user_group_member_handler, admin_assign_channel_owner_handler, admin_clear_announcement_handler,
   admin_create_bot_handler, admin_deactivate_user_handler, admin_get_channel_moderation_handler,
-  admin_get_permission_scheme_handler, admin_get_space_permission_scheme_handler, admin_instance_handler,
-  admin_list_audit_handler, admin_list_bots_handler, admin_list_conversation_members_handler,
-  admin_list_conversations_handler, admin_list_space_members_handler, admin_list_spaces_handler,
-  admin_list_user_devices_handler, admin_list_users_handler, admin_reactivate_user_handler,
-  admin_reissue_local_activation_handler, admin_revoke_bot_handler, admin_revoke_device_handler,
-  admin_rotate_bot_token_handler, admin_set_announcement_handler, admin_set_channel_moderation_handler,
+  admin_get_permission_scheme_handler, admin_get_push_health_handler,
+  admin_get_space_permission_scheme_handler, admin_instance_handler, admin_list_audit_handler,
+  admin_list_bots_handler, admin_list_conversation_members_handler, admin_list_conversations_handler,
+  admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
+  admin_list_users_handler, admin_reactivate_user_handler, admin_reissue_local_activation_handler,
+  admin_revoke_bot_handler, admin_revoke_device_handler, admin_rotate_bot_token_handler,
+  admin_set_announcement_handler, admin_set_channel_moderation_handler,
   admin_update_permission_scheme_handler, admin_update_space_permission_scheme_handler, admit_guest_handler,
   append_policy_handler, append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
   cancel_meeting_handler, cancel_recovery_request_handler, change_local_password_handler,
@@ -57,12 +58,12 @@ use crate::handlers::{
   remove_conversation_member_handler, remove_space_member_handler, remove_user_group_member_handler,
   rendezvous_handler, report_participant_joined_handler, report_participant_left_handler,
   revoke_device_handler, revoke_share_link_handler, search_users_handler, send_message_handler,
-  set_conversation_retention_handler, set_custom_status_handler, set_device_certificate_handler,
-  set_meeting_rsvp_handler, set_presence_handler, set_read_position_handler, set_space_retention_handler,
-  set_thread_read_handler, unfollow_thread_handler, unpin_message_handler, unregister_push_handler,
-  update_category_handler, update_conversation_handler, update_conversation_member_handler,
-  update_meeting_handler, update_space_handler, update_space_member_handler, update_user_group_handler,
-  upload_key_packages_handler,
+  send_test_push_handler, set_conversation_retention_handler, set_custom_status_handler,
+  set_device_certificate_handler, set_meeting_rsvp_handler, set_presence_handler, set_read_position_handler,
+  set_space_retention_handler, set_thread_read_handler, unfollow_thread_handler, unpin_message_handler,
+  unregister_push_handler, update_category_handler, update_conversation_handler,
+  update_conversation_member_handler, update_meeting_handler, update_space_handler,
+  update_space_member_handler, update_user_group_handler, upload_key_packages_handler,
 };
 use crate::handlers::{
   complete_org_background_upload_handler, create_org_background_upload_handler,
@@ -333,6 +334,7 @@ pub fn router(state: AppState) -> Router {
       "/devices/{device_id}/push",
       put(register_push_handler).delete(unregister_push_handler),
     )
+    .route("/devices/{device_id}/push/test", post(send_test_push_handler))
     .route("/attachments", post(create_attachment_handler))
     .route(
       "/attachments/{attachment_id}/complete",
@@ -365,6 +367,10 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/admin/users/{user_id}/devices",
       get(admin_list_user_devices_handler),
+    )
+    .route(
+      "/admin/users/{user_id}/push-health",
+      get(admin_get_push_health_handler),
     )
     .route(
       "/admin/users/{user_id}/deactivate",

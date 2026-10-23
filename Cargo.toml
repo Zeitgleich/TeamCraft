@@ -72,6 +72,8 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 time = "0.3"
 # IANA time zone names, validated on the server (profile time zone); the database is compiled in.
 chrono-tz = { version = "0.10", default-features = false }
+# The UTC offset of a time zone at an instant (chrono-tz answers through chrono's `TimeZone`).
+chrono = { version = "0.4", default-features = false }
 
 # Encoding
 base64 = "0.22"

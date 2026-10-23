@@ -274,7 +274,7 @@ fn known_name(provider: &PushProvider) -> Option<&'static str> {
   }
 }
 
-fn now_millis() -> UnixMillis {
+pub(crate) fn now_millis() -> UnixMillis {
   let millis = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .map_or(0, |elapsed| elapsed.as_millis());
@@ -317,6 +317,10 @@ mod tests {
       maybe_message_id: None,
       maybe_sender_id: None,
       is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: None,
     }
   }
 

@@ -1,6 +1,7 @@
 //! APNs over HTTP/2 with provider token authentication (a `.p8` key). Message pushes are alerts with
 //! `mutable-content`, so the iOS notification service extension can open the sealed wake-up; call
-//! pushes use the VoIP topic (e2ee.md §7). The alert text is generic: Apple never sees content.
+//! pushes use the VoIP topic (e2ee.md §7); withdrawals are silent background pushes the app handles
+//! itself. The alert text is generic: Apple never sees content.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -89,6 +90,29 @@ struct VoipPayload<'a> {
   sealed: &'a str,
 }
 
+#[derive(Serialize)]
+struct BackgroundPayload<'a> {
+  aps: BackgroundAps,
+  #[serde(rename = "w")]
+  sealed: &'a str,
+}
+
+#[derive(Serialize)]
+struct BackgroundAps {
+  #[serde(rename = "content-available")]
+  content_available: u8,
+}
+
+/// The parts of one APNs request that depend on the wake-up.
+#[derive(Debug, PartialEq, Eq)]
+struct ApnsRequest {
+  push_type: &'static str,
+  topic: String,
+  priority: &'static str,
+  expiration: String,
+  body: Vec<u8>,
+}
+
 #[derive(Deserialize)]
 struct ApnsError {
   reason: Option<String>,
@@ -143,6 +167,59 @@ impl ApnsSender {
     Ok(jwt)
   }
 
+  /// Calls go through PushKit (VoIP topic, now or never); withdrawals are background pushes, which
+  /// Apple requires to have priority 5; everything else is a mutable alert for the extension.
+  fn request(&self, message: &PushMessage, now: u64) -> Result<ApnsRequest, PushError> {
+    let sealed = URL_SAFE_NO_PAD.encode(&message.sealed);
+    let until_ttl = now.saturating_add(message.ttl.as_secs()).to_string();
+    let (push_type, topic, priority, expiration, body) = match message.kind {
+      PushKind::Call => (
+        "voip",
+        format!("{}.voip", self.bundle_id),
+        "10",
+        VOIP_EXPIRATION.to_owned(),
+        serde_json::to_vec(&VoipPayload { sealed: &sealed }),
+      ),
+      PushKind::Dismiss => (
+        "background",
+        self.bundle_id.clone(),
+        "5",
+        until_ttl,
+        serde_json::to_vec(&BackgroundPayload {
+          aps: BackgroundAps { content_available: 1 },
+          sealed: &sealed,
+        }),
+      ),
+      PushKind::Message | PushKind::Mention | PushKind::Test | PushKind::Unknown(_) => (
+        "alert",
+        self.bundle_id.clone(),
+        match message.urgency {
+          Urgency::High => "10",
+          Urgency::Normal => "5",
+        },
+        until_ttl,
+        serde_json::to_vec(&AlertPayload {
+          aps: Aps {
+            alert: AlertBody {
+              body: &self.alert_text,
+            },
+            sound: "default",
+            mutable_content: 1,
+          },
+          sealed: &sealed,
+        }),
+      ),
+    };
+    let body = body.map_err(|_| PushError::Invalid("encoding the APNs payload failed".into()))?;
+    Ok(ApnsRequest {
+      push_type,
+      topic,
+      priority,
+      expiration,
+      body,
+    })
+  }
+
   fn forget_provider_token(&self) {
     *self.cached_token.lock().unwrap_or_else(|p| p.into_inner()) = None;
   }
@@ -167,49 +244,18 @@ impl PushSender for ApnsSender {
         return Err(PushError::Invalid("not an APNs device token".into()));
       }
       let now = jsonwebtoken::get_current_timestamp();
-      let is_call = message.kind == PushKind::Call;
-      let sealed = URL_SAFE_NO_PAD.encode(&message.sealed);
-      let (push_type, topic, priority, expiration, body) = if is_call {
-        (
-          "voip",
-          format!("{}.voip", self.bundle_id),
-          "10",
-          VOIP_EXPIRATION.to_owned(),
-          serde_json::to_vec(&VoipPayload { sealed: &sealed }),
-        )
-      } else {
-        (
-          "alert",
-          self.bundle_id.clone(),
-          match message.urgency {
-            Urgency::High => "10",
-            Urgency::Normal => "5",
-          },
-          now.saturating_add(message.ttl.as_secs()).to_string(),
-          serde_json::to_vec(&AlertPayload {
-            aps: Aps {
-              alert: AlertBody {
-                body: &self.alert_text,
-              },
-              sound: "default",
-              mutable_content: 1,
-            },
-            sealed: &sealed,
-          }),
-        )
-      };
-      let body = body.map_err(|_| PushError::Invalid("encoding the APNs payload failed".into()))?;
+      let request = self.request(message, now)?;
 
       let response = self
         .http
         .post(format!("{}/3/device/{}", self.base_url, target.token))
         .header("authorization", authorization_header(&self.provider_token(now)?)?)
-        .header("apns-topic", topic)
-        .header("apns-push-type", push_type)
-        .header("apns-priority", priority)
-        .header("apns-expiration", expiration)
+        .header("apns-topic", request.topic)
+        .header("apns-push-type", request.push_type)
+        .header("apns-priority", request.priority)
+        .header("apns-expiration", request.expiration)
         .header("content-type", "application/json")
-        .body(body)
+        .body(request.body)
         .send()
         .await
         .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
@@ -261,6 +307,86 @@ mod tests {
     assert!(is_device_token(&"ab12".repeat(16)));
     for bad in ["", "short", "../../x", &"zz".repeat(20), &"a".repeat(201)] {
       assert!(!is_device_token(bad), "{bad}");
+    }
+  }
+
+  mod requests {
+    use super::*;
+
+    // A throwaway P-256 key, only for building a sender in tests.
+    const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg6G/tz4y1fJr77K7z
+8ihxQPWlvTEJdzjz7EQQOhyZDCihRANCAATZcK4MntsHsGrLiiYY/R5u+PkPZpuN
+dgo8LHX0AxF1j8QPNmXOWNMLAbz+fRtRJGmQiDQP92HZZ1d7Hu/IeczB
+-----END PRIVATE KEY-----
+";
+
+    #[test]
+    fn calls_go_through_pushkit_now_or_never() {
+      let request = sender().request(&message(PushKind::Call), 1000).unwrap();
+      assert_eq!(
+        (
+          request.push_type,
+          request.topic.as_str(),
+          request.priority,
+          request.expiration.as_str()
+        ),
+        ("voip", "com.example.app.voip", "10", "0")
+      );
+      assert!(!String::from_utf8(request.body).unwrap().contains("aps"));
+    }
+
+    #[test]
+    fn withdrawals_are_silent_background_pushes() {
+      let request = sender().request(&message(PushKind::Dismiss), 1000).unwrap();
+      assert_eq!(
+        (
+          request.push_type,
+          request.topic.as_str(),
+          request.priority,
+          request.expiration.as_str()
+        ),
+        ("background", "com.example.app", "5", "1060")
+      );
+      let body = String::from_utf8(request.body).unwrap();
+      assert!(body.contains(r#""content-available":1"#), "{body}");
+      assert!(
+        !body.contains("alert") && !body.contains("mutable-content"),
+        "{body}"
+      );
+    }
+
+    #[test]
+    fn messages_and_tests_are_mutable_alerts() {
+      for kind in [PushKind::Message, PushKind::Mention, PushKind::Test] {
+        let request = sender().request(&message(kind), 1000).unwrap();
+        assert_eq!((request.push_type, request.priority), ("alert", "10"));
+        let body = String::from_utf8(request.body).unwrap();
+        assert!(body.contains(r#""mutable-content":1"#), "{body}");
+        assert!(body.contains("New message"), "{body}");
+      }
+    }
+
+    fn sender() -> ApnsSender {
+      ApnsSender::new(ApnsSettings {
+        key_pem: TEST_KEY.to_owned().into(),
+        key_id: "KEY".into(),
+        team_id: "TEAM".into(),
+        bundle_id: "com.example.app".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        alert_text: "New message".into(),
+        timeout: Duration::from_secs(1),
+      })
+      .unwrap()
+    }
+
+    fn message(kind: PushKind) -> PushMessage {
+      PushMessage {
+        sealed: vec![1, 2, 3],
+        kind,
+        urgency: Urgency::High,
+        ttl: Duration::from_secs(60),
+      }
     }
   }
 

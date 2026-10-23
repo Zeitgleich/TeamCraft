@@ -591,6 +591,12 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
             from_user_id: snapshot.started_by,
           },
         );
+        tokio::spawn(crate::push::routing::notify_ring(
+          state.clone(),
+          conversation_id,
+          snapshot.call_id,
+          snapshot.started_by,
+        ));
         spawn_ring_timeout(
           state.clone(),
           conversation_id,
@@ -599,7 +605,13 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
         );
       }
     },
-    JoinChange::Updated(snapshot) => publish_update(state, members, &snapshot),
+    JoinChange::Updated(snapshot) => {
+      if !snapshot.is_ringing {
+        // Somebody answered: the other phones stop ringing.
+        tokio::spawn(crate::push::routing::end_ring(state.clone(), snapshot.call_id));
+      }
+      publish_update(state, members, &snapshot);
+    },
   }
   refresh_caller_presence(state, report.user_id).await;
   Ok(())
@@ -620,6 +632,7 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
     return Ok(());
   }
   if let LeaveChange::Ended { call_id, .. } = &change {
+    tokio::spawn(crate::push::routing::end_ring(state.clone(), *call_id));
     finish_history(state, *call_id).await;
   }
   let members = state.database.conversation_member_ids(conversation_id).await?;
@@ -776,6 +789,7 @@ fn spawn_ring_timeout(state: AppState, conversation_id: ConversationId, call_id:
     let Some(snapshot) = calls.stop_ringing(conversation_id, call_id) else {
       return;
     };
+    crate::push::routing::end_ring(state.clone(), call_id).await;
     report_missed(&state, call_id).await;
     match state.database.conversation_member_ids(conversation_id).await {
       Ok(members) => publish_update(&state, members, &snapshot),

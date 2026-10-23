@@ -1,17 +1,25 @@
-//! Who gets a push for a new message (e2ee.md §7): the server decides from metadata it has anyway.
+//! Who gets a push, and when (e2ee.md §7, notifications.md "Push routing" and "Mobile push
+//! delivery"): the server decides from metadata it has anyway. Messages, rings, withdrawals after
+//! reading elsewhere and test pushes all start here.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use teamcraft_db::{DueReminder, PushDeviceRow, PushRecipientRow};
 use teamcraft_proto::{
-  ConversationId, ConversationKind, DndSchedule, MessageId, NotificationLevel, PushKind, PushMode,
-  PushProvider, PushWakeUp, ThreadId, UserId,
+  CallId, ConversationId, ConversationKind, DeviceId, DndSchedule, Id, MessageId, NotificationLevel,
+  PushKind, PushMode, PushProvider, PushWakeUp, Snowflake, TestPushOutcome, TestPushResponse, ThreadId,
+  UserId,
 };
 use time::OffsetDateTime;
-use tracing::{debug, info, warn};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::time::Instant;
+use tracing::{debug, warn};
 
-use super::sender::{PushError, PushTarget, Urgency};
-use crate::gateway::{ActiveDevices, DeviceAggregate};
+use super::delivery::{self, can_dismiss};
+use super::sender::{PushError, now_millis};
+use super::tracker::{DeliveryEvent, Ring};
+use crate::gateway::ActiveDevices;
 use crate::services::notifications;
 use crate::state::AppState;
 
@@ -35,12 +43,39 @@ pub struct NewMessageEvent {
 pub enum Skip {
   Muted,
   DoNotDisturb,
-  /// A device of the user is active: they see the message there.
+  /// A device of the user is in use: they see the message there.
   Active,
   /// The channel only notifies on mentions and this one doesn't mention the user.
   NotMentioned,
   /// Integration channels push only for mentions.
   IntegrationChannel,
+}
+
+/// What the user is doing on their connected devices right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attention {
+  /// Nothing in use (devices may be connected but idle).
+  Away,
+  /// A phone or tablet has the app in the foreground.
+  MobileActive,
+  /// The user is looking at a desktop or web session.
+  DesktopAttentive,
+}
+
+/// When the push goes out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timing {
+  Now,
+  /// After the grace delay, and only if the message is still unread then (the user may read it on
+  /// the desktop they are looking at).
+  AfterGrace,
+}
+
+/// The routing's answer for one recipient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+  pub kind: PushKind,
+  pub timing: Timing,
 }
 
 /// What the routing knows about one recipient.
@@ -53,43 +88,59 @@ pub struct RecipientState {
   pub is_direct: bool,
   /// Integration channel: only mentions notify.
   pub is_integration: bool,
+  /// DND is on and no override lets this message through.
   pub is_dnd: bool,
   /// The user follows the thread the message replies in.
   pub is_followed_thread: bool,
-  /// Push even while a device of the user is active.
+  /// Push even while a device of the user is in use.
   pub always_pushes: bool,
-  pub devices: DeviceAggregate,
+  pub attention: Attention,
+  /// `notifications.mobile_push_delay_secs` is not 0.
+  pub has_grace: bool,
 }
 
-/// The routing rules:
+/// The routing rules (notifications.md, "Push routing"):
 ///
-/// 1. Muted (level `none`, or muted until a later time) never notifies. Urgent messages don't
-///    override a mute.
-/// 2. Do-not-disturb (manual, or the schedule unless the sender is allowed) suppresses all pushes
-///    (mentions are collected and shown afterwards).
-/// 3. No push while a device of the user is active: they see the message live (unless the user
-///    chose to be pushed always).
-/// 4. Mentions, direct messages and replies in followed threads push; otherwise only `all` channels do.
-pub fn decide(state: RecipientState) -> Result<PushKind, Skip> {
+/// 1. Muted (level `none`, or muted until a later time) never notifies.
+/// 2. Do-not-disturb suppresses the push unless an override applies (decided by the caller).
+/// 3. Mentions, direct messages and replies in followed threads push; otherwise only `all` channels
+///    do, and integration channels only for mentions.
+/// 4. Unless the user chose to be pushed always: no push while a phone is in use; while a desktop
+///    is attentive, the push waits for the grace delay (or is dropped without one).
+pub fn decide(state: RecipientState) -> Result<Decision, Skip> {
   if state.level_is_none {
     return Err(Skip::Muted);
   }
   if state.is_dnd {
     return Err(Skip::DoNotDisturb);
   }
-  if state.devices == DeviceAggregate::Active && !state.always_pushes {
-    return Err(Skip::Active);
-  }
-  if state.is_mentioned || state.is_direct {
-    return Ok(PushKind::Mention);
-  }
-  if state.is_integration {
+  let kind = if state.is_mentioned || state.is_direct {
+    PushKind::Mention
+  } else if state.is_integration {
     return Err(Skip::IntegrationChannel);
-  }
-  if state.level_is_all || state.is_followed_thread {
-    Ok(PushKind::Message)
+  } else if state.level_is_all || state.is_followed_thread {
+    PushKind::Message
   } else {
-    Err(Skip::NotMentioned)
+    return Err(Skip::NotMentioned);
+  };
+  let timing = match (state.always_pushes, state.attention, state.has_grace) {
+    (true, _, _) | (false, Attention::Away, _) => Timing::Now,
+    (false, Attention::MobileActive, _) | (false, Attention::DesktopAttentive, false) => {
+      return Err(Skip::Active);
+    },
+    (false, Attention::DesktopAttentive, true) => Timing::AfterGrace,
+  };
+  Ok(Decision { kind, timing })
+}
+
+/// Rings ring every device, in use or not; only a mute or DND without an override stops them.
+pub fn decide_ring(is_muted: bool, is_dnd: bool) -> Result<(), Skip> {
+  if is_muted {
+    Err(Skip::Muted)
+  } else if is_dnd {
+    Err(Skip::DoNotDisturb)
+  } else {
+    Ok(())
   }
 }
 
@@ -110,13 +161,14 @@ async fn route(
     .list_push_recipients(event.conversation, event.sender, event.maybe_thread)
     .await?;
   for recipient in recipients {
-    push_to_recipient(state, event, &recipient, now);
+    push_to_recipient(state, event, recipient, now).await;
   }
   Ok(())
 }
 
 /// Pushes an urgent direct message again to one recipient who has not acknowledged it (the
-/// scheduler of `services::urgent`). The routing rules apply as for the first push.
+/// scheduler of `services::urgent`). The routing rules apply as for the first push; the apps replace
+/// the earlier notification and alert again.
 pub async fn notify_reminder(
   state: &AppState,
   reminder: DueReminder,
@@ -148,87 +200,331 @@ pub async fn notify_reminder(
     )
     .await?;
   for recipient in recipients
-    .iter()
+    .into_iter()
     .filter(|recipient| recipient.user == reminder.user)
   {
-    push_to_recipient(state, &event, recipient, now);
+    push_to_recipient(state, &event, recipient, now).await;
   }
   Ok(())
 }
 
-fn push_to_recipient(
+async fn push_to_recipient(
   state: &AppState,
   event: &NewMessageEvent,
-  recipient: &PushRecipientRow,
+  recipient: PushRecipientRow,
   now: OffsetDateTime,
 ) {
-  let unix_seconds = now.unix_timestamp();
   let verdict = decide(RecipientState {
     level_is_all: recipient.notification_level == NotificationLevel::All,
-    level_is_none: recipient.notification_level == NotificationLevel::None
-      || notifications::is_muted(recipient.maybe_muted_until, now),
+    level_is_none: is_muted(&recipient, now),
     is_mentioned: event.mentioned.contains(&recipient.user),
     is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
     is_integration: event.is_integration,
-    is_dnd: is_dnd(recipient, now, unix_seconds, event.sender),
+    is_dnd: is_dnd(&recipient, now, event.sender, event.is_urgent),
     is_followed_thread: recipient.is_following_thread,
-    always_pushes: PushMode::from(recipient.push_mode.clone()) == PushMode::Always,
-    devices: blocking_activity(state, recipient),
+    always_pushes: always_pushes(&recipient),
+    attention: attention(state, &recipient),
+    has_grace: state.settings.notifications.mobile_push_delay_secs > 0,
   });
-  let kind = match verdict {
-    Ok(kind) => kind,
+  let decision = match verdict {
+    Ok(decision) => decision,
     Err(skip) => {
       debug!(user_id = %recipient.user, ?skip, "no push");
+      if skip == Skip::DoNotDisturb {
+        record_all(state, &recipient, DeliveryEvent::SuppressedDnd);
+      }
       return;
     },
   };
-  let delay = mobile_delay(state, recipient);
-  for device in &recipient.devices {
-    // A device with a live connection already got the event.
-    if state.hub.is_device_connected(recipient.user, device.device) {
+  let wake_up = PushWakeUp {
+    maybe_thread_id: event.maybe_thread,
+    maybe_badge: badge(state, recipient.user, &recipient.devices).await,
+    maybe_sent_at: Some(now_millis()),
+    ..PushWakeUp::for_message(
+      decision.kind,
+      event.conversation,
+      event.message,
+      event.sender,
+      event.is_urgent,
+    )
+  };
+  match decision.timing {
+    Timing::Now => send_to_offline_devices(state, recipient.user, recipient.devices, &wake_up),
+    Timing::AfterGrace => {
+      let grace = Duration::from_secs(state.settings.notifications.mobile_push_delay_secs);
+      tokio::spawn(hold_for_desktop(state.clone(), recipient, wake_up, grace));
+    },
+  }
+}
+
+/// Rings the members of a DM or group DM (except the caller) on every device without a live
+/// connection; devices with one get the gateway's `call_ring`.
+pub async fn notify_ring(state: AppState, conversation: ConversationId, call: CallId, caller: UserId) {
+  let recipients = match state
+    .database
+    .list_push_recipients(conversation, caller, None)
+    .await
+  {
+    Ok(recipients) => recipients,
+    Err(error) => {
+      warn!(%error, conversation_id = %conversation, "listing the people to ring failed");
+      return;
+    },
+  };
+  let now = OffsetDateTime::now_utc();
+  let mut targets = Vec::new();
+  for recipient in recipients {
+    let verdict = decide_ring(is_muted(&recipient, now), is_dnd(&recipient, now, caller, false));
+    if let Err(skip) = verdict {
+      debug!(user_id = %recipient.user, ?skip, "no ring push");
+      if skip == Skip::DoNotDisturb {
+        record_all(&state, &recipient, DeliveryEvent::SuppressedDnd);
+      }
       continue;
     }
     let wake_up = PushWakeUp {
-      kind: kind.clone(),
-      conversation_id: event.conversation,
-      maybe_message_id: Some(event.message),
-      maybe_sender_id: Some(event.sender),
-      is_urgent: event.is_urgent,
+      kind: PushKind::Call,
+      conversation_id: conversation,
+      maybe_message_id: None,
+      maybe_sender_id: Some(caller),
+      is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: Some(call),
+      maybe_badge: None,
+      maybe_sent_at: Some(now_millis()),
     };
-    match delay {
-      Some(delay) if is_mobile(&device.provider) => {
-        spawn_delayed_delivery(state.clone(), recipient.user, device.clone(), wake_up, delay);
+    for device in recipient.devices {
+      if state.hub.is_device_connected(recipient.user, device.device) {
+        continue;
+      }
+      if can_dismiss(&device.provider) {
+        targets.push((recipient.user, device.device));
+      }
+      delivery::spawn(state.clone(), recipient.user, device, wake_up.clone());
+    }
+  }
+  if !targets.is_empty() {
+    state.push_tracker.record_ring(
+      call,
+      Ring {
+        conversation,
+        targets,
       },
-      _ => spawn_delivery(state.clone(), recipient.user, device.clone(), wake_up),
+    );
+  }
+}
+
+/// The ring ended (answered, timed out, cancelled): phones that rang stop.
+pub async fn end_ring(state: AppState, call: CallId) {
+  let Some(ring) = state.push_tracker.take_ring(call) else {
+    return;
+  };
+  let mut users: Vec<UserId> = ring.targets.iter().map(|(user, _)| *user).collect();
+  users.sort_unstable();
+  users.dedup();
+  for user in users {
+    let devices: HashSet<DeviceId> = ring
+      .targets
+      .iter()
+      .filter(|(owner, _)| *owner == user)
+      .map(|(_, device)| *device)
+      .collect();
+    let wake_up = PushWakeUp {
+      kind: PushKind::Dismiss,
+      conversation_id: ring.conversation,
+      maybe_message_id: None,
+      maybe_sender_id: None,
+      is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: Some(call),
+      maybe_badge: None,
+      maybe_sent_at: Some(now_millis()),
+    };
+    send_dismissal(&state, user, &devices, wake_up).await;
+  }
+}
+
+/// The user read the conversation (or a thread of it) up to `up_to`: phones that show a
+/// notification for it remove it. Devices with a live connection learn it from the gateway.
+pub async fn dismiss_read(
+  state: AppState,
+  user: UserId,
+  conversation: ConversationId,
+  maybe_thread: Option<ThreadId>,
+  up_to: MessageId,
+) {
+  let devices: HashSet<DeviceId> = state
+    .push_tracker
+    .take_read(user, conversation, maybe_thread, up_to)
+    .into_iter()
+    .collect();
+  if devices.is_empty() {
+    return;
+  }
+  let maybe_badge = match state.database.push_badge_count(user).await {
+    Ok(count) => Some(count),
+    Err(error) => {
+      warn!(%error, "counting the badge failed");
+      None
+    },
+  };
+  let wake_up = PushWakeUp {
+    kind: PushKind::Dismiss,
+    conversation_id: conversation,
+    maybe_message_id: Some(up_to),
+    maybe_sender_id: None,
+    is_urgent: false,
+    maybe_thread_id: maybe_thread,
+    maybe_call_id: None,
+    maybe_badge,
+    maybe_sent_at: Some(now_millis()),
+  };
+  send_dismissal(&state, user, &devices, wake_up).await;
+}
+
+/// Sends a test wake-up to one of the user's devices and says how the push service took it.
+pub async fn send_test(
+  state: &AppState,
+  user: UserId,
+  device: DeviceId,
+) -> Result<TestPushResponse, teamcraft_db::DbError> {
+  let devices = state.database.list_push_devices(user).await?;
+  let sent_at = now_millis();
+  let Some(row) = devices.into_iter().find(|row| row.device == device) else {
+    return Ok(TestPushResponse {
+      outcome: TestPushOutcome::NotRegistered,
+      maybe_provider: None,
+      sent_at,
+    });
+  };
+  let wake_up = PushWakeUp {
+    kind: PushKind::Test,
+    conversation_id: no_conversation(),
+    maybe_message_id: None,
+    maybe_sender_id: None,
+    is_urgent: false,
+    maybe_thread_id: None,
+    maybe_call_id: None,
+    maybe_badge: None,
+    maybe_sent_at: Some(sent_at),
+  };
+  let outcome = match delivery::deliver_once(state, user, &row, &wake_up).await {
+    Ok(()) => TestPushOutcome::Sent,
+    Err(PushError::Gone) => TestPushOutcome::Gone,
+    Err(PushError::NotConfigured) => TestPushOutcome::NotConfigured,
+    Err(PushError::Unavailable(_)) => TestPushOutcome::Unavailable,
+    Err(PushError::Rejected(_) | PushError::Invalid(_) | PushError::Crypto(_)) => TestPushOutcome::Rejected,
+  };
+  Ok(TestPushResponse {
+    outcome,
+    maybe_provider: Some(row.provider),
+    sent_at,
+  })
+}
+
+/// Waits while the user looks at a desktop: until the grace delay is over or the desktop stops being
+/// attentive. Then pushes the phones if the message is still unread.
+async fn hold_for_desktop(
+  state: AppState,
+  recipient: PushRecipientRow,
+  wake_up: PushWakeUp,
+  grace: Duration,
+) {
+  let deadline = Instant::now() + grace;
+  let mut lost = state.hub.subscribe_attention_lost();
+  loop {
+    tokio::select! {
+      () = tokio::time::sleep_until(deadline) => break,
+      result = lost.recv() => match result {
+        Ok(user) if user == recipient.user && attention(&state, &recipient) != Attention::DesktopAttentive => break,
+        Ok(_) | Err(RecvError::Lagged(_)) => {},
+        // The hub is gone: the server shuts down.
+        Err(RecvError::Closed) => return,
+      },
+    }
+  }
+  if let Some(message) = wake_up.maybe_message_id {
+    match state
+      .database
+      .has_read_message(recipient.user, wake_up.conversation_id, message)
+      .await
+    {
+      Ok(true) => {
+        debug!(user_id = %recipient.user, "the message was read meanwhile; no push to the phone");
+        record_all(&state, &recipient, DeliveryEvent::HeldForDesktop);
+        return;
+      },
+      Ok(false) => {},
+      Err(error) => warn!(%error, "checking the read position failed; pushing anyway"),
+    }
+  }
+  send_to_offline_devices(&state, recipient.user, recipient.devices, &wake_up);
+}
+
+/// A device with a live connection already got the event over the gateway.
+fn send_to_offline_devices(
+  state: &AppState,
+  user: UserId,
+  devices: Vec<PushDeviceRow>,
+  wake_up: &PushWakeUp,
+) {
+  for device in devices {
+    if state.hub.is_device_connected(user, device.device) {
+      continue;
+    }
+    delivery::spawn(state.clone(), user, device, wake_up.clone());
+  }
+}
+
+async fn send_dismissal(state: &AppState, user: UserId, devices: &HashSet<DeviceId>, wake_up: PushWakeUp) {
+  let rows = match state.database.list_push_devices(user).await {
+    Ok(rows) => rows,
+    Err(error) => {
+      warn!(%error, "listing push devices for a withdrawal failed");
+      return;
+    },
+  };
+  for row in rows {
+    if devices.contains(&row.device)
+      && can_dismiss(&row.provider)
+      && !state.hub.is_device_connected(user, row.device)
+    {
+      delivery::spawn(state.clone(), user, row, wake_up.clone());
     }
   }
 }
 
-/// A push to a phone is held back while the user works at a desktop (see
-/// `notifications.mobile_push_delay_secs`).
-fn mobile_delay(state: &AppState, recipient: &PushRecipientRow) -> Option<Duration> {
-  let seconds = state.settings.notifications.mobile_push_delay_secs;
-  if seconds == 0 || PushMode::from(recipient.push_mode.clone()) == PushMode::Always {
+/// The badge for the user's phones; absent without a phone or when counting fails.
+async fn badge(state: &AppState, user: UserId, devices: &[PushDeviceRow]) -> Option<u32> {
+  if !devices.iter().any(|device| is_mobile(&device.provider)) {
     return None;
   }
-  let active = active_devices(state, recipient);
-  (active.is_desktop_active && !active.is_mobile_active).then(|| Duration::from_secs(seconds))
+  match state.database.push_badge_count(user).await {
+    Ok(count) => Some(count),
+    Err(error) => {
+      warn!(%error, "counting the badge failed");
+      None
+    },
+  }
 }
 
-/// The user is active on a phone: they see messages there, whatever the desktop does.
-fn blocking_activity(state: &AppState, recipient: &PushRecipientRow) -> DeviceAggregate {
+fn record_all(state: &AppState, recipient: &PushRecipientRow, event: DeliveryEvent) {
+  let now = now_millis();
+  for device in &recipient.devices {
+    state
+      .push_tracker
+      .record(recipient.user, device.device, event, now);
+  }
+}
+
+fn attention(state: &AppState, recipient: &PushRecipientRow) -> Attention {
   let active = active_devices(state, recipient);
   if active.is_mobile_active {
-    return DeviceAggregate::Active;
-  }
-  // Without a delay, a desktop in use keeps pushes away as before.
-  if active.is_desktop_active && state.settings.notifications.mobile_push_delay_secs == 0 {
-    return DeviceAggregate::Active;
-  }
-  if active.is_desktop_active {
-    DeviceAggregate::Idle
+    Attention::MobileActive
+  } else if active.is_desktop_attentive {
+    Attention::DesktopAttentive
   } else {
-    state.hub.device_aggregate(recipient.user)
+    Attention::Away
   }
 }
 
@@ -245,91 +541,56 @@ fn is_mobile(provider: &PushProvider) -> bool {
   !matches!(provider, PushProvider::WebPush | PushProvider::Unknown(_))
 }
 
-fn is_dnd(recipient: &PushRecipientRow, now: OffsetDateTime, unix_seconds: i64, sender: UserId) -> bool {
-  let is_manual =
-    recipient.presence_pref == "dnd" && recipient.maybe_dnd_until.is_none_or(|until| until > now);
-  is_manual || is_scheduled_dnd(recipient, unix_seconds, sender)
+fn always_pushes(recipient: &PushRecipientRow) -> bool {
+  PushMode::from(recipient.push_mode.clone()) == PushMode::Always
 }
 
-fn is_scheduled_dnd(recipient: &PushRecipientRow, unix_seconds: i64, sender: UserId) -> bool {
-  let Some(raw) = &recipient.maybe_dnd_schedule else {
+fn is_muted(recipient: &PushRecipientRow, now: OffsetDateTime) -> bool {
+  recipient.notification_level == NotificationLevel::None
+    || notifications::is_muted(recipient.maybe_muted_until, now)
+}
+
+/// DND, manual or scheduled, unless an override (allowed sender, urgent message) lets this through.
+fn is_dnd(recipient: &PushRecipientRow, now: OffsetDateTime, sender: UserId, is_urgent: bool) -> bool {
+  let maybe_schedule = schedule(recipient);
+  if maybe_schedule
+    .as_ref()
+    .is_some_and(|schedule| schedule.lets_through(sender, is_urgent))
+  {
     return false;
-  };
+  }
+  let is_manual =
+    recipient.presence_pref == "dnd" && recipient.maybe_dnd_until.is_none_or(|until| until > now);
+  is_manual
+    || maybe_schedule.is_some_and(|schedule| {
+      let unix_seconds = now.unix_timestamp();
+      schedule.is_active_at(
+        unix_seconds,
+        notifications::utc_offset_at(&schedule, unix_seconds),
+      )
+    })
+}
+
+fn schedule(recipient: &PushRecipientRow) -> Option<DndSchedule> {
+  let raw = recipient.maybe_dnd_schedule.as_ref()?;
   match serde_json::from_str::<DndSchedule>(raw) {
-    Ok(schedule) => schedule.silences(unix_seconds, sender),
+    Ok(schedule) => Some(schedule),
     Err(error) => {
       // Validated on write, so this means a stored value from an incompatible version: notify.
       warn!(%error, user_id = %recipient.user, "ignoring an unreadable DND schedule");
-      false
+      None
     },
   }
 }
 
-/// Waits, then pushes if the message is still unread and no phone of the user shows it by now.
-fn spawn_delayed_delivery(
-  state: AppState,
-  user: UserId,
-  device: PushDeviceRow,
-  wake_up: PushWakeUp,
-  delay: Duration,
-) {
-  tokio::spawn(async move {
-    tokio::time::sleep(delay).await;
-    if let (Some(conversation), Some(message)) = (Some(wake_up.conversation_id), wake_up.maybe_message_id) {
-      match state.database.has_read_message(user, conversation, message).await {
-        Ok(true) => {
-          debug!(user_id = %user, "the message was read meanwhile; no push to the phone");
-          return;
-        },
-        Ok(false) => {},
-        Err(error) => warn!(%error, "checking the read position failed; pushing anyway"),
-      }
-    }
-    if state.hub.is_device_connected(user, device.device) {
-      return;
-    }
-    spawn_delivery(state, user, device, wake_up);
-  });
-}
-
-fn spawn_delivery(state: AppState, user: UserId, device: PushDeviceRow, wake_up: PushWakeUp) {
-  tokio::spawn(async move {
-    let target = PushTarget {
-      user,
-      device: device.device,
-      provider: device.provider,
-      token: device.token,
-      push_key: device.push_key,
-    };
-    let urgency = if wake_up.is_urgent {
-      Urgency::High
-    } else {
-      Urgency::Normal
-    };
-    match state
-      .push
-      .deliver(&target, &wake_up, urgency, state.settings.push.ttl)
-      .await
-    {
-      Ok(()) => debug!(device_id = %target.device, "push sent"),
-      Err(PushError::Gone) => {
-        info!(device_id = %target.device, "push registration is gone, forgetting it");
-        if let Err(error) = state.database.clear_push_registration(user, target.device).await {
-          warn!(%error, "clearing the push registration failed");
-        }
-      },
-      Err(PushError::NotConfigured) => {
-        debug!(provider = %target.provider, "push provider unavailable");
-      },
-      Err(error) => warn!(%error, device_id = %target.device, "push failed"),
-    }
-  });
+/// Test pushes name no conversation; ID `0` would be the first instant of the Snowflake epoch on
+/// worker 0, which no server hands out in practice.
+fn no_conversation() -> ConversationId {
+  ConversationId::from_snowflake(Snowflake::ZERO)
 }
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::Id;
-
   use super::*;
 
   fn base() -> RecipientState {
@@ -342,8 +603,16 @@ mod tests {
       is_dnd: false,
       is_followed_thread: false,
       always_pushes: false,
-      devices: DeviceAggregate::NoDevice,
+      attention: Attention::Away,
+      has_grace: true,
     }
+  }
+
+  fn now(kind: PushKind) -> Result<Decision, Skip> {
+    Ok(Decision {
+      kind,
+      timing: Timing::Now,
+    })
   }
 
   #[test]
@@ -354,7 +623,7 @@ mod tests {
         is_mentioned: true,
         ..base()
       }),
-      Ok(PushKind::Mention)
+      now(PushKind::Mention)
     );
   }
 
@@ -365,7 +634,7 @@ mod tests {
         level_is_all: true,
         ..base()
       }),
-      Ok(PushKind::Message)
+      now(PushKind::Message)
     );
     assert_eq!(
       decide(RecipientState {
@@ -373,7 +642,7 @@ mod tests {
         is_mentioned: true,
         ..base()
       }),
-      Ok(PushKind::Mention)
+      now(PushKind::Mention)
     );
   }
 
@@ -384,7 +653,24 @@ mod tests {
         is_direct: true,
         ..base()
       }),
-      Ok(PushKind::Mention)
+      now(PushKind::Mention)
+    );
+  }
+
+  #[test]
+  fn integration_channels_push_only_for_mentions() {
+    let integration = RecipientState {
+      is_integration: true,
+      level_is_all: true,
+      ..base()
+    };
+    assert_eq!(decide(integration), Err(Skip::IntegrationChannel));
+    assert_eq!(
+      decide(RecipientState {
+        is_mentioned: true,
+        ..integration
+      }),
+      now(PushKind::Mention)
     );
   }
 
@@ -395,7 +681,7 @@ mod tests {
         is_followed_thread: true,
         ..base()
       }),
-      Ok(PushKind::Message)
+      now(PushKind::Message)
     );
     assert_eq!(
       decide(RecipientState {
@@ -408,25 +694,13 @@ mod tests {
   }
 
   #[test]
-  fn users_who_chose_always_are_pushed_while_a_device_is_active() {
-    assert_eq!(
-      decide(RecipientState {
-        is_mentioned: true,
-        always_pushes: true,
-        devices: DeviceAggregate::Active,
-        ..base()
-      }),
-      Ok(PushKind::Mention)
-    );
-  }
-
-  #[test]
   fn a_mute_beats_everything_else() {
     let muted = RecipientState {
       level_is_none: true,
       is_mentioned: true,
       is_direct: true,
       level_is_all: true,
+      always_pushes: true,
       ..base()
     };
     assert_eq!(decide(muted), Err(Skip::Muted));
@@ -438,41 +712,90 @@ mod tests {
       decide(RecipientState {
         is_dnd: true,
         is_mentioned: true,
+        always_pushes: true,
         ..base()
       }),
       Err(Skip::DoNotDisturb)
     );
   }
 
-  #[test]
-  fn an_active_device_suppresses_the_push_but_an_idle_one_does_not() {
-    let mentioned = RecipientState {
-      is_mentioned: true,
-      ..base()
-    };
-    assert_eq!(
-      decide(RecipientState {
-        devices: DeviceAggregate::Active,
-        ..mentioned
-      }),
-      Err(Skip::Active)
-    );
-    assert_eq!(
-      decide(RecipientState {
-        devices: DeviceAggregate::Idle,
-        ..mentioned
-      }),
-      Ok(PushKind::Mention)
-    );
+  mod attention {
+    use super::*;
+
+    fn mention(attention: Attention) -> RecipientState {
+      RecipientState {
+        is_mentioned: true,
+        attention,
+        ..base()
+      }
+    }
+
+    #[test]
+    fn a_phone_in_use_gets_no_push() {
+      assert_eq!(decide(mention(Attention::MobileActive)), Err(Skip::Active));
+    }
+
+    #[test]
+    fn an_attentive_desktop_holds_the_push_for_the_grace_delay() {
+      assert_eq!(
+        decide(mention(Attention::DesktopAttentive)),
+        Ok(Decision {
+          kind: PushKind::Mention,
+          timing: Timing::AfterGrace,
+        })
+      );
+    }
+
+    #[test]
+    fn without_a_grace_delay_an_attentive_desktop_suppresses_the_push() {
+      assert_eq!(
+        decide(RecipientState {
+          has_grace: false,
+          ..mention(Attention::DesktopAttentive)
+        }),
+        Err(Skip::Active)
+      );
+    }
+
+    #[test]
+    fn a_desktop_that_is_open_but_not_looked_at_does_not_delay_the_phone() {
+      assert_eq!(decide(mention(Attention::Away)), now(PushKind::Mention));
+    }
+
+    #[test]
+    fn users_who_chose_always_are_pushed_at_once_whatever_they_use() {
+      for attention in [Attention::MobileActive, Attention::DesktopAttentive] {
+        assert_eq!(
+          decide(RecipientState {
+            always_pushes: true,
+            ..mention(attention)
+          }),
+          now(PushKind::Mention)
+        );
+      }
+    }
+  }
+
+  mod rings {
+    use super::*;
+
+    #[test]
+    fn rings_stop_only_for_mutes_and_dnd() {
+      assert_eq!(decide_ring(false, false), Ok(()));
+      assert_eq!(decide_ring(true, false), Err(Skip::Muted));
+      assert_eq!(decide_ring(false, true), Err(Skip::DoNotDisturb));
+    }
   }
 
   mod do_not_disturb {
-    use teamcraft_proto::{DndWindow, Snowflake, Weekday};
+    use teamcraft_proto::{DndWindow, Weekday};
 
     use super::*;
 
     // 2026-01-05 (Monday) 23:00 UTC.
     const MONDAY_NIGHT: i64 = 1_767_571_200 + 23 * 3600;
+    // 2026-07-06 (Monday) 00:00 UTC, in summer time.
+    const SUMMER_MONDAY: i64 = 1_783_296_000;
 
     #[test]
     fn timed_do_not_disturb_ends() {
@@ -482,35 +805,111 @@ mod tests {
         ..recipient("dnd", None)
       };
       let sender = user(2);
-      assert!(is_dnd(&at(None), now, 0, sender));
-      assert!(is_dnd(&at(Some(60)), now, 0, sender));
-      assert!(!is_dnd(&at(Some(-60)), now, 0, sender));
-      assert!(!is_dnd(&recipient("auto", None), now, 0, sender));
+      assert!(is_dnd(&at(None), now, sender, false));
+      assert!(is_dnd(&at(Some(60)), now, sender, false));
+      assert!(!is_dnd(&at(Some(-60)), now, sender, false));
+      assert!(!is_dnd(&recipient("auto", None), now, sender, false));
     }
 
     #[test]
     fn the_schedule_silences_everybody_but_allowed_senders() {
       let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
-      let schedule = DndSchedule {
-        utc_offset_minutes: 0,
-        windows: vec![DndWindow {
-          weekdays: vec![Weekday::Monday],
-          start_minute: 22 * 60,
-          end_minute: 7 * 60,
-        }],
-        allow_user_ids: vec![user(3)],
+      let scheduled = recipient("auto", Some(night_shift(None)));
+      assert!(is_dnd(&scheduled, now, user(2), false));
+      assert!(!is_dnd(&scheduled, now, user(3), false));
+      let evening = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT - 5 * 3600).unwrap();
+      assert!(!is_dnd(&scheduled, evening, user(2), false));
+    }
+
+    #[test]
+    fn overrides_apply_to_manual_dnd_too() {
+      let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT - 12 * 3600).unwrap();
+      let manual = recipient("dnd", Some(night_shift(None)));
+      assert!(is_dnd(&manual, now, user(2), false));
+      assert!(!is_dnd(&manual, now, user(3), false));
+    }
+
+    #[test]
+    fn urgent_messages_break_through_when_the_user_allows_it() {
+      let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
+      let strict = recipient("dnd", Some(night_shift(None)));
+      assert!(is_dnd(&strict, now, user(2), true));
+      let mut schedule: DndSchedule = serde_json::from_str(&night_shift(None)).unwrap();
+      schedule.allows_urgent = true;
+      let lenient = recipient("dnd", Some(serde_json::to_string(&schedule).unwrap()));
+      assert!(!is_dnd(&lenient, now, user(2), true));
+      assert!(is_dnd(&lenient, now, user(2), false));
+    }
+
+    #[test]
+    fn the_time_zone_follows_daylight_saving_time() {
+      // 22:00-07:00 in Berlin: 21:00 UTC in winter (CET), 20:00 UTC in summer (CEST). The stored
+      // offset (+60) is the winter one, as a client saved it in January.
+      let berlin = recipient("auto", Some(night_shift(Some("Europe/Berlin"))));
+      let summer_evening = |hour: i64| {
+        // Sunday evening, so the Sunday window applies.
+        OffsetDateTime::from_unix_timestamp(SUMMER_MONDAY - 24 * 3600 + hour * 3600).unwrap()
       };
-      let scheduled = recipient("auto", Some(serde_json::to_string(&schedule).unwrap()));
-      assert!(is_dnd(&scheduled, now, MONDAY_NIGHT, user(2)));
-      assert!(!is_dnd(&scheduled, now, MONDAY_NIGHT, user(3)));
-      assert!(!is_dnd(&scheduled, now, MONDAY_NIGHT - 5 * 3600, user(2)));
+      assert!(is_dnd(
+        &berlin,
+        summer_evening(20) + time::Duration::minutes(30),
+        user(2),
+        false
+      ));
+      assert!(!is_dnd(
+        &berlin,
+        summer_evening(19) + time::Duration::minutes(30),
+        user(2),
+        false
+      ));
+      // Without the zone, the stale offset puts the start an hour late.
+      let fixed = recipient("auto", Some(night_shift(None)));
+      assert!(!is_dnd(
+        &fixed,
+        summer_evening(20) + time::Duration::minutes(30),
+        user(2),
+        false
+      ));
+    }
+
+    #[test]
+    fn an_unknown_time_zone_falls_back_to_the_offset() {
+      let schedule: DndSchedule = serde_json::from_str(&night_shift(Some("Mars/Olympus"))).unwrap();
+      assert_eq!(notifications::utc_offset_at(&schedule, MONDAY_NIGHT), 60);
+      let berlin: DndSchedule = serde_json::from_str(&night_shift(Some("Europe/Berlin"))).unwrap();
+      assert_eq!(notifications::utc_offset_at(&berlin, SUMMER_MONDAY), 120);
     }
 
     #[test]
     fn an_unreadable_schedule_does_not_silence() {
       let now = OffsetDateTime::from_unix_timestamp(MONDAY_NIGHT).unwrap();
       let broken = recipient("auto", Some("{not json".into()));
-      assert!(!is_dnd(&broken, now, MONDAY_NIGHT, user(2)));
+      assert!(!is_dnd(&broken, now, user(2), false));
+    }
+
+    /// 22:00-07:00 local every day, user 3 allowed, stored with a +60 offset.
+    fn night_shift(maybe_time_zone: Option<&str>) -> String {
+      let all_week = vec![
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+        Weekday::Sunday,
+      ];
+      serde_json::to_string(&DndSchedule {
+        utc_offset_minutes: 60,
+        maybe_time_zone: maybe_time_zone.map(str::to_owned),
+        windows: vec![DndWindow {
+          weekdays: all_week,
+          start_minute: 22 * 60,
+          end_minute: 7 * 60,
+        }],
+        allow_user_ids: vec![user(3)],
+        allows_urgent: false,
+      })
+      .unwrap()
     }
 
     fn user(raw: i64) -> UserId {

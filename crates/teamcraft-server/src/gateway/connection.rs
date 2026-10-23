@@ -238,6 +238,11 @@ async fn handle_client_message(
       }
       true
     },
+    GatewayClientMessage::Attention { is_attentive } => {
+      // Cheap and idempotent: no throttle needed, the lease bounds what a flood can do.
+      state.hub.set_attention(&attached.session_id, is_attentive);
+      true
+    },
     GatewayClientMessage::Typing { conversation_id } => {
       state.hub.touch_activity(&attached.session_id);
       let now = Instant::now();

@@ -6,11 +6,13 @@
 
 mod apns;
 pub mod crypto;
+mod delivery;
 mod fcm;
 mod gateway;
 pub mod routing;
 mod sender;
 mod status;
+pub mod tracker;
 mod unified_push;
 mod web_push;
 
@@ -21,5 +23,6 @@ pub use gateway::{
 };
 pub use sender::{PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency};
 pub use status::ProviderHealth;
+pub use tracker::PushTracker;
 pub use unified_push::UnifiedPushSender;
 pub use web_push::{Vapid, WebPushSender, WebPushSubscription};

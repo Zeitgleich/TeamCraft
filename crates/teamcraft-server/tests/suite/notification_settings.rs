@@ -37,6 +37,7 @@ mod user_settings {
       "utc_offset_minutes": 60,
       "windows": [{"weekdays": ["mon", "fri"], "start_minute": 1320, "end_minute": 420}],
       "allow_user_ids": [],
+      "allows_urgent": false,
     });
     let body = json!({
       "auto_follow_mentioned_threads": false,
