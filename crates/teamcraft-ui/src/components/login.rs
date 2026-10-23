@@ -304,6 +304,9 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
   let name = check.server.display_name.clone();
   let host = check.server.host.clone();
   let initial = name.chars().next().map(String::from).unwrap_or_default();
+  let provider = check.identity_provider_host.clone();
+  let warning_host = provider.clone();
+  let is_elsewhere = check.is_identity_provider_elsewhere;
   view! {
     <AuthFrame>
       <h1>{move || i18n.t("server-entry-confirm-title")}</h1>
@@ -314,6 +317,18 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
           <p class="muted-text small mono" translate="no">{host}</p>
         </div>
       </div>
+      <p class="auth-provider small">
+        <span translate="no">{i18n.t_with("server-entry-provider", &[("host", &provider)])}</span>
+      </p>
+      {is_elsewhere
+        .then(|| {
+          view! {
+            <div class="auth-alert" role="alert">
+              <Icon name=IconName::Alert />
+              <p>{i18n.t_with("server-entry-provider-elsewhere", &[("host", &warning_host)])}</p>
+            </div>
+          }
+        })}
       <p class="muted-text">{move || i18n.t("server-entry-confirm-body")}</p>
       <div class="auth-actions">
         <button

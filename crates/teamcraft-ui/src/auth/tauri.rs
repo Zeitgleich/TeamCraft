@@ -215,6 +215,12 @@ pub struct ServerState {
 pub struct ServerCheck {
   pub server: ServerView,
   pub brand: teamcraft_proto::BrandResponse,
+  /// Where the password will be entered.
+  #[serde(default)]
+  pub identity_provider_host: String,
+  /// The identity provider lies outside the server's domain.
+  #[serde(default)]
+  pub is_identity_provider_elsewhere: bool,
 }
 
 /// A failed server step: the i18n key of the message (`server-entry-*`) and details for logs.

@@ -213,7 +213,7 @@ optionally lock the apps to it:
 
 | Platform | Where                                                                                                                                          |
 |----------|------------------------------------------------------------------------------------------------------------------------------------------------|
-| Desktop  | `desktop.json` with `{"server_url": "team.example.com", "lock_server": true}` in `/etc/teamcraft/` (Linux), `/Library/Application Support/TeamCraft/` (macOS) or `%ProgramData%\TeamCraft\` (Windows); or the environment variable `TEAMCRAFT_SERVER_URL` (not locked) |
+| Desktop  | `desktop.json` with `{"server_url": "team.example.com", "lock_server": true}` in `/etc/teamcraft/` (Linux) or `/Library/Application Support/TeamCraft/` (macOS), owned by root and writable only by root (else ignored); or the environment variable `TEAMCRAFT_SERVER_URL` (not locked). Windows: the policy registry key follows (#220) |
 | Android  | Managed configuration (Android Enterprise / MDM app restrictions): `server_url`, `lock_server`                                                  |
 | iOS      | Managed app configuration (`com.apple.configuration.managed`): `server_url`, `lock_server`                                                      |
 

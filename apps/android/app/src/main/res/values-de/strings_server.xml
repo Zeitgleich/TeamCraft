@@ -28,4 +28,6 @@
   <string name="restriction_server_url_description">Der TeamCraft-Server, bei dem sich die Nutzer anmelden, zum Beispiel https://team.example.com. Die App prüft ihn und lässt ihn vor der Anmeldung bestätigen.</string>
   <string name="restriction_lock_server_title">Server sperren</string>
   <string name="restriction_lock_server_description">Nutzer können nicht zu einem anderen Server wechseln. Ein Konto auf einem anderen Server wird abgemeldet.</string>
+  <string name="server_confirm_provider">Du meldest dich bei %1$s an.</string>
+  <string name="server_confirm_provider_elsewhere">Dieser Server meldet dich über %1$s an, das nicht zu seiner eigenen Domain gehört. Fahre nur fort, wenn deine Organisation diesen Anmeldedienst nutzt; sonst könnte sich jemand als dein Server ausgeben.</string>
 </resources>

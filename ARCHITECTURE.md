@@ -76,6 +76,16 @@ device cross-signing by the user's identity key, identity-key change warnings an
 verification codes (see [docs/e2ee.md](docs/e2ee.md) §3).
 Key transparency is a later option.
 
+**Server entry and token relay.** The native apps take the server address from the user (or the
+device's management) and the sign-in settings from that server (docs/operations.md "Server address
+in the apps"). A server the user is lured to (a typo domain) can announce a real instance's issuer
+and client ID; with a live SSO session the identity provider then hands an access token for the real
+instance to the app, which sends it to the lookalike, and the lookalike can replay it at the real
+server (bearer tokens are not bound to a client). Mitigations today: the confirmation screen shows
+the identity provider's host and warns when it lies outside the server's domain, tokens are stored
+per server origin and issuer, and E2EE keeps message content out of reach (the relayed token gives
+API access, not keys). The real fix is sender-constrained tokens with DPoP (RFC 9449, issue #120).
+
 Push goes through APNs/FCM, optionally via a **push gateway** operated by the publisher of the store
 apps. Wake-ups are sealed to the device's push key before they leave the server, so neither Apple,
 Google nor a gateway can read or forge them; a malicious gateway can only drop, delay or replay

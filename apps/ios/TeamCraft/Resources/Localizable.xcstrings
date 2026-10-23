@@ -6296,6 +6296,38 @@
           }
         }
       }
+    },
+    "server_confirm_provider %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You will sign in at %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du meldest dich bei %@ an."
+          }
+        }
+      }
+    },
+    "server_confirm_provider_elsewhere %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server signs you in through %@, which is not part of its own domain. Continue only if your organization uses this sign-in service; otherwise someone could be impersonating your server."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Server meldet dich über %@ an, das nicht zu seiner eigenen Domain gehört. Fahre nur fort, wenn deine Organisation diesen Anmeldedienst nutzt; sonst könnte sich jemand als dein Server ausgeben."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

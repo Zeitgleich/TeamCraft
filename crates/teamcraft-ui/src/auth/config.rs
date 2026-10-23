@@ -19,10 +19,14 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-  /// The same origin and the server's sign-in settings, overridden per browser through the
-  /// `localStorage` keys `teamcraft.server_url`, `teamcraft.oidc_issuer` and
-  /// `teamcraft.oidc_client_id`.
+  /// The same origin and the server's sign-in settings. Development builds take overrides per
+  /// browser from the `localStorage` keys `teamcraft.server_url`, `teamcraft.oidc_issuer` and
+  /// `teamcraft.oidc_client_id`; release builds ignore them (a script that wrote them could send
+  /// the next sign-in elsewhere).
   pub fn load() -> Self {
+    if !cfg!(debug_assertions) {
+      return Self::default();
+    }
     Self {
       server_url: load_string(KEY_SERVER_URL).unwrap_or_default(),
       maybe_issuer: load_string(KEY_ISSUER).filter(|value| !value.is_empty()),

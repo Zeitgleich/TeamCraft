@@ -27,6 +27,7 @@ const MAX_INPUT_CHARS: usize = 2048;
 const MAX_CLIENT_ID_CHARS: usize = 200;
 const MAX_SCOPES: usize = 20;
 const MAX_SCOPE_CHARS: usize = 100;
+const MAX_DISPLAY_NAME_CHARS: usize = 64;
 /// Host names that are this device; plain `http` to them stays on the device.
 const LOOPBACK_NAMES: [&str; 2] = ["localhost", "localhost."];
 
@@ -66,6 +67,10 @@ pub struct ServerProfile {
 pub struct CheckedServer {
   pub profile: ServerProfile,
   pub brand: BrandResponse,
+  /// Where the user will enter their password; shown on the confirmation.
+  pub identity_provider_host: String,
+  /// The identity provider lies outside the server's domain: the confirmation warns.
+  pub is_identity_provider_elsewhere: bool,
 }
 
 /// The server's answer to `GET /api/v1/server-info`, as the caller received it. Callers must not
@@ -90,6 +95,15 @@ pub enum ServerAddressError {
   InsecureHttp,
   #[error("the address contains a user name or password")]
   HasCredentials,
+}
+
+/// The identity provider's discovery document can't be trusted.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DiscoveryError {
+  #[error("the discovery document is for another issuer")]
+  IssuerMismatch,
+  #[error("the discovery document names an endpoint that is not https")]
+  UnsafeEndpoint,
 }
 
 /// The address answered, but not as a usable TeamCraft server.
@@ -160,19 +174,18 @@ impl ServerOrigin {
   }
 
   /// A file and key name for everything stored for this server: letters, digits, `.`, `-` and
-  /// `_` only. `http` origins get a prefix so they never share storage with `https` ones.
+  /// `_` only, and different for different origins. Any other character (`:` of a port, `[` `]`
+  /// of an IPv6 address, `_`) becomes `_` and its two hex digits; `http` origins get a prefix so
+  /// they never share storage with `https` ones.
   pub fn storage_key(&self) -> String {
-    let host: String = self
-      .host()
-      .chars()
-      .map(|ch| {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-') {
-          ch
-        } else {
-          '_'
-        }
-      })
-      .collect();
+    let mut host = String::new();
+    for byte in self.host().bytes() {
+      if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-') {
+        host.push(char::from(byte));
+      } else {
+        host.push_str(&format!("_{byte:02x}"));
+      }
+    }
     if self.0.starts_with("http://") {
       format!("http_{host}")
     } else {
@@ -279,7 +292,7 @@ pub fn check_server_info(
 ) -> Result<CheckedServer, ServerCheckError> {
   let info = parse_answer(answer)?;
   check_versions(&info, client_version)?;
-  let issuer = check_issuer(&info.sign_in.issuer, policy)?;
+  let issuer = check_issuer(&info.sign_in.issuer, origin, policy)?;
   let client_id = check_client_id(&info.sign_in.client_id)?;
   let scopes = check_scopes(&info.sign_in.scopes)?;
   if let (Some(own), Some(listed)) = (maybe_redirect_uri, &info.sign_in.maybe_redirect_uris)
@@ -287,8 +300,11 @@ pub fn check_server_info(
   {
     return Err(ServerCheckError::RedirectNotAllowed);
   }
-  let display_name = info.brand.display_name.trim().to_owned();
+  let display_name = clean_display_name(&info.brand.display_name);
+  let (identity_provider_host, is_identity_provider_elsewhere) = identity_provider(origin, &issuer);
   Ok(CheckedServer {
+    identity_provider_host,
+    is_identity_provider_elsewhere,
     profile: ServerProfile {
       origin: origin.clone(),
       issuer,
@@ -361,15 +377,19 @@ fn compare_release(left: &Version, right: &Version) -> Ordering {
   (left.major, left.minor, left.patch).cmp(&(right.major, right.minor, right.patch))
 }
 
-fn check_issuer(issuer: &str, policy: HttpPolicy) -> Result<String, ServerCheckError> {
+fn check_issuer(issuer: &str, origin: &ServerOrigin, policy: HttpPolicy) -> Result<String, ServerCheckError> {
   let invalid = |reason: &str| ServerCheckError::InvalidSignIn(format!("issuer: {reason}"));
   let url = Url::parse(issuer.trim()).map_err(|_| invalid("not a URL"))?;
   let Some(host) = url.host() else {
     return Err(invalid("no host"));
   };
+  // A plain-http issuer on this device only goes with a server on this device (development).
+  let is_server_local = Url::parse(origin.as_str())
+    .ok()
+    .is_some_and(|server| server.host().is_some_and(|server_host| is_loopback(&server_host)));
   match url.scheme() {
     "https" => {},
-    "http" if policy == HttpPolicy::Allowed || is_loopback(&host) => {},
+    "http" if policy == HttpPolicy::Allowed || (is_loopback(&host) && is_server_local) => {},
     _ => return Err(invalid("not https")),
   }
   if !url.username().is_empty() || url.password().is_some() {
@@ -380,6 +400,85 @@ fn check_issuer(issuer: &str, policy: HttpPolicy) -> Result<String, ServerCheckE
   }
   // The issuer must equal the tokens' `iss` exactly; keep it as the server wrote it.
   Ok(issuer.trim().to_owned())
+}
+
+/// The brand name as shown for confirmation: no control or bidirectional formatting characters
+/// (which could make a name look like another), at most 64 characters.
+fn clean_display_name(name: &str) -> String {
+  name
+    .chars()
+    .filter(|ch| !ch.is_control() && !is_bidi_control(*ch))
+    .take(MAX_DISPLAY_NAME_CHARS)
+    .collect::<String>()
+    .trim()
+    .to_owned()
+}
+
+fn is_bidi_control(ch: char) -> bool {
+  matches!(ch, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// The identity provider's host, and whether it lies outside the server's own domain. Signing in
+/// hands that provider's access token to this server; a provider elsewhere is shown with a
+/// warning on the confirmation (a server copying another instance's settings would show the real
+/// provider of that instance). Without the public suffix list, "the server's domain" is its host
+/// without the first label when it has three or more labels.
+fn identity_provider(origin: &ServerOrigin, issuer: &str) -> (String, bool) {
+  let provider = Url::parse(issuer)
+    .ok()
+    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    .unwrap_or_default();
+  let server = Url::parse(origin.as_str())
+    .ok()
+    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    .unwrap_or_default();
+  let labels: Vec<&str> = server.split('.').collect();
+  let server_domain = if labels.len() >= 3 {
+    labels[1..].join(".")
+  } else {
+    server.clone()
+  };
+  let is_inside =
+    provider == server || provider == server_domain || provider.ends_with(&format!(".{server_domain}"));
+  (provider, !is_inside)
+}
+
+/// Whether an endpoint of the identity provider's discovery document may be used: `https`
+/// (plain `http` only on loopback, or anywhere in development builds), no credentials. Anything
+/// else (`file:`, `javascript:`, `search-ms:`, ...) must never reach a browser or the OS opener.
+pub fn is_provider_endpoint(endpoint: &str, policy: HttpPolicy) -> bool {
+  let Ok(url) = Url::parse(endpoint) else {
+    return false;
+  };
+  let Some(host) = url.host() else {
+    return false;
+  };
+  let is_scheme_ok = match url.scheme() {
+    "https" => true,
+    "http" => policy == HttpPolicy::Allowed || is_loopback(&host),
+    _ => false,
+  };
+  is_scheme_ok && url.username().is_empty() && url.password().is_none()
+}
+
+/// Checks a discovery document's `issuer` and endpoints (RFC 8414 §3.3: the `issuer` must equal
+/// the configured one exactly).
+pub fn check_discovery(
+  expected_issuer: &str,
+  discovered_issuer: &str,
+  endpoints: &[&str],
+  policy: HttpPolicy,
+) -> Result<(), DiscoveryError> {
+  if discovered_issuer != expected_issuer {
+    return Err(DiscoveryError::IssuerMismatch);
+  }
+  if endpoints
+    .iter()
+    .any(|endpoint| !is_provider_endpoint(endpoint, policy))
+  {
+    return Err(DiscoveryError::UnsafeEndpoint);
+  }
+  Ok(())
 }
 
 fn check_client_id(client_id: &str) -> Result<String, ServerCheckError> {
@@ -550,11 +649,17 @@ mod tests {
     fn storage_keys_are_file_names_and_separate_http_from_https() {
       assert_eq!(
         origin("team.example.com:8443").storage_key(),
-        "team.example.com_8443"
+        "team.example.com_3a8443"
       );
-      assert_eq!(origin("[::1]").storage_key(), "___1_");
+      assert_eq!(origin("[::1]").storage_key(), "_5b_3a_3a1_5d");
       let http = ServerOrigin::parse("http://localhost:8081", HttpPolicy::LoopbackOnly).unwrap();
-      assert_eq!(http.storage_key(), "http_localhost_8081");
+      assert_eq!(http.storage_key(), "http_localhost_3a8081");
+      // Different origins never share a key.
+      assert_ne!(origin("[::1]:2").storage_key(), origin("[::1:2]").storage_key());
+      assert_ne!(
+        origin("a.example.com:8443").storage_key(),
+        origin("a.example.com").storage_key()
+      );
     }
 
     #[test]
@@ -672,9 +777,19 @@ mod tests {
     }
 
     #[test]
-    fn a_loopback_issuer_is_fine_and_development_builds_allow_http() {
+    fn a_loopback_issuer_needs_a_local_server_and_development_builds_allow_http() {
       let json = info_json(|info| info["sign_in"]["issuer"] = "http://127.0.0.1:8080/realms/dev".into());
-      assert!(check(200, &json).is_ok());
+      // A remote server must not send this device's sign-in to a local plain-http provider.
+      assert!(check(200, &json).is_err());
+      let local = ServerOrigin::parse("http://127.0.0.1:8081", HttpPolicy::LoopbackOnly).unwrap();
+      let checked = check_server_info(
+        &local,
+        answer(200, &json),
+        "1.0.0",
+        None,
+        HttpPolicy::LoopbackOnly,
+      );
+      assert!(checked.is_ok());
       let json = info_json(|info| info["sign_in"]["issuer"] = "http://10.0.2.2:8080/realms/dev".into());
       assert!(check(200, &json).is_err());
       let development = check_server_info(
@@ -714,6 +829,62 @@ mod tests {
         with_redirect("http://127.0.0.1:53817/other"),
         Err(ServerCheckError::RedirectNotAllowed)
       );
+    }
+
+    #[test]
+    fn the_identity_provider_is_shown_and_flagged_when_elsewhere() {
+      let checked = check(200, &info_json(|_| {})).unwrap();
+      assert_eq!(checked.identity_provider_host, "auth.example.com");
+      assert!(!checked.is_identity_provider_elsewhere);
+      let other = info_json(|info| info["sign_in"]["issuer"] = "https://sso.other.example/realms/x".into());
+      let checked = check(200, &other).unwrap();
+      assert_eq!(checked.identity_provider_host, "sso.other.example");
+      assert!(checked.is_identity_provider_elsewhere);
+      let same_host = info_json(|info| info["sign_in"]["issuer"] = "https://team.example.com/auth".into());
+      assert!(!check(200, &same_host).unwrap().is_identity_provider_elsewhere);
+      let lookalike = info_json(|info| info["sign_in"]["issuer"] = "https://evilexample.com/".into());
+      assert!(check(200, &lookalike).unwrap().is_identity_provider_elsewhere);
+    }
+
+    #[test]
+    fn brand_names_lose_control_and_bidi_characters_and_are_capped() {
+      let json = info_json(|info| info["brand"]["display_name"] = "Bank\u{202E}moc.elpmaxe\u{0007}".into());
+      assert_eq!(check(200, &json).unwrap().profile.display_name, "Bankmoc.elpmaxe");
+      let long = info_json(|info| info["brand"]["display_name"] = "x".repeat(500).into());
+      assert_eq!(
+        check(200, &long).unwrap().profile.display_name.chars().count(),
+        64
+      );
+    }
+
+    #[test]
+    fn discovery_documents_must_match_the_issuer_and_use_https() {
+      let issuer = "https://auth.example.com/realms/company";
+      let good = ["https://auth.example.com/auth", "https://auth.example.com/token"];
+      assert!(check_discovery(issuer, issuer, &good, HttpPolicy::LoopbackOnly).is_ok());
+      assert_eq!(
+        check_discovery(issuer, "https://evil.example", &good, HttpPolicy::LoopbackOnly),
+        Err(DiscoveryError::IssuerMismatch)
+      );
+      for bad in [
+        "file://host/share/x.lnk",
+        "search-ms:query=x",
+        "ms-officecmd:x",
+        "javascript:alert(1)",
+        "http://auth.example.com/auth",
+        "https://user:pw@auth.example.com/auth",
+        "not a url",
+      ] {
+        assert_eq!(
+          check_discovery(issuer, issuer, &[bad], HttpPolicy::LoopbackOnly),
+          Err(DiscoveryError::UnsafeEndpoint),
+          "{bad}"
+        );
+      }
+      assert!(is_provider_endpoint(
+        "http://127.0.0.1:8080/auth",
+        HttpPolicy::LoopbackOnly
+      ));
     }
 
     #[test]

@@ -61,6 +61,11 @@ pub struct CheckedServer {
   pub server: StoredServer,
   /// The brand for the confirmation screen; `None` when the brand part is unusable.
   pub maybe_brand: Option<LoginBrand>,
+  /// Where the user will enter their password: show it on the confirmation screen.
+  pub identity_provider_host: String,
+  /// The identity provider lies outside the server's domain: warn on the confirmation screen
+  /// ("signs in through …"); a server can copy another instance's settings.
+  pub is_identity_provider_elsewhere: bool,
 }
 
 /// The account's server and how to sign in to it. `profile_json` is what the app stores; it is
@@ -117,6 +122,8 @@ pub fn check_server_info(
   Ok(CheckedServer {
     server: stored(&checked.profile)?,
     maybe_brand,
+    identity_provider_host: checked.identity_provider_host,
+    is_identity_provider_elsewhere: checked.is_identity_provider_elsewhere,
   })
 }
 
@@ -195,6 +202,8 @@ mod tests {
     let checked = check(200, &answer_json()).unwrap();
     assert_eq!(checked.server.address.origin, "https://team.example.com");
     assert_eq!(checked.server.address.storage_key, "team.example.com");
+    assert_eq!(checked.identity_provider_host, "auth.example.com");
+    assert!(!checked.is_identity_provider_elsewhere);
     assert_eq!(checked.server.scopes, ["openid", "profile", "email"]);
     assert_eq!(checked.maybe_brand.unwrap().display_name, "Example Chat");
     let back = stored_server(checked.server.profile_json.clone()).unwrap();

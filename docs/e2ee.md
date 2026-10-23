@@ -105,6 +105,22 @@ That makes it a second, independent trust anchor:
 Later option: a key transparency log (append-only, auditable) so that a malicious server can't show
 different identity keys to different users.
 
+### 3.1.1 Sign-in through the server's provider (residual risk)
+
+The apps learn the issuer and client ID from the server they were pointed at
+(`GET /api/v1/server-info`). A lookalike server can announce another instance's real settings; an
+existing SSO session then yields an access token for the real instance, which the app sends to the
+lookalike as a bearer token, and the lookalike can use it at the real server until it expires. It gets
+API access as that user (metadata, ciphertext, the ability to post as them), but no device or identity
+keys: message content stays end-to-end encrypted, and new devices still need the existing device or
+the recovery passphrase (§5, §6).
+
+Mitigated by: showing the identity provider's host on the server confirmation, with a warning when it
+is outside the server's domain; discovery documents must match the announced issuer (RFC 8414 §3.3)
+and use https; ID tokens must carry the announced issuer and client (iOS, which reads them); refresh
+tokens are kept per origin, issuer and client. Fixed by binding tokens to the device with DPoP
+(RFC 9449), issue #120.
+
 ### 3.2 Enrollment order and interruptions
 
 Enrollment is a series of requests, and the network can drop between any two of them. The order is

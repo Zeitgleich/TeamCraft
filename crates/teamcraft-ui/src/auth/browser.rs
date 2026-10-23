@@ -14,7 +14,7 @@ use oauth2::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use teamcraft_client_api::server_entry::SERVER_INFO_PATH;
+use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_discovery};
 use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
 
 use super::fetch::fetch;
@@ -63,6 +63,7 @@ struct Tokens {
 
 #[derive(Clone, Debug, Deserialize)]
 struct Discovery {
+  issuer: String,
   authorization_endpoint: String,
   token_endpoint: String,
   #[serde(default, rename = "end_session_endpoint")]
@@ -356,6 +357,20 @@ impl BrowserAuth {
       )));
     }
     let found: Discovery = serde_json::from_slice(&response.body)
+      .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
+    // The page navigates to these endpoints: https only (a `javascript:` one would run in the
+    // page), and the document must be the issuer's own (RFC 8414 §3.3).
+    let mut endpoints = vec![
+      found.authorization_endpoint.as_str(),
+      found.token_endpoint.as_str(),
+    ];
+    endpoints.extend(found.maybe_end_session_endpoint.as_deref());
+    let policy = if cfg!(debug_assertions) {
+      HttpPolicy::Allowed
+    } else {
+      HttpPolicy::LoopbackOnly
+    };
+    check_discovery(&sign_in.issuer, &found.issuer, &endpoints, policy)
       .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
     self.discovery.replace(Some(found.clone()));
     Ok(found)

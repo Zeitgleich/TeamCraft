@@ -51,6 +51,9 @@ struct TokenResponse: Decodable, Equatable {
 struct IdTokenClaims: Equatable {
   let subject: String
   let name: String?
+  let issuer: String?
+  /// `aud` as a list (a single string becomes one entry).
+  let audiences: [String]
 
   init?(jwt: String) {
     let parts = jwt.split(separator: ".")
@@ -61,6 +64,17 @@ struct IdTokenClaims: Equatable {
     else { return nil }
     self.subject = subject
     self.name = (json["name"] as? String) ?? (json["preferred_username"] as? String)
+    self.issuer = json["iss"] as? String
+    if let audience = json["aud"] as? String {
+      self.audiences = [audience]
+    } else {
+      self.audiences = (json["aud"] as? [String]) ?? []
+    }
+  }
+
+  /// Whether the token was issued by `issuer` to `clientId` (OIDC Core §3.1.3.7, steps 2 and 3).
+  func isIssued(by issuer: String, to clientId: String) -> Bool {
+    self.issuer == issuer && audiences.contains(clientId)
   }
 }
 
@@ -75,12 +89,35 @@ struct OidcClient {
   var urlSession: URLSession = .shared
 
   struct Endpoints: Decodable, Equatable {
+    /// The document's `issuer`; must equal the configured one (RFC 8414 §3.3).
+    var issuer: String?
     let authorizationEndpoint: URL
     let tokenEndpoint: URL
 
     enum CodingKeys: String, CodingKey {
+      case issuer
       case authorizationEndpoint = "authorization_endpoint"
       case tokenEndpoint = "token_endpoint"
+    }
+
+    /// https only (plain http to this device in debug builds), and the issuer's own document.
+    func isTrusted(for issuer: URL) -> Bool {
+      self.issuer == issuer.absoluteString
+        && [authorizationEndpoint, tokenEndpoint].allSatisfy(Self.isSafe)
+    }
+
+    static func isSafe(_ url: URL) -> Bool {
+      guard url.user == nil, url.password == nil, let host = url.host, !host.isEmpty else { return false }
+      switch url.scheme?.lowercased() {
+      case "https": return true
+      case "http":
+        #if DEBUG
+          return true
+        #else
+          return ["localhost", "127.0.0.1", "::1"].contains(host)
+        #endif
+      default: return false
+      }
     }
   }
 
@@ -89,7 +126,9 @@ struct OidcClient {
     do {
       let (data, response) = try await urlSession.data(from: url)
       guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw OidcError.discoveryFailed }
-      return try JSONDecoder().decode(Endpoints.self, from: data)
+      let endpoints = try JSONDecoder().decode(Endpoints.self, from: data)
+      guard endpoints.isTrusted(for: issuer) else { throw OidcError.discoveryFailed }
+      return endpoints
     } catch let error as OidcError {
       throw error
     } catch {
@@ -108,7 +147,9 @@ struct OidcClient {
         "code_verifier": verifier,
       ],
       urlSession: urlSession)
-    guard let idToken = response.idToken, let claims = IdTokenClaims(jwt: idToken) else {
+    guard let idToken = response.idToken, let claims = IdTokenClaims(jwt: idToken),
+      claims.isIssued(by: issuer.absoluteString, to: clientId)
+    else {
       throw OidcError.invalidResponse
     }
     return OidcSession(

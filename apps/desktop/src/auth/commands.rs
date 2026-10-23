@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use teamcraft_client_api::remote::ApiMethod;
-use teamcraft_client_api::server_entry::{ServerOrigin, ServerProfile};
+use teamcraft_client_api::server_entry::{ServerOrigin, ServerProfile, is_provider_endpoint};
 use teamcraft_proto::BrandResponse;
 
 use base64::Engine;
@@ -54,11 +54,15 @@ pub struct ServerStateView {
   pub is_locked: bool,
 }
 
-/// A checked server waiting for confirmation, with its brand.
+/// A checked server waiting for confirmation, with its brand and identity provider.
 #[derive(Debug, Serialize)]
 pub struct ServerCheckView {
   pub server: ServerView,
   pub brand: BrandResponse,
+  /// Where the password will be entered; the confirmation shows it.
+  pub identity_provider_host: String,
+  /// The provider lies outside the server's domain: the confirmation warns.
+  pub is_identity_provider_elsewhere: bool,
 }
 
 #[tauri::command]
@@ -110,6 +114,8 @@ pub async fn server_check(
   Ok(ServerCheckView {
     server,
     brand: checked.brand,
+    identity_provider_host: checked.identity_provider_host,
+    is_identity_provider_elsewhere: checked.is_identity_provider_elsewhere,
   })
 }
 
@@ -120,6 +126,7 @@ pub async fn server_confirm(
   servers: State<'_, Arc<ServerState>>,
   service: State<'_, Arc<Service>>,
 ) -> Result<ServerView, CommandError> {
+  refuse_while_signed_in(&service).await?;
   let profile = servers
     .pending
     .lock()
@@ -130,6 +137,15 @@ pub async fn server_confirm(
       kind: "server-entry-not-checked",
       message: "this server was not checked".to_owned(),
     })?;
+  // A stored token of this server with other sign-in settings must not be used any more.
+  if let Some(previous) = servers.directory.profile(&profile.origin)
+    && previous != profile
+  {
+    service
+      .forget_tokens(&DesktopConfig::from_profile(&previous))
+      .await
+      .map_err(CommandError::from)?;
+  }
   servers
     .directory
     .activate(profile.clone())
@@ -155,6 +171,13 @@ pub async fn server_forget(
       message: "the managed configuration does not allow changing the server".to_owned(),
     });
   }
+  refuse_while_signed_in(&service).await?;
+  if let Some(active) = servers.directory.active() {
+    service
+      .forget_tokens(&DesktopConfig::from_profile(&active))
+      .await
+      .map_err(CommandError::from)?;
+  }
   servers.directory.forget_active().map_err(|error| CommandError {
     kind: "server-entry-not-saved",
     message: error.to_string(),
@@ -171,6 +194,10 @@ pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, Comm
 #[tauri::command]
 pub async fn auth_login(app: AppHandle, service: State<'_, Arc<Service>>) -> Result<(), CommandError> {
   let open = move |url: &str| {
+    // Only web addresses reach the OS opener (never `file:`, `search-ms:` and the like).
+    if !is_provider_endpoint(url, HTTP_POLICY) {
+      return Err("the sign-in address is not https".to_owned());
+    }
     app
       .opener()
       .open_url(url, None::<&str>)
@@ -241,4 +268,15 @@ fn view(profile: &ServerProfile) -> ServerView {
     display_name: profile.display_name.clone(),
     has_local_accounts: profile.has_local_accounts,
   }
+}
+
+/// The server can only change while nobody is signed in to it (sign out first).
+async fn refuse_while_signed_in(service: &Service) -> Result<(), CommandError> {
+  if service.is_signed_in().await {
+    return Err(CommandError {
+      kind: "server-entry-signed-in",
+      message: "sign out before changing the server".to_owned(),
+    });
+  }
+  Ok(())
 }

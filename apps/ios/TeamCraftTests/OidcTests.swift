@@ -61,6 +61,37 @@ final class OidcTests: XCTestCase {
     XCTAssertNil(IdTokenClaims(jwt: "not-a-jwt"))
   }
 
+  func testDiscoveryMustBeTheIssuersOwnAndHttps() throws {
+    let issuer = URL(string: "https://id.example.com/realms/team")!
+    let good = OidcClient.Endpoints(
+      issuer: issuer.absoluteString, authorizationEndpoint: URL(string: "https://id.example.com/auth")!,
+      tokenEndpoint: URL(string: "https://id.example.com/token")!)
+    XCTAssertTrue(good.isTrusted(for: issuer))
+    var otherIssuer = good
+    otherIssuer.issuer = "https://evil.example"
+    XCTAssertFalse(otherIssuer.isTrusted(for: issuer))
+    XCTAssertFalse(OidcClient.Endpoints.isSafe(URL(string: "file:///etc/passwd")!))
+    XCTAssertFalse(OidcClient.Endpoints.isSafe(URL(string: "https://user:pw@id.example.com/x")!))
+  }
+
+  func testIdTokensMustBeForThisIssuerAndClient() throws {
+    func jwt(_ claims: [String: Any]) -> String {
+      let payload = try! JSONSerialization.data(withJSONObject: claims)
+      let encoded = payload.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+      return "e30.\(encoded).sig"
+    }
+    let issuer = "https://id.example.com/realms/team"
+    let good = IdTokenClaims(jwt: jwt(["sub": "u1", "iss": issuer, "aud": ["teamcraft", "other"]]))
+    XCTAssertEqual(good?.isIssued(by: issuer, to: "teamcraft"), true)
+    let single = IdTokenClaims(jwt: jwt(["sub": "u1", "iss": issuer, "aud": "teamcraft"]))
+    XCTAssertEqual(single?.isIssued(by: issuer, to: "teamcraft"), true)
+    let foreign = IdTokenClaims(jwt: jwt(["sub": "u1", "iss": "https://evil.example", "aud": "teamcraft"]))
+    XCTAssertEqual(foreign?.isIssued(by: issuer, to: "teamcraft"), false)
+    XCTAssertEqual(single?.isIssued(by: issuer, to: "another-client"), false)
+  }
+
   func testFormEncodingEscapesReservedCharacters() {
     XCTAssertEqual(OidcClient.formEncoded(["b": "x y&z", "a": "1"]), "a=1&b=x%20y%26z")
   }

@@ -34,6 +34,7 @@ use tokio::sync::{Mutex, Notify};
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{
   self, CheckedServer, HttpPolicy, ServerAnswer, ServerCheckError, ServerOrigin, ServerProfile,
+  check_discovery, is_provider_endpoint,
 };
 
 pub use store::{KeyringStore, TokenStore};
@@ -74,6 +75,12 @@ impl DesktopConfig {
       client_id: profile.client_id.clone(),
       scopes: profile.scopes.clone(),
     }
+  }
+
+  /// The keyring entry of this server's refresh token: per origin, issuer and client, so a server
+  /// that announces another identity provider never gets the previous provider's token.
+  pub fn token_key(&self) -> String {
+    format!("{}|{}|{}", self.server_url, self.issuer, self.client_id)
   }
 
   /// The directory name of this server's local data.
@@ -180,6 +187,7 @@ pub struct ApiBytesResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 struct Discovery {
+  issuer: String,
   authorization_endpoint: String,
   token_endpoint: String,
   #[serde(default)]
@@ -275,7 +283,7 @@ impl<S: TokenStore> AuthService<S> {
     let Some(server) = self.active_server() else {
       return Ok(false);
     };
-    let Some(refresh) = self.store.load(&server.server_url).await? else {
+    let Some(refresh) = self.store.load(&server.token_key()).await? else {
       return Ok(false);
     };
     let mut session = self.session.lock().await;
@@ -283,7 +291,7 @@ impl<S: TokenStore> AuthService<S> {
       Ok(()) => Ok(true),
       // The provider rejected the token (expired, revoked, user disabled): forget it.
       Err(AuthError::Denied(_) | AuthError::NotSignedIn) => {
-        self.store.clear(&server.server_url).await?;
+        self.store.clear(&server.token_key()).await?;
         Ok(false)
       },
       Err(other) => Err(other),
@@ -302,6 +310,12 @@ impl<S: TokenStore> AuthService<S> {
       .add_scopes(server.scopes.iter().cloned().map(Scope::new))
       .set_pkce_challenge(challenge)
       .url();
+    // The discovery was checked; check the final URL again right before the OS opens it.
+    if !is_provider_endpoint(url.as_str(), HTTP_POLICY) {
+      return Err(AuthError::InvalidResponse(
+        "the sign-in address is not https".to_owned(),
+      ));
+    }
     open_browser(url.as_str())
       .map_err(|error| AuthError::Unsupported(format!("could not open the browser: {error}")))?;
 
@@ -342,9 +356,9 @@ impl<S: TokenStore> AuthService<S> {
     };
     let refresh = match in_memory {
       Some(token) => Some(token),
-      None => self.store.load(&server.server_url).await?,
+      None => self.store.load(&server.token_key()).await?,
     };
-    self.store.clear(&server.server_url).await?;
+    self.store.clear(&server.token_key()).await?;
     if let (Some(refresh), Some(endpoint)) = (refresh, discovery.and_then(|found| found.end_session_endpoint))
     {
       let form = [
@@ -392,8 +406,10 @@ impl<S: TokenStore> AuthService<S> {
     maybe_body: Option<String>,
   ) -> Result<ApiResponse, AuthError> {
     validate_api_path(path)?;
-    let token = self.access_token().await?;
-    let url = format!("{}{path}", self.server()?.server_url.trim_end_matches('/'));
+    // One read of the server: the token and the URL always belong to the same one.
+    let server = self.server()?;
+    let token = self.access_token(&server).await?;
+    let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
     let mut request = self
       .http
       .request(reqwest_method(method), url)
@@ -425,8 +441,9 @@ impl<S: TokenStore> AuthService<S> {
     maybe_body: Option<(String, Vec<u8>)>,
   ) -> Result<ApiBytesResponse, AuthError> {
     validate_api_path(path)?;
-    let token = self.access_token().await?;
-    let url = format!("{}{path}", self.server()?.server_url.trim_end_matches('/'));
+    let server = self.server()?;
+    let token = self.access_token(&server).await?;
+    let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
     let mut request = self
       .http
       .request(reqwest_method(method), url)
@@ -460,12 +477,33 @@ impl<S: TokenStore> AuthService<S> {
   /// The current access token as text, refreshed when needed. For the in-process client core only:
   /// the webview never gets it.
   pub async fn bearer_token(&self) -> Result<String, AuthError> {
-    Ok(self.access_token().await?.expose_secret().to_owned())
+    Ok(self.server_bearer_token().await?.1)
   }
 
-  async fn access_token(&self) -> Result<SecretString, AuthError> {
+  /// `(server origin, access token)`: the token with the server it is for.
+  pub async fn server_bearer_token(&self) -> Result<(String, String), AuthError> {
     let server = self.server()?;
+    let token = self.access_token(&server).await?;
+    Ok((server.server_url, token.expose_secret().to_owned()))
+  }
+
+  /// Whether a session (tokens in memory) exists.
+  pub async fn is_signed_in(&self) -> bool {
+    self.session.lock().await.maybe_tokens.is_some()
+  }
+
+  /// Deletes the stored refresh token of `server` (leaving it, or its sign-in settings changed).
+  pub async fn forget_tokens(&self, server: &DesktopConfig) -> Result<(), AuthError> {
+    self.store.clear(&server.token_key()).await
+  }
+
+  /// The access token of `server`, refreshed when needed; refused when the active server is
+  /// another one by now.
+  async fn access_token(&self, server: &DesktopConfig) -> Result<SecretString, AuthError> {
     let mut session = self.session.lock().await;
+    if self.active_server().as_ref() != Some(server) {
+      return Err(AuthError::NotSignedIn);
+    }
     let needs_refresh = match &session.maybe_tokens {
       None => return Err(AuthError::NotSignedIn),
       Some(tokens) => tokens.expires_at.saturating_duration_since(Instant::now()) <= REFRESH_MARGIN,
@@ -481,7 +519,7 @@ impl<S: TokenStore> AuthService<S> {
             .map(|token| SecretString::from(token.expose_secret().to_owned()))
         })
         .ok_or(AuthError::NotSignedIn)?;
-      if let Err(error) = self.refresh_with(&mut session, &server, refresh).await {
+      if let Err(error) = self.refresh_with(&mut session, server, refresh).await {
         if matches!(error, AuthError::Denied(_) | AuthError::NotSignedIn) {
           session.maybe_tokens = None;
         }
@@ -535,7 +573,7 @@ impl<S: TokenStore> AuthService<S> {
       .map(|token| token.secret().clone())
       .or(previous);
     if let Some(refresh) = &refresh {
-      self.store.save(&server.server_url, refresh).await?;
+      self.store.save(&server.token_key(), refresh).await?;
     }
     let lifetime = response.expires_in().unwrap_or(Duration::from_secs(60));
     session.maybe_tokens = Some(Tokens {
@@ -582,6 +620,15 @@ impl<S: TokenStore> AuthService<S> {
     let found: Discovery = response
       .json()
       .await
+      .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
+    // The endpoints reach the system browser and the token requests: https only, and the
+    // document must be the configured issuer's (RFC 8414 §3.3).
+    let mut endpoints = vec![
+      found.authorization_endpoint.as_str(),
+      found.token_endpoint.as_str(),
+    ];
+    endpoints.extend(found.end_session_endpoint.as_deref());
+    check_discovery(&server.issuer, &found.issuer, &endpoints, HTTP_POLICY)
       .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
     session.maybe_discovery = Some(found.clone());
     Ok(found)
@@ -756,6 +803,26 @@ mod tests {
     for bad in bad_paths {
       assert!(validate_api_path(bad).is_err(), "{bad}");
     }
+  }
+
+  #[test]
+  fn refresh_tokens_are_kept_per_server_issuer_and_client() {
+    let config = DesktopConfig {
+      server_url: "https://team.example.com".into(),
+      issuer: "https://auth.example.com/realms/a".into(),
+      client_id: "teamcraft".into(),
+      scopes: vec!["openid".into()],
+    };
+    let other_issuer = DesktopConfig {
+      issuer: "https://evil.example".into(),
+      ..config.clone()
+    };
+    let other_client = DesktopConfig {
+      client_id: "other".into(),
+      ..config.clone()
+    };
+    assert_ne!(config.token_key(), other_issuer.token_key());
+    assert_ne!(config.token_key(), other_client.token_key());
   }
 
   #[test]

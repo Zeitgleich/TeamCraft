@@ -72,17 +72,20 @@ impl ServerState {
   }
 
   /// The account to start with: the active one, unless the managed configuration forbids its
-  /// server (it is forgotten then, and the managed server is offered instead).
-  pub fn startup_account(&self) -> Option<ServerProfile> {
-    let active = self.directory.active()?;
+  /// server. A forbidden one is forgotten and returned as `Err`, so its tokens can be deleted;
+  /// the managed server is offered instead.
+  pub fn startup_account(&self) -> Result<Option<ServerProfile>, ServerProfile> {
+    let Some(active) = self.directory.active() else {
+      return Ok(None);
+    };
     if self.managed.allows(&active.origin) {
-      return Some(active);
+      return Ok(Some(active));
     }
     tracing::info!("the managed configuration does not allow the stored server; forgetting it");
     if let Err(error) = self.directory.forget_active() {
       tracing::warn!(%error, "could not update the account list");
     }
-    None
+    Err(active)
   }
 }
 
@@ -119,6 +122,16 @@ impl ServerDirectory {
       .cloned()
   }
 
+  /// The stored profile of `origin`, if any.
+  pub fn profile(&self, origin: &ServerOrigin) -> Option<ServerProfile> {
+    self
+      .lock()
+      .accounts
+      .iter()
+      .find(|profile| &profile.origin == origin)
+      .cloned()
+  }
+
   /// Stores `profile` (replacing an older one of the same server) and makes it the active account.
   pub fn activate(&self, profile: ServerProfile) -> std::io::Result<()> {
     let mut accounts = self.lock();
@@ -149,6 +162,7 @@ impl ManagedServer {
   /// environment, then a default compiled into a self-built app.
   pub fn load() -> Self {
     let from_file = system_config_path()
+      .filter(|path| is_admin_owned(path))
       .and_then(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
       .and_then(
         |(path, bytes)| match serde_json::from_slice::<ManagedFile>(&bytes) {
@@ -210,15 +224,44 @@ fn save(path: &Path, accounts: &Accounts) -> std::io::Result<()> {
   std::fs::rename(&temporary, path)
 }
 
-/// Where administrators put `desktop.json` on each platform.
+/// Where administrators put `desktop.json`. Not on Windows: any user may create folders in
+/// `%ProgramData%`, so a file there proves nothing; Windows gets the policy registry key (#220).
 fn system_config_path() -> Option<PathBuf> {
   if cfg!(target_os = "windows") {
-    std::env::var_os("ProgramData").map(|base| PathBuf::from(base).join("TeamCraft").join(MANAGED_FILE))
+    None
   } else if cfg!(target_os = "macos") {
     Some(PathBuf::from("/Library/Application Support/TeamCraft").join(MANAGED_FILE))
   } else {
     Some(PathBuf::from("/etc/teamcraft").join(MANAGED_FILE))
   }
+}
+
+/// Only a file root owns and only root can change counts: otherwise any local user could send
+/// every user of the computer to their server. An untrusted file is ignored with a warning.
+#[cfg(unix)]
+fn is_admin_owned(path: &Path) -> bool {
+  use std::os::unix::fs::MetadataExt;
+
+  let trusted = |metadata: &std::fs::Metadata| metadata.uid() == 0 && metadata.mode() & 0o022 == 0;
+  let Ok(metadata) = std::fs::metadata(path) else {
+    // No file: nothing to trust or warn about.
+    return false;
+  };
+  let is_dir_trusted = path
+    .parent()
+    .and_then(|dir| std::fs::metadata(dir).ok())
+    .is_some_and(|dir| trusted(&dir));
+  if trusted(&metadata) && is_dir_trusted {
+    true
+  } else {
+    tracing::warn!(path = %path.display(), "ignoring a managed configuration that other users can change");
+    false
+  }
+}
+
+#[cfg(not(unix))]
+fn is_admin_owned(_path: &Path) -> bool {
+  false
 }
 
 #[cfg(test)]

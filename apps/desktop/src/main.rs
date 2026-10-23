@@ -81,8 +81,17 @@ fn main() -> anyhow::Result<()> {
         ServerDirectory::load(&core::commands::base_dir(app.handle())?),
         ManagedServer::load(),
       ));
-      if let Some(profile) = servers.startup_account() {
-        tauri::async_runtime::block_on(service.set_server(Some(DesktopConfig::from_profile(&profile))));
+      match servers.startup_account() {
+        Ok(Some(profile)) => {
+          tauri::async_runtime::block_on(service.set_server(Some(DesktopConfig::from_profile(&profile))));
+        },
+        Ok(None) => {},
+        Err(forbidden) => {
+          let config = DesktopConfig::from_profile(&forbidden);
+          if let Err(error) = tauri::async_runtime::block_on(service.forget_tokens(&config)) {
+            tracing::warn!(%error, "could not delete the token of a forbidden server");
+          }
+        },
       }
       app.manage(servers);
       let emitter = app.handle().clone();
@@ -249,7 +258,7 @@ fn watch_wake(app: &tauri::AppHandle) {
 fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>, tokens: TokenCache) {
   tauri::async_runtime::spawn(async move {
     loop {
-      tokens.set(service.bearer_token().await.ok());
+      tokens.set(service.server_bearer_token().await.ok());
       tokio::time::sleep(TOKEN_REFRESH).await;
     }
   });

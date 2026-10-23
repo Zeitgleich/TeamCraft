@@ -61,25 +61,46 @@ pub struct CoreConfig {
   pub argon2: Argon2Settings,
 }
 
-/// The newest access token, kept fresh by the login code and read synchronously by the core.
+/// The newest access token with the server (origin) it belongs to, kept fresh by the login code
+/// and read synchronously by the core.
 #[derive(Clone, Default)]
-pub struct TokenCache(Arc<Mutex<Option<String>>>);
+pub struct TokenCache(Arc<Mutex<Option<(String, String)>>>);
 
 impl TokenCache {
-  pub fn set(&self, token: Option<String>) {
+  /// `(server origin, access token)`, or nothing while signed out.
+  pub fn set(&self, maybe_token: Option<(String, String)>) {
     if let Ok(mut slot) = self.0.lock() {
-      *slot = token;
+      *slot = maybe_token;
+    }
+  }
+
+  /// The tokens of one server: a core never sends another server's token, even right after the
+  /// user switched servers.
+  pub fn for_server(&self, server_url: &str) -> ServerTokens {
+    ServerTokens {
+      cache: self.clone(),
+      server_url: server_url.to_owned(),
     }
   }
 }
 
-impl AccessTokenSource for TokenCache {
+/// [`TokenCache`] limited to one server.
+#[derive(Clone)]
+pub struct ServerTokens {
+  cache: TokenCache,
+  server_url: String,
+}
+
+impl AccessTokenSource for ServerTokens {
   fn access_token(&self) -> Result<String, ApiError> {
     self
+      .cache
       .0
       .lock()
       .ok()
       .and_then(|slot| slot.clone())
+      .filter(|(server_url, _)| *server_url == self.server_url)
+      .map(|(_, token)| token)
       .ok_or_else(|| ApiError::Token("not signed in".to_owned()))
   }
 }
@@ -119,7 +140,7 @@ pub struct CallPreparation {
   pub devices: Vec<VerifiedDevice>,
 }
 
-type Api = HttpServerApi<TokenCache>;
+type Api = HttpServerApi<ServerTokens>;
 type Gateway = <Api as ServerApi>::Gateway;
 type Store = Arc<SqlCipherStore>;
 
@@ -554,7 +575,10 @@ impl Core {
   }
 
   fn api(&self) -> Api {
-    HttpServerApi::new(self.config.server_url.clone(), self.tokens.clone())
+    HttpServerApi::new(
+      self.config.server_url.clone(),
+      self.tokens.for_server(&self.config.server_url),
+    )
   }
 
   async fn handle(&mut self, request: Request) {
@@ -1071,4 +1095,20 @@ async fn lock_store(path: &std::path::Path) -> Result<StoreLock, String> {
     }
   }
   StoreLock::acquire(path).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_core_never_gets_the_token_of_another_server() {
+    let cache = TokenCache::default();
+    let tokens = cache.for_server("https://a.example.com");
+    assert!(tokens.access_token().is_err());
+    cache.set(Some(("https://b.example.com".into(), "token-b".into())));
+    assert!(tokens.access_token().is_err());
+    cache.set(Some(("https://a.example.com".into(), "token-a".into())));
+    assert_eq!(tokens.access_token().ok().as_deref(), Some("token-a"));
+  }
 }

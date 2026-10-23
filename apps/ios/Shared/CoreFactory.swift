@@ -86,8 +86,9 @@ struct CoreFactory {
   }
 
   /// One key per server and account, so the same subject on two servers never shares a key.
+  /// Storage keys never contain `|`, so the name splits back unambiguously.
   static func databaseKeyName(storageKey: String, account: String) -> String {
-    "\(storageKey).\(account)"
+    "\(storageKey)|\(account)"
   }
 }
 

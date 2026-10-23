@@ -27,7 +27,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -133,6 +135,22 @@ fun ConfirmServerScreen(
       style = MaterialTheme.typography.bodyLarge,
       textAlign = TextAlign.Center,
     )
+    Text(
+      stringResource(R.string.server_confirm_provider, checked.identityProviderHost),
+      style = MaterialTheme.typography.bodyMedium,
+      textAlign = TextAlign.Center,
+    )
+    if (checked.isIdentityProviderElsewhere) {
+      // A server can copy another instance's sign-in settings; a provider outside the server's
+      // domain gets an explicit warning (docs/e2ee.md "Sign-in through the server's provider").
+      Text(
+        stringResource(R.string.server_confirm_provider_elsewhere, checked.identityProviderHost),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+      )
+    }
     Text(
       stringResource(R.string.server_confirm_hint),
       style = MaterialTheme.typography.bodyMedium,
