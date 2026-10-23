@@ -25,13 +25,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     // Simulators and unsigned builds have no APNs; the app works without push.
   }
 
-  /// The app is in the foreground: show a banner unless that conversation is on screen.
+  /// Silent (`content-available`) pushes: a `dismiss` wake-up after something was read or a ring
+  /// ended on another device (notifications.md, "Mobile push delivery").
+  func application(
+    _ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]
+  ) async -> UIBackgroundFetchResult {
+    await AppModel.shared.handleBackgroundPush(userInfo)
+  }
+
+  /// The app is in the foreground: show a banner unless that conversation is on screen; a push the
+  /// extension couldn't open (the app held the store) is opened by the app.
   func userNotificationCenter(
     _ center: UNUserNotificationCenter, willPresent notification: UNNotification
   ) async -> UNNotificationPresentationOptions {
-    let conversationId = notification.request.content.userInfo[NotificationCategories.conversationKey] as? String
-    let visible = await MainActor.run { AppModel.shared.visibleConversationId }
-    return conversationId != nil && conversationId == visible ? [] : [.banner, .sound]
+    await AppModel.shared.presentation(for: notification)
   }
 
   func userNotificationCenter(
@@ -43,6 +50,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     let tag = info[NotificationAuthenticator.tagKey] as? String
     await AppModel.shared.handle(
       notificationAction: response.actionIdentifier, conversationId: conversationId, tag: tag,
-      replyText: reply)
+      replyText: reply, maybeThreadId: info[NotificationKeys.thread] as? String,
+      notificationId: response.notification.request.identifier)
   }
 }
