@@ -15,7 +15,7 @@ work stream).
 | After the first app switch every send failed ("Something went wrong") and the text was lost: `Engine::start` dropped the running client when called again | Android, iOS | done (PR #70) |
 | Sign-in against the dev stack always failed: AppAuth rejects ID tokens of a plain-HTTP issuer         | Android      | done (PR #70) |
 | Downloads finished but the message kept its progress bar: transfers end without a change event       | Android      | done (polled like iOS) |
-| 16 KB page size warning on Android 15+ (`libjnidispatch.so`, CameraX libs not aligned) in the old toolchain; recheck after the Gradle 9 / JNA 5.19 upgrade | Android | open: Play requirement |
+| 16 KB page size: all native libraries are 16 KB-aligned since the Gradle 9 / NDK 28 / JNA 5.19 upgrade (`llvm-readelf`) | Android | done |
 
 ## Getting in
 
@@ -77,8 +77,10 @@ work stream).
 | Mention highlighting in message text                                                      | iOS          | done   |
 | Emoji autocomplete (`:smile:`)                                                            | Android, iOS | open   |
 | Voice messages                                                                            | Android, iOS | open: core |
-| Image grid for several images in one message                                              | Android, iOS | open   |
-| Save an image to the gallery (the share sheet covers it for now)                          | Android      | open   |
+| Image grid for several images in one message                                              | Android      | done   |
+| Image grid for several images in one message                                              | iOS          | open   |
+| Save an image to the gallery (Pictures/TeamCraft, Android 10+)                            | Android      | done   |
+| Picked attachments were lost when looking at another conversation before sending          | Android      | done   |
 | A message the server rejected showed "Sending…" forever; now "Not sent" with Retry/Delete | Android, iOS | done   |
 
 ## Sharing and navigation
@@ -91,8 +93,8 @@ work stream).
 | Message links in messages open the conversation at the message (in the app)        | Android      | done   |
 | Message links in messages open the conversation or thread at the message           | iOS          | done   |
 | Message links from other apps (`teamcraft:` deep links; decide with the launch-token rule) | Android, iOS | open |
-| Tablet / foldable two-pane layout                                                  | Android      | open   |
-| Open conversation lost after process death                                         | Android      | open   |
+| Tablet / foldable / landscape: list next to the open conversation                  | Android      | done   |
+| Open conversation after process death (checked: the navigation state restores it) | Android      | done   |
 
 ## Security and settings
 
@@ -102,6 +104,6 @@ work stream).
 | App switcher shows chats                                                         | iOS          | done (option) |
 | Settings are one long scrolling page; group into sub-pages                       | Android      | open   |
 | Dynamic color (Material You) as an option next to the TeamCraft theme             | Android      | open   |
-| Font scale: fixed heights cut text at 200 % (badges, chips)                       | Android      | open   |
 | After a server restart clients never got the live gateway back (stale session resumed forever) | all | done (#92) |
+| Font scale 200 %: chat list, conversation, composer checked, nothing cut off      | Android      | done   |
 | No Android logs from the Rust core (`tracing` goes nowhere on Android)            | Android      | open: made the send bug hard to find |

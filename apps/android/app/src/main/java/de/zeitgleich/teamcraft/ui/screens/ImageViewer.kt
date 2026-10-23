@@ -1,6 +1,15 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import android.content.Context
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.TextButton
+import androidx.annotation.RequiresApi
+import android.widget.Toast
+import android.provider.MediaStore
+import android.os.Environment
+import android.os.Build
+import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -55,6 +64,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.R
 
+/** The folder under Pictures that saved images go to. */
+private const val GALLERY_FOLDER = "TeamCraft"
+
 /** Zoom limits of the viewer; double tap toggles between 1× and this. */
 private const val MAX_ZOOM = 5f
 private const val DOUBLE_TAP_ZOOM = 2.5f
@@ -69,6 +81,7 @@ data class ViewedImage(val path: String, val fileName: String, val mediaType: St
 @Composable
 fun ImageViewer(image: ViewedImage, onDismiss: () -> Unit) {
   val context = LocalContext.current
+  val scope = rememberCoroutineScope()
   val configuration = LocalConfiguration.current
   val density = LocalDensity.current
   val maxSidePx = with(density) { maxOf(configuration.screenWidthDp, configuration.screenHeightDp).dp.roundToPx() }
@@ -129,12 +142,46 @@ fun ImageViewer(image: ViewedImage, onDismiss: () -> Unit) {
           style = MaterialTheme.typography.titleSmall,
           modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          TextButton(onClick = { scope.launch { saveToGallery(context, image) } }) {
+            Text(stringResource(R.string.image_save), color = Color.White)
+          }
+        }
         IconButton(onClick = { shareFile(context, File(image.path), image.mediaType) }) {
           Icon(Icons.Filled.Share, contentDescription = stringResource(R.string.share), tint = Color.White)
         }
       }
     }
   }
+}
+
+/**
+ * Copies the decrypted image into the shared Pictures/TeamCraft folder, the user's explicit choice
+ * to take it out of the app. Android 10+ (no storage permission needed there).
+ */
+@RequiresApi(Build.VERSION_CODES.Q)
+private suspend fun saveToGallery(context: Context, image: ViewedImage) {
+  val isSaved = withContext(Dispatchers.IO) {
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+      put(MediaStore.Images.Media.DISPLAY_NAME, image.fileName)
+      put(MediaStore.Images.Media.MIME_TYPE, image.mediaType)
+      put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$GALLERY_FOLDER")
+      put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return@withContext false
+    val isCopied = runCatching {
+      resolver.openOutputStream(uri)?.use { output -> File(image.path).inputStream().use { it.copyTo(output) } } != null
+    }.getOrDefault(false)
+    if (isCopied) {
+      resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+    } else {
+      // A half-written entry would show as a broken picture.
+      resolver.delete(uri, null, null)
+    }
+    isCopied
+  }
+  Toast.makeText(context, if (isSaved) R.string.image_saved else R.string.image_save_failed, Toast.LENGTH_SHORT).show()
 }
 
 /** Hands a decrypted file to another app (send to, save to files) through the FileProvider. */

@@ -98,6 +98,7 @@ import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
 import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
 import de.zeitgleich.teamcraft.ui.typingLine
+import de.zeitgleich.teamcraft.ui.entry
 import de.zeitgleich.teamcraft.ui.sensitiveClip
 import uniffi.teamcraft_ffi.needsChannelConfirmation
 
@@ -693,7 +694,8 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
   val context = LocalContext.current
   var text by rememberSaveable(conversationId, maybeThread) { mutableStateOf("") }
   var isDraftLoaded by remember(conversationId, maybeThread) { mutableStateOf(false) }
-  var files by remember(conversationId, maybeThread) { mutableStateOf<List<PickedFile>>(emptyList()) }
+  // Kept in the view model: picked files survive looking at another conversation (until sent).
+  var files by viewModel.pickedFiles.entry("$conversationId/${maybeThread.orEmpty()}", emptyList())
   var priority by rememberSaveable(conversationId) { mutableStateOf("normal") }
   var wantsAcknowledgement by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isSilent by rememberSaveable(conversationId) { mutableStateOf(false) }

@@ -24,6 +24,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -454,7 +457,11 @@ private fun MessageRow(
         MessageText(message, snapshot, onOpenPermalink)
     }
     if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
-    maybeExtras?.files?.forEach { file -> FileAttachment(file, onOpenFile) }
+    val files = maybeExtras?.files.orEmpty()
+    // Several pictures in one message: a grid instead of a long column of large previews.
+    val gridImages = files.filter { it.isImage && it.maybeThumbnailPng != null }.takeIf { it.size >= 2 }.orEmpty()
+    if (gridImages.isNotEmpty()) ImageGrid(gridImages, onOpenFile)
+    files.filterNot { it in gridImages }.forEach { file -> FileAttachment(file, onOpenFile) }
     maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it) }
     if (message.reactions.isNotEmpty()) {
       FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -669,6 +676,37 @@ private fun FileAttachment(file: FileInfo, onOpen: (FileInfo) -> Unit) {
     }
     if (file.transfer.state == "failed") {
       Text(stringResource(R.string.file_failed), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+    }
+  }
+}
+
+/** Square tiles, two per row; a tap opens the picture like a single one. */
+@Composable
+private fun ImageGrid(images: List<FileInfo>, onOpen: (FileInfo) -> Unit) {
+  Column(Modifier.padding(top = 4.dp).widthIn(max = 280.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    for (row in images.chunked(2)) {
+      Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (image in row) {
+          val maybeThumbnail = rememberThumbnail(image.maybeThumbnailPng)
+          Box(
+            Modifier
+              .weight(1f)
+              .aspectRatio(1f)
+              .clip(RoundedCornerShape(8.dp))
+              .background(MaterialTheme.colorScheme.surfaceVariant)
+              .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(image) },
+          ) {
+            maybeThumbnail?.let {
+              Image(it, contentDescription = image.fileName, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            }
+            image.transfer.maybeProgress?.let { progress ->
+              LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter))
+            }
+          }
+        }
+        // An odd last picture keeps its tile size.
+        if (row.size == 1) Spacer(Modifier.weight(1f))
+      }
     }
   }
 }

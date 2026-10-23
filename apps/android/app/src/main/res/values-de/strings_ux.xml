@@ -74,4 +74,8 @@
   <string name="typing_two">%1$s und %2$s schreiben …</string>
   <string name="typing_several">Mehrere Personen schreiben …</string>
   <string name="share_typing">Anderen zeigen, wenn ich schreibe</string>
+  <string name="no_conversation_selected">Wähle eine Unterhaltung.</string>
+  <string name="image_save">Speichern</string>
+  <string name="image_saved">In Bilder/TeamCraft gespeichert</string>
+  <string name="image_save_failed">Das Bild konnte nicht gespeichert werden.</string>
 </resources>
