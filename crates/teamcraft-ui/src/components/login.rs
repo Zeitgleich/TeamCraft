@@ -41,8 +41,8 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
       SessionState::Checking => view! { <CheckingScreen /> }.into_any(),
       SessionState::SignedOut(problem) => view! { <LoginScreen problem=problem control=control /> }.into_any(),
       SessionState::SigningIn => view! { <SigningInScreen control=control /> }.into_any(),
-      SessionState::NeedsEnrollment { me, has_existing_identity } => {
-        view! { <EnrollScreen name=me.display_name has_existing_identity=has_existing_identity control=control /> }.into_any()
+      SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost } => {
+        view! { <EnrollScreen name=me.display_name has_existing_identity=has_existing_identity was_data_lost=was_data_lost control=control /> }.into_any()
       },
       SessionState::NeedsDeviceSetup(me) => view! { <WelcomeScreen name=me.display_name control=control /> }.into_any(),
       SessionState::Ready(me) => view! { <DataGate me=me settings=settings control=control /> }.into_any(),
@@ -361,7 +361,12 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
 /// First run on this device (desktop): create the encryption keys, or recover them when the account
 /// already has some. The passphrase wraps the key backup (e2ee.md §6.2).
 #[component]
-fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionControl) -> impl IntoView {
+fn EnrollScreen(
+  name: String,
+  has_existing_identity: bool,
+  was_data_lost: bool,
+  control: SessionControl,
+) -> impl IntoView {
   let i18n = use_i18n();
   let is_linking = RwSignal::new(false);
   let name = StoredValue::new(name);
@@ -401,6 +406,12 @@ fn EnrollScreen(name: String, has_existing_identity: bool, control: SessionContr
     <Show when=move || !is_linking.get() fallback=|| ()>
     <AuthFrame>
       <h1 translate="no">{move || i18n.t_with("enroll-title", &[("name", &name.get_value())])}</h1>
+      {was_data_lost.then(|| view! {
+        <div class="auth-alert" role="alert">
+          <Icon name=IconName::Alert />
+          <p>{move || i18n.t("enroll-data-lost")}</p>
+        </div>
+      })}
       <p class="muted-text">
         {move || if has_existing_identity { i18n.t("enroll-recover-subtitle") } else { i18n.t("enroll-new-subtitle") }}
       </p>

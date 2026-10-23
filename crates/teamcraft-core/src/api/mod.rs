@@ -45,7 +45,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
-use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse};
+use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
@@ -359,6 +359,8 @@ pub trait ServerApi {
   fn notification_settings(&self) -> impl Future<Output = Result<NotificationSettings, ApiError>>;
   /// How the server reaches its push gateway (`GET /push/gateway`), for sealing device tokens.
   fn push_gateway(&self) -> impl Future<Output = Result<PushGatewayResponse, ApiError>>;
+  /// The key browsers subscribe to Web Push with (`GET /push/web-key`).
+  fn web_push_key(&self) -> impl Future<Output = Result<WebPushKeyResponse, ApiError>>;
   /// The public information of a push gateway (`GET /v1/info`, no account): its token key. Asked
   /// of the gateway itself, never through the server, so a server can't substitute a key.
   fn gateway_info(&self, gateway_url: &str) -> impl Future<Output = Result<GatewayInfoResponse, ApiError>>;

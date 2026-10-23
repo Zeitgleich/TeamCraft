@@ -222,7 +222,8 @@ async fn a_second_device_is_linked_with_a_code_and_confirmed_on_the_first() {
   assert!(matches!(
     second.status().await,
     CoreStatus::NeedsEnrollment {
-      has_existing_identity: true
+      has_existing_identity: true,
+      ..
     }
   ));
 

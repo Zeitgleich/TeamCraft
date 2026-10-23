@@ -10,6 +10,10 @@
 //   - keeps running the previous verified version if a new one does not verify, and tells the pages.
 // A build without a pinned key (development) skips all of this and says so.
 //
+// Updates. A verified update waits until the user reloads (the page offers it) or every tab closed;
+// it never takes over a page on its own. Each page is served from the release it was loaded with, and
+// a release's cache is kept while a page still uses it, so a page never mixes two releases.
+//
 // Push. The Rust half of the worker (teamcraft-web-sw: opens the sealed wake-up, builds the
 // notification) is built by trunk; scripts/finish-sw.sh inlines its JS glue at the end of this file and
 // names its wasm file in PUSH_WASM. The wasm is a file of the signed release, so it is only ever read
@@ -26,10 +30,18 @@ const CACHE_PREFIX = 'teamcraft-release-';
 const PARALLEL_DOWNLOADS = 4;
 
 const STATE_CACHE = 'teamcraft-sw-state';
+// The verified status of a release that is installed but not active yet; it becomes `/state` on
+// activation, so the running worker, restarted meanwhile, keeps serving its own release.
+const PENDING_STATE = '/pending';
 const PUSH_CONFIG_CACHE = 'teamcraft-push-config';
 const PUSH_WASM = '__PUSH_WASM__';
 
 let status = { state: IS_PINNED ? 'pending' : 'unsigned', version: '', key_fingerprint: '', reason: '' };
+// Which release each page was loaded with (client ID -> { version, at }), and releases that were
+// active once.
+let releases = { clients: {}, retired: [] };
+// A page is listed before the browser reports it as a client; until then it counts as alive.
+const NEW_CLIENT_GRACE_MS = 60 * 1000;
 // A worker the browser stopped and started again has forgotten what it verified; the result is kept
 // in a cache and read back before the first request is answered.
 const restored = restoreStatus();
@@ -42,10 +54,22 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
       await restored;
-      const keep = status.version ? CACHE_PREFIX + status.version : null;
-      for (const name of await caches.keys()) {
-        if (name.startsWith(CACHE_PREFIX) && name !== keep) await caches.delete(name);
+      // The previous worker kept recording pages while this one waited.
+      await restoreReleases();
+      const previous = status.version;
+      await adoptPendingStatus();
+      if (previous && previous !== status.version && !releases.retired.includes(previous)) {
+        releases.retired.push(previous);
       }
+      // Caches of releases that were never active (a failed install) go now; retired ones only once
+      // no page uses them.
+      for (const name of await caches.keys()) {
+        const version = name.slice(CACHE_PREFIX.length);
+        if (name.startsWith(CACHE_PREFIX) && version !== status.version && !releases.retired.includes(version)) {
+          await caches.delete(name);
+        }
+      }
+      await pruneReleases();
       await self.clients.claim();
       await broadcast();
     })(),
@@ -56,7 +80,10 @@ self.addEventListener('message', (event) => {
   // Only pages of this origin talk to the worker; anything else is ignored.
   if (event.origin !== self.location.origin || !event.source) return;
   const data = event.data || {};
-  if (data.type === 'status') {
+  if (data.type === 'skip_waiting') {
+    // The user chose to reload into the new release (sent to the waiting worker).
+    event.waitUntil(self.skipWaiting());
+  } else if (data.type === 'status') {
     event.waitUntil(restored.then(() => event.source.postMessage(statusMessage())));
   } else if (data.type === 'push_probe') {
     // Whether the push code loads (tests, diagnostics): answers { type: 'push', ready, reason }.
@@ -77,32 +104,92 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/') || url.pathname === '/sw.js' || url.pathname === '/release.json') return;
   event.respondWith(
-    restored.then(() => (status.state === 'verified' ? fromVerifiedCache(request, url) : fetch(request))),
+    restored.then(() => (status.state === 'verified' ? fromVerifiedCache(event, url) : fetch(request))),
   );
 });
 
 async function restoreStatus() {
   if (!IS_PINNED) return;
   try {
-    const hit = await (await caches.open(STATE_CACHE)).match('/state');
+    const state = await caches.open(STATE_CACHE);
+    const hit = await state.match('/state');
     if (hit) status = await hit.json();
+    await restoreReleases();
   } catch (error) {
     // No stored state: the worker serves from the network until the next verified install.
   }
 }
 
-async function saveStatus() {
-  await (await caches.open(STATE_CACHE)).put('/state', new Response(JSON.stringify(status)));
+async function restoreReleases() {
+  try {
+    const known = await (await caches.open(STATE_CACHE)).match('/releases');
+    if (known) releases = await known.json();
+  } catch (error) {
+    // Unknown pages only keep old releases longer.
+  }
 }
 
-async function fromVerifiedCache(request, url) {
-  const cache = await caches.open(CACHE_PREFIX + status.version);
-  // Every page route (/, /meeting/<id>, /f/<id>) is the same app shell.
-  const target = request.mode === 'navigate' ? '/index.html' : url.pathname;
-  const hit = await cache.match(target);
-  if (hit) return hit;
-  // Not part of the signed release: nothing the app needs. Let it fail instead of trusting the network.
+async function saveState(path, value) {
+  await (await caches.open(STATE_CACHE)).put(path, new Response(JSON.stringify(value)));
+}
+
+// On activation: the release this worker installed becomes the one it serves.
+async function adoptPendingStatus() {
+  const state = await caches.open(STATE_CACHE);
+  const pending = await state.match(PENDING_STATE);
+  if (!pending) return;
+  status = await pending.json();
+  await saveState('/state', status);
+  await state.delete(PENDING_STATE);
+}
+
+async function fromVerifiedCache(event, url) {
+  const request = event.request;
+  // Every page route (/, /meeting/<id>, /f/<id>) is the same app shell, of the current release.
+  if (request.mode === 'navigate') {
+    if (event.resultingClientId) event.waitUntil(rememberClient(event.resultingClientId));
+    const shell = await (await caches.open(CACHE_PREFIX + status.version)).match('/index.html');
+    return shell || notInRelease();
+  }
+  // Everything else from the release the page was loaded with; a page from before this worker
+  // tracked releases may find its file in a retired release.
+  const known = releases.clients[event.clientId];
+  const versions = known ? [known.version] : [status.version, ...releases.retired.slice().reverse()];
+  for (const candidate of versions) {
+    const hit = await (await caches.open(CACHE_PREFIX + candidate)).match(url.pathname);
+    if (hit) return hit;
+  }
+  return notInRelease();
+}
+
+// Not part of the signed release: nothing the app needs. Let it fail instead of trusting the network.
+function notInRelease() {
   return new Response('not part of the signed release', { status: 404 });
+}
+
+async function rememberClient(clientId) {
+  releases.clients[clientId] = { version: status.version, at: Date.now() };
+  await pruneReleases();
+}
+
+// Forgets pages that are gone and deletes retired releases no page uses any more. Pages whose release
+// is unknown (loaded before this worker tracked releases) keep every retired release alive.
+async function pruneReleases() {
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const live = new Set(windows.map((client) => client.id));
+  const now = Date.now();
+  for (const [id, known] of Object.entries(releases.clients)) {
+    if (!live.has(id) && now - known.at > NEW_CLIENT_GRACE_MS) delete releases.clients[id];
+  }
+  const hasUnknown = windows.some((client) => !(client.id in releases.clients));
+  const used = new Set(Object.values(releases.clients).map((known) => known.version));
+  if (!hasUnknown) {
+    for (const version of releases.retired.filter((retired) => !used.has(retired))) {
+      await caches.delete(CACHE_PREFIX + version);
+    }
+    releases.retired = releases.retired.filter((retired) => used.has(retired));
+  }
+  await saveState('/releases', releases);
 }
 
 async function installVerified() {
@@ -121,14 +208,21 @@ async function installVerified() {
       for (let next = queue.shift(); next; next = queue.shift()) await storeVerified(cache, sources, ...next);
     };
     await Promise.all(Array.from({ length: PARALLEL_DOWNLOADS }, worker));
-    status = {
+    const verified = {
       state: 'verified',
       version: manifest.version,
       key_fingerprint: await keyFingerprint(),
       reason: '',
     };
-    await saveStatus();
-    await self.skipWaiting();
+    if (self.registration.active) {
+      // An update: it waits until the user reloads or every tab closed, and serves nothing before.
+      await saveState(PENDING_STATE, verified);
+    } else {
+      // The first install: nothing runs yet.
+      status = verified;
+      await saveState('/state', status);
+      await self.skipWaiting();
+    }
   } catch (error) {
     const unsupported = error && error.name === 'NotSupportedError';
     status = { ...status, state: unsupported ? 'unsupported' : 'rejected', reason: reasonOf(error) };
@@ -270,6 +364,28 @@ async function showPush(event) {
     tag: 'teamcraft-wake-up',
     renotify: false,
   });
+}
+
+// The browser rotated or dropped the subscription. Where it handed no new one, subscribe again with
+// the old one's key; the page that owns the store registers it with the server (e2ee.md §7), now if
+// one is open, otherwise when the app is opened next.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(renewSubscription(event));
+});
+
+async function renewSubscription(event) {
+  try {
+    const manager = self.registration.pushManager;
+    const key = event.oldSubscription && event.oldSubscription.options.applicationServerKey;
+    if (!event.newSubscription && !(await manager.getSubscription()) && key) {
+      await manager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    }
+  } catch (error) {
+    console.warn('push subscription not renewed', error);
+  }
+  for (const client of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) {
+    client.postMessage({ type: 'push_subscription_changed' });
+  }
 }
 
 self.addEventListener('notificationclick', (event) => {

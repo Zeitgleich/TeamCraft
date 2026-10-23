@@ -7,6 +7,8 @@
 #[cfg(target_arch = "wasm32")]
 mod browser;
 mod key_source;
+#[cfg(not(target_arch = "wasm32"))]
+mod lock;
 mod memory;
 pub mod sealed;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
@@ -19,6 +21,8 @@ pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
+#[cfg(not(target_arch = "wasm32"))]
+pub use lock::StoreLock;
 pub use memory::MemoryStore;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
@@ -332,6 +336,15 @@ pub enum StoreError {
   Corrupt(String),
   #[error("database key: {0}")]
   KeySource(#[from] KeySourceError),
+  /// The browser refused a write for lack of storage space.
+  #[error("there is not enough storage space to save the local data")]
+  QuotaExceeded,
+  /// A newer version of the app took over the database; this one has to reload.
+  #[error("the local database was closed by a newer version of the app")]
+  Closed,
+  /// Another process (a second app instance) holds the store.
+  #[error("the local data is in use by another instance of the app")]
+  InUse,
 }
 
 /// Persistent client state. Implementations are internally synchronized.

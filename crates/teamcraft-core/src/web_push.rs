@@ -1,5 +1,8 @@
 //! Web Push in the browser (e2ee.md §7): subscribing the page, and the service worker's handlers.
 //!
+//! Browsers rotate or drop subscriptions on their own; [`Client::check_web_push`] notices that at
+//! start and when the service worker reports `pushsubscriptionchange`, and registers again.
+//!
 //! The service worker is `web/service-worker.js` (the minimal JavaScript the platform forces: push
 //! and click listeners must be registered synchronously at startup, before wasm has loaded). It
 //! calls [`handle_push`] and [`handle_notification_click`], exported with the `service-worker`
@@ -22,16 +25,7 @@ use crate::store::LocalStore;
 /// `vapid_public_key` is the server's application server key, base64url (the server logs it at
 /// start; see the crate README).
 pub async fn subscribe(vapid_public_key: &str) -> Result<String, CoreError> {
-  let window = web_sys::window().ok_or_else(|| browser_error("no window: subscribe from a page"))?;
-  let ready = window
-    .navigator()
-    .service_worker()
-    .ready()
-    .map_err(|error| js_failure("serviceWorker.ready", &error))?;
-  let registration: web_sys::ServiceWorkerRegistration = JsFuture::from(ready)
-    .await
-    .map_err(|error| js_failure("serviceWorker.ready", &error))?
-    .unchecked_into();
+  let registration = registration().await?;
   let options = web_sys::PushSubscriptionOptionsInit::new();
   // Browsers only allow subscriptions that show a notification for every push.
   options.set_user_visible_only(true);
@@ -44,12 +38,24 @@ pub async fn subscribe(vapid_public_key: &str) -> Result<String, CoreError> {
     .await
     .map_err(|error| js_failure("pushManager.subscribe", &error))?
     .unchecked_into();
-  let json = subscription
-    .to_json()
-    .map_err(|error| js_failure("subscription.toJSON", &error))?;
-  js_sys::JSON::stringify(&json)
-    .map(String::from)
-    .map_err(|error| js_failure("JSON.stringify", &error))
+  subscription_json(&subscription)
+}
+
+/// The browser's current subscription as JSON (`pushManager.getSubscription()`); `None` when the
+/// browser has none (it expired, or the user revoked the permission).
+pub async fn current_subscription() -> Result<Option<String>, CoreError> {
+  let registration = registration().await?;
+  let request = registration
+    .push_manager()
+    .and_then(|manager| manager.get_subscription())
+    .map_err(|error| js_failure("pushManager.getSubscription", &error))?;
+  let subscription = JsFuture::from(request)
+    .await
+    .map_err(|error| js_failure("pushManager.getSubscription", &error))?;
+  if subscription.is_null() || subscription.is_undefined() {
+    return Ok(None);
+  }
+  subscription_json(&subscription.unchecked_into()).map(Some)
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -58,6 +64,55 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let subscription = subscribe(vapid_public_key).await?;
     self.register_push(PushProvider::WebPush, &subscription).await
   }
+
+  /// Browsers rotate or drop push subscriptions without asking (e2ee.md §7). Call at start and
+  /// when the service worker reports `pushsubscriptionchange`: a dropped subscription is made again
+  /// with the server's key, a changed one is registered under the same push key. Does nothing when
+  /// this device has no Web Push registration. Returns whether the registration changed.
+  pub async fn check_web_push(&mut self) -> Result<bool, CoreError> {
+    if self.registered_push_provider()? != Some(PushProvider::WebPush) {
+      return Ok(false);
+    }
+    let subscription = match current_subscription().await? {
+      Some(subscription) => subscription,
+      None => {
+        let key = self
+          .api()
+          .web_push_key()
+          .await?
+          .maybe_public_key
+          .ok_or_else(|| browser_error("the server no longer sends Web Push"))?;
+        subscribe(&key).await?
+      },
+    };
+    self.renew_push_token(PushProvider::WebPush, &subscription).await
+  }
+}
+
+/// The page's service worker registration, once it is active.
+async fn registration() -> Result<web_sys::ServiceWorkerRegistration, CoreError> {
+  let window = web_sys::window().ok_or_else(|| browser_error("no window: subscribe from a page"))?;
+  let ready = window
+    .navigator()
+    .service_worker()
+    .ready()
+    .map_err(|error| js_failure("serviceWorker.ready", &error))?;
+  Ok(
+    JsFuture::from(ready)
+      .await
+      .map_err(|error| js_failure("serviceWorker.ready", &error))?
+      .unchecked_into(),
+  )
+}
+
+/// The subscription as the server expects it: `PushSubscription.toJSON()`, as text.
+fn subscription_json(subscription: &web_sys::PushSubscription) -> Result<String, CoreError> {
+  let json = subscription
+    .to_json()
+    .map_err(|error| js_failure("subscription.toJSON", &error))?;
+  js_sys::JSON::stringify(&json)
+    .map(String::from)
+    .map_err(|error| js_failure("JSON.stringify", &error))
 }
 
 #[cfg(feature = "service-worker")]

@@ -33,7 +33,9 @@ use teamcraft_proto::{
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
 };
-use teamcraft_proto::{Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse};
+use teamcraft_proto::{
+  Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse, WebPushKeyResponse,
+};
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -797,6 +799,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn push_gateway(&self) -> Result<PushGatewayResponse, ApiError> {
     self.get("/push/gateway").await
+  }
+
+  async fn web_push_key(&self) -> Result<WebPushKeyResponse, ApiError> {
+    self.get("/push/web-key").await
   }
 
   async fn gateway_info(&self, gateway_url: &str) -> Result<GatewayInfoResponse, ApiError> {

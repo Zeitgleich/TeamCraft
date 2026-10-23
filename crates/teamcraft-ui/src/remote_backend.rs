@@ -28,7 +28,7 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection, CoreStatus,
-  EnrollRequest, LinkStatus, MessageWindow,
+  EnrollRequest, LinkStatus, MessageWindow, StoreHealth,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyResponse};
@@ -55,6 +55,11 @@ pub async fn connection_state() -> Result<CoreConnection, String> {
 /// The network came back or the page became visible again: the core checks its connection now.
 pub async fn network_changed() -> Result<(), String> {
   call("core_network_changed", &json!({})).await
+}
+
+/// Whether the browser saves the local data (e2ee.md §9.4). Browser only.
+pub async fn store_health() -> Result<StoreHealth, String> {
+  call("core_store_health", &json!({})).await
 }
 
 /// Creates (or recovers) the keys of this device.

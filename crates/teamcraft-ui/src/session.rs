@@ -30,6 +30,8 @@ pub enum SessionState {
   NeedsEnrollment {
     me: GetMeResponse,
     has_existing_identity: bool,
+    /// This browser had the account set up, but its data is gone (e2ee.md §9.4).
+    was_data_lost: bool,
   },
   Ready(GetMeResponse),
 }
@@ -167,10 +169,12 @@ impl SessionControl {
       Ok(CoreStatus::Ready { .. }) => self.state.set(SessionState::Ready(me)),
       Ok(CoreStatus::NeedsEnrollment {
         has_existing_identity,
+        was_data_lost,
       }) => {
         self.state.set(SessionState::NeedsEnrollment {
           me,
           has_existing_identity,
+          was_data_lost,
         });
       },
       Ok(CoreStatus::Failed { message }) => self

@@ -670,6 +670,12 @@ Details:
   with the server's VAPID key (`GET /api/v1/push/web-key`), registers the subscription with a fresh push
   key, keeps the access token in the `PushSession` fresh, and tells the worker which database to open;
   a click on a notification focuses an open window or opens `/?conversation_id=<id>`.
+  Browsers rotate or drop subscriptions on their own. The worker handles `pushsubscriptionchange`
+  (subscribing again with the old subscription's key where the browser did not) and tells open pages;
+  the page that owns the store (§9.4), at every start and on that message, compares
+  `pushManager.getSubscription()` with what it registered and registers a changed or new one under
+  the same push key (`Client::check_web_push`). Until a page opens, pushes to a rotated subscription
+  are lost: registering needs the device's keys, which only the owning page uses.
 - iOS caveat: an NSE must show every notification it receives, unless the app has Apple's
   `com.apple.developer.usernotifications.filtering` entitlement. Threema has it (its NSE entitlements
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,
@@ -882,6 +888,13 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   The app is served from that cache, never from the network. An update that does not verify is dropped: the previous verified version keeps
   running and the pages are told, so the UI warns (and shows the key's fingerprint on the About
   screen). A worker the browser stopped restores what it verified from a cache before answering.
+- **Updates.** A verified update installs in the background but does not take over open pages: it
+  waits until the user reloads (the page offers "a new version is ready") or every tab closed. Each
+  page is served from the release it was loaded with (the worker remembers the release per page),
+  and a release's cache is deleted only once no page uses it, so a page never loads files of two
+  releases. Pages call `registration.update()` when they become visible, come back online and
+  hourly, at most every 15 minutes, and ask `GET /api/v1/client-compatibility`; a version the server
+  no longer supports asks for the reload too.
 - **Push code.** The service worker needs Rust for push (§7: open the sealed wake-up, read the store,
   build the notification). A worker cannot verify scripts it loads with `importScripts`, so
   `scripts/finish-sw.sh` (a Trunk hook) inlines the JS glue into `sw.js`, and the worker reads the wasm
@@ -892,6 +905,43 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   use). The check protects returning users against a changed or partly replaced bundle, and gives
   auditors a signed list of what a release is. People who need more use the desktop and mobile apps,
   which do not take their code from the server.
+
+### 9.4 One owner per store, durable writes (implemented)
+
+Every store is loaded into memory, worked on there and written back. Two cores on the same store
+would each keep their own copy of the MLS state, the outbox and the key packages; whoever writes last
+wins per record. MLS epochs fork (messages become undecryptable) and queued messages go out twice.
+So exactly one core owns a device's store at a time:
+
+- **Web.** The tab holding the Web Lock `teamcraft-core-<user>` (`navigator.locks`, taken with
+  `ifAvailable` before IndexedDB is opened) owns the store and runs the core. Other tabs of the same
+  account are followers: their `core_*` calls go over the `BroadcastChannel` of the same name to the
+  owner, which answers them and announces every change, so all tabs show the same data. Each
+  follower also waits for the lock; when the owner closes or crashes, the browser hands it to one of
+  them, which opens the store and becomes the owner. A follower whose owner does not answer (a frozen
+  tab) gets an error instead of waiting forever. Browsers without Web Locks run one core per tab, as
+  before. The service worker only reads the store (push previews, §7).
+- **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
+  Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
+  and exits. Behind that, an OS file lock (`<store>.lock`, `StoreLock`) keeps any second process off
+  the store, for example on Linux without a session bus. The OS releases it when the process ends.
+- **Mobile.** One app process; the iOS notification service extension only reads the store.
+
+**Writes that fail (web).** IndexedDB refuses writes when the origin's quota is exhausted. A failed
+write is kept and issued again on every flush, until it went through; the flush reports the reason
+(quota exceeded, or the database closed for a newer version) and the app shows that changes are not
+saved on this device. Without that, memory and disk would diverge silently and the next reload would
+roll the MLS state back. A newer version of the app that upgrades the database (`versionchange`) gets
+it: the old page closes its connection, stops writing and asks for a reload.
+
+**Eviction (web).** The core asks for persistent storage (`navigator.storage.persist()`) when it
+opens the store; browsers grant it by their own rules (installed or often used sites, or the user
+agrees). Without it the browser may delete the origin's data under storage pressure, and Safari
+deletes it after weeks without a visit. Deleted data can't be restored from the device, but the keys
+can: the enrollment screen comes up again, and when this browser had the account set up before (a
+marker in local storage), it says that the browser deleted the data and offers the recovery
+passphrase or linking from another device. If the browser deleted the marker as well, it looks like a
+first visit, which offers the same two ways.
 
 ## 10. Search
 

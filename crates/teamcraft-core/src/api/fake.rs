@@ -49,6 +49,7 @@ use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
   GatewayInfoResponse, GatewayLimits, GatewayTokenKey, PushGatewayBinding, PushGatewayResponse, PushProvider,
+  WebPushKeyResponse,
 };
 use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
@@ -68,6 +69,8 @@ const KEY_PACKAGE_RENEWAL_WINDOW_MS: i64 = 56 * DAY_MS;
 
 /// The seed of the fake gateway's token key, to open what the client sealed (tests).
 pub const FAKE_GATEWAY_TOKEN_SEED: [u8; 32] = [0x42; 32];
+/// The VAPID key the fake server hands to browsers (not a real key; browser tests fake the push service).
+pub const FAKE_WEB_PUSH_KEY: &str = "fake-web-push-key";
 
 /// The shared server state. Clone it to hand the same server to several clients.
 #[derive(Clone, Default)]
@@ -2333,6 +2336,12 @@ impl ServerApi for FakeServerApi {
       Ok(PushGatewayResponse {
         maybe_gateway: state.push_gateway.clone(),
       })
+    })
+  }
+
+  async fn web_push_key(&self) -> Result<WebPushKeyResponse, ApiError> {
+    Ok(WebPushKeyResponse {
+      maybe_public_key: Some(FAKE_WEB_PUSH_KEY.to_owned()),
     })
   }
 

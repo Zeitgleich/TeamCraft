@@ -231,6 +231,119 @@ async fn a_message_written_in_the_web_client_reaches_a_second_client() {
   rig.finish().await;
 }
 
+/// e2ee.md §9.4: two tabs of the same account share one core. Messages sent alternately from both
+/// tabs each reach Carol exactly once and decrypt (one MLS state, one outbox), and when the owning tab
+/// closes, the other one takes the store over and keeps working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_tabs_share_one_core_and_the_second_takes_over() {
+  let Some(mut rig) = Rig::start().await else { return };
+  let channel = rig.channel;
+  let first = rig.browser.page.clone();
+  rig
+    .browser
+    .screenshot_on_failure("web-two-tabs-first", |page| async move {
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+    })
+    .await;
+  rig
+    .deliver_until(|texts| texts.iter().any(|text| text == "hello from carol"))
+    .await;
+
+  let second = rig
+    .browser
+    .new_page(&format!("{WEB_ORIGIN}/?backend=server"))
+    .await;
+  sign_in_again(&second).await;
+  wait_for_text(&second, "browser-channel").await;
+  let follows = second
+    .evaluate("navigator.locks.query().then(state => state.held.length + ':' + state.pending.length)")
+    .await
+    .unwrap()
+    .into_value::<String>()
+    .unwrap();
+  assert_eq!(
+    follows, "1:1",
+    "one tab holds the store lock, the other waits for it"
+  );
+
+  let sent = ["tab one: 1", "tab two: 1", "tab one: 2", "tab two: 2"];
+  for (index, text) in sent.iter().enumerate() {
+    let page = if index % 2 == 0 { &first } else { &second };
+    send_in_channel(page, text).await;
+    rig
+      .deliver_until(|texts| texts.iter().any(|seen| seen == text))
+      .await;
+  }
+  // Every message arrived once, in order, and Carol could decrypt each of them.
+  let texts = rig.carol.texts(channel);
+  let seen: Vec<&str> = texts
+    .iter()
+    .map(String::as_str)
+    .filter(|text| text.starts_with("tab "))
+    .collect();
+  assert_eq!(seen, sent);
+  assert_eq!(
+    seen,
+    sent
+      .iter()
+      .map(|text| (*text).to_owned())
+      .collect::<Vec<_>>()
+      .iter()
+      .collect::<Vec<_>>()
+  );
+
+  // The owner goes away: the follower opens the store and sends on its own.
+  first.close().await.unwrap();
+  send_in_channel(&second, "tab two after the first closed").await;
+  rig
+    .deliver_until(|texts| texts.iter().any(|text| text == "tab two after the first closed"))
+    .await;
+  let texts = rig.carol.texts(channel);
+  assert_eq!(
+    texts
+      .iter()
+      .filter(|text| *text == "tab two after the first closed")
+      .count(),
+    1
+  );
+  rig.finish().await;
+}
+
+/// e2ee.md §9.4: when the browser refuses writes for lack of space, the user is told that data is not
+/// saved, and the warning goes away once the writes went through. Chrome's DevTools quota override
+/// does not reach IndexedDB reliably, so the page's `put` refuses like a full disk does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_quota_is_shown_and_recovers() {
+  let Some(rig) = Rig::start().await else { return };
+  rig
+    .browser
+    .screenshot_on_failure("web-quota", |page| async move {
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      page
+        .evaluate(
+          "(() => { const put = IDBObjectStore.prototype.put; window.__teamcraftPut = put; \
+           IDBObjectStore.prototype.put = function () { \
+             throw new DOMException('The quota has been exceeded.', 'QuotaExceededError'); }; })()",
+        )
+        .await
+        .unwrap();
+      send_in_channel(&page, "written without space").await;
+      wait_for_text(&page, "no storage space left").await;
+      shot(&page, "web-quota-banner").await;
+
+      // Space is free again: the kept writes go through on the next flush.
+      page
+        .evaluate("IDBObjectStore.prototype.put = window.__teamcraftPut")
+        .await
+        .unwrap();
+      wait_for_text_gone(&page, "no storage space left").await;
+    })
+    .await;
+  rig.finish().await;
+}
+
 /// The stack with the web build, the browser and the data the browser will show: Alice owns a
 /// channel she shares with Carol.
 struct Rig {
@@ -290,6 +403,30 @@ impl Rig {
     self.browser.close().await;
     self.stack.stop().await;
   }
+
+  /// Pumps Alice's and Carol's clients (Alice's other device commits the browser into the channel)
+  /// until Carol's texts satisfy `is_done`.
+  async fn deliver_until(&mut self, is_done: impl Fn(&[String]) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut round = 0_u32;
+    while !is_done(&self.carol.texts(self.channel)) {
+      assert!(
+        Instant::now() < deadline,
+        "Carol did not get the expected messages; she has {:?}",
+        self.carol.texts(self.channel)
+      );
+      if round.is_multiple_of(50) {
+        self.alice.heartbeat().await;
+        self.carol.heartbeat().await;
+      }
+      round += 1;
+      self.alice.pump_reconnecting().await;
+      self.alice.client.apply_pending_changes().await.unwrap();
+      self.carol.pump_reconnecting().await;
+      self.carol.client.apply_pending_changes().await.unwrap();
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+  }
 }
 
 /// Signs in through Keycloak's login page and unlocks the account's keys on this new browser.
@@ -330,6 +467,57 @@ async fn sign_in_as_alice(page: &Page) {
     .await
     .unwrap();
   click_text(page, "Unlock").await;
+}
+
+/// Signs in again in another tab, if the tab did not restore the session itself; Keycloak still has
+/// it, so no form comes up.
+async fn sign_in_again(page: &Page) {
+  let deadline = Instant::now() + WAIT;
+  loop {
+    let text = body_text(page).await;
+    if text.contains("browser-channel") {
+      return;
+    }
+    if text.contains("Sign in") {
+      click_text(page, "Sign in").await;
+      return;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "the second tab shows neither the app nor sign-in:\n{text}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+}
+
+/// Opens the test channel and sends `text` from the composer.
+async fn send_in_channel(page: &Page, text: &str) {
+  // Input goes to the tab in front; a background tab never gets it.
+  page.bring_to_front().await.unwrap();
+  click_text(page, "browser-channel").await;
+  let composer = wait_for_element(page, "textarea").await;
+  composer
+    .click()
+    .await
+    .unwrap()
+    .type_str(text)
+    .await
+    .unwrap()
+    .press_key("Enter")
+    .await
+    .unwrap();
+  wait_for_text(page, text).await;
+}
+
+async fn wait_for_text_gone(page: &Page, needle: &str) {
+  let deadline = Instant::now() + WAIT;
+  while body_text(page).await.contains(needle) {
+    assert!(
+      Instant::now() < deadline,
+      "{needle:?} is still shown after {WAIT:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }
 
 /// Saves a screenshot as `target/e2e-artifacts/<name>.png` (kept after passing runs too).

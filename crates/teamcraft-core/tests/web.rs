@@ -69,6 +69,43 @@ async fn another_key_cannot_open_the_store() {
   assert!(matches!(result, Err(StoreError::WrongKey)));
 }
 
+/// e2ee.md §9.4: a newer version of the app upgrading the database closes this page's copy; writes
+/// after that are not lost silently but reported until the page reloads.
+#[wasm_bindgen_test]
+async fn a_newer_version_closes_the_store_and_writes_report_it() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.put(Table::Users, "1", b"one").unwrap();
+  store.flush().await.unwrap();
+
+  open_with_newer_version(&name).await;
+  store.put(Table::Users, "2", b"two").unwrap();
+  assert!(matches!(store.flush().await, Err(StoreError::Closed)));
+  // The cache still answers; the page asks the user to reload.
+  assert_eq!(store.get(Table::Users, "2").unwrap(), Some(b"two".to_vec()));
+}
+
+/// e2ee.md §9.4: a write the browser refuses (quota) is reported by every flush and kept; once space
+/// is free it goes through, and a reopened store has it.
+#[wasm_bindgen_test]
+async fn a_refused_write_is_reported_and_written_once_there_is_space() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  refuse_puts(true);
+  store.put(Table::Users, "1", b"one").unwrap();
+  assert!(matches!(store.flush().await, Err(StoreError::QuotaExceeded)));
+  assert!(matches!(store.flush().await, Err(StoreError::QuotaExceeded)));
+
+  refuse_puts(false);
+  store.flush().await.unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+  let reopened = IndexedDbStore::open(&name, &key).await.unwrap();
+  assert_eq!(reopened.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+}
+
 #[wasm_bindgen_test]
 async fn browser_key_is_created_once_and_reused() {
   let name = database_name();
@@ -153,12 +190,16 @@ fn push_wake_up_round_trips_in_wasm() {
   assert!(open_wakeup(&SymmetricKey::generate(&mut OsRng), &sealed).is_err());
 }
 
+/// The text messages of a conversation; system events (a member joined) are left out.
 fn texts(store: &impl LocalStore, conversation: ConversationId) -> Vec<String> {
   store
     .messages(conversation, MessageFilter::TopLevel)
     .unwrap()
-    .iter()
-    .map(body)
+    .into_iter()
+    .filter_map(|message| match message.content {
+      MessageContent::Text { body, .. } => Some(body),
+      _ => None,
+    })
     .collect()
 }
 
@@ -190,6 +231,36 @@ fn message(conversation: i64, client: u8, text: &str) -> StoredMessage {
 
 fn id<T: Id>(raw: i64) -> T {
   T::from_snowflake(Snowflake::new(raw).unwrap())
+}
+
+/// Makes `IDBObjectStore.put` throw `QuotaExceededError`, as a full disk does, or restores it.
+fn refuse_puts(is_refusing: bool) {
+  let script = if is_refusing {
+    "globalThis.__put = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function () { \
+     throw new DOMException('quota', 'QuotaExceededError'); };"
+  } else {
+    "IDBObjectStore.prototype.put = globalThis.__put;"
+  };
+  js_sys::eval(script).unwrap();
+}
+
+/// Opens `name` with a higher schema version, as a newer release of the app would.
+async fn open_with_newer_version(name: &str) {
+  use wasm_bindgen::JsCast;
+  let factory: web_sys::IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
+    .unwrap()
+    .unchecked_into();
+  let request = factory.open_with_u32(name, 1_000).unwrap();
+  let opened = js_sys::Promise::new(&mut |resolve, reject| {
+    request.set_onsuccess(Some(&resolve));
+    request.set_onerror(Some(&reject));
+  });
+  let database: web_sys::IdbDatabase = wasm_bindgen_futures::JsFuture::from(opened)
+    .await
+    .map(|_| request.result().unwrap())
+    .unwrap()
+    .unchecked_into();
+  database.close();
 }
 
 /// Each test gets its own database, so tests don't see each other's data.

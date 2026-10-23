@@ -15,7 +15,9 @@ use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::push_preview::{PreviewContent, push_preview};
-use teamcraft_core::store::{IndexedDbStore, LocalStore, MemoryStore, MessageFilter, browser_database_key};
+use teamcraft_core::store::{
+  IndexedDbStore, LocalStore, MemoryStore, MessageContent, MessageFilter, browser_database_key,
+};
 use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{PushKind, PushProvider, PushWakeUp};
@@ -58,8 +60,13 @@ async fn service_worker_previews_a_push_from_the_encrypted_store() {
   alice.add_member(channel, bob.user_id()).await.unwrap();
   alice.send_text(channel, None, "from the worker").await.unwrap();
   while bob.pump(&mut gateway).await.unwrap() > 0 {}
-  let message_id = store.messages(channel, MessageFilter::TopLevel).unwrap()[0]
-    .maybe_server_id
+  // The channel also holds the "member added" event; the push is about the text message.
+  let message_id = store
+    .messages(channel, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .find(|message| matches!(message.content, MessageContent::Text { .. }))
+    .and_then(|message| message.maybe_server_id)
     .unwrap();
   store.flush().await.unwrap();
   let bob_device = bob.device_id();

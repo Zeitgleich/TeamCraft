@@ -45,6 +45,9 @@ tauri-plugin-notification = "2"
 tauri-plugin-window-state = "2"
 # Self-update of the Windows, macOS and AppImage builds from a signed manifest (docs/updates.md).
 tauri-plugin-updater = "2"
+# One running instance on every OS: a second process would fork the encrypted store (e2ee.md §9.4).
+# Same Tauri plugin family; on Linux it adds zbus, already in the tree through the keyring.
+tauri-plugin-single-instance = "2"
 # Refresh token in the OS keyring (Secret Service on Linux, Keychain on macOS).
 keyring = "4"
 reqwest = { workspace = true, features = ["form"] }
@@ -84,8 +87,8 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 [target.'cfg(target_os = "windows")'.dependencies]
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["mediafoundation", "graphics-capture", "wasapi-loopback"] }
 
-# Windows shell integration: the `teamcraft://` links (registered by the installer), one running
-# instance that receives them, and the "start at login" option (a registry Run entry).
+# Windows shell integration: the `teamcraft://` links (registered by the installer), handed to the
+# running instance, and the "start at login" option (a registry Run entry).
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

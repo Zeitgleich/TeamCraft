@@ -62,6 +62,7 @@ pub mod settings_modal;
 pub mod settings_tabs;
 pub mod sidebar;
 pub mod status_menu;
+pub mod storage_banner;
 pub mod thread_panel;
 pub mod threads_inbox;
 pub mod top_bar;

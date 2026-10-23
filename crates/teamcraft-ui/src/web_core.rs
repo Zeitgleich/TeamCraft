@@ -8,6 +8,9 @@
 //!
 //! The access token is the page's own (the browser flow keeps tokens in memory, see `auth::browser`);
 //! a small loop keeps the copy the core reads fresh.
+//!
+//! Only one tab per account runs the core (`web_tabs`, e2ee.md §9.4); the others pass their calls
+//! to it.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -24,7 +27,7 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
-  LinkStatus, MessageWindow, SecuritySnapshot, last_activity_of,
+  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, last_activity_of,
 };
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
@@ -32,8 +35,7 @@ use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::records;
-use teamcraft_core::store::IndexedDbStore;
-use teamcraft_core::store::browser_database_key;
+use teamcraft_core::store::{IndexedDbStore, StoreError, browser_database_key};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::workspace::RosterRole;
@@ -50,6 +52,8 @@ use teamcraft_proto::{
 use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
+use crate::settings::{load_string, store_string};
+use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
@@ -62,6 +66,13 @@ const TOKEN_REFRESH: Duration = Duration::from_secs(20);
 /// How long the access token stored for the service worker is used. Tokens are renewed every
 /// [`TOKEN_REFRESH`]; the stored one only has to outlive a push that arrives while no page is open.
 const PUSH_SESSION_LIFETIME_MS: i64 = 4 * 60 * 1000;
+/// Local storage key (per user) remembering that this browser had the account set up, so a store
+/// the browser deleted is told apart from a first visit (e2ee.md §9.4).
+const STORE_READY_PREFIX: &str = "teamcraft.store_ready.";
+/// How long to wait before checking the push subscription again after the check failed (offline).
+const PUSH_CHECK_RETRY: Duration = Duration::from_secs(60);
+/// What the service worker posts when the browser changed the push subscription.
+const SUBSCRIPTION_CHANGED: &str = "push_subscription_changed";
 
 type Api = HttpServerApi<WebTokens>;
 type Store = Rc<IndexedDbStore>;
@@ -71,6 +82,7 @@ thread_local! {
   static SETUP: RefCell<Option<Setup>> = const { RefCell::new(None) };
   static RUNNING: RefCell<Option<Running>> = const { RefCell::new(None) };
   static LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
+  static IS_WATCHING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// What the page tells the core once: who signs the requests and where the server is.
@@ -79,11 +91,28 @@ struct Setup {
   server_url: String,
 }
 
-struct Running {
-  user: UserId,
-  requests: mpsc::UnboundedSender<Request>,
-  /// Read without asking the loop, which may be busy connecting.
-  connection: ConnectionStatus,
+/// The core of the signed-in account: in this tab, or in the tab that owns the store.
+enum Running {
+  Owner {
+    user: UserId,
+    requests: mpsc::UnboundedSender<Request>,
+    /// `None` without Web Locks: then no other tab can find this one.
+    maybe_channel: Option<OwnerChannel>,
+    /// Read without asking the loop, which may be busy connecting.
+    connection: ConnectionStatus,
+  },
+  Follower {
+    user: UserId,
+    follower: Rc<Follower>,
+  },
+}
+
+impl Running {
+  fn user(&self) -> UserId {
+    match self {
+      Self::Owner { user, .. } | Self::Follower { user, .. } => *user,
+    }
+  }
 }
 
 /// The access token the core reads synchronously; renewed by [`keep_token_fresh`].
@@ -133,12 +162,33 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
       stop();
       Ok(Value::Null)
     },
+    _ => match current_follower() {
+      Some(follower) => follower.call(command, args).await,
+      None => serve(command, args).await,
+    },
+  }
+}
+
+/// A call from a follower tab. Starting and stopping stay with the tab that asks: a follower's
+/// start only asks where the core stands, its stop only ends its own link.
+async fn serve_follower(command: String, args: Value) -> Result<Value, String> {
+  match command.as_str() {
+    "core_start" => to_value(ask(Request::Status).await?),
+    "core_stop" => Ok(Value::Null),
+    _ => serve(&command, args).await,
+  }
+}
+
+/// Runs a command on this tab's core.
+async fn serve(command: &str, args: Value) -> Result<Value, String> {
+  match command {
     "core_status" => to_value(ask(Request::Status).await?),
     "core_connection" => to_value(connection_state()?),
     "core_network_changed" => {
       send(Request::NetworkChanged)?;
       Ok(Value::Null)
     },
+    "core_store_health" => to_value(ask(Request::StoreHealth).await?),
     "core_enroll" => {
       let request: EnrollRequest = field(&args, "request")?;
       ask(|reply| Request::Enroll(request, reply))
@@ -223,15 +273,34 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<Value, String> {
   serde_json::to_value(value).map_err(|error| error.to_string())
 }
 
-/// Starts (or reuses) the core for `user` and reports where it stands.
+/// Starts (or reuses) the core for `user` and reports where it stands. The core runs in this tab
+/// when it gets the store's lock; otherwise the tab follows the one that has it.
 async fn start(user: UserId) -> Result<CoreStatus, String> {
   let reuse = RUNNING.with(|running| {
     running
       .borrow()
       .as_ref()
-      .is_some_and(|running| running.user == user)
+      .is_some_and(|running| running.user() == user)
   });
   if !reuse {
+    match web_tabs::try_own(user).await {
+      Ownership::Owned(lock) => start_owner(user, Some(lock)).await?,
+      Ownership::Unsupported => start_owner(user, None).await?,
+      Ownership::Taken => start_follower(user)?,
+    }
+  }
+  match current_follower() {
+    Some(follower) => {
+      let status = follower.call("core_start", Value::Null).await?;
+      serde_json::from_value(status).map_err(|error| error.to_string())
+    },
+    None => ask(Request::Status).await,
+  }
+}
+
+/// Runs the core in this tab. With a lock, other tabs of the account can reach it.
+async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), String> {
+  {
     let (auth, server_url) = SETUP
       .with(|setup| {
         setup
@@ -248,8 +317,13 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
       .map_err(|error: AuthError| error.to_string())?;
     *tokens.0.borrow_mut() = Some(first);
     let (sender, receiver) = mpsc::unbounded();
+    let maybe_channel = match maybe_lock.is_some() {
+      true => Some(OwnerChannel::open(user, serve_follower)?),
+      false => None,
+    };
     let connection = ConnectionStatus::new();
-    let core = Core::new(server_url, user, tokens.clone(), connection.clone());
+    let core = Core::new(server_url, user, tokens.clone(), connection.clone(), maybe_lock);
+    watch_worker();
     let generation = std::rc::Rc::new(());
     keep_token_fresh(auth, tokens, Rc::downgrade(&generation));
     wasm_bindgen_futures::spawn_local(async move {
@@ -258,23 +332,60 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
     });
     // Replacing a running core (another account signed in) drops its sender, which stops it.
     RUNNING.with(|running| {
-      *running.borrow_mut() = Some(Running {
+      *running.borrow_mut() = Some(Running::Owner {
         user,
         requests: sender,
         connection,
+        maybe_channel,
       })
     });
   }
-  ask(Request::Status).await
+  Ok(())
 }
 
-fn connection_state() -> Result<CoreConnection, String> {
+/// Follows the tab that owns the store, and takes over once that tab is gone.
+fn start_follower(user: UserId) -> Result<(), String> {
+  tracing::info!("TeamCraft is open in another tab; following it");
+  let follower = Follower::join(user, notify_local)?;
   RUNNING.with(|running| {
-    running
-      .borrow()
-      .as_ref()
-      .map(|running| running.connection.get().into())
-      .ok_or_else(|| "the core has not been started".to_owned())
+    *running.borrow_mut() = Some(Running::Follower {
+      user,
+      follower: Rc::new(follower),
+    })
+  });
+  wasm_bindgen_futures::spawn_local(async move {
+    let Some(lock) = web_tabs::wait_to_own(user).await else {
+      return;
+    };
+    let is_still_following = RUNNING.with(|running| {
+      matches!(&*running.borrow(), Some(Running::Follower { user: following, .. }) if *following == user)
+    });
+    if !is_still_following {
+      // Dropping the lock hands it on.
+      return;
+    }
+    tracing::info!("the other tab closed; TeamCraft runs in this tab now");
+    match start_owner(user, Some(lock)).await {
+      Ok(()) => notify_local(),
+      Err(error) => tracing::error!(%error, "could not take over the local data"),
+    }
+  });
+  Ok(())
+}
+
+fn current_follower() -> Option<Rc<Follower>> {
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Follower { follower, .. }) => Some(follower.clone()),
+    _ => None,
+  })
+}
+
+/// The owner's connection; a follower's calls are answered by the owner.
+fn connection_state() -> Result<CoreConnection, String> {
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Owner { connection, .. }) => Ok(connection.get().into()),
+    Some(Running::Follower { .. }) => Err("the core runs in another tab".to_owned()),
+    None => Err("the core has not been started".to_owned()),
   })
 }
 
@@ -283,14 +394,10 @@ fn stop() {
 }
 
 fn send(request: Request) -> Result<(), String> {
-  RUNNING.with(|running| {
-    running
-      .borrow()
-      .as_ref()
-      .ok_or_else(|| "the core has not been started".to_owned())?
-      .requests
-      .unbounded_send(request)
-      .map_err(|_| stopped())
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Owner { requests, .. }) => requests.unbounded_send(request).map_err(|_| stopped()),
+    Some(Running::Follower { .. }) => Err("the core runs in another tab".to_owned()),
+    None => Err("the core has not been started".to_owned()),
   })
 }
 
@@ -320,7 +427,21 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
   });
 }
 
+/// Tells this tab's UI, and the follower tabs, that the core's data changed.
 fn notify_changed() {
+  RUNNING.with(|running| {
+    if let Some(Running::Owner {
+      maybe_channel: Some(channel),
+      ..
+    }) = &*running.borrow()
+    {
+      channel.announce_change();
+    }
+  });
+  notify_local();
+}
+
+fn notify_local() {
   let listeners: Vec<_> = LISTENERS.with(|listeners| listeners.borrow().clone());
   for listener in listeners {
     if let Ok(mut callback) = listener.try_borrow_mut() {
@@ -331,6 +452,9 @@ fn notify_changed() {
 
 enum Request {
   Status(oneshot::Sender<CoreStatus>),
+  StoreHealth(oneshot::Sender<StoreHealth>),
+  /// The service worker saw the browser change the push subscription.
+  CheckPush,
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
   Messages {
@@ -378,6 +502,8 @@ enum Wake {
 }
 
 struct Core {
+  /// Held while the core runs; other tabs of the account follow this one (e2ee.md §9.4).
+  _maybe_lock: Option<OwnerLock>,
   server_url: String,
   user: UserId,
   tokens: WebTokens,
@@ -400,6 +526,11 @@ struct Core {
   /// The last attention report, repeated after a reconnect (the server forgets it with the
   /// connection).
   maybe_attention: Option<bool>,
+  /// Whether IndexedDB keeps up with the cache, as of the last flush.
+  store_health: StoreHealth,
+  /// When to compare the browser's push subscription with the registration next; `None` when
+  /// nothing is due (e2ee.md §7).
+  maybe_push_check_at_ms: Option<i64>,
 }
 
 /// A link in progress on this (new) device.
@@ -410,10 +541,17 @@ struct LinkRun {
 }
 
 impl Core {
-  fn new(server_url: String, user: UserId, tokens: WebTokens, status: ConnectionStatus) -> Self {
+  fn new(
+    server_url: String,
+    user: UserId,
+    tokens: WebTokens,
+    status: ConnectionStatus,
+    maybe_lock: Option<OwnerLock>,
+  ) -> Self {
     let mut connection = ConnectionSupervisor::new(ConnectionSettings::default(), status);
     connection.set_observer(Box::new(|_| notify_changed()));
     Self {
+      _maybe_lock: maybe_lock,
       server_url,
       user,
       tokens,
@@ -430,6 +568,8 @@ impl Core {
       approval: None,
       approval_misses: 0,
       maybe_attention: None,
+      store_health: StoreHealth::Saved,
+      maybe_push_check_at_ms: None,
     }
   }
 
@@ -444,6 +584,54 @@ impl Core {
         Wake::Linked(result) => self.on_linked(result).await,
         Wake::Tick => self.on_tick().await,
       }
+      self.check_store().await;
+      self.check_push().await;
+    }
+  }
+
+  /// Registers the browser's push subscription again when the browser rotated or dropped it.
+  async fn check_push(&mut self) {
+    let (Some(client), Some(due_at)) = (self.client.as_mut(), self.maybe_push_check_at_ms) else {
+      return;
+    };
+    if now_ms() < due_at {
+      return;
+    }
+    self.maybe_push_check_at_ms = match client.check_web_push().await {
+      Ok(is_renewed) => {
+        if is_renewed {
+          tracing::info!("the browser changed the push subscription; registered the new one");
+          self.last_session_token = None;
+          self.save_push_session();
+        }
+        None
+      },
+      Err(error) => {
+        tracing::warn!(%error, "could not check the push subscription");
+        Some(now_ms().saturating_add(millis(PUSH_CHECK_RETRY)))
+      },
+    };
+  }
+
+  /// Waits until IndexedDB has everything written so far, and tells the UI when that stops (or
+  /// starts again) working: what is not saved is lost on reload (e2ee.md §9.4).
+  async fn check_store(&mut self) {
+    let Some(store) = self.store.as_ref() else {
+      return;
+    };
+    let health = match store.flush().await {
+      Ok(()) => StoreHealth::Saved,
+      Err(StoreError::QuotaExceeded) => StoreHealth::QuotaExceeded,
+      Err(StoreError::Closed) => StoreHealth::Closed,
+      Err(error) => {
+        tracing::warn!(%error, "local data not saved");
+        StoreHealth::Failed
+      },
+    };
+    if health != self.store_health {
+      tracing::info!(?health, "local storage state changed");
+      self.store_health = health;
+      notify_changed();
     }
   }
 
@@ -488,6 +676,7 @@ impl Core {
   async fn try_open(&mut self) -> Result<CoreStatus, String> {
     let name = format!("teamcraft-{}", self.user);
     announce_database(&name);
+    request_persistent_storage();
     let key = browser_database_key(&name)
       .await
       .map_err(|error| error.to_string())?;
@@ -508,6 +697,7 @@ impl Core {
       Some(client) => Ok(self.adopt(client)),
       None => Ok(CoreStatus::NeedsEnrollment {
         has_existing_identity: self.has_existing_identity().await?,
+        was_data_lost: load_string(&self.store_ready_key()).is_some(),
       }),
     }
   }
@@ -525,11 +715,12 @@ impl Core {
   async fn refresh_enrollment_hint(&mut self) {
     if self.client.is_none()
       && self.link.is_none()
-      && let CoreStatus::NeedsEnrollment { .. } = self.status
+      && let CoreStatus::NeedsEnrollment { was_data_lost, .. } = self.status
       && let Ok(has_existing_identity) = self.has_existing_identity().await
     {
       self.status = CoreStatus::NeedsEnrollment {
         has_existing_identity,
+        was_data_lost,
       };
     }
   }
@@ -544,7 +735,13 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.client = Some(client);
+    self.maybe_push_check_at_ms = Some(i64::MIN);
+    store_string(&self.store_ready_key(), "1");
     status
+  }
+
+  fn store_ready_key(&self) -> String {
+    format!("{STORE_READY_PREFIX}{}", self.user)
   }
 
   fn api(&self) -> Api {
@@ -557,6 +754,8 @@ impl Core {
         self.refresh_enrollment_hint().await;
         drop(reply.send(self.status.clone()));
       },
+      Request::StoreHealth(reply) => drop(reply.send(self.store_health.clone())),
+      Request::CheckPush => self.maybe_push_check_at_ms = Some(i64::MIN),
       Request::Enroll(request, reply) => {
         let result = self.enroll(request).await;
         if result.is_ok() {
@@ -1075,6 +1274,50 @@ async fn link_task(
   };
   notify_changed();
   link.receive_secrets().await.map_err(describe)
+}
+
+/// Passes the service worker's "subscription changed" on to the core (once per page).
+fn watch_worker() {
+  if IS_WATCHING_WORKER.with(|is_watching| is_watching.replace(true)) {
+    return;
+  }
+  let Some(window) = web_sys::window() else { return };
+  let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+    |event: web_sys::MessageEvent| {
+      let kind = js_sys::Reflect::get(&event.data(), &"type".into())
+        .ok()
+        .and_then(|kind| kind.as_string());
+      // Follower tabs get the message too; only the owner has a core to tell.
+      if kind.as_deref() == Some(SUBSCRIPTION_CHANGED) && current_follower().is_none() {
+        drop(send(Request::CheckPush));
+      }
+    },
+  );
+  if window
+    .navigator()
+    .service_worker()
+    .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
+    .is_ok()
+  {
+    // Lives as long as the page.
+    listener.forget();
+  }
+}
+
+/// Asks the browser not to delete the store under storage pressure (e2ee.md §9.4). Browsers decide
+/// on their own (Chrome grants it to installed or often used sites, Firefox asks the user); without
+/// it the store can be evicted, and the enrollment screen says so.
+fn request_persistent_storage() {
+  let Some(window) = web_sys::window() else { return };
+  let Ok(promise) = window.navigator().storage().persist() else {
+    return;
+  };
+  wasm_bindgen_futures::spawn_local(async move {
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+      Ok(granted) => tracing::info!(is_persistent = granted.is_truthy(), "persistent storage"),
+      Err(error) => tracing::debug!(?error, "persistent storage not available"),
+    }
+  });
 }
 
 /// Tells the service worker which database holds this account's keys, so it can open pushes. It
