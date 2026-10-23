@@ -15,7 +15,8 @@ use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallRequest,
-  IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk, RemoteVideoTrack, RunningCall,
+  CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
+  RemoteVideoTrack, RunningCall,
 };
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
@@ -106,6 +107,10 @@ pub enum CallAction {
   StopScreenShare,
   /// Opens the system's video effects panel (macOS: Portrait, background, Studio Light).
   OpenSystemVideoEffects,
+  /// Which call status sounds play (a device setting; also before any call).
+  SetStatusSounds {
+    sounds: CallStatusSounds,
+  },
   #[serde(other)]
   Unknown,
 }

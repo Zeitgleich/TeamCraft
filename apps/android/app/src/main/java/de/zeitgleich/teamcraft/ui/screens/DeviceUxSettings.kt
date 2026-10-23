@@ -26,10 +26,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.calls.CallSoundPrefs
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.security.LockAfter
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
+import uniffi.teamcraft_ffi.CallStatusSounds
 
 /** App lock on or off, and after how long in the background it locks again. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -84,6 +86,35 @@ fun ShareTypingSetting() {
   }
 }
 
+/** Which call status sounds play (reconnecting, reconnected, call lost); applies from the next call. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun CallStatusSoundsSetting() {
+  val context = LocalContext.current
+  val prefs = remember { CallSoundPrefs.prefs(context) }
+  var sounds by remember { mutableStateOf(prefs.statusSounds) }
+  Column {
+    Text(stringResource(R.string.call_status_sounds))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      for ((choice, label) in STATUS_SOUND_CHOICES) {
+        FilterChip(
+          selected = sounds == choice,
+          onClick = {
+            sounds = choice
+            prefs.setStatusSounds(choice)
+          },
+          label = { Text(stringResource(label)) },
+        )
+      }
+    }
+    Text(
+      stringResource(R.string.call_status_sounds_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
 /** The wallpaper's colors instead of TeamCraft's (Android 12+). */
 @Composable
 fun DynamicColorSetting() {
@@ -105,6 +136,12 @@ fun SendWithEnterSetting() {
     prefs.setSendWithEnter(it)
   }
 }
+
+private val STATUS_SOUND_CHOICES = listOf(
+  CallStatusSounds.ALL to R.string.call_status_sounds_all,
+  CallStatusSounds.OWN_ONLY to R.string.call_status_sounds_own_only,
+  CallStatusSounds.OFF to R.string.call_status_sounds_off,
+)
 
 private val LOCK_AFTER_CHOICES = listOf(
   LockAfter.Immediately to R.string.app_lock_immediately,

@@ -12,12 +12,14 @@ pub mod audio_frame;
 pub mod audio_io;
 pub mod audio_level;
 pub mod bwe;
+pub mod call_resilience;
 pub mod datagram;
 pub mod fragment;
 pub mod jitter;
 #[cfg(feature = "native")]
 pub mod openh264_library;
 pub mod rtp;
+pub mod uplink_layers;
 pub mod video;
 #[cfg(any(feature = "native", feature = "web"))]
 pub mod video_capture;
@@ -42,6 +44,8 @@ pub mod audio_pipeline;
 pub mod audio_processing;
 #[cfg(feature = "dave")]
 pub mod call_auth;
+#[cfg(feature = "dave")]
+pub mod call_cues;
 #[cfg(feature = "dave")]
 pub mod call_engine;
 #[cfg(feature = "native")]

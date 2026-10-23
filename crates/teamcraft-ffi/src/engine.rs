@@ -33,7 +33,7 @@ use teamcraft_core::{
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
-use teamcraft_proto::{ConversationId, Id, ThreadId};
+use teamcraft_proto::{CallJoinTokenResponse, ConversationId, Id, ThreadId};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, LocalSet};
 
@@ -538,6 +538,21 @@ impl Engine {
       self.start().await?;
     }
     result
+  }
+
+  /// A fresh join token for the conversation's call, to rejoin after a lost connection.
+  pub(crate) async fn call_join_token(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<CallJoinTokenResponse, TeamCraftError> {
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let client = self.take_client().await?;
+    let result = client.call_join_token(conversation).await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    Ok(result?)
   }
 
   pub(crate) fn calls(&self) -> &CallHub {

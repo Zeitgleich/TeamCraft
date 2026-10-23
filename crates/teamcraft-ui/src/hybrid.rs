@@ -8,7 +8,7 @@
 //! builds with the `demo` feature).
 
 use std::rc::Rc;
-use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_client_api::calls::{CallStatusSounds, OrgBackgroundRule};
 use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::{
@@ -695,6 +695,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
   fn open_system_video_effects(&self) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::OpenSystemVideoEffects);
+    }
+  }
+
+  fn set_call_status_sounds(&self, sounds: CallStatusSounds) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetStatusSounds { sounds });
     }
   }
 }

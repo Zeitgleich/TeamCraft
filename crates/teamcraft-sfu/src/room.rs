@@ -3,17 +3,27 @@
 //! State sits behind a `std::sync::Mutex` that is never held across an `.await`; the per-datagram
 //! critical section parses headers and restamps the datagram per receiver. A lock-free forwarding
 //! table is a later optimization (SPIKE.md).
+//!
+//! A participant whose connection is lost keeps its slot (audio stream, published tracks,
+//! subscriptions) while it reconnects: the others hear `participant_reconnecting`, and a join of
+//! the same device on a new connection takes the slot back ([`JoinOutcome::Resumed`]). Every
+//! connection gets its own [`SessionId`], so a late cleanup of an old connection never touches the
+//! slot a newer one took over.
 
 use std::{
   collections::{HashMap, HashSet},
-  sync::{Arc, Mutex, MutexGuard, PoisonError},
-  time::Instant,
+  sync::{
+    Arc, Mutex, MutexGuard, PoisonError,
+    atomic::{AtomicU64, Ordering},
+  },
+  time::{Duration, Instant},
 };
 
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
-  Base64Bytes, CallEvent, CallId, CallParticipant, DeviceId, MediaCapabilities, MediaStreamId,
-  SfuControlAction, TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, DeviceId, ErrorBody, ErrorCode,
+  MediaCapabilities, MediaStreamId, SfuControlAction, TransportFeedback, UserId, VideoCodec, VideoLayerInfo,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -29,10 +39,12 @@ use crate::{
 };
 
 /// How long a closing participant has to receive the host's event before the connection drops.
-const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+const CLOSE_GRACE: Duration = Duration::from_millis(250);
 /// QUIC application close code for connections a meeting host ended.
 const CLOSED_BY_HOST: u32 = 0x4801;
 const SIGNALING_OVERFLOW: u32 = 0x4802;
+/// QUIC application close code for a connection the same device replaced with a newer one.
+pub const REPLACED_BY_NEW_CONNECTION: u32 = 0x4804;
 
 /// All rooms of this SFU.
 pub struct Rooms {
@@ -40,6 +52,7 @@ pub struct Rooms {
   rooms: Mutex<HashMap<CallId, Arc<Room>>>,
   /// Host controls that outlive a room's participants: locked calls, removed users.
   control: Mutex<ControlState>,
+  next_session: AtomicU64,
 }
 
 #[derive(Default)]
@@ -51,27 +64,65 @@ struct ControlState {
 /// One call.
 pub struct Room {
   call_id: CallId,
+  reconnect_grace: Duration,
   state: Mutex<RoomState>,
 }
+
+/// One connection of a participant; a device that reconnects gets a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionId(u64);
 
 /// Handle a session needs to talk to its participant.
 #[derive(Clone)]
 pub struct ParticipantHandle {
-  pub connection: Connection,
+  pub link: Arc<dyn ParticipantLink>,
   pub signal_tx: Sender<Outgoing>,
+}
+
+/// The datagram side of a participant's connection (a trait so rooms are tested without network).
+pub trait ParticipantLink: Send + Sync {
+  /// Sends one datagram. Unreliable by design: a full buffer or a closed peer drops it.
+  fn send_datagram(&self, bytes: &[u8]);
+  /// Closes the connection with a QUIC application error code.
+  fn close(&self, code: u32, reason: &[u8]);
+}
+
+/// Whether a join started a new participant or took back a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinOutcome {
+  Joined,
+  /// The device was already in the call (reconnecting, or on a connection that is not yet known
+  /// to be dead) and continues on the new connection.
+  Resumed,
 }
 
 struct RoomState {
   participants: HashMap<DeviceId, Participant>,
+  /// The latest session of every device that joined, also after it left: a session's cleanup
+  /// releases the slot only if it is still that device's latest session.
+  latest_sessions: HashMap<DeviceId, SessionId>,
   forwarder: Forwarder,
   dave: DaveCoordinator,
   next_stream_id: u32,
 }
 
+/// What releasing a session's slot did.
+struct Release {
+  has_left: bool,
+  is_room_empty: bool,
+}
+
 struct Participant {
   user_id: UserId,
   audio_stream_id: StreamId,
-  handle: ParticipantHandle,
+  session: SessionId,
+  presence: Presence,
+}
+
+enum Presence {
+  Connected(ParticipantHandle),
+  /// The connection was lost; the slot waits for the device to join again.
+  Reconnecting,
 }
 
 #[derive(Debug, Error)]
@@ -90,12 +141,25 @@ pub enum RoomError {
   CallNotFound(CallId),
 }
 
+impl ParticipantLink for Connection {
+  fn send_datagram(&self, bytes: &[u8]) {
+    if let Err(error) = Connection::send_datagram(self, bytes) {
+      trace!(%error, "datagram dropped");
+    }
+  }
+
+  fn close(&self, code: u32, reason: &[u8]) {
+    Connection::close(self, code.into(), reason);
+  }
+}
+
 impl Rooms {
   pub fn new(config: SfuConfig) -> Self {
     Self {
       config,
       rooms: Mutex::new(HashMap::new()),
       control: Mutex::new(ControlState::default()),
+      next_session: AtomicU64::new(1),
     }
   }
 
@@ -148,26 +212,31 @@ impl Rooms {
     Ok(())
   }
 
-  /// Adds a participant to a call, creating the room on first join.
+  /// Adds a participant to a call, creating the room on first join. A device that is already in
+  /// the call takes its slot back on the new connection; a locked call still lets it back in.
   pub fn join(
     &self,
     grant: JoinGrant,
     capabilities: MediaCapabilities,
     handle: ParticipantHandle,
-  ) -> Result<Arc<Room>, RoomError> {
+  ) -> Result<(Arc<Room>, SessionId, JoinOutcome), RoomError> {
     let call_id = grant.call_id;
+    let session = SessionId(self.next_session.fetch_add(1, Ordering::Relaxed));
+    // The rooms lock is held across the join so `leave` can't drop the room in between.
+    // Lock order everywhere: rooms, then control, then room state.
+    let mut rooms = lock(&self.rooms);
+    let has_slot = rooms
+      .get(&call_id)
+      .is_some_and(|room| room.has_participant(grant.device_id));
     {
       let control = lock(&self.control);
       if control.removed.contains(&(call_id, grant.user_id)) {
         return Err(RoomError::Removed);
       }
-      if control.locked.contains(&call_id) {
+      if control.locked.contains(&call_id) && !has_slot {
         return Err(RoomError::Locked);
       }
     }
-    // The rooms lock is held across the join so `leave` can't drop the room in between.
-    // Lock order everywhere: rooms, then room state.
-    let mut rooms = lock(&self.rooms);
     let room = match rooms.get(&call_id) {
       Some(room) => Arc::clone(room),
       None => {
@@ -177,18 +246,25 @@ impl Rooms {
         room
       },
     };
-    let result = room.join(grant.user_id, grant.device_id, capabilities, handle);
+    let result = room.join(grant, capabilities, handle, session, Instant::now());
     if result.is_err() && room.is_empty() {
       rooms.remove(&call_id);
     }
-    result?;
-    Ok(room)
+    Ok((room, session, result?))
   }
 
-  /// Removes a participant; the room goes away with its last participant.
-  pub fn leave(&self, room: &Room, participant_id: DeviceId) {
-    let is_empty = room.leave(participant_id);
-    if is_empty {
+  /// The session's connection was lost: the participant keeps its slot while it reconnects.
+  /// Returns `false` if the session no longer holds the slot (nothing to wait for).
+  pub fn disconnect(&self, room: &Room, participant_id: DeviceId, session: SessionId, now: Instant) -> bool {
+    room.disconnect(participant_id, session, now)
+  }
+
+  /// Releases the session's slot: the participant leaves the call (also after a reconnect grace
+  /// period ran out). Returns whether the participant left because of this session, i.e. whether
+  /// its leave is to be reported; a device that is back on a newer session stays.
+  pub fn leave(&self, room: &Room, participant_id: DeviceId, session: SessionId) -> bool {
+    let release = room.leave(participant_id, session);
+    if release.is_room_empty {
       let mut rooms = lock(&self.rooms);
       // Only drop the room if no one rejoined in the meantime.
       if rooms.get(&room.call_id).is_some_and(|current| current.is_empty()) {
@@ -200,6 +276,7 @@ impl Rooms {
         info!(call_id = %room.call_id, "room closed");
       }
     }
+    release.has_left
   }
 }
 
@@ -207,18 +284,87 @@ impl Room {
   fn new(call_id: CallId, config: &SfuConfig) -> Result<Self, RoomError> {
     let state = RoomState {
       participants: HashMap::new(),
+      latest_sessions: HashMap::new(),
       forwarder: Forwarder::new(config.forwarding),
       dave: DaveCoordinator::new(call_id)?,
       next_stream_id: 1,
     };
     Ok(Self {
       call_id,
+      reconnect_grace: config.reconnect_grace,
       state: Mutex::new(state),
     })
   }
 
   pub fn call_id(&self) -> CallId {
     self.call_id
+  }
+
+  /// Handles one signaling message of a joined participant; an error goes back to it.
+  pub fn on_client_message(
+    &self,
+    participant_id: DeviceId,
+    message: CallClientMessage,
+    now: Instant,
+  ) -> Result<(), ErrorBody> {
+    match message {
+      CallClientMessage::DaveKeyPackage {
+        key_package,
+        maybe_key_binding,
+      } => self
+        .on_key_package(
+          participant_id,
+          key_package.into_vec(),
+          maybe_key_binding.map(Base64Bytes::into_vec),
+        )
+        .map_err(|error| {
+          warn!(participant_id = %participant_id, %error, "rejected key package");
+          ErrorBody::new(ErrorCode::InvalidKeyPackage, error.to_string())
+        }),
+      CallClientMessage::DaveCommit {
+        epoch,
+        commit,
+        maybe_welcome,
+      } => {
+        self.on_commit(
+          participant_id,
+          epoch,
+          commit.into_vec(),
+          maybe_welcome.map(Base64Bytes::into_vec),
+        );
+        Ok(())
+      },
+      CallClientMessage::Join { .. } => Err(ErrorBody::new(ErrorCode::ProtocolViolation, "already joined")),
+      CallClientMessage::TransportFeedback { feedback } => {
+        self.on_transport_feedback(participant_id, &feedback, now);
+        Ok(())
+      },
+      CallClientMessage::PublishVideo { kind, codec, layers } => rejected(
+        participant_id,
+        self.publish_video(participant_id, kind, codec, layers),
+      ),
+      CallClientMessage::UnpublishVideo { stream_id } => {
+        rejected(participant_id, self.unpublish_video(participant_id, stream_id))
+      },
+      CallClientMessage::PublishScreenAudio => {
+        rejected(participant_id, self.publish_screen_audio(participant_id))
+      },
+      CallClientMessage::UnpublishScreenAudio { stream_id } => rejected(
+        participant_id,
+        self.unpublish_screen_audio(participant_id, stream_id),
+      ),
+      CallClientMessage::Subscribe {
+        stream_id,
+        maybe_max_layer,
+      } => rejected(
+        participant_id,
+        self.subscribe(participant_id, stream_id, maybe_max_layer, now),
+      ),
+      CallClientMessage::Unknown => {
+        debug!(participant_id = %participant_id, "ignoring unknown message");
+        Ok(())
+      },
+    }
   }
 
   /// Forwards one media datagram from `sender`: audio to everyone if the sender is among the
@@ -229,24 +375,18 @@ impl Room {
     datagram: &[u8],
     now: Instant,
   ) -> Result<usize, RoomError> {
-    let deliveries: Vec<(Connection, Vec<u8>)> = {
+    let deliveries: Vec<(Arc<dyn ParticipantLink>, Vec<u8>)> = {
       let mut state = lock(&self.state);
       let route = state.forwarder.route(sender, datagram, now)?;
       state.apply(route.effects);
       route
         .deliveries
         .into_iter()
-        .filter_map(|(receiver, bytes)| {
-          let participant = state.participants.get(&receiver)?;
-          Some((participant.handle.connection.clone(), bytes))
-        })
+        .filter_map(|(receiver, bytes)| Some((Arc::clone(&state.handle_of(receiver)?.link), bytes)))
         .collect()
     };
-    for (connection, bytes) in &deliveries {
-      // Datagrams are unreliable by design; a full send buffer or closed peer just drops this one.
-      if let Err(error) = connection.send_datagram(bytes) {
-        trace!(%error, "datagram dropped");
-      }
+    for (link, bytes) in &deliveries {
+      link.send_datagram(bytes);
     }
     Ok(deliveries.len())
   }
@@ -356,91 +496,109 @@ impl Room {
 
   fn join(
     &self,
-    user_id: UserId,
-    participant_id: DeviceId,
+    grant: JoinGrant,
     capabilities: MediaCapabilities,
     handle: ParticipantHandle,
-  ) -> Result<(), RoomError> {
+    session: SessionId,
+    now: Instant,
+  ) -> Result<JoinOutcome, RoomError> {
+    let participant_id = grant.device_id;
     let mut state = lock(&self.state);
-    if state.participants.contains_key(&participant_id) {
-      return Err(RoomError::AlreadyJoined(participant_id));
-    }
-    let audio_stream_id = state.allocate_stream_id();
-    let others: Vec<CallParticipant> = state
-      .participants
-      .iter()
-      .map(|(&device_id, participant)| participant.info(device_id))
-      .collect();
     let package = state.dave.external_sender_package()?;
-    let participant = Participant {
-      user_id,
-      audio_stream_id,
-      handle,
+    let outcome = match state.participants.get(&participant_id) {
+      Some(existing) if existing.user_id != grant.user_id => {
+        return Err(RoomError::AlreadyJoined(participant_id));
+      },
+      Some(_) => {
+        let was_reconnecting = state.resume(participant_id, capabilities, handle, session, now);
+        state.welcome(self.call_id, participant_id, package, self.reconnect_grace);
+        if was_reconnecting {
+          state.broadcast_except(
+            participant_id,
+            CallEvent::ParticipantReconnected {
+              device_id: participant_id,
+            },
+          );
+        }
+        JoinOutcome::Resumed
+      },
+      None => {
+        let audio_stream_id = state.allocate_stream_id();
+        state
+          .forwarder
+          .add_participant(participant_id, audio_stream_id, capabilities, now);
+        state.participants.insert(
+          participant_id,
+          Participant {
+            user_id: grant.user_id,
+            audio_stream_id,
+            session,
+            presence: Presence::Connected(handle),
+          },
+        );
+        state.welcome(self.call_id, participant_id, package, self.reconnect_grace);
+        let info = state.info(participant_id);
+        if let Some(participant) = info {
+          state.broadcast_except(participant_id, CallEvent::ParticipantJoined { participant });
+        }
+        JoinOutcome::Joined
+      },
     };
-    let info = participant.info(participant_id);
-    send(
-      &participant.handle,
-      CallEvent::Joined {
-        call_id: self.call_id,
-        participant: info,
-        participants: others,
-        video_tracks: state.forwarder.video_tracks(),
-        screen_audio_tracks: state.forwarder.screen_audio_tracks(),
-      },
-    );
-    send(
-      &participant.handle,
-      CallEvent::DaveExternalSender {
-        package: Base64Bytes::new(package),
-      },
-    );
-    let active_speakers = state.forwarder.active_speakers().to_vec();
-    if !active_speakers.is_empty() {
-      send(
-        &participant.handle,
-        CallEvent::ActiveSpeakers {
-          device_ids: active_speakers,
-        },
-      );
-    }
-    state.broadcast(CallEvent::ParticipantJoined { participant: info });
-    state
-      .forwarder
-      .add_participant(participant_id, audio_stream_id, capabilities, Instant::now());
-    state.participants.insert(participant_id, participant);
-    info!(call_id = %self.call_id, participant_id = %participant_id, "participant joined");
-    Ok(())
+    state.latest_sessions.insert(participant_id, session);
+    info!(call_id = %self.call_id, participant_id = %participant_id, ?outcome, "participant joined");
+    Ok(outcome)
   }
 
-  /// Returns whether the room is now empty.
-  fn leave(&self, participant_id: DeviceId) -> bool {
+  /// The participant's connection is gone; it keeps its slot. Returns whether `session` held it.
+  fn disconnect(&self, participant_id: DeviceId, session: SessionId, now: Instant) -> bool {
     let mut state = lock(&self.state);
-    if state.participants.remove(&participant_id).is_none() {
-      return state.participants.is_empty();
+    let Some(participant) = state
+      .participants
+      .get_mut(&participant_id)
+      .filter(|participant| participant.session == session)
+    else {
+      return false;
+    };
+    if matches!(participant.presence, Presence::Reconnecting) {
+      return false;
     }
-    state.broadcast(CallEvent::ParticipantLeft {
-      device_id: participant_id,
-    });
-    let removal = state.forwarder.remove_participant(participant_id, Instant::now());
-    for stream_id in removal.video_tracks {
-      state.broadcast(CallEvent::VideoUnpublished {
-        stream_id: MediaStreamId(stream_id.0),
-      });
-    }
-    if let Some(stream_id) = removal.maybe_screen_audio {
-      state.broadcast(CallEvent::ScreenAudioUnpublished {
-        stream_id: MediaStreamId(stream_id.0),
-      });
-    }
-    state.apply(removal.effects);
+    participant.presence = Presence::Reconnecting;
+    let effects = state.forwarder.suspend(participant_id, now);
+    state.apply(effects);
+    // The device comes back with a new DAVE key package; until then the group re-keys without it
+    // (e2ee.md §8: a lost device must not hold a current media key).
     let outbound = state.dave.on_leave(participant_id);
     state.dispatch(outbound);
-    info!(
-      call_id = %self.call_id,
-      participant_id = %participant_id,
-      "participant left"
-    );
-    state.participants.is_empty()
+    state.broadcast(CallEvent::ParticipantReconnecting {
+      device_id: participant_id,
+    });
+    info!(call_id = %self.call_id, participant_id = %participant_id, "participant reconnecting");
+    true
+  }
+
+  fn leave(&self, participant_id: DeviceId, session: SessionId) -> Release {
+    let mut state = lock(&self.state);
+    let is_latest = state.latest_sessions.get(&participant_id) == Some(&session);
+    let holds_slot = state
+      .participants
+      .get(&participant_id)
+      .is_some_and(|participant| participant.session == session);
+    if holds_slot {
+      state.remove(self.call_id, participant_id, Instant::now());
+    }
+    // A slot the host dropped while it was reconnecting was this session's too.
+    let has_left = holds_slot || (is_latest && !state.participants.contains_key(&participant_id));
+    if has_left {
+      state.latest_sessions.remove(&participant_id);
+    }
+    Release {
+      has_left,
+      is_room_empty: state.participants.is_empty(),
+    }
+  }
+
+  fn has_participant(&self, participant_id: DeviceId) -> bool {
+    lock(&self.state).participants.contains_key(&participant_id)
   }
 
   fn is_empty(&self) -> bool {
@@ -448,30 +606,148 @@ impl Room {
   }
 
   /// Tells the user's devices why, then closes their connections (the sessions then leave as
-  /// usual: DAVE re-keys and the server hears about it).
+  /// usual: DAVE re-keys and the server hears about it). Reconnecting devices of the user lose
+  /// their slot at once.
   fn close_user(&self, user_id: UserId, event: CallEvent) {
-    let state = lock(&self.state);
-    let handles: Vec<ParticipantHandle> = state
+    let mut state = lock(&self.state);
+    let devices: Vec<DeviceId> = state
       .participants
-      .values()
-      .filter(|participant| participant.user_id == user_id)
-      .map(|participant| participant.handle.clone())
+      .iter()
+      .filter(|(_, participant)| participant.user_id == user_id)
+      .map(|(device_id, _)| *device_id)
       .collect();
-    close_after_event(handles, event);
+    self.close(&mut state, &devices, event);
   }
 
   fn close_everyone(&self, event: CallEvent) {
-    let state = lock(&self.state);
-    let handles = state
-      .participants
-      .values()
-      .map(|participant| participant.handle.clone())
-      .collect();
-    close_after_event(handles, event);
+    let mut state = lock(&self.state);
+    let devices: Vec<DeviceId> = state.participants.keys().copied().collect();
+    self.close(&mut state, &devices, event);
+  }
+
+  fn close(&self, state: &mut RoomState, devices: &[DeviceId], event: CallEvent) {
+    let mut handles = Vec::new();
+    for device_id in devices {
+      match state.handle_of(*device_id) {
+        Some(handle) => handles.push(handle.clone()),
+        None => state.remove(self.call_id, *device_id, Instant::now()),
+      }
+    }
+    close_after_event(handles, event, CLOSED_BY_HOST, b"closed by the meeting host");
   }
 }
 
 impl RoomState {
+  /// Sends a (re)joined participant what it needs to start: the call's state, the DAVE external
+  /// sender, the current speakers and who of the others is reconnecting.
+  fn welcome(&self, call_id: CallId, participant_id: DeviceId, package: Vec<u8>, reconnect_grace: Duration) {
+    let Some(participant) = self.info(participant_id) else {
+      return;
+    };
+    let others: Vec<CallParticipant> = self
+      .participants
+      .keys()
+      .filter(|device_id| **device_id != participant_id)
+      .filter_map(|device_id| self.info(*device_id))
+      .collect();
+    self.send_to(
+      participant_id,
+      CallEvent::Joined {
+        call_id,
+        participant,
+        participants: others,
+        video_tracks: self.forwarder.video_tracks(),
+        screen_audio_tracks: self.forwarder.screen_audio_tracks(),
+        maybe_reconnect_grace_ms: Some(u64::try_from(reconnect_grace.as_millis()).unwrap_or(u64::MAX)),
+      },
+    );
+    self.send_to(
+      participant_id,
+      CallEvent::DaveExternalSender {
+        package: Base64Bytes::new(package),
+      },
+    );
+    let active_speakers = self.forwarder.active_speakers().to_vec();
+    if !active_speakers.is_empty() {
+      self.send_to(
+        participant_id,
+        CallEvent::ActiveSpeakers {
+          device_ids: active_speakers,
+        },
+      );
+    }
+    for (device_id, other) in &self.participants {
+      if matches!(other.presence, Presence::Reconnecting) {
+        self.send_to(
+          participant_id,
+          CallEvent::ParticipantReconnecting {
+            device_id: *device_id,
+          },
+        );
+      }
+    }
+  }
+
+  /// A device that is in the call joined on a new connection: it continues in its slot. A
+  /// connection still thought alive is replaced (the device knows better: it is gone). Returns
+  /// whether the others saw it reconnecting.
+  fn resume(
+    &mut self,
+    participant_id: DeviceId,
+    capabilities: MediaCapabilities,
+    handle: ParticipantHandle,
+    session: SessionId,
+    now: Instant,
+  ) -> bool {
+    let Some(participant) = self.participants.get_mut(&participant_id) else {
+      return false;
+    };
+    let previous = std::mem::replace(&mut participant.presence, Presence::Connected(handle));
+    participant.session = session;
+    let was_reconnecting = match previous {
+      Presence::Connected(old) => {
+        close_after_event(
+          vec![old],
+          CallEvent::ConnectionReplaced,
+          REPLACED_BY_NEW_CONNECTION,
+          b"replaced by a new connection",
+        );
+        // The new connection brings a new DAVE key package: the old leaf goes.
+        let outbound = self.dave.on_leave(participant_id);
+        self.dispatch(outbound);
+        false
+      },
+      Presence::Reconnecting => true,
+    };
+    self.forwarder.resume(participant_id, capabilities, now);
+    was_reconnecting
+  }
+
+  /// Removes a participant for good: its tracks and DAVE leaf go, everyone hears about it.
+  fn remove(&mut self, call_id: CallId, participant_id: DeviceId, now: Instant) {
+    if self.participants.remove(&participant_id).is_none() {
+      return;
+    }
+    self.broadcast(CallEvent::ParticipantLeft {
+      device_id: participant_id,
+    });
+    let removal = self.forwarder.remove_participant(participant_id, now);
+    for stream_id in removal.video_tracks {
+      self.broadcast(CallEvent::VideoUnpublished {
+        stream_id: MediaStreamId(stream_id.0),
+      });
+    }
+    if let Some(stream_id) = removal.maybe_screen_audio {
+      self.broadcast(CallEvent::ScreenAudioUnpublished {
+        stream_id: MediaStreamId(stream_id.0),
+      });
+    }
+    self.apply(removal.effects);
+    let outbound = self.dave.on_leave(participant_id);
+    self.dispatch(outbound);
+    info!(call_id = %call_id, participant_id = %participant_id, "participant left");
+  }
+
   /// The next free stream id. The counter wraps after 2^32 publications; ids still in use are
   /// skipped, so a new stream never takes over someone's (their microphone, say).
   fn allocate_stream_id(&mut self) -> StreamId {
@@ -515,53 +791,77 @@ impl RoomState {
     }
   }
 
-  fn send_to(&self, device_id: DeviceId, event: CallEvent) {
-    if let Some(participant) = self.participants.get(&device_id) {
-      send(&participant.handle, event);
+  /// The connection of a participant, unless it is reconnecting.
+  fn handle_of(&self, device_id: DeviceId) -> Option<&ParticipantHandle> {
+    match &self.participants.get(&device_id)?.presence {
+      Presence::Connected(handle) => Some(handle),
+      Presence::Reconnecting => None,
     }
   }
 
+  fn info(&self, device_id: DeviceId) -> Option<CallParticipant> {
+    let participant = self.participants.get(&device_id)?;
+    Some(CallParticipant {
+      user_id: participant.user_id,
+      device_id,
+      audio_stream_id: MediaStreamId(participant.audio_stream_id.0),
+    })
+  }
+
+  fn send_to(&self, device_id: DeviceId, event: CallEvent) {
+    if let Some(handle) = self.handle_of(device_id) {
+      send(handle, event);
+    }
+  }
+
+  /// Sends to every connected participant.
   fn broadcast(&self, event: CallEvent) {
-    for participant in self.participants.values() {
-      send(&participant.handle, event.clone());
+    for device_id in self.participants.keys() {
+      self.send_to(*device_id, event.clone());
+    }
+  }
+
+  fn broadcast_except(&self, excluded: DeviceId, event: CallEvent) {
+    for device_id in self
+      .participants
+      .keys()
+      .filter(|device_id| **device_id != excluded)
+    {
+      self.send_to(*device_id, event.clone());
     }
   }
 
   fn dispatch(&self, outbound: Vec<Outbound>) {
     for Outbound { recipient, event } in outbound {
-      match self.participants.get(&recipient) {
-        Some(participant) => send(&participant.handle, event),
+      match self.handle_of(recipient) {
+        Some(handle) => send(handle, event),
         None => debug!(
           participant_id = %recipient,
-          "dropping DAVE message for departed participant"
+          "dropping DAVE message for a departed or reconnecting participant"
         ),
       }
     }
   }
 }
 
-impl Participant {
-  fn info(&self, device_id: DeviceId) -> CallParticipant {
-    CallParticipant {
-      user_id: self.user_id,
-      device_id,
-      audio_stream_id: MediaStreamId(self.audio_stream_id.0),
-    }
-  }
+/// Turns a rejected request into a `protocol_violation` error for the client.
+fn rejected(participant_id: DeviceId, result: Result<(), RoomError>) -> Result<(), ErrorBody> {
+  result.map_err(|error| {
+    debug!(participant_id = %participant_id, %error, "request rejected");
+    ErrorBody::new(ErrorCode::ProtocolViolation, error.to_string())
+  })
 }
 
 /// Sends `event` to each handle and closes the connections a moment later, so the event is
 /// written first.
-fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent) {
+fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent, code: u32, reason: &'static [u8]) {
   for handle in &handles {
     send(handle, event.clone());
   }
   tokio::spawn(async move {
     tokio::time::sleep(CLOSE_GRACE).await;
     for handle in handles {
-      handle
-        .connection
-        .close(CLOSED_BY_HOST.into(), b"closed by the meeting host");
+      handle.link.close(code, reason);
     }
   });
 }
@@ -572,9 +872,7 @@ fn send(handle: &ParticipantHandle, event: CallEvent) {
     // A participant that doesn't drain its signaling stream would make the queue grow without bound.
     Err(TrySendError::Full(_)) => {
       warn!("signaling queue full, disconnecting the participant");
-      handle
-        .connection
-        .close(SIGNALING_OVERFLOW.into(), b"signaling queue overflow");
+      handle.link.close(SIGNALING_OVERFLOW, b"signaling queue overflow");
     },
     // The receiver only disappears when the session ends, which also removes the participant.
     Err(TrySendError::Closed(_)) => warn!("signaling channel closed"),

@@ -256,6 +256,7 @@ tile-you = You
 tile-muted = muted
 tile-hand = hand raised
 tile-speaking = speaking
+tile-reconnecting = reconnecting
 
 ## Pre-join screen
 prejoin-quick-controls = Microphone and camera
@@ -777,6 +778,11 @@ calls-noise = Noise suppression
 calls-echo = Echo cancellation
 calls-ptt = Push to talk
 calls-ptt-hint = Hold a key to talk instead of an open microphone.
+calls-status-sounds = Call status sounds
+calls-status-sounds-hint = A soft tone repeats while your connection is lost, and short tones tell when it is back or the call ended. Only you hear them.
+calls-status-sounds-all = Mine and others' connections
+calls-status-sounds-own-only = Only my connection
+calls-status-sounds-off = Off
 calls-background = Default background
 calls-background-hint = Applied on your device before your video is sent.
 
@@ -889,6 +895,7 @@ audit-session-ended = Session ended
 audit-other = Other
 policy-saving = Signing and publishing…
 call-connecting = Connecting…
+call-reconnecting = Connection lost, reconnecting…
 control-deafen = Mute the call audio
 control-undeafen = Unmute the call audio
 enroll-link = Link with another device

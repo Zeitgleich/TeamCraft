@@ -23,6 +23,7 @@ pub enum CallEvent {
   Effect(BackgroundEffect),
   StartScreenShare { has_sound: bool },
   StopScreenShare,
+  StatusSounds(CallStatusSounds),
 }
 
 type CallHandler = Rc<dyn Fn(CallEvent)>;

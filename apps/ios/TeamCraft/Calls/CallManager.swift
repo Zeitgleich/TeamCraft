@@ -6,7 +6,7 @@ import PushKit
 
 /// The call this device is in or rings for, as the in-call screen shows it.
 struct ActiveCall: Identifiable, Equatable {
-  enum Phase: Equatable { case ringing, connecting, connected }
+  enum Phase: Equatable { case ringing, connecting, connected, reconnecting }
 
   let id: UUID
   /// Empty while a VoIP push is still being opened (the call was reported before it was readable).
@@ -206,6 +206,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       do {
         let session = try await AppModel.shared.joinCall(conversationId: call.conversationId)
         maybeSession = session
+        session.setStatusSounds(sounds: CallStatusSoundsSetting.current.sounds)
         session.setEncodedVideoListener(listener: self)
         if var current = activeCall {
           current.phase = .connected
@@ -443,7 +444,12 @@ extension CallManager: CallListener {
       call.isSecured = state.isSecured
       call.participantCount = state.participantCount
       call.maybePrivacyCode = state.maybePrivacyCode
-      if state.phase == .connected { call.phase = .connected }
+      switch state.phase {
+      case .connected: call.phase = .connected
+      // The connection broke; the core rejoins (the others keep this device's place meanwhile).
+      case .reconnecting: call.phase = .reconnecting
+      case .connecting, .ended: break
+      }
       self.activeCall = call
       if state.phase == .ended {
         self.maybeEndNote = Self.note(for: state.maybeEndReason)

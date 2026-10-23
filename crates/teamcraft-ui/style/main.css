@@ -2412,6 +2412,22 @@ select.input {
   outline-color: var(--accent);
 }
 
+/* Connection lost, rejoining: dimmed until the person is back. */
+.tile-reconnecting .video-surface {
+  opacity: 0.45;
+}
+
+.tile-status {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.6);
+  color: #fff;
+  font-size: 0.75rem;
+}
+
 .video-surface {
   position: absolute;
   inset: 0;

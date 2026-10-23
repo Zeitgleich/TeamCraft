@@ -13,11 +13,19 @@
 //! Every input (network, worklet, codecs, timers, app commands) is funneled into one channel that
 //! a single task drains, so the engine needs no locking. Timers use `setInterval`, which browsers
 //! do not throttle in tabs that play audio.
+//!
+//! Browsers can't migrate a WebTransport session to another network. When the session closes
+//! without the call being over, the driver opens a new one with a fresh join ticket and the engine
+//! rejoins within the SFU's grace period (ARCHITECTURE.md §6.5); audio and video carry over.
 
 mod video;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
@@ -40,13 +48,17 @@ use web_time::Instant;
 
 use self::video::{TrackSender, VideoView};
 
-use crate::audio_frame::{EncodedAudioFrame, FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ};
+use crate::audio_frame::{
+  EncodedAudioFrame, FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ, planned_loss_percent,
+};
 use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource, sine_tone};
 use crate::audio_level::{DEFAULT_VOICE_THRESHOLD_DBOV, measure_audio_level};
 use crate::call_auth::CallKeyAuthenticator;
+use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
+use crate::call_resilience::{JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig};
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::AudioLevel;
@@ -68,6 +80,10 @@ const MAX_PLAYBACK_SAMPLES: u32 = 48_000 / 5;
 const MAX_DECODED_SAMPLES: usize = 5 * FRAME_SAMPLES_PER_CHANNEL;
 /// Opus bitrate for voice.
 const OPUS_BITRATE_BPS: u32 = 32_000;
+/// Loss Opus plans in-band FEC for until the uplink is measured (as on native clients).
+const OPUS_LOSS_FLOOR_PERCENT: u8 = 5;
+/// The planned loss changes the encoder's configuration only in steps this big.
+const OPUS_LOSS_STEP_PERCENT: u8 = 5;
 /// Mixed frames above this amplitude count as audible in [`CallStats`].
 const AUDIBLE_AMPLITUDE: f32 = 0.01;
 
@@ -94,6 +110,27 @@ pub struct WebCallConfig {
   /// Binds DAVE keys to device identities (e2ee.md §8); `None` only for development pages.
   pub maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   pub jitter: JitterBufferConfig,
+  /// Rejoin timing after a lost session.
+  pub resilience: ResilienceConfig,
+  /// Fresh join tickets for rejoining; without one the first ticket is used again, which works
+  /// only while it is valid (development pages).
+  pub maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
+  /// Which call status sounds (reconnecting, reconnected, connection lost) play.
+  pub status_cues: StatusCues,
+}
+
+/// Gets a fresh join ticket from `teamcraft-server` in the page.
+pub trait WebJoinTicketSource {
+  fn fetch(&self) -> LocalTicketFuture;
+}
+
+/// A join ticket on its way (on the page's event loop).
+pub type LocalTicketFuture = Pin<Box<dyn Future<Output = Result<JoinTicket, JoinTicketError>>>>;
+
+impl std::fmt::Debug for dyn WebJoinTicketSource {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("WebJoinTicketSource")
+  }
 }
 
 /// The browser's microphones and speakers. Labels are empty until the page has microphone
@@ -112,6 +149,10 @@ pub enum WebCallError {
   Unsupported(&'static str),
   #[error(transparent)]
   Engine(#[from] CallEngineError),
+  #[error(transparent)]
+  Ticket(#[from] JoinTicketError),
+  #[error("the connection to the call was lost and could not be restored in time")]
+  ConnectionLost,
   #[error("the call ended")]
   Ended,
 }
@@ -119,7 +160,18 @@ pub enum WebCallError {
 /// Everything the call task reacts to.
 enum Input {
   Signal(CallServerMessage),
-  SignalingClosed,
+  /// The signaling stream of the session with this generation ended.
+  SignalingClosed {
+    generation: u64,
+  },
+  /// A rejoin attempt opened a new session.
+  Relinked {
+    transport: Transport,
+    ticket: JoinTicket,
+    generation: u64,
+  },
+  /// Rejoining took longer than the SFU keeps the slot.
+  ReconnectExpired,
   Datagram(Vec<u8>),
   Captured(Vec<f32>),
   Encoded(Vec<u8>),
@@ -164,6 +216,7 @@ enum Command {
     canvas: HtmlCanvasElement,
   },
   UnwatchVideo(MediaStreamId),
+  SetStatusCues(StatusCues),
   Leave,
 }
 
@@ -191,6 +244,8 @@ struct Capture {
 /// Microphone or tone samples → 20 ms frames → WebCodecs Opus.
 struct OpusEncoder {
   encoder: AudioEncoder,
+  /// The loss the encoder's in-band FEC is planned for.
+  planned_loss_percent: u8,
   pending: Vec<f32>,
   /// Levels of frames handed to the encoder whose output has not arrived yet (FIFO).
   levels: VecDeque<AudioLevel>,
@@ -237,7 +292,7 @@ impl WebCall {
     ensure_supported()?;
     let (inputs, input_rx) = mpsc::unbounded();
     let audio = WebAudio::open(&config.source, &config.sink, &inputs).await?;
-    let transport = Transport::connect(&config, &inputs).await?;
+    let transport = Transport::connect(&config.sfu_url, config.maybe_certificate_hash, &inputs, 0).await?;
     let (event_tx, events) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     let task_inputs = inputs.clone();
@@ -346,6 +401,12 @@ impl WebCall {
     let _ = self.command(Command::UnwatchVideo(stream_id));
   }
 
+  /// Which call status sounds play from now on.
+  pub fn set_status_cues(&self, status_cues: StatusCues) {
+    // The call already ended if this fails.
+    let _ = self.command(Command::SetStatusCues(status_cues));
+  }
+
   fn command(&self, command: Command) -> Result<(), WebCallError> {
     self
       .inputs
@@ -415,7 +476,18 @@ async fn run_call(
     engine.set_authenticator(Arc::clone(authenticator));
   }
   let mut state = CallState {
-    transport: &transport,
+    maybe_transport: Some(transport),
+    generation: 0,
+    maybe_lost_at: None,
+    ticket: JoinTicket {
+      sfu_url: config.sfu_url.clone(),
+      token: config.token.clone(),
+    },
+    maybe_certificate_hash: config.maybe_certificate_hash,
+    resilience: config.resilience,
+    maybe_ticket_source: config.maybe_ticket_source.clone(),
+    cues: CuePlayer::new(config.status_cues),
+    is_ending_lost: false,
     inputs: &inputs,
     events: &events,
     jitter: config.jitter,
@@ -447,10 +519,19 @@ async fn run_call(
     if let Err(error) = state.flush(&mut engine) {
       break Err(error);
     }
+    // Refused, ended by the host or replaced by another connection: nothing to rejoin.
+    if engine.is_over() {
+      break Ok(());
+    }
+    if engine.is_in_call() {
+      state.maybe_lost_at = None;
+    }
   };
 
   audio.close();
-  transport.close();
+  if let Some(transport) = &state.maybe_transport {
+    transport.close();
+  }
   let mut stats = state.stats;
   stats.maybe_privacy_code = engine.privacy_code();
   info!(?stats, "call ended");
@@ -464,7 +545,20 @@ enum Flow {
 
 /// What the call task owns besides the engine and the audio graph.
 struct CallState<'a> {
-  transport: &'a Transport,
+  /// The current session; `None` while rejoining.
+  maybe_transport: Option<Transport>,
+  /// Counts sessions, so a late end of an old one is not taken for the current one.
+  generation: u64,
+  /// When the connection was lost, while rejoining.
+  maybe_lost_at: Option<Instant>,
+  ticket: JoinTicket,
+  maybe_certificate_hash: Option<[u8; 32]>,
+  resilience: ResilienceConfig,
+  maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
+  /// Status sounds, mixed into the playback (never sent).
+  cues: CuePlayer,
+  /// Rejoining failed; the call ends once the "connection lost" sound has played.
+  is_ending_lost: bool,
   inputs: &'a mpsc::UnboundedSender<Input>,
   events: &'a mpsc::UnboundedSender<CallEngineEvent>,
   jitter: JitterBufferConfig,
@@ -489,7 +583,26 @@ impl CallState<'_> {
   ) -> Result<Flow, WebCallError> {
     match input {
       Input::Signal(message) => engine.handle_signal(message, Instant::now())?,
-      Input::SignalingClosed => return Ok(Flow::Leave),
+      Input::SignalingClosed { generation } => {
+        if generation == self.generation {
+          return Ok(self.on_session_lost(engine));
+        }
+      },
+      Input::Relinked {
+        transport,
+        ticket,
+        generation,
+      } => {
+        info!("connected again, rejoining the call");
+        self.maybe_transport = Some(transport);
+        self.generation = generation;
+        engine.rejoin(ticket.token.clone(), Instant::now());
+        self.ticket = ticket;
+      },
+      Input::ReconnectExpired => {
+        self.is_ending_lost = true;
+        self.cues.play(CallCue::ConnectionLost);
+      },
       Input::Datagram(bytes) => engine.handle_datagram(&bytes, Instant::now()),
       Input::Captured(samples) => {
         if !self.is_muted {
@@ -510,7 +623,12 @@ impl CallState<'_> {
         }
       },
       Input::CodecFailed(message) => warn!(%message, "audio codec error"),
-      Input::FrameTick => self.on_frame_tick(audio)?,
+      Input::FrameTick => {
+        self.on_frame_tick(audio)?;
+        if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
+          return Err(WebCallError::ConnectionLost);
+        }
+      },
       Input::TimerTick => engine.on_timer(Instant::now()),
       Input::VideoTick(kind) => {
         if let Some(sender) = self.senders.iter_mut().find(|sender| sender.kind == kind) {
@@ -533,8 +651,17 @@ impl CallState<'_> {
   fn flush(&mut self, engine: &mut CallEngine) -> Result<(), WebCallError> {
     while let Some(output) = engine.poll_output() {
       match output {
-        EngineOutput::Signal(message) => self.transport.send_signal(&message)?,
-        EngineOutput::Datagram(bytes) => self.transport.send_datagram(&bytes),
+        // While rejoining there is no session; the engine renews what matters when it is back.
+        EngineOutput::Signal(message) => {
+          if let Some(transport) = &self.maybe_transport {
+            transport.send_signal(&message)?;
+          }
+        },
+        EngineOutput::Datagram(bytes) => {
+          if let Some(transport) = &self.maybe_transport {
+            transport.send_datagram(&bytes);
+          }
+        },
         EngineOutput::Event(CallEngineEvent::AudioFrame {
           sender,
           origin,
@@ -588,14 +715,79 @@ impl CallState<'_> {
                 sender.set_needed_layers(layers);
               }
             },
+            CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
+              self.encoder.set_measured_loss_percent(*loss_percent)?;
+            },
             _ => {},
           }
+          self.cues.on_event(&event);
           // The app may have stopped listening; the call goes on.
           let _ = self.events.unbounded_send(event);
         },
       }
     }
     Ok(())
+  }
+
+  /// The session ended. Unless the call is over, the device rejoins on a new session.
+  fn on_session_lost(&mut self, engine: &mut CallEngine) -> Flow {
+    if engine.is_over() {
+      return Flow::Leave;
+    }
+    warn!("lost the connection to the call, rejoining");
+    // The session is gone already; nothing to close.
+    self.maybe_transport = None;
+    engine.connection_lost();
+    let now = Instant::now();
+    let lost_at = *self.maybe_lost_at.get_or_insert(now);
+    let grace = engine
+      .maybe_reconnect_grace()
+      .unwrap_or(self.resilience.default_reconnect_grace);
+    self.spawn_reconnect(lost_at, grace, self.generation + 1);
+    Flow::Continue
+  }
+
+  /// Tries to open a new session until one is up or the grace period is over.
+  fn spawn_reconnect(&self, lost_at: Instant, grace: Duration, generation: u64) {
+    let inputs = self.inputs.clone();
+    let maybe_source = self.maybe_ticket_source.clone();
+    let fallback = self.ticket.clone();
+    let maybe_hash = self.maybe_certificate_hash;
+    let resilience = self.resilience;
+    spawn_local(async move {
+      let mut schedule = ReconnectSchedule::new(lost_at, grace);
+      // The call ended meanwhile when nobody reads the inputs any more.
+      while !inputs.is_closed() {
+        let now = Instant::now();
+        if schedule.has_expired(now) {
+          let _ = inputs.unbounded_send(Input::ReconnectExpired);
+          return;
+        }
+        sleep(schedule.next_attempt_at().saturating_duration_since(now)).await;
+        let attempt = async {
+          let ticket = match &maybe_source {
+            Some(source) => source.fetch().await?,
+            None => fallback.clone(),
+          };
+          let transport = Transport::connect(&ticket.sfu_url, maybe_hash, &inputs, generation).await?;
+          Ok::<_, WebCallError>((transport, ticket))
+        };
+        match attempt.await {
+          Ok((transport, ticket)) => {
+            let _ = inputs.unbounded_send(Input::Relinked {
+              transport,
+              ticket,
+              generation,
+            });
+            return;
+          },
+          Err(error) => {
+            debug!(%error, "rejoin attempt failed");
+            schedule.on_failed_attempt(Instant::now(), &resilience);
+          },
+        }
+      }
+    });
   }
 
   /// Every 20 ms: the tone source's next frame, decoding due packets and playing the mix.
@@ -625,13 +817,16 @@ impl CallState<'_> {
       }
     }
     if self.is_deafened {
-      return Ok(());
-    }
-    for sample in &mut mix {
-      *sample = sample.clamp(-1.0, 1.0);
-    }
-    if mix.iter().any(|sample| sample.abs() > AUDIBLE_AMPLITUDE) {
+      mix.fill(0.0);
+    } else if mix.iter().any(|sample| sample.abs() > AUDIBLE_AMPLITUDE) {
       self.stats.audible_frames_played += 1;
+    }
+    // Status sounds play even when deafened: they are status, not call audio.
+    for (sample, cue) in mix
+      .iter_mut()
+      .zip(self.cues.next_samples(FRAME_SAMPLES_PER_CHANNEL))
+    {
+      *sample = (*sample + cue).clamp(-1.0, 1.0);
     }
     audio.play(&mix)
   }
@@ -678,6 +873,7 @@ impl CallState<'_> {
         self.views.insert(stream_id, view);
         engine.subscribe_video(stream_id, Some(0));
       },
+      Command::SetStatusCues(status_cues) => self.cues.set_setting(status_cues),
       Command::UnwatchVideo(stream_id) => {
         if self.views.remove(&stream_id).is_some() {
           engine.subscribe_video(stream_id, None);
@@ -758,12 +954,16 @@ impl CallState<'_> {
 }
 
 impl Transport {
+  /// Opens a session; its signaling stream's end arrives as [`Input::SignalingClosed`] with
+  /// `generation`.
   async fn connect(
-    config: &WebCallConfig,
+    sfu_url: &str,
+    maybe_certificate_hash: Option<[u8; 32]>,
     inputs: &mpsc::UnboundedSender<Input>,
+    generation: u64,
   ) -> Result<Self, WebCallError> {
     let options = Object::new();
-    if let Some(hash) = config.maybe_certificate_hash {
+    if let Some(hash) = maybe_certificate_hash {
       let entry = dictionary(&[
         ("algorithm", JsValue::from_str("sha-256")),
         ("value", Uint8Array::from(&hash[..]).into()),
@@ -776,7 +976,7 @@ impl Transport {
       )
       .map_err(browser("WebTransport options"))?;
     }
-    let transport = WebTransport::new(&config.sfu_url, &options).map_err(browser("WebTransport"))?;
+    let transport = WebTransport::new(sfu_url, &options).map_err(browser("WebTransport"))?;
     JsFuture::from(transport.ready())
       .await
       .map_err(browser("WebTransport connect"))?;
@@ -793,7 +993,7 @@ impl Transport {
       .writable()
       .get_writer()
       .map_err(browser("datagram stream"))?;
-    spawn_local(read_signaling(stream.readable(), inputs.clone()));
+    spawn_local(read_signaling(stream.readable(), inputs.clone(), generation));
     spawn_local(read_datagrams(datagram_stream.readable(), inputs.clone()));
     Ok(Self {
       transport,
@@ -987,22 +1187,31 @@ impl OpusEncoder {
     ])
     .map_err(browser("AudioEncoder"))?;
     let encoder = AudioEncoder::new(&init).map_err(browser("AudioEncoder"))?;
-    let config = dictionary(&[
-      ("codec", JsValue::from_str("opus")),
-      ("sampleRate", JsValue::from(SAMPLE_RATE_HZ)),
-      ("numberOfChannels", JsValue::from(1)),
-      ("bitrate", JsValue::from(OPUS_BITRATE_BPS)),
-    ])
-    .map_err(browser("AudioEncoder"))?;
-    encoder.configure(&config).map_err(browser("AudioEncoder"))?;
+    encoder
+      .configure(&opus_config(OPUS_LOSS_FLOOR_PERCENT)?)
+      .map_err(browser("AudioEncoder"))?;
     Ok(Self {
       encoder,
+      planned_loss_percent: OPUS_LOSS_FLOOR_PERCENT,
       pending: Vec::with_capacity(2 * FRAME_SAMPLES_PER_CHANNEL),
       levels: VecDeque::new(),
       timestamp_us: 0.0,
       _output: output,
       _error: error,
     })
+  }
+
+  /// Plans in-band FEC for the loss measured on the uplink; reconfigures only on real changes.
+  fn set_measured_loss_percent(&mut self, measured_percent: u8) -> Result<(), WebCallError> {
+    let planned = planned_loss_percent(OPUS_LOSS_FLOOR_PERCENT, measured_percent);
+    if planned.abs_diff(self.planned_loss_percent) < OPUS_LOSS_STEP_PERCENT {
+      return Ok(());
+    }
+    self.planned_loss_percent = planned;
+    self
+      .encoder
+      .configure(&opus_config(planned)?)
+      .map_err(browser("AudioEncoder"))
   }
 
   /// Encodes every complete 20 ms frame; the encoded bytes arrive as [`Input::Encoded`].
@@ -1033,6 +1242,41 @@ impl OpusEncoder {
     }
     Ok(())
   }
+}
+
+/// Voice at 32 kbit/s in 20 ms frames with in-band FEC planned for `loss_percent` (WebCodecs'
+/// Opus registration).
+fn opus_config(loss_percent: u8) -> Result<Object, WebCallError> {
+  let opus = dictionary(&[
+    ("frameDuration", JsValue::from(20_000)),
+    ("useinbandfec", JsValue::TRUE),
+    ("packetlossperc", JsValue::from(loss_percent)),
+  ])
+  .map_err(browser("AudioEncoder"))?;
+  dictionary(&[
+    ("codec", JsValue::from_str("opus")),
+    ("sampleRate", JsValue::from(SAMPLE_RATE_HZ)),
+    ("numberOfChannels", JsValue::from(1)),
+    ("bitrate", JsValue::from(OPUS_BITRATE_BPS)),
+    ("opus", opus.into()),
+  ])
+  .map_err(browser("AudioEncoder"))
+}
+
+/// Waits on the page's event loop.
+async fn sleep(duration: Duration) {
+  if duration.is_zero() {
+    return;
+  }
+  let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+  let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+    if let Ok(window) = window() {
+      // A timer that can't be set resolves never; the grace period ends the waiting then.
+      let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+    }
+  });
+  // The promise only resolves.
+  let _ = JsFuture::from(promise).await;
 }
 
 impl Drop for OpusEncoder {
@@ -1165,7 +1409,7 @@ impl SignalingDecoder {
   }
 }
 
-async fn read_signaling(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>) {
+async fn read_signaling(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>, generation: u64) {
   let mut decoder = SignalingDecoder::default();
   let result = read_chunks(stream, |chunk| {
     let bodies = match decoder.push(&chunk) {
@@ -1191,7 +1435,7 @@ async fn read_signaling(stream: ReadableStream, inputs: mpsc::UnboundedSender<In
   if let Err(error) = result {
     debug!(error = %js_message(&error), "signaling stream ended");
   }
-  let _ = inputs.unbounded_send(Input::SignalingClosed);
+  let _ = inputs.unbounded_send(Input::SignalingClosed { generation });
 }
 
 async fn read_datagrams(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>) {

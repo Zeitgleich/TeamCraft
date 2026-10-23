@@ -430,7 +430,7 @@ impl TeamCraft {
         })
       })
       .await?;
-    calls::join(preparation, hub).await
+    calls::join(preparation, hub, self.jobs.clone(), &self.network).await
   }
 }
 

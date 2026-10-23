@@ -11,14 +11,21 @@
 //! trusts (from `teamcraft-server`, verified like chat membership), it passes it with
 //! [`CallEngine::set_trusted_roster`] and proposals for anyone else are rejected; without one the
 //! engine falls back to the SFU's list and says so with [`CallEngineEvent::UntrustedRoster`].
+//!
+//! Lost connections: the driver reports [`CallEngine::connection_lost`] and later
+//! [`CallEngine::rejoin`]s on a new connection. The engine keeps what survives a rejoin (RTP
+//! numbering, own tracks, subscriptions, mute state), starts DAVE over with a new key package and
+//! reconciles everything else with the SFU's fresh `joined` (ARCHITECTURE.md §6.5). Video layers
+//! of own tracks follow the uplink estimate, so audio keeps flowing when bandwidth drops.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
-  DeviceId, ErrorBody, MediaCapabilities, MediaStreamId, ScreenAudioTrack, UserId, VideoCodec,
-  VideoLayerInfo, VideoTrack, VideoTrackKind,
+  DeviceId, ErrorBody, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UserId,
+  VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -32,6 +39,7 @@ use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
 use crate::dave::{DaveCallId, DaveError, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
+use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, demand_bps};
 use crate::video::EncodedVideoFrame;
 
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz.
@@ -50,6 +58,21 @@ pub struct CallEngine {
   screen_audio: ScreenAudioState,
   /// Tracks this device publishes, by the stream id the SFU assigned.
   own_video: HashMap<StreamId, OutgoingVideo>,
+  /// The same tracks as announced (kind, codec, layers): to fit them into the uplink and to
+  /// publish them again after a rejoin.
+  own_tracks: HashMap<StreamId, VideoTrack>,
+  /// Publications asked for whose stream id hasn't arrived yet.
+  pending_publications: VecDeque<(VideoTrackKind, VideoCodec, Vec<VideoLayerInfo>)>,
+  /// Layers of own tracks the SFU asked for; without an entry, all of them.
+  sfu_layers: HashMap<StreamId, Vec<u8>>,
+  /// Layers of own tracks the driver was last told to send.
+  sent_layers: HashMap<StreamId, Vec<u8>>,
+  uplink_layers: UplinkLayers,
+  uplink_policy: UplinkPolicy,
+  /// Other devices' tracks this device receives, with the highest layer asked for.
+  subscriptions: HashMap<StreamId, u8>,
+  /// How long the SFU keeps this device's slot after the connection was lost.
+  maybe_reconnect_grace: Option<Duration>,
   /// Tracks other devices publish.
   remote_video: HashMap<StreamId, IncomingVideo>,
   maybe_dave: Option<DaveParticipant>,
@@ -59,6 +82,9 @@ pub struct CallEngine {
   verified_keys: HashMap<DeviceId, Vec<u8>>,
   /// A member failed key verification: media stays off for this call.
   is_compromised: bool,
+  /// The call is over for this device whatever happens to the connection: the SFU refused the
+  /// join, a host removed the user or ended the call, or the device joined on another connection.
+  is_over: bool,
   has_reported_unauthenticated_keys: bool,
   uplink: SendSideEstimator,
   downlink_feedback: FeedbackRecorder,
@@ -101,6 +127,14 @@ pub enum CallEngineEvent {
   },
   ParticipantJoined(CallParticipant),
   ParticipantLeft(DeviceId),
+  /// This device's connection was lost; the driver is getting it back into the call. Media is
+  /// paused meanwhile.
+  Reconnecting,
+  /// Back in the call on a new connection; changes while away came as the usual events.
+  Reconnected,
+  /// Another device's connection was lost; it keeps its place while it reconnects.
+  ParticipantReconnecting(DeviceId),
+  ParticipantReconnected(DeviceId),
   ActiveSpeakers(Vec<DeviceId>),
   /// The DAVE group (re)keyed; media is end-to-end encrypted. Compare `privacy_code` out of band.
   Secured {
@@ -149,9 +183,13 @@ pub enum CallEngineEvent {
   EndedByHost {
     by_user_id: UserId,
   },
-  /// Estimated uplink bandwidth after new feedback.
+  /// This device joined the call on another connection (another window); this one ends.
+  ConnectionReplaced,
+  /// Estimated uplink bandwidth and loss after new feedback. Audio encoders plan their forward
+  /// error correction for `loss_percent`.
   UplinkEstimate {
     bps: u32,
+    loss_percent: u8,
   },
   /// The SFU proposed members without a trusted roster to check them against.
   UntrustedRoster,
@@ -175,7 +213,18 @@ pub struct CallStats {
 enum Phase {
   Idle,
   Joining,
-  Joined { call_id: CallId, audio_stream: StreamId },
+  Joined {
+    call_id: CallId,
+    audio_stream: StreamId,
+  },
+  /// The connection was lost; waiting for a new one.
+  Reconnecting {
+    call_id: CallId,
+  },
+  /// Sent `join` on a new connection; the SFU's `joined` resumes the call.
+  Rejoining {
+    call_id: CallId,
+  },
 }
 
 /// Which of a device's audio streams a frame belongs to.
@@ -192,6 +241,13 @@ enum ScreenAudioState {
   Off,
   Requested,
   Publishing(StreamId),
+}
+
+/// What the SFU's `joined` says about the call when this device comes back.
+struct RejoinedState {
+  participants: Vec<CallParticipant>,
+  video_tracks: Vec<VideoTrack>,
+  screen_audio_tracks: Vec<ScreenAudioTrack>,
 }
 
 /// RTP numbering of one outgoing audio stream.
@@ -218,6 +274,7 @@ pub enum CallEngineError {
 impl CallEngine {
   pub fn new(config: CallEngineConfig, now: Instant) -> Self {
     let uplink = SendSideEstimator::new(config.bwe);
+    let uplink_layers = UplinkLayers::new(config.bwe.start_bps);
     Self {
       config,
       phase: Phase::Idle,
@@ -225,12 +282,21 @@ impl CallEngine {
       audio_streams: HashMap::new(),
       screen_audio: ScreenAudioState::Off,
       own_video: HashMap::new(),
+      own_tracks: HashMap::new(),
+      pending_publications: VecDeque::new(),
+      sfu_layers: HashMap::new(),
+      sent_layers: HashMap::new(),
+      uplink_layers,
+      uplink_policy: UplinkPolicy::default(),
+      subscriptions: HashMap::new(),
+      maybe_reconnect_grace: None,
       remote_video: HashMap::new(),
       maybe_dave: None,
       maybe_trusted_roster: None,
       maybe_authenticator: None,
       verified_keys: HashMap::new(),
       is_compromised: false,
+      is_over: false,
       has_reported_unauthenticated_keys: false,
       uplink,
       downlink_feedback: FeedbackRecorder::new(now),
@@ -251,6 +317,75 @@ impl CallEngine {
       token,
       capabilities: self.config.capabilities.clone(),
     });
+  }
+
+  /// The connection to the SFU is gone. Media pauses (the others' DAVE group re-keys without
+  /// this device) until [`Self::rejoin`] brings the device back into its slot. Also call it when
+  /// a rejoin attempt's connection fails.
+  pub fn connection_lost(&mut self) {
+    match self.phase {
+      Phase::Joined { call_id, .. } => {
+        self.phase = Phase::Reconnecting { call_id };
+        self.maybe_dave = None;
+        self.event(CallEngineEvent::Reconnecting);
+      },
+      Phase::Rejoining { call_id } => {
+        self.phase = Phase::Reconnecting { call_id };
+        self.maybe_dave = None;
+      },
+      Phase::Idle | Phase::Joining | Phase::Reconnecting { .. } => {},
+    }
+  }
+
+  /// Joins the call again on a new connection after [`Self::connection_lost`], with a fresh
+  /// join token. The RTP numbering continues and own tracks and subscriptions are kept or
+  /// renewed; DAVE starts over with a new key package. [`CallEngineEvent::Reconnected`] follows
+  /// the SFU's answer.
+  pub fn rejoin(&mut self, token: String, now: Instant) {
+    match self.phase {
+      Phase::Reconnecting { call_id } => self.phase = Phase::Rejoining { call_id },
+      // Lost before the first `joined`: join again from scratch.
+      Phase::Joining => {},
+      Phase::Idle | Phase::Joined { .. } | Phase::Rejoining { .. } => return,
+    }
+    self.last_event_seq = 0;
+    self.verified_keys.clear();
+    // Another network: its capacity is unknown, measure afresh.
+    self.uplink = SendSideEstimator::new(self.config.bwe);
+    self.uplink_layers = UplinkLayers::new(self.config.bwe.start_bps);
+    self.update_uplink_demand();
+    self.downlink_feedback = FeedbackRecorder::new(now);
+    self.uplink_feedback_epoch = now;
+    self.signal(CallClientMessage::Join {
+      token,
+      capabilities: self.config.capabilities.clone(),
+    });
+  }
+
+  /// Over for good (refused, removed, ended, or replaced by another connection of this device):
+  /// a lost connection is not to be answered with a rejoin.
+  pub fn is_over(&self) -> bool {
+    self.is_over
+  }
+
+  /// Joined, and not reconnecting.
+  pub fn is_in_call(&self) -> bool {
+    matches!(self.phase, Phase::Joined { .. })
+  }
+
+  /// Between losing the connection and being back in the call.
+  pub fn is_reconnecting(&self) -> bool {
+    matches!(self.phase, Phase::Reconnecting { .. } | Phase::Rejoining { .. })
+  }
+
+  /// How long the SFU keeps this device's slot after a lost connection, as it announced.
+  pub fn maybe_reconnect_grace(&self) -> Option<Duration> {
+    self.maybe_reconnect_grace
+  }
+
+  /// Bandwidth kept for audio when the uplink limits video layers.
+  pub fn set_uplink_policy(&mut self, policy: UplinkPolicy) {
+    self.uplink_policy = policy;
   }
 
   /// The participants the app trusts to be in this call (devices). Proposals for others are
@@ -328,6 +463,10 @@ impl CallEngine {
         self.handle_event(event, now)
       },
       CallServerMessage::Error { error } => {
+        // An error in answer to `join` means the SFU refused it and closes the connection.
+        if matches!(self.phase, Phase::Joining | Phase::Rejoining { .. }) {
+          self.is_over = true;
+        }
         self.event(CallEngineEvent::Error(error));
         Ok(())
       },
@@ -392,17 +531,25 @@ impl CallEngine {
   /// Starts publishing a video track; [`CallEngineEvent::VideoPublished`] brings its stream id.
   /// Screen shares use one layer (no simulcast).
   pub fn publish_video(&mut self, kind: VideoTrackKind, codec: VideoCodec, layers: Vec<VideoLayerInfo>) {
+    self
+      .pending_publications
+      .push_back((kind.clone(), codec.clone(), layers.clone()));
     self.signal(CallClientMessage::PublishVideo { kind, codec, layers });
   }
 
   pub fn unpublish_video(&mut self, stream_id: MediaStreamId) {
-    if self.own_video.remove(&StreamId(stream_id.0)).is_some() {
+    if self.forget_own_track(StreamId(stream_id.0)) {
       self.signal(CallClientMessage::UnpublishVideo { stream_id });
     }
   }
 
   /// Receives another device's track up to `max_layer`; `None` stops receiving it.
   pub fn subscribe_video(&mut self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>) {
+    let stream = StreamId(stream_id.0);
+    match maybe_max_layer {
+      Some(max_layer) => self.subscriptions.insert(stream, max_layer),
+      None => self.subscriptions.remove(&stream),
+    };
     self.signal(CallClientMessage::Subscribe {
       stream_id,
       maybe_max_layer,
@@ -410,10 +557,17 @@ impl CallEngine {
   }
 
   /// Encrypts, splits and sends one encoded frame of an own track. Dropped before DAVE is ready,
-  /// like audio.
+  /// like audio, and on layers nobody receives or the uplink can't carry.
   pub fn send_video(&mut self, stream_id: MediaStreamId, frame: &EncodedVideoFrame, now: Instant) {
     let stream = StreamId(stream_id.0);
     if self.is_compromised || !self.own_video.contains_key(&stream) {
+      return;
+    }
+    let is_layer_sent = self
+      .sent_layers
+      .get(&stream)
+      .is_none_or(|layers| layers.contains(&frame.layer.value()));
+    if !is_layer_sent {
       return;
     }
     let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
@@ -467,7 +621,17 @@ impl CallEngine {
         participants,
         video_tracks,
         screen_audio_tracks,
+        maybe_reconnect_grace_ms,
       } => {
+        self.maybe_reconnect_grace = maybe_reconnect_grace_ms.map(Duration::from_millis);
+        if let Phase::Rejoining { call_id: previous } = self.phase {
+          let state = RejoinedState {
+            participants,
+            video_tracks,
+            screen_audio_tracks,
+          };
+          return self.on_rejoined(previous, call_id, participant, state);
+        }
         self.on_joined(call_id, participant, participants)?;
         for track in video_tracks {
           self.add_video_track(track);
@@ -483,10 +647,15 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::ParticipantLeft { device_id } => {
-        self.participants.remove(&device_id);
-        self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
-        self.remote_video.retain(|_, track| track.sender != device_id);
-        self.event(CallEngineEvent::ParticipantLeft(device_id));
+        self.remove_participant(device_id);
+        Ok(())
+      },
+      CallEvent::ParticipantReconnecting { device_id } => {
+        self.event(CallEngineEvent::ParticipantReconnecting(device_id));
+        Ok(())
+      },
+      CallEvent::ParticipantReconnected { device_id } => {
+        self.event(CallEngineEvent::ParticipantReconnected(device_id));
         Ok(())
       },
       CallEvent::ActiveSpeakers { device_ids } => {
@@ -520,10 +689,7 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::TransportFeedback { feedback } => {
-        let bps = self
-          .uplink
-          .on_feedback(&feedback, now, self.uplink_feedback_epoch);
-        self.event(CallEngineEvent::UplinkEstimate { bps });
+        self.on_uplink_feedback(&feedback, now);
         Ok(())
       },
       CallEvent::VideoPublished { track } => {
@@ -531,8 +697,10 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::VideoUnpublished { stream_id } => {
-        self.remote_video.remove(&StreamId(stream_id.0));
-        self.own_video.remove(&StreamId(stream_id.0));
+        let stream = StreamId(stream_id.0);
+        self.remote_video.remove(&stream);
+        self.subscriptions.remove(&stream);
+        self.forget_own_track(stream);
         self.event(CallEngineEvent::VideoUnpublished(stream_id));
         Ok(())
       },
@@ -549,7 +717,14 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::LayersNeeded { stream_id, layers } => {
-        self.event(CallEngineEvent::LayersNeeded { stream_id, layers });
+        let stream = StreamId(stream_id.0);
+        if self.own_tracks.contains_key(&stream) {
+          self.sfu_layers.insert(stream, layers);
+          // The SFU asks for keyframes itself where receivers switch.
+          self.announce_layers(false);
+        } else {
+          self.event(CallEngineEvent::LayersNeeded { stream_id, layers });
+        }
         Ok(())
       },
       CallEvent::MutedByHost { by_user_id } => {
@@ -559,11 +734,18 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::RemovedByHost { by_user_id } => {
+        self.is_over = true;
         self.event(CallEngineEvent::RemovedByHost { by_user_id });
         Ok(())
       },
       CallEvent::EndedByHost { by_user_id } => {
+        self.is_over = true;
         self.event(CallEngineEvent::EndedByHost { by_user_id });
+        Ok(())
+      },
+      CallEvent::ConnectionReplaced => {
+        self.is_over = true;
+        self.event(CallEngineEvent::ConnectionReplaced);
         Ok(())
       },
       CallEvent::Unknown => Ok(()),
@@ -598,6 +780,291 @@ impl CallEngine {
       participants,
     });
     Ok(())
+  }
+
+  /// Back in the call after a rejoin: everything that changed while away is reconciled with the
+  /// SFU's view, and own tracks and subscriptions are renewed where the SFU no longer has them.
+  fn on_rejoined(
+    &mut self,
+    previous: CallId,
+    call_id: CallId,
+    participant: CallParticipant,
+    state: RejoinedState,
+  ) -> Result<(), CallEngineError> {
+    if call_id != previous {
+      return Err(CallEngineError::Protocol("rejoined another call"));
+    }
+    if participant.device_id != self.config.device_id {
+      return Err(CallEngineError::Protocol("joined as another device"));
+    }
+    self.phase = Phase::Joined {
+      call_id,
+      audio_stream: StreamId(participant.audio_stream_id.0),
+    };
+    self.maybe_dave = Some(DaveParticipant::new(
+      DaveParticipantId::from_device(self.config.device_id),
+      DaveCallId::from_call(call_id),
+    )?);
+    self.reconcile_participants(state.participants);
+    self.reconcile_remote_video(&state.video_tracks);
+    self.reconcile_screen_audio(&state.screen_audio_tracks);
+    self.reconcile_own_video(&state.video_tracks);
+    // Subscriptions to tracks that are still there; the SFU may have kept them, which is fine.
+    let mut subscriptions: Vec<(StreamId, u8)> = self.subscriptions.iter().map(|(s, l)| (*s, *l)).collect();
+    subscriptions.sort_unstable();
+    for (stream, max_layer) in subscriptions {
+      self.signal(CallClientMessage::Subscribe {
+        stream_id: MediaStreamId(stream.0),
+        maybe_max_layer: Some(max_layer),
+      });
+    }
+    self.event(CallEngineEvent::Reconnected);
+    Ok(())
+  }
+
+  fn reconcile_participants(&mut self, participants: Vec<CallParticipant>) {
+    let current: BTreeMap<DeviceId, CallParticipant> = participants
+      .into_iter()
+      .map(|participant| (participant.device_id, participant))
+      .collect();
+    let known: Vec<DeviceId> = self.participants.keys().copied().collect();
+    for device_id in known {
+      // Gone, or back with another audio stream (it rejoined without a slot): left, then joined.
+      if current.get(&device_id) != self.participants.get(&device_id) {
+        self.remove_participant(device_id);
+      }
+    }
+    for participant in current.into_values() {
+      if !self.participants.contains_key(&participant.device_id) {
+        self.add_participant(participant);
+        self.event(CallEngineEvent::ParticipantJoined(participant));
+      }
+    }
+  }
+
+  fn reconcile_remote_video(&mut self, tracks: &[VideoTrack]) {
+    let own = self.config.device_id;
+    let current: BTreeMap<StreamId, &VideoTrack> = tracks
+      .iter()
+      .filter(|track| track.device_id != own)
+      .map(|track| (StreamId(track.stream_id.0), track))
+      .collect();
+    let gone: Vec<StreamId> = self
+      .remote_video
+      .keys()
+      .filter(|stream| !current.contains_key(stream))
+      .copied()
+      .collect();
+    for stream in gone {
+      self.remote_video.remove(&stream);
+      self.subscriptions.remove(&stream);
+      self.event(CallEngineEvent::VideoUnpublished(MediaStreamId(stream.0)));
+    }
+    for (stream, track) in current {
+      if !self.remote_video.contains_key(&stream) {
+        self.add_video_track(track.clone());
+      }
+    }
+  }
+
+  fn reconcile_screen_audio(&mut self, tracks: &[ScreenAudioTrack]) {
+    let own = self.config.device_id;
+    let others: BTreeMap<StreamId, ScreenAudioTrack> = tracks
+      .iter()
+      .filter(|track| track.device_id != own)
+      .map(|track| (StreamId(track.stream_id.0), *track))
+      .collect();
+    let gone: Vec<(StreamId, DeviceId)> = self
+      .audio_streams
+      .iter()
+      .filter(|(stream, (_, origin))| *origin == AudioOrigin::Screen && !others.contains_key(stream))
+      .map(|(stream, (device_id, _))| (*stream, *device_id))
+      .collect();
+    for (stream, device_id) in gone {
+      self.audio_streams.remove(&stream);
+      self.event(CallEngineEvent::ScreenAudioChanged {
+        device_id,
+        is_shared: false,
+      });
+    }
+    for (stream, track) in others {
+      if !self.audio_streams.contains_key(&stream) {
+        self.on_screen_audio_published(track);
+      }
+    }
+    let maybe_own = tracks
+      .iter()
+      .find(|track| track.device_id == own)
+      .map(|track| StreamId(track.stream_id.0));
+    match (self.screen_audio, maybe_own) {
+      (ScreenAudioState::Publishing(_), Some(stream)) => {
+        self.screen_audio = ScreenAudioState::Publishing(stream)
+      },
+      (ScreenAudioState::Requested, Some(stream)) => {
+        self.screen_audio = ScreenAudioState::Publishing(stream);
+        self.event(CallEngineEvent::ScreenAudioChanged {
+          device_id: own,
+          is_shared: true,
+        });
+      },
+      // Stopped while away: the SFU still forwards it.
+      (ScreenAudioState::Off, Some(stream)) => self.signal(CallClientMessage::UnpublishScreenAudio {
+        stream_id: MediaStreamId(stream.0),
+      }),
+      // The SFU dropped it with the slot (or never got the request): ask again.
+      (ScreenAudioState::Publishing(_) | ScreenAudioState::Requested, None) => {
+        self.screen_audio = ScreenAudioState::Requested;
+        self.signal(CallClientMessage::PublishScreenAudio);
+      },
+      (ScreenAudioState::Off, None) => {},
+    }
+  }
+
+  fn reconcile_own_video(&mut self, tracks: &[VideoTrack]) {
+    let own = self.config.device_id;
+    let mut unanswered = std::mem::take(&mut self.pending_publications);
+    let announced: Vec<&VideoTrack> = tracks.iter().filter(|track| track.device_id == own).collect();
+    for track in &announced {
+      let stream = StreamId(track.stream_id.0);
+      if self.own_tracks.contains_key(&stream) {
+        continue;
+      }
+      // Published just before the loss, the answer got lost: take it.
+      if let Some(position) = unanswered.iter().position(|(kind, ..)| *kind == track.kind) {
+        unanswered.remove(position);
+        self.add_video_track((*track).clone());
+      } else {
+        // Unpublished while away.
+        self.signal(CallClientMessage::UnpublishVideo {
+          stream_id: track.stream_id,
+        });
+      }
+    }
+    // Tracks the SFU dropped with the slot: publish them again; the driver learns the new id.
+    let lost: Vec<VideoTrack> = self
+      .own_tracks
+      .iter()
+      .filter(|(stream, _)| !announced.iter().any(|track| track.stream_id.0 == stream.0))
+      .map(|(_, track)| track.clone())
+      .collect();
+    for track in lost {
+      self.forget_own_track(StreamId(track.stream_id.0));
+      self.event(CallEngineEvent::VideoUnpublished(track.stream_id));
+      self.publish_video(track.kind, track.codec, track.layers);
+    }
+    for (kind, codec, layers) in unanswered {
+      self.publish_video(kind, codec, layers);
+    }
+  }
+
+  fn remove_participant(&mut self, device_id: DeviceId) {
+    self.participants.remove(&device_id);
+    self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
+    let streams: Vec<StreamId> = self
+      .remote_video
+      .iter()
+      .filter(|(_, track)| track.sender == device_id)
+      .map(|(stream, _)| *stream)
+      .collect();
+    for stream in streams {
+      self.remote_video.remove(&stream);
+      self.subscriptions.remove(&stream);
+    }
+    self.event(CallEngineEvent::ParticipantLeft(device_id));
+  }
+
+  /// Drops an own track's state; returns whether it was published.
+  fn forget_own_track(&mut self, stream: StreamId) -> bool {
+    let was_published = self.own_video.remove(&stream).is_some();
+    self.own_tracks.remove(&stream);
+    self.sfu_layers.remove(&stream);
+    self.sent_layers.remove(&stream);
+    self.uplink_layers.remove(stream);
+    self.update_uplink_demand();
+    was_published
+  }
+
+  /// New uplink feedback: the estimate decides which own video layers fit next to the audio, the
+  /// loss how much forward error correction the audio carries.
+  fn on_uplink_feedback(&mut self, feedback: &TransportFeedback, now: Instant) {
+    let bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
+    let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
+    let tracks: Vec<OwnTrack<'_>> = self
+      .own_tracks
+      .iter()
+      .map(|(stream, track)| OwnTrack {
+        stream: *stream,
+        kind: &track.kind,
+        layers: &track.layers,
+      })
+      .collect();
+    let has_changed =
+      self
+        .uplink_layers
+        .on_estimate(bps, &tracks, is_sending_screen_audio, &self.uplink_policy);
+    if has_changed {
+      self.announce_layers(true);
+    }
+    let loss_percent = loss_percent(self.uplink.loss_ratio());
+    self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// Tells the driver which layers of each own track to encode: those the SFU needs and the uplink
+  /// carries. Layers the uplink takes back get a keyframe, so receivers can decode them at once.
+  fn announce_layers(&mut self, with_keyframes: bool) {
+    let mut streams: Vec<StreamId> = self.own_tracks.keys().copied().collect();
+    streams.sort_unstable();
+    for stream in streams {
+      let Some(track) = self
+        .own_tracks
+        .get(&stream)
+        .filter(|track| !track.layers.is_empty())
+      else {
+        continue;
+      };
+      let wanted: Vec<u8> = match self.sfu_layers.get(&stream) {
+        Some(layers) => layers.clone(),
+        None => track.layers.iter().map(|info| info.layer).collect(),
+      };
+      let layers: Vec<u8> = wanted
+        .into_iter()
+        .filter(|layer| self.uplink_layers.allows(stream, *layer))
+        .collect();
+      let previous = self.sent_layers.get(&stream).cloned().unwrap_or_default();
+      if layers == previous {
+        continue;
+      }
+      self.sent_layers.insert(stream, layers.clone());
+      let stream_id = MediaStreamId(stream.0);
+      let resumed: Vec<u8> = layers
+        .iter()
+        .copied()
+        .filter(|layer| !previous.contains(layer))
+        .collect();
+      self.event(CallEngineEvent::LayersNeeded { stream_id, layers });
+      if with_keyframes {
+        for layer in resumed {
+          self.event(CallEngineEvent::KeyframeRequested { stream_id, layer });
+        }
+      }
+    }
+  }
+
+  /// Lets the uplink estimate grow to what all own layers need, even while some are held back.
+  fn update_uplink_demand(&mut self) {
+    let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
+    let tracks: Vec<OwnTrack<'_>> = self
+      .own_tracks
+      .iter()
+      .map(|(stream, track)| OwnTrack {
+        stream: *stream,
+        kind: &track.kind,
+        layers: &track.layers,
+      })
+      .collect();
+    let maybe_demand =
+      (!tracks.is_empty()).then(|| demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
+    self.uplink.set_demand_bps(maybe_demand);
   }
 
   fn on_external_sender(&mut self, package: &[u8]) -> Result<(), CallEngineError> {
@@ -682,7 +1149,9 @@ impl CallEngine {
 
   fn call_id(&self) -> Option<CallId> {
     match self.phase {
-      Phase::Joined { call_id, .. } => Some(call_id),
+      Phase::Joined { call_id, .. } | Phase::Reconnecting { call_id } | Phase::Rejoining { call_id } => {
+        Some(call_id)
+      },
       Phase::Idle | Phase::Joining => None,
     }
   }
@@ -788,10 +1257,25 @@ impl CallEngine {
   fn add_video_track(&mut self, track: VideoTrack) {
     let stream = StreamId(track.stream_id.0);
     if track.device_id == self.config.device_id {
+      if let Some(position) = self
+        .pending_publications
+        .iter()
+        .position(|(kind, ..)| *kind == track.kind)
+      {
+        self.pending_publications.remove(position);
+      }
       self.own_video.insert(
         stream,
         OutgoingVideo::new(track.kind.clone(), track.codec.clone()),
       );
+      // Drivers start with every layer. A track without layer list isn't limited.
+      if !track.layers.is_empty() {
+        self
+          .sent_layers
+          .insert(stream, track.layers.iter().map(|info| info.layer).collect());
+      }
+      self.own_tracks.insert(stream, track.clone());
+      self.update_uplink_demand();
     } else {
       self.remote_video.insert(stream, IncomingVideo::new(&track));
     }
@@ -971,6 +1455,12 @@ impl AudioRtpState {
   }
 }
 
+/// Measured loss as a whole percentage.
+fn loss_percent(ratio: f64) -> u8 {
+  // Invariant: clamped to 0..=100 first, so the cast is lossless.
+  (ratio * 100.0).round().clamp(0.0, 100.0) as u8
+}
+
 fn frame_codec(codec: &VideoCodec) -> FrameCodec {
   match codec {
     VideoCodec::Av1 => FrameCodec::Av1,
@@ -1024,6 +1514,27 @@ mod tests {
         result,
         Err(CallEngineError::SequenceGap { last: 0, received: 2 })
       ));
+    }
+
+    #[test]
+    fn error_in_answer_to_join_is_a_refusal() {
+      let now = Instant::now();
+      let mut engine = engine(1, now);
+      engine.join("t".into());
+      let refusal = CallServerMessage::Error {
+        error: ErrorBody::new(teamcraft_proto::ErrorCode::CallLocked, "locked"),
+      };
+      engine.handle_signal(refusal.clone(), now).unwrap();
+      assert!(engine.is_over());
+      // Errors for requests during the call are no refusal.
+      let mut joined_engine = engine_joined(2, now);
+      joined_engine.handle_signal(refusal, now).unwrap();
+      assert!(!joined_engine.is_over());
+      // Replaced by another connection of this device: over too.
+      joined_engine
+        .handle_signal(event(2, CallEvent::ConnectionReplaced), now)
+        .unwrap();
+      assert!(joined_engine.is_over());
     }
 
     #[test]
@@ -1333,6 +1844,378 @@ mod tests {
     }
   }
 
+  mod reconnect {
+    use super::*;
+
+    #[test]
+    fn lost_connection_pauses_media_and_the_rejoin_keeps_rtp_numbering() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.send_audio(&frame(), now);
+      take_datagram(&mut alice);
+      let sequence = alice.microphone_rtp.sequence;
+
+      alice.connection_lost();
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Event(CallEngineEvent::Reconnecting)]
+      );
+      assert!(alice.is_reconnecting() && !alice.is_secured());
+      alice.send_audio(&frame(), now);
+      assert!(drain(&mut alice).is_empty(), "nothing is sent while away");
+
+      alice.rejoin("fresh".into(), now);
+      assert!(matches!(
+        alice.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::Join { token, .. })) if token == "fresh"
+      ));
+      // The new connection numbers its events from 1 again.
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Event(CallEngineEvent::Reconnected)]
+      );
+      assert!(!alice.is_reconnecting());
+      assert_eq!(alice.microphone_rtp.sequence, sequence);
+      assert_eq!(alice.maybe_reconnect_grace(), Some(Duration::from_secs(30)));
+      // DAVE starts over: a new key package once the external sender arrives.
+      let gateway = DaveExternalSender::new().unwrap();
+      let package = Base64Bytes::new(gateway.package().unwrap());
+      alice
+        .handle_signal(event(2, CallEvent::DaveExternalSender { package }), now)
+        .unwrap();
+      let (key_package, maybe_binding) = key_package_of(&mut alice);
+      assert!(!key_package.is_empty() && maybe_binding.is_some());
+    }
+
+    #[test]
+    fn rejoin_reconciles_what_changed_while_away() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[2, 3], &gateway, None, now);
+      let mut seq = 3;
+      for signal in [
+        CallEvent::VideoPublished {
+          track: video_track(60, 2, 1),
+        },
+        CallEvent::VideoPublished {
+          track: video_track(50, 1, 3),
+        },
+      ] {
+        alice.handle_signal(event(seq, signal), now).unwrap();
+        seq += 1;
+      }
+      alice.subscribe_video(MediaStreamId(60), Some(2));
+      alice.publish_screen_audio();
+      let own_sound = ScreenAudioTrack {
+        device_id: device(1),
+        stream_id: MediaStreamId(70),
+      };
+      alice
+        .handle_signal(
+          event(seq, CallEvent::ScreenAudioPublished { track: own_sound }),
+          now,
+        )
+        .unwrap();
+      drain(&mut alice);
+
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      // The SFU lost the slot: 3 left, 4 came, nothing is published any more.
+      alice.handle_signal(event(1, joined(1, &[2, 4])), now).unwrap();
+      let outputs = drain(&mut alice);
+      for expected in [
+        EngineOutput::Event(CallEngineEvent::ParticipantLeft(device(3))),
+        EngineOutput::Event(CallEngineEvent::ParticipantJoined(participant(4))),
+        EngineOutput::Event(CallEngineEvent::VideoUnpublished(MediaStreamId(60))),
+        EngineOutput::Event(CallEngineEvent::VideoUnpublished(MediaStreamId(50))),
+        EngineOutput::Signal(CallClientMessage::PublishVideo {
+          kind: VideoTrackKind::Camera,
+          codec: VideoCodec::H264,
+          layers: layers(3),
+        }),
+        EngineOutput::Signal(CallClientMessage::PublishScreenAudio),
+        EngineOutput::Event(CallEngineEvent::Reconnected),
+      ] {
+        assert!(outputs.contains(&expected), "missing {expected:?} in {outputs:?}");
+      }
+      assert!(
+        !outputs
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Signal(CallClientMessage::Subscribe { .. }))),
+        "no subscription to a track that is gone"
+      );
+      assert_eq!(
+        outputs.last(),
+        Some(&EngineOutput::Event(CallEngineEvent::Reconnected))
+      );
+    }
+
+    #[test]
+    fn rejoin_into_the_kept_slot_keeps_tracks_and_renews_subscriptions() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[2], &gateway, None, now);
+      let remote = video_track(60, 2, 1);
+      let own = video_track(50, 1, 3);
+      alice
+        .handle_signal(
+          event(
+            3,
+            CallEvent::VideoPublished {
+              track: remote.clone(),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      alice
+        .handle_signal(event(4, CallEvent::VideoPublished { track: own.clone() }), now)
+        .unwrap();
+      alice.subscribe_video(MediaStreamId(60), Some(0));
+      drain(&mut alice);
+
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      let CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        ..
+      } = joined(1, &[2])
+      else {
+        unreachable!()
+      };
+      let kept = CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks: vec![remote, own],
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+      };
+      alice.handle_signal(event(1, kept), now).unwrap();
+      assert_eq!(
+        drain(&mut alice),
+        vec![
+          EngineOutput::Signal(CallClientMessage::Subscribe {
+            stream_id: MediaStreamId(60),
+            maybe_max_layer: Some(0),
+          }),
+          EngineOutput::Event(CallEngineEvent::Reconnected),
+        ]
+      );
+    }
+
+    #[test]
+    fn connection_lost_before_the_first_joined_joins_again() {
+      let now = Instant::now();
+      let mut alice = engine(1, now);
+      alice.join("first".into());
+      drain(&mut alice);
+      alice.connection_lost();
+      assert!(drain(&mut alice).is_empty());
+      alice.rejoin("second".into(), now);
+      assert!(matches!(
+        alice.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::Join { token, .. })) if token == "second"
+      ));
+      alice.handle_signal(event(1, joined(1, &[])), now).unwrap();
+      assert!(alice.is_in_call());
+    }
+
+    #[test]
+    fn rejoining_another_call_is_rejected() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, None, now);
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      let CallEvent::Joined {
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        ..
+      } = joined(1, &[])
+      else {
+        unreachable!()
+      };
+      let other_call = CallEvent::Joined {
+        call_id: CallId::from_snowflake(Snowflake::new(CALL + 1).unwrap()),
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+      };
+      assert!(matches!(
+        alice.handle_signal(event(1, other_call), now),
+        Err(CallEngineError::Protocol(_))
+      ));
+    }
+
+    #[test]
+    fn a_failed_attempt_goes_back_to_reconnecting_quietly() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, None, now);
+      alice.connection_lost();
+      alice.rejoin("first".into(), now);
+      drain(&mut alice);
+      alice.connection_lost();
+      assert!(drain(&mut alice).is_empty(), "Reconnecting is reported once");
+      alice.rejoin("second".into(), now);
+      assert!(matches!(
+        alice.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::Join { token, .. })) if token == "second"
+      ));
+    }
+
+    #[test]
+    fn other_devices_reconnecting_are_reported() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[2], &gateway, None, now);
+      drain(&mut alice);
+      alice
+        .handle_signal(
+          event(3, CallEvent::ParticipantReconnecting { device_id: device(2) }),
+          now,
+        )
+        .unwrap();
+      alice
+        .handle_signal(
+          event(4, CallEvent::ParticipantReconnected { device_id: device(2) }),
+          now,
+        )
+        .unwrap();
+      assert_eq!(
+        drain(&mut alice),
+        vec![
+          EngineOutput::Event(CallEngineEvent::ParticipantReconnecting(device(2))),
+          EngineOutput::Event(CallEngineEvent::ParticipantReconnected(device(2))),
+        ]
+      );
+      assert_eq!(alice.participants().count(), 1);
+    }
+  }
+
+  mod uplink {
+    use super::*;
+
+    #[test]
+    fn lossy_uplink_stops_video_before_audio_and_raises_the_loss_for_fec() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      drain(&mut alice);
+      // Two seconds of a link that loses every other datagram.
+      let mut outputs = Vec::new();
+      for round in 0..20u16 {
+        let at = now + Duration::from_millis(100 * u64::from(round));
+        for _ in 0..10 {
+          alice.send_audio(&frame(), at);
+        }
+        drain(&mut alice);
+        let arrivals_us = (0..10u64)
+          .map(|i| (i % 2 == 0).then_some(u64::from(round) * 100_000 + i * 2_000))
+          .collect();
+        let feedback = TransportFeedback {
+          base_seq: round * 10,
+          arrivals_us,
+        };
+        alice
+          .handle_signal(
+            event(7 + u64::from(round), CallEvent::TransportFeedback { feedback }),
+            at,
+          )
+          .unwrap();
+        outputs.extend(drain(&mut alice));
+      }
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: Vec::new(),
+        }))
+      );
+      let max_loss = outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::UplinkEstimate { loss_percent, .. }) => Some(*loss_percent),
+          _ => None,
+        })
+        .max();
+      assert_eq!(max_loss, Some(50));
+      // Video is held back, audio still goes out.
+      let later = now + Duration::from_secs(3);
+      let video = EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        layer: SimulcastLayer::BASE,
+        timestamp: RtpTimestamp(0),
+        is_keyframe: true,
+        data: vec![1; 100],
+      };
+      alice.send_video(MediaStreamId(50), &video, later);
+      assert!(drain(&mut alice).is_empty());
+      alice.send_audio(&frame(), later);
+      take_datagram(&mut alice);
+    }
+
+    #[test]
+    fn layers_the_sfu_needs_are_narrowed_to_what_the_uplink_carries() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, None, now);
+      alice
+        .handle_signal(
+          event(
+            3,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      drain(&mut alice);
+      let needed = CallEvent::LayersNeeded {
+        stream_id: MediaStreamId(50),
+        layers: vec![0, 1],
+      };
+      alice.handle_signal(event(4, needed), now).unwrap();
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: vec![0, 1],
+        })]
+      );
+      // The same again changes nothing for the driver.
+      let needed = CallEvent::LayersNeeded {
+        stream_id: MediaStreamId(50),
+        layers: vec![0, 1],
+      };
+      alice.handle_signal(event(5, needed), now).unwrap();
+      assert!(drain(&mut alice).is_empty());
+    }
+  }
+
   mod trust {
     use super::*;
 
@@ -1620,6 +2503,13 @@ mod tests {
     )
   }
 
+  fn engine_joined(id: i64, now: Instant) -> CallEngine {
+    let mut engine = engine(id, now);
+    engine.join("t".into());
+    engine.handle_signal(event(1, joined(id, &[])), now).unwrap();
+    engine
+  }
+
   fn joined(id: i64, others: &[i64]) -> CallEvent {
     CallEvent::Joined {
       call_id: call(),
@@ -1627,7 +2517,33 @@ mod tests {
       participants: others.iter().map(|other| participant(*other)).collect(),
       video_tracks: Vec::new(),
       screen_audio_tracks: Vec::new(),
+      maybe_reconnect_grace_ms: Some(30_000),
     }
+  }
+
+  /// A track of `owner` with `layer_count` layers on `stream`.
+  fn video_track(stream: u32, owner: i64, layer_count: u8) -> VideoTrack {
+    VideoTrack {
+      stream_id: MediaStreamId(stream),
+      device_id: device(owner),
+      kind: VideoTrackKind::Camera,
+      codec: VideoCodec::H264,
+      layers: layers(layer_count),
+    }
+  }
+
+  fn layers(count: u8) -> Vec<VideoLayerInfo> {
+    [(320, 180, 150_000), (640, 360, 500_000), (1280, 720, 1_500_000)]
+      .into_iter()
+      .zip(0..count)
+      .map(|((width, height, max_bitrate_bps), layer)| VideoLayerInfo {
+        layer,
+        width,
+        height,
+        max_framerate: 30,
+        max_bitrate_bps,
+      })
+      .collect()
   }
 
   fn dave_proposals(

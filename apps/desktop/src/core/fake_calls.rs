@@ -121,6 +121,7 @@ impl FakeCalls {
       | CallAction::SetPushToTalk { .. }
       | CallAction::SetTalking { .. }
       | CallAction::SelectCamera { .. }
+      | CallAction::SetStatusSounds { .. }
       | CallAction::Unknown => {},
     }
   }
@@ -140,6 +141,8 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     is_muted: false,
     maybe_muted_by_host: None,
     screen_sound: ScreenShareSound::Off,
+    is_reconnecting: false,
+    reconnecting: Vec::new(),
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),

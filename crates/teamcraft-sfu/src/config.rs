@@ -30,6 +30,15 @@ pub struct SfuConfig {
   pub join_token_leeway: Duration,
   /// Join tokens valid for longer than this are rejected.
   pub max_join_token_lifetime: Duration,
+  /// QUIC keep-alive. Mobile carriers' NATs drop idle UDP mappings after about 30 s (some after
+  /// 20 s); this keeps them open in quiet calls and makes a dead path show within the idle timeout.
+  pub keep_alive_interval: Duration,
+  /// A connection that receives nothing for this long is lost (the shorter of this and the
+  /// client's setting applies). Its participant then keeps the slot for `reconnect_grace`.
+  pub idle_timeout: Duration,
+  /// How long a participant whose connection was lost keeps its slot to rejoin; the others see
+  /// it as reconnecting meanwhile. Clients learn it with `joined`.
+  pub reconnect_grace: Duration,
 }
 
 impl Default for SfuConfig {
@@ -44,6 +53,9 @@ impl Default for SfuConfig {
       max_signaling_message_bytes: 256 * 1024,
       join_token_leeway: Duration::from_secs(5),
       max_join_token_lifetime: Duration::from_secs(300),
+      keep_alive_interval: Duration::from_secs(2),
+      idle_timeout: Duration::from_secs(10),
+      reconnect_grace: Duration::from_secs(30),
     }
   }
 }

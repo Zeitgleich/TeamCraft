@@ -129,10 +129,12 @@ pub fn core_connection(host: State<'_, CoreHost>) -> Result<CoreConnection, Comm
   Ok(host.current()?.connection_state().into())
 }
 
-/// The webview saw the network come back or the window become visible again.
+/// The webview saw the network come back or the window become visible again: the gateway and a
+/// running call check their connections at once.
 #[tauri::command]
-pub fn core_network_changed(host: State<'_, CoreHost>) {
+pub fn core_network_changed(host: State<'_, CoreHost>, calls: State<'_, Arc<CallHost>>) {
   host.network_changed();
+  calls.network_changed();
 }
 
 #[tauri::command]

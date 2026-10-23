@@ -319,6 +319,7 @@ class CallController(
       return false
     }
     maybeSession = session
+    session.setStatusSounds(CallSoundPrefs.prefs(context).statusSounds)
     session.setVideoListener(Video())
     if (options.isMuted) session.setMuted(true)
     wantsCamera.value = options.isCameraOn

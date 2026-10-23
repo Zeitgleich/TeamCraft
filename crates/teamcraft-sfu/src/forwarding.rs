@@ -11,6 +11,10 @@
 //!   number; the receiver's feedback drives a [`SendSideEstimator`]. Incoming datagrams with a
 //!   transport sequence number are recorded for the sender's own (uplink) estimation.
 //!
+//! - **Reconnecting participants** keep their streams and subscriptions but receive nothing until
+//!   they are back ([`Forwarder::suspend`], [`Forwarder::resume`]); a new path starts with fresh
+//!   bandwidth estimates.
+//!
 //! The payload is never read; DAVE frames stay encrypted.
 
 use std::collections::{BTreeMap, HashMap};
@@ -100,6 +104,8 @@ struct ParticipantRoute {
   /// Base for the receiver's arrival times in its feedback (only differences matter).
   feedback_epoch: Instant,
   allocator: LayerAllocator,
+  /// The connection was lost: nothing is sent to it until it is back.
+  is_suspended: bool,
 }
 
 #[derive(Debug)]
@@ -166,8 +172,50 @@ impl Forwarder {
       uplink: FeedbackRecorder::new(now),
       feedback_epoch: now,
       allocator: LayerAllocator::new(),
+      is_suspended: false,
     };
     self.participants.insert(device_id, route);
+  }
+
+  /// A participant's connection was lost: it stops receiving and drops out of the speaker
+  /// selection; its tracks stay published and its subscriptions stay (paused) for its return.
+  pub fn suspend(&mut self, device_id: DeviceId, now: Instant) -> Vec<Effect> {
+    let Some(participant) = self.participants.get_mut(&device_id) else {
+      return Vec::new();
+    };
+    participant.is_suspended = true;
+    let mut effects = Vec::new();
+    if let Some(speakers) = self.speakers.remove(device_id, now) {
+      effects.push(Effect::ActiveSpeakers(speakers));
+    }
+    let subscribed: Vec<StreamId> = self
+      .video_tracks
+      .iter_mut()
+      .filter_map(|(&stream_id, route)| {
+        let subscription = route.subscribers.get_mut(&device_id)?;
+        subscription.target = None;
+        subscription.current = None;
+        Some(stream_id)
+      })
+      .collect();
+    for stream_id in subscribed {
+      effects.extend(self.update_layers_needed(stream_id));
+    }
+    effects
+  }
+
+  /// A suspended participant is back on a new connection, possibly over another network: its
+  /// estimates start over; the next allocation resumes its subscriptions (with keyframes).
+  pub fn resume(&mut self, device_id: DeviceId, capabilities: MediaCapabilities, now: Instant) {
+    let bwe = self.config.bwe;
+    if let Some(participant) = self.participants.get_mut(&device_id) {
+      participant.capabilities = capabilities;
+      participant.downlink = SendSideEstimator::new(bwe);
+      participant.uplink = FeedbackRecorder::new(now);
+      participant.feedback_epoch = now;
+      participant.allocator = LayerAllocator::new();
+      participant.is_suspended = false;
+    }
   }
 
   /// Removes a participant with its tracks and subscriptions.
@@ -475,12 +523,13 @@ impl Forwarder {
       .map(|participant| participant.downlink.estimate_bps())
   }
 
+  /// Everyone reachable except `sender`.
   fn others(&self, sender: DeviceId) -> Vec<DeviceId> {
     self
       .participants
-      .keys()
-      .copied()
-      .filter(|id| *id != sender)
+      .iter()
+      .filter(|(id, route)| **id != sender && !route.is_suspended)
+      .map(|(id, _)| *id)
       .collect()
   }
 
@@ -510,7 +559,11 @@ impl Forwarder {
 
   /// Recomputes a receiver's layers; asks publishers for keyframes where a receiver switches.
   fn reallocate(&mut self, receiver: DeviceId, now: Instant) -> Vec<Effect> {
-    let Some(participant) = self.participants.get_mut(&receiver) else {
+    let Some(participant) = self
+      .participants
+      .get_mut(&receiver)
+      .filter(|participant| !participant.is_suspended)
+    else {
       return Vec::new();
     };
     // Without any feedback yet (older clients) the estimate is just the start value; it still
@@ -778,6 +831,99 @@ mod tests {
       let removal = forwarder.remove_participant(device(1), now);
       assert_eq!(removal.video_tracks, vec![VIDEO]);
       assert!(forwarder.video_tracks().is_empty());
+    }
+  }
+
+  mod reconnecting {
+    use super::*;
+
+    #[test]
+    fn suspended_receiver_gets_nothing_until_it_resumes() {
+      let (mut forwarder, now) = room(3);
+      let speak = |forwarder: &mut Forwarder, at| {
+        let mut receivers: Vec<DeviceId> = forwarder
+          .route(device(1), &audio(1, 10), at)
+          .unwrap()
+          .deliveries
+          .into_iter()
+          .map(|(receiver, _)| receiver)
+          .collect();
+        receivers.sort();
+        receivers
+      };
+      assert_eq!(speak(&mut forwarder, now), devices(&[2, 3]));
+      forwarder.suspend(device(2), now);
+      assert_eq!(speak(&mut forwarder, now), devices(&[3]));
+      forwarder.resume(device(2), MediaCapabilities::default(), now);
+      assert_eq!(speak(&mut forwarder, now), devices(&[2, 3]));
+    }
+
+    #[test]
+    fn suspended_speaker_leaves_the_speaker_selection() {
+      let (mut forwarder, now) = room(2);
+      forwarder.route(device(1), &audio(1, 10), now).unwrap();
+      assert_eq!(forwarder.active_speakers(), devices(&[1]));
+      let effects = forwarder.suspend(device(1), now);
+      assert!(effects.contains(&Effect::ActiveSpeakers(Vec::new())));
+    }
+
+    #[test]
+    fn subscription_pauses_while_suspended_and_resumes_with_a_keyframe() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      assert_eq!(send_frame(&mut forwarder, 0, true, now), devices(&[2]));
+      let effects = forwarder.suspend(device(2), now);
+      assert!(effects.contains(&Effect::LayersNeeded {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layers: Vec::new(),
+      }));
+      assert!(send_frame(&mut forwarder, 0, true, now).is_empty());
+      // The allocation timer does nothing for a suspended receiver.
+      assert!(forwarder.on_timer(device(2), now).is_empty());
+      // Back a second later (keyframe requests are rate limited per layer).
+      let later = now + Duration::from_secs(1);
+      forwarder.resume(device(2), capabilities_av1(), later);
+      let effects = forwarder.on_timer(device(2), later);
+      assert!(effects.contains(&Effect::KeyframeRequest {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layer: 0,
+      }));
+      assert!(send_frame(&mut forwarder, 0, false, later).is_empty());
+      assert_eq!(send_frame(&mut forwarder, 0, true, later), devices(&[2]));
+    }
+
+    #[test]
+    fn tracks_of_a_suspended_publisher_stay_published() {
+      let (mut forwarder, now) = video_room();
+      forwarder.suspend(device(1), now);
+      assert_eq!(forwarder.video_tracks().len(), 1);
+    }
+
+    #[test]
+    fn resumed_receiver_starts_with_a_fresh_estimate() {
+      let (mut forwarder, now) = room(2);
+      let start = forwarder.downlink_estimate_bps(device(2)).unwrap();
+      // Losing half of everything for a while drives the estimate down.
+      for round in 0..30u16 {
+        let at = now + Duration::from_millis(100 * u64::from(round));
+        for _ in 0..10 {
+          forwarder.route(device(1), &audio(1, 10), at).unwrap();
+        }
+        let arrivals_us = (0..10u64)
+          .map(|i| (i % 2 == 0).then_some(u64::from(round) * 100_000 + i * 1_000))
+          .collect();
+        let feedback = TransportFeedback {
+          base_seq: round * 10,
+          arrivals_us,
+        };
+        forwarder.on_transport_feedback(device(2), &feedback, at);
+      }
+      assert!(forwarder.downlink_estimate_bps(device(2)).unwrap() < start);
+      forwarder.suspend(device(2), now);
+      forwarder.resume(device(2), MediaCapabilities::default(), now);
+      assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(start));
     }
   }
 
@@ -1091,6 +1237,14 @@ mod tests {
       )
       .unwrap();
     (forwarder, now)
+  }
+
+  fn capabilities_av1() -> MediaCapabilities {
+    MediaCapabilities {
+      video_decoders: vec![VideoCodec::Av1, VideoCodec::Vp9],
+      max_simulcast_layers: 3,
+      ..MediaCapabilities::default()
+    }
   }
 
   /// Sends one single-fragment frame on `layer` of [`VIDEO`]; returns who receives it.

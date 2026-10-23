@@ -386,6 +386,16 @@ impl CallService {
     Some(call.snapshot(conversation_id, started.by, started.at))
   }
 
+  /// Whether the device is in the roster of the conversation's call. The SFU reports a device
+  /// whose connection was lost as gone only after its reconnect grace period, so this holds while
+  /// it rejoins.
+  pub fn is_device_in_call(&self, conversation_id: ConversationId, device_id: DeviceId) -> bool {
+    self
+      .lock()
+      .get(&conversation_id)
+      .is_some_and(|call| call.participants.iter().any(|entry| entry.device_id == device_id))
+  }
+
   /// Whether a device of the user is in the roster of a running call.
   pub fn is_in_call(&self, user: UserId) -> bool {
     self
@@ -460,7 +470,7 @@ pub async fn create_join_token(
   }
 
   if access.view.conversation.kind == ConversationKind::Meeting {
-    check_meeting_admission(state, calls, caller, conversation_id).await?;
+    check_meeting_admission(state, calls, caller, conversation_id, request.device_id).await?;
   }
   let call_id = calls.call_for(conversation_id, Instant::now(), || state.next_id())?;
   let claims = calls.claims(call_id, caller.user.id, request.device_id, unix_now_secs()?);
@@ -472,12 +482,14 @@ pub async fn create_join_token(
   })
 }
 
-/// A meeting that is over, a lock and removals by the host keep people out of its call.
+/// A meeting that is over, a lock and removals by the host keep people out of its call. A lock
+/// doesn't keep out a device that is in the call already: it rejoins after a lost connection.
 async fn check_meeting_admission(
   state: &AppState,
   calls: &CallService,
   caller: &AuthenticatedUser,
   conversation_id: ConversationId,
+  device_id: DeviceId,
 ) -> Result<(), ApiError> {
   let Some(meeting) = state
     .database
@@ -495,6 +507,7 @@ async fn check_meeting_admission(
     ));
   }
   if calls.is_locked(conversation_id)
+    && !calls.is_device_in_call(conversation_id, device_id)
     && !state
       .database
       .meeting_host_ids(&meeting)
@@ -880,6 +893,21 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
         .call_for(id(1), start + Duration::from_secs(3000), || Ok(id(101)))
         .unwrap();
       assert_eq!((first, later), (id(100), id(100)));
+    }
+
+    #[test]
+    fn device_in_the_roster_counts_as_in_the_call() {
+      let service = service();
+      service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
+      let entry = CallRosterEntry {
+        user_id: id(4),
+        device_id: id(5),
+      };
+      assert!(!service.is_device_in_call(id(1), id(5)));
+      service.participant_joined(id(1), entry, false, UnixMillis(0));
+      assert!(service.is_device_in_call(id(1), id(5)));
+      assert!(!service.is_device_in_call(id(1), id(6)));
+      assert!(!service.is_device_in_call(id(2), id(5)));
     }
 
     #[test]

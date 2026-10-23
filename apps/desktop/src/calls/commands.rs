@@ -10,7 +10,7 @@ use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
 use teamcraft_media::effects::BackgroundImage;
 use teamcraft_proto::MediaStreamId;
 
-use super::{CallHost, push_to_talk, video};
+use super::{CallHost, CoreJoinTickets, push_to_talk, video};
 use crate::core::commands::{CommandError, CoreHost};
 
 #[tauri::command]
@@ -164,8 +164,10 @@ pub async fn call_action(
 ) -> Result<(), CommandError> {
   match action {
     CallAction::Join { request } => {
-      let preparation = core.current()?.prepare_call(request.conversation).await?;
-      calls.join(request, preparation).await?;
+      let runtime = core.current()?;
+      let preparation = runtime.prepare_call(request.conversation).await?;
+      let tickets = Arc::new(CoreJoinTickets::new(runtime, request.conversation));
+      calls.join(request, preparation, tickets).await?;
     },
     CallAction::Leave => calls.leave().await,
     CallAction::Decline { conversation } => calls.decline(conversation),
@@ -202,6 +204,7 @@ pub async fn call_action(
       calls.set_push_to_talk(is_enabled, shortcut, is_global).await;
     },
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,
+    CallAction::SetStatusSounds { sounds } => calls.set_status_sounds(sounds).await,
     CallAction::Unknown => return Err(CommandError::from("unknown call action".to_owned())),
   }
   Ok(())

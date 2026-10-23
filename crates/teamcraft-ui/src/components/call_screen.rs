@@ -69,6 +69,17 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     state.read(|backend| backend.active_call().and_then(|active| active.maybe_privacy_code))
   });
   let is_connecting = Memo::new(move |_| is_real && state.read(|backend| backend.active_call().is_none()));
+  let is_reconnecting = Memo::new(move |_| {
+    state.read(|backend| backend.active_call().is_some_and(|active| active.is_reconnecting))
+  });
+  let reconnecting = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .active_call()
+        .map(|active| active.reconnecting)
+        .unwrap_or_default()
+    })
+  });
   let rotation = Cell::new(0_usize);
   use_interval(SPEAKER_ROTATE_MS, move || {
     if is_real {
@@ -150,6 +161,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         is_camera_on=participant.is_camera_on
         has_hand_raised=participant.has_hand_raised
         is_speaking=Signal::derive(move || speaking.get() == Some(id))
+        is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
       />
     }
   };
@@ -298,6 +310,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </span>
         <Show when=move || is_connecting.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-connecting")}</span>
+        </Show>
+        <Show when=move || is_reconnecting.get() fallback=|| ()>
+          <span class="muted-text" role="status">{move || i18n.t("call-reconnecting")}</span>
         </Show>
       </header>
       {move || {

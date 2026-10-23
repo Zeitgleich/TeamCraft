@@ -78,6 +78,7 @@
   <string name="call_channel">Calls</string>
   <string name="call_ongoing">TeamCraft call</string>
   <string name="call_connecting">Connecting…</string>
+  <string name="call_reconnecting">Connection lost, reconnecting…</string>
   <string name="call_securing">Securing the call…</string>
   <string name="call_secured">End-to-end encrypted</string>
   <string name="call_ended">Call ended</string>

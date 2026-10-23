@@ -168,6 +168,8 @@ private fun ChatsPage(viewModel: MainViewModel) {
   ShareTypingSetting()
   DynamicColorSetting()
   HorizontalDivider()
+  CallStatusSoundsSetting()
+  HorizontalDivider()
   Heading(R.string.search_prefetch_title)
   SearchPrefetchSection(viewModel.segmentPrefetch)
 }

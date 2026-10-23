@@ -315,6 +315,7 @@ private fun CallControls(
 private fun phaseText(maybeState: CallStateInfo?): Int = when (maybeState?.phase) {
   null, CallPhase.CONNECTING -> R.string.call_connecting
   CallPhase.CONNECTED -> if (maybeState.isSecured) R.string.call_secured else R.string.call_securing
+  CallPhase.RECONNECTING -> R.string.call_reconnecting
   CallPhase.ENDED -> when (maybeState.maybeEndReason) {
     CallEndReason.REMOVED_BY_HOST -> R.string.call_removed_by_host
     CallEndReason.ENDED_BY_HOST -> R.string.call_ended_by_host

@@ -19,12 +19,16 @@
 //!   `web_call` example, served for the `/engine` test page
 //! - `TEAMCRAFT_SFU_CERT` / `TEAMCRAFT_SFU_KEY`: PEM files; without them a self-signed
 //!   certificate valid for 14 days is generated (browsers accept it via certificate hash)
+//! - `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS`: how long a participant whose connection was lost keeps
+//!   its slot to rejoin, default 30
+//! - `TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS`: a connection silent this long is lost, default 10
 
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
@@ -79,6 +83,12 @@ async fn run() -> anyhow::Result<()> {
     config.bind_addr = bind;
   }
   config.maybe_dev_http_addr = env_addr("TEAMCRAFT_SFU_DEV_HTTP")?;
+  if let Some(grace) = env_duration_secs("TEAMCRAFT_SFU_RECONNECT_GRACE_SECS")? {
+    config.reconnect_grace = grace;
+  }
+  if let Some(timeout) = env_duration_secs("TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS")? {
+    config.idle_timeout = timeout;
+  }
 
   let identity = load_identity().await?;
   let verifier = load_verifier(&config)?;
@@ -203,6 +213,17 @@ fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {
         .parse()
         .with_context(|| format!("{name} is not a socket address"))?,
     )),
+    Err(_) => Ok(None),
+  }
+}
+
+fn env_duration_secs(name: &str) -> anyhow::Result<Option<Duration>> {
+  match std::env::var(name) {
+    Ok(value) => Ok(Some(Duration::from_secs(
+      value
+        .parse()
+        .with_context(|| format!("{name} is not a number of seconds"))?,
+    ))),
     Err(_) => Ok(None),
   }
 }

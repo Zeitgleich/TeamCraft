@@ -4,8 +4,10 @@
 //! [`CallClientMessage::Join`] with a join token from `teamcraft-server`. Messages on that stream
 //! are framed as a 4-byte big-endian length followed by one JSON message. Every
 //! [`CallServerMessage::Event`] carries a sequence number that increases by one per connection.
-//! A dropped connection is not resumed: the client rejoins with a fresh token and gets a fresh
-//! `joined` event (media state is ephemeral).
+//! A QUIC connection survives a change of the client's address (connection migration). If it is
+//! lost anyway, the SFU keeps the device's slot for a grace period ([`CallEvent::Joined`] says how
+//! long) and tells the others it is reconnecting; the client joins again with a fresh token on a
+//! new connection and takes its slot back with a fresh `joined` event (ARCHITECTURE.md §6.5).
 //!
 //! Media flows as QUIC datagrams (`teamcraft-media::datagram`), not through these types.
 
@@ -119,11 +121,24 @@ pub enum CallEvent {
     video_tracks: Vec<VideoTrack>,
     #[serde(default)]
     screen_audio_tracks: Vec<ScreenAudioTrack>,
+    /// How long the SFU keeps this device's slot after its connection was lost; rejoining within
+    /// it resumes the call. Older SFUs omit it and drop the slot at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_reconnect_grace_ms: Option<u64>,
   },
   ParticipantJoined {
     participant: CallParticipant,
   },
   ParticipantLeft {
+    device_id: DeviceId,
+  },
+  /// A device's connection was lost; its slot is kept while it reconnects. Media from and to it
+  /// pauses; `participant_left` follows if it doesn't come back within the grace period.
+  ParticipantReconnecting {
+    device_id: DeviceId,
+  },
+  /// A reconnecting device is back on a new connection (same slot and audio stream).
+  ParticipantReconnected {
     device_id: DeviceId,
   },
   /// Devices whose audio the SFU currently forwards, loudest first.
@@ -196,6 +211,10 @@ pub enum CallEvent {
   EndedByHost {
     by_user_id: UserId,
   },
+  /// The same device joined the call on another connection (another window, or this one came
+  /// back after the SFU gave it up for lost); the SFU closes this connection right after. Not to
+  /// be answered with a rejoin.
+  ConnectionReplaced,
   #[serde(other)]
   Unknown,
 }
@@ -386,6 +405,48 @@ mod tests {
     assert!(
       matches!(joined, CallEvent::Joined { screen_audio_tracks, .. } if screen_audio_tracks.is_empty())
     );
+  }
+
+  #[test]
+  fn reconnect_wire_format() {
+    let device_id = DeviceId::from_snowflake(Snowflake::new(5).unwrap());
+    for (event, expected) in [
+      (CallEvent::ConnectionReplaced, r#"{"type":"connection_replaced"}"#),
+      (
+        CallEvent::ParticipantReconnecting { device_id },
+        r#"{"type":"participant_reconnecting","device_id":"5"}"#,
+      ),
+      (
+        CallEvent::ParticipantReconnected { device_id },
+        r#"{"type":"participant_reconnected","device_id":"5"}"#,
+      ),
+    ] {
+      assert_eq!(serde_json::to_string(&event).unwrap(), expected);
+      assert_eq!(serde_json::from_str::<CallEvent>(expected).unwrap(), event);
+    }
+    let joined = CallEvent::Joined {
+      call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+      participant: participant(),
+      participants: Vec::new(),
+      video_tracks: Vec::new(),
+      screen_audio_tracks: Vec::new(),
+      maybe_reconnect_grace_ms: Some(30_000),
+    };
+    let json = serde_json::to_string(&joined).unwrap();
+    assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000}"#));
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), joined);
+    // Older SFUs keep no slot.
+    let old: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      old,
+      CallEvent::Joined {
+        maybe_reconnect_grace_ms: None,
+        ..
+      }
+    ));
   }
 
   #[test]
