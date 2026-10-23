@@ -144,7 +144,31 @@ mod user_settings {
 }
 
 mod conversation_settings {
+  use std::time::Duration;
+
   use super::*;
+
+  #[tokio::test]
+  async fn the_users_devices_hear_about_a_change() {
+    let app = app!();
+    let carol = member("carol");
+    let channel = channel_with(&app, &[&carol]).await;
+    let device = register_device(&app, &carol).await;
+    let mut socket = ws::connect(&app, &carol, &device).await;
+
+    let path = format!("/conversations/{channel}/notification-settings");
+    let put = app.put(&carol, &path, json!({"level": "none"})).await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+    let events = ws::events(&mut socket, Duration::from_millis(500)).await;
+    assert!(
+      events.iter().any(|event| matches!(
+        event,
+        teamcraft_proto::GatewayEvent::ConversationUpdate { conversation_id } if conversation_id.to_string() == channel
+      )),
+      "{events:?}"
+    );
+    app.stop().await;
+  }
 
   #[tokio::test]
   async fn level_and_mute_time_round_trip_and_show_up_in_the_membership() {
