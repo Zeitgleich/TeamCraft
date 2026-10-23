@@ -352,7 +352,7 @@ fn is_format_char(c: char) -> bool {
 /// Maps library errors to messages that tell the client what is wrong without leaking internals.
 fn invalid(error: &jsonwebtoken::errors::Error) -> AuthError {
   let reason = match error.kind() {
-    ErrorKind::ExpiredSignature => "token expired",
+    ErrorKind::ExpiredSignature => return AuthError::Expired("token expired".into()),
     ErrorKind::ImmatureSignature => "token is not valid yet",
     ErrorKind::InvalidSignature => "bad signature",
     ErrorKind::InvalidIssuer => "wrong issuer",
@@ -732,7 +732,7 @@ mod tests {
 
   fn assert_invalid<T: std::fmt::Debug>(result: Result<T, AuthError>, expected: &str) {
     match result {
-      Err(AuthError::InvalidToken(reason)) => assert_eq!(reason, expected),
+      Err(AuthError::InvalidToken(reason) | AuthError::Expired(reason)) => assert_eq!(reason, expected),
       other => panic!("expected invalid token ({expected}), got {other:?}"),
     }
   }

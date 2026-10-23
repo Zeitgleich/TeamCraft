@@ -532,8 +532,8 @@ pub async fn validate_session_token(
     .map_err(|error| internal(&error))?;
   match state_of_session {
     SessionState::Active => {},
-    SessionState::Expired => return Err(AuthError::InvalidToken("the session timed out".into())),
-    SessionState::Unknown => return Err(AuthError::InvalidToken("the session has ended".into())),
+    SessionState::Expired => return Err(AuthError::Expired("the session timed out".into())),
+    SessionState::Unknown => return Err(AuthError::Expired("the session has ended".into())),
   }
   let user: UserId = claims
     .sub

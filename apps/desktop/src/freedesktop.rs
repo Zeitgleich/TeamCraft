@@ -19,6 +19,9 @@ const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 const DEFAULT_ACTION: &str = "default";
 
+const LOGIND: &str = "org.freedesktop.login1";
+const LOGIND_MANAGER: &str = "org.freedesktop.login1.Manager";
+
 /// Session and system bus, connected on first use.
 #[derive(Default)]
 pub struct Buses {
@@ -126,6 +129,35 @@ impl Buses {
         && action == DEFAULT_ACTION
       {
         on_click(id);
+      }
+    }
+  }
+
+  /// Calls `on_wake` every time the computer resumes from suspend (logind `PrepareForSleep(false)`),
+  /// for as long as the system bus lives. Returns at once when there is no system bus.
+  pub async fn watch_wake(&self, on_wake: impl Fn() + Send + 'static) {
+    let Some(system) = self.system().await else {
+      return;
+    };
+    let rule = zbus::MatchRule::builder()
+      .msg_type(zbus::message::Type::Signal)
+      .sender(LOGIND)
+      .and_then(|builder| builder.interface(LOGIND_MANAGER))
+      .and_then(|builder| builder.member("PrepareForSleep"))
+      .map(|builder| builder.build());
+    let Ok(rule) = rule else {
+      return;
+    };
+    let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, system, None).await else {
+      tracing::debug!("cannot watch for suspend and resume");
+      return;
+    };
+    while let Some(Ok(message)) = stream.next().await {
+      // `true` before suspending, `false` after resuming.
+      if let Ok(is_going_to_sleep) = message.body().deserialize::<bool>()
+        && !is_going_to_sleep
+      {
+        on_wake();
       }
     }
   }

@@ -37,6 +37,20 @@ pub enum AccountState {
   },
 }
 
+/// Where the gateway connection stands. The banner follows this, not the OS connectivity: the
+/// device can be online while the server is unreachable or the session expired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ConnectionState {
+  Connecting,
+  Connected,
+  /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
+  Offline {
+    retry_at_ms: i64,
+  },
+  /// The server refused the access token: the user has to sign in again.
+  SignInRequired,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ConversationKind {
   Public,
@@ -484,6 +498,18 @@ impl From<MentionSettings> for MentionPreferences {
       first_name_is_mention: settings.is_first_name_mention,
       channel_mentions_notify: settings.do_channel_mentions_notify,
       keywords: settings.keywords,
+    }
+  }
+}
+
+impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
+  fn from(state: teamcraft_core::connection::ConnectionState) -> Self {
+    use teamcraft_core::connection::ConnectionState as Core;
+    match state {
+      Core::Connecting => Self::Connecting,
+      Core::Connected => Self::Connected,
+      Core::Offline { retry_at_ms } => Self::Offline { retry_at_ms },
+      Core::SignInRequired => Self::SignInRequired,
     }
   }
 }

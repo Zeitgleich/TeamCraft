@@ -796,12 +796,12 @@ impl ActivityWatch {
   }
 }
 
-fn on_window(event: &str, callback: impl Fn() + 'static) {
+pub(crate) fn on_window(event: &str, callback: impl Fn() + 'static) {
   let Some(window) = web_sys::window() else { return };
   listen_on(&window, event, callback);
 }
 
-fn on_document(event: &str, callback: impl Fn() + 'static) {
+pub(crate) fn on_document(event: &str, callback: impl Fn() + 'static) {
   let Some(document) = web_sys::window().and_then(|window| window.document()) else {
     return;
   };

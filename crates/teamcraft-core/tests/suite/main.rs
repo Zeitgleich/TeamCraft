@@ -9,6 +9,7 @@ mod calls;
 mod chat_actions;
 #[path = "../common/mod.rs"]
 mod common;
+mod connection;
 mod dev_stack;
 mod devices;
 mod enrollment;

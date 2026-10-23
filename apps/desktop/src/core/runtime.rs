@@ -12,9 +12,12 @@ use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
   MessageWindow, SecuritySnapshot,
 };
-use teamcraft_core::api::{AccessTokenSource, ApiError, GatewayConnection, HttpServerApi, ServerApi};
+use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
-use teamcraft_core::clock::SystemClock;
+use teamcraft_core::clock::{Clock, SystemClock};
+use teamcraft_core::connection::{
+  ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
+};
 use teamcraft_core::records;
 use teamcraft_core::store::{DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -35,12 +38,8 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
-/// How often the gateway is kept alive (the server announces its own limit in `hello`).
-const HEARTBEAT: Duration = Duration::from_secs(25);
-/// Outbox retries while offline or after a failed send.
+/// Outbox retries while offline or after a failed send; also the connection's regular check.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-const RECONNECT_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// Where the core keeps its data and talks to.
 #[derive(Clone, Debug)]
@@ -154,11 +153,15 @@ enum Request {
     reply: oneshot::Sender<Result<(), String>>,
   },
   ApprovalCancel,
+  /// The network changed or the computer woke up: check the connection now.
+  NetworkChanged,
 }
 
 /// Handle to the core thread. Dropping it stops the thread.
 pub struct CoreRuntime {
   requests: mpsc::UnboundedSender<Request>,
+  /// Read without asking the core thread, which may be busy connecting.
+  connection: ConnectionStatus,
   thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -174,6 +177,8 @@ impl CoreRuntime {
     on_call_event: CallEventHandler,
   ) -> Self {
     let (requests, receiver) = mpsc::unbounded_channel();
+    let connection = ConnectionStatus::new();
+    let status = connection.clone();
     let thread = std::thread::Builder::new()
       .name("teamcraft-core".to_owned())
       .spawn(move || {
@@ -184,10 +189,25 @@ impl CoreRuntime {
             return;
           },
         };
-        runtime.block_on(Core::new(config, user, key, tokens, on_change, on_call_event).run(receiver));
+        let core = Core::new(config, user, key, tokens, on_change, on_call_event, status);
+        runtime.block_on(core.run(receiver));
       })
       .ok();
-    Self { requests, thread }
+    Self {
+      requests,
+      connection,
+      thread,
+    }
+  }
+
+  /// Where the gateway connection stands.
+  pub fn connection_state(&self) -> ConnectionState {
+    self.connection.get()
+  }
+
+  /// Reconnects at once instead of after the backoff: the network changed or the computer woke up.
+  pub fn network_changed(&self) {
+    drop(self.requests.send(Request::NetworkChanged));
   }
 
   pub async fn status(&self) -> CoreStatus {
@@ -352,10 +372,8 @@ struct Core {
   store: Option<Store>,
   client: Option<Client<Api, Store>>,
   backend: Option<CoreChatBackend<Store>>,
-  gateway: Option<Gateway>,
+  connection: ConnectionSupervisor<Gateway>,
   status: CoreStatus,
-  backoff: Duration,
-  reconnect_at: tokio::time::Instant,
   link: Option<LinkRun>,
   /// Why the last link failed, until the user tries again.
   link_failure: LinkStatus,
@@ -381,7 +399,11 @@ impl Core {
     tokens: TokenCache,
     on_change: Arc<dyn Fn() + Send + Sync>,
     on_call_event: CallEventHandler,
+    status: ConnectionStatus,
   ) -> Self {
+    let mut connection = ConnectionSupervisor::new(ConnectionSettings::default(), status);
+    let notify = on_change.clone();
+    connection.set_observer(Box::new(move |_| notify()));
     Self {
       config,
       user,
@@ -392,10 +414,8 @@ impl Core {
       store: None,
       client: None,
       backend: None,
-      gateway: None,
+      connection,
       status: CoreStatus::NotStarted,
-      backoff: RECONNECT_MIN,
-      reconnect_at: tokio::time::Instant::now(),
       link: None,
       link_failure: LinkStatus::Idle,
       approval: None,
@@ -406,20 +426,23 @@ impl Core {
 
   async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
     self.open().await;
-    let mut heartbeat = tokio::time::interval(HEARTBEAT);
     let mut flush = tokio::time::interval(FLUSH_INTERVAL);
     loop {
-      let is_connected = self.gateway.is_some();
-      let wants_connection = self.client.is_some() && !is_connected;
+      self.connect().await;
+      let maybe_deadline = self.connection_deadline();
       tokio::select! {
         request = requests.recv() => match request {
           Some(request) => self.handle(request).await,
           None => break,
         },
-        frame = receive(&mut self.gateway), if is_connected => self.on_frame(frame).await,
-        _ = heartbeat.tick(), if is_connected => self.send_heartbeat().await,
-        _ = flush.tick(), if self.client.is_some() => self.flush().await,
-        () = tokio::time::sleep_until(self.reconnect_at), if wants_connection => self.connect().await,
+        frame = self.connection.receive() => self.on_frame(frame).await,
+        _ = flush.tick(), if self.client.is_some() => {
+          self.connection.on_tick(SystemClock.now_ms()).await;
+          self.flush().await;
+        },
+        () = sleep_for(maybe_deadline), if maybe_deadline.is_some() => {
+          self.connection.on_tick(SystemClock.now_ms()).await;
+        },
         linked = poll_link(&mut self.link), if self.link.is_some() => self.on_linked(linked).await,
       }
     }
@@ -496,7 +519,6 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.client = Some(client);
-    self.reconnect_at = tokio::time::Instant::now();
     status
   }
 
@@ -534,6 +556,7 @@ impl Core {
         drop(reply.send(self.approval_confirm(&short_code).await))
       },
       Request::ApprovalCancel => self.approval = None,
+      Request::NetworkChanged => self.connection.network_changed(SystemClock.now_ms()).await,
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::UpdatePolicy(reply) => drop(
         reply.send(
@@ -865,70 +888,40 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    match client.connect_gateway().await {
-      Ok((connection, outcome)) => {
-        tracing::info!(?outcome, "gateway connected");
-        self.gateway = Some(connection);
-        self.backoff = RECONNECT_MIN;
-        self.repeat_attention().await;
-        self.changed();
-      },
-      Err(error) => {
-        tracing::warn!(%error, "gateway connection failed, retrying");
-        self.schedule_reconnect();
-      },
+    if self.connection.connect_if_due(client).await.is_some() {
+      self.repeat_attention().await;
+      self.changed();
     }
   }
 
-  fn schedule_reconnect(&mut self) {
-    self.gateway = None;
-    self.reconnect_at = tokio::time::Instant::now() + self.backoff;
-    self.backoff = (self.backoff * 2).min(RECONNECT_MAX);
+  /// How long until the connection needs the loop (`None`: it doesn't, or there is no client yet).
+  fn connection_deadline(&self) -> Option<Duration> {
+    self.client.as_ref()?;
+    let deadline_ms = self.connection.next_deadline_ms()?;
+    let wait_ms = deadline_ms.saturating_sub(SystemClock.now_ms()).max(0);
+    Some(Duration::from_millis(wait_ms.unsigned_abs()))
   }
 
   async fn on_frame(&mut self, frame: Option<Result<teamcraft_proto::GatewayServerMessage, ApiError>>) {
-    let outcome = match (frame, self.client.as_mut()) {
-      (Some(Ok(frame)), Some(client)) => client.handle_frame(frame).await,
-      (Some(Err(error)), _) => Err(CoreError::Api(error)),
-      (None, _) => Err(CoreError::Gateway("connection closed".to_owned())),
-      (_, None) => return,
-    };
-    match outcome {
-      Ok(()) => self.changed(),
-      Err(error) => {
-        tracing::warn!(%error, "gateway ended");
-        self.schedule_reconnect();
-      },
-    }
-  }
-
-  async fn send_heartbeat(&mut self) {
-    let Some(connection) = self.gateway.as_mut() else {
+    let Some(client) = self.client.as_mut() else {
       return;
     };
-    if let Err(error) = connection.send(&GatewayClientMessage::Heartbeat).await {
-      tracing::warn!(%error, "heartbeat failed");
-      self.schedule_reconnect();
+    if self.connection.on_frame(client, frame).await {
+      self.changed();
     }
   }
 
   /// Tells the server whether this device is idle (docs/gateway.md); a failure ends the connection
   /// like a failed heartbeat.
   async fn send_activity(&mut self, is_idle: bool) {
-    let Some(connection) = self.gateway.as_mut() else {
-      return;
-    };
     let activity = if is_idle {
       DeviceActivity::Idle
     } else {
       DeviceActivity::Active
     };
-    if let Err(error) = connection
-      .send(&GatewayClientMessage::SetActivity { activity })
-      .await
-    {
-      tracing::warn!(%error, "could not report the device activity");
-      self.schedule_reconnect();
+    let message = GatewayClientMessage::SetActivity { activity };
+    if self.connection.is_connected() && !self.connection.send(SystemClock.now_ms(), &message).await {
+      tracing::warn!("could not report the device activity");
     }
   }
 
@@ -936,15 +929,9 @@ impl Core {
   /// Remembered so a new connection repeats it.
   async fn send_attention(&mut self, is_attentive: bool) {
     self.maybe_attention = Some(is_attentive);
-    let Some(connection) = self.gateway.as_mut() else {
-      return;
-    };
-    if let Err(error) = connection
-      .send(&GatewayClientMessage::Attention { is_attentive })
-      .await
-    {
-      tracing::warn!(%error, "could not report the attention");
-      self.schedule_reconnect();
+    let message = GatewayClientMessage::Attention { is_attentive };
+    if self.connection.is_connected() && !self.connection.send(SystemClock.now_ms(), &message).await {
+      tracing::warn!("could not report the attention");
     }
   }
 
@@ -959,11 +946,10 @@ impl Core {
   }
 }
 
-async fn receive(
-  gateway: &mut Option<Gateway>,
-) -> Option<Result<teamcraft_proto::GatewayServerMessage, ApiError>> {
-  match gateway {
-    Some(connection) => connection.receive().await,
+/// Sleeps `maybe_duration` (only polled when there is one).
+async fn sleep_for(maybe_duration: Option<Duration>) {
+  match maybe_duration {
+    Some(duration) => tokio::time::sleep(duration).await,
     None => std::future::pending().await,
   }
 }

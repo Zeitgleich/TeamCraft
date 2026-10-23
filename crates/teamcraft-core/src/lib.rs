@@ -7,6 +7,7 @@ pub mod api;
 pub mod attestation;
 pub mod client;
 pub mod clock;
+pub mod connection;
 pub mod error;
 pub mod link_preview;
 pub mod notify_rules;

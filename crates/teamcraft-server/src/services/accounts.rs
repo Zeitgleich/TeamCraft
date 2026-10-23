@@ -81,7 +81,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
     identity.maybe_session_id.as_deref(),
     identity.issued_at,
   ) {
-    return Err(AuthError::InvalidToken("the session has ended".into()).into());
+    return Err(AuthError::Expired("the session has ended".into()).into());
   }
   super::session::enforce(state, &identity).await?;
   let kind = match identity.role {

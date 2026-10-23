@@ -115,4 +115,9 @@ impl CoreError {
   pub fn is_retry_later(&self) -> bool {
     matches!(self, Self::Api(error) if error.is_retry_later())
   }
+
+  /// See [`ApiError::is_sign_in_required`].
+  pub fn is_sign_in_required(&self) -> bool {
+    matches!(self, Self::Api(error) if error.is_sign_in_required())
+  }
 }

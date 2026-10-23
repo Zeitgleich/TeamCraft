@@ -276,6 +276,21 @@ pub enum CoreStatus {
   },
 }
 
+/// Where the core's gateway connection stands, for the connection banner (the core's
+/// `ConnectionState` on its way to the webview).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CoreConnection {
+  Connecting,
+  Connected,
+  /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
+  Offline {
+    retry_at_ms: i64,
+  },
+  /// The server refused the access token: the user has to sign in again.
+  SignInRequired,
+}
+
 /// First-run setup of this device (e2ee.md §3, §6).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollRequest {
