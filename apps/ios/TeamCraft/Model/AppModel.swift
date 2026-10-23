@@ -394,6 +394,9 @@ final class AppModel {
     guard case .ready = phase else { return }
     await startSyncing()
     await reconcileNotifications()
+    // APNs hands out the token once per launch, but the app may stay suspended for days: retry a
+    // registration that failed (server unreachable) and re-seal the token when it is due.
+    if let token = maybePushToken { await registerPushIfNeeded(token: token) }
   }
 
   func sceneEnteredBackground() async {
@@ -744,7 +747,7 @@ final class AppModel {
       try await core.registerPush(service: .apns, token: token)
       defaults.set(token, forKey: Self.pushTokenKey)
     } catch {
-      // Not stored: the next launch tries again.
+      // Not stored: the next foreground tries again.
     }
   }
 
