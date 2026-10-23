@@ -111,9 +111,72 @@ encoding the three layers in parallel would bring the latency down. The software
 the fallback when no hardware encoder is usable. Segmentation plus blur and the software encoder
 together stay below the 33 ms frame budget on average.
 
+## Clients
+
+How fast and how lean the apps are for the person using them; the budgets they must stay within are
+in [.claude/rules/robustness.md](../.claude/rules/robustness.md) ("Performance and resources").
+
+### Web client (Chrome)
+
+`tests/e2e` `perf.rs` drives the release web build in headless Chrome against the release server
+(tests/e2e/README.md has the setup):
+
+```sh
+cargo test -p teamcraft-e2e --features browser --test suite -- --nocapture perf::   # PERF_SCALE=small
+```
+
+Carol signs in, leaves, and comes back to a workspace that grew while she was away. "Small" is 3
+spaces, 24 channels, 3,000 messages (1,500 in one channel) and 12 photos; it runs in the nightly e2e
+suite and fails on a regression. Measured on the machine above while it was otherwise idle (one
+Android emulator running), web bundle 9.5 MB of wasm:
+
+| What                                                          | Small workspace       |
+|---------------------------------------------------------------|-----------------------|
+| Sign in and unlock the keys on a new browser                  | 1.1 s                 |
+| Coming back: catch-up until the channel list shows            | 2.1 s                 |
+| Coming back: until every channel of the space is read         | 2.4 s                 |
+| Reload of a signed-in tab until the channel list shows        | 0.4 s                 |
+| Main-thread tasks over 50 ms while catching up                | none                  |
+| Channel switch, p50 / p95 / max                               | 31 / 35 / 41 ms       |
+| Opening the 1,500-message channel                             | 35 ms                 |
+| Message rows in the DOM, after opening / after scrolling back | 24 / 23 (virtualised) |
+| Frames over 50 ms while scrolling back 120 steps              | 0 of 121              |
+| Memory of the browser's processes (PSS): empty / app started  | 335 / 548 MiB         |
+| JS heap after start / after 40 / after 80 channel switches    | 4.8 / 4.9 / 4.9 MiB   |
+| PSS after 80 channel switches                                 | 560 MiB               |
+| Idle in the foreground: CPU / wakeups (whole browser)         | 1.4 % / 163 per s     |
+
+What the numbers say:
+
+- The app adds about 210 MiB to the browser; most of it is the compiled wasm and its linear memory
+  (the JS heap is under 5 MiB). Channel switches don't grow it.
+- The message list is virtualised: the DOM holds about 25 rows whatever the channel's length.
+- While idle the page still runs about 0.4 s of tasks per minute: the sync loop's 3 s tick and a
+  30 s REST poll of unread counts, threads, presence and read receipts (#183). A one-second banner
+  timer that ran even while connected is fixed.
+- Sending used to read the whole conversation for every message (fixed); it showed when filling a
+  20,000-message channel.
+- Against the budgets in robustness.md: switching, scrolling, start and memory are well within them;
+  idle network is not (the 30 s poll, #183, and the once-a-minute account data sync).
+
+The large workspace (20 spaces, 300 channels, 100k messages, 200 photos), the desktop app and the
+Android app are measured against the same harness (`PERF_SCALE=large`, `PERF_MOBILE_USER`); their
+numbers follow in a separate change. Slack, Teams and Element were not measured: that needs their
+apps installed and accounts on their services.
+
+### Android (first numbers)
+
+Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37
+image does not boot on this AMD host), signed out:
+
+| What                                          | Value     |
+|-----------------------------------------------|-----------|
+| Cold start to the first frame (`am start -W`) | 1.0–1.2 s |
+| Memory after start (PSS)                      | 95 MiB    |
+
 ## Limits to keep in mind
 
 - All of this is for a single server instance and one database; rate limits and the call roster are
   per instance (`docs/operations.md`).
-- Index segments, attachments and search are client-side and not covered here.
+- Index segments, attachments and search are client-side and not covered by the server tests.
 - The load tests do not use TLS, a reverse proxy or real clients; WebSocket frames are small.

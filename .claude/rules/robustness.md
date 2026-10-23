@@ -85,6 +85,33 @@ state of the codebase is recorded in [docs/robustness-audit.md](../../docs/robus
   expiry checks allow skew (leeway) and are done by the party whose clock is authoritative.
 - Displayed relative times tolerate a wrong local clock (no "in 3 hours" for a message just sent).
 
+### Performance and resources
+
+TeamCraft must stay light: people keep it open all day next to everything else, often on battery.
+Measure, don't guess: `tests/e2e` `perf.rs` (web, nightly with generous bounds), numbers and method
+in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that touches a hot path
+(opening a channel, sending, sync, the message list, timers) states its effect on these budgets.
+
+| Budget                                                  | Desktop   | Web (Chrome)                | Mobile                                       |
+|---------------------------------------------------------|-----------|-----------------------------|----------------------------------------------|
+| Signed-in start until the channel list is usable        | ≤ 2 s     | ≤ 1.5 s (reload)            | ≤ 2 s                                        |
+| Channel switch, p95                                     | ≤ 100 ms  | ≤ 100 ms                    | ≤ 150 ms                                     |
+| Memory with a large workspace (300 channels, 100k msgs) | ≤ 400 MiB | ≤ 350 MiB above the browser | ≤ 250 MiB                                    |
+| Memory growth over 100 channel switches                 | ≤ 10 %    | ≤ 10 %                      | ≤ 10 %                                       |
+| Idle, connected, in the foreground: CPU                 | ≤ 0.5 %   | ≤ 1 %                       | ≤ 1 %                                        |
+| Network while idle besides the gateway heartbeat        | none      | none                        | none                                         |
+| In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
+| Download size                                           | –         | ≤ 10 MB wasm uncompressed   | –                                            |
+
+- Lists that can grow (messages, members, channels, search hits) are virtualised or paged; nothing
+  renders or loads "all of them".
+- No work proportional to a conversation's or workspace's size on a hot path (send, switch, scroll,
+  tick). Reading the whole conversation to send one message is the kind of bug this rules out.
+- Timers only run while their result can be seen; push and gateway events, not polling, deliver
+  changes. Every periodic task states its interval and why.
+- Calls: hardware codecs where available, video effects on the GPU, and no work for streams nobody
+  watches; battery measurements per call type are tracked in docs/performance.md.
+
 ### User-visible status
 
 - The user can always tell whether they are connected, whether an action is pending or failed, and

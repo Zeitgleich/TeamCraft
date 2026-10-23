@@ -269,12 +269,17 @@ pub fn enqueue_message(
   let client_message_id = ClientMessageId::from_bytes(bytes);
   // Outbox messages are ordered by time written; keep that order strict even within a millisecond
   // (a reaction toggled twice quickly must apply in order).
-  let latest_pending = store
-    .messages(draft.conversation_id, crate::store::MessageFilter::All)?
-    .iter()
-    .filter(|message| message.maybe_server_id.is_none())
-    .map(|message| message.sent_at_ms)
-    .max();
+  // Only the outbox is looked at: reading the whole conversation made every send cost as much as
+  // the conversation's history.
+  let mut latest_pending = None;
+  for entry in list_json::<OutboxEntry>(store, Table::Outbox)?
+    .into_iter()
+    .filter(|entry| entry.conversation_id == draft.conversation_id)
+  {
+    if let Some(message) = store.message(entry.conversation_id, entry.client_message_id)? {
+      latest_pending = latest_pending.max(Some(message.sent_at_ms));
+    }
+  }
   let now_ms = latest_pending.map_or(now_ms, |latest| now_ms.max(latest + 1));
   store.upsert_message(&StoredMessage {
     conversation_id: draft.conversation_id,

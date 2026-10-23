@@ -31,6 +31,8 @@ mod membership;
 mod messaging;
 mod mfa;
 mod moderator;
+#[cfg(feature = "browser")]
+mod perf;
 mod retention_limits;
 mod threads_policy;
 #[cfg(feature = "browser")]
