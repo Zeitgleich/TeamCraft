@@ -36,8 +36,10 @@ pub struct JwksCache {
   source: Box<dyn JwkSource>,
   options: JwksCacheOptions,
   state: RwLock<Option<CachedKeys>>,
-  // Serializes refreshes so concurrent requests with a new key ID trigger one fetch.
-  refresh: Mutex<()>,
+  // Serializes refreshes so concurrent requests with a new key ID trigger one fetch. Holds when the
+  // last fetch was attempted, successful or not: during a provider outage a failed fetch must
+  // count too, or every request would wait for its own fetch to time out.
+  refresh: Mutex<Option<Instant>>,
 }
 
 struct CachedKeys {
@@ -51,7 +53,7 @@ impl JwksCache {
       source,
       options,
       state: RwLock::new(None),
-      refresh: Mutex::new(()),
+      refresh: Mutex::new(None),
     }
   }
 
@@ -84,15 +86,22 @@ impl JwksCache {
   }
 
   async fn refresh_if_allowed(&self) -> Result<(), AuthError> {
-    let _guard = self.refresh.lock().await;
-    let last_fetch = self.state.read().await.as_ref().map(|cached| cached.fetched_at);
-    if let Some(fetched_at) = last_fetch
-      && fetched_at.elapsed() < self.options.min_refresh_interval
+    let mut last_attempt = self.refresh.lock().await;
+    let has_keys = self.state.read().await.is_some();
+    if let Some(attempted_at) = *last_attempt
+      && attempted_at.elapsed() < self.options.min_refresh_interval
     {
-      debug!("signing keys were refreshed recently, not fetching again");
-      return Ok(());
+      debug!("signing keys were fetched recently, not fetching again");
+      return if has_keys {
+        Ok(())
+      } else {
+        Err(AuthError::KeysUnavailable(
+          "the identity provider was unreachable moments ago".into(),
+        ))
+      };
     }
 
+    *last_attempt = Some(Instant::now());
     match self.source.fetch().await {
       Ok(keys) => {
         debug!(key_count = keys.keys.len(), "signing keys refreshed");
@@ -103,7 +112,7 @@ impl JwksCache {
         Ok(())
       },
       // Keep serving with the stale set if there is one; a provider outage must not log everyone out.
-      Err(error) if last_fetch.is_some() => {
+      Err(error) if has_keys => {
         warn!(%error, "refreshing signing keys failed, using the cached set");
         Ok(())
       },
@@ -254,6 +263,38 @@ mod tests {
     // The refresh fails, the stale set is kept and still verifies tokens.
     cache.key(TEST_KEY_ID).await.unwrap();
     assert_eq!(source.fetches(), 2);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn an_outage_is_not_retried_by_every_request() {
+    let source = FakeSource::with_key(TEST_KEY_ID);
+    let cache = JwksCache::new(Box::new(source.clone()), OPTIONS);
+    cache.key(TEST_KEY_ID).await.unwrap();
+    tokio::time::advance(Duration::from_secs(601)).await;
+    source.set_failing(true);
+
+    for _ in 0..10 {
+      cache.key(TEST_KEY_ID).await.unwrap();
+    }
+    assert_eq!(source.fetches(), 2, "one failed refresh, then the stale set");
+
+    tokio::time::advance(Duration::from_secs(31)).await;
+    cache.key(TEST_KEY_ID).await.unwrap();
+    assert_eq!(source.fetches(), 3, "retried after the minimum interval");
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn without_keys_a_failed_fetch_is_not_repeated_at_once() {
+    let source = FakeSource::with_key(TEST_KEY_ID);
+    source.set_failing(true);
+    let cache = JwksCache::new(Box::new(source.clone()), OPTIONS);
+    for _ in 0..5 {
+      assert!(matches!(
+        cache.key(TEST_KEY_ID).await,
+        Err(AuthError::KeysUnavailable(_))
+      ));
+    }
+    assert_eq!(source.fetches(), 1);
   }
 
   #[tokio::test(start_paused = true)]
