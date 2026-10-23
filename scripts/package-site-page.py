@@ -52,7 +52,12 @@ ARCH_TITLES = {"x64": "x64", "arm64": "ARM64"}
 # Where an OS calls its architectures something else.
 OS_ARCH_TITLES = {"macos": {"arm64": "Apple silicon", "x64": "Intel"}}
 # What the main button of a platform card downloads.
-KIND_BUTTONS = {"exe": "installer", "dmg": "disk image", "appimage": "AppImage", "apk-full": "APK"}
+KIND_BUTTONS = {"exe": "installer", "dmg": "disk image", "apk-full": "APK"}
+# The package buttons of the Linux card, next to the repository: the title and which distributions.
+LINUX_PACKAGES = {
+    "deb": (".deb", "Debian, Ubuntu"),
+    "rpm": (".rpm", "Fedora, openSUSE"),
+}
 # Platforms whose main download is a choice between architectures the visitor has to know: a button
 # each, with a hint, instead of one button and "Also for" links.
 ARCH_CHOICES = {
@@ -106,10 +111,10 @@ RULES = [
     (r"_(?P<arch>x64|arm64)_[A-Za-z-]+\.msi$", "windows", "msi", "MSI package", False,
       "For managed installs (Group Policy, Intune)"),
     (r"_(?P<arch>aarch64|x64)\.dmg$", "macos", "dmg", "Disk image (.dmg)", True, ""),
-    (r"_(?P<arch>amd64|aarch64)\.AppImage$", "linux", "appimage", "AppImage", True,
-      "Runs on most distributions, updates itself"),
-    (r"_(?P<arch>amd64|arm64)\.deb$", "linux", "deb", "Debian / Ubuntu (.deb)", False, ""),
-    (r"\.(?P<arch>x86_64|aarch64)\.rpm$", "linux", "rpm", "Fedora / openSUSE (.rpm)", False, ""),
+    (r"_(?P<arch>amd64|aarch64)\.AppImage$", "linux", "appimage", "AppImage", False,
+      "Portable, no automatic system integration"),
+    (r"_(?P<arch>amd64|arm64)\.deb$", "linux", "deb", "Debian / Ubuntu (.deb)", True, ""),
+    (r"\.(?P<arch>x86_64|aarch64)\.rpm$", "linux", "rpm", "Fedora / openSUSE (.rpm)", True, ""),
     (r"-(?P<arch>x86_64|aarch64)\.flatpak$", "linux", "flatpak", "Flatpak bundle", False, ""),
     (r"-full-release\.apk$", "android", "apk-full", "APK", True,
       "Push notifications through Google Play services"),
@@ -126,7 +131,7 @@ DEBUG_RULES = [
 ]
 ARCH_ALIASES = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64"}
 OS_ORDER = list(OS_TITLES)
-KIND_ORDER = ["exe", "msi", "dmg", "appimage", "deb", "rpm", "flatpak", "apk-full", "apk-libre"]
+KIND_ORDER = ["exe", "msi", "dmg", "deb", "rpm", "flatpak", "appimage", "apk-full", "apk-libre"]
 ARCH_ORDER = ["x64", "arm64", ""]
 # Where another architecture comes first: nearly every Mac sold since 2020 has Apple silicon.
 OS_ARCH_ORDER = {"macos": ["arm64", "x64", ""]}
@@ -448,7 +453,9 @@ def render_platform(channel, os_name, env, has_linux_repositories):
     primaries = [d for d in downloads if d.is_primary]
     others = [d for d in downloads if not d.is_primary]
     body = []
-    if primaries and os_name in ARCH_CHOICES:
+    if os_name == "linux" and (primaries or has_linux_repositories):
+        body.append(render_linux_install(primaries, channel, has_linux_repositories))
+    elif primaries and os_name in ARCH_CHOICES:
         body.append(render_arch_choice(primaries, channel, ARCH_CHOICES[os_name]))
     elif primaries:
         body.append(render_primary_downloads(primaries, channel))
@@ -457,8 +464,8 @@ def render_platform(channel, os_name, env, has_linux_repositories):
           replace an install from a store, and the signed release will need a fresh install.</span></p>""")
     if os_name == "android" and env.get("PLAY_STORE_URL"):
         body.append(f'<a class="button button-secondary store" href="{esc(env["PLAY_STORE_URL"])}">Get it on Google Play</a>')
-    if others or (os_name == "linux" and downloads and has_linux_repositories):
-        body.append(render_more_downloads(others, channel, os_name == "linux" and has_linux_repositories))
+    if others:
+        body.append(render_more_downloads(others, channel))
     if not body:
         body.append('<p class="platform-empty">Not part of this release.</p>')
     content = "\n        ".join(body)
@@ -528,7 +535,47 @@ def render_arch_choice(primaries, channel, choice):
           <p class="choice-help">{ICON_INFO}<span>{choice["help"]}</span></p>"""
 
 
-def render_more_downloads(others, channel, links_repositories):
+def render_linux_install(primaries, channel, has_repositories):
+    """The Linux card's main choice: the package repository (updates through the system's package
+    manager), and next to it a direct download per package type, equal weight; the visitor's
+    distribution isn't known to the browser. AppImage is only listed under more options."""
+    parts = []
+    if has_repositories:
+        parts.append(f"""<a class="button button-primary download choice repo-choice" href="#linux" data-os="linux" data-arch=""
+             data-kind="repository" data-label="Package repository" data-meta="Debian, Ubuntu, Fedora, openSUSE"
+             data-tag="{esc(channel.tag)}" data-primary>{ICON_DOWNLOAD}
+            <span class="choice-text"><span class="choice-title">Install from the package repository</span>
+            <span class="choice-hint">Debian, Ubuntu · Fedora, openSUSE</span></span>
+            <span class="choice-size">Recommended</span></a>
+          <p class="choice-help">{ICON_INFO}<span>Updates arrive through your system&rsquo;s package manager.</span></p>""")
+    items = []
+    for kind, (title, distributions) in LINUX_PACKAGES.items():
+        group = [d for d in primaries if d.kind == kind]
+        if group:
+            items.append(render_package_choice(group, channel, title, distributions))
+    if items:
+        parts.append(f'<div class="pkg-choices">{"".join(items)}</div>')
+    return "\n          ".join(parts)
+
+
+def render_package_choice(group, channel, title, distributions):
+    """A button for the first architecture and an "Also for" link per further one."""
+    first, rest = group[0], group[1:]
+    button = (f'<a class="button button-secondary download choice" href="{esc(first.url)}" {download_data(first, channel)} '
+              f'aria-label="Download {esc(first.label)}, {esc(download_meta(first))}">{ICON_DOWNLOAD}'
+              f'<span class="choice-text"><span class="choice-title">{esc(title)}</span>'
+              f'<span class="choice-hint">{esc(distributions)}</span></span>'
+              f'<span class="choice-size">{esc(download_meta(first))}</span></a>')
+    others = ""
+    if rest:
+        links = " · ".join(
+            f'<a class="download" href="{esc(d.url)}" {download_data(d, channel)} '
+            f'aria-label="{esc(d.label)}, {esc(download_meta(d))}">{esc(download_meta(d))}</a>' for d in rest)
+        others = f'<p class="primary-alt">Also for {links}</p>'
+    return f'<div class="pkg-item">{button}{others}</div>'
+
+
+def render_more_downloads(others, channel):
     """Every further package kind, with a link per architecture."""
     kinds = list(dict.fromkeys(d.kind for d in others))
     rows = []
@@ -541,11 +588,7 @@ def render_more_downloads(others, channel, links_repositories):
             f'aria-label="{esc(d.label)}, {esc(download_meta(d))}">{esc(download_meta(d))}</a>' for d in group)
         rows.append(f'<li><span class="option-text"><span class="option-label">{esc(first.label)}</span>{note}</span>'
                     f'<span class="option-links">{links}</span></li>')
-    if links_repositories:
-        rows.append('<li class="option-repo"><span class="option-text"><span class="option-label">Package repository'
-                    '</span><span class="option-note">Updates with your system through apt, dnf or zypper</span></span>'
-                    f'<span class="option-links"><a class="option-link" href="#linux">Set up {ICON_ARROW}</a></span></li>')
-    count = len(kinds) + (1 if links_repositories else 0)
+    count = len(kinds)
     return f"""<details class="more">
             <summary><span>More options</span><span class="more-count">{count}</span>{ICON_CHEVRON}</summary>
             <ul class="options">
