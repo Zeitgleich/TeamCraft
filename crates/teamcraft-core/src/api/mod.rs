@@ -470,7 +470,13 @@ impl ApiError {
   /// expired before the app refreshed it. Queued work (outbox, uploads) waits instead of failing
   /// for good; the app handles the signed-out state itself.
   pub fn is_retry_later(&self) -> bool {
-    self.is_transient() || matches!(self, Self::Token(_) | Self::Status { status: 401, .. })
+    self.is_transient() || self.is_sign_in_required()
+  }
+
+  /// No access token, or the server refused it: retrying with the same token won't help, the user
+  /// (or the app's token refresh) has to sign in again.
+  pub fn is_sign_in_required(&self) -> bool {
+    matches!(self, Self::Token(_) | Self::Status { status: 401, .. })
   }
 
   pub(crate) fn status(status: u16, code: ErrorCode, message: impl Into<String>) -> Self {

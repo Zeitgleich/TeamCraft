@@ -61,12 +61,19 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 #[cfg(not(target_arch = "wasm32"))]
 const KEEPALIVE_RETRIES: u32 = 3;
+/// The whole of a JSON API call (not blob transfers, which may be slow on a slow link). On macOS,
+/// iOS and Windows a request on a connection that died mid-flight would otherwise hang until the OS
+/// gives up: keepalive only probes idle sockets and there is no `TCP_USER_TIMEOUT`.
+#[cfg(not(target_arch = "wasm32"))]
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long sent data may stay unacknowledged before the connection counts as dead.
 #[cfg(any(target_os = "android", target_os = "linux"))]
 const UNACKNOWLEDGED_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Silence after which the gateway connection counts as dead: two heartbeat intervals (25 s, plus
-/// up to one runner tick) and room for a slow round trip.
+/// up to one runner tick) and room for a slow round trip. The apps' `ConnectionSupervisor` detects
+/// silence itself, with the interval from `hello`; this is the transport's backstop for clients that
+/// drive the connection on their own (the integration bridge).
 const GATEWAY_SILENCE_LIMIT_MS: i64 = 50_000;
 
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
@@ -101,12 +108,13 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
   fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
     self.require_secure_transport()?;
     let token = self.tokens.access_token()?;
-    Ok(
-      self
-        .client
-        .request(method, format!("{}/api/v1{path}", self.base_url))
-        .bearer_auth(token),
-    )
+    let request = self
+      .client
+      .request(method, format!("{}/api/v1{path}", self.base_url))
+      .bearer_auth(token);
+    #[cfg(not(target_arch = "wasm32"))]
+    let request = request.timeout(API_REQUEST_TIMEOUT);
+    Ok(request)
   }
 
   async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, ApiError> {
@@ -1311,6 +1319,20 @@ mod tests {
     // Paused time jumps ahead while everything waits, so the timeout fires without a real wait.
     let result = connect_websocket(&format!("ws://{address}/api/v1/gateway")).await;
     assert!(matches!(result, Err(ApiError::Network(message)) if message.contains("timed out")));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn an_api_call_to_a_server_that_never_answers_times_out() {
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // Takes the request and never answers, like a connection that died mid-flight.
+    tokio::spawn(async move {
+      let (_socket, _) = listener.accept().await.unwrap();
+      std::future::pending::<()>().await;
+    });
+    let api = HttpServerApi::new(format!("http://{address}"), StaticToken("token".into()));
+    let result = api.me().await;
+    assert!(matches!(result, Err(ApiError::Network(_))), "{result:?}");
   }
 
   mod liveness {

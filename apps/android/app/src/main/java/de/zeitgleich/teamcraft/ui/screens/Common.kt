@@ -13,6 +13,19 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.delay
+import uniffi.teamcraft_ffi.ConnectionState
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -21,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 
@@ -66,19 +80,62 @@ fun ChromeTopBar(
   )
 }
 
-/** A thin bar while the device is offline: new messages wait, sent ones stay in the outbox. */
+/**
+ * A thin bar while the app can't reach the server: the device is offline, the server is
+ * unreachable although the device is online, or the session expired. Follows the core's connection
+ * state; new messages wait, sent ones stay in the outbox.
+ */
 @Composable
-fun OfflineBanner() {
-  if (rememberIsOnline()) return
+fun OfflineBanner(onSignInAgain: () -> Unit) {
+  val graph = TeamCraftApplication.graph(LocalContext.current)
+  val isOnline = rememberIsOnline()
+  val maybeConnection by graph.core.connectionState.collectAsState()
+  val now by produceState(System.currentTimeMillis()) {
+    while (true) {
+      delay(COUNTDOWN_MILLIS)
+      value = System.currentTimeMillis()
+    }
+  }
+  var maybeConnectingSince by remember { mutableStateOf<Long?>(null) }
+  LaunchedEffect(maybeConnection) {
+    maybeConnectingSince = if (maybeConnection is ConnectionState.Connecting) System.currentTimeMillis() else null
+  }
+  val connection = maybeConnection
+  val (text, maybeAction) = when {
+    !isOnline -> stringResource(R.string.offline_banner) to null
+    connection is ConnectionState.Offline -> {
+      val seconds = ((connection.retryAtMs - now).coerceAtLeast(0) + 999) / 1000
+      stringResource(R.string.connection_unreachable, seconds) to
+        (stringResource(R.string.connection_retry) to { graph.core.networkChanged() })
+    }
+    connection is ConnectionState.SignInRequired ->
+      stringResource(R.string.connection_sign_in) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
+    connection is ConnectionState.Connecting &&
+      maybeConnectingSince?.let { now - it >= CONNECTING_GRACE_MILLIS } == true ->
+      stringResource(R.string.connection_connecting) to null
+    else -> return
+  }
   Surface(
     color = MaterialTheme.colorScheme.errorContainer,
     modifier = Modifier.fillMaxWidth(),
   ) {
-    Text(
-      stringResource(R.string.offline_banner),
-      style = MaterialTheme.typography.labelMedium,
-      color = MaterialTheme.colorScheme.onErrorContainer,
-      modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-    )
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      modifier = Modifier.padding(start = 16.dp, end = 4.dp),
+    ) {
+      Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = Modifier.weight(1f).padding(vertical = 6.dp),
+      )
+      maybeAction?.let { (label, action) ->
+        TextButton(onClick = action) { Text(label) }
+      }
+    }
   }
 }
+
+/** "Connecting" only shows when it takes longer than this; a quick reconnect needs no banner. */
+private const val CONNECTING_GRACE_MILLIS = 3_000L
+private const val COUNTDOWN_MILLIS = 1_000L

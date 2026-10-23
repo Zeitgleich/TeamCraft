@@ -114,6 +114,16 @@ struct State {
   maybe_forced_device_id: Option<DeviceId>,
   /// A network cut armed per user: after the given number of calls, the next one fails.
   network_cuts: HashMap<UserId, (u32, NetworkCut)>,
+  /// Users whose gateway connections stay open but carry nothing either way: no `hello`, no
+  /// answers, no events (a half-open connection after a network change, a stalled server).
+  silent_gateway_users: HashSet<UserId>,
+  /// Connections that died without the client noticing: frames sent on them vanish and nothing
+  /// arrives on them any more.
+  frozen_connections: HashSet<u64>,
+  /// Handshakes refused because the token was (as `set_signed_out`), to check a client stops trying.
+  gateway_refusals: u64,
+  /// Gateway connections opened so far.
+  gateway_connects: u64,
   next_connection: u64,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
@@ -282,6 +292,41 @@ impl FakeServer {
     } else {
       state.signed_out_users.remove(&user);
     }
+  }
+
+  /// While set, this user's gateway connections go silent: new ones never get `hello`, frames sent
+  /// on open ones are swallowed, and no events or answers arrive (they are still buffered for a
+  /// resume).
+  pub fn set_gateway_silent(&self, user: UserId, is_silent: bool) {
+    let mut state = self.lock();
+    if is_silent {
+      state.silent_gateway_users.insert(user);
+    } else {
+      state.silent_gateway_users.remove(&user);
+    }
+  }
+
+  /// The open gateway connections of a user die silently (half-open TCP after a network change):
+  /// the client's sends still succeed but nothing reaches either side. New connections work.
+  pub fn freeze_gateways(&self, user: UserId) {
+    let mut state = self.lock();
+    let open: Vec<u64> = state
+      .sessions
+      .values()
+      .filter(|session| session.user == user)
+      .filter_map(|session| session.maybe_live.as_ref().map(|(connection, _)| *connection))
+      .collect();
+    state.frozen_connections.extend(open);
+  }
+
+  /// How many gateway handshakes were refused for a bad token so far.
+  pub fn gateway_refusal_count(&self) -> u64 {
+    self.lock().gateway_refusals
+  }
+
+  /// How many gateway connections were opened so far.
+  pub fn gateway_connect_count(&self) -> u64 {
+    self.lock().gateway_connects
   }
 
   /// How many gateway heartbeats arrived so far.
@@ -2378,8 +2423,10 @@ impl ServerApi for FakeServerApi {
         return Err(ApiError::Network("fake server: client is offline".into()));
       }
       state.next_connection += 1;
+      state.gateway_connects += 1;
       state.next_connection
     };
+    let is_silent = self.server.lock().silent_gateway_users.contains(&self.user);
     let gateway = FakeGateway {
       server: self.server.clone(),
       user: self.user,
@@ -2396,9 +2443,11 @@ impl ServerApi for FakeServerApi {
         maybe_live: Some((connection, sender.clone())),
       },
     );
-    let _ = sender.unbounded_send(GatewayServerMessage::Hello {
-      heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
-    });
+    if !is_silent {
+      let _ = sender.unbounded_send(GatewayServerMessage::Hello {
+        heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
+      });
+    }
     Ok(gateway)
   }
 
@@ -2435,6 +2484,23 @@ impl GatewayConnection for FakeGateway {
     else {
       return Err(ApiError::Network("fake gateway closed".into()));
     };
+    if state.silent_gateway_users.contains(&self.user) || state.frozen_connections.contains(&self.connection)
+    {
+      return Ok(());
+    }
+    let is_handshake = matches!(
+      message,
+      GatewayClientMessage::Identify { .. } | GatewayClientMessage::Resume { .. }
+    );
+    if is_handshake && state.signed_out_users.contains(&self.user) {
+      // Like the server: an error frame, then the connection closes.
+      state.gateway_refusals += 1;
+      state.sessions.remove(&pending_session(self.connection));
+      let _ = sender.unbounded_send(GatewayServerMessage::Error {
+        error: ErrorBody::new(ErrorCode::InvalidToken, "invalid token: token expired"),
+      });
+      return Ok(());
+    }
     match message {
       GatewayClientMessage::Identify { .. } => {
         state.sessions.remove(&pending_session(self.connection));
@@ -2840,12 +2906,21 @@ impl State {
 
   fn publish(&mut self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {
     let users: HashSet<UserId> = users.into_iter().collect();
+    let silent = &self.silent_gateway_users;
+    let frozen = &self.frozen_connections;
     for (id, session) in self.sessions.iter_mut() {
       if !users.contains(&session.user) || id.starts_with(PENDING_PREFIX) {
         continue;
       }
       session.seq += 1;
       session.buffer.push((session.seq, event.clone()));
+      let is_frozen = session
+        .maybe_live
+        .as_ref()
+        .is_some_and(|(connection, _)| frozen.contains(connection));
+      if silent.contains(&session.user) || is_frozen {
+        continue;
+      }
       if let Some((_, sender)) = &session.maybe_live
         && sender
           .unbounded_send(GatewayServerMessage::Event {

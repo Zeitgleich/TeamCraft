@@ -3681,6 +3681,86 @@
         }
       }
     },
+    "connection_unreachable %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server can't be reached. Messages wait until it is back. Next attempt in %lld s."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in %lld s."
+          }
+        }
+      }
+    },
+    "connection_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try now"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jetzt versuchen"
+          }
+        }
+      }
+    },
+    "connection_sign_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your session has expired. Messages wait until you sign in again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest."
+          }
+        }
+      }
+    },
+    "connection_sign_in_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erneut anmelden"
+          }
+        }
+      }
+    },
+    "connection_connecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecting to the server…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verbindung zum Server wird aufgebaut…"
+          }
+        }
+      }
+    },
     "passphrase": {
       "localizations": {
         "en": {

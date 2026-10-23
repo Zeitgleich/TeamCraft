@@ -152,8 +152,10 @@ async fn authenticate(
   match result {
     Ok(caller) => Some(caller),
     Err(error) => {
-      // Guessing tokens over the gateway counts like guessing them over HTTP.
-      if matches!(error, ApiError::Auth(_)) {
+      // Guessing tokens over the gateway counts like guessing them over HTTP. Expired tokens don't:
+      // clients waking up from sleep reconnect with them, and an office behind one address would
+      // otherwise lock itself out.
+      if matches!(&error, ApiError::Auth(auth) if auth.is_guess()) {
         state
           .rate_limits
           .record_auth_failure(ip, std::time::Instant::now());

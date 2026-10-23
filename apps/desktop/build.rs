@@ -14,6 +14,8 @@ const COMMANDS: &[&str] = &[
   "public_get",
   "core_start",
   "core_status",
+  "core_connection",
+  "core_network_changed",
   "core_enroll",
   "core_snapshot",
   "core_link_start",

@@ -21,13 +21,14 @@ pub use calls::{
   RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
+use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppConfig, BrandLinks, ConversationItem, ConversationKind, EmojiSuggestion, LoginBrand,
-  MentionSettings, MessageItem, NotificationSuppression, OrgRecoveryStart, Presence, PushDiagnosticsInfo,
-  PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, TestPushOutcome, TestPushResult,
+  AccountState, AppConfig, BrandLinks, ConnectionState, ConversationItem, ConversationKind, EmojiSuggestion,
+  LoginBrand, MentionSettings, MessageItem, NotificationSuppression, OrgRecoveryStart, Presence,
+  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
+  SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -40,6 +41,9 @@ uniffi::setup_scaffolding!();
 #[derive(uniffi::Object)]
 pub struct TeamCraft {
   jobs: mpsc::UnboundedSender<Job>,
+  /// Network changes the app reports; the sync loop (and later calls) listen.
+  network: NetworkChanges,
+  connection: ConnectionStatus,
 }
 
 /// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android);
@@ -65,8 +69,31 @@ impl TeamCraft {
     tokens: Arc<dyn TokenProvider>,
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
-    let jobs = engine::spawn(config, tokens, listener)?;
-    Ok(Arc::new(Self { jobs }))
+    let network = NetworkChanges::new();
+    let connection = ConnectionStatus::new();
+    let signals = engine::SyncSignals {
+      network: network.clone(),
+      connection: connection.clone(),
+    };
+    let jobs = engine::spawn(config, tokens, listener, signals)?;
+    Ok(Arc::new(Self {
+      jobs,
+      network,
+      connection,
+    }))
+  }
+
+  /// The network changed (Android `NetworkCallback`, iOS `NWPathMonitor`) or the app came back
+  /// from the background: the gateway checks its connection at once instead of after the backoff.
+  /// Cheap; call it on every change.
+  pub fn network_changed(&self) {
+    self.network.notify();
+  }
+
+  /// Where the gateway connection stands, for the banner. Changes are announced through
+  /// [`EventListener::on_change`].
+  pub fn connection_state(&self) -> ConnectionState {
+    self.connection.get().into()
   }
 
   pub async fn account_state(&self) -> Result<AccountState, TeamCraftError> {

@@ -8,11 +8,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use common::{PASSPHRASE, clock, options, settings};
+use common::{PASSPHRASE, TokioClock, clock, options, settings};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::clock::Clock;
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageFilter};
 
@@ -64,14 +63,14 @@ async fn a_busy_runner_keeps_sending_heartbeats() {
     .complete(
       server.add_user("Carol"),
       Arc::new(MemoryStore::new()),
-      Box::new(TokioClock::new()),
+      Box::new(TokioClock::new().0),
       settings(),
       options(PASSPHRASE),
     )
     .await
     .unwrap();
   let settings = RunnerSettings::default();
-  let heartbeat = settings.heartbeat;
+  let heartbeat = settings.connection.max_heartbeat;
   let (runner, handle) = SyncRunner::new(client, settings, Box::new(|| {}));
   // Something wakes the runner every second, more often than its tick: a busy conversation.
   let busy_for = heartbeat * 4;
@@ -113,23 +112,4 @@ async fn dropping_every_handle_stops_the_runner() {
       .list(teamcraft_core::store::Table::Conversations)
       .is_ok()
   );
-}
-
-/// Wall-clock time that follows tokio's (paused) clock, so the runner's deadlines and its sleeps agree.
-struct TokioClock {
-  started: tokio::time::Instant,
-}
-
-impl TokioClock {
-  fn new() -> Self {
-    Self {
-      started: tokio::time::Instant::now(),
-    }
-  }
-}
-
-impl Clock for TokioClock {
-  fn now_ms(&self) -> i64 {
-    1_800_000_000_000 + i64::try_from(self.started.elapsed().as_millis()).unwrap()
-  }
 }

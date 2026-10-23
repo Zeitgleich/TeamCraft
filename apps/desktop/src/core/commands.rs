@@ -7,8 +7,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus,
-  MessageWindow,
+  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection, CoreStatus,
+  EnrollRequest, LinkStatus, MessageWindow,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
@@ -31,6 +31,13 @@ impl CoreHost {
       config,
       tokens,
       running: Mutex::new(None),
+    }
+  }
+
+  /// The network changed or the computer woke up: the running core checks its connection now.
+  pub fn network_changed(&self) {
+    if let Ok(runtime) = self.current() {
+      runtime.network_changed();
     }
   }
 
@@ -114,6 +121,18 @@ pub async fn core_start(
 #[tauri::command]
 pub async fn core_status(host: State<'_, CoreHost>) -> Result<CoreStatus, CommandError> {
   Ok(host.current()?.status().await)
+}
+
+/// Where the gateway connection stands, for the banner; answered without waiting for the core.
+#[tauri::command]
+pub fn core_connection(host: State<'_, CoreHost>) -> Result<CoreConnection, CommandError> {
+  Ok(host.current()?.connection_state().into())
+}
+
+/// The webview saw the network come back or the window become visible again.
+#[tauri::command]
+pub fn core_network_changed(host: State<'_, CoreHost>) {
+  host.network_changed();
 }
 
 #[tauri::command]

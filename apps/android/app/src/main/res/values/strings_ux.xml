@@ -18,6 +18,11 @@
     <item quantity="other">%d unread messages</item>
   </plurals>
   <string name="offline_banner">No connection. Messages are sent when you\'re back online.</string>
+  <string name="connection_unreachable">The server can\'t be reached. Messages wait until it is back. Next attempt in %1$d s.</string>
+  <string name="connection_retry">Try now</string>
+  <string name="connection_sign_in">Your session has expired. Messages wait until you sign in again.</string>
+  <string name="connection_sign_in_action">Sign in again</string>
+  <string name="connection_connecting">Connecting to the server…</string>
 
   <!-- Conversation -->
   <string name="jump_down">Jump to the newest message</string>

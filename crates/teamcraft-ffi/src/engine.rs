@@ -20,6 +20,7 @@ use teamcraft_core::client::LinkApproval;
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
 use teamcraft_core::clock::{Clock as _, SystemClock};
+use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_guard;
@@ -80,6 +81,14 @@ pub(crate) struct Engine {
   calls: CallHub,
   /// Applied to decrypted push texts (keywords, first name).
   mentions: MentionSettings,
+  signals: SyncSignals,
+}
+
+/// What the app's handle shares with every sync loop the engine starts.
+#[derive(Clone)]
+pub(crate) struct SyncSignals {
+  pub(crate) network: NetworkChanges,
+  pub(crate) connection: ConnectionStatus,
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
@@ -107,6 +116,7 @@ pub(crate) fn spawn(
   config: AppConfig,
   tokens: Arc<dyn TokenProvider>,
   listener: Arc<dyn EventListener>,
+  signals: SyncSignals,
 ) -> Result<mpsc::UnboundedSender<Job>, TeamCraftError> {
   let (ready, opened) = std::sync::mpsc::channel();
   let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
@@ -124,7 +134,7 @@ pub(crate) fn spawn(
       LocalSet::new().block_on(&runtime, async move {
         // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
         // goes nowhere on Android, so the error carries the message and location instead.
-        let mut engine = match open_reporting_panics(config, ForeignTokens(tokens), listener) {
+        let mut engine = match open_reporting_panics(config, ForeignTokens(tokens), listener, signals) {
           Ok(engine) => engine,
           Err(error) => {
             let _ = ready.send(Err(error));
@@ -148,6 +158,7 @@ fn open_reporting_panics(
   config: AppConfig,
   tokens: ForeignTokens,
   listener: Arc<dyn EventListener>,
+  signals: SyncSignals,
 ) -> Result<Engine, TeamCraftError> {
   let report = Arc::new(Mutex::new(String::new()));
   let previous_hook = std::panic::take_hook();
@@ -157,7 +168,9 @@ fn open_reporting_panics(
       *report = info.to_string();
     }
   }));
-  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| Engine::open(config, tokens, listener)));
+  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| {
+    Engine::open(config, tokens, listener, signals)
+  }));
   std::panic::set_hook(previous_hook);
   opened.unwrap_or_else(|_| {
     let message = report.lock().map(|report| report.clone()).unwrap_or_default();
@@ -172,6 +185,7 @@ impl Engine {
     config: AppConfig,
     tokens: ForeignTokens,
     listener: Arc<dyn EventListener>,
+    signals: SyncSignals,
   ) -> Result<Self, TeamCraftError> {
     let key = SymmetricKey::from_slice(&config.database_key)
       .ok_or_else(|| TeamCraftError::InvalidInput("the database key must be 32 bytes".into()))?;
@@ -210,6 +224,7 @@ impl Engine {
       maybe_approval: None,
       calls: CallHub::default(),
       mentions,
+      signals,
     };
     if let Some(client) = Client::open(
       engine.api(),
@@ -348,11 +363,13 @@ impl Engine {
       ClientSlot::Missing => return Err(TeamCraftError::NotEnrolled),
     };
     let listener = self.listener.clone();
-    let (runner, handle) = SyncRunner::new(
+    let (mut runner, handle) = SyncRunner::new(
       *client,
       RunnerSettings::default(),
       Box::new(move || listener.on_change()),
     );
+    runner.watch_network(&self.signals.network);
+    runner.share_connection_status(self.signals.connection.clone());
     let task = tokio::task::spawn_local(runner.run());
     self.client = ClientSlot::Running { handle, task };
     Ok(())

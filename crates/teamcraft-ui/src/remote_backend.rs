@@ -27,8 +27,8 @@ use teamcraft_client_api::model::{
   SpaceId, ThreadId, ThreadSummary, User, UserId,
 };
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus,
-  MessageWindow,
+  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection, CoreStatus,
+  EnrollRequest, LinkStatus, MessageWindow,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyResponse};
@@ -45,6 +45,16 @@ const REFRESH_DELAY: Duration = Duration::from_millis(120);
 /// Where the local client stands, as the shell reports it.
 pub async fn core_status(user: UserId) -> Result<CoreStatus, String> {
   call("core_start", &json!({ "user": user })).await
+}
+
+/// Where the core's gateway connection stands (answered without waiting for the core).
+pub async fn connection_state() -> Result<CoreConnection, String> {
+  call("core_connection", &json!({})).await
+}
+
+/// The network came back or the page became visible again: the core checks its connection now.
+pub async fn network_changed() -> Result<(), String> {
+  call("core_network_changed", &json!({})).await
 }
 
 /// Creates (or recovers) the keys of this device.

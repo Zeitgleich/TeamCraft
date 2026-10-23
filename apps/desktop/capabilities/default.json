@@ -18,6 +18,8 @@
     "allow-public-get",
     "allow-core-start",
     "allow-core-status",
+    "allow-core-connection",
+    "allow-core-network-changed",
     "allow-core-enroll",
     "allow-core-snapshot",
     "allow-core-link-start",

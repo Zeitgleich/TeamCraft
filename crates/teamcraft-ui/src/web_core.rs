@@ -23,17 +23,19 @@ use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
-  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
-  MessageWindow, SecuritySnapshot, last_activity_of,
+  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
+  LinkStatus, MessageWindow, SecuritySnapshot, last_activity_of,
 };
-use teamcraft_core::api::{AccessTokenSource, ApiError, GatewayConnection, HttpServerApi, ServerApi};
+use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
-use teamcraft_core::clock::SystemClock;
+use teamcraft_core::clock::{Clock, SystemClock};
+use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::records;
 use teamcraft_core::store::IndexedDbStore;
 use teamcraft_core::store::browser_database_key;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
@@ -53,8 +55,6 @@ use crate::auth::{AuthError, Authenticator};
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// How often the loop wakes up on its own: outbox retries, heartbeats, staggered commits.
 const TICK: Duration = Duration::from_secs(3);
-/// Gateway heartbeat interval (the server allows some slack).
-const HEARTBEAT: Duration = Duration::from_secs(25);
 /// How often account data (saved items, drafts) is pulled from the user's other devices.
 const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
 /// How often the core's copy of the access token is renewed from the page's session.
@@ -62,8 +62,6 @@ const TOKEN_REFRESH: Duration = Duration::from_secs(20);
 /// How long the access token stored for the service worker is used. Tokens are renewed every
 /// [`TOKEN_REFRESH`]; the stored one only has to outlive a push that arrives while no page is open.
 const PUSH_SESSION_LIFETIME_MS: i64 = 4 * 60 * 1000;
-const RECONNECT_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 type Api = HttpServerApi<WebTokens>;
 type Store = Rc<IndexedDbStore>;
@@ -84,6 +82,8 @@ struct Setup {
 struct Running {
   user: UserId,
   requests: mpsc::UnboundedSender<Request>,
+  /// Read without asking the loop, which may be busy connecting.
+  connection: ConnectionStatus,
 }
 
 /// The access token the core reads synchronously; renewed by [`keep_token_fresh`].
@@ -134,6 +134,11 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
       Ok(Value::Null)
     },
     "core_status" => to_value(ask(Request::Status).await?),
+    "core_connection" => to_value(connection_state()?),
+    "core_network_changed" => {
+      send(Request::NetworkChanged)?;
+      Ok(Value::Null)
+    },
     "core_enroll" => {
       let request: EnrollRequest = field(&args, "request")?;
       ask(|reply| Request::Enroll(request, reply))
@@ -243,7 +248,8 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
       .map_err(|error: AuthError| error.to_string())?;
     *tokens.0.borrow_mut() = Some(first);
     let (sender, receiver) = mpsc::unbounded();
-    let core = Core::new(server_url, user, tokens.clone());
+    let connection = ConnectionStatus::new();
+    let core = Core::new(server_url, user, tokens.clone(), connection.clone());
     let generation = std::rc::Rc::new(());
     keep_token_fresh(auth, tokens, Rc::downgrade(&generation));
     wasm_bindgen_futures::spawn_local(async move {
@@ -255,10 +261,21 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
       *running.borrow_mut() = Some(Running {
         user,
         requests: sender,
+        connection,
       })
     });
   }
   ask(Request::Status).await
+}
+
+fn connection_state() -> Result<CoreConnection, String> {
+  RUNNING.with(|running| {
+    running
+      .borrow()
+      .as_ref()
+      .map(|running| running.connection.get().into())
+      .ok_or_else(|| "the core has not been started".to_owned())
+  })
 }
 
 fn stop() {
@@ -348,6 +365,8 @@ enum Request {
     reply: oneshot::Sender<Result<(), String>>,
   },
   ApprovalCancel,
+  /// The browser went online, the tab became visible or was resumed: check the connection now.
+  NetworkChanged,
 }
 
 /// What woke the loop.
@@ -365,15 +384,12 @@ struct Core {
   store: Option<Store>,
   client: Option<Client<Api, Store>>,
   backend: Option<CoreChatBackend<Store>>,
-  gateway: Option<<Api as ServerApi>::Gateway>,
+  connection: ConnectionSupervisor<<Api as ServerApi>::Gateway>,
   status: CoreStatus,
-  backoff: Duration,
-  reconnect_at_ms: i64,
   /// When the next tick is due. A deadline rather than a fresh sleep per wake-up, so a busy
   /// connection or a chatty UI can't postpone heartbeats until the server drops the connection.
   next_tick_ms: i64,
-  last_heartbeat_ms: i64,
-  last_account_sync_ms: i64,
+  upkeep: Upkeep,
   link: Option<LinkRun>,
   /// The access token last written to the push session, so it is only stored when it changes.
   last_session_token: Option<String>,
@@ -394,7 +410,9 @@ struct LinkRun {
 }
 
 impl Core {
-  fn new(server_url: String, user: UserId, tokens: WebTokens) -> Self {
+  fn new(server_url: String, user: UserId, tokens: WebTokens, status: ConnectionStatus) -> Self {
+    let mut connection = ConnectionSupervisor::new(ConnectionSettings::default(), status);
+    connection.set_observer(Box::new(|_| notify_changed()));
     Self {
       server_url,
       user,
@@ -402,13 +420,10 @@ impl Core {
       store: None,
       client: None,
       backend: None,
-      gateway: None,
+      connection,
       status: CoreStatus::NotStarted,
-      backoff: RECONNECT_MIN,
-      reconnect_at_ms: i64::MIN,
       next_tick_ms: i64::MIN,
-      last_heartbeat_ms: i64::MIN,
-      last_account_sync_ms: i64::MIN,
+      upkeep: Upkeep::new(ACCOUNT_SYNC),
       link: None,
       last_session_token: None,
       link_failure: LinkStatus::Idle,
@@ -421,9 +436,7 @@ impl Core {
   async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
     self.open().await;
     loop {
-      if self.client.is_some() && self.gateway.is_none() && now_ms() >= self.reconnect_at_ms {
-        self.connect().await;
-      }
+      self.connect().await;
       match self.next_wake(&mut requests).await {
         Wake::Request(None) => return,
         Wake::Request(Some(request)) => self.handle(request).await,
@@ -435,14 +448,14 @@ impl Core {
   }
 
   async fn next_wake(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Wake {
-    let until_tick_ms = self.next_tick_ms.saturating_sub(now_ms()).max(0);
-    let Self { gateway, link, .. } = self;
-    let frame = Box::pin(async {
-      match gateway {
-        Some(connection) => connection.receive().await,
-        None => std::future::pending().await,
-      }
-    });
+    // The connection's deadlines count only once there is a client to connect.
+    let deadline = match (&self.client, self.connection.next_deadline_ms()) {
+      (Some(_), Some(connection)) => connection.min(self.next_tick_ms),
+      _ => self.next_tick_ms,
+    };
+    let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
+    let Self { connection, link, .. } = self;
+    let frame = Box::pin(connection.receive());
     let linked = Box::pin(async {
       match link {
         Some(run) => run.future.as_mut().await,
@@ -531,7 +544,6 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.client = Some(client);
-    self.reconnect_at_ms = i64::MIN;
     status
   }
 
@@ -573,6 +585,7 @@ impl Core {
         drop(reply.send(self.approval_confirm(&short_code).await));
       },
       Request::ApprovalCancel => self.approval = None,
+      Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::Messages {
         conversation,
@@ -925,29 +938,7 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if let Err(error) = client.generate_pending_previews().await {
-      tracing::debug!(%error, "link previews not made");
-    }
-    let mut is_changed = false;
-    match client.upload_pending().await {
-      Ok(uploaded) => is_changed |= uploaded > 0,
-      Err(error) => tracing::debug!(%error, "uploads did not finish"),
-    }
-    match client.flush_outbox().await {
-      Ok(report) => {
-        if report.pending > 0 || report.failed > 0 {
-          tracing::debug!(
-            sent = report.sent,
-            pending = report.pending,
-            failed = report.failed,
-            "outbox"
-          );
-        }
-        is_changed |= report.sent > 0;
-      },
-      Err(error) => tracing::debug!(%error, "outbox flush did not finish"),
-    }
-    if is_changed {
+    if upkeep::flush(client).await {
       notify_changed();
     }
   }
@@ -956,91 +947,51 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    match client.connect_gateway().await {
-      Ok((connection, outcome)) => {
-        tracing::info!(?outcome, "gateway connected");
-        self.gateway = Some(connection);
-        self.backoff = RECONNECT_MIN;
-        self.last_heartbeat_ms = now_ms();
-        self.repeat_attention().await;
-        notify_changed();
-      },
-      Err(error) => {
-        tracing::warn!(%error, "gateway connection failed, retrying");
-        self.schedule_reconnect();
-      },
+    if self.connection.connect_if_due(client).await.is_some() {
+      self.repeat_attention().await;
+      notify_changed();
     }
   }
 
-  fn schedule_reconnect(&mut self) {
-    self.gateway = None;
-    self.reconnect_at_ms = now_ms().saturating_add(millis(self.backoff));
-    self.backoff = (self.backoff * 2).min(RECONNECT_MAX);
-  }
-
   async fn on_frame(&mut self, frame: Option<Result<GatewayServerMessage, ApiError>>) {
-    let outcome = match (frame, self.client.as_mut()) {
-      (Some(Ok(frame)), Some(client)) => client.handle_frame(frame).await,
-      (Some(Err(error)), _) => Err(CoreError::Api(error)),
-      (None, _) => Err(CoreError::Gateway("connection closed".to_owned())),
-      (_, None) => return,
+    let Some(client) = self.client.as_mut() else {
+      return;
     };
-    match outcome {
-      Ok(()) => notify_changed(),
-      Err(error) => {
-        tracing::warn!(%error, "gateway ended");
-        self.schedule_reconnect();
-      },
+    if self.connection.on_frame(client, frame).await {
+      notify_changed();
     }
   }
 
   async fn on_tick(&mut self) {
     let now = now_ms();
-    self.next_tick_ms = now.saturating_add(millis(TICK));
-    if now.saturating_sub(self.last_heartbeat_ms) >= millis(HEARTBEAT)
-      && let Some(connection) = self.gateway.as_mut()
-    {
-      self.last_heartbeat_ms = now;
-      if let Err(error) = connection.send(&GatewayClientMessage::Heartbeat).await {
-        tracing::warn!(%error, "heartbeat failed");
-        self.schedule_reconnect();
-      }
+    if self.client.is_some() {
+      self.connection.on_tick(now).await;
     }
+    if now < self.next_tick_ms {
+      // Woken for the connection only.
+      return;
+    }
+    self.next_tick_ms = now.saturating_add(millis(TICK));
     self.save_push_session();
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if client.is_key_bag_dirty() || now.saturating_sub(self.last_account_sync_ms) >= millis(ACCOUNT_SYNC) {
-      self.last_account_sync_ms = now;
-      match client.sync_account_data().await {
-        Ok(()) => notify_changed(),
-        Err(error) => tracing::debug!(%error, "account data not synced yet"),
-      }
+    if self.upkeep.tick(client).await {
+      notify_changed();
     }
-    // Staggered commits (a colleague's new device) come due without a gateway event.
-    if let Err(error) = client.apply_pending_changes().await {
-      tracing::debug!(%error, "pending membership changes not applied yet");
-    }
-    self.flush().await;
   }
 
   /// Tells the server whether this device is idle (docs/gateway.md); a failure ends the connection
   /// like a failed heartbeat.
   async fn send_activity(&mut self, is_idle: bool) {
-    let Some(connection) = self.gateway.as_mut() else {
-      return;
-    };
     let activity = if is_idle {
       DeviceActivity::Idle
     } else {
       DeviceActivity::Active
     };
-    if let Err(error) = connection
-      .send(&GatewayClientMessage::SetActivity { activity })
-      .await
-    {
-      tracing::warn!(%error, "could not report the device activity");
-      self.schedule_reconnect();
+    let message = GatewayClientMessage::SetActivity { activity };
+    if self.connection.is_connected() && !self.connection.send(now_ms(), &message).await {
+      tracing::warn!("could not report the device activity");
     }
   }
 
@@ -1048,15 +999,9 @@ impl Core {
   /// Remembered so a new connection repeats it.
   async fn send_attention(&mut self, is_attentive: bool) {
     self.maybe_attention = Some(is_attentive);
-    let Some(connection) = self.gateway.as_mut() else {
-      return;
-    };
-    if let Err(error) = connection
-      .send(&GatewayClientMessage::Attention { is_attentive })
-      .await
-    {
-      tracing::warn!(%error, "could not report the attention");
-      self.schedule_reconnect();
+    let message = GatewayClientMessage::Attention { is_attentive };
+    if self.connection.is_connected() && !self.connection.send(now_ms(), &message).await {
+      tracing::warn!("could not report the attention");
     }
   }
 
@@ -1068,7 +1013,7 @@ impl Core {
 }
 
 fn now_ms() -> i64 {
-  js_sys::Date::now() as i64
+  SystemClock.now_ms()
 }
 
 fn millis(duration: Duration) -> i64 {

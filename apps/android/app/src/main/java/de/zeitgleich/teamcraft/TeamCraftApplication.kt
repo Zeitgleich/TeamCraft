@@ -20,6 +20,7 @@ import de.zeitgleich.teamcraft.notifications.PushStats
 import de.zeitgleich.teamcraft.notifications.ReadWatcher
 import de.zeitgleich.teamcraft.push.PushManager
 import de.zeitgleich.teamcraft.search.SegmentPrefetch
+import de.zeitgleich.teamcraft.ui.NetworkWatcher
 import uniffi.teamcraft_ffi.AccountState
 
 /** Process-wide objects, shared by the activity, receivers and services. */
@@ -35,6 +36,7 @@ class AppGraph(context: Context) {
   val push = PushManager(context, core, pushHandler, mentionPrefs, scope)
   val segmentPrefetch = SegmentPrefetch(context)
   val readWatcher = ReadWatcher(core, notifier, scope)
+  val network = NetworkWatcher(context) { core.networkChanged() }
 }
 
 class TeamCraftApplication : Application() {
@@ -46,6 +48,7 @@ class TeamCraftApplication : Application() {
     graph = AppGraph(this)
     graph.segmentPrefetch.schedule()
     graph.readWatcher.start()
+    graph.network.start()
     // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.
     graph.scope.launch(Dispatchers.IO) { File(cacheDir, "outgoing").deleteRecursively() }
     ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(graph))

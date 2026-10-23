@@ -92,6 +92,8 @@ fn main() -> anyhow::Result<()> {
       create_main_window(app)?;
       #[cfg(target_os = "linux")]
       notifications::watch_clicks(app.handle());
+      #[cfg(target_os = "linux")]
+      watch_wake(app.handle());
       #[cfg(windows)]
       windows_shell::forward_deep_links(app.handle());
       Ok(())
@@ -120,6 +122,8 @@ fn main() -> anyhow::Result<()> {
       auth::commands::public_get,
       core::commands::core_start,
       core::commands::core_status,
+      core::commands::core_connection,
+      core::commands::core_network_changed,
       core::commands::core_enroll,
       core::commands::core_snapshot,
       core::commands::core_link_start,
@@ -192,6 +196,24 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
 
 /// The client core reads its access token synchronously; this keeps a copy current (the login code
 /// refreshes it before it expires) and clears it on sign-out.
+/// Resuming from suspend reconnects the gateway at once (logind). macOS and Windows have no such
+/// hook without native code; there the core notices the wall-clock jump at its next check (within
+/// seconds) and the webview reports the network coming back.
+#[cfg(target_os = "linux")]
+fn watch_wake(app: &tauri::AppHandle) {
+  let app = app.clone();
+  tauri::async_runtime::spawn(async move {
+    let buses = app.state::<attention::OsProbe>().buses();
+    let handle = app.clone();
+    buses
+      .watch_wake(move || {
+        tracing::info!("resumed from suspend");
+        handle.state::<CoreHost>().network_changed();
+      })
+      .await;
+  });
+}
+
 fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>, tokens: TokenCache) {
   tauri::async_runtime::spawn(async move {
     loop {

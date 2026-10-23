@@ -7,6 +7,7 @@ pub mod api;
 pub mod attestation;
 pub mod client;
 pub mod clock;
+pub mod connection;
 pub mod error;
 pub mod link_preview;
 pub mod notify_rules;
@@ -35,6 +36,7 @@ mod ui_people;
 mod ui_search;
 #[cfg(feature = "ui")]
 mod ui_workspace;
+pub mod upkeep;
 #[cfg(target_arch = "wasm32")]
 pub mod web_push;
 pub mod workspace;

@@ -17,6 +17,11 @@
     <item quantity="other">%d ungelesene Nachrichten</item>
   </plurals>
   <string name="offline_banner">Keine Verbindung. Nachrichten werden gesendet, sobald du wieder online bist.</string>
+  <string name="connection_unreachable">Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in %1$d s.</string>
+  <string name="connection_retry">Jetzt versuchen</string>
+  <string name="connection_sign_in">Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.</string>
+  <string name="connection_sign_in_action">Erneut anmelden</string>
+  <string name="connection_connecting">Verbindung zum Server wird aufgebaut…</string>
 
   <!-- Conversation -->
   <string name="jump_down">Zur neuesten Nachricht springen</string>

@@ -1,14 +1,18 @@
 //! The realtime gateway (docs/gateway.md): handshake with resume, and applying events.
 
+use std::future::Future;
+use std::time::Duration;
+
 use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use teamcraft_proto::{
-  DeviceActivity, GatewayClientMessage, GatewayEvent, GatewayServerMessage, MlsMessageKind,
+  DeviceActivity, ErrorBody, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
+  MlsMessageKind,
 };
 
 use super::Client;
 use super::groups::MlsProgress;
-use crate::api::{GatewayConnection, ServerApi};
+use crate::api::{ApiError, GatewayConnection, ServerApi};
 use crate::error::CoreError;
 use crate::platform;
 use crate::read_state;
@@ -24,14 +28,38 @@ pub enum GatewayOutcome {
   Fresh,
 }
 
+/// How long each step of the handshake (socket and `hello`, the answer to `resume` or `identify`)
+/// may take when the caller doesn't say: a server that accepts the socket and then stays silent must
+/// not hold the reconnect loop forever.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A gateway connection that finished its handshake.
+pub struct GatewayStart<G> {
+  pub connection: G,
+  pub outcome: GatewayOutcome,
+  /// The heartbeat interval the server asked for in `hello`.
+  pub heartbeat_interval: Duration,
+}
+
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Connects the gateway, resuming the stored session if possible; a fresh session triggers a
   /// full sync. Process the returned connection with [`Self::pump`] or [`Self::run_gateway`].
   pub async fn connect_gateway(&mut self) -> Result<(A::Gateway, GatewayOutcome), CoreError> {
+    let start = self.start_gateway(DEFAULT_HANDSHAKE_TIMEOUT).await?;
+    Ok((start.connection, start.outcome))
+  }
+
+  /// Like [`Self::connect_gateway`], with a deadline for every handshake step and the heartbeat
+  /// interval from `hello`. A rejected token comes back as an API error with status 401
+  /// ([`CoreError::is_sign_in_required`]).
+  pub async fn start_gateway(
+    &mut self,
+    handshake_timeout: Duration,
+  ) -> Result<GatewayStart<A::Gateway>, CoreError> {
     // Events may have been missed while disconnected: every group is caught up again before the
     // outbox sends into it.
     self.mls_current.clear();
-    let mut connection = self.open_gateway().await?;
+    let (mut connection, mut heartbeat_interval) = self.open_gateway(handshake_timeout).await?;
     // A resumed session skips the full sync; the own name may still be missing from older stores.
     self.refresh_own_summary().await;
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
@@ -43,15 +71,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           device_id: self.account.device_id,
         })
         .await?;
-      match receive(&mut connection).await? {
-        GatewayServerMessage::Resumed { .. } => return Ok((connection, GatewayOutcome::Resumed)),
+      match receive(&mut connection, handshake_timeout).await? {
+        GatewayServerMessage::Resumed { .. } => {
+          return Ok(GatewayStart {
+            connection,
+            outcome: GatewayOutcome::Resumed,
+            heartbeat_interval,
+          });
+        },
         GatewayServerMessage::SessionInvalid => {
           // The server forgot the session (a restart, or the resume window passed) and closes this
           // connection. Forget it here too, or every reconnect would try it again forever.
           self.sync.maybe_gateway_session = None;
           self.persist_sync()?;
-          connection = self.open_gateway().await?;
+          (connection, heartbeat_interval) = self.open_gateway(handshake_timeout).await?;
         },
+        GatewayServerMessage::Error { error } => return Err(rejected(error)),
         other => {
           return Err(CoreError::Gateway(format!(
             "unexpected answer to resume: {other:?}"
@@ -66,8 +101,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         activity: DeviceActivity::Active,
       })
       .await?;
-    let session_id = match receive(&mut connection).await? {
+    let session_id = match receive(&mut connection, handshake_timeout).await? {
       GatewayServerMessage::Ready { session_id, .. } => session_id,
+      GatewayServerMessage::Error { error } => return Err(rejected(error)),
       other => {
         return Err(CoreError::Gateway(format!(
           "unexpected answer to identify: {other:?}"
@@ -82,15 +118,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       last_seq: 0,
     });
     self.persist_sync()?;
-    Ok((connection, GatewayOutcome::Fresh))
+    Ok(GatewayStart {
+      connection,
+      outcome: GatewayOutcome::Fresh,
+      heartbeat_interval,
+    })
   }
 
-  /// A new gateway connection, after the server's `hello`.
-  async fn open_gateway(&self) -> Result<A::Gateway, CoreError> {
-    let mut connection = self.api.connect_gateway().await?;
-    match receive(&mut connection).await? {
-      GatewayServerMessage::Hello { .. } => Ok(connection),
-      other => Err(CoreError::Gateway(format!("expected hello, got {other:?}"))),
+  /// The token the handshake sends (`identify`/`resume`).
+  pub(crate) fn gateway_token(&self) -> Result<String, ApiError> {
+    self.api.gateway_token()
+  }
+
+  /// A new gateway connection after the server's `hello`, and the heartbeat interval it asked for.
+  async fn open_gateway(&self, handshake_timeout: Duration) -> Result<(A::Gateway, Duration), CoreError> {
+    let opened = within(handshake_timeout, async {
+      let mut connection = self.api.connect_gateway().await?;
+      let hello = receive(&mut connection, handshake_timeout).await?;
+      Ok::<_, CoreError>((connection, hello))
+    })
+    .await??;
+    match opened {
+      (
+        connection,
+        GatewayServerMessage::Hello {
+          heartbeat_interval_ms,
+        },
+      ) => Ok((connection, Duration::from_millis(heartbeat_interval_ms))),
+      (_, other) => Err(CoreError::Gateway(format!("expected hello, got {other:?}"))),
     }
   }
 
@@ -136,7 +191,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_gateway(
     &mut self,
     connection: &mut A::Gateway,
-    heartbeat: std::time::Duration,
+    heartbeat: Duration,
   ) -> Result<(), CoreError> {
     let mut tick = Box::pin(platform::sleep(heartbeat));
     loop {
@@ -279,9 +334,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-async fn receive<G: GatewayConnection>(connection: &mut G) -> Result<GatewayServerMessage, CoreError> {
-  match connection.receive().await {
+async fn receive<G: GatewayConnection>(
+  connection: &mut G,
+  timeout: Duration,
+) -> Result<GatewayServerMessage, CoreError> {
+  match within(timeout, connection.receive()).await? {
     Some(frame) => Ok(frame?),
     None => Err(CoreError::Gateway("connection closed during handshake".into())),
   }
+}
+
+/// `future`'s output, or an error once `timeout` has passed.
+async fn within<T>(timeout: Duration, future: impl Future<Output = T>) -> Result<T, CoreError> {
+  match select(Box::pin(future), Box::pin(platform::sleep(timeout))).await {
+    Either::Left((output, _)) => Ok(output),
+    Either::Right(((), _)) => Err(CoreError::Gateway(format!(
+      "no answer from the gateway within {} s",
+      timeout.as_secs()
+    ))),
+  }
+}
+
+/// The server refused the handshake. A refused token reads like a refused HTTP request (401), so
+/// the caller can tell "sign in again" apart from an outage.
+fn rejected(error: ErrorBody) -> CoreError {
+  let status = match error.error_code {
+    ErrorCode::Unauthorized | ErrorCode::InvalidToken => 401,
+    ErrorCode::Unavailable | ErrorCode::Internal => 503,
+    ErrorCode::RateLimited => 429,
+    _ => 403,
+  };
+  CoreError::Api(ApiError::Status {
+    status,
+    maybe_body: Some(error),
+  })
 }
