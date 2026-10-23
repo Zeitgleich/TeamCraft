@@ -877,142 +877,122 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   }
 
   fn admin_brands(&self) -> Option<AdminBrandsResponse> {
-    match &self.maybe_admin {
-      Some(admin) => admin.brands(),
-      None => self.mock.admin_brands(),
-    }
+    self.maybe_admin.as_ref().and_then(|admin| admin.brands())
   }
 
   fn create_brand(&self, request: CreateBrandRequest) {
-    match &self.maybe_admin {
-      Some(admin) => admin.create_brand(request),
-      None => self.mock.create_brand(request),
+    if let Some(admin) = &self.maybe_admin {
+      admin.create_brand(request);
     }
   }
 
   fn update_brand(&self, id: String, request: UpdateBrandRequest) {
-    match &self.maybe_admin {
-      Some(admin) => admin.update_brand(&id, request),
-      None => self.mock.update_brand(id, request),
+    if let Some(admin) = &self.maybe_admin {
+      admin.update_brand(&id, request);
     }
   }
 
   fn delete_brand(&self, id: String) {
-    match &self.maybe_admin {
-      Some(admin) => admin.delete_brand(&id),
-      None => self.mock.delete_brand(id),
+    if let Some(admin) = &self.maybe_admin {
+      admin.delete_brand(&id);
     }
   }
 
   fn take_over_brand(&self, id: String) {
-    match &self.maybe_admin {
-      Some(admin) => admin.take_over_brand(&id),
-      None => self.mock.take_over_brand(id),
+    if let Some(admin) = &self.maybe_admin {
+      admin.take_over_brand(&id);
     }
   }
 
   fn brand_asset_preview(&self, id: &str, slot: &BrandAssetSlot) -> Option<String> {
-    match &self.maybe_admin {
-      Some(admin) => admin.brand_asset_preview(id, slot),
-      None => self.mock.brand_asset_preview(id, slot),
-    }
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.brand_asset_preview(id, slot))
   }
 
   fn upload_brand_asset(&self, id: String, slot: BrandAssetSlot, bytes: Vec<u8>, content_type: String) {
-    match &self.maybe_admin {
-      Some(admin) => admin.upload_brand_asset(&id, &slot, bytes, content_type),
-      None => self.mock.upload_brand_asset(id, slot, bytes, content_type),
+    if let Some(admin) = &self.maybe_admin {
+      admin.upload_brand_asset(&id, &slot, bytes, content_type);
     }
   }
 
   fn delete_brand_asset(&self, id: String, slot: BrandAssetSlot) {
-    match &self.maybe_admin {
-      Some(admin) => admin.delete_brand_asset(&id, &slot),
-      None => self.mock.delete_brand_asset(id, slot),
+    if let Some(admin) = &self.maybe_admin {
+      admin.delete_brand_asset(&id, &slot);
     }
   }
 
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
-    match &self.maybe_admin {
-      Some(admin) => admin.mail_settings(),
-      None => self.mock.mail_settings(),
-    }
+    self.maybe_admin.as_ref().and_then(|admin| admin.mail_settings())
   }
 
   fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {
-    match &self.maybe_admin {
-      Some(admin) => admin.save_mail_settings(request),
-      None => self.mock.save_mail_settings(request),
+    if let Some(admin) = &self.maybe_admin {
+      admin.save_mail_settings(request);
     }
   }
 
   fn reset_mail_settings(&self) {
-    match &self.maybe_admin {
-      Some(admin) => admin.reset_mail_settings(),
-      None => self.mock.reset_mail_settings(),
+    if let Some(admin) = &self.maybe_admin {
+      admin.reset_mail_settings();
     }
   }
 
   fn send_test_mail(&self, request: SendTestMailRequest) {
-    match &self.maybe_admin {
-      Some(admin) => admin.send_test_mail(request),
-      None => self.mock.send_test_mail(request),
+    if let Some(admin) = &self.maybe_admin {
+      admin.send_test_mail(request);
     }
   }
 
   fn calendar_settings(&self) -> Option<AdminCalendarSettingsResponse> {
-    match &self.maybe_admin {
-      Some(admin) => admin.calendar_settings(),
-      None => self.mock.calendar_settings(),
-    }
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.calendar_settings())
   }
 
   fn save_calendar_settings(&self, request: UpdateCalendarSettingsRequest) {
-    match &self.maybe_admin {
-      Some(admin) => admin.save_calendar_settings(request),
-      None => self.mock.save_calendar_settings(request),
+    if let Some(admin) = &self.maybe_admin {
+      admin.save_calendar_settings(request);
     }
   }
 
   fn reset_calendar_settings(&self) {
-    match &self.maybe_admin {
-      Some(admin) => admin.reset_calendar_settings(),
-      None => self.mock.reset_calendar_settings(),
+    if let Some(admin) = &self.maybe_admin {
+      admin.reset_calendar_settings();
     }
   }
 
   fn test_calendar(&self) {
-    match &self.maybe_admin {
-      Some(admin) => admin.test_calendar(),
-      None => self.mock.test_calendar(),
+    if let Some(admin) = &self.maybe_admin {
+      admin.test_calendar();
     }
   }
 
   fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
-    match &self.maybe_admin {
-      Some(admin) => admin.last_settings_test(),
-      None => self.mock.last_settings_test(),
-    }
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.last_settings_test())
   }
 
   fn runtime_settings(&self) -> Option<RuntimeSettingsResponse> {
-    match &self.maybe_admin {
-      Some(admin) => admin.runtime_settings(),
-      None => self.mock.runtime_settings(),
-    }
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.runtime_settings())
   }
 
   fn save_runtime_settings(&self, section: RuntimeSettingsSection) {
-    match &self.maybe_admin {
-      Some(admin) => admin.save_runtime_settings(section),
-      None => self.mock.save_runtime_settings(section),
+    if let Some(admin) = &self.maybe_admin {
+      admin.save_runtime_settings(section);
     }
   }
 
   fn reset_runtime_settings(&self, key: RuntimeSettingsKey) {
-    match &self.maybe_admin {
-      Some(admin) => admin.reset_runtime_settings(key),
-      None => self.mock.reset_runtime_settings(key),
+    if let Some(admin) = &self.maybe_admin {
+      admin.reset_runtime_settings(key);
     }
   }
 
