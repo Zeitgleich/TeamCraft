@@ -91,7 +91,9 @@ function offerDownload({ os, arch }) {
   const block = document.querySelector(`[data-channel-block="${cta.dataset.channel}"]`);
   if (!block) return;
   const candidates = [...block.querySelectorAll(`a.download[data-primary][data-os="${os}"]`)];
-  const choice = candidates.find((link) => link.dataset.arch === arch) || candidates[0];
+  // Linux: the package repository (it updates with the system) before a single package.
+  const choice = candidates.find((link) => link.dataset.kind === "repository")
+    || candidates.find((link) => link.dataset.arch === arch) || candidates[0];
   if (!choice) return;
   label.textContent = `Download for ${OS_NAMES[os]}`;
   button.href = choice.href;
@@ -109,6 +111,7 @@ function offerDownload({ os, arch }) {
 // the highlight and the first place.
 function preferArch(card, arch) {
   if (!arch) return;
+  for (const item of card.querySelectorAll(".pkg-item")) preferPackageArch(item, arch);
   const choices = card.querySelector(".choices");
   if (choices) {
     preferChoice(choices, arch);
@@ -131,6 +134,25 @@ function preferArch(card, arch) {
   other.setAttribute("aria-label", mainLabel.replace(/^Download /, ""));
   other.textContent = other.dataset.meta;
   if (mainMeta) mainMeta.textContent = main.dataset.meta;
+}
+
+// A package button (Linux .deb / .rpm) of the visitor's architecture trades places with its "Also for" link.
+function preferPackageArch(item, arch) {
+  const main = item.querySelector("a.choice");
+  const other = item.querySelector(`.primary-alt a.download[data-arch="${arch}"]`);
+  if (!main || !other || main.dataset.arch === arch) return;
+  const size = main.querySelector(".choice-size");
+  const mainLabel = main.getAttribute("aria-label");
+  const otherLabel = other.getAttribute("aria-label");
+  for (const name of ["href", "data-arch", "data-meta"]) {
+    const value = main.getAttribute(name);
+    main.setAttribute(name, other.getAttribute(name));
+    other.setAttribute(name, value);
+  }
+  main.setAttribute("aria-label", `Download ${otherLabel}`);
+  other.setAttribute("aria-label", mainLabel.replace(/^Download /, ""));
+  if (size) size.textContent = main.dataset.meta;
+  other.textContent = other.dataset.meta;
 }
 
 function preferChoice(choices, arch) {

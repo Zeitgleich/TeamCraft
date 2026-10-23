@@ -143,6 +143,45 @@ class RenderTest(unittest.TestCase):
         self.assertIn("macOS 14 or newer · Apple silicon and Intel", card)
         self.assertNotIn("Also for", card)
 
+    def test_the_linux_card_recommends_the_repository_and_lists_appimage_last(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        self.add_repositories("prerelease")
+        html = self.render()
+        card = html[html.index('data-os="linux" aria-labelledby'):]
+        card = card[:card.index("</article>")]
+        repo = card.index("Install from the package repository")
+        deb = card.index("TeamCraft_1.0.1_amd64.deb")
+        rpm = card.index("TeamCraft-1.0.1-1.x86_64.rpm")
+        more = card.index('<details class="more">')
+        self.assertLess(repo, deb)
+        self.assertLess(deb, rpm)
+        self.assertLess(rpm, more)
+        self.assertIn('href="#linux"', card[:deb])
+        self.assertIn("Debian, Ubuntu · Fedora, openSUSE", card)
+        self.assertIn("Also for", card)
+        self.assertIn("TeamCraft_1.0.1_arm64.deb", card[:more])
+        self.assertIn("TeamCraft-1.0.1-1.aarch64.rpm", card[:more])
+        options = card[more:]
+        self.assertLess(options.index("Flatpak bundle"), options.index("AppImage"))
+        self.assertIn("TeamCraft_1.0.1_amd64.AppImage", options)
+        self.assertIn("TeamCraft_1.0.1_aarch64.AppImage", options)
+        self.assertIn("Portable, no automatic system integration", options)
+        self.assertNotIn(".deb", options)
+        self.assertNotIn("Download AppImage", card)
+        # Only the repository, .deb and .rpm are offered to the hero.
+        for line in card.split("<a "):
+            if "AppImage" in line:
+                self.assertNotIn("data-primary", line)
+
+    def test_the_linux_card_without_repositories_still_offers_the_packages(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        card = html[html.index('data-os="linux" aria-labelledby'):]
+        card = card[:card.index("</article>")]
+        self.assertNotIn("Install from the package repository", card)
+        self.assertIn("TeamCraft_1.0.1_amd64.deb", card)
+        self.assertIn("TeamCraft-1.0.1-1.x86_64.rpm", card)
+
     def test_fingerprint_and_store_link_come_from_the_environment(self):
         self.add_release("prerelease", "v1.0.0-rc.1")
         self.add_repositories("prerelease")

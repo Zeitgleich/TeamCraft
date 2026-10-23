@@ -2151,10 +2151,29 @@ svg {
 }
 
 /* A button per architecture (macOS): the recommended one highlighted, both always visible. */
-.choices {
+.choices,
+.pkg-choices {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 10px;
+}
+
+.pkg-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pkg-item .button.choice {
+  flex: 1;
+}
+
+.pkg-item .primary-alt {
+  margin-top: 0;
+}
+
+.button.repo-choice {
+  margin-bottom: 8px;
 }
 
 .button.choice {
