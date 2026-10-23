@@ -452,6 +452,8 @@ impl TestApp {
     settings.security.rate_limits.is_enabled = false;
     // Withdrawals coalesce for a moment only, so tests see them quickly.
     settings.push.dismiss_coalesce = Duration::from_millis(50);
+    // One retry worker per pool: hundreds of parallel test apps share the dev Postgres's connections.
+    settings.push.retry.workers = 1;
     customize(&mut settings);
 
     let keys = JwksCache::new(
