@@ -60,7 +60,9 @@ exists).
 | No banner when the device is offline; sending silently waits                                      | done   |
 | No zoom shortcuts (Ctrl/Cmd + `+` / `-` / `0`) and no text size setting                           | done   |
 | The desktop window forgets its size and position                                                  | done   |
-| Tray icon with unread badge, start minimised to tray                                              | open   |
+| Tray icon with unread badge, close to tray, start minimised                                       | done   |
+| Clicking a desktop notification only focuses the app (Linux: now opens the conversation)          | partly |
+| "Start at login" exists in the shell (Windows) but had no switch in the UI                        | done   |
 | Clicking an author name does nothing; it now opens the profile card (local time, status, message) | done   |
 | Hover card on names (picture, status, local time, message, profile)                               | done   |
 | Favourites can be reordered (drag, or Ctrl+Shift+Up/Down); categories still can't                 | partly |
@@ -72,6 +74,12 @@ exists).
 |---------------------------------------------------------------------------------------------------|--------|
 | Below about 1100px width the page scrolls sideways and header buttons are cut off                 | done   |
 | Two unclosed blocks in `style/main.css` hid every later rule; a test now checks the braces        | done   |
+
+## Bugs found on the way (desktop)
+
+| Bug                                                                                               | State  |
+|---------------------------------------------------------------------------------------------------|--------|
+| Five desktop commands were refused by the Tauri ACL (notifications, attention, call video)        | done   |
 
 ## Already in place (checked)
 

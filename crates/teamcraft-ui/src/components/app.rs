@@ -59,6 +59,7 @@ use crate::notifier::{NotificationTitle, Notifier, ReadWatcher, all_conversation
 use crate::notify_sync::NotificationSync;
 use crate::prefs::Zoom;
 use crate::reactive::use_interval;
+use crate::sections::badge_count;
 use crate::settings::{BackendMode, Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, SidePanel};
 
@@ -111,6 +112,15 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
   if tauri::has_core() {
     watch_for_notifications(state, i18n);
+  }
+  if tauri::is_available() {
+    sync_tray(state, i18n);
+    // A click on a desktop notification (tagged with its conversation) opens that conversation.
+    tauri::listen_text(NOTIFICATION_OPENED_EVENT, move |tag| {
+      if let Ok(conversation) = tag.parse::<ConversationId>() {
+        state.open_conversation(conversation);
+      }
+    });
   }
   if !tauri::is_available() {
     open_conversations_from_notifications(state);
@@ -431,6 +441,44 @@ fn initial_location(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> 
 }
 
 /// Desktop only: new mentions and DMs become system notifications, decided by the user's preferences.
+/// Keeps the tray icon's badge, tooltip and menu texts in step with the unread messages and the
+/// language (desktop app).
+/// What the desktop shell emits when one of its notifications was clicked (payload: the tag).
+const NOTIFICATION_OPENED_EVENT: &str = "notification-opened";
+
+fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
+  let brand = crate::brand::Brand::use_current();
+  Effect::new(move |previous: Option<(u32, String, String)>| {
+    let unread = state.read(|backend| {
+      let mut list: Vec<_> = backend
+        .spaces()
+        .into_iter()
+        .flat_map(|space| backend.space_conversations(space.id))
+        .collect();
+      list.extend(backend.direct_conversations());
+      badge_count(&list)
+    });
+    let current = (
+      unread,
+      i18n.locale().tag().to_owned(),
+      brand.0.with(|brand| brand.display_name.clone()),
+    );
+    if previous.as_ref() != Some(&current) {
+      let name = current.2.clone();
+      let tooltip = match unread {
+        0 => name,
+        count => i18n.t_with(
+          "tray-tooltip-unread",
+          &[("name", &name), ("count", &count.to_string())],
+        ),
+      };
+      let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
+      leptos::task::spawn_local(async move { tauri::tray_update(unread, &tooltip, &show, &quit).await });
+    }
+    current
+  });
+}
+
 fn watch_for_notifications(state: AppState, i18n: crate::i18n::I18n) {
   let notifier = Notifier::default();
   let read_watcher = ReadWatcher::default();

@@ -16,7 +16,8 @@ workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: the tray icon with its menu and closing the window to the tray.
+tauri = { version = "2", features = ["tray-icon"] }
 # The client core runs on the Rust side of the shell: encrypted store, sync engine, MLS.
 teamcraft-core = { path = "../../crates/teamcraft-core", features = ["ui"] }
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api" }

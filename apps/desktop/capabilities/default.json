@@ -40,6 +40,9 @@
     "allow-withdraw-notifications",
     "allow-os-attention",
     "allow-autostart-get",
-    "allow-autostart-set"
+    "allow-autostart-set",
+    "allow-shell-prefs-get",
+    "allow-shell-prefs-set",
+    "allow-tray-update"
   ]
 }

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use tokio::sync::OnceCell;
 use zbus::Connection;
 use zbus::zvariant::{OwnedValue, Value};
@@ -16,6 +17,7 @@ const DEFAULT_EXPIRY: i32 = -1;
 
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
+const DEFAULT_ACTION: &str = "default";
 
 /// Session and system bus, connected on first use.
 #[derive(Default)]
@@ -78,7 +80,8 @@ impl Buses {
     let session = self.session().await?;
     let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
     hints.insert("desktop-entry", Value::from(notification.desktop_entry));
-    let actions: Vec<&str> = Vec::new();
+    // "default" is what the server invokes when the notification itself is clicked; no button.
+    let actions: Vec<&str> = vec![DEFAULT_ACTION, ""];
     let body = (
       notification.app_name,
       notification.replaces_id,
@@ -98,6 +101,33 @@ impl Buses {
       &body,
     )
     .await
+  }
+
+  /// Calls `on_click` with the ID of every notification the user clicks, for as long as the session
+  /// bus lives. Returns at once when there is no session bus.
+  pub async fn watch_clicks(&self, on_click: impl Fn(u32) + Send + 'static) {
+    let Some(session) = self.session().await else {
+      return;
+    };
+    let rule = zbus::MatchRule::builder()
+      .msg_type(zbus::message::Type::Signal)
+      .interface(NOTIFICATIONS)
+      .and_then(|builder| builder.member("ActionInvoked"))
+      .map(|builder| builder.build());
+    let Ok(rule) = rule else {
+      return;
+    };
+    let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, session, None).await else {
+      tracing::debug!("cannot watch notification clicks");
+      return;
+    };
+    while let Some(Ok(message)) = stream.next().await {
+      if let Ok((id, action)) = message.body().deserialize::<(u32, String)>()
+        && action == DEFAULT_ACTION
+      {
+        on_click(id);
+      }
+    }
   }
 
   /// Closes a notification shown earlier (already closed ones are ignored by the server).
