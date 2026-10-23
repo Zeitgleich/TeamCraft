@@ -463,6 +463,30 @@ async fn second_device_recovers_identity_and_history() {
 }
 
 #[tokio::test]
+async fn history_on_a_new_device_shows_edits_and_deletions() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "history")
+    .await
+    .unwrap();
+  let draft = alice.client.send_text(channel, None, "draft").await.unwrap();
+  alice.client.edit_message(channel, draft, "final").await.unwrap();
+  alice.client.send_text(channel, None, "keep").await.unwrap();
+  let oops = alice.client.send_text(channel, None, "oops").await.unwrap();
+  alice.client.delete_message(channel, oops).await.unwrap();
+  alice.client.upload_key_bag().await.unwrap();
+
+  // History arrives newest first, so the edit and the deletion come before their targets.
+  let mut laptop = Peer::enroll_as(alice.api.clone(), "Alice laptop").await;
+  alice.client.add_missing_devices(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut laptop]).await;
+  laptop.client.load_older_messages(channel).await.unwrap();
+  assert_eq!(laptop.texts(channel), vec!["final", "keep"]);
+}
+
+#[tokio::test]
 async fn wrong_passphrase_does_not_recover() {
   let server = FakeServer::new();
   let alice = Peer::enroll(&server, "Alice").await;
