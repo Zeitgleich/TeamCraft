@@ -28,6 +28,13 @@ called `team-craft` on Debian and Fedora because the Tauri bundler derives it fr
 Both `.deb` and `.rpm` pull in WebKitGTK and GTK automatically and recommend a keyring service
 (`gnome-keyring`) because the refresh token is stored there.
 
+## Updates
+
+Windows, macOS and AppImage builds update themselves; deb and rpm come from the signed APT and RPM
+repositories; Flatpak through Flatpak ([docs/updates.md](../../../docs/updates.md)). The release
+workflow signs the update artifacts with `sign-update.sh` when the updater key secret exists. Local
+builds have an empty `plugins.updater.pubkey` unless it is committed, and debug builds never update.
+
 ## Icons
 
 `icons/` holds the app icon: PNGs from 32 px to 1024 px and `icon.icns` for macOS (PNG payloads for

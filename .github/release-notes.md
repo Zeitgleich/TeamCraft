@@ -24,6 +24,9 @@ digest:
 | macOS (Apple silicon and Intel) | `TeamCraft_*_universal.dmg`                                     |
 | Linux x86_64 / aarch64          | `.deb`, `.rpm`, `.AppImage`, `teamcraft-desktop-<arch>.flatpak` |
 
+Windows, macOS and AppImage installs update themselves from here on. For deb and rpm, add the APT or
+RPM repository once and updates come with the system's ones ([docs/updates.md](https://github.com/{{repo}}/blob/main/docs/updates.md)).
+
 **Android** – `teamcraft-android-{{version}}-full-release*.apk` (with Firebase push) or
 `-libre-release*.apk` (without Google services). Files ending in `-unsigned.apk` must be signed before
 they install; the `-debug-signed.apk` files install as they are and are meant for testing only.

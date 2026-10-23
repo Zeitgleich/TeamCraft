@@ -23,6 +23,7 @@ Read before changing behaviour:
 | [docs/push-gateway.md](docs/push-gateway.md)   | Push gateway for store apps (own repo): server side, contract |
 | [docs/operations.md](docs/operations.md)       | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
 | [docs/release.md](docs/release.md)             | Versions and the release procedure                            |
+| [docs/updates.md](docs/updates.md)             | Desktop self-update, package repositories, update policy      |
 
 ## Repository layout
 

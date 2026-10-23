@@ -4,7 +4,8 @@
 # - Server and SFU images, multi-arch (amd64 + arm64, each built on a native runner), pushed to
 #   ghcr.io/<owner>/teamcraft-server and -sfu: the version tag, X.Y and `latest` for releases, only
 #   the version for prereleases. Signed with cosign (keyless) and with a build provenance attestation.
-# - Desktop packages from desktop-release.yml (called, not copied), the web client bundle.
+# - Desktop packages from desktop-release.yml (called, not copied), the web client bundle, and the
+#   desktop updater manifest latest.json when the update artifacts are signed (docs/updates.md).
 # - Android APKs of both flavors: release builds (signed only when the upload key secrets exist,
 #   `-unsigned` otherwise) and `-debug-signed` builds for testers.
 # - SBOMs (SPDX and CycloneDX) of the source tree and both images, image digests, SHA256SUMS, and a
@@ -211,6 +212,8 @@ jobs:
       # The Linux jobs run in the CI image on GHCR.
       packages: read
     uses: ./.github/workflows/desktop-release.yml
+    # The optional signing secrets (Apple Developer ID, updater key) are read inside it.
+    secrets: inherit
 
   android:
     name: Android (full + libre)
@@ -338,17 +341,28 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Assemble the release files
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           mkdir -p dist
           mv "teamcraft-source-${VERSION}.spdx.json" "teamcraft-source-${VERSION}.cdx.json" dist/
           # Packages of every platform the desktop workflow builds (Windows joins with its jobs).
           find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
             -o -name '*.flatpak' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
+            -o -name '*.app.tar.gz' -o -name '*.sig' \
             -o -name '*.apk' -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
           # The web client: the same trunk build the desktop app embeds, served by the server
           # ([web] static_dir).
           tar -C artifacts/ui-dist -czf "dist/teamcraft-web-${VERSION}.tar.gz" .
           cat artifacts/release-image-*/*.image > dist/images.txt
+          # The desktop updater's manifest; every platform must be signed or none (docs/updates.md §3).
+          if compgen -G 'dist/*.sig' >/dev/null; then
+            scripts/updater-manifest.py --version "$VERSION" --tag "$TAG" --repo "$REPO" --dir dist --require-all > dist/latest.json
+            cat dist/latest.json
+          else
+            echo "::warning::no signed update artifacts: this release has no latest.json, installed apps won't see it"
+          fi
           (cd dist && sha256sum -- * > SHA256SUMS)
           ls -l dist
           cat dist/images.txt
