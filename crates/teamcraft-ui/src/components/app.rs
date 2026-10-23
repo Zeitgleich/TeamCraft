@@ -50,6 +50,7 @@ use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
 use crate::components::update_notice::UpdateNotice;
+use crate::components::window_controls::{WindowControls, provide_window_chrome};
 use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, JoinSpaceDialog, NewChannelDialog, NewSpaceDialog,
   SpaceSettingsDialog,
@@ -78,7 +79,16 @@ pub fn App() -> impl IntoView {
   apply_zoom(settings);
   apply_language_attribute();
   crate::brand::provide_brand(settings);
+  provide_window_chrome();
+  // Above every screen: sign-in has no top bar, but the window still needs its controls.
+  view! {
+    <WindowControls />
+    {screen(settings)}
+  }
+}
 
+/// The guest page, the sign-in gate or (development) the demo shell.
+fn screen(settings: Settings) -> AnyView {
   // A personal meeting link needs no sign-in: it gets its own page before anything else.
   if let Some((meeting, invite_token)) = guest_link_from_location() {
     return view! { <GuestJoinPage meeting=meeting invite_token=invite_token /> }.into_any();

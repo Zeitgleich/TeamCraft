@@ -10231,6 +10231,7 @@ dependencies = [
  "avcapture",
  "base64 0.23.1",
  "futures-util",
+ "gtk",
  "keyring",
  "oauth2",
  "objc2-core-graphics",

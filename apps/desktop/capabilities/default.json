@@ -53,6 +53,8 @@
     "allow-update-set-preference",
     "allow-update-download",
     "allow-update-restart",
-    "allow-update-with-package-manager"
+    "allow-update-with-package-manager",
+    "allow-window-chrome",
+    "allow-window-action"
   ]
 }

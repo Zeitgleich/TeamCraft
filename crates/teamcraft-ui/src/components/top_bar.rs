@@ -3,21 +3,24 @@ use leptos::prelude::*;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::status_menu::StatusMenu;
+use crate::components::window_controls::window_drag_handler;
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::state::{Overlay, use_app_state};
 
-/// Global header: search, help and the account/status menu.
+/// Global header: search, help and the account/status menu. In the desktop app it is also the
+/// window's title bar: a press on its empty parts or the brand moves the window.
 #[component]
 pub fn TopBar() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let me = Memo::new(move |_| state.me());
   let menu_open = move || matches!(state.overlay.get(), Overlay::StatusMenu);
+  let on_drag = window_drag_handler();
 
   view! {
-    <header class="top-bar">
-      <div class="brand" translate="no">
+    <header class="top-bar" data-window-drag="" on:mousedown=on_drag>
+      <div class="brand" translate="no" data-window-drag="">
         "TeamCraft"
       </div>
       <button class="search-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>

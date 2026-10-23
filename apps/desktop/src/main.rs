@@ -17,6 +17,7 @@ mod shell_prefs;
 mod single_instance;
 mod tray;
 mod updates;
+mod window_chrome;
 #[cfg(windows)]
 mod windows_shell;
 
@@ -35,6 +36,7 @@ use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
 use crate::shell_prefs::ShellPrefsState;
 use crate::updates::UpdateHost;
+use crate::window_chrome::WindowChromeState;
 
 /// How often the core's token cache is refreshed from the login session.
 const TOKEN_REFRESH: Duration = Duration::from_secs(2);
@@ -60,10 +62,11 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_notification::init())
     // The shell drives it (updates.rs); the webview gets no updater permission.
     .plugin(tauri_plugin_updater::Builder::new().build())
-    // Size, position and maximized state; visibility is ours (start minimized to the tray).
+    // Size, position and maximized state; visibility is ours (start minimized to the tray), and so
+    // are the decorations (the title bar setting, window_chrome.rs).
     .plugin(
       tauri_plugin_window_state::Builder::default()
-        .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+        .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
         .build(),
     )
     .manage(service)
@@ -100,6 +103,11 @@ fn main() -> anyhow::Result<()> {
       Ok(())
     })
     .on_window_event(|window, event| {
+      if let WindowEvent::Resized(_) = event
+        && window.label() == tray::MAIN_WINDOW
+      {
+        window_chrome::on_resized(window);
+      }
       // Closing keeps the app running in the tray (notifications keep coming) when the user wants it.
       if let WindowEvent::CloseRequested { api, .. } = event
         && window.label() == tray::MAIN_WINDOW
@@ -159,6 +167,8 @@ fn main() -> anyhow::Result<()> {
       updates::update_download,
       updates::update_restart,
       updates::update_with_package_manager,
+      window_chrome::window_chrome,
+      window_chrome::window_action,
     ])
     .build(tauri::generate_context!())
     .context("failed to build the TeamCraft desktop shell")?
@@ -179,11 +189,14 @@ fn main() -> anyhow::Result<()> {
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   let prefs = app.state::<ShellPrefsState>().get();
   let is_hidden = prefs.is_start_minimized && tray::has_tray(app.handle());
+  // The title stays set without a title bar: the taskbar, Alt+Tab and the dock show it.
   let window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
     .title("TeamCraft")
     .visible(!is_hidden)
     .inner_size(1360.0, 860.0)
     .min_inner_size(720.0, 520.0);
+  let window = window_chrome::configure(window, prefs.title_bar);
+  app.manage(WindowChromeState::new(prefs.title_bar));
   #[cfg(debug_assertions)]
   let window = match std::env::var("TEAMCRAFT_BACKEND") {
     Ok(mode) if matches!(mode.as_str(), "server" | "mock") => window.initialization_script(format!(

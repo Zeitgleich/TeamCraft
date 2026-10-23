@@ -1529,6 +1529,8 @@ settings-autostart = Start when I sign in to the computer
 settings-close-to-tray = Keep running in the tray when the window is closed
 settings-close-to-tray-hint = Notifications keep arriving. Quit from the tray icon's menu.
 settings-start-minimized = Start in the tray without opening the window
+settings-system-title-bar = Use the system title bar
+settings-system-title-bar-hint = Shows the operating system's title bar above TeamCraft's own. On macOS the change applies at the next start.
 
 ## Desktop updates (docs/updates.md)
 settings-updates = Updates
@@ -1832,3 +1834,10 @@ admin-recovery-unavailable = Starting an organization recovery from the console 
 settings-devices-unavailable = The device list could not be loaded yet.
 security-my-key-unavailable = Your key is not available yet: this device has no encryption keys set up.
 link-unavailable = Linking a device needs this app's encryption, which is not running here. Reload the page or use the desktop app.
+
+## Window controls of the desktop app's own title bar
+window-controls = Window
+window-minimize = Minimize
+window-maximize = Maximize
+window-restore = Restore
+window-close = Close

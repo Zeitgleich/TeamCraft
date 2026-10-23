@@ -67,6 +67,9 @@ futures-util = "0.3"
 # Idle time, screen lock and replaceable, withdrawable notifications over D-Bus (MIT; already in the
 # tree through ashpd, same version and runtime).
 zbus = { version = "5.13", default-features = false, features = ["tokio"] }
+# The desktop's window button layout (gtk-decoration-layout) for the custom title bar (MIT; the
+# same version Tauri uses on Linux, so already in the tree).
+gtk = "0.18"
 
 # macOS cameras (AVFoundation) and hardware H.264 through GStreamer's VideoToolbox encoder
 # (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);

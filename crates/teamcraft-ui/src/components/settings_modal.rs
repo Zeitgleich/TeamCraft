@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use teamcraft_client_api::window_chrome::TitleBar;
 
 use crate::auth::tauri;
 use crate::components::bundle_banner::AboutSection;
@@ -368,6 +369,20 @@ fn DesktopSection() -> impl IntoView {
             on:change=move |ev| save(|prefs, on| prefs.is_start_minimized = on, event_target_checked(&ev))
           />
           <span>{move || i18n.t("settings-start-minimized")}</span>
+        </label>
+        <label class="check-row">
+          <input
+            type="checkbox"
+            prop:checked=current.title_bar == TitleBar::System
+            on:change=move |ev| save(
+              |prefs, on| prefs.title_bar = if on { TitleBar::System } else { TitleBar::Custom },
+              event_target_checked(&ev),
+            )
+          />
+          <span>
+            {move || i18n.t("settings-system-title-bar")}
+            <small class="muted-text">{move || i18n.t("settings-system-title-bar-hint")}</small>
+          </span>
         </label>
       })}
       {move || error.get().map(|message| view! { <p class="composer-error" role="alert">{message}</p> })}

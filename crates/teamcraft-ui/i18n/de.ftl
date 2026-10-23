@@ -1529,6 +1529,8 @@ settings-autostart = Beim Anmelden am Computer starten
 settings-close-to-tray = Beim Schließen des Fensters im Infobereich weiterlaufen
 settings-close-to-tray-hint = Benachrichtigungen kommen weiter an. Beenden über das Menü des Symbols im Infobereich.
 settings-start-minimized = Im Infobereich starten, ohne das Fenster zu öffnen
+settings-system-title-bar = Titelleiste des Systems verwenden
+settings-system-title-bar-hint = Zeigt die Titelleiste des Betriebssystems über der von TeamCraft. Unter macOS gilt die Änderung ab dem nächsten Start.
 
 ## Desktop updates (docs/updates.md)
 settings-updates = Updates
@@ -1832,3 +1834,10 @@ admin-recovery-unavailable = Eine Organisationswiederherstellung kann noch nicht
 settings-devices-unavailable = Die Geräteliste konnte noch nicht geladen werden.
 security-my-key-unavailable = Dein Schlüssel ist noch nicht verfügbar: Auf diesem Gerät ist keine Verschlüsselung eingerichtet.
 link-unavailable = Zum Verknüpfen eines Geräts wird die Verschlüsselung dieser App benötigt, die hier nicht läuft. Lade die Seite neu oder nutze die Desktop-App.
+
+## Window controls of the desktop app's own title bar
+window-controls = Fenster
+window-minimize = Minimieren
+window-maximize = Maximieren
+window-restore = Wiederherstellen
+window-close = Schließen
