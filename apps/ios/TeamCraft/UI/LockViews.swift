@@ -166,7 +166,10 @@ struct OfflineBanner: View {
         text: Text("connection_sign_in"),
         action: Action(label: "connection_sign_in_action") { Task { await model.signOut() } })
     case .connecting:
-      guard let since = maybeConnectingSince, now.timeIntervalSince(since) >= Self.connectingGrace else { return nil }
+      guard let since = maybeConnectingSince, now.timeIntervalSince(since) >= Self.connectingGrace
+      else {
+        return nil
+      }
       return Notice(text: Text("connection_connecting"), action: nil)
     case .connected, nil:
       return nil
