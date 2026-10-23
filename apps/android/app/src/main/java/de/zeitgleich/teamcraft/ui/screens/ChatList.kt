@@ -80,6 +80,7 @@ fun ChatListScreen(
   onSearch: () -> Unit,
   onSettings: () -> Unit,
   onNavigate: (String) -> Unit,
+  maybeSelectedId: String? = null,
 ) {
   var conversations by remember { mutableStateOf<List<ConversationItem>?>(null) }
   var previews by remember { mutableStateOf<Map<String, ChatListEntry>>(emptyMap()) }
@@ -132,6 +133,7 @@ fun ChatListScreen(
                 viewModel = viewModel,
                 conversation = conversation,
                 maybeEntry = previews[conversation.id],
+                isSelected = conversation.id == maybeSelectedId,
                 onClick = { onOpen(conversation.id) },
               )
             }
@@ -185,6 +187,7 @@ private fun SwipeableConversationRow(
   viewModel: MainViewModel,
   conversation: ConversationItem,
   maybeEntry: ChatListEntry?,
+  isSelected: Boolean,
   onClick: () -> Unit,
 ) {
   val haptics = LocalHapticFeedback.current
@@ -206,7 +209,7 @@ private fun SwipeableConversationRow(
       scope.launch { state.reset() }
     },
   ) {
-    ConversationRow(conversation, maybeEntry, actions, onClick)
+    ConversationRow(conversation, maybeEntry, actions, isSelected, onClick)
   }
 }
 
@@ -269,6 +272,7 @@ private fun ConversationRow(
   conversation: ConversationItem,
   maybeEntry: ChatListEntry?,
   actions: RowActions,
+  isSelected: Boolean,
   onClick: () -> Unit,
 ) {
   val haptics = LocalHapticFeedback.current
@@ -279,7 +283,8 @@ private fun ConversationRow(
     Row(
       modifier = Modifier
         .fillMaxWidth()
-        .background(MaterialTheme.colorScheme.background)
+        // The open conversation, when it shows next to the list (two panes).
+        .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.background)
         .combinedClickable(
           onClick = onClick,
           onLongClick = {

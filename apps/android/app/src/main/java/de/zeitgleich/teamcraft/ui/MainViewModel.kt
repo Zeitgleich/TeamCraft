@@ -12,6 +12,7 @@ import java.io.OutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +63,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The chat features over the core's JSON bridge. */
   val chat = ChatClient { graph.core.core() }
   private val failures = MutableStateFlow<Int?>(null)
+
+  /** Files picked in a composer and not sent yet, by conversation and thread. */
+  val pickedFiles = mutableStateMapOf<String, List<PickedFile>>()
 
   /** The last action that failed, as a message to show once. */
   val lastFailure: StateFlow<Int?> = failures

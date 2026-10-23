@@ -76,4 +76,8 @@
   <string name="typing_two">%1$s and %2$s are typing…</string>
   <string name="typing_several">Several people are typing…</string>
   <string name="share_typing">Show others when I\'m typing</string>
+  <string name="no_conversation_selected">Pick a conversation.</string>
+  <string name="image_save">Save</string>
+  <string name="image_saved">Saved to Pictures/TeamCraft</string>
+  <string name="image_save_failed">The picture couldn\'t be saved.</string>
 </resources>

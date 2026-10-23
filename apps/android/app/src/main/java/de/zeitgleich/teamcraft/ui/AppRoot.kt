@@ -2,6 +2,24 @@ package de.zeitgleich.teamcraft.ui
 
 import android.content.Intent
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.key
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -112,13 +130,50 @@ private fun ReadyNavigation(
   }
   NavHost(navController = navigation, startDestination = "chats") {
     composable("chats") {
-      ChatListScreen(
-        viewModel = viewModel,
-        onOpen = { navigation.navigate("conversation/$it") },
-        onSearch = { navigation.navigate("search") },
-        onSettings = { navigation.navigate("settings") },
-        onNavigate = { route -> navigation.navigate(route) },
-      )
+      // Wide windows (tablets, unfolded foldables, landscape) show the conversation next to the list.
+      val isWide = LocalConfiguration.current.screenWidthDp >= TWO_PANE_MIN_WIDTH_DP
+      var maybeSelected by rememberSaveable { mutableStateOf<String?>(null) }
+      LaunchedEffect(isWide) {
+        // Folded or rotated to narrow: the open conversation stays open, as a screen of its own.
+        val selected = maybeSelected
+        if (!isWide && selected != null) {
+          maybeSelected = null
+          navigation.navigate("conversation/$selected")
+        }
+      }
+      val list = @Composable {
+        ChatListScreen(
+          viewModel = viewModel,
+          onOpen = { if (isWide) maybeSelected = it else navigation.navigate("conversation/$it") },
+          onSearch = { navigation.navigate("search") },
+          onSettings = { navigation.navigate("settings") },
+          onNavigate = { route -> navigation.navigate(route) },
+          maybeSelectedId = maybeSelected.takeIf { isWide },
+        )
+      }
+      if (!isWide) {
+        list()
+      } else {
+        Row(Modifier.fillMaxSize()) {
+          Box(Modifier.width(LIST_PANE_WIDTH_DP.dp).fillMaxHeight()) { list() }
+          VerticalDivider()
+          Box(Modifier.weight(1f).fillMaxHeight()) {
+            when (val selected = maybeSelected) {
+              null -> NoConversationSelected()
+              else -> key(selected) {
+                ConversationScreen(
+                  viewModel = viewModel,
+                  conversationId = selected,
+                  onOpenThread = { threadId -> navigation.navigate("thread/$selected/$threadId") },
+                  onOpenFiles = { navigation.navigate("files/$selected") },
+                  onBack = { maybeSelected = null },
+                  onOpenPermalink = openPermalink,
+                )
+              }
+            }
+          }
+        }
+      }
     }
     composable(
       "conversation/{id}?focus={focus}",
@@ -234,4 +289,19 @@ private fun focusArgument() = navArgument("focus") {
   type = NavType.StringType
   nullable = true
   defaultValue = null
+}
+
+/** From this window width on, the chat list and the open conversation share the screen. */
+private const val TWO_PANE_MIN_WIDTH_DP = 720
+private const val LIST_PANE_WIDTH_DP = 360
+
+@Composable
+private fun NoConversationSelected() {
+  Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
+    Text(
+      stringResource(R.string.no_conversation_selected),
+      style = MaterialTheme.typography.bodyLarge,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
 }
