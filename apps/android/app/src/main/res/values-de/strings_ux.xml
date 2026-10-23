@@ -62,4 +62,5 @@
   <string name="permalink_unavailable">Diese Nachricht ist auf diesem Gerät nicht verfügbar.</string>
   <string name="sign_in_network">Der Anmeldeserver ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.</string>
   <string name="sign_in_rejected">Der Anmeldeserver hat die Anmeldung nicht angenommen. Versuche es erneut oder frag deine Administration.</string>
+  <string name="enroll_working">Schlüssel werden eingerichtet …</string>
 </resources>
