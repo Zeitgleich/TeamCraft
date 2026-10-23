@@ -717,6 +717,21 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RefreshCallHistory);
   }
 
+  fn own_devices(&self) -> Vec<teamcraft_client_api::admin::DeviceInfo> {
+    match self.ask(ChatQuery::OwnDevices) {
+      Some(ChatAnswer::Devices { devices }) => devices,
+      _ => Vec::new(),
+    }
+  }
+
+  fn refresh_own_devices(&self) {
+    self.act(ChatAction::RefreshOwnDevices);
+  }
+
+  fn revoke_own_device(&self, device: teamcraft_proto::DeviceId) {
+    self.act(ChatAction::RevokeOwnDevice { device });
+  }
+
   fn security_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {
     self.mirror.borrow().snapshot.security.clone()
   }

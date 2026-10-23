@@ -11,14 +11,15 @@ use crate::actions::{
   OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use crate::activity::ActivityFeed;
+use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallRequest,
   IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk, RemoteVideoTrack, RunningCall,
 };
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
-  ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
+  ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{SavedSearch, SearchHit, SearchResults};
@@ -303,6 +304,12 @@ pub enum ChatAction {
     visibility: LastSeenVisibility,
   },
   RefreshCallHistory,
+  /// Fetch this user's device list again (the devices settings were opened).
+  RefreshOwnDevices,
+  /// Sign out one of this user's other devices.
+  RevokeOwnDevice {
+    device: DeviceId,
+  },
   /// Founds a new channel (and its encryption group) in a space.
   CreateChannel {
     space: SpaceId,
@@ -532,6 +539,8 @@ impl ChatAction {
       Self::MarkActivityRead => backend.mark_activity_read(),
       Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),
       Self::RefreshCallHistory => backend.refresh_call_history(),
+      Self::RefreshOwnDevices => backend.refresh_own_devices(),
+      Self::RevokeOwnDevice { device } => backend.revoke_own_device(device),
       Self::SetThreadFollowed {
         conversation,
         thread,
@@ -708,6 +717,7 @@ pub enum ChatQuery {
   },
   Privacy,
   CallHistory,
+  OwnDevices,
   #[serde(other)]
   Unknown,
 }
@@ -790,6 +800,9 @@ pub enum ChatAnswer {
   },
   CallHistory {
     calls: Vec<CallHistoryItem>,
+  },
+  Devices {
+    devices: Vec<DeviceInfo>,
   },
   Unsupported,
 }
@@ -896,6 +909,9 @@ impl ChatQuery {
       },
       Self::CallHistory => ChatAnswer::CallHistory {
         calls: backend.call_history(),
+      },
+      Self::OwnDevices => ChatAnswer::Devices {
+        devices: backend.own_devices(),
       },
       Self::Unknown => ChatAnswer::Unsupported,
     }

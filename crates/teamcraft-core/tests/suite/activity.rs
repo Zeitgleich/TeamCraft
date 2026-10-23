@@ -1,5 +1,5 @@
-//! The activity feed, last seen and call history as the UI reads them: built from decrypted local
-//! data and the server's answers, through the same adapter the desktop shell uses.
+//! The activity feed, last seen, call history and own devices as the UI reads them: built from
+//! decrypted local data and the server's answers, through the same adapter the desktop shell uses.
 #![cfg(feature = "ui")]
 #![allow(clippy::unwrap_used)]
 
@@ -170,4 +170,36 @@ async fn the_call_history_lists_missed_incoming_and_outgoing_calls() {
   );
   assert_eq!(calls[0].duration_ms(), Some(60_000));
   assert_eq!(calls[0].conversation, channel);
+}
+
+#[tokio::test]
+async fn the_device_settings_list_own_devices_and_sign_one_out() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  alice.client.upload_key_bag().await.unwrap();
+  let laptop = Peer::enroll_as(alice.api.clone(), "Alice laptop").await;
+  let (phone_id, laptop_id) = (alice.client.device_id(), laptop.client.device_id());
+
+  let alice_ui = backend_of(&alice);
+  assert!(
+    alice_ui.own_devices().is_empty(),
+    "the first look asks the server"
+  );
+  run_commands(&mut alice, &alice_ui).await;
+  let listed: Vec<_> = alice_ui
+    .own_devices()
+    .iter()
+    .map(|device| (device.id, device.is_current))
+    .collect();
+  assert_eq!(listed, [(phone_id, true), (laptop_id, false)]);
+
+  // Signing out goes through the core: the server forgets the laptop and the list is read again.
+  alice_ui.revoke_own_device(laptop_id);
+  run_commands(&mut alice, &alice_ui).await;
+  let remaining: Vec<_> = alice_ui.own_devices().iter().map(|device| device.id).collect();
+  assert_eq!(remaining, [phone_id]);
+  assert!(
+    server.device_list_of(alice.client.user_id()).is_some(),
+    "the signed device list was published without the laptop"
+  );
 }

@@ -1,6 +1,6 @@
-//! The data boundary of the UI. Components only talk to [`ChatBackend`]; the mock implementation in
+//! The data boundary of the UI. Components only talk to [`ChatBackend`];
 //! `teamcraft-core`'s `CoreChatBackend` implements them over the encrypted local store; the UI crate
-//! ships a mock for development.
+//! has a mock for development (feature `demo`, never in a shipped build).
 //!
 //! The trait is synchronous on purpose: it models the *local, already decrypted* store of the client
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
@@ -315,6 +315,17 @@ pub trait ChatBackend {
   }
   /// Asks for the newest calls again (the call list opened).
   fn refresh_call_history(&self) {}
+
+  /// This user's devices as the server last listed them; empty until the first answer.
+  fn own_devices(&self) -> Vec<crate::admin::DeviceInfo> {
+    Vec::new()
+  }
+
+  /// The device list was opened: fetch it again.
+  fn refresh_own_devices(&self) {}
+
+  /// Signs out one of the user's other devices (e2ee.md §3: the signed device list drops it).
+  fn revoke_own_device(&self, _device: DeviceId) {}
 }
 
 /// Calls and huddles. Media runs in `teamcraft-media`; this is the roster and device view of it,
@@ -327,6 +338,12 @@ pub trait CallBackend {
   fn call_participants(&self, conversation: ConversationId) -> Vec<Participant>;
   /// The drop-in huddle running in a channel, if any.
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo>;
+
+  /// Whether this client can take part in calls at all. Without call support the UI offers no call
+  /// buttons instead of a call screen that connects nowhere.
+  fn has_calls(&self) -> bool {
+    false
+  }
 
   /// The call this device is in.
   fn active_call(&self) -> Option<ActiveCall> {
@@ -372,6 +389,10 @@ pub trait AdminBackend {
   fn remove_device(&self, user: UserId, device: DeviceId);
   fn set_user_active(&self, user: UserId, is_active: bool);
   fn start_org_recovery(&self, user: UserId);
+  /// Whether [`AdminBackend::start_org_recovery`] does anything on this client.
+  fn can_start_org_recovery(&self) -> bool {
+    false
+  }
   /// Adds the admin to a private channel according to the `admin_self_join` policy.
   fn admin_join_channel(&self, channel: ConversationId) -> SelfJoinOutcome;
   fn audit_log(&self) -> Vec<AuditEntry>;
@@ -476,6 +497,8 @@ pub trait SecurityBackend {
   /// Safety number and trust state of a contact.
   fn contact_verification(&self, user: UserId) -> crate::security::ContactVerification;
   fn set_contact_verified(&self, user: UserId, is_verified: bool);
+  /// The device list was opened: ask the server again.
+  fn refresh_my_devices(&self) {}
 }
 
 /// Full-text search over everything the user can read. `teamcraft-core` will answer from encrypted

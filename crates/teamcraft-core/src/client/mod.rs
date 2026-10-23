@@ -10,7 +10,7 @@ mod attachments;
 mod attested;
 mod backgrounds;
 mod calls;
-mod devices;
+pub mod devices;
 mod enroll;
 pub mod files;
 mod gateway;

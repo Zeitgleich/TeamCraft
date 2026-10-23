@@ -1,5 +1,5 @@
-//! View models the UI renders. The mock backend produces them today; the real client core
-//! (`teamcraft-core`) will map decrypted data into the same shapes.
+//! View models the UI renders. The client core (`teamcraft-core`) maps decrypted data into these
+//! shapes.
 
 use serde::{Deserialize, Serialize};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};

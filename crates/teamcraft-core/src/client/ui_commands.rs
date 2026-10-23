@@ -131,6 +131,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),
       CoreCommand::SetLastSeenVisibility { visibility } => self.set_last_seen_visibility(visibility).await,
       CoreCommand::RefreshCallHistory => self.refresh_call_history().await,
+      CoreCommand::RefreshOwnDevices => self.refresh_own_devices().await,
+      CoreCommand::RevokeOwnDevice { device } => {
+        self.revoke_device(device).await?;
+        self.refresh_own_devices().await
+      },
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
       CoreCommand::DownloadFile {
