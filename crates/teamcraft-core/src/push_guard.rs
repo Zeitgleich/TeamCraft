@@ -14,9 +14,10 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
   ConversationId, ConversationResponse, MessageId, NotificationLevel, NotificationSettings, PresenceState,
-  PushKind, PushWakeUp,
+  PushKind, PushWakeUp, TestPushResponse,
 };
 
+use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -109,7 +110,6 @@ pub fn is_duplicate(store: &impl LocalStore, wake_up: &PushWakeUp) -> Result<boo
 pub fn local_suppression(
   store: &impl LocalStore,
   wake_up: &PushWakeUp,
-  me: Option<teamcraft_proto::UserId>,
   now_ms: i64,
   utc_offset_minutes: i16,
 ) -> Result<Option<Suppression>, CoreError> {
@@ -141,9 +141,9 @@ pub fn local_suppression(
   if lets_through {
     return Ok(None);
   }
-  let is_manual_dnd = match me {
-    Some(me) => {
-      records::get_json::<PresenceState>(store, Table::Presence, &me.to_string())?
+  let is_manual_dnd = match records::load_account(store)? {
+    Some(account) => {
+      records::get_json::<PresenceState>(store, Table::Presence, &account.user_id.to_string())?
         == Some(PresenceState::DoNotDisturb)
     },
     None => false,
@@ -151,6 +151,16 @@ pub fn local_suppression(
   let is_scheduled_dnd =
     maybe_schedule.is_some_and(|schedule| schedule.is_active_at(now_ms.div_euclid(1000), utc_offset_minutes));
   Ok((is_manual_dnd || is_scheduled_dnd).then_some(Suppression::DoNotDisturb))
+}
+
+/// Asks the server for a test wake-up to this device (notification diagnostics). Works without a
+/// running client, like the rest of this module.
+pub async fn send_test_push<A: ServerApi>(
+  store: &impl LocalStore,
+  api: &A,
+) -> Result<TestPushResponse, CoreError> {
+  let account = records::load_account(store)?.ok_or(CoreError::NotEnrolled)?;
+  Ok(api.send_test_push(account.device_id).await?)
 }
 
 /// Remembers the settings the second layer checks.

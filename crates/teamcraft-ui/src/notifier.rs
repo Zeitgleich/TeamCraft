@@ -110,8 +110,14 @@ pub fn decide(input: &PolicyInput) -> Decision {
 }
 
 fn is_in_dnd_schedule(input: &PolicyInput) -> bool {
-  dnd_to_server(&input.prefs.dnd, None, input.now)
-    .is_some_and(|schedule| schedule.silences(input.now / MS_PER_SECOND, input.sender))
+  dnd_to_server(&input.prefs.dnd, None, input.now).is_some_and(|schedule| {
+    schedule.silences(
+      input.now / MS_PER_SECOND,
+      schedule.utc_offset_minutes,
+      input.sender,
+      false,
+    )
+  })
 }
 
 /// `@username`, `@channel`/`@here`/`@all` (when enabled), the first name (when enabled) or a keyword

@@ -284,6 +284,9 @@ pub fn dnd_to_server(dnd: &DndSchedule, previous: Option<&DndWire>, now: Timesta
     allow_user_ids: previous
       .map(|previous| previous.allow_user_ids.clone())
       .unwrap_or_default(),
+    // Kept from what another device stored until this UI edits them itself.
+    maybe_time_zone: previous.and_then(|previous| previous.maybe_time_zone.clone()),
+    allows_urgent: previous.is_some_and(|previous| previous.allows_urgent),
   })
 }
 
@@ -425,6 +428,7 @@ mod tests {
           end_minute: 6 * 60 + 30,
         }],
         allow_user_ids: Vec::new(),
+        ..DndWire::default()
       }),
     };
     apply_global(&mut prefs, &server);
@@ -450,6 +454,7 @@ mod tests {
       utc_offset_minutes: 60,
       windows: Vec::new(),
       allow_user_ids: vec![sender],
+      ..DndWire::default()
     };
     let dnd = DndSchedule {
       is_enabled: true,

@@ -18,6 +18,7 @@ mod messages;
 mod org_backgrounds;
 mod org_recovery;
 mod push;
+mod push_guard;
 mod queries;
 mod runner;
 mod search;
