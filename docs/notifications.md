@@ -236,6 +236,7 @@ Emulators and simulators do not reproduce Doze, App Standby buckets, OEM battery
 phone in Doze rings within seconds; a ring wakes a locked phone (Android full-screen, iOS CallKit);
 reading on the desktop removes the phone's notification; DND schedule across a DST change; badge after
 reading elsewhere; the test push on each provider (gateway FCM, gateway APNs, UnifiedPush).
+The full checklist: [manual-tests/push.md](manual-tests/push.md).
 
 ## Read receipts
 
