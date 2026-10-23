@@ -291,14 +291,36 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      # Downloads this run's artifacts with gh.
+      actions: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
       IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          path: artifacts
+      # Only what the release attaches: not the buildx records (*.dockerbuild) and image digests the
+      # other jobs leave behind. Each artifact lands in artifacts/<name>/. Large downloads fail now
+      # and then; the whole download is retried.
+      - name: Download the release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          patterns=(linux-packages-* 'teamcraft-desktop-*.flatpak*' 'macos-*' 'windows-*' ui-dist release-android 'release-image-*')
+          args=()
+          for pattern in "${patterns[@]}"; do args+=(--pattern "$pattern"); done
+          for attempt in 1 2 3 4; do
+            rm -rf artifacts
+            if gh run download "$RUN_ID" --repo "$REPO" --dir artifacts "${args[@]}"; then
+              du -sh artifacts/*
+              exit 0
+            fi
+            echo "::warning::download attempt $attempt failed"
+            sleep $((attempt * 30))
+          done
+          echo "::error::downloading the release files failed"
+          exit 1
       - name: Source SBOM, SPDX (Cargo.lock and the Android/Gradle dependencies in the tree)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
