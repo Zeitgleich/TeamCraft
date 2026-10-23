@@ -96,6 +96,7 @@ enum ChatQuery {
   case messageExtras(conversationId: String, messageIds: [String])
   case conversationFiles(conversationId: String)
   case maxUploadBytes
+  case resolvePermalink(link: String)
 
   var json: String {
     switch self {
@@ -105,6 +106,8 @@ enum ChatQuery {
       return jsonText(["kind": "conversation_files", "conversation": conversation])
     case .maxUploadBytes:
       return jsonText(["kind": "max_upload_bytes"])
+    case .resolvePermalink(let link):
+      return jsonText(["kind": "resolve_permalink", "link": link])
     }
   }
 }

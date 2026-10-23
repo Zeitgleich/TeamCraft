@@ -3729,6 +3729,22 @@
         }
       }
     },
+    "permalink_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That message isn't available on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Nachricht ist auf diesem Gerät nicht verfügbar."
+          }
+        }
+      }
+    },
     "prefetch_always": {
       "localizations": {
         "en": {

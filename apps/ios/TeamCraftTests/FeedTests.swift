@@ -60,6 +60,14 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(links.map(\.absoluteString), ["https://example.com/a"])
   }
 
+  func testMessageLinksAndMentions() {
+    let body = "@alex see teamcraft:/c/12/m/34 and @me, @here; mail sam@example.com @nobody"
+    let text = messageText(body, usernames: ["alex", "sam"], myUsername: "Me")
+    XCTAssertEqual(text.runs.compactMap(\.link).map(\.absoluteString), ["teamcraft:/c/12/m/34"])
+    let mentioned = text.runs.filter { $0.inlinePresentationIntent == .stronglyEmphasized }.map { String(text[$0.range].characters) }
+    XCTAssertEqual(mentioned, ["@alex", "@me", "@here"])
+  }
+
   func testDirectMessagesByRecency() {
     func dm(_ id: String, _ name: String) -> ConversationItem {
       ConversationItem(

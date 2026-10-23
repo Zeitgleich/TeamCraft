@@ -25,6 +25,9 @@ struct ChatPane: View {
   @State private var isAtBottom = true
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
+  @State private var mentionNames: (usernames: Set<String>, me: String) = ([], "")
+  @State private var maybeHighlighted: String?
+  @State private var isPermalinkMissing = false
   @FocusState private var isComposerFocused: Bool
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
@@ -68,6 +71,15 @@ struct ChatPane: View {
     .alert("send_failed", isPresented: $isSendFailed) {
       Button("done", role: .cancel) {}
     }
+    .alert("permalink_unavailable", isPresented: $isPermalinkMissing) {
+      Button("done", role: .cancel) {}
+    }
+    // Message links open in the app; web links go to the browser as usual.
+    .environment(\.openURL, OpenURLAction { url in
+      guard url.scheme == "teamcraft" else { return .systemAction }
+      Task { await openPermalink(url.absoluteString) }
+      return .handled
+    })
     .alert("attachment_error_title", isPresented: attachmentErrorBinding, presenting: attachmentError) { _ in
       Button("done", role: .cancel) {}
     } message: { error in
@@ -81,6 +93,7 @@ struct ChatPane: View {
       await reload()
       await followTransfers()
     }
+    .task { mentionNames = await model.mentionNames() }
     .onAppear { model.visibleConversationId = conversation.id }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
@@ -99,9 +112,11 @@ struct ChatPane: View {
               MessageRow(
                 message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
                 isContinuation: isContinuation, showsThreadLink: threadId == nil,
-                onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) }
+                onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
+                mentionNames: mentionNames
               )
               .padding(.top, isContinuation ? 0 : 8)
+              .background(maybeHighlighted == message.id ? Theme.accentSoft : Color.clear)
               .contentShape(Rectangle())
               .onTapGesture(count: 2) { react(message, Self.quickReaction) }
               .contextMenu { menu(for: message) }
@@ -127,8 +142,11 @@ struct ChatPane: View {
           .padding()
         }
       }
+      // A message link opened this conversation, or points into it: show the message.
+      .onChange(of: messages.map(\.id)) { _, _ in focusLinkedMessage(proxy) }
+      .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
       .onChange(of: messages.last?.id) { _, last in
-        guard last != nil else { return }
+        guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
         // Own messages always come into view; others' only while reading at the bottom.
         if isAtBottom || messages.last?.authorId == account.userId {
           withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
@@ -280,6 +298,32 @@ struct ChatPane: View {
     }
   }
 
+  /// Opens a message link: its thread here, or its conversation (the list switches to it).
+  private func openPermalink(_ link: String) async {
+    guard let target = await model.resolvePermalink(link) else {
+      isPermalinkMissing = true
+      return
+    }
+    model.focusMessageId = target.message
+    if target.conversation != conversation.id {
+      model.openConversationId = target.conversation
+    } else if let thread = target.maybeThread, thread != threadId {
+      maybeThread = ThreadTarget(threadId: thread)
+    }
+  }
+
+  /// Scrolls to the message a link pointed at, once it is loaded, and highlights it for a moment.
+  private func focusLinkedMessage(_ proxy: ScrollViewProxy) {
+    guard let focus = model.focusMessageId, messages.contains(where: { $0.id == focus }) else { return }
+    model.focusMessageId = nil
+    maybeHighlighted = focus
+    withAnimation { proxy.scrollTo(focus, anchor: .center) }
+    Task {
+      try? await Task.sleep(for: .seconds(2.5))
+      withAnimation { maybeHighlighted = nil }
+    }
+  }
+
   private func react(_ message: MessageItem, _ emoji: String) {
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
@@ -390,6 +434,7 @@ struct MessageRow: View {
   var isContinuation = false
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
+  var mentionNames: (usernames: Set<String>, me: String) = ([], "")
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
@@ -414,7 +459,7 @@ struct MessageRow: View {
           }
         }
         if !message.body.isEmpty || files.isEmpty {
-          Text(linkedText(message.body))
+          Text(messageText(message.body, usernames: mentionNames.usernames, myUsername: mentionNames.me))
             .textSelection(.enabled)
             .padding(10)
             .background(isMine ? Theme.ownBubble : Theme.surface)

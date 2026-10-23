@@ -73,12 +73,30 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   let isSendFailed: Bool?
 }
 
+/// Where a message link points (`teamcraft:/c/…/m/…[/t/…]`).
+struct PermalinkTarget: Decodable, Equatable, Sendable {
+  let conversation: String
+  let message: String
+  let maybeThread: String?
+}
+
 /// The tagged answer of a `ChatQuery`; read the field that belongs to its `answer`.
 struct ChatAnswer: Decodable, Sendable {
   let answer: String
   let extras: [MessageExtras]?
   let files: [FileInfo]?
   let maybeBytes: Int64?
+  let maybeTarget: PermalinkTarget?
+}
+
+/// The people part of the core's chat snapshot: who can be mentioned.
+struct PeopleSnapshot: Decodable, Sendable {
+  struct Person: Decodable, Sendable {
+    let username: String
+  }
+
+  let me: Person
+  let users: [Person]?
 }
 
 /// A meeting as the server lists it (`GET /meetings`).

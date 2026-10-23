@@ -1,4 +1,4 @@
-import Foundation
+import SwiftUI
 
 /// Messages of one author this close together are shown as one block (no repeated name).
 let groupWindowMs: Int64 = 5 * 60 * 1000
@@ -93,16 +93,63 @@ func oneLine(_ body: String, maxLength: Int = 160) -> String {
 
 /// The body with its web links tappable. Only http(s) links: the text comes from another user.
 func linkedText(_ body: String) -> AttributedString {
+  messageText(body, usernames: [], myUsername: "")
+}
+
+/// Links to a message (`teamcraft:/c/<conversation>/m/<message>[/t/<thread>]`, the core's format).
+private let permalinkPattern = try? NSRegularExpression(pattern: #"teamcraft:/c/\d+/m/\d+(?:/t/\d+)?"#)
+/// `@word` at the start or after a non-word character (not inside e-mail addresses).
+private let mentionPattern = try? NSRegularExpression(pattern: #"(?<![\w@])@([\w.\-]+)"#)
+/// The core's names for "everyone here" (teamcraft-client-api `notify::CHANNEL_MENTIONS`).
+private let channelMentions: Set<String> = ["channel", "here", "all"]
+
+/// The body with tappable web links (http/https only: the text comes from another user), message
+/// links (`teamcraft:` URLs the conversation opens in the app) and highlighted mentions of known
+/// people (`usernames` in lower case); the user's own name and `@channel`/`@here`/`@all` stronger.
+func messageText(_ body: String, usernames: Set<String>, myUsername: String) -> AttributedString {
   var text = AttributedString(body)
-  guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return text }
-  let range = NSRange(body.startIndex..., in: body)
-  for match in detector.matches(in: body, range: range) {
-    guard let url = match.url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-      let stringRange = Range(match.range, in: body),
-      let lower = AttributedString.Index(stringRange.lowerBound, within: text),
-      let upper = AttributedString.Index(stringRange.upperBound, within: text)
-    else { continue }
-    text[lower..<upper].link = url
+  let whole = NSRange(body.startIndex..., in: body)
+  var linked: [Range<String.Index>] = []
+  if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+    for match in detector.matches(in: body, range: whole) {
+      guard let url = match.url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+        let range = Range(match.range, in: body)
+      else { continue }
+      setAttributes(&text, body, range) { $0.link = url }
+      linked.append(range)
+    }
+  }
+  for match in permalinkPattern?.matches(in: body, range: whole) ?? [] {
+    guard let range = Range(match.range, in: body), let url = URL(string: String(body[range])) else { continue }
+    setAttributes(&text, body, range) { $0.link = url }
+    linked.append(range)
+  }
+  for match in mentionPattern?.matches(in: body, range: whole) ?? [] {
+    guard let nameRange = Range(match.range(at: 1), in: body), let atRange = Range(match.range, in: body) else {
+      continue
+    }
+    let name = String(body[nameRange]).trimmingCharacters(in: CharacterSet(charactersIn: ".-")).lowercased()
+    let range = atRange.lowerBound..<body.index(nameRange.lowerBound, offsetBy: name.count)
+    guard !linked.contains(where: { $0.overlaps(range) }) else { continue }
+    let isMe = channelMentions.contains(name) || (!myUsername.isEmpty && name == myUsername.lowercased())
+    guard isMe || usernames.contains(name) else { continue }
+    setAttributes(&text, body, range) { attributes in
+      attributes.inlinePresentationIntent = .stronglyEmphasized
+      attributes.foregroundColor = isMe ? Theme.mentionText : Theme.accent
+      if isMe { attributes.backgroundColor = Theme.mentionBackground }
+    }
   }
   return text
+}
+
+private func setAttributes(
+  _ text: inout AttributedString, _ body: String, _ range: Range<String.Index>,
+  _ change: (inout AttributeContainer) -> Void
+) {
+  guard let lower = AttributedString.Index(range.lowerBound, within: text),
+    let upper = AttributedString.Index(range.upperBound, within: text)
+  else { return }
+  var container = AttributeContainer()
+  change(&container)
+  text[lower..<upper].mergeAttributes(container)
 }
