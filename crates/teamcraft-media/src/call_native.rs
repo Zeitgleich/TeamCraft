@@ -7,13 +7,15 @@
 //!
 //! Network changes (ARCHITECTURE.md §6.5): the socket is bound to the wildcard address, so when
 //! the device switches networks its packets leave through the new route and the SFU migrates the
-//! QUIC connection to the new path; nothing else changes. Apps report network changes with
-//! [`NativeCall::network_changed`]: if the path then stays silent, or it breaks in any other way,
+//! QUIC connection to the new path; nothing else changes. Mobile apps report network changes with
+//! [`NativeCall::network_changed`], on desktops the driver notices a new route to the SFU itself.
+//! If the path then stays silent, or it breaks in any other way,
 //! the driver gets a fresh join ticket and rejoins on a new connection within the SFU's grace
 //! period; devices, mute state and tracks carry over.
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -63,6 +65,8 @@ const MAX_PLAYBACK_BUFFER_SAMPLES: usize = 48_000 / 5;
 const LEAVE: u32 = 0;
 /// How long a broken signaling stream waits for its connection's close reason.
 const STREAM_CLOSE_WAIT: Duration = Duration::from_millis(200);
+/// How often the route toward the SFU is looked up (see [`RouteWatch`]).
+const ROUTE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A running call.
 pub struct NativeCall {
@@ -594,12 +598,22 @@ struct CallConnection {
   /// take for a deliberate leave and free the slot (it keeps it only for lost connections).
   lost_links: Vec<Link>,
   monitor: PathMonitor,
+  route: RouteWatch,
   maybe_schedule: Option<ReconnectSchedule>,
   maybe_attempt: Option<JoinHandle<Result<(Link, JoinTicket), NativeCallError>>>,
   ticket: JoinTicket,
   maybe_certificate_hash: Option<[u8; 32]>,
   resilience: ResilienceConfig,
   maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
+}
+
+/// Notices when the local address the system would send from toward the SFU changes (another
+/// interface, a new network), for platforms that don't tell the app (desktops). Mobile apps report
+/// changes themselves, earlier.
+#[derive(Debug)]
+struct RouteWatch {
+  maybe_local_ip: Option<IpAddr>,
+  maybe_checked_at: Option<Instant>,
 }
 
 /// One QUIC connection with its signaling stream; reader tasks feed [`LinkInput`]s.
@@ -640,6 +654,7 @@ impl CallConnection {
       maybe_link: Some(link),
       lost_links: Vec::new(),
       monitor: PathMonitor::new(now),
+      route: RouteWatch::new(),
       maybe_schedule: None,
       maybe_attempt: None,
       ticket: JoinTicket {
@@ -702,6 +717,13 @@ impl CallConnection {
     };
     let received = link.connection.quic_connection().stats().udp_rx.datagrams;
     self.monitor.on_received_packets(received, now);
+    if self.route.is_due(now) {
+      let maybe_local_ip = local_route_to(link.connection.remote_address());
+      if self.route.on_route(maybe_local_ip, now) {
+        debug!("the route to the SFU changed");
+        self.monitor.on_network_changed(now, &self.resilience);
+      }
+    }
     if self.monitor.check(now, &self.resilience) == PathState::Dead {
       self.lose(engine, now);
     }
@@ -737,6 +759,7 @@ impl CallConnection {
     info!(attempts = self.attempts(), "connected again, rejoining the call");
     self.maybe_link = Some(link);
     self.monitor = PathMonitor::new(now);
+    self.route = RouteWatch::new();
     engine.rejoin(ticket.token.clone(), now);
     self.ticket = ticket;
   }
@@ -783,6 +806,45 @@ impl CallConnection {
       link.connection.close(LEAVE.into(), b"leave");
     }
   }
+}
+
+impl RouteWatch {
+  fn new() -> Self {
+    Self {
+      maybe_local_ip: None,
+      maybe_checked_at: None,
+    }
+  }
+
+  fn is_due(&self, now: Instant) -> bool {
+    self
+      .maybe_checked_at
+      .is_none_or(|checked_at| now.saturating_duration_since(checked_at) >= ROUTE_CHECK_INTERVAL)
+  }
+
+  /// Records the local address of the current route; returns whether it changed from a known one
+  /// (no route at all counts as a change too: the network went away).
+  fn on_route(&mut self, maybe_local_ip: Option<IpAddr>, now: Instant) -> bool {
+    let is_first = self.maybe_checked_at.is_none();
+    self.maybe_checked_at = Some(now);
+    let has_changed = !is_first && maybe_local_ip != self.maybe_local_ip;
+    self.maybe_local_ip = maybe_local_ip;
+    has_changed
+  }
+}
+
+/// The local address the system would send from toward `remote`: connecting a UDP socket picks
+/// the route without sending anything.
+fn local_route_to(remote: SocketAddr) -> Option<IpAddr> {
+  // Dual-stack sockets show IPv4 peers as IPv4-mapped; look the route up in their own family.
+  let remote = SocketAddr::new(remote.ip().to_canonical(), remote.port());
+  let unspecified: IpAddr = match remote {
+    SocketAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+    SocketAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
+  };
+  let socket = UdpSocket::bind(SocketAddr::new(unspecified, 0)).ok()?;
+  socket.connect(remote).ok()?;
+  Some(socket.local_addr().ok()?.ip())
 }
 
 impl Link {
@@ -1230,5 +1292,39 @@ async fn read_datagrams(connection: Connection, inputs: mpsc::UnboundedSender<Li
         return;
       },
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_new_local_address_toward_the_sfu_is_a_network_change() {
+    let start = Instant::now();
+    let mut route = RouteWatch::new();
+    let wifi: IpAddr = "192.0.2.10".parse().unwrap();
+    let mobile: IpAddr = "2001:db8::7".parse().unwrap();
+    assert!(route.is_due(start));
+    assert!(
+      !route.on_route(Some(wifi), start),
+      "the first lookup is the baseline"
+    );
+    assert!(!route.is_due(start + Duration::from_millis(500)));
+    assert!(!route.on_route(Some(wifi), start + ROUTE_CHECK_INTERVAL));
+    assert!(route.on_route(Some(mobile), start + 2 * ROUTE_CHECK_INTERVAL));
+    assert!(
+      route.on_route(None, start + 3 * ROUTE_CHECK_INTERVAL),
+      "no route at all"
+    );
+  }
+
+  #[test]
+  fn loopback_peers_are_reached_from_loopback() {
+    let v6 = local_route_to(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433));
+    assert_eq!(v6, Some(Ipv6Addr::LOCALHOST.into()));
+    // An IPv4 peer as a dual-stack socket reports it: looked up as IPv4.
+    let mapped = SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 4433);
+    assert_eq!(local_route_to(mapped), Some(Ipv4Addr::LOCALHOST.into()));
   }
 }
