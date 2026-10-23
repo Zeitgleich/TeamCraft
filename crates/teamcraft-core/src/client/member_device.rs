@@ -192,7 +192,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// device's key, only from a list that names it, and only for current members or devices whose
   /// removal time the user's devices recorded (their later messages are refused).
   pub(crate) async fn learn_sender_keys(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.apply_shared_removals(conversation)?;
     let parked: Vec<MessageResponse> = records::list_json(&self.store, Table::Undecrypted)?;
     let mut senders = BTreeSet::new();
     for message in parked
@@ -238,37 +237,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.retry_undecrypted(conversation)
   }
 
-  /// Shares the removal times this device recorded locally (also by versions before they travelled
-  /// in the account data) with the user's other and future devices. Idempotent: only removals the
-  /// account data doesn't know yet, or later ones, change it.
+  /// Shares the removal records this device keeps locally (also those of versions before they
+  /// travelled in the account data) with the user's other and future devices. Idempotent.
   pub(crate) fn share_removed_senders(&mut self) -> Result<(), CoreError> {
-    let removals: Vec<(String, i64)> = self
-      .store
-      .list(Table::RemovedSenders)?
-      .into_iter()
-      .filter_map(|(key, value)| Some((key, serde_json::from_slice::<i64>(&value).ok()?)))
-      .collect();
-    if removals.is_empty() {
+    let mut rows = Vec::new();
+    for (key, _) in self.store.list(Table::RemovedSenders)? {
+      if let Some(absence) = records::removed_sender(&self.store, &key)? {
+        rows.push((key, absence));
+      }
+    }
+    if rows.is_empty() {
       return Ok(());
     }
     self.update_account_data(|data, _| {
-      removals.iter().fold(false, |changed, (key, left_at_ms)| {
-        data.note_removed_sender(key, *left_at_ms) | changed
+      rows.iter().fold(false, |changed, (key, absence)| {
+        let left = data.note_removed_sender(key, absence.left_at_ms);
+        let back = absence
+          .maybe_back_at_ms
+          .is_some_and(|back| data.note_sender_back(key, back));
+        changed | left | back
       })
     })
   }
 
-  /// Takes the removal times the user's devices recorded in the account data (for devices this one
-  /// never saw leave) into the local check of removed senders.
-  fn apply_shared_removals(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let prefix = format!("{conversation}/");
+  /// Takes the removal records of the user's devices from the account data into the local check,
+  /// for every conversation, before anything is decrypted: when the account data is loaded or
+  /// merged.
+  pub(crate) fn apply_shared_removals(&mut self) -> Result<(), CoreError> {
     let data = self.account_data();
-    for key in data.removed_senders.keys().filter(|key| key.starts_with(&prefix)) {
-      if let Some(left_at_ms) = data.removed_sender(key)
-        && self.store.get(Table::RemovedSenders, key)?.is_none()
-      {
-        records::put_json(&self.store, Table::RemovedSenders, key, &left_at_ms)?;
-      }
+    for (key, absence) in &data.removed_senders {
+      records::merge_removed_sender(&self.store, key, absence)?;
     }
     Ok(())
   }

@@ -63,12 +63,33 @@ pub struct AccountData {
   pub maybe_workspace_root: Option<PinnedKey>,
 }
 
-/// When a device left a conversation, and when it was added back after that, in server times.
+/// When a device last left a conversation, and when it was last added back, in server times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SenderAbsence {
   pub left_at_ms: i64,
   #[serde(rename = "back_at_ms", default, skip_serializing_if = "Option::is_none")]
   pub maybe_back_at_ms: Option<i64>,
+}
+
+impl SenderAbsence {
+  /// Whether a message the device signed at `sent_at_ms` falls into its absence: after it left
+  /// (with `grace_ms` for messages on the way) and before it came back, if it did.
+  pub fn covers(&self, sent_at_ms: i64, grace_ms: i64) -> bool {
+    let is_after_leaving = sent_at_ms > self.left_at_ms.saturating_add(grace_ms);
+    let is_before_return = match self.maybe_back_at_ms {
+      Some(back) if back >= self.left_at_ms => sent_at_ms < back,
+      _ => true,
+    };
+    is_after_leaving && is_before_return
+  }
+
+  /// Takes the later time of each from `other`; returns whether that changed anything.
+  pub fn merge(&mut self, other: &Self) -> bool {
+    let before = *self;
+    self.left_at_ms = self.left_at_ms.max(other.left_at_ms);
+    self.maybe_back_at_ms = self.maybe_back_at_ms.max(other.maybe_back_at_ms);
+    *self != before
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,9 +168,11 @@ impl AccountData {
     merge_map(&mut self.pins, &other.pins);
     merge_map(&mut self.backgrounds, &other.backgrounds);
     for (key, theirs) in &other.removed_senders {
-      let entry = self.removed_senders.entry(key.clone()).or_insert(*theirs);
-      entry.left_at_ms = entry.left_at_ms.max(theirs.left_at_ms);
-      entry.maybe_back_at_ms = entry.maybe_back_at_ms.max(theirs.maybe_back_at_ms);
+      self
+        .removed_senders
+        .entry(key.clone())
+        .or_insert(*theirs)
+        .merge(theirs);
     }
     for (conversation, epoch) in &other.group_epochs {
       let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);

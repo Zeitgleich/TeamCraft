@@ -918,12 +918,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for device in group.verified_members(directory)? {
       let user = convert::user_from_crypto(device.user_id())?;
       let device_id = convert::device_from_crypto(device.device_id())?;
-      // A member again (added back): its new messages count.
+      // A member again (added back): what it signs from now on counts; what it signed while out
+      // still doesn't.
       let key = format!("{conversation}/{user}/{device_id}");
-      if let Some(left_at_ms) = records::get_json::<i64>(&self.store, Table::RemovedSenders, &key)?
-        && left_at_ms <= at_ms
+      if let Some(absence) = records::removed_sender(&self.store, &key)?
+        && absence.left_at_ms <= at_ms
+        && absence.maybe_back_at_ms.is_none_or(|back| back < at_ms)
       {
-        self.store.delete(Table::RemovedSenders, &key)?;
+        records::merge_removed_sender(
+          &self.store,
+          &key,
+          &crate::account_data::SenderAbsence {
+            left_at_ms: absence.left_at_ms,
+            maybe_back_at_ms: Some(at_ms),
+          },
+        )?;
         self.update_account_data(|data, _| data.note_sender_back(&key, at_ms))?;
       }
       if records::device_signing_key(&self.store, user, device_id)?.as_ref() != Some(device.signing_key()) {
@@ -952,7 +961,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         convert::user_from_crypto(member.user_id)?,
         convert::device_from_crypto(member.device_id)?
       );
-      records::put_json(&self.store, Table::RemovedSenders, &key, &at_ms)?;
+      records::merge_removed_sender(
+        &self.store,
+        &key,
+        &crate::account_data::SenderAbsence {
+          left_at_ms: at_ms,
+          maybe_back_at_ms: None,
+        },
+      )?;
       // The user's other (and future) devices refuse its later messages too.
       self.update_account_data(|data, _| data.note_removed_sender(&key, at_ms))?;
     }

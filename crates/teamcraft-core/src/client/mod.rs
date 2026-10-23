@@ -189,7 +189,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let sync = records::load_sync_state(&store)?;
     let maybe_preview_fetcher = previews::default_fetcher(&settings.link_previews);
     let maybe_jwks_source = attested::default_jwks_source(settings.maybe_attestation.as_ref());
-    Ok(Some(Self {
+    let mut client = Self {
       api,
       store,
       clock,
@@ -206,7 +206,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       member_join_attempts: HashMap::new(),
-    }))
+    };
+    // Startup: removal records of the user's devices count from the start, and this device's own
+    // (also from older versions) are shared.
+    client.apply_shared_removals()?;
+    client.share_removed_senders()?;
+    Ok(Some(client))
   }
 
   /// A sealed device token is sealed again after this long (tests set it to zero to force it).

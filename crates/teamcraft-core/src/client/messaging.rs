@@ -441,16 +441,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Whether the message's device had left the conversation before the message's time.
+  /// Whether the message's device was out of the conversation at the message's time (it had
+  /// left and, if it came back, not yet).
   fn sent_after_leaving(&self, message: &MessageResponse) -> Result<bool, CoreError> {
     let key = format!(
       "{}/{}/{}",
       message.conversation_id, message.sender_user_id, message.sender_device_id
     );
-    let maybe_left_at: Option<i64> = records::get_json(&self.store, Table::RemovedSenders, &key)?;
-    Ok(maybe_left_at.is_some_and(|left_at| {
-      message.id.snowflake().unix_millis() > left_at.saturating_add(REMOVED_SENDER_GRACE_MS)
-    }))
+    Ok(
+      records::removed_sender(&self.store, &key)?
+        .is_some_and(|absence| absence.covers(message.id.snowflake().unix_millis(), REMOVED_SENDER_GRACE_MS)),
+    )
   }
 
   fn message_context(

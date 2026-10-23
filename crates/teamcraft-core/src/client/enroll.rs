@@ -199,6 +199,8 @@ impl PendingEnrollment {
     )?;
     records::save_account(&client.store, &client.account)?;
     records::delete_pending_device(&client.store)?;
+    // Removal records from the key bag count before the first message is decrypted.
+    client.apply_shared_removals()?;
     client.finish_enrollment().await?;
     Ok(client)
   }

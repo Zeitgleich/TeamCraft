@@ -249,8 +249,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     mut approval: LinkApproval<A::Rendezvous>,
   ) -> Result<(), CoreError> {
-    // Hand over the newest content keys, and the version the server has, so the new device's next
-    // upload doesn't conflict.
+    // Hand over the newest content keys and removal records, and the version the server has, so
+    // the new device's next upload doesn't conflict.
+    self.share_removed_senders()?;
     if self.sync.is_key_bag_dirty {
       self.upload_key_bag().await?;
     }

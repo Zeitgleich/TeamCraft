@@ -258,14 +258,17 @@ a message whose device key isn't known yet waits until it is. A device that isn'
 verify yet it records that one sending device's key, if the sender's signed device list (identity
 signature, never older than one seen before) names the device, and only if the sender is a member
 per the server or a device whose leaving time it knows. Every device runs this for messages it can't
-verify yet, not only new ones. Leaving times travel in the account data (§6.4): every device that
-processes a removal records it there, and on each full sync shares the removals it recorded
-locally (also those from before this version), so a new device refuses a removed device's messages
-dated after its removal (and before it was added back) too. It can't know removals that none of
-the user's devices processed (or that only a device not updated yet knows). Edits, deletes and reactions are
+verify yet, not only new ones. Every device keeps, per conversation and device, when the device last
+left and last came back (server times of the commits) and refuses what it signed while out: after
+it left (with the slack) and before it came back. These records travel in the account data (§6.4):
+every device that processes a removal or a return records it there, shares what it has locally
+(also from before this version) at startup, at each full sync and before handing its key bag to a
+linked device, and takes the records of the others into its check for all conversations whenever it
+loads or merges the account data, before it decrypts anything. A device can't know removals that
+none of the user's devices processed (or that only a device not updated yet knows). Edits, deletes and reactions are
 messages too, so nobody can change or delete someone else's message. A device that left a conversation
-(removed, or its user removed) can't add messages dated after it left (five minutes of slack for
-clocks). Messages from before signatures existed are refused unless the client setting
+(removed, or its user removed) can't add messages dated after it left and before it was added
+back, if it was (five minutes of slack for clocks). Messages from before signatures existed are refused unless the client setting
 `accept_unsigned_messages` allows them.
 
 ### 4.5 Attachments
@@ -653,10 +656,9 @@ restored together with them on a new device.
 - **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
-- **Removed senders.** When devices left conversations and when they were added back, both in the
-  server times of the commits, so a new device refuses what they sign while out (§4.4). Merging
-  keeps the later time of each, so a device's clock never decides; a device is out while its last
-  removal is later than its last return. Never pruned yet (#186).
+- **Removed senders.** When devices last left conversations and last came back, both in the server
+  times of the commits, so every device of the user refuses what they signed while out (§4.4).
+  Merging keeps the later time of each, so a device's clock never decides. Never pruned yet (#186).
 - **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
   user looked at. Merging takes the later one, so reading on any device counts everywhere and never
   moves back. The feed itself is computed from decrypted messages on each device (notifications.md).

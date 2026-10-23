@@ -129,23 +129,34 @@ async fn group_information_from_before_a_removal_is_refused_whatever_epoch_the_s
 #[tokio::test]
 async fn a_new_device_refuses_what_a_removed_member_signs_after_the_removal() {
   let server = FakeServer::new();
-  let (mut phone, mut bob, channel) = channel_with_history(&server).await;
+  let mut phone = Peer::enroll(&server, "Alice").await;
   let mut carol = Peer::enroll(&server, "Carol").await;
+  let space = phone.space().await;
+  // Carol stays in a channel made first (the new device learns her key there before it gets to
+  // the channel she was removed from).
+  let lobby = phone.client.create_channel(space, "lobby").await.unwrap();
+  phone
+    .client
+    .add_member(lobby, carol.client.user_id())
+    .await
+    .unwrap();
+  let channel = phone.client.create_channel(space, "general").await.unwrap();
   phone
     .client
     .add_member(channel, carol.client.user_id())
     .await
     .unwrap();
-  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  settle(&mut [&mut phone, &mut carol]).await;
+  carol.client.send_text(lobby, None, "hello lobby").await.unwrap();
   carol.client.send_text(channel, None, "before").await.unwrap();
-  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  settle(&mut [&mut phone, &mut carol]).await;
   phone
     .client
     .remove_member(channel, carol.client.user_id())
     .await
     .unwrap();
-  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
-  // The phone recorded the removal as an older version: locally only. Its next sync shares it.
+  settle(&mut [&mut phone, &mut carol]).await;
+  // The phone recorded the removal as an older version: locally only. Starting again shares it.
   phone
     .client
     .update_account_data(|data, _| {
@@ -158,7 +169,7 @@ async fn a_new_device_refuses_what_a_removed_member_signs_after_the_removal() {
   // Later the server lists Carol as a member again and lets her post; she still has the key from
   // before her removal. No member signed her back in.
   server.advance_clock(std::time::Duration::from_secs(10 * 60));
-  bob
+  phone
     .api
     .add_member(
       channel,
@@ -170,12 +181,37 @@ async fn a_new_device_refuses_what_a_removed_member_signs_after_the_removal() {
     .await
     .unwrap();
   carol.client.send_text(channel, None, "forged").await.unwrap();
-  let laptop_api = phone.api.clone();
-  let mut laptop = Peer::enroll_as(laptop_api, "Alice laptop").await;
+  let mut laptop = Peer::enroll_as(phone.api.clone(), "Alice laptop").await;
   laptop.client.full_sync().await.unwrap();
+  assert_eq!(laptop.texts(lobby), ["hello lobby"]);
   let texts = laptop.texts(channel);
   assert!(texts.contains(&"before".to_string()), "{texts:?}");
   assert!(!texts.contains(&"forged".to_string()), "{texts:?}");
+
+  // Live too: another forged message over the gateway.
+  carol
+    .client
+    .send_text(channel, None, "forged again")
+    .await
+    .unwrap();
+  settle(&mut [&mut laptop]).await;
+  assert!(!laptop.texts(channel).contains(&"forged again".to_string()));
+}
+
+#[test]
+fn a_device_added_back_counts_again_but_not_for_its_time_away() {
+  let absence = teamcraft_core::account_data::SenderAbsence {
+    left_at_ms: 1_000,
+    maybe_back_at_ms: Some(10_000),
+  };
+  assert!(!absence.covers(900, 0), "before it left");
+  assert!(absence.covers(5_000, 0), "while it was out");
+  assert!(!absence.covers(11_000, 0), "after it came back");
+  let left_again = teamcraft_core::account_data::SenderAbsence {
+    left_at_ms: 20_000,
+    ..absence
+  };
+  assert!(left_again.covers(30_000, 0), "out again since 20 000");
 }
 
 #[tokio::test]
