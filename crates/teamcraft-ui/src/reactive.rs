@@ -24,3 +24,36 @@ pub fn use_interval(interval_ms: u64, callback: impl Fn() + 'static) {
     Err(_) => tracing::debug!("could not start interval"),
   }
 }
+
+/// Like [`use_interval`], but only while the reactive condition `is_active` holds (and once right
+/// when it starts to): an idle page shouldn't wake up every second for something nobody sees.
+pub fn use_interval_while(
+  interval_ms: u64,
+  is_active: impl Fn() -> bool + 'static,
+  callback: impl Fn() + Clone + 'static,
+) {
+  use std::time::Duration;
+
+  use leptos::leptos_dom::helpers::{IntervalHandle, set_interval_with_handle};
+
+  let handle = StoredValue::new(None::<IntervalHandle>);
+  Effect::new(move |_| {
+    let should_run = is_active();
+    let is_running = handle.with_value(Option::is_some);
+    if should_run && !is_running {
+      callback();
+      match set_interval_with_handle(callback.clone(), Duration::from_millis(interval_ms)) {
+        Ok(started) => handle.set_value(Some(started)),
+        Err(_) => tracing::debug!("could not start interval"),
+      }
+    } else if !should_run && let Some(running) = handle.get_value() {
+      running.clear();
+      handle.set_value(None);
+    }
+  });
+  on_cleanup(move || {
+    if let Some(running) = handle.try_get_value().flatten() {
+      running.clear();
+    }
+  });
+}

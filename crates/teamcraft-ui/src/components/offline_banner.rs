@@ -17,7 +17,7 @@ use crate::clock::now_ms;
 use crate::components::app::{on_document, on_window};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval;
+use crate::reactive::use_interval_while;
 use crate::remote_backend;
 use crate::session::use_session;
 
@@ -69,7 +69,18 @@ pub fn OfflineBanner() -> impl IntoView {
   };
   refresh();
   tauri::listen(CORE_CHANGED_EVENT, refresh);
-  use_interval(COUNTDOWN_MS, move || now.set(now_ms()));
+  // The clock only matters while a countdown or the connecting grace period can show; a connected
+  // app must not wake up every second for it.
+  use_interval_while(
+    COUNTDOWN_MS,
+    move || {
+      matches!(
+        connection.get(),
+        Some(CoreConnection::Connecting | CoreConnection::Offline { .. })
+      )
+    },
+    move || now.set(now_ms()),
+  );
   report_network_changes(is_online);
 
   let notice = Memo::new(move |_| {
