@@ -320,6 +320,54 @@ impl Default for ThreadPolicy {
   }
 }
 
+wire_enum! {
+  /// Whether desktop apps of the workspace update themselves (docs/updates.md §4.4).
+  pub enum ClientUpdateMode {
+    /// Devices follow their own preference (automatic, notify only, off).
+    Allowed => "allowed",
+    /// No self-updates: IT deploys new versions. deb/rpm/Flatpak installs are unaffected.
+    Disabled => "disabled",
+  }
+}
+
+wire_enum! {
+  /// Which releases desktop apps update to.
+  pub enum UpdateChannel {
+    Stable => "stable",
+    /// Release candidates and betas, and stable releases when they are newer.
+    Prerelease => "prerelease",
+  }
+}
+
+/// How desktop apps update (docs/updates.md §4.4). Clients enforce it; it is owner-signed like the
+/// rest of the policy, so a server can't switch updates off or redirect them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ClientUpdatePolicy {
+  pub mode: ClientUpdateMode,
+  pub channel: UpdateChannel,
+  /// Only this version is installed (`1.2.3` or `1.2.3-rc.1`), and only when it is newer.
+  #[serde(rename = "pinned_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_pinned_version: Option<String>,
+  /// Clients older than this ask their user to update.
+  #[serde(rename = "minimum_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_minimum_version: Option<String>,
+  /// An https mirror of the update manifest (`latest.json`) that replaces the channel URLs.
+  #[serde(rename = "feed_url", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_feed_url: Option<String>,
+}
+
+impl Default for ClientUpdatePolicy {
+  fn default() -> Self {
+    Self {
+      mode: ClientUpdateMode::Allowed,
+      channel: UpdateChannel::Stable,
+      maybe_pinned_version: None,
+      maybe_minimum_version: None,
+      maybe_feed_url: None,
+    }
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -346,6 +394,8 @@ pub struct WorkspacePolicy {
   pub notifications: NotificationDefaults,
   #[serde(default)]
   pub call_backgrounds: CallBackgroundPolicy,
+  #[serde(default)]
+  pub client_updates: ClientUpdatePolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -386,6 +436,7 @@ impl Default for WorkspacePolicy {
       passwords: PasswordPolicy::default(),
       notifications: NotificationDefaults::default(),
       call_backgrounds: CallBackgroundPolicy::default(),
+      client_updates: ClientUpdatePolicy::default(),
     }
   }
 }
@@ -449,6 +500,35 @@ mod tests {
     assert_eq!(policy.compliance_archive.mode, ComplianceArchiveMode::Off);
     assert!(json.contains(r#""admin_self_join":"visible""#));
     assert!(policy.org_recovery.is_enabled_for_members && !policy.org_recovery.is_enabled_for_guests);
+  }
+
+  #[test]
+  fn client_updates_default_to_allowed_stable_and_older_policies_still_parse() {
+    let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(
+      value["client_updates"],
+      serde_json::json!({"mode": "allowed", "channel": "stable"})
+    );
+    value.as_object_mut().unwrap().remove("client_updates");
+    let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
+    assert_eq!(older.client_updates, ClientUpdatePolicy::default());
+
+    let pinned: ClientUpdatePolicy = serde_json::from_value(serde_json::json!({
+      "mode": "disabled",
+      "channel": "nightly",
+      "pinned_version": "1.2.3",
+      "minimum_version": "1.1.0",
+      "feed_url": "https://updates.example.com/latest.json",
+    }))
+    .unwrap();
+    assert_eq!(pinned.mode, ClientUpdateMode::Disabled);
+    assert_eq!(pinned.channel, UpdateChannel::Unknown("nightly".to_owned()));
+    assert_eq!(pinned.maybe_pinned_version.as_deref(), Some("1.2.3"));
+    assert_eq!(pinned.maybe_minimum_version.as_deref(), Some("1.1.0"));
+    assert_eq!(
+      pinned.maybe_feed_url.as_deref(),
+      Some("https://updates.example.com/latest.json")
+    );
   }
 
   #[test]

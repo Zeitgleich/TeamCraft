@@ -18,6 +18,15 @@ pub struct HealthResponse {
   pub status: HealthStatus,
 }
 
+/// `GET /api/v1/client-compatibility` (no sign-in): which clients this server still works with
+/// (docs/updates.md §4.4). Versions are semantic versions (`1.2.3`, `1.2.3-rc.1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ClientCompatibilityResponse {
+  pub server_version: String,
+  /// Older clients ask their user to update.
+  pub minimum_client_version: String,
+}
+
 /// `GET /api/v1/me`: the authenticated user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct GetMeResponse {
@@ -41,6 +50,19 @@ mod tests {
     })
     .unwrap();
     assert_eq!(json, r#"{"status":"ok"}"#);
+  }
+
+  #[test]
+  fn client_compatibility_wire_format_is_stable() {
+    let json = serde_json::to_string(&ClientCompatibilityResponse {
+      server_version: "1.0.1".into(),
+      minimum_client_version: "1.0.0".into(),
+    })
+    .unwrap();
+    assert_eq!(
+      json,
+      r#"{"server_version":"1.0.1","minimum_client_version":"1.0.0"}"#
+    );
   }
 
   #[test]

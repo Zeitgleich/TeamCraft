@@ -19,9 +19,13 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::ids as crypto;
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::workspace::{WorkspaceLog, log_entry_hash, verify_log_entry};
-use teamcraft_proto::{Base64Bytes, UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy};
+use teamcraft_proto::{
+  Base64Bytes, ClientUpdatePolicy, UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
+};
 
 use crate::convert;
+use crate::records;
+use crate::store::{LocalStore, Table};
 
 /// The roster document an owner signs. A full snapshot per version, so verifying needs no deltas.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,6 +530,15 @@ fn payload_error(log: &'static str, entry: &WorkspaceLogEntryResponse, reason: &
     version: entry.version,
     reason: reason.to_string(),
   }
+}
+
+/// The update rules of the verified workspace policy (docs/updates.md §4.4); `None` while this
+/// device has verified nothing yet (the desktop shell then keeps the last rules it saw).
+pub fn verified_client_update_policy(store: &impl LocalStore) -> Option<ClientUpdatePolicy> {
+  records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()
+    .map(|state| state.policy.client_updates)
 }
 
 #[cfg(test)]
