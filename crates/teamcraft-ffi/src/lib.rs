@@ -24,7 +24,7 @@ pub use error::TeamCraftError;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem,
+  AccountState, AppConfig, ConversationItem, ConversationKind, EmojiSuggestion, MentionSettings, MessageItem,
   NotificationSuppression, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification,
   PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
   TestPushOutcome, TestPushResult,
@@ -405,6 +405,29 @@ impl TeamCraft {
       .await?;
     calls::join(preparation, hub).await
   }
+}
+
+/// Emoji whose names match what the user typed after `:` in the composer (the shared catalog, as
+/// on desktop), at most `limit`.
+#[uniffi::export]
+pub fn emoji_suggestions(query: String, limit: u32) -> Vec<EmojiSuggestion> {
+  teamcraft_client_api::emoji_catalog::search(&query)
+    .into_iter()
+    .take(usize::try_from(limit).unwrap_or(usize::MAX))
+    .map(|emoji| EmojiSuggestion {
+      emoji: emoji.to_string(),
+      shortcode: teamcraft_client_api::emoji_catalog::shortcode(emoji)
+        .unwrap_or_default()
+        .to_string(),
+    })
+    .collect()
+}
+
+/// Replaces emoticons (`:)`) and `:shortcodes:` in a message before sending, as desktop does;
+/// code stays as typed.
+#[uniffi::export]
+pub fn emoji_convert(text: String) -> String {
+  teamcraft_client_api::emoji::convert(&text)
 }
 
 /// Whether a link from content other members control (a bookmark) may be opened: web links only.

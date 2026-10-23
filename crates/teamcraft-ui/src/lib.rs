@@ -18,8 +18,8 @@ pub mod clock;
 pub mod components;
 pub mod delivery;
 pub mod diff;
-pub mod emoji;
-pub mod emoji_catalog;
+// Shared with the mobile apps (through the FFI), so they live in the client API.
+pub use teamcraft_client_api::{emoji, emoji_catalog};
 pub mod groups;
 pub mod highlight;
 pub mod hybrid;

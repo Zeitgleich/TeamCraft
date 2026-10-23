@@ -131,6 +131,17 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(extras?.edits?.first?.body, "old")
   }
 
+  func testEmojiQueryAndCompletion() {
+    XCTAssertEqual(activeEmojiQuery("great :thu"), "thu")
+    XCTAssertEqual(activeEmojiQuery(":+1"), "+1")
+    XCTAssertNil(activeEmojiQuery("nice :)"))
+    XCTAssertNil(activeEmojiQuery("done :tada: "))
+    XCTAssertNil(activeEmojiQuery(":tada:"))
+    XCTAssertNil(activeEmojiQuery("time 10:30"))
+    XCTAssertEqual(completeEmoji(in: "great :thu", with: "👍"), "great 👍 ")
+    XCTAssertEqual(completeEmoji(in: ":thu", with: "👍"), "👍 ")
+  }
+
   func testAppLockClock() {
     var clock = AppLockClock()
     let start = ContinuousClock.now
