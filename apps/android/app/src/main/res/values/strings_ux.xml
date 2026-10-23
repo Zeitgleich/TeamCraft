@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Chat list -->
+  <string name="chats_empty_hint">Join a channel or start a direct message to get going.</string>
+  <string name="chat_mark_read">Mark as read</string>
+  <string name="chat_mark_unread">Mark as unread</string>
+  <string name="chat_muted">Muted</string>
+  <string name="chat_preview_deleted">Message deleted</string>
+  <string name="chat_preview_event">Conversation updated</string>
+  <!-- Sender and text of the newest message, e.g. "Alice: See you later" -->
+  <string name="chat_preview_sender">%1$s: %2$s</string>
+  <plurals name="chat_mentions">
+    <item quantity="one">%d mention</item>
+    <item quantity="other">%d mentions</item>
+  </plurals>
+  <plurals name="chat_unread">
+    <item quantity="one">%d unread message</item>
+    <item quantity="other">%d unread messages</item>
+  </plurals>
+  <string name="offline_banner">No connection. Messages are sent when you\'re back online.</string>
+
+  <!-- Conversation -->
+  <string name="jump_down">Jump to the newest message</string>
+  <plurals name="jump_down_new">
+    <item quantity="one">%d newer message, jump down</item>
+    <item quantity="other">%d newer messages, jump down</item>
+  </plurals>
+  <string name="day_today">Today</string>
+  <string name="day_yesterday">Yesterday</string>
+  <!-- Accessibility action: toggles a reaction with the given emoji -->
+  <string name="react_quick">React with %1$s</string>
+  <string name="file_open">Open</string>
+  <string name="image_unreadable">This image can\'t be shown.</string>
+  <string name="close">Close</string>
+  <string name="share">Share</string>
+  <string name="delete_confirm_title">Delete this message?</string>
+  <string name="delete_confirm_text">It is removed for everyone in the conversation.</string>
+  <string name="attach_camera">Camera</string>
+  <string name="attach_gallery">Photos and videos</string>
+  <string name="attach_file">File</string>
+
+  <!-- Sharing from other apps -->
+  <string name="share_title">Share to…</string>
+  <string name="share_filter">Find a conversation</string>
+  <plurals name="share_files">
+    <item quantity="one">%d file</item>
+    <item quantity="other">%d files</item>
+  </plurals>
+
+  <!-- App lock and composer settings -->
+  <string name="app_lock">App lock (fingerprint, face or screen lock)</string>
+  <string name="app_lock_unavailable">Set up a screen lock on this device to use the app lock.</string>
+  <string name="app_lock_after">Lock again after leaving the app</string>
+  <string name="app_lock_immediately">Immediately</string>
+  <string name="app_lock_one_minute">1 minute</string>
+  <string name="app_lock_five_minutes">5 minutes</string>
+  <string name="app_lock_fifteen_minutes">15 minutes</string>
+  <string name="app_lock_prompt">Unlock TeamCraft</string>
+  <string name="app_lock_locked">TeamCraft is locked</string>
+  <string name="app_lock_unlock">Unlock</string>
+  <string name="send_with_enter">Send with Enter (hardware keyboard)</string>
+</resources>

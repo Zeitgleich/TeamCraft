@@ -1,6 +1,5 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.graphics.BitmapFactory
 import android.text.format.Formatter
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -24,13 +23,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.File
+import kotlinx.coroutines.delay
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
@@ -43,8 +42,16 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
   val changes by viewModel.changeCount.collectAsState()
   val context = LocalContext.current
   var files by remember { mutableStateOf<List<FileInfo>?>(null) }
+  var maybeViewed by remember { mutableStateOf<ViewedImage?>(null) }
   LaunchedEffect(changes, conversationId) {
     files = viewModel.readChat { query(ChatQueries.files(conversationId)).files }
+  }
+  LaunchedEffect(files) {
+    // Downloads report their end in the store, not every chunk: follow them while they run.
+    if (files.orEmpty().any { it.transfer.isMoving }) {
+      delay(1000)
+      files = viewModel.readChat { query(ChatQueries.files(conversationId)).files } ?: files
+    }
   }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.files_title), maybeOnBack = onBack) }) { padding ->
     if (files?.isEmpty() == true) {
@@ -55,17 +62,19 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
         Column(
           Modifier.padding(4.dp).clickable {
             val path = file.transfer.path
-            if (file.transfer.state == "local" && path != null) {
+            if (file.transfer.state == "local" && path != null && file.isImage) {
+              maybeViewed = ViewedImage(path, file.fileName, file.mediaType)
+            } else if (file.transfer.state == "local" && path != null) {
               openFile(context, File(path), file.mediaType)
             } else {
               viewModel.act(ChatActions.download(file.conversation, file.message))
             }
           },
         ) {
-          val bitmap = file.thumbnailBytes()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-          if (bitmap != null) {
+          val maybeThumbnail = rememberThumbnail(file.maybeThumbnailPng)
+          if (maybeThumbnail != null) {
             Image(
-              bitmap.asImageBitmap(),
+              maybeThumbnail,
               contentDescription = file.fileName,
               contentScale = ContentScale.Crop,
               modifier = Modifier.fillMaxWidth().aspectRatio(1f),
@@ -80,4 +89,5 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
       }
     }
   }
+  maybeViewed?.let { image -> ImageViewer(image) { maybeViewed = null } }
 }

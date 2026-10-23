@@ -13,7 +13,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -90,7 +90,7 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
   }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.saved_title), maybeOnBack = onBack) }) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
-      TabRow(selectedTabIndex = tab) {
+      PrimaryTabRow(selectedTabIndex = tab) {
         Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(stringResource(R.string.saved_items)) })
         Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(stringResource(R.string.mentions)) })
       }

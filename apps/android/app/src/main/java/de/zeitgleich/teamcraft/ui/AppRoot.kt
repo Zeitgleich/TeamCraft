@@ -27,6 +27,7 @@ import de.zeitgleich.teamcraft.ui.screens.MessageScreen
 import de.zeitgleich.teamcraft.ui.screens.OrgRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.SearchScreen
 import de.zeitgleich.teamcraft.ui.screens.SettingsScreen
+import de.zeitgleich.teamcraft.ui.screens.SharePickerScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadScreen
 
 @Composable
@@ -34,6 +35,8 @@ fun AppRoot(
   viewModel: MainViewModel,
   maybeConversationToOpen: String?,
   onConversationOpened: () -> Unit,
+  maybeShare: SharedContent?,
+  onShareHandled: () -> Unit,
   onLogin: (Intent) -> Unit,
 ) {
   val state by viewModel.appState.collectAsState()
@@ -67,7 +70,7 @@ fun AppRoot(
       onCancel = viewModel::cancelLinking,
     )
     is AppState.Failed -> MessageScreen(message = current.error, onRetry = viewModel::refresh)
-    is AppState.Ready -> ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened)
+    is AppState.Ready -> ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened, maybeShare, onShareHandled)
   }
 }
 
@@ -77,6 +80,8 @@ private fun ReadyNavigation(
   account: AppState.Ready,
   maybeConversationToOpen: String?,
   onConversationOpened: () -> Unit,
+  maybeShare: SharedContent?,
+  onShareHandled: () -> Unit,
 ) {
   val navigation = rememberNavController()
   LaunchedEffect(maybeConversationToOpen) {
@@ -84,6 +89,9 @@ private fun ReadyNavigation(
       navigation.navigate("conversation/$it")
       onConversationOpened()
     }
+  }
+  LaunchedEffect(maybeShare) {
+    if (maybeShare != null) navigation.navigate("share") { launchSingleTop = true }
   }
   NavHost(navController = navigation, startDestination = "chats") {
     composable("chats") {
@@ -151,6 +159,26 @@ private fun ReadyNavigation(
         conversationId = entry.arguments?.getString("id").orEmpty(),
         onBack = { navigation.popBackStack() },
       )
+    }
+    composable("share") {
+      val content = maybeShare
+      if (content == null) {
+        LaunchedEffect(Unit) { navigation.popBackStack() }
+      } else {
+        SharePickerScreen(
+          viewModel = viewModel,
+          content = content,
+          onPick = { conversation ->
+            PendingShare.current.value = PendingShare.Target(conversation, content)
+            onShareHandled()
+            navigation.navigate("conversation/$conversation") { popUpTo("chats") }
+          },
+          onBack = {
+            onShareHandled()
+            navigation.popBackStack()
+          },
+        )
+      }
     }
     composable("settings") {
       SettingsScreen(viewModel = viewModel, account = account, onBack = { navigation.popBackStack() })

@@ -126,6 +126,8 @@ dependencies {
   implementation(libs.zxing.core)
   // Search segment prefetch on unmetered networks while charging.
   implementation(libs.androidx.work.runtime)
+  // App lock: biometrics or the device's screen lock through the system prompt.
+  implementation(libs.androidx.biometric)
   // UniFFI's Kotlin bindings call the Rust library through JNA.
   implementation("${libs.jna.get()}@aar")
   "fullImplementation"(libs.firebase.messaging)
