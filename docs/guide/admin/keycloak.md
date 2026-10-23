@@ -7,16 +7,16 @@ example; do not use its credentials in production.
 
 ## Realm checklist
 
-| Item                                   | Setting                                                                                                                                           |
-|----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
-| Public client `teamcraft`              | Authorization code + PKCE (`S256`), no direct access grants, no service account                                                                   |
-| Redirect URIs                          | Web client origin, `http://127.0.0.1/callback` and `http://[::1]/callback` (desktop, any port), `com.example.teamcraft:/oauth/callback` (Android) |
-| Web origins                            | The web client origin                                                                                                                             |
-| Client roles on `teamcraft`            | `owner`, `admin`, `member`, `guest`                                                                                                               |
-| Back-channel logout                    | URL `https://chat.example.com/api/v1/auth/backchannel-logout`, session required `true`                                                            |
-| Confidential client `teamcraft-server` | Service account only (no flows), used for user sync                                                                                               |
-| Service account roles                  | `realm-management`: `view-users`, `query-users`, `query-groups`, `view-realm`, `view-clients`, `query-clients`                                    |
-| Realm token lifespan                   | Short access tokens (the dev realm uses a few minutes); the gateway re-checks every hour                                                          |
+| Item                                   | Setting                                                                                                                                                  |
+|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Public client `teamcraft`              | Authorization code + PKCE (`S256`), no direct access grants, no service account                                                                          |
+| Redirect URIs                          | Web client origin, `http://127.0.0.1/callback` and `http://[::1]/callback` (desktop, any port), `de.zeitgleich.teamcraft:/oauth/callback` (Android, iOS) |
+| Web origins                            | The web client origin                                                                                                                                    |
+| Client roles on `teamcraft`            | `owner`, `admin`, `member`, `guest`                                                                                                                      |
+| Back-channel logout                    | URL `https://chat.example.com/api/v1/auth/backchannel-logout`, session required `true`                                                                   |
+| Confidential client `teamcraft-server` | Service account only (no flows), used for user sync                                                                                                      |
+| Service account roles                  | `realm-management`: `view-users`, `query-users`, `query-groups`, `view-realm`, `view-clients`, `query-clients`                                           |
+| Realm token lifespan                   | Short access tokens (the dev realm uses a few minutes); the gateway re-checks every hour                                                                 |
 
 With [several brands](configuration.md#several-brands-on-one-server) every brand host name goes into the
 client's **valid redirect URIs**, **web origins** and **post logout redirect URIs** (for example

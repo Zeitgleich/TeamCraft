@@ -148,7 +148,7 @@ adb install app/build/outputs/apk/full/debug/app-full-debug.apk
 
 The app uses `127.0.0.1` rather than the emulator's `10.0.2.2` on purpose: Keycloak writes the host
 the device used into the token's issuer, and the server accepts only its configured issuer. The dev
-realm's public client `teamcraft` already allows the redirect URI `com.example.teamcraft:/oauth/callback`.
+realm's public client `teamcraft` already allows the redirect URI `de.zeitgleich.teamcraft:/oauth/callback`.
 Plain HTTP is only allowed to `127.0.0.1`, `localhost` and `10.0.2.2`
 (`res/xml/network_security_config.xml`).
 
