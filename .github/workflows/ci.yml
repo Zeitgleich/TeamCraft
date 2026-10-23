@@ -197,6 +197,31 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The desktop shell links GStreamer (VideoToolbox encoding); same pinned packages as the release.
+      - name: GStreamer framework
+        env:
+          GSTREAMER_VERSION: "1.28.8"
+        run: |
+          set -euo pipefail
+          base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
+          for package in gstreamer-1.0 gstreamer-1.0-devel; do
+            file="$package-$GSTREAMER_VERSION-universal.pkg"
+            curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" "$base/$file"
+          done
+          cd "$RUNNER_TEMP"
+          echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
+          echo "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7  gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
+          sudo installer -pkg "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" -target /
+      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
+        run: mkdir -p crates/teamcraft-ui/dist
+      # The desktop shell has macOS-only code (notification center, dock); the release build is the
+      # only other place it gets compiled for macOS.
+      - name: Clippy (desktop shell)
+        env:
+          SQLX_OFFLINE: "true"
+          PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
+        run: cargo clippy -p teamcraft-desktop --all-targets -- -D warnings
       - name: Clippy (call media)
         run: cargo clippy -p teamcraft-media --all-targets --features native,avfoundation,screencapturekit,effects,openh264-source -- -D warnings
       - name: Test (call media)

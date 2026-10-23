@@ -99,8 +99,10 @@ pub async fn withdraw_notifications(
   if mac_center::is_available() {
     mac_center::withdraw(&tags);
   }
+  #[cfg(not(windows))]
+  let _ = &app;
   #[cfg(not(any(windows, target_os = "macos")))]
-  let _ = (&app, &tags);
+  let _ = &tags;
   Ok(())
 }
 
@@ -126,6 +128,8 @@ pub fn prepare() {
 }
 
 /// Hands what the user did to the webview, bringing the window up first where the action needs it.
+// macOS notifications have no buttons yet (see mac_center), so nothing reports there.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn report(app: &AppHandle, event: NotificationActionEvent) {
   if event.action.brings_window_up() {
     crate::tray::show_main_window(app);
