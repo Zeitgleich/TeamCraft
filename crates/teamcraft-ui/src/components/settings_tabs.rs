@@ -870,18 +870,6 @@ pub fn SidebarTab() -> impl IntoView {
       value=Signal::derive(move || prefs.get().sidebar.is_grouped_by_space)
       on_change=Callback::new(move |value: bool| prefs.update(|all| all.sidebar.is_grouped_by_space = value))
     />
-    <SelectField
-      id="setting-dm-limit"
-      label="settings-dm-limit"
-      options=options(&["0", "5", "10", "20"], "settings-dm-limit-")
-      value=Signal::derive(move || prefs.get().sidebar.dm_limit.to_string())
-      on_change=Callback::new(move |value: String| {
-        if let Ok(limit) = value.parse::<u32>() {
-          prefs.update(|all| all.sidebar.dm_limit = limit);
-        }
-      })
-      hint="settings-dm-limit-hint"
-    />
   }
 }
 

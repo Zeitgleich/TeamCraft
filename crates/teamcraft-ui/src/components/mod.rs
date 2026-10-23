@@ -32,6 +32,7 @@ pub mod calls_view;
 pub mod channel_view;
 pub mod composer;
 pub mod composer_commands;
+pub mod direct_messages;
 pub mod directory_view;
 pub mod emoji_picker;
 pub mod file_views;

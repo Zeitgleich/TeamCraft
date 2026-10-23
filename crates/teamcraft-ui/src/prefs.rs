@@ -494,10 +494,38 @@ impl SidebarSort {
   }
 }
 
+/// How the direct messages page orders its conversations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DmSort {
+  /// The newest message first.
+  #[default]
+  Recent,
+  Alphabetical,
+}
+
+impl DmSort {
+  pub const ALL: [DmSort; 2] = [Self::Recent, Self::Alphabetical];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Recent => "recent",
+      Self::Alphabetical => "alphabetical",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|value| value.slug() == slug)
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidebarPrefs {
+  /// Order of the channels in a space.
   pub sort: SidebarSort,
+  /// Order of the direct messages page.
+  pub dm_sort: DmSort,
   /// Direct messages shown before "show more"; 0 shows all.
   pub dm_limit: u32,
   /// One sidebar with the channels of every space grouped by space (Slack style), instead of the
@@ -509,6 +537,7 @@ impl Default for SidebarPrefs {
   fn default() -> Self {
     Self {
       sort: SidebarSort::Default,
+      dm_sort: DmSort::Recent,
       dm_limit: 0,
       is_grouped_by_space: false,
     }

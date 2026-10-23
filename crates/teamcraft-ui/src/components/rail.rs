@@ -3,21 +3,40 @@ use leptos::prelude::*;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{Space, initials};
-use crate::state::{MainView, Overlay, use_app_state};
+use crate::sections::{RailBadge, badge_count};
+use crate::state::{Overlay, RailEntry, use_app_state};
 
-/// Space switcher on the far left (Mattermost "team sidebar").
+/// Space switcher on the far left (Mattermost "team sidebar"), with the direct messages on top
+/// (they live outside spaces). In the grouped sidebar one entry stands for all spaces.
 #[component]
 pub fn SpaceRail() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let spaces = Memo::new(move |_| state.read(|backend| backend.spaces()));
+  let is_grouped = Memo::new(move |_| {
+    state
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.is_grouped_by_space)
+  });
 
   view! {
     <nav class="space-rail" aria-label=move || i18n.t("rail-label")>
+      <DirectMessagesButton />
+      <span class="rail-divider" aria-hidden="true"></span>
       <ul>
-        <For each=move || spaces.get() key=|space| (space.id, space.unread_count, space.mention_count) let:space>
-          <SpaceButton space=space />
-        </For>
+        {move || {
+          if is_grouped.get() {
+            view! { <AllSpacesButton /> }.into_any()
+          } else {
+            view! {
+              <For each=move || spaces.get() key=|space| space.id let:space>
+                <SpaceButton space=space />
+              </For>
+            }
+              .into_any()
+          }
+        }}
       </ul>
       <button class="rail-add" on:click=move |_| {
         // Joining an open space is the common case for everyone but the first person.
@@ -30,12 +49,96 @@ pub fn SpaceRail() -> impl IntoView {
   }
 }
 
+/// The direct messages page, with the number of unread DMs and mentions in them.
+#[component]
+fn DirectMessagesButton() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let count = Memo::new(move |_| {
+    let list = state.with_mutes(state.read(|backend| backend.direct_conversations()));
+    badge_count(&list)
+  });
+  let is_current = move || state.rail.get() == RailEntry::DirectMessages;
+  let label = move || match count.get() {
+    0 => i18n.t("sidebar-direct-messages"),
+    unread => i18n.t_with("rail-dm-unread", &[("count", &unread.to_string())]),
+  };
+  view! {
+    <button
+      class="space-btn rail-dm"
+      class:current=is_current
+      aria-label=label
+      title=label
+      aria-current=move || is_current().then_some("true")
+      on:click=move |_| state.open_direct_messages()
+    >
+      <Icon name=IconName::Chats />
+      {move || {
+        let unread = count.get();
+        (unread > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{unread}</span> })
+      }}
+    </button>
+  }
+}
+
+/// In the grouped sidebar: back from the direct messages to the channels of every space.
+#[component]
+fn AllSpacesButton() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let badge = Memo::new(move |_| {
+    let list = state.read(|backend| {
+      backend
+        .spaces()
+        .into_iter()
+        .flat_map(|space| backend.space_conversations(space.id))
+        .collect::<Vec<_>>()
+    });
+    RailBadge::of(&state.with_mutes(list))
+  });
+  let is_current = move || state.rail.get() == RailEntry::Space;
+  view! {
+    <li>
+      <button
+        class="space-btn"
+        class:current=is_current
+        aria-label=move || i18n.t("sidebar-all-spaces")
+        title=move || i18n.t("sidebar-all-spaces")
+        aria-current=move || is_current().then_some("true")
+        on:click=move |_| state.open_space(state.space.get_untracked())
+      >
+        <Icon name=IconName::Grid />
+        <RailBadgeView badge=badge />
+      </button>
+    </li>
+  }
+}
+
+/// Mentions as a number, other unread messages as a dot.
+#[component]
+fn RailBadgeView(badge: Memo<RailBadge>) -> impl IntoView {
+  move || {
+    let current = badge.get();
+    if current.mention_count > 0 {
+      view! { <span class="badge-count" aria-hidden="true">{current.mention_count}</span> }.into_any()
+    } else if current.has_unread {
+      view! { <span class="dot-unread" aria-hidden="true"></span> }.into_any()
+    } else {
+      ().into_any()
+    }
+  }
+}
+
 #[component]
 fn SpaceButton(space: Space) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = space.id;
-  let is_current = move || state.space.get() == id;
+  // Only the space's own channels count; DMs have their own entry.
+  let badge = Memo::new(move |_| {
+    RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_conversations(id))))
+  });
+  let is_current = move || state.rail.get() == RailEntry::Space && state.space.get() == id;
   let is_muted = move || {
     state
       .settings
@@ -45,12 +148,13 @@ fn SpaceButton(space: Space) -> impl IntoView {
   let label = {
     let name = space.name.clone();
     move || {
-      if space.mention_count > 0 {
+      let current = badge.get();
+      if current.mention_count > 0 {
         i18n.t_with(
           "rail-space-mentions",
-          &[("name", &name), ("count", &space.mention_count.to_string())],
+          &[("name", &name), ("count", &current.mention_count.to_string())],
         )
-      } else if space.unread_count > 0 {
+      } else if current.has_unread {
         i18n.t_with("rail-space-unread", &[("name", &name)])
       } else {
         name.clone()
@@ -68,30 +172,10 @@ fn SpaceButton(space: Space) -> impl IntoView {
         aria-label=label.clone()
         title=label
         aria-current=move || is_current().then_some("true")
-        on:click=move |_| {
-          state.space.set(id);
-          // Land in the first channel unless the current conversation already belongs to the space.
-          let belongs = match state.view.get_untracked() {
-            MainView::Conversation(current) => state
-              .read(|backend| backend.conversation(current))
-              .is_some_and(|conv| conv.maybe_space == Some(id) || conv.maybe_space.is_none()),
-            MainView::Threads
-            | MainView::Search
-            | MainView::Meetings
-            | MainView::Saved
-            | MainView::Activity
-            | MainView::Calls
-            | MainView::Directory => true,
-            MainView::Admin(_) | MainView::GettingStarted => false,
-          };
-          if !belongs {
-            state.open_first_conversation_of(id);
-          }
-        }
+        on:click=move |_| state.open_space(id)
       >
         <span aria-hidden="true">{initials(&space.name)}</span>
-        {(space.mention_count > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{space.mention_count}</span> })}
-        {move || (space.mention_count == 0 && space.unread_count > 0 && !is_muted()).then(|| view! { <span class="dot-unread" aria-hidden="true"></span> })}
+        <RailBadgeView badge=badge />
       </button>
     </li>
   }

@@ -145,12 +145,10 @@ pub struct Settings {
 impl Settings {
   /// Sidebar grouping from the current preferences. `usize::MAX` as limit shows every DM (keyboard
   /// navigation must reach conversations that the list currently hides).
-  pub fn sidebar_options(&self, dm_limit: usize) -> SidebarOptions {
-    let prefs = self.prefs.get();
+  pub fn sidebar_options(&self) -> SidebarOptions {
     SidebarOptions {
       show_unreads_group: self.show_unreads_group.get(),
-      sort: prefs.sidebar.sort,
-      dm_limit: if dm_limit == usize::MAX { 0 } else { dm_limit },
+      sort: self.prefs.with(|prefs| prefs.sidebar.sort),
     }
   }
 
