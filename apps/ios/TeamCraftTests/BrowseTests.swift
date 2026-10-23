@@ -26,12 +26,20 @@ final class BrowseTests: XCTestCase {
 
   func testDirectConversationIsFoundButNotAGroup() throws {
     let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
-    XCTAssertEqual(snapshot.directConversation(with: "2"), "11")
-    XCTAssertNil(snapshot.directConversation(with: "3"))
+    XCTAssertEqual(snapshot.directConversation(with: ["2"]), "11")
+    XCTAssertNil(snapshot.directConversation(with: ["3"]))
+  }
+
+  func testGroupIsFoundForExactlyItsPeople() throws {
+    let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
+    XCTAssertEqual(snapshot.directConversation(with: ["3", "2", "1"]), "10")
+    XCTAssertNil(snapshot.directConversation(with: ["2", "3", "4"]))
   }
 
   func testBrowseActionsOnTheWire() {
     XCTAssertEqual(ChatAction.openDm(userId: "2").json, #"{"action":"open_dm","user":"2"}"#)
+    XCTAssertEqual(
+      ChatAction.openGroupDm(userIds: ["2", "3"]).json, #"{"action":"open_group_dm","users":["2","3"]}"#)
     XCTAssertEqual(
       ChatAction.joinChannel(conversationId: "10").json, #"{"action":"join_channel","conversation":"10"}"#)
     XCTAssertEqual(ChatQuery.browseChannels(spaceId: "9").json, #"{"kind":"browse_channels","space":"9"}"#)

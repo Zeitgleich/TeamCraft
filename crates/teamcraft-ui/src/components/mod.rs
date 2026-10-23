@@ -37,6 +37,7 @@ pub mod emoji_picker;
 pub mod file_views;
 pub mod getting_started;
 pub mod guest_join;
+pub mod home;
 pub mod huddle_bar;
 pub mod icons;
 pub mod incoming_call;

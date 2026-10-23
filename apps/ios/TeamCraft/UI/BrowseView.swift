@@ -17,7 +17,9 @@ struct BrowseView: View {
   @State private var snapshot: BrowseSnapshot?
   @State private var spaceId: String?
   @State private var channels: [BrowsableChannel] = []
-  @State private var maybePendingDmUser: String?
+  /// People picked for a new DM (one) or group DM (several).
+  @State private var picked: [String] = []
+  @State private var maybePendingDm: [String]?
   @State private var isCreating = false
   @State private var newChannelName = ""
 
@@ -104,16 +106,37 @@ struct BrowseView: View {
     if snapshot != nil && people.isEmpty {
       hint("browse_no_people")
     } else {
-      List(people) { person in
-        Button {
-          message(person.id)
-        } label: {
-          VStack(alignment: .leading) {
-            Text(verbatim: person.displayName).foregroundStyle(Theme.text)
-            Text(verbatim: "@" + person.username).font(.footnote).foregroundStyle(Theme.textMuted)
+      List {
+        Section {
+          ForEach(people) { person in
+            let isPicked = picked.contains(person.id)
+            Button {
+              if isPicked { picked.removeAll { $0 == person.id } } else { picked.append(person.id) }
+            } label: {
+              HStack {
+                Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
+                  .foregroundStyle(isPicked ? Theme.accent : Theme.textMuted)
+                VStack(alignment: .leading) {
+                  Text(verbatim: person.displayName).foregroundStyle(Theme.text)
+                  Text(verbatim: "@" + person.username).font(.footnote).foregroundStyle(Theme.textMuted)
+                }
+              }
+            }
+            .accessibilityAddTraits(isPicked ? .isSelected : [])
+            .disabled(maybePendingDm != nil)
           }
+        } footer: {
+          Text("dm_pick_hint")
         }
-        .disabled(maybePendingDmUser != nil)
+      }
+      .safeAreaInset(edge: .bottom) {
+        if !picked.isEmpty {
+          Button(LocalizedStringKey(picked.count == 1 ? "dm_start" : "dm_start_group")) { message(picked) }
+            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity)
+            .padding()
+            .disabled(maybePendingDm != nil)
+        }
       }
     }
   }
@@ -132,8 +155,8 @@ struct BrowseView: View {
     if spaceId == nil { spaceId = loaded?.spaces?.first?.id }
     await loadChannels()
     // A new direct conversation opens as soon as the core created it, as on desktop.
-    if let user = maybePendingDmUser, let created = loaded?.directConversation(with: user) {
-      maybePendingDmUser = nil
+    if let users = maybePendingDm, let created = loaded?.directConversation(with: users) {
+      maybePendingDm = nil
       open(created)
     }
   }
@@ -143,13 +166,14 @@ struct BrowseView: View {
     channels = await model.browseChannels(spaceId: spaceId)
   }
 
-  private func message(_ userId: String) {
-    if let existing = snapshot?.directConversation(with: userId) {
+  private func message(_ userIds: [String]) {
+    if let existing = snapshot?.directConversation(with: userIds) {
       open(existing)
       return
     }
-    maybePendingDmUser = userId
-    Task { await model.perform(.openDm(userId: userId)) }
+    maybePendingDm = userIds
+    let action: ChatAction = userIds.count == 1 ? .openDm(userId: userIds[0]) : .openGroupDm(userIds: userIds)
+    Task { await model.perform(action) }
   }
 
   private func createChannel() {

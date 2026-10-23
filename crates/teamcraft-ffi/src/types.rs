@@ -59,6 +59,9 @@ pub struct ConversationItem {
   pub is_favorite: bool,
   pub is_muted: bool,
   pub can_post: bool,
+  /// The other person's presence in a one-to-one DM (the direct messages list shows it).
+  #[uniffi(default = None)]
+  pub maybe_peer_presence: Option<Presence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -382,6 +385,17 @@ impl From<PushService> for PushProvider {
       PushService::Fcm => Self::Fcm,
       PushService::UnifiedPush => Self::UnifiedPush,
       PushService::Apns => Self::Apns,
+    }
+  }
+}
+
+impl From<PresenceStatus> for Presence {
+  fn from(presence: PresenceStatus) -> Self {
+    match presence {
+      PresenceStatus::Online => Self::Online,
+      PresenceStatus::Away => Self::Away,
+      PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
+      PresenceStatus::Offline => Self::Offline,
     }
   }
 }

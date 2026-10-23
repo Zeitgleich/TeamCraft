@@ -847,6 +847,17 @@ impl ChatBackend for RemoteChat {
       .max(mirror.feeds.get(&conversation).map_or(0, |feed| feed.total))
   }
 
+  fn last_activity(&self, conversation: ConversationId) -> Option<teamcraft_client_api::model::TimestampMs> {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .last_activity
+      .iter()
+      .find(|(id, _)| *id == conversation)
+      .map(|(_, at)| *at)
+  }
+
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
     let total = self.message_count(conversation);
     let end = total.min(start.saturating_add(len));
@@ -935,6 +946,10 @@ impl ChatBackend for RemoteChat {
 
   fn open_dm(&self, user: UserId) {
     self.act(ChatAction::OpenDm { user });
+  }
+
+  fn open_group_dm(&self, users: Vec<UserId>) {
+    self.act(ChatAction::OpenGroupDm { users });
   }
 
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {

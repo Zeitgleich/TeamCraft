@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The direct messages tab: DMs and group DMs live outside spaces. -->
+<resources>
+  <string name="chats_tab_home">Home</string>
+  <string name="chats_tab_spaces">Spaces</string>
+  <string name="home_filter_unread">Unread</string>
+  <string name="home_filter_people">People</string>
+  <string name="home_filter_groups">Groups</string>
+  <string name="chats_no_channels">No channels yet. Browse the channels of your spaces to join one.</string>
+  <string name="chat_tab_new">%1$s, new messages</string>
+  <plurals name="chat_tab_unread">
+    <item quantity="one">%1$s, %2$d unread</item>
+    <item quantity="other">%1$s, %2$d unread</item>
+  </plurals>
+  <string name="dm_new">New message</string>
+  <string name="dm_filter">Filter direct messages</string>
+  <string name="dm_filter_empty">No direct messages match.</string>
+  <string name="dm_empty">Direct messages with one or several colleagues show up here. They don\'t belong to a space.</string>
+  <string name="dm_pick_hint">Pick one person for a direct message, or several for a group.</string>
+  <string name="dm_start">Open conversation</string>
+  <string name="dm_start_group">Start group</string>
+  <string name="clear">Clear</string>
+  <string name="presence_peer_offline">Offline</string>
+</resources>

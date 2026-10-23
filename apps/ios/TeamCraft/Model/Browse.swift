@@ -32,9 +32,14 @@ struct BrowseSnapshot: Decodable, Sendable {
       .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
   }
 
-  /// The one-to-one conversation with a person, if there is one.
-  func directConversation(with userId: String) -> String? {
-    conversations?.first { $0.kind == "Direct" && ($0.memberIds ?? []).contains(userId) }?.id
+  /// The DM (one person) or group DM (several) with exactly these people and the user, if there is
+  /// one.
+  func directConversation(with userIds: [String]) -> String? {
+    let wanted = Set(userIds).subtracting([me.id])
+    let kind = wanted.count == 1 ? "Direct" : "Group"
+    return conversations?.first {
+      $0.kind == kind && Set($0.memberIds ?? []).subtracting([me.id]) == wanted
+    }?.id
   }
 }
 

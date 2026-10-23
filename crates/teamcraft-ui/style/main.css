@@ -5177,3 +5177,190 @@ select.input {
 .shortcut-plus {
   opacity: 0.6;
 }
+
+/* ---- Direct messages page (rail entry, sidebar, start page, new message) ---- */
+
+.space-btn.rail-dm {
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--chrome-strong);
+}
+
+.space-btn.rail-dm.current {
+  background: var(--accent);
+  color: #fff;
+}
+
+.rail-divider {
+  width: 24px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.space-rail ul .space-btn:has(> .icon) {
+  display: grid;
+  place-items: center;
+}
+
+.dm-filter {
+  margin: 0 12px 4px;
+}
+
+.dm-filter .input {
+  width: 100%;
+  height: 30px;
+}
+
+/* Inputs on the sidebar's chrome colours, like the jump button. */
+.dm-filter .input,
+.dm-options .input {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--chrome-strong);
+}
+
+.dm-filter .input::placeholder {
+  color: var(--sb-muted);
+}
+
+.dm-options option {
+  background: var(--sb-bg);
+  color: var(--chrome-strong);
+}
+
+.dm-options .muted-text {
+  color: var(--sb-muted);
+}
+
+.dm-options {
+  display: grid;
+  gap: 4px;
+  margin: 0 12px 8px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 13px;
+}
+
+.sb-section-title {
+  margin: 0;
+  padding: 14px 12px 4px 16px;
+  color: var(--sb-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.sb-empty {
+  display: grid;
+  gap: 10px;
+  margin: 16px;
+  color: var(--sb-muted);
+  font-size: 13px;
+}
+
+.dm-home {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 420px;
+  margin: 15vh auto 0;
+  padding: 0 24px;
+  text-align: center;
+}
+
+.dm-home h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.dm-home-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--accent);
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.chip-list:empty {
+  display: none;
+}
+
+.person-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.new-message .input {
+  width: 100%;
+}
+
+.home-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 12px 8px;
+}
+
+.home-chip {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 13px;
+  background: transparent;
+  color: var(--chrome-text);
+  font-size: 12.5px;
+}
+
+.home-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.home-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.home-avatar {
+  display: inline-flex;
+  flex: none;
+}
+
+.home-avatar-group {
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.home-avatar-group .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.dm-sidebar .sb-item .badge {
+  font-size: 10px;
+}
+
+/* Single avatars in lists, not the overlapping stack the small size is made for. */
+.home-avatar .avatar-sm,
+.person-item .avatar-sm {
+  width: 24px;
+  height: 24px;
+  margin-left: 0;
+  box-shadow: none;
+}

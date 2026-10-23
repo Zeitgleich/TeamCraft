@@ -15,6 +15,10 @@ struct ConversationListView: View {
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
   @State private var maybeBrowseTab: BrowseView.Tab?
+  /// DMs live outside spaces (as on desktop), so they have their own tab.
+  @State private var tab: ChatTab = .home
+  @State private var homeChip: HomeFilter = .all
+  @State private var dmFilter = ""
 
   var body: some View {
     NavigationSplitView {
@@ -23,6 +27,7 @@ struct ConversationListView: View {
           VStack(spacing: 0) {
             OfflineBanner()
             NotificationPromptCard()
+            if !isSearching && !conversations.isEmpty { tabPicker }
           }
         }
         .navigationTitle("chats_title")
@@ -69,6 +74,12 @@ struct ConversationListView: View {
         model.openConversationId = nil
       }
     }
+    // A conversation opened from elsewhere (notification, link, new message) shows in its own tab.
+    .onChange(of: selection) { _, id in
+      if let selected = conversations.first(where: { $0.id == id }) {
+        tab = selected.isDirect ? .home : .spaces
+      }
+    }
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
@@ -94,7 +105,22 @@ struct ConversationListView: View {
       EmptyChatsView { tab in maybeBrowseTab = tab }
     } else {
       List(selection: $selection) {
-        ForEach(conversationSections(conversations, lastActivity: previews.mapValues(\.sentDate))) { section in
+        if tab == .home {
+          TextField("dm_filter", text: $dmFilter)
+            .textFieldStyle(.roundedBorder)
+            .autocorrectionDisabled()
+          homeChips
+          if shownSections.isEmpty {
+            let isUnfiltered = dmFilter.isEmpty && homeChip == .all
+            Text(LocalizedStringKey(isUnfiltered ? "dm_empty" : "dm_filter_empty")).foregroundStyle(Theme.textMuted)
+            if isUnfiltered {
+              Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
+            }
+          }
+        } else if shownSections.isEmpty {
+          Text("chats_no_channels").foregroundStyle(Theme.textMuted)
+        }
+        ForEach(shownSections) { section in
           Section(header: Text(title(of: section.title))) {
             ForEach(section.conversations, id: \.id) { conversation in
               ConversationRow(conversation: conversation, maybePreview: previews[conversation.id])
@@ -111,6 +137,58 @@ struct ConversationListView: View {
       }
       .listStyle(.sidebar)
     }
+  }
+
+  private var shownSections: [ConversationSection] {
+    switch tab {
+    case .spaces: return channelSections(conversations)
+    case .home:
+      return directSections(
+        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
+    }
+  }
+
+  /// Unread / People / Groups; tapping the selected chip again shows everything.
+  private var homeChips: some View {
+    HStack {
+      ForEach(HomeFilter.chips, id: \.self) { chip in
+        Button(LocalizedStringKey(chipKey(chip))) { homeChip = homeChip == chip ? .all : chip }
+          .buttonStyle(.bordered)
+          .tint(homeChip == chip ? Theme.accent : .secondary)
+          .accessibilityAddTraits(homeChip == chip ? .isSelected : [])
+      }
+    }
+  }
+
+  private func chipKey(_ chip: HomeFilter) -> String {
+    switch chip {
+    case .all: return "home_filter_all"
+    case .unread: return "home_filter_unread"
+    case .people: return "home_filter_people"
+    case .groups: return "home_filter_groups"
+    }
+  }
+
+  /// Home and spaces, each with what is new in it.
+  private var tabPicker: some View {
+    Picker("chats_title", selection: $tab) {
+      ForEach(ChatTab.allCases, id: \.self) { tab in
+        Text(tabLabel(tab)).tag(tab)
+      }
+    }
+    .pickerStyle(.segmented)
+    .padding(.horizontal)
+    .padding(.vertical, 6)
+  }
+
+  /// "Home (3)": channels count only mentions, DMs every unread message.
+  private func tabLabel(_ tab: ChatTab) -> String {
+    let isDirect = tab == .home
+    let name = isDirect ? String(localized: "home_title") : String(localized: "chats_tab_spaces")
+    let badge = TabBadge(conversations.filter { $0.isDirect == isDirect })
+    let count = isDirect ? max(badge.mentions, badge.unread) : badge.mentions
+    if count > 0 { return "\(name) (\(count))" }
+    return badge.unread > 0 ? "\(name) •" : name
   }
 
   /// Read when unread; otherwise unread again from the newest message.
@@ -160,6 +238,14 @@ struct ConversationRow: View {
   var body: some View {
     HStack(spacing: 10) {
       Image(systemName: icon).frame(width: 22).foregroundStyle(Theme.textMuted)
+        .overlay(alignment: .bottomTrailing) {
+          if let presence = conversation.maybePeerPresence {
+            Circle()
+              .fill(presenceColor(presence))
+              .frame(width: 8, height: 8)
+              .accessibilityLabel(Text(presenceLabel(presence)))
+          }
+        }
       VStack(alignment: .leading, spacing: 2) {
         HStack {
           Text(conversation.name)
@@ -214,6 +300,24 @@ struct ConversationRow: View {
       return date.formatted(.dateTime.weekday(.abbreviated))
     }
     return date.formatted(date: .numeric, time: .omitted)
+  }
+
+  private func presenceColor(_ presence: Presence) -> Color {
+    switch presence {
+    case .online: return .green
+    case .away: return .orange
+    case .doNotDisturb: return .red
+    case .offline: return .gray
+    }
+  }
+
+  private func presenceLabel(_ presence: Presence) -> LocalizedStringKey {
+    switch presence {
+    case .online: return "presence_online"
+    case .away: return "presence_away"
+    case .doNotDisturb: return "presence_dnd"
+    case .offline: return "presence_peer_offline"
+    }
   }
 
   private var icon: String {

@@ -67,6 +67,11 @@ impl Engine {
           .with_client(|client| Box::pin(async move { client.open_dm(user).await.map(|_| ()) }))
           .await
       },
+      ChatAction::OpenGroupDm { users } => {
+        self
+          .with_client(|client| Box::pin(async move { client.open_group_dm(&users).await.map(|_| ()) }))
+          .await
+      },
       ChatAction::AddMember { conversation, user } => {
         self
           .with_client(|client| Box::pin(async move { client.add_member(conversation, user).await }))

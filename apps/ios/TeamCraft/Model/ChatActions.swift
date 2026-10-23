@@ -25,6 +25,8 @@ enum ChatAction {
   case createChannel(spaceId: String, name: String)
   /// The direct conversation with a person; created when there is none yet.
   case openDm(userId: String)
+  /// The group DM with exactly these people (and the user); created when there is none yet.
+  case openGroupDm(userIds: [String])
 
   /// The wire form.
   var json: String {
@@ -71,6 +73,8 @@ enum ChatAction {
       object = ["action": "create_channel", "space": space, "name": name]
     case .openDm(let user):
       object = ["action": "open_dm", "user": user]
+    case .openGroupDm(let users):
+      object = ["action": "open_group_dm", "users": users]
     }
     return jsonText(object)
   }

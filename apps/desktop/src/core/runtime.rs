@@ -768,6 +768,9 @@ impl Core {
           .map_err(describe);
       },
       ChatAction::OpenDm { user } => return client.open_dm(*user).await.map(|_| ()).map_err(describe),
+      ChatAction::OpenGroupDm { users } => {
+        return client.open_group_dm(users).await.map(|_| ()).map_err(describe);
+      },
       ChatAction::AddMember { conversation, user } => {
         return client.add_member(*conversation, *user).await.map_err(describe);
       },
@@ -807,6 +810,7 @@ impl Core {
     match action {
       ChatAction::CreateChannel { .. }
       | ChatAction::OpenDm { .. }
+      | ChatAction::OpenGroupDm { .. }
       | ChatAction::AddMember { .. }
       | ChatAction::ChangePassphrase { .. }
       | ChatAction::SetActivity { .. }

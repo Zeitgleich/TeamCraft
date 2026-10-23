@@ -9,11 +9,13 @@ use leptos::prelude::*;
 use crate::admin::AdminSection;
 use crate::backend::Backend;
 use crate::calls::CallState;
-use crate::model::{Conversation, ConversationId, MessageId, SpaceId, ThreadId, User, UserId, id_from_raw};
+use crate::model::{
+  Conversation, ConversationId, MessageId, SpaceId, ThreadId, TimestampMs, User, UserId, id_from_raw,
+};
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
 use crate::reactive::get_if_observed;
-use crate::sections::{apply_favorite_order, build_sections};
+use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
 use teamcraft_client_api::actions::{NewChannel, NewSpace};
@@ -75,6 +77,15 @@ pub struct UnreadMarker {
   pub index: usize,
 }
 
+/// The entry of the space rail that is selected, and so which sidebar shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RailEntry {
+  /// Home: the DMs and group DMs, which live outside spaces (Element's and Discord's home).
+  Home,
+  /// The space in [`AppState::space`] (or all spaces, in the grouped sidebar).
+  Space,
+}
+
 /// What fills the main column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainView {
@@ -97,6 +108,8 @@ pub enum MainView {
   Directory,
   /// First steps for an empty workspace or space: create a space or channel, invite colleagues.
   GettingStarted,
+  /// Home with no conversation open.
+  Home,
 }
 
 /// What the right-hand panel shows.
@@ -136,6 +149,8 @@ pub enum Overlay {
   /// Pick a conversation to forward a message to.
   Forward(ConversationId, MessageId),
   NewSpace,
+  /// Pick one or several people to write to (a DM or a group DM).
+  NewMessage,
   /// Open spaces to join, and the way to create a new one.
   JoinSpace,
   NewChannel(SpaceId),
@@ -160,6 +175,7 @@ pub struct AppState {
   /// Bumped after every backend mutation; reading data through [`AppState::read`] subscribes to it.
   revision: RwSignal<u64>,
   pub space: RwSignal<SpaceId>,
+  pub rail: RwSignal<RailEntry>,
   pub view: RwSignal<MainView>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
@@ -171,8 +187,8 @@ pub struct AppState {
   /// Bumped when the composer sent a message, so the feed scrolls to it.
   /// The message the composer quotes in its next message.
   pub reply_target: RwSignal<Option<ReplyTarget>>,
-  /// The person whose direct conversation was asked for and is not there yet.
-  pub pending_dm: RwSignal<Option<UserId>>,
+  /// The people of a DM or group DM that was asked for and is not there yet.
+  pub pending_dm: RwSignal<Option<Vec<UserId>>>,
   /// Short messages shown over the app until dismissed (reminders, undo).
   pub toasts: RwSignal<Vec<Toast>>,
   next_toast: StoredValue<u64>,
@@ -212,6 +228,7 @@ impl AppState {
       backend: StoredValue::new_local(backend),
       revision: RwSignal::new(0),
       space: RwSignal::new(space),
+      rail: RwSignal::new(RailEntry::Space),
       view: RwSignal::new(view),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
@@ -249,8 +266,8 @@ impl AppState {
       self.pending_open.set(None);
       self.open_conversation(conversation);
     }
-    if let Some(user) = self.pending_dm.get_untracked()
-      && let Some(conversation) = self.direct_with(user)
+    if let Some(users) = self.pending_dm.get_untracked()
+      && let Some(conversation) = self.direct_with(&users)
     {
       self.pending_dm.set(None);
       self.open_conversation(conversation);
@@ -363,29 +380,123 @@ impl AppState {
 
   /// Opens the direct conversation with a person, creating it first if there is none yet.
   pub fn open_direct(&self, user: UserId) {
-    if let Some(conversation) = self.direct_with(user) {
+    self.open_direct_with(vec![user]);
+  }
+
+  /// Opens the DM (one person) or group DM (several) with exactly these people, creating it first
+  /// if there is none yet. The user themself may be in `users`.
+  pub fn open_direct_with(&self, mut users: Vec<UserId>) {
+    let me = self.me().id;
+    users.retain(|user| *user != me);
+    users.sort();
+    users.dedup();
+    if users.is_empty() {
+      return;
+    }
+    if let Some(conversation) = self.direct_with(&users) {
       self.open_conversation(conversation);
-    } else {
-      self.pending_dm.set(Some(user));
-      self.write(|backend| backend.open_dm(user));
+      return;
+    }
+    self.pending_dm.set(Some(users.clone()));
+    match users.as_slice() {
+      [user] => {
+        let user = *user;
+        self.write(|backend| backend.open_dm(user));
+      },
+      _ => self.write(|backend| backend.open_group_dm(users)),
     }
   }
 
-  fn direct_with(&self, user: UserId) -> Option<ConversationId> {
+  fn direct_with(&self, users: &[UserId]) -> Option<ConversationId> {
     let me = self.me().id;
+    let kind = if users.len() == 1 {
+      crate::model::ConversationKind::Direct
+    } else {
+      crate::model::ConversationKind::Group
+    };
     self.read(|backend| {
       backend
         .direct_conversations()
         .into_iter()
-        .find(|conversation| {
-          conversation.kind == crate::model::ConversationKind::Direct
-            && conversation.member_ids.contains(&user)
-            && conversation
-              .member_ids
-              .iter()
-              .all(|member| *member == user || *member == me)
-        })
+        .find(|conversation| conversation.kind == kind && has_exactly(&conversation.member_ids, users, me))
         .map(|conversation| conversation.id)
+    })
+  }
+
+  /// Switches the sidebar to a space (all spaces in the grouped sidebar). Lands in its first channel
+  /// unless the open page isn't tied to a space (threads, search, …) or already belongs to it.
+  pub fn open_space(&self, space: SpaceId) {
+    self.space.set(space);
+    self.rail.set(RailEntry::Space);
+    let is_grouped = self
+      .settings
+      .prefs
+      .with_untracked(|prefs| prefs.sidebar.is_grouped_by_space);
+    let belongs = match self.view.get_untracked() {
+      MainView::Conversation(current) => {
+        self
+          .read(|backend| backend.conversation(current))
+          .is_some_and(|conversation| {
+            conversation.maybe_space.is_some() && (is_grouped || conversation.maybe_space == Some(space))
+          })
+      },
+      MainView::Threads
+      | MainView::Search
+      | MainView::Meetings
+      | MainView::Saved
+      | MainView::Activity
+      | MainView::Calls
+      | MainView::Directory => true,
+      MainView::Admin(_) | MainView::GettingStarted | MainView::Home => false,
+    };
+    if !belongs {
+      self.open_first_conversation_of(space);
+    }
+  }
+
+  /// Shows Home: the most recent DM, or the page's start when there is none.
+  pub fn open_home(&self) {
+    self.rail.set(RailEntry::Home);
+    let is_direct_open = self
+      .current_conversation_id()
+      .and_then(|id| self.read(|backend| backend.conversation(id)))
+      .is_some_and(|conversation| conversation.kind.is_direct_like());
+    if is_direct_open {
+      return;
+    }
+    let maybe_recent = self.direct_list().into_iter().next();
+    match maybe_recent {
+      Some(conversation) => self.open_conversation(conversation.id),
+      None => {
+        self.view.set(MainView::Home);
+        self.panel.set(SidePanel::Closed);
+      },
+    }
+  }
+
+  /// DMs and group DMs as Home lists them (favorites first, then by recency
+  /// or name), without the display limit.
+  pub fn direct_list(&self) -> Vec<Conversation> {
+    let sort = self.settings.prefs.with(|prefs| prefs.sidebar.dm_sort);
+    build_direct(self.direct_entries(), sort, 0, "", HomeFilter::All)
+      .sections
+      .into_iter()
+      .flat_map(|section| section.conversations)
+      .collect()
+  }
+
+  /// DMs and group DMs (without the ones being left, mutes applied), each with the time of its
+  /// newest message.
+  pub fn direct_entries(&self) -> Vec<(Conversation, Option<TimestampMs>)> {
+    let list = self.with_mutes(self.sidebar_list(self.read(|backend| backend.direct_conversations())));
+    self.read(|backend| {
+      list
+        .into_iter()
+        .map(|conversation| {
+          let at = backend.last_activity(conversation.id);
+          (conversation, at)
+        })
+        .collect()
     })
   }
 
@@ -417,7 +528,8 @@ impl AppState {
       | MainView::Activity
       | MainView::Calls
       | MainView::Directory
-      | MainView::GettingStarted => None,
+      | MainView::GettingStarted
+      | MainView::Home => None,
     }
   }
 
@@ -428,6 +540,9 @@ impl AppState {
     };
     if let Some(space) = conversation.maybe_space {
       self.space.set(space);
+      self.rail.set(RailEntry::Space);
+    } else if conversation.kind.is_direct_like() {
+      self.rail.set(RailEntry::Home);
     }
     if let SidePanel::Thread {
       conversation: open, ..
@@ -487,7 +602,7 @@ impl AppState {
     }
   }
 
-  /// Marks every conversation of the current space (and the direct messages) as read.
+  /// Marks every conversation of the current list (the space's channels, or the DMs) as read.
   pub fn mark_all_read(&self) {
     let unread: Vec<ConversationId> = self
       .navigable_conversations()
@@ -596,6 +711,20 @@ impl AppState {
         .favorite_order
         .with(|order| apply_favorite_order(&mut list, order));
     }
+    list
+  }
+
+  /// Conversations with the notification settings applied: one muted there (or through its space)
+  /// looks muted in the lists too.
+  pub fn with_mutes(&self, mut list: Vec<Conversation>) -> Vec<Conversation> {
+    self.settings.prefs.with(|prefs| {
+      for conversation in &mut list {
+        let maybe_space = conversation.maybe_space.map(|space| space.to_string());
+        conversation.is_muted |= prefs
+          .notifications
+          .is_muted_in(&conversation.id.to_string(), maybe_space.as_deref());
+      }
+    });
     list
   }
 
@@ -724,14 +853,28 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
-  /// All conversations listed in the sidebar of the current space, in sidebar order.
+  /// All conversations of the current sidebar in its order: the DMs on Home,
+  /// otherwise the channels of the current space (of every space in the grouped sidebar).
   pub fn navigable_conversations(&self) -> Vec<Conversation> {
+    if self.rail.get() == RailEntry::Home {
+      return self.direct_list();
+    }
     let space = self.space.get();
-    let options = self.settings.sidebar_options(usize::MAX);
+    let is_grouped = self
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.is_grouped_by_space);
+    let options = self.settings.sidebar_options();
     let all = self.sidebar_list(self.read(|backend| {
-      let mut list = backend.space_conversations(space);
-      list.extend(backend.direct_conversations());
-      list
+      if is_grouped {
+        backend
+          .spaces()
+          .into_iter()
+          .flat_map(|space| backend.space_conversations(space.id))
+          .collect()
+      } else {
+        backend.space_conversations(space)
+      }
     }));
     build_sections(&all, &options)
       .into_iter()
@@ -757,4 +900,12 @@ impl AppState {
 
 pub fn use_app_state() -> AppState {
   expect_context::<AppState>()
+}
+
+/// Whether `members` are exactly `users` plus (optionally) `me`.
+fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
+  users.iter().all(|user| members.contains(user))
+    && members
+      .iter()
+      .all(|member| *member == me || users.contains(member))
 }

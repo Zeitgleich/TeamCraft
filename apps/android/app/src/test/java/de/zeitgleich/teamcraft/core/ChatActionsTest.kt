@@ -35,6 +35,11 @@ class ChatActionsTest {
   }
 
   @Test
+  fun groupDmListsThePeople() {
+    assertEquals("""{"action":"open_group_dm","users":["2","3"]}""", ChatActions.openGroupDm(listOf("2", "3")))
+  }
+
+  @Test
   fun archiveChannelSetsOnlyTheArchivedChange() {
     assertEquals(
       """{"action":"update_channel","conversation":"7","changes":{"maybe_is_archived":true}}""",

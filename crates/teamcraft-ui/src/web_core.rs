@@ -24,7 +24,7 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
-  MessageWindow, SecuritySnapshot,
+  MessageWindow, SecuritySnapshot, last_activity_of,
 };
 use teamcraft_core::api::{AccessTokenSource, ApiError, GatewayConnection, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
@@ -759,12 +759,14 @@ impl Core {
       .iter()
       .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
       .collect();
+    let last_activity = last_activity_of(backend, &conversations);
     Ok(ChatSnapshot {
       me: backend.me(),
       users: backend.users(),
       spaces: backend.spaces(),
       conversations,
       message_counts,
+      last_activity,
       security: self.security_snapshot()?,
     })
   }
@@ -811,6 +813,9 @@ impl Core {
           .map_err(describe);
       },
       ChatAction::OpenDm { user } => return client.open_dm(*user).await.map(|_| ()).map_err(describe),
+      ChatAction::OpenGroupDm { users } => {
+        return client.open_group_dm(users).await.map(|_| ()).map_err(describe);
+      },
       ChatAction::AddMember { conversation, user } => {
         return client.add_member(*conversation, *user).await.map_err(describe);
       },
@@ -875,6 +880,7 @@ impl Core {
       ChatAction::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
       ChatAction::CreateChannel { .. }
       | ChatAction::OpenDm { .. }
+      | ChatAction::OpenGroupDm { .. }
       | ChatAction::AddMember { .. }
       | ChatAction::ChangePassphrase { .. }
       | ChatAction::SetActivity { .. }

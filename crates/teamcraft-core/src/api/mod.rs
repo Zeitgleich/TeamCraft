@@ -16,13 +16,13 @@ use std::future::Future;
 pub use http::{AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken};
 use teamcraft_proto::{
   AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
-  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest, DeviceId,
-  DeviceListResponse, DeviceResponse, ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage,
-  GetMeResponse, IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse,
-  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
-  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
-  ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
+  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
+  CreateGroupDmRequest, DeviceId, DeviceListResponse, DeviceResponse, ErrorBody, ErrorCode,
+  GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse, KeyBagResponse,
+  KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
+  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
+  ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
   RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
   UserId, UserSummary,
 };
@@ -118,6 +118,10 @@ pub trait ServerApi {
   fn create_dm(
     &self,
     request: &CreateDmRequest,
+  ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
+  fn create_group_dm(
+    &self,
+    request: &CreateGroupDmRequest,
   ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
   fn add_member(
     &self,

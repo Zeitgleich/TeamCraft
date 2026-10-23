@@ -9,7 +9,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
-use teamcraft_client_api::model::{Message as MessageView, is_pending};
+use teamcraft_client_api::model::{
+  Conversation as ConversationView, ConversationKind as ConversationKindView, Message as MessageView, UserId,
+  is_pending,
+};
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
@@ -372,10 +375,12 @@ impl Engine {
       conversations.extend(backend.space_conversations(*space));
     }
     conversations.extend(backend.direct_conversations());
+    let me = backend.me().id;
     Ok(
       conversations
         .into_iter()
         .map(|conversation| ConversationItem {
+          maybe_peer_presence: peer_presence(backend, &conversation, me),
           id: conversation.id.to_string(),
           maybe_space_id: conversation.maybe_space.map(|space| space.to_string()),
           maybe_space_name: conversation
@@ -842,4 +847,17 @@ fn remove_shared_downloads(directory: &std::path::Path) {
       tracing::debug!(%error, "an old shared download could not be deleted");
     }
   }
+}
+
+/// The other person's presence in a one-to-one DM; `None` for every other conversation.
+fn peer_presence(
+  backend: &impl ChatBackend,
+  conversation: &ConversationView,
+  me: UserId,
+) -> Option<Presence> {
+  if conversation.kind != ConversationKindView::Direct {
+    return None;
+  }
+  let other = conversation.member_ids.iter().find(|member| **member != me)?;
+  backend.user(*other).map(|user| Presence::from(user.presence))
 }

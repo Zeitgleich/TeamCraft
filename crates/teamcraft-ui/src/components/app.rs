@@ -26,6 +26,7 @@ use crate::components::directory_view::DirectoryView;
 use crate::components::file_views::{FilesPanel, Gallery};
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
+use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::login::SessionGate;
@@ -63,7 +64,7 @@ use crate::prefs::Zoom;
 use crate::reactive::use_interval;
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
-use crate::state::{AppState, MainView, Overlay, SidePanel};
+use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel};
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -165,10 +166,10 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <div class="app-body">
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
-          <Show when=move || !state.settings.prefs.with(|prefs| prefs.sidebar.is_grouped_by_space) fallback=|| ()>
-            <SpaceRail />
+          <SpaceRail />
+          <Show when=move || state.rail.get() == RailEntry::Home fallback=|| view! { <Sidebar /> }>
+            <HomeSidebar />
           </Show>
-          <Sidebar />
         </Show>
         <main id="main-content" class="main" tabindex="-1">
           {move || match state.view.get() {
@@ -182,6 +183,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Calls => view! { <CallsView /> }.into_any(),
             MainView::Directory => view! { <DirectoryView /> }.into_any(),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
+            MainView::Home => view! { <HomeStart /> }.into_any(),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
@@ -250,6 +252,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
         Overlay::Gallery(conversation, message) => view! { <Gallery conversation=conversation start=message /> }.into_any(),
         Overlay::NewSpace => view! { <NewSpaceDialog /> }.into_any(),
+        Overlay::NewMessage => view! { <NewMessageDialog /> }.into_any(),
         Overlay::JoinSpace => view! { <JoinSpaceDialog /> }.into_any(),
         Overlay::NewChannel(space) => view! { <NewChannelDialog space=space /> }.into_any(),
         Overlay::BrowseChannels(space) => view! { <BrowseChannelsDialog space=space /> }.into_any(),

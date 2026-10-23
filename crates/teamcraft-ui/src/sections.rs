@@ -1,26 +1,20 @@
-//! Pure grouping of conversations into sidebar sections.
+//! Pure grouping of conversations into sidebar sections: the channels of a space, and the
+//! Home (DMs and group DMs live outside spaces).
 
-use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId};
-use crate::prefs::SidebarSort;
+use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs};
+use crate::prefs::{DmSort, SidebarSort};
 
-/// Sidebar sections in display order.
+/// Sidebar sections of a space in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SectionKind {
   Unreads,
   Favorites,
   Channels,
   Integrations,
-  DirectMessages,
 }
 
 impl SectionKind {
-  pub const ALL: [SectionKind; 5] = [
-    Self::Unreads,
-    Self::Favorites,
-    Self::Channels,
-    Self::Integrations,
-    Self::DirectMessages,
-  ];
+  pub const ALL: [SectionKind; 4] = [Self::Unreads, Self::Favorites, Self::Channels, Self::Integrations];
 
   pub fn from_slug(slug: &str) -> Option<Self> {
     Self::ALL.into_iter().find(|kind| kind.slug() == slug)
@@ -32,7 +26,6 @@ impl SectionKind {
       Self::Favorites => "favorites",
       Self::Channels => "channels",
       Self::Integrations => "integrations",
-      Self::DirectMessages => "direct-messages",
     }
   }
 
@@ -43,7 +36,6 @@ impl SectionKind {
       Self::Favorites => "sidebar-favorites",
       Self::Channels => "sidebar-channels",
       Self::Integrations => "sidebar-integrations",
-      Self::DirectMessages => "sidebar-direct-messages",
     }
   }
 }
@@ -52,17 +44,13 @@ impl SectionKind {
 pub struct Section {
   pub kind: SectionKind,
   pub conversations: Vec<Conversation>,
-  /// Direct messages cut off by the display limit.
-  pub hidden_count: usize,
 }
 
-/// How the sidebar groups and orders conversations.
+/// How the sidebar of a space groups and orders its channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SidebarOptions {
   pub show_unreads_group: bool,
   pub sort: SidebarSort,
-  /// Direct messages to show; 0 shows all.
-  pub dm_limit: usize,
 }
 
 impl SidebarOptions {
@@ -70,30 +58,26 @@ impl SidebarOptions {
     Self {
       show_unreads_group,
       sort: SidebarSort::Default,
-      dm_limit: 0,
     }
   }
 }
 
-/// Groups conversations: unread ones (optional), favorites, then the remaining by category. Every
-/// conversation appears exactly once; empty sections are omitted except the channel list itself.
+/// Groups the channels of a space: unread ones (optional), favorites, then the remaining by
+/// category. Every conversation appears exactly once; empty sections are omitted. Direct messages
+/// have their own page ([`build_direct`]); one passed in here goes into no section.
 pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) -> Vec<Section> {
-  let mut sections: Vec<Section> = [
-    SectionKind::Unreads,
-    SectionKind::Favorites,
-    SectionKind::Channels,
-    SectionKind::Integrations,
-    SectionKind::DirectMessages,
-  ]
-  .into_iter()
-  .map(|kind| Section {
-    kind,
-    conversations: Vec::new(),
-    hidden_count: 0,
-  })
-  .collect();
+  let mut sections: Vec<Section> = SectionKind::ALL
+    .into_iter()
+    .map(|kind| Section {
+      kind,
+      conversations: Vec::new(),
+    })
+    .collect();
 
-  for conversation in conversations {
+  for conversation in conversations
+    .iter()
+    .filter(|conversation| !conversation.kind.is_direct_like())
+  {
     let kind = if options.show_unreads_group && conversation.unread_count > 0 && !conversation.is_muted {
       SectionKind::Unreads
     } else if conversation.is_favorite {
@@ -101,9 +85,8 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
     } else {
       match conversation.category {
         SidebarCategory::Favorites => SectionKind::Favorites,
-        SidebarCategory::Channels => SectionKind::Channels,
         SidebarCategory::Integrations => SectionKind::Integrations,
-        SidebarCategory::DirectMessages => SectionKind::DirectMessages,
+        SidebarCategory::Channels | SidebarCategory::DirectMessages => SectionKind::Channels,
       }
     };
     if let Some(section) = sections.iter_mut().find(|section| section.kind == kind) {
@@ -116,22 +99,156 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
         .conversations
         .sort_by_key(|conversation| conversation.name.to_lowercase());
     }
-    if section.kind == SectionKind::DirectMessages
-      && options.dm_limit > 0
-      && section.conversations.len() > options.dm_limit
-    {
-      // Unread conversations stay visible even beyond the limit.
-      let (keep, rest): (Vec<_>, Vec<_>) = section
-        .conversations
-        .drain(..)
-        .enumerate()
-        .partition(|(index, conv)| *index < options.dm_limit || conv.unread_count > 0);
-      section.hidden_count = rest.len();
-      section.conversations = keep.into_iter().map(|(_, conv)| conv).collect();
-    }
   }
   sections.retain(|section| !section.conversations.is_empty());
   sections
+}
+
+/// The sections of Home, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DirectSectionKind {
+  Favorites,
+  Conversations,
+}
+
+impl DirectSectionKind {
+  /// i18n key of the section title.
+  pub fn title_key(self) -> &'static str {
+    match self {
+      Self::Favorites => "sidebar-favorites",
+      Self::Conversations => "sidebar-direct-messages",
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirectSection {
+  pub kind: DirectSectionKind,
+  pub conversations: Vec<Conversation>,
+}
+
+/// The filter chips above the Home list (Element: Unread, People, Groups). One at a time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HomeFilter {
+  #[default]
+  All,
+  /// Conversations with unread messages (muted ones only with mentions).
+  Unread,
+  /// One-to-one DMs.
+  People,
+  /// Group DMs.
+  Groups,
+}
+
+impl HomeFilter {
+  /// The chips, in display order ("All" is no chip selected).
+  pub const CHIPS: [HomeFilter; 3] = [Self::Unread, Self::People, Self::Groups];
+
+  /// i18n key of the chip.
+  pub fn label_key(self) -> &'static str {
+    match self {
+      Self::All => "home-filter-all",
+      Self::Unread => "home-filter-unread",
+      Self::People => "home-filter-people",
+      Self::Groups => "home-filter-groups",
+    }
+  }
+
+  pub fn matches(self, conversation: &Conversation) -> bool {
+    match self {
+      Self::All => true,
+      Self::Unread => {
+        conversation.mention_count > 0 || (conversation.unread_count > 0 && !conversation.is_muted)
+      },
+      Self::People => conversation.kind == ConversationKind::Direct,
+      Self::Groups => conversation.kind == ConversationKind::Group,
+    }
+  }
+}
+
+/// The list of Home.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirectList {
+  pub sections: Vec<DirectSection>,
+  /// Conversations cut off by the display limit ("show more").
+  pub hidden_count: usize,
+}
+
+/// Lists DMs and group DMs (each with the time of its newest message): favorites, then the rest,
+/// both in `sort` order. Only those `chip` lets through and whose names contain `filter` (any case)
+/// are kept; while filtering the limit doesn't apply. `limit` 0 shows all; unread conversations stay
+/// visible beyond it.
+pub fn build_direct(
+  conversations: Vec<(Conversation, Option<TimestampMs>)>,
+  sort: DmSort,
+  limit: usize,
+  filter: &str,
+  chip: HomeFilter,
+) -> DirectList {
+  let needle = filter.trim().to_lowercase();
+  let mut list: Vec<(Conversation, Option<TimestampMs>)> = conversations
+    .into_iter()
+    .filter(|(conversation, _)| conversation.kind.is_direct_like() && chip.matches(conversation))
+    .filter(|(conversation, _)| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
+    .collect();
+  match sort {
+    DmSort::Recent => list.sort_by(|(a, a_at), (b, b_at)| {
+      b_at
+        .cmp(a_at)
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    }),
+    DmSort::Alphabetical => list.sort_by_key(|(conversation, _)| conversation.name.to_lowercase()),
+  }
+  let (favorites, rest): (Vec<Conversation>, Vec<Conversation>) = list
+    .into_iter()
+    .map(|(conversation, _)| conversation)
+    .partition(|conversation| conversation.is_favorite);
+  let mut hidden_count = 0;
+  let is_filtering = !needle.is_empty() || chip != HomeFilter::All;
+  let rest = if limit > 0 && !is_filtering && rest.len() > limit {
+    let (keep, cut): (Vec<_>, Vec<_>) = rest
+      .into_iter()
+      .enumerate()
+      .partition(|(index, conversation)| *index < limit || conversation.unread_count > 0);
+    hidden_count = cut.len();
+    keep.into_iter().map(|(_, conversation)| conversation).collect()
+  } else {
+    rest
+  };
+  let sections = [
+    (DirectSectionKind::Favorites, favorites),
+    (DirectSectionKind::Conversations, rest),
+  ]
+  .into_iter()
+  .filter(|(_, conversations)| !conversations.is_empty())
+  .map(|(kind, conversations)| DirectSection { kind, conversations })
+  .collect();
+  DirectList {
+    sections,
+    hidden_count,
+  }
+}
+
+/// What a space rail entry shows for its conversations: a mention count, or a dot for unread
+/// messages in conversations that aren't muted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RailBadge {
+  pub mention_count: u32,
+  pub has_unread: bool,
+}
+
+impl RailBadge {
+  pub fn of(conversations: &[Conversation]) -> Self {
+    Self {
+      mention_count: conversations
+        .iter()
+        .map(|conversation| conversation.mention_count)
+        .sum(),
+      has_unread: conversations
+        .iter()
+        .any(|conversation| conversation.unread_count > 0 && !conversation.is_muted),
+    }
+  }
 }
 
 /// The number on the app's badge (dock, taskbar, tray): mentions everywhere plus unread direct and
@@ -190,13 +307,12 @@ pub struct SpaceGroup {
   pub conversations: Vec<Conversation>,
 }
 
-/// The "all spaces in one sidebar" layout: unread and favorite conversations of every space on top,
-/// then one group per space, then the direct messages.
+/// The "all spaces in one sidebar" layout: unread and favorite channels of every space on top, then
+/// one group per space.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupedSidebar {
   pub top: Vec<Section>,
   pub spaces: Vec<SpaceGroup>,
-  pub direct: Vec<Section>,
 }
 
 /// Splits [`build_sections`] by space. `spaces` gives the order and names of the groups; a channel
@@ -207,12 +323,10 @@ pub fn build_grouped(
   options: &SidebarOptions,
 ) -> GroupedSidebar {
   let mut top = Vec::new();
-  let mut direct = Vec::new();
   let mut channels: Vec<Conversation> = Vec::new();
   for section in build_sections(conversations, options) {
     match section.kind {
       SectionKind::Unreads | SectionKind::Favorites => top.push(section),
-      SectionKind::DirectMessages => direct.push(section),
       SectionKind::Channels | SectionKind::Integrations => channels.extend(section.conversations),
     }
   }
@@ -229,7 +343,7 @@ pub fn build_grouped(
     })
     .filter(|group| !group.conversations.is_empty())
     .collect();
-  GroupedSidebar { top, spaces, direct }
+  GroupedSidebar { top, spaces }
 }
 
 #[cfg(test)]
@@ -318,11 +432,11 @@ mod tests {
   use crate::model::{ConversationId, ConversationKind, id_from_raw};
 
   #[test]
-  fn each_conversation_appears_once() {
+  fn each_channel_appears_once_and_direct_messages_not_at_all() {
     let list = vec![
       conversation(1, SidebarCategory::Channels, 3, false),
       conversation(2, SidebarCategory::Channels, 0, true),
-      conversation(3, SidebarCategory::DirectMessages, 0, false),
+      direct(3, 2, None).0,
       conversation(4, SidebarCategory::Integrations, 0, false),
     ];
     let sections = build_sections(&list, &SidebarOptions::plain(true));
@@ -332,8 +446,7 @@ mod tests {
       [
         SectionKind::Unreads,
         SectionKind::Favorites,
-        SectionKind::Integrations,
-        SectionKind::DirectMessages
+        SectionKind::Integrations
       ]
     );
     assert_eq!(
@@ -341,33 +454,126 @@ mod tests {
         .iter()
         .map(|section| section.conversations.len())
         .sum::<usize>(),
-      4
+      3
     );
   }
 
   #[test]
-  fn sorting_and_dm_limit_apply() {
+  fn channels_sort_by_name() {
     let mut list = vec![
-      conversation(1, SidebarCategory::DirectMessages, 0, false),
-      conversation(2, SidebarCategory::DirectMessages, 0, false),
-      conversation(3, SidebarCategory::DirectMessages, 0, false),
+      conversation(1, SidebarCategory::Channels, 0, false),
+      conversation(2, SidebarCategory::Channels, 0, false),
     ];
     list[0].name = "zed".into();
     list[1].name = "Amy".into();
-    list[2].name = "bob".into();
     let options = SidebarOptions {
       show_unreads_group: true,
       sort: SidebarSort::Alphabetical,
-      dm_limit: 2,
     };
-    let sections = build_sections(&list, &options);
-    let names: Vec<&str> = sections[0]
+    let names: Vec<String> = build_sections(&list, &options)[0]
       .conversations
       .iter()
-      .map(|c| c.name.as_str())
+      .map(|c| c.name.clone())
       .collect();
-    assert_eq!(names, ["Amy", "bob"]);
-    assert_eq!(sections[0].hidden_count, 1);
+    assert_eq!(names, ["Amy", "zed"]);
+  }
+
+  mod direct_page {
+    use super::*;
+
+    fn names(list: &DirectList) -> Vec<Vec<&str>> {
+      list
+        .sections
+        .iter()
+        .map(|section| section.conversations.iter().map(|c| c.name.as_str()).collect())
+        .collect()
+    }
+
+    fn sample() -> Vec<(Conversation, Option<TimestampMs>)> {
+      let mut amy = direct(1, 0, Some(10));
+      amy.0.name = "Amy".into();
+      let mut zed = direct(2, 0, Some(30));
+      zed.0.name = "zed".into();
+      let mut bob = direct(3, 0, None);
+      bob.0.name = "bob".into();
+      let mut group = direct(4, 0, Some(20));
+      group.0.name = "Amy, bob".into();
+      group.0.kind = ConversationKind::Group;
+      let channel = (conversation(5, SidebarCategory::Channels, 0, false), Some(99));
+      vec![amy, zed, bob, group, channel]
+    }
+
+    #[test]
+    fn newest_first_without_channels() {
+      let list = build_direct(sample(), DmSort::Recent, 0, "", HomeFilter::All);
+      assert_eq!(names(&list), [vec!["zed", "Amy, bob", "Amy", "bob"]]);
+      assert_eq!(list.hidden_count, 0);
+    }
+
+    #[test]
+    fn alphabetical_with_favorites_first() {
+      let mut conversations = sample();
+      conversations[1].0.is_favorite = true;
+      let list = build_direct(conversations, DmSort::Alphabetical, 0, "", HomeFilter::All);
+      assert_eq!(names(&list), [vec!["zed"], vec!["Amy", "Amy, bob", "bob"]]);
+      assert_eq!(list.sections[0].kind, DirectSectionKind::Favorites);
+    }
+
+    #[test]
+    fn the_limit_keeps_unread_ones() {
+      let mut conversations = sample();
+      conversations[2].0.unread_count = 1;
+      let list = build_direct(conversations, DmSort::Recent, 1, "", HomeFilter::All);
+      assert_eq!(names(&list), [vec!["zed", "bob"]]);
+      assert_eq!(list.hidden_count, 2);
+    }
+
+    #[test]
+    fn chips_pick_unread_people_or_groups() {
+      let mut conversations = sample();
+      conversations[2].0.unread_count = 1;
+      conversations[0].0.unread_count = 3;
+      conversations[0].0.is_muted = true;
+      let unread = build_direct(conversations.clone(), DmSort::Recent, 1, "", HomeFilter::Unread);
+      assert_eq!(
+        names(&unread),
+        [vec!["bob"]],
+        "muted without a mention isn't unread; no limit"
+      );
+      let people = build_direct(conversations.clone(), DmSort::Recent, 0, "", HomeFilter::People);
+      assert_eq!(names(&people), [vec!["zed", "Amy", "bob"]]);
+      let groups = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::Groups);
+      assert_eq!(names(&groups), [vec!["Amy, bob"]]);
+    }
+
+    #[test]
+    fn filtering_ignores_case_and_the_limit() {
+      let list = build_direct(sample(), DmSort::Recent, 1, " AMY ", HomeFilter::All);
+      assert_eq!(names(&list), [vec!["Amy, bob", "Amy"]]);
+      assert_eq!(list.hidden_count, 0);
+      assert!(
+        build_direct(sample(), DmSort::Recent, 0, "nobody", HomeFilter::All)
+          .sections
+          .is_empty()
+      );
+    }
+  }
+
+  #[test]
+  fn rail_badges_skip_muted_unread_but_count_mentions() {
+    let mut muted = conversation(1, SidebarCategory::Channels, 4, false);
+    muted.is_muted = true;
+    muted.mention_count = 1;
+    assert_eq!(
+      RailBadge::of(std::slice::from_ref(&muted)),
+      RailBadge {
+        mention_count: 1,
+        has_unread: false
+      }
+    );
+    let unread = conversation(2, SidebarCategory::Channels, 2, false);
+    assert!(RailBadge::of(&[muted, unread]).has_unread);
+    assert_eq!(RailBadge::of(&[]), RailBadge::default());
   }
 
   #[test]
@@ -377,7 +583,7 @@ mod tests {
       conversation(1, SidebarCategory::Channels, 0, false),
       conversation(2, SidebarCategory::Channels, 4, false),
       conversation(3, SidebarCategory::Integrations, 0, false),
-      conversation(4, SidebarCategory::DirectMessages, 0, false),
+      direct(4, 0, None).0,
       conversation(5, SidebarCategory::Channels, 0, true),
     ];
     list[0].maybe_space = Some(a);
@@ -400,7 +606,6 @@ mod tests {
       "Project B only has an unread and a favorite channel, both on top"
     );
     assert_eq!(grouped.spaces[0].conversations.len(), 2);
-    assert_eq!(grouped.direct[0].conversations.len(), 1);
   }
 
   #[test]
@@ -410,6 +615,12 @@ mod tests {
       build_sections(&list, &SidebarOptions::plain(false))[0].kind,
       SectionKind::Channels
     );
+  }
+
+  fn direct(id: u64, unread: u32, maybe_at: Option<TimestampMs>) -> (Conversation, Option<TimestampMs>) {
+    let mut dm = conversation(id, SidebarCategory::DirectMessages, unread, false);
+    dm.kind = ConversationKind::Direct;
+    (dm, maybe_at)
   }
 
   fn conversation(id: u64, category: SidebarCategory, unread: u32, is_favorite: bool) -> Conversation {

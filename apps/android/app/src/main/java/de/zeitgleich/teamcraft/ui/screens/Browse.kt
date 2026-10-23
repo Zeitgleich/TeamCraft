@@ -9,6 +9,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -29,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
@@ -37,6 +42,7 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.toggled
 
 /** Public channels of each space to join, a new channel, and people to message directly. */
 @Composable
@@ -49,19 +55,41 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   var isCreating by remember { mutableStateOf(false) }
   val spaces = snapshot?.spaces.orEmpty()
   val maybeSpace = spaces.getOrNull(spaceIndex)
+  // People picked for a new DM (one) or group DM (several).
+  var picked by rememberSaveable { mutableStateOf(listOf<String>()) }
   // A new direct conversation opens as soon as the core created it, as on desktop.
-  var maybePendingDm by rememberSaveable { mutableStateOf<String?>(null) }
+  var maybePendingDm by rememberSaveable { mutableStateOf<List<String>?>(null) }
   LaunchedEffect(changes, maybeSpace?.id) {
     val loaded = viewModel.readChat { snapshot() }
     snapshot = loaded
     channels = maybeSpace?.let { space -> viewModel.readChat { query(ChatQueries.browseChannels(space.id)).channels } } ?: emptyList()
-    val maybeCreated = maybePendingDm?.let { user -> loaded?.let { directWith(it, user) } }
+    val maybeCreated = maybePendingDm?.let { users -> loaded?.let { directWith(it, users) } }
     if (maybeCreated != null) {
       maybePendingDm = null
       onOpen(maybeCreated)
     }
   }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.browse_title), maybeOnBack = onBack) }) { padding ->
+  val startConversation: () -> Unit = {
+    val users = picked
+    val maybeExisting = snapshot?.let { directWith(it, users) }
+    if (maybeExisting != null) {
+      onOpen(maybeExisting)
+    } else {
+      maybePendingDm = users
+      viewModel.act(if (users.size == 1) ChatActions.openDm(users.single()) else ChatActions.openGroupDm(users))
+    }
+  }
+  Scaffold(
+    topBar = { ChromeTopBar(title = stringResource(R.string.browse_title), maybeOnBack = onBack) },
+    bottomBar = {
+      if (showPeople && picked.isNotEmpty()) {
+        Button(
+          onClick = startConversation,
+          modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+        ) { Text(stringResource(if (picked.size == 1) R.string.dm_start else R.string.dm_start_group)) }
+      }
+    },
+  ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
       PrimaryTabRow(selectedTabIndex = if (showPeople) 1 else 0) {
         Tab(selected = !showPeople, onClick = { showPeople = false }, text = { Text(stringResource(R.string.channels)) })
@@ -72,20 +100,23 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
       if (showPeople && snapshot != null && people.isEmpty()) {
         EmptyHint(R.string.browse_no_people)
       } else if (showPeople) {
+        Text(
+          stringResource(R.string.dm_pick_hint),
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
+        )
         LazyColumn(Modifier.fillMaxSize()) {
           items(people, key = { it.id }) { user ->
+            val isPicked = user.id in picked
             Row(
-              Modifier.fillMaxWidth().clickable {
-                val maybeExisting = snapshot?.let { directWith(it, user.id) }
-                if (maybeExisting != null) {
-                  onOpen(maybeExisting)
-                } else {
-                  maybePendingDm = user.id
-                  viewModel.act(ChatActions.openDm(user.id))
-                }
-              }.padding(16.dp),
+              Modifier
+                .fillMaxWidth()
+                .toggleable(value = isPicked, role = Role.Checkbox) { picked = toggled(picked, user.id) }
+                .padding(16.dp),
               verticalAlignment = Alignment.CenterVertically,
             ) {
+              Checkbox(checked = isPicked, onCheckedChange = null, modifier = Modifier.padding(end = 12.dp))
               Column(Modifier.weight(1f)) {
                 Text(user.displayName)
                 Text(
@@ -166,9 +197,15 @@ private fun EmptyHint(@StringRes text: Int) {
   )
 }
 
-/** The one-to-one conversation with a person, if there is one. */
-fun directWith(snapshot: ChatSnapshot, userId: String): String? =
-  snapshot.conversations.firstOrNull { it.kind == "Direct" && userId in it.memberIds }?.id
+/**
+ * The DM (one person) or group DM (several) with exactly these people and the user, if there is
+ * one.
+ */
+fun directWith(snapshot: ChatSnapshot, users: List<String>): String? {
+  val wanted = users.toSet() - snapshot.me.id
+  val kind = if (wanted.size == 1) "Direct" else "Group"
+  return snapshot.conversations.firstOrNull { it.kind == kind && it.memberIds.toSet() - snapshot.me.id == wanted }?.id
+}
 
 /** A small marker for a presence state as the core reports it. */
 fun presenceDot(presence: String): String = when (presence) {

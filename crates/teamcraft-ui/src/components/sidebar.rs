@@ -66,7 +66,7 @@ pub fn Sidebar() -> impl IntoView {
     let space = state.space.get();
     let is_grouped = is_grouped.get();
     let list = state.read(|backend| {
-      let mut list = if is_grouped {
+      if is_grouped {
         backend
           .spaces()
           .into_iter()
@@ -74,45 +74,17 @@ pub fn Sidebar() -> impl IntoView {
           .collect()
       } else {
         backend.space_conversations(space)
-      };
-      list.extend(backend.direct_conversations());
-      list
+      }
     });
     state.sidebar_list(list)
   });
   let collapsed_spaces =
     RwSignal::new(load_json::<HashSet<SpaceId>>(KEY_COLLAPSED_SPACES).unwrap_or_default());
   Effect::new(move |_| collapsed_spaces.with(|set| store_json(KEY_COLLAPSED_SPACES, set)));
-  let show_all_dms = RwSignal::new(false);
-  // Conversations with the notification settings applied: one muted there (or through its space)
-  // looks muted here too.
-  let listed = Memo::new(move |_| {
-    let prefs = state.settings.prefs.get();
-    let mut list = conversations.get();
-    for conversation in &mut list {
-      let maybe_space = conversation.maybe_space.map(|space| space.to_string());
-      conversation.is_muted |= prefs
-        .notifications
-        .is_muted_in(&conversation.id.to_string(), maybe_space.as_deref());
-    }
-    list
-  });
-  let dm_limit = move || {
-    if show_all_dms.get() {
-      0
-    } else {
-      state.settings.prefs.with(|prefs| prefs.sidebar.dm_limit as usize)
-    }
-  };
-  let sections =
-    Memo::new(move |_| build_sections(&listed.get(), &state.settings.sidebar_options(dm_limit())));
-  let grouped = Memo::new(move |_| {
-    build_grouped(
-      &spaces.get(),
-      &listed.get(),
-      &state.settings.sidebar_options(dm_limit()),
-    )
-  });
+  let listed = Memo::new(move |_| state.with_mutes(conversations.get()));
+  let sections = Memo::new(move |_| build_sections(&listed.get(), &state.settings.sidebar_options()));
+  let grouped =
+    Memo::new(move |_| build_grouped(&spaces.get(), &listed.get(), &state.settings.sidebar_options()));
   let thread_unread = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -228,12 +200,12 @@ pub fn Sidebar() -> impl IntoView {
       <div class="sidebar-scroll">
         {move || {
           if is_grouped.get() {
-            view! { <GroupedSections grouped=grouped show_all=show_all_dms collapsed=collapsed collapsed_spaces=collapsed_spaces /> }
+            view! { <GroupedSections grouped=grouped collapsed=collapsed collapsed_spaces=collapsed_spaces /> }
               .into_any()
           } else {
             view! {
               <For each=move || sections.get() key=section_key let:section>
-                <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all_dms collapsed=collapsed />
+                <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
               </For>
             }
               .into_any()
@@ -257,18 +229,16 @@ fn section_key(section: &crate::sections::Section) -> SectionKey {
   (section.kind, rows)
 }
 
-/// The grouped layout: unread and favorite conversations, one collapsible group per space, then
-/// the direct messages.
+/// The grouped layout: unread and favorite channels, then one collapsible group per space.
 #[component]
 fn GroupedSections(
   grouped: Memo<GroupedSidebar>,
-  show_all: RwSignal<bool>,
   collapsed: RwSignal<HashSet<SectionKind>>,
   collapsed_spaces: RwSignal<HashSet<SpaceId>>,
 ) -> impl IntoView {
   view! {
     <For each=move || grouped.get().top key=section_key let:section>
-      <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all collapsed=collapsed />
+      <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
     </For>
     <For
       each=move || grouped.get().spaces
@@ -276,9 +246,6 @@ fn GroupedSections(
       let:group
     >
       <SpaceGroupSection group=group collapsed=collapsed_spaces />
-    </For>
-    <For each=move || grouped.get().direct key=section_key let:section>
-      <SidebarSection kind=section.kind conversations=section.conversations hidden=section.hidden_count show_all=show_all collapsed=collapsed />
     </For>
   }
 }
@@ -385,8 +352,6 @@ pub fn space_mute_entry(is_muted: bool) -> crate::prefs::ConversationNotify {
 fn SidebarSection(
   kind: SectionKind,
   conversations: Vec<Conversation>,
-  hidden: usize,
-  show_all: RwSignal<bool>,
   collapsed: RwSignal<HashSet<SectionKind>>,
 ) -> impl IntoView {
   let i18n = use_i18n();
@@ -435,14 +400,6 @@ fn SidebarSection(
           conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view().into_any()
         }}
       </ul>
-      {(hidden > 0)
-        .then(|| {
-          view! {
-            <button class="sb-more" hidden=is_collapsed on:click=move |_| show_all.set(true)>
-              {move || i18n.t_count("sidebar-show-more", hidden)}
-            </button>
-          }
-        })}
     </section>
   }
 }
@@ -516,7 +473,7 @@ fn focus_sidebar_item(conversation: ConversationId) {
 }
 
 #[component]
-fn SidebarItem(conversation: Conversation) -> impl IntoView {
+pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = conversation.id;

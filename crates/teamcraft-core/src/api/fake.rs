@@ -14,17 +14,17 @@ use futures_util::StreamExt;
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ChannelModeration, ChannelRole, ClaimKeyPackagesRequest,
   ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationId, ConversationKind, ConversationMemberResponse,
-  ConversationResponse, ConversationVisibility, CreateChannelRequest, CreateDmRequest, DeviceId,
-  DeviceResponse, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse,
-  HistoryPolicy, Id, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
-  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
-  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
-  ListSpacesResponse, MessageId, MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest,
-  MyMembership, NotificationLevel, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
-  PutKeyBagRequest, RegisterDeviceRequest, Role, SendMessageRequest, SetPresenceRequest,
-  SetReadPositionRequest, Snowflake, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis,
-  UpdateConversationMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind,
-  UserSummary,
+  ConversationResponse, ConversationVisibility, CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest,
+  DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
+  GetMeResponse, HistoryPolicy, Id, IdentityKeyResponse, JoinPolicy, KeyBagResponse,
+  KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
+  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
+  ListSpaceMembersResponse, ListSpacesResponse, MessageId, MessageResponse, MlsMessageKind,
+  MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel, PostMlsCommitRequest,
+  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, Role,
+  SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake, SpaceId, SpaceMemberResponse,
+  SpaceResponse, SpaceRole, UnixMillis, UpdateConversationMemberRequest, UploadIdentityKeyRequest,
+  UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -854,6 +854,40 @@ impl ServerApi for FakeServerApi {
       );
       state.publish(
         [me, request.user_id],
+        &GatewayEvent::ConversationUpdate { conversation_id: id },
+      );
+      Ok(state.conversation(id)?.view(me))
+    })
+  }
+
+  async fn create_group_dm(&self, request: &CreateGroupDmRequest) -> Result<ConversationResponse, ApiError> {
+    self.with(|state, me| {
+      let mut participants: Vec<UserId> = request.user_ids.clone();
+      participants.push(me);
+      participants.sort();
+      participants.dedup();
+      for user in &participants {
+        state.user(*user)?;
+      }
+      let existing = state.conversations.values().find(|conversation| {
+        conversation.response.kind == ConversationKind::Group
+          && conversation.members.len() == participants.len()
+          && participants
+            .iter()
+            .all(|user| conversation.members.contains_key(user))
+      });
+      if let Some(conversation) = existing {
+        return Ok(conversation.view(me));
+      }
+      let id = state.create_conversation(
+        ConversationKind::Group,
+        None,
+        None,
+        HistoryPolicy::Full,
+        &participants,
+      );
+      state.publish(
+        participants.clone(),
         &GatewayEvent::ConversationUpdate { conversation_id: id },
       );
       Ok(state.conversation(id)?.view(me))

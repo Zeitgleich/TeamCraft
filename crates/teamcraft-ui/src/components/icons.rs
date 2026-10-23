@@ -57,6 +57,10 @@ pub enum IconName {
   User,
   EyeOff,
   Calendar,
+  /// A house: Home, where the direct messages are.
+  Home,
+  /// A pencil: write a new message.
+  Compose,
 }
 
 impl IconName {
@@ -78,6 +82,8 @@ impl IconName {
       Self::Send => "M22 2 11 13 M22 2l-7 20-4-9-9-4z",
       Self::Reply => "M9 14 4 9l5-5 M4 9h10a6 6 0 0 1 6 6v3",
       Self::Threads => "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+      Self::Home => "M3 11 12 3l9 8 M5 9.5V21h5v-6h4v6h5V9.5",
+      Self::Compose => "M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z",
       Self::ChevronDown => "M6 9l6 6 6-6",
       Self::ChevronRight => "M9 6l6 6-6 6",
       Self::Close => "M18 6 6 18M6 6l12 12",

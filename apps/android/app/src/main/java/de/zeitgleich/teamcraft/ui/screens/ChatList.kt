@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
@@ -38,7 +39,11 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -80,12 +85,18 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PreviewContent
 import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.SectionTitle
-import de.zeitgleich.teamcraft.ui.sections
+import de.zeitgleich.teamcraft.ui.ChatTab
+import de.zeitgleich.teamcraft.ui.HomeFilter
+import de.zeitgleich.teamcraft.ui.channelSections
+import de.zeitgleich.teamcraft.ui.directSections
+import de.zeitgleich.teamcraft.ui.isDirect
+import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.Presence
 
 /** Room below the last conversation so the New chat button doesn't cover it. */
 private val FAB_CLEARANCE = 88.dp
@@ -104,7 +115,17 @@ fun ChatListScreen(
   // Long-press starts selecting several conversations, as in WhatsApp; back or ✕ ends it.
   var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
   var maybeNotifying by remember { mutableStateOf<String?>(null) }
+  // DMs live outside spaces (as on desktop), so they have their own tab.
+  var tab by rememberSaveable { mutableStateOf(ChatTab.Home) }
+  var dmFilter by rememberSaveable { mutableStateOf("") }
+  var homeChip by rememberSaveable { mutableStateOf(HomeFilter.All) }
   BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
+  // A conversation opened from elsewhere (notification, link) shows in its own tab.
+  LaunchedEffect(maybeSelectedId, conversations) {
+    conversations?.firstOrNull { it.id == maybeSelectedId }?.let { selected ->
+      tab = if (selected.isDirect) ChatTab.Home else ChatTab.Spaces
+    }
+  }
   LaunchedEffect(Unit) {
     // Every read finishes before the next starts: while syncing, changes come faster than a full
     // pass over all conversations, and restarting on each would never show the previews.
@@ -141,11 +162,18 @@ fun ChatListScreen(
     },
     floatingActionButton = {
       if (selection.isEmpty()) {
-        ExtendedFloatingActionButton(
-          onClick = { onNavigate("browse?people=true") },
-          icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
-          text = { Text(stringResource(R.string.new_chat)) },
-        )
+        when (tab) {
+          ChatTab.Home -> ExtendedFloatingActionButton(
+            onClick = { onNavigate("browse?people=true") },
+            icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+            text = { Text(stringResource(R.string.dm_new)) },
+          )
+          ChatTab.Spaces -> ExtendedFloatingActionButton(
+            onClick = { onNavigate("browse") },
+            icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+            text = { Text(stringResource(R.string.browse_channels)) },
+          )
+        }
       }
     },
   ) { padding ->
@@ -163,12 +191,26 @@ fun ChatListScreen(
         }
       }
       val loaded = conversations
+      ChatTabs(tab, loaded.orEmpty(), onSelect = { tab = it })
+      if (tab == ChatTab.Home && !loaded.isNullOrEmpty()) {
+        DirectFilter(dmFilter, onChange = { dmFilter = it })
+        HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it })
+      }
+      val lastActivity = previews.mapValues { it.value.preview.sentAt }
+      val shown = loaded?.let {
+        when (tab) {
+          ChatTab.Spaces -> channelSections(it)
+          ChatTab.Home -> directSections(it, lastActivity, dmFilter, homeChip)
+        }
+      }
       when {
-        loaded == null -> LoadingScreen()
+        loaded == null || shown == null -> LoadingScreen()
         loaded.isEmpty() -> EmptyChats(onBrowse = { onNavigate("browse") }, onMessage = { onNavigate("browse?people=true") })
+        shown.isEmpty() && tab == ChatTab.Home && (dmFilter.isNotBlank() || homeChip != HomeFilter.All) -> EmptyHint(stringResource(R.string.dm_filter_empty))
+        shown.isEmpty() && tab == ChatTab.Home -> EmptyDirect(onMessage = { onNavigate("browse?people=true") })
+        shown.isEmpty() -> EmptyHint(stringResource(R.string.chats_no_channels))
         else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
-          val lastActivity = previews.mapValues { it.value.preview.sentAt }
-          for (section in sections(loaded, lastActivity)) {
+          for (section in shown) {
             item(key = "section-${section.title}") { SectionHeader(section.title) }
             items(section.conversations, key = { "${section.title}-${it.id}" }) { conversation ->
               SwipeableConversationRow(
@@ -216,6 +258,108 @@ private fun EmptyChats(onBrowse: () -> Unit, onMessage: () -> Unit) {
     Button(onClick = onBrowse, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.browse_channels)) }
     OutlinedButton(onClick = onMessage, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.message_someone)) }
   }
+}
+
+/** Spaces and direct messages, each with what is new in it. */
+@Composable
+private fun ChatTabs(selected: ChatTab, conversations: List<ConversationItem>, onSelect: (ChatTab) -> Unit) {
+  val (direct, channels) = conversations.partition { it.isDirect }
+  PrimaryTabRow(selectedTabIndex = selected.ordinal) {
+    for (tab in ChatTab.entries) {
+      val label = stringResource(if (tab == ChatTab.Spaces) R.string.chats_tab_spaces else R.string.chats_tab_home)
+      val badge = tabBadge(if (tab == ChatTab.Spaces) channels else direct)
+      // Channels show a count only for mentions; DMs count every unread message.
+      val count = if (tab == ChatTab.Spaces) badge.mentions else maxOf(badge.mentions, badge.unread)
+      val description = when {
+        count > 0 -> pluralStringResource(R.plurals.chat_tab_unread, count, label, count)
+        badge.unread > 0 -> stringResource(R.string.chat_tab_new, label)
+        else -> label
+      }
+      Tab(
+        selected = tab == selected,
+        onClick = { onSelect(tab) },
+        modifier = Modifier.semantics { contentDescription = description },
+        text = {
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(label)
+            when {
+              count > 0 -> Text(
+                count.toString(),
+                color = LocalTeamCraftColors.current.chromeText,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                  .background(LocalTeamCraftColors.current.badge, RoundedCornerShape(10.dp))
+                  .padding(horizontal = 6.dp, vertical = 1.dp),
+              )
+              badge.unread > 0 -> Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+            }
+          }
+        },
+      )
+    }
+  }
+}
+
+/** Unread / People / Groups; pressing the selected chip again shows everything. */
+@Composable
+private fun HomeChips(selected: HomeFilter, onSelect: (HomeFilter) -> Unit) {
+  Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    for ((chip, label) in listOf(
+      HomeFilter.Unread to R.string.home_filter_unread,
+      HomeFilter.People to R.string.home_filter_people,
+      HomeFilter.Groups to R.string.home_filter_groups,
+    )) {
+      FilterChip(selected = chip == selected, onClick = { onSelect(chip) }, label = { Text(stringResource(label)) })
+    }
+  }
+}
+
+@Composable
+private fun DirectFilter(value: String, onChange: (String) -> Unit) {
+  OutlinedTextField(
+    value = value,
+    onValueChange = onChange,
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    placeholder = { Text(stringResource(R.string.dm_filter)) },
+    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+    trailingIcon = {
+      if (value.isNotEmpty()) {
+        IconButton(onClick = { onChange("") }) {
+          Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.clear))
+        }
+      }
+    },
+    singleLine = true,
+  )
+}
+
+@Composable
+private fun EmptyDirect(onMessage: () -> Unit) {
+  Column(
+    Modifier.fillMaxSize().padding(32.dp),
+    verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+    horizontalAlignment = Alignment.CenterHorizontally,
+  ) {
+    Icon(Icons.Filled.Email, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(48.dp))
+    Text(
+      stringResource(R.string.dm_empty),
+      style = MaterialTheme.typography.bodyMedium,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      textAlign = TextAlign.Center,
+    )
+    Button(onClick = onMessage, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.dm_new)) }
+  }
+}
+
+@Composable
+private fun EmptyHint(text: String) {
+  Text(
+    text,
+    style = MaterialTheme.typography.bodyMedium,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    textAlign = TextAlign.Center,
+    modifier = Modifier.fillMaxWidth().padding(32.dp),
+  )
 }
 
 @Composable
@@ -476,21 +620,49 @@ private fun listTime(context: Context, sentAt: Long): String {
 private fun ConversationAvatar(conversation: ConversationItem) {
   val isPerson = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
   val label = if (isPerson) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
-  Box(
-    Modifier
-      .size(40.dp)
-      .background(
-        if (isPerson) avatarColor(conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
-        CircleShape,
-      ),
-    contentAlignment = Alignment.Center,
-  ) {
-    Text(
-      label,
-      style = MaterialTheme.typography.titleMedium,
-      color = if (isPerson) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+  Box {
+    Box(
+      Modifier
+        .size(40.dp)
+        .background(
+          if (isPerson) avatarColor(conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
+          CircleShape,
+        ),
+      contentAlignment = Alignment.Center,
+    ) {
+      Text(
+        label,
+        style = MaterialTheme.typography.titleMedium,
+        color = if (isPerson) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    }
+    conversation.maybePeerPresence?.let { presence ->
+      val description = stringResource(presenceLabel(presence))
+      Box(
+        Modifier
+          .align(Alignment.BottomEnd)
+          .size(12.dp)
+          .background(MaterialTheme.colorScheme.background, CircleShape)
+          .padding(2.dp)
+          .background(presenceColor(presence), CircleShape)
+          .semantics { contentDescription = description },
+      )
+    }
   }
+}
+
+private fun presenceColor(presence: Presence): Color = when (presence) {
+  Presence.ONLINE -> Color(0xFF2E9E5B)
+  Presence.AWAY -> Color(0xFFE0A030)
+  Presence.DO_NOT_DISTURB -> Color(0xFFD0453A)
+  Presence.OFFLINE -> Color(0xFF8A8F98)
+}
+
+private fun presenceLabel(presence: Presence): Int = when (presence) {
+  Presence.ONLINE -> R.string.presence_online
+  Presence.AWAY -> R.string.presence_away
+  Presence.DO_NOT_DISTURB -> R.string.presence_dnd
+  Presence.OFFLINE -> R.string.presence_peer_offline
 }
 
 /** A stable hue per name, so people are recognizable at a glance. */
