@@ -338,12 +338,14 @@ impl Engine {
   }
 
   pub(crate) async fn start(&mut self) -> Result<(), TeamCraftError> {
-    let ClientSlot::Idle(client) = std::mem::replace(&mut self.client, ClientSlot::Missing) else {
-      // Already running, or nothing to run yet.
-      return match &self.client {
-        ClientSlot::Missing => Err(TeamCraftError::NotEnrolled),
-        _ => Ok(()),
-      };
+    let client = match std::mem::replace(&mut self.client, ClientSlot::Missing) {
+      ClientSlot::Idle(client) => client,
+      // Already running: keep it (the app starts on sign-in and again on every foreground).
+      running @ ClientSlot::Running { .. } => {
+        self.client = running;
+        return Ok(());
+      },
+      ClientSlot::Missing => return Err(TeamCraftError::NotEnrolled),
     };
     let listener = self.listener.clone();
     let (runner, handle) = SyncRunner::new(
