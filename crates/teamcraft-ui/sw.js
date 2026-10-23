@@ -22,6 +22,8 @@ const RELEASE_PUBLIC_KEY = '__RELEASE_PUBLIC_KEY__';
 const IS_PINNED = !RELEASE_PUBLIC_KEY.startsWith('__');
 const SIGNATURE_LABEL = 'teamcraft-web-release-v1\n';
 const CACHE_PREFIX = 'teamcraft-release-';
+// Files fetched at the same time while a release is installed.
+const PARALLEL_DOWNLOADS = 4;
 
 const STATE_CACHE = 'teamcraft-sw-state';
 const PUSH_CONFIG_CACHE = 'teamcraft-push-config';
@@ -105,15 +107,20 @@ async function fromVerifiedCache(request, url) {
 
 async function installVerified() {
   try {
+    await restored;
     const manifest = await verifiedManifest();
     const cache = await caches.open(CACHE_PREFIX + manifest.version);
-    for (const [path, expected] of Object.entries(manifest.files)) {
-      const response = await fetch('/' + path, { cache: 'no-store' });
-      if (!response.ok) throw new Error('missing file ' + path);
-      const bytes = await response.clone().arrayBuffer();
-      if ((await sha256Hex(bytes)) !== expected) throw new Error('hash mismatch for ' + path);
-      await cache.put('/' + path, response);
+    // Files of the running release (or of an interrupted install of this one) that did not change are
+    // taken over instead of downloaded again; their hash is checked like a download's.
+    const sources = [cache];
+    if (status.state === 'verified' && status.version && status.version !== manifest.version) {
+      sources.push(await caches.open(CACHE_PREFIX + status.version));
     }
+    const queue = Object.entries(manifest.files);
+    const worker = async () => {
+      for (let next = queue.shift(); next; next = queue.shift()) await storeVerified(cache, sources, ...next);
+    };
+    await Promise.all(Array.from({ length: PARALLEL_DOWNLOADS }, worker));
     status = {
       state: 'verified',
       version: manifest.version,
@@ -130,6 +137,30 @@ async function installVerified() {
     if (unsupported) await self.skipWaiting();
     else throw error;
   }
+}
+
+// One file of the release into the new cache: a matching copy from `sources`, else a download.
+// Downloads may come from the HTTP cache (the page has just loaded the same immutable files, and the
+// server's precompressed variants arrive decoded); the hash decides, and a mismatch is retried once
+// from the network before the release is rejected.
+async function storeVerified(cache, sources, path, expected) {
+  const url = '/' + path;
+  for (const source of sources) {
+    const hit = await source.match(url);
+    if (hit && (await sha256Hex(await hit.clone().arrayBuffer())) === expected) {
+      if (source !== cache) await cache.put(url, hit);
+      return;
+    }
+  }
+  for (const mode of ['default', 'no-store']) {
+    const response = await fetch(url, { cache: mode });
+    if (!response.ok) throw new Error('missing file ' + path);
+    if ((await sha256Hex(await response.clone().arrayBuffer())) === expected) {
+      await cache.put(url, response);
+      return;
+    }
+  }
+  throw new Error('hash mismatch for ' + path);
 }
 
 async function verifiedManifest() {
