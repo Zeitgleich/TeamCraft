@@ -20,6 +20,7 @@ class UnifiedPushReceiver : MessagingReceiver() {
     // A temporary fallback endpoint is registered too: it is better than no notifications.
     val keys = endpoint.pubKeySet
     val token = PushSubscription.json(endpoint.url, keys?.pubKey, keys?.auth)
+    UnifiedPushStatus(context).record(UnifiedPushStatus.State.REGISTERED)
     TeamCraftApplication.graph(context).push.onToken(PushService.UNIFIED_PUSH, token)
   }
 
@@ -27,14 +28,23 @@ class UnifiedPushReceiver : MessagingReceiver() {
     val pending = goAsync()
     CoroutineScope(Dispatchers.Default).launch {
       try {
-        TeamCraftApplication.graph(context).push.onWakeUp(message.content)
+        WakeUpWork.handle(context, message.content)
       } finally {
         pending.finish()
       }
     }
   }
 
-  override fun onRegistrationFailed(context: Context, reason: FailedReason, instance: String) {}
+  // The diagnostics show these; registering again is the user's choice there.
+  override fun onRegistrationFailed(context: Context, reason: FailedReason, instance: String) {
+    UnifiedPushStatus(context).record(UnifiedPushStatus.State.FAILED, reason.name)
+  }
 
-  override fun onUnregistered(context: Context, instance: String) {}
+  override fun onUnregistered(context: Context, instance: String) {
+    UnifiedPushStatus(context).record(UnifiedPushStatus.State.UNREGISTERED)
+  }
+
+  override fun onTempUnavailable(context: Context, instance: String) {
+    UnifiedPushStatus(context).record(UnifiedPushStatus.State.TEMPORARILY_UNAVAILABLE)
+  }
 }

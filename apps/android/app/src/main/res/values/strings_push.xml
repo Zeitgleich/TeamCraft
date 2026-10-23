@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Notification channels (names and descriptions in the system settings). -->
+  <string name="notification_channel_messages_description">New messages in channels and groups</string>
+  <string name="notification_channel_mentions_description">Direct messages, mentions and urgent messages</string>
+  <string name="notification_channel_incoming_calls">Incoming calls</string>
+  <string name="notification_channel_incoming_calls_description">Rings when somebody calls you, also on the lock screen</string>
+  <string name="notification_channel_calls_description">The call you are in</string>
+  <string name="notification_channel_other">Other</string>
+  <string name="notification_channel_other_description">Test notifications and background work</string>
+  <plurals name="notification_summary">
+    <item quantity="one">%d conversation</item>
+    <item quantity="other">%d conversations</item>
+  </plurals>
+  <string name="push_fetching">Checking for new messages…</string>
+
+  <!-- Calls -->
+  <string name="call_incoming">Incoming call</string>
+  <string name="call_answer">Answer</string>
+  <string name="call_decline">Decline</string>
+  <string name="call_missed">Missed call (do not disturb or muted)</string>
+
+  <!-- Test push -->
+  <string name="test_push_title">Test notification</string>
+  <string name="test_push_received">Notifications reach this device.</string>
+  <string name="test_push_received_after">Notifications reach this device (after %1$d s).</string>
+  <string name="test_push_requesting">Asking the server for a test notification…</string>
+  <string name="test_push_waiting">Sent through %1$s. Waiting for it to arrive…</string>
+  <string name="test_push_arrived">The test notification arrived after %1$s s.</string>
+  <string name="test_push_request_failed">The server could not be reached.</string>
+  <string name="test_push_not_registered">This device is not registered for notifications yet.</string>
+  <string name="test_push_not_configured">The server has no push service set up for this kind of device.</string>
+  <string name="test_push_unavailable">The push service is unavailable right now. Try again later.</string>
+  <string name="test_push_rejected">The push service refused the notification.</string>
+  <string name="test_push_gone">The registration expired. Open the app again to register anew.</string>
+  <string name="test_push_unknown">The push service answered something unexpected.</string>
+
+  <!-- Diagnostics -->
+  <string name="diagnostics_title">Notification diagnostics</string>
+  <string name="diagnostics_service">Push service</string>
+  <string name="diagnostics_service_fcm">Firebase Cloud Messaging (high priority)</string>
+  <string name="diagnostics_service_unifiedpush">UnifiedPush through %1$s</string>
+  <string name="diagnostics_service_none">No push service</string>
+  <string name="unifiedpush_registered">Registered with the distributor.</string>
+  <string name="unifiedpush_failed">The distributor refused the registration (%1$s).</string>
+  <string name="unifiedpush_unregistered">The distributor unregistered this app.</string>
+  <string name="unifiedpush_unavailable">The distributor is temporarily unavailable.</string>
+  <string name="unifiedpush_waiting">Waiting for the distributor.</string>
+  <string name="unifiedpush_choose">Several distributors are installed. Choose one:</string>
+  <string name="unifiedpush_register_again">Register again</string>
+  <string name="diagnostics_system">On this phone</string>
+  <string name="diagnostics_permission_granted">Notification permission granted.</string>
+  <string name="diagnostics_permission_missing">Notification permission missing.</string>
+  <string name="diagnostics_enabled">Notifications are on for this app.</string>
+  <string name="diagnostics_disabled">Notifications are off for this app.</string>
+  <string name="diagnostics_open_settings">Open notification settings</string>
+  <string name="diagnostics_change">Change</string>
+  <string name="importance_off">Off</string>
+  <string name="importance_min">Silent and minimized</string>
+  <string name="importance_low">Silent</string>
+  <string name="importance_default">Sound</string>
+  <string name="importance_high">Sound and pop-up</string>
+  <string name="diagnostics_full_screen_allowed">Calls may ring on the full screen.</string>
+  <string name="diagnostics_full_screen_denied">Calls may not ring on the full screen; they show as a small notification.</string>
+  <string name="diagnostics_full_screen_allow">Allow full-screen calls</string>
+  <string name="diagnostics_system_dnd">The phone\'s own do not disturb is on.</string>
+  <string name="diagnostics_received">Received</string>
+  <string name="diagnostics_none_received">No push received on this device yet.</string>
+  <string name="diagnostics_received_count">Pushes received: %1$d</string>
+  <string name="diagnostics_last_received">Last push: %1$s</string>
+  <string name="diagnostics_last_kind">Kind: %1$s</string>
+  <string name="diagnostics_last_delay">Delay from the server: %1$s s</string>
+  <string name="diagnostics_suppressed">Kept quiet by this device (muted or do not disturb): %1$d</string>
+  <string name="diagnostics_send_test">Send test notification</string>
+  <string name="push_kind_message">Message</string>
+  <string name="push_kind_call">Call</string>
+  <string name="push_kind_dismiss">Read elsewhere</string>
+  <string name="push_kind_test">Test</string>
+  <string name="push_kind_unknown">Unknown</string>
+
+  <!-- Battery -->
+  <string name="battery_title">Battery and background</string>
+  <string name="battery_more">How background delivery works</string>
+  <string name="battery_app_unrestricted">This app is not battery-optimized.</string>
+  <string name="battery_app_optimized">This app is battery-optimized (the normal setting).</string>
+  <string name="battery_background_restricted">Background use is restricted for this app. Allow it in the app\'s settings, or notifications may not arrive.</string>
+  <string name="battery_distributor_unrestricted">%1$s may run in the background without limits.</string>
+  <string name="battery_distributor_optimized">%1$s is battery-optimized: notifications may arrive late or not at all.</string>
+  <string name="battery_open_distributor">Open %1$s settings</string>
+  <string name="battery_fcm_explained">Notifications come as high-priority messages through the phone\'s push service, which wakes the app even in deep sleep. No battery setting needs to change.</string>
+  <string name="battery_unifiedpush_explained">With UnifiedPush, the distributor app keeps the connection to the push server and wakes this app for each notification. The distributor must be allowed to run in the background: in its app settings, set battery use to unrestricted.</string>
+  <string name="battery_vendor_hint">Some phones stop background apps on their own (for example after a while or when the screen is off). If notifications arrive late, look in the phone\'s battery or app-launch settings for this app and the distributor, and allow them to run in the background.</string>
+
+  <!-- Do not disturb -->
+  <string name="dnd_title">Do not disturb</string>
+  <string name="dnd_open">Do not disturb settings</string>
+  <string name="dnd_quick_title">Right now</string>
+  <string name="dnd_state_off">Do not disturb is off.</string>
+  <string name="dnd_state_on">Do not disturb is on.</string>
+  <string name="dnd_state_until">Do not disturb until %1$s.</string>
+  <string name="dnd_state_scheduled">Do not disturb is on by schedule.</string>
+  <string name="dnd_one_hour">For 1 hour</string>
+  <string name="dnd_until_morning">Until 08:00</string>
+  <string name="dnd_custom">Until…</string>
+  <string name="dnd_end">End do not disturb</string>
+  <string name="dnd_schedule_title">Schedule</string>
+  <string name="dnd_schedule_hint">Times in your time zone (%1$s). They follow daylight saving time.</string>
+  <string name="dnd_add_range">Add time range</string>
+  <string name="dnd_from">From %1$s</string>
+  <string name="dnd_to">to %1$s</string>
+  <string name="dnd_next_day">Ends the next day.</string>
+  <string name="dnd_range_invalid">Choose at least one day and different start and end times.</string>
+  <string name="dnd_remove">Remove</string>
+  <string name="dnd_allow_title">Exceptions</string>
+  <string name="dnd_allow_hint">Messages from these people notify you during do not disturb.</string>
+  <string name="dnd_add_person">Add person</string>
+  <string name="dnd_allows_urgent">Urgent messages notify me during do not disturb</string>
+  <string name="dnd_save">Save</string>
+  <string name="dnd_saved">Saved for all your devices.</string>
+
+  <!-- Per-conversation mute -->
+  <string name="mute_off">Not muted</string>
+  <string name="mute_one_hour">1 hour</string>
+  <string name="mute_eight_hours">8 hours</string>
+  <string name="mute_one_day">1 day</string>
+  <string name="mute_one_week">1 week</string>
+  <string name="mute_forever">Until I unmute</string>
+  <string name="mute_forever_state">Muted until you unmute.</string>
+  <string name="mute_until">Muted until %1$s.</string>
+</resources>

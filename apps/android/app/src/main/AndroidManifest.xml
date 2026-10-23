@@ -10,6 +10,8 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <!-- Rings take over the screen like a phone call (Android 14+: the user can revoke it). -->
+  <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
   <!-- Video in calls and scanning the device-link QR code. -->
   <uses-permission android:name="android.permission.CAMERA" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
@@ -62,6 +64,11 @@
       android:launchMode="singleTask"
       android:showWhenLocked="true"
       android:turnScreenOn="true" />
+
+    <!-- "Decline" on the incoming-call notification. -->
+    <receiver
+      android:name=".calls.CallActionReceiver"
+      android:exported="false" />
 
     <service
       android:name=".calls.CallService"
