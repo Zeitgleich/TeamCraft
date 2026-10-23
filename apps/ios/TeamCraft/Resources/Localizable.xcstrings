@@ -1937,6 +1937,22 @@
         }
       }
     },
+    "offline_banner": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No connection. Messages are sent when you're back online."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine Verbindung. Nachrichten werden gesendet, sobald du wieder online bist."
+          }
+        }
+      }
+    },
     "passphrase": {
       "localizations": {
         "en": {

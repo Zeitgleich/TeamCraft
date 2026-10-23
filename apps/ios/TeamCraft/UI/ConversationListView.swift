@@ -18,6 +18,7 @@ struct ConversationListView: View {
   var body: some View {
     NavigationSplitView {
       sidebar
+        .safeAreaInset(edge: .top, spacing: 0) { OfflineBanner() }
         .navigationTitle("chats_title")
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
