@@ -1,6 +1,5 @@
 package de.zeitgleich.teamcraft.ui
 
-import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -34,8 +33,6 @@ class MainActivity : FragmentActivity() {
     viewModel.completeLogin(result.data)
   }
 
-  private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
-
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
@@ -45,9 +42,6 @@ class MainActivity : FragmentActivity() {
     if (!isLocked.value) isUnlockedInProcess = true
     openConversation.value = conversationToOpen(intent)
     share.value = sharedContent(intent, packageName)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-      notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-    }
     setContent {
       TeamCraftTheme {
         if (isLocked.value) {

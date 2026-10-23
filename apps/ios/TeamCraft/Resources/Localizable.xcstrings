@@ -2649,22 +2649,6 @@
         }
       }
     },
-    "enroll_recover_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Your account already has encryption keys. Enter your recovery passphrase, or link this phone from a device you're signed in on."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dein Konto hat bereits Verschlüsselungsschlüssel. Gib deine Wiederherstellungs-Passphrase ein oder verknüpfe dieses Telefon über ein Gerät, auf dem du angemeldet bist."
-          }
-        }
-      }
-    },
     "enroll_title": {
       "localizations": {
         "en": {
@@ -3149,22 +3133,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Über ein anderes Gerät verknüpfen"
-          }
-        }
-      }
-    },
-    "link_new_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "On a device you're signed in on, open Settings → Link a device and scan or enter this code."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Öffne auf einem Gerät, auf dem du angemeldet bist, Einstellungen → Gerät verknüpfen und scanne oder gib diesen Code ein."
           }
         }
       }
@@ -5093,6 +5061,486 @@
           "stringUnit": {
             "state": "translated",
             "value": "Du"
+          }
+        }
+      }
+    },
+    "browse_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browse"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Durchsuchen"
+          }
+        }
+      }
+    },
+    "people": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "People"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personen"
+          }
+        }
+      }
+    },
+    "spaces": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space"
+          }
+        }
+      }
+    },
+    "open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffnen"
+          }
+        }
+      }
+    },
+    "channel_join": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitreten"
+          }
+        }
+      }
+    },
+    "channel_create": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neuer Kanal"
+          }
+        }
+      }
+    },
+    "channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channel name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanalname"
+          }
+        }
+      }
+    },
+    "enroll_working": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Creating keys…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel werden erstellt…"
+          }
+        }
+      }
+    },
+    "sign_in_server %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server: %@"
+          }
+        }
+      }
+    },
+    "brand_support": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Help"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hilfe"
+          }
+        }
+      }
+    },
+    "brand_privacy": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privacy"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Datenschutz"
+          }
+        }
+      }
+    },
+    "brand_terms": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terms"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nutzungsbedingungen"
+          }
+        }
+      }
+    },
+    "brand_imprint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Imprint"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impressum"
+          }
+        }
+      }
+    },
+    "passphrase_rule %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "At least %lld characters. Keep it in a password manager or write it down: nobody, not even your admins, can read it back to you."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mindestens %lld Zeichen. Bewahre sie in einem Passwortmanager auf oder schreib sie auf: Niemand, auch nicht deine Admins, kann sie dir nennen."
+          }
+        }
+      }
+    },
+    "passphrase_show": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show passphrase"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passphrase anzeigen"
+          }
+        }
+      }
+    },
+    "passphrase_hide": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide passphrase"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passphrase verbergen"
+          }
+        }
+      }
+    },
+    "restore_link_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account is already set up on another device. Link this phone from it: it's quickest, and your message history comes along."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Konto ist schon auf einem anderen Gerät eingerichtet. Verknüpfe dieses Telefon von dort: Das geht am schnellsten, und dein Nachrichtenverlauf kommt mit."
+          }
+        }
+      }
+    },
+    "restore_passphrase_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No other device at hand? Enter your recovery passphrase."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kein anderes Gerät zur Hand? Gib deine Wiederherstellungs-Passphrase ein."
+          }
+        }
+      }
+    },
+    "link_steps_phone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On your other phone: open TeamCraft, Settings → Devices → Link a device, and scan or enter this code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf deinem anderen Telefon: TeamCraft öffnen, Einstellungen → Geräte → Gerät verknüpfen, und diesen Code scannen oder eingeben."
+          }
+        }
+      }
+    },
+    "link_steps_computer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On a computer: Settings → Devices and security → Link a new device, and enter this code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Am Computer: Einstellungen → Geräte und Sicherheit → Neues Gerät verknüpfen, und diesen Code eingeben."
+          }
+        }
+      }
+    },
+    "notification_prompt_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Don't miss messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine Nachricht verpassen"
+          }
+        }
+      }
+    },
+    "notification_prompt_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow notifications to hear about direct messages, mentions and calls while TeamCraft is closed. Message content stays encrypted until it reaches this phone."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erlaube Mitteilungen, um bei Direktnachrichten, Erwähnungen und Anrufen benachrichtigt zu werden, auch wenn TeamCraft geschlossen ist. Inhalte bleiben verschlüsselt, bis sie auf diesem Telefon ankommen."
+          }
+        }
+      }
+    },
+    "notification_prompt_allow": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erlauben"
+          }
+        }
+      }
+    },
+    "not_now": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not now"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht jetzt"
+          }
+        }
+      }
+    },
+    "new_chat": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New chat"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neuer Chat"
+          }
+        }
+      }
+    },
+    "browse_channels": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browse channels"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanäle durchsuchen"
+          }
+        }
+      }
+    },
+    "message_someone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message someone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemandem schreiben"
+          }
+        }
+      }
+    },
+    "browse_no_people": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "People you share a channel with appear here. Join a channel first, or ask a colleague to add you to one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hier erscheinen Personen, mit denen du einen Kanal teilst. Tritt zuerst einem Kanal bei oder lass dich von jemandem hinzufügen."
+          }
+        }
+      }
+    },
+    "browse_no_channels": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody has created a channel you can join here yet. Create one with New channel."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hier gibt es noch keinen Kanal, dem du beitreten kannst. Lege einen mit Neuer Kanal an."
+          }
+        }
+      }
+    },
+    "browse_no_spaces": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You aren't in a space yet. Ask your admin to add you to one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist noch in keinem Space. Bitte deine Admins, dich hinzuzufügen."
           }
         }
       }

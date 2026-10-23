@@ -14,11 +14,17 @@ struct ConversationListView: View {
   @State private var isShowingMeetings = false
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
+  @State private var maybeBrowseTab: BrowseView.Tab?
 
   var body: some View {
     NavigationSplitView {
       sidebar
-        .safeAreaInset(edge: .top, spacing: 0) { OfflineBanner() }
+        .safeAreaInset(edge: .top, spacing: 0) {
+          VStack(spacing: 0) {
+            OfflineBanner()
+            NotificationPromptCard()
+          }
+        }
         .navigationTitle("chats_title")
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
@@ -30,6 +36,8 @@ struct ConversationListView: View {
             .accessibilityLabel(Text("search_filters_title"))
           }
           ToolbarItemGroup(placement: .topBarTrailing) {
+            Button { maybeBrowseTab = .people } label: { Image(systemName: "square.and.pencil") }
+              .accessibilityLabel(Text("new_chat"))
             Button { isShowingMeetings = true } label: { Image(systemName: "calendar") }
               .accessibilityLabel(Text("meetings_title"))
             Button { isShowingSettings = true } label: { Image(systemName: "gearshape") }
@@ -64,6 +72,9 @@ struct ConversationListView: View {
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
+    .sheet(item: $maybeBrowseTab) { tab in
+      BrowseView(tab: tab) { conversationId in selection = conversationId }
+    }
   }
 
   /// The text and the filters in the core's query syntax.
@@ -80,11 +91,7 @@ struct ConversationListView: View {
         selection = hit.message.conversationId
       }
     } else if conversations.isEmpty {
-      ContentUnavailableView {
-        Label("no_conversations", systemImage: "bubble.left.and.bubble.right")
-      } description: {
-        Text("chats_empty_hint")
-      }
+      EmptyChatsView { tab in maybeBrowseTab = tab }
     } else {
       List(selection: $selection) {
         ForEach(conversationSections(conversations, lastActivity: previews.mapValues(\.sentDate))) { section in

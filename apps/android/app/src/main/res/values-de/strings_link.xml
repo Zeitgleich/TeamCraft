@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="link_qr_description">QR-Code mit dem Verknüpfungscode</string>
-  <string name="link_qr_hint">Scanne diesen QR-Code auf dem anderen Gerät oder gib den Code darunter ein.</string>
   <string name="link_scan_qr">QR-Code scannen</string>
   <string name="link_scan_hint">Richte die Kamera auf den QR-Code des neuen Geräts.</string>
   <string name="link_camera_denied">Der Kamerazugriff wurde verweigert. Gib den Code stattdessen von Hand ein.</string>

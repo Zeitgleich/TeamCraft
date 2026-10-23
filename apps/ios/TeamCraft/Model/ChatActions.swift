@@ -21,6 +21,10 @@ enum ChatAction {
   /// An own message the server rejected: send it again, or drop it.
   case retrySend(conversationId: String, messageId: String)
   case discardUnsent(conversationId: String, messageId: String)
+  case joinChannel(conversationId: String)
+  case createChannel(spaceId: String, name: String)
+  /// The direct conversation with a person; created when there is none yet.
+  case openDm(userId: String)
 
   /// The wire form.
   var json: String {
@@ -61,6 +65,12 @@ enum ChatAction {
       object = ["action": "retry_send", "conversation": conversation, "message": message]
     case .discardUnsent(let conversation, let message):
       object = ["action": "discard_unsent", "conversation": conversation, "message": message]
+    case .joinChannel(let conversation):
+      object = ["action": "join_channel", "conversation": conversation]
+    case .createChannel(let space, let name):
+      object = ["action": "create_channel", "space": space, "name": name]
+    case .openDm(let user):
+      object = ["action": "open_dm", "user": user]
     }
     return jsonText(object)
   }
@@ -112,6 +122,8 @@ enum ChatQuery {
   case resolvePermalink(link: String)
   case typingUsers(conversationId: String)
   case permalink(conversationId: String, messageId: String)
+  /// The channels of a space the user is in or can join.
+  case browseChannels(spaceId: String)
 
   var json: String {
     switch self {
@@ -127,6 +139,8 @@ enum ChatQuery {
       return jsonText(["kind": "typing_users", "conversation": conversation])
     case .permalink(let conversation, let message):
       return jsonText(["kind": "permalink", "conversation": conversation, "message": message])
+    case .browseChannels(let space):
+      return jsonText(["kind": "browse_channels", "space": space])
     }
   }
 }

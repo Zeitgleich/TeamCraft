@@ -108,3 +108,26 @@ work stream).
 | After a server restart clients never got the live gateway back (stale session resumed forever) | all | done (#92) |
 | Font scale 200 %: chat list, conversation, composer checked, nothing cut off      | Android      | done   |
 | No Android logs from the Rust core (`tracing` goes nowhere on Android)            | Android      | open: made the send bug hard to find |
+
+## First run (2026-10-23)
+
+Install → sign-in → passphrase or linking → notifications → first chat, walked on the emulator
+against the dev stack with a test brand.
+
+| Friction                                                                                                                                   | Platform     | Status                               |
+|--------------------------------------------------------------------------------------------------------------------------------------------|--------------|--------------------------------------|
+| Notification permission asked at the very first start, before sign-in, without a reason                                                    | Android      | done                                 |
+| Notification permission asked right after setup with the bare system prompt                                                                | iOS          | done                                 |
+| Sign-in showed no brand and not which server; now logo, title, text, links and host                                                        | Android, iOS | done                                 |
+| Passphrase fields: no show/hide; keyboard Done did nothing                                                                                 | Android, iOS | done                                 |
+| Second device: linking (quickest, history comes along) was the third option; now first                                                     | Android, iOS | done                                 |
+| Link screen said only "enter this code"; now steps for a phone (scan) and a computer                                                       | Android, iOS | done                                 |
+| Empty chat list: a chip only; now Browse channels / Message someone and a New chat button                                                  | Android, iOS | done                                 |
+| Tapping a person in Browse created the DM but didn't open it                                                                               | Android      | done                                 |
+| No Browse at all (channels, people, join, new channel): a new user couldn't start a chat                                                   | iOS          | done                                 |
+| Browse lists were blank with no explanation when empty                                                                                     | Android, iOS | done                                 |
+| New member finds nobody to message: people come only from shared conversations; the server's `GET /users` search is unused by every client | all          | open: core                           |
+| Linking a phone from a computer means typing a 105-character code (desktop can't scan)                                                     | desktop      | open: webcam scan or approval prompt |
+| Approving a new device on iOS: code typed by hand, no QR scanner                                                                           | iOS          | open                                 |
+| Server URL is fixed per build: no server-URL screen (needs a public OIDC discovery endpoint)                                               | Android, iOS | open: server + design                |
+| SVG brand logos don't show on mobile (name shown instead)                                                                                  | Android, iOS | open                                 |

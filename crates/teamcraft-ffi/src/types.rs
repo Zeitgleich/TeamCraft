@@ -86,6 +86,28 @@ pub struct EmojiSuggestion {
   pub shortcode: String,
 }
 
+/// What the sign-in screen shows of the server's brand.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LoginBrand {
+  pub display_name: String,
+  pub maybe_logo_url: Option<String>,
+  /// The dark theme's logo (the light one when the brand has no dark variant).
+  pub maybe_logo_dark_url: Option<String>,
+  /// Heading and text in the asked language (else English).
+  pub maybe_title: Option<String>,
+  pub maybe_text: Option<String>,
+  pub links: BrandLinks,
+}
+
+/// The brand's legal and support links; https only.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct BrandLinks {
+  pub maybe_support: Option<String>,
+  pub maybe_privacy: Option<String>,
+  pub maybe_terms: Option<String>,
+  pub maybe_imprint: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ReactionItem {
   pub emoji: String,

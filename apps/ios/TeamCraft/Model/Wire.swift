@@ -107,6 +107,7 @@ struct ChatAnswer: Decodable, Sendable {
   let maybeTarget: PermalinkTarget?
   let users: [String]?
   let maybeLink: String?
+  let channels: [BrowsableChannel]?
 }
 
 /// The people part of the core's chat snapshot: who can be mentioned.
