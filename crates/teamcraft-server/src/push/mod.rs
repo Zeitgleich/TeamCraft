@@ -9,6 +9,7 @@ pub mod crypto;
 mod delivery;
 mod fcm;
 mod gateway;
+mod retry;
 pub mod routing;
 mod sender;
 mod status;
@@ -21,6 +22,7 @@ pub use fcm::{FCM_BASE_URL, FcmSender, FcmSettings, ServiceAccount};
 pub use gateway::{
   GatewayClient, GatewaySender, GatewaySettings, load_or_create_gateway_key, parse_gateway_key,
 };
+pub use retry::spawn_retry_workers;
 pub use sender::{GatewayBinding, PushDispatcher, PushError, PushMessage, PushSender, PushTarget, Urgency};
 pub use status::ProviderHealth;
 pub use tracker::PushTracker;

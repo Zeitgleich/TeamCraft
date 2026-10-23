@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use teamcraft_proto::{DeviceId, PushKind, PushProvider, PushWakeUp, UnixMillis, UserId};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 
 use super::crypto::{PushCryptoError, seal_wakeup};
@@ -70,14 +70,51 @@ pub enum PushError {
   Gone,
   #[error("the push service rejected the request with status {0}")]
   Rejected(u16),
-  #[error("the push service is unavailable: {0}")]
-  Unavailable(String),
+  /// A temporary failure (5xx, 429, timeout): the wake-up is tried again later.
+  #[error("the push service is unavailable: {reason}")]
+  Unavailable {
+    reason: String,
+    /// How long the push service asked us to wait (`Retry-After`), if it said.
+    maybe_retry_after: Option<Duration>,
+  },
   #[error("this provider is not configured")]
   NotConfigured,
   #[error("the registration is invalid: {0}")]
   Invalid(String),
   #[error(transparent)]
   Crypto(#[from] PushCryptoError),
+}
+
+impl PushError {
+  /// A temporary failure without a hint how long to wait.
+  pub fn unavailable(reason: impl Into<String>) -> Self {
+    Self::Unavailable {
+      reason: reason.into(),
+      maybe_retry_after: None,
+    }
+  }
+
+  /// A temporary failure; the push service asked to wait `maybe_retry_after` (if it said).
+  pub fn unavailable_for(reason: impl Into<String>, maybe_retry_after: Option<Duration>) -> Self {
+    Self::Unavailable {
+      reason: reason.into(),
+      maybe_retry_after,
+    }
+  }
+}
+
+/// Reads a `Retry-After` header (RFC 9110 §10.2.3): delay seconds or an HTTP date. `None` if absent
+/// or unreadable; a date in the past is no wait at all.
+pub(crate) fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+  let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+  if let Ok(secs) = value.parse::<u64>() {
+    return Some(Duration::from_secs(secs));
+  }
+  let at = httpdate::parse_http_date(value).ok()?;
+  Some(
+    at.duration_since(std::time::SystemTime::now())
+      .unwrap_or(Duration::ZERO),
+  )
 }
 
 /// Sends one push through one provider. Implementations get the sealed wake-up and wrap it the way
@@ -123,6 +160,8 @@ pub struct PushDispatcher {
   maybe_web_public_key: Option<String>,
   /// How this server reaches its push gateway, if it has one (told to the apps).
   maybe_gateway_binding: Option<GatewayBinding>,
+  /// Wakes the retry workers when a wake-up is queued for an immediate attempt.
+  retry_signal: Notify,
 }
 
 /// The gateway a server sends through, as its apps need to know it.
@@ -145,6 +184,7 @@ impl PushDispatcher {
       health: ProviderHealthTracker::default(),
       maybe_web_public_key: None,
       maybe_gateway_binding: None,
+      retry_signal: Notify::new(),
     }
   }
 
@@ -164,6 +204,10 @@ impl PushDispatcher {
   pub fn with_gateway_binding(mut self, binding: GatewayBinding) -> Self {
     self.maybe_gateway_binding = Some(binding);
     self
+  }
+
+  pub(super) fn retry_signal(&self) -> &Notify {
+    &self.retry_signal
   }
 
   pub fn gateway_binding(&self) -> Option<&GatewayBinding> {
@@ -243,7 +287,7 @@ impl PushDispatcher {
     let _permit = pool
       .acquire()
       .await
-      .map_err(|_| PushError::Unavailable("shutting down".into()))?;
+      .map_err(|_| PushError::unavailable("shutting down"))?;
     debug!(provider = %target.provider, device_id = %target.device, "sending push");
     let result = sender.send(target, &message).await;
     self.health.record(name, is_user_endpoint, &result, now_millis());
@@ -253,7 +297,7 @@ impl PushDispatcher {
 
 /// Web Push and UnifiedPush post to an endpoint the user registered, not to a service the operator
 /// configured.
-fn is_user_endpoint(provider: &PushProvider) -> bool {
+pub(super) fn is_user_endpoint(provider: &PushProvider) -> bool {
   matches!(provider, PushProvider::WebPush | PushProvider::UnifiedPush)
 }
 
@@ -286,7 +330,7 @@ impl PerUserLimit {
     let permit = semaphore
       .acquire_owned()
       .await
-      .map_err(|_| PushError::Unavailable("shutting down".into()))?;
+      .map_err(|_| PushError::unavailable("shutting down"))?;
     Ok(UserPermit {
       user,
       maybe_permit: Some(permit),
@@ -442,7 +486,7 @@ mod tests {
         match self.0 {
           Ok(()) => Ok(()),
           Err(410) => Err(PushError::Gone),
-          Err(status) => Err(PushError::Unavailable(format!("status {status}"))),
+          Err(status) => Err(PushError::unavailable(format!("status {status}"))),
         }
       })
     }

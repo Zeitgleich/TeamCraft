@@ -330,9 +330,9 @@ mod what_comes_back {
         Urgency::Normal,
       )
     };
-    assert!(matches!(push().await, Err(PushError::Unavailable(_))));
+    assert!(matches!(push().await, Err(PushError::Unavailable { .. })));
     stack.fake.set_reply(None);
-    assert!(matches!(push().await, Err(PushError::Unavailable(_))));
+    assert!(matches!(push().await, Err(PushError::Unavailable { .. })));
     assert_eq!(
       stack.fake.push_attempts(),
       1,
@@ -350,7 +350,7 @@ mod what_comes_back {
     ] {
       let result = answer(status, code).await;
       assert!(
-        matches!(result, Err(PushError::Unavailable(_))),
+        matches!(result, Err(PushError::Unavailable { .. })),
         "{code}: {result:?}"
       );
     }
@@ -396,7 +396,7 @@ mod what_comes_back {
       )
       .await;
 
-    assert!(matches!(result, Err(PushError::Unavailable(_))), "{result:?}");
+    assert!(matches!(result, Err(PushError::Unavailable { .. })), "{result:?}");
   }
 }
 

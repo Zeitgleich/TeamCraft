@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::{Host, Url};
 
 use super::crypto::{SubscriptionKeys, VapidKey, encrypt_web_push};
-use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
+use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency, retry_after};
 use crate::auth::BoxFuture;
 
 /// Connecting to an endpoint a user chose may take this long at most; a working push service
@@ -271,12 +271,16 @@ pub(super) async fn post_encrypted(
     .body(body)
     .send()
     .await
-    .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+    .map_err(|e| PushError::unavailable(e.without_url().to_string()))?;
+  let maybe_retry_after = retry_after(response.headers());
   match response.status() {
     status if status.is_success() => Ok(()),
     StatusCode::NOT_FOUND | StatusCode::GONE => Err(PushError::Gone),
-    StatusCode::TOO_MANY_REQUESTS => Err(PushError::Unavailable("rate limited".into())),
-    status if status.is_server_error() => Err(PushError::Unavailable(format!("status {status}"))),
+    StatusCode::TOO_MANY_REQUESTS => Err(PushError::unavailable_for("rate limited", maybe_retry_after)),
+    status if status.is_server_error() => Err(PushError::unavailable_for(
+      format!("status {status}"),
+      maybe_retry_after,
+    )),
     status => Err(PushError::Rejected(status.as_u16())),
   }
 }

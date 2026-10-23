@@ -32,6 +32,7 @@ mod org_recovery;
 mod permission_override;
 mod profile;
 mod push;
+mod push_retry;
 mod retention;
 mod server_settings;
 mod share_link;
@@ -86,6 +87,7 @@ pub use org_recovery::{
 pub use permission_override::{OverrideEdit, StoredOverride};
 pub use profile::{StoredAvatar, StoredProfile, StoredWorkingHours};
 pub use push::{PushDeviceRow, PushRecipientRow};
+pub use push_retry::{NewPushRetry, PushRetryClaim, PushRetryRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};
 pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};

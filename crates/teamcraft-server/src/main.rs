@@ -26,7 +26,7 @@ use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{
   APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FcmSender, FcmSettings,
   GatewayBinding, GatewayClient, GatewaySettings, PushDispatcher, ServiceAccount, UnifiedPushSender, Vapid,
-  WebPushSender, load_or_create_gateway_key, parse_gateway_key,
+  WebPushSender, load_or_create_gateway_key, parse_gateway_key, spawn_retry_workers,
 };
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
@@ -246,6 +246,8 @@ async fn run() -> anyhow::Result<()> {
   spawn_background_sweeper(state.clone());
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
+  // Wake-ups that failed for a temporary reason, also those queued before a restart.
+  spawn_retry_workers(&state);
 
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
@@ -792,6 +794,10 @@ fn push_settings(config: &Config) -> PushSettings {
     retry: RetryPolicy {
       max_retries: push.max_retries,
       initial_delay: Duration::from_millis(push.retry_initial_delay_ms),
+      max_delay: Duration::from_secs(push.retry_max_delay_secs),
+      workers: push.retry_workers.max(1),
+      max_queued_per_device: push.retry_max_queued_per_device,
+      poll_interval: Duration::from_millis(push.retry_poll_interval_ms.max(10)),
     },
     test_interval: Duration::from_secs(push.test_interval_secs),
     max_rings_per_minute: push.max_rings_per_minute,

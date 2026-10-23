@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO push_retries\n           (id, user_id, device_id, is_user_endpoint, kind, conversation_id, message_id, sender_id,\n            is_urgent, thread_id, call_id, badge, sent_at_ms, attempts, next_attempt_at, expires_at)\n         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,\n                now() + $15::bigint * interval '1 millisecond',\n                now() + $16::bigint * interval '1 millisecond'\n         WHERE (SELECT COUNT(*) FROM push_retries WHERE device_id = $3) < $17",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bool",
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bool",
+        "Int8",
+        "Int8",
+        "Int4",
+        "Int8",
+        "Int4",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1aa4f43416035cbda350fb79e757635ef5435d846540eec475f9adf7c1ae49f8"
+}

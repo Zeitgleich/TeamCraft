@@ -49,6 +49,8 @@ struct Inner {
   revoked: Vec<Vec<u8>>,
   reply: Option<(u16, Value)>,
   accepts_unbound: bool,
+  /// Pushes are taken and never answered (a gateway that hangs, or a send cut off by a crash).
+  is_hanging: bool,
 }
 
 #[derive(Clone, Default)]
@@ -117,6 +119,23 @@ impl FakeGateway {
     self.inner.lock().unwrap().known.clear();
   }
 
+  /// Takes every following push and never answers it (`false` answers again). A hung push is
+  /// not recorded, also when the server gives up on it.
+  pub fn set_hanging(&self, is_hanging: bool) {
+    self.inner.lock().unwrap().is_hanging = is_hanging;
+  }
+
+  /// Waits until `count` push requests arrived, accepted or not.
+  pub async fn wait_for_attempts(&self, count: usize) -> usize {
+    for _ in 0..200 {
+      if self.push_attempts() >= count {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    self.push_attempts()
+  }
+
   /// Answers every following push with this status and error body (the push is not recorded);
   /// `None` goes back to accepting.
   pub fn set_reply(&self, maybe_reply: Option<(u16, Value)>) {
@@ -160,8 +179,15 @@ async fn push(State(fake): State<FakeGateway>, headers: HeaderMap, body: axum::b
   let Ok(request) = serde_json::from_slice::<GatewayPushRequest>(&body) else {
     return error(400, "invalid_request");
   };
+  let is_hanging = {
+    let mut inner = fake.inner.lock().unwrap();
+    inner.push_attempts += 1;
+    inner.is_hanging
+  };
+  if is_hanging {
+    std::future::pending::<()>().await;
+  }
   let mut inner = fake.inner.lock().unwrap();
-  inner.push_attempts += 1;
   if let Some((status, body)) = inner.reply.clone() {
     return (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response();
   }

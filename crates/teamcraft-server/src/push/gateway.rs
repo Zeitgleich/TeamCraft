@@ -21,7 +21,7 @@ use teamcraft_proto::{
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
+use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency, retry_after};
 use crate::auth::BoxFuture;
 
 /// How long to hold back after the gateway said "too many" without saying how long.
@@ -72,7 +72,7 @@ impl GatewayClient {
       .connect_timeout(settings.timeout.min(Duration::from_secs(5)))
       .redirect(reqwest::redirect::Policy::none())
       .build()
-      .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+      .map_err(|e| PushError::unavailable(e.without_url().to_string()))?;
     Ok(Arc::new(Self {
       base_url: settings.url.trim_end_matches('/').to_owned(),
       accept_unbound_tokens: settings.accept_unbound_tokens,
@@ -123,7 +123,10 @@ impl GatewayClient {
       && Instant::now() < until
     {
       // Not even sent: the gateway asked us to wait, and ignoring that gets a server blocked.
-      return Err(PushError::Unavailable("the push gateway asked to wait".into()));
+      return Err(PushError::unavailable_for(
+        "the push gateway asked to wait",
+        Some(until.saturating_duration_since(Instant::now())),
+      ));
     }
     let body = serde_json::to_vec(request)
       .map_err(|_| PushError::Invalid("encoding the gateway request failed".into()))?;
@@ -189,27 +192,21 @@ impl GatewayClient {
       .body(body)
       .send()
       .await
-      .map_err(|e| GatewayFailure::Provider(PushError::Unavailable(e.without_url().to_string())))?;
+      .map_err(|e| GatewayFailure::Provider(PushError::unavailable(e.without_url().to_string())))?;
     let status = response.status();
     if status.is_success() {
       return Ok(());
     }
-    let maybe_header_wait = response
-      .headers()
-      .get(reqwest::header::RETRY_AFTER)
-      .and_then(|value| value.to_str().ok())
-      .and_then(|value| value.trim().parse::<u64>().ok())
-      .map(Duration::from_secs);
+    let maybe_header_wait = retry_after(response.headers());
     let maybe_body = read_error_body(response).await;
     let maybe_body_wait = maybe_body
       .as_ref()
       .and_then(|body| body.maybe_retry_after_secs)
       .map(|secs| Duration::from_secs(u64::from(secs)));
-    let retry_after = maybe_header_wait.or(maybe_body_wait).unwrap_or(DEFAULT_BACKOFF);
     Err(classify(
       status.as_u16(),
       maybe_body.map(|body| body.error_code),
-      retry_after,
+      maybe_header_wait.or(maybe_body_wait),
     ))
   }
 }
@@ -333,7 +330,9 @@ impl From<GatewayFailure> for PushError {
     match failure {
       // Registering did not help: the gateway keeps refusing us.
       GatewayFailure::UnknownServer => PushError::Rejected(401),
-      GatewayFailure::Throttled { status, .. } => PushError::Unavailable(format!("gateway status {status}")),
+      GatewayFailure::Throttled { status, retry_after } => {
+        PushError::unavailable_for(format!("gateway status {status}"), Some(retry_after))
+      },
       GatewayFailure::Provider(error) => error,
     }
   }
@@ -345,7 +344,11 @@ impl From<GatewayFailure> for PushError {
 /// (blocked, bad signature, over quota) must never delete devices. Problems of one token
 /// (`invalid_request`, `token_rate_limited`) say nothing about the gateway and don't count
 /// against its health.
-fn classify(status: u16, maybe_code: Option<GatewayErrorCode>, retry_after: Duration) -> GatewayFailure {
+fn classify(
+  status: u16,
+  maybe_code: Option<GatewayErrorCode>,
+  maybe_retry_after: Option<Duration>,
+) -> GatewayFailure {
   let failure = match (status, &maybe_code) {
     (_, Some(GatewayErrorCode::UnknownServer)) => return GatewayFailure::UnknownServer,
     // The registration is no use for this server any more (the push service says so, or the sealed
@@ -363,7 +366,10 @@ fn classify(status: u16, maybe_code: Option<GatewayErrorCode>, retry_after: Dura
       ),
     ) => PushError::Gone,
     (_, Some(GatewayErrorCode::RateLimited | GatewayErrorCode::QuotaExceeded)) => {
-      return GatewayFailure::Throttled { retry_after, status };
+      return GatewayFailure::Throttled {
+        retry_after: maybe_retry_after.unwrap_or(DEFAULT_BACKOFF),
+        status,
+      };
     },
     (_, Some(GatewayErrorCode::InvalidRequest)) => {
       PushError::Invalid("the push gateway refused the request".into())
@@ -379,8 +385,10 @@ fn classify(status: u16, maybe_code: Option<GatewayErrorCode>, retry_after: Dura
       );
       PushError::Rejected(status)
     },
+    // Apple or Google down (the gateway passes on how long they asked to wait), or the gateway
+    // itself overloaded.
     (_, Some(GatewayErrorCode::ProviderUnavailable)) | (429 | 500..=599, _) => {
-      PushError::Unavailable(format!("gateway status {status}"))
+      PushError::unavailable_for(format!("gateway status {status}"), maybe_retry_after)
     },
     _ => {
       warn!(status, code = ?maybe_code.as_ref().map(GatewayErrorCode::as_str), "the push gateway refused the push");
@@ -418,7 +426,7 @@ mod tests {
   use super::*;
 
   fn class(status: u16, code: Option<GatewayErrorCode>) -> PushError {
-    match classify(status, code, DEFAULT_BACKOFF) {
+    match classify(status, code, None) {
       GatewayFailure::Provider(error) => error,
       failure @ GatewayFailure::Throttled { .. } => failure.into(),
       GatewayFailure::UnknownServer => PushError::Rejected(0),
@@ -456,7 +464,7 @@ mod tests {
   fn limits_of_the_server_make_it_wait_and_outages_are_retryable() {
     for code in [GatewayErrorCode::RateLimited, GatewayErrorCode::QuotaExceeded] {
       assert!(matches!(
-        classify(429, Some(code), Duration::from_secs(30)),
+        classify(429, Some(code), Some(Duration::from_secs(30))),
         GatewayFailure::Throttled { retry_after, .. } if retry_after == Duration::from_secs(30)
       ));
     }
@@ -465,8 +473,18 @@ mod tests {
       (503, None),
       (429, None),
     ] {
-      assert!(matches!(class(status, code), PushError::Unavailable(_)));
+      assert!(matches!(class(status, code), PushError::Unavailable { .. }));
     }
+    // Without a hint, the server's own limit waits the default; an outage leaves it to the queue.
+    assert!(matches!(
+      classify(429, Some(GatewayErrorCode::RateLimited), None),
+      GatewayFailure::Throttled { retry_after, .. } if retry_after == DEFAULT_BACKOFF
+    ));
+    let wait = Some(Duration::from_secs(90));
+    assert!(matches!(
+      classify(502, Some(GatewayErrorCode::ProviderUnavailable), wait),
+      GatewayFailure::Provider(PushError::Unavailable { maybe_retry_after, .. }) if maybe_retry_after == wait
+    ));
   }
 
   #[test]
@@ -498,7 +516,7 @@ mod tests {
   #[test]
   fn an_unknown_server_triggers_registration() {
     assert!(matches!(
-      classify(401, Some(GatewayErrorCode::UnknownServer), DEFAULT_BACKOFF),
+      classify(401, Some(GatewayErrorCode::UnknownServer), None),
       GatewayFailure::UnknownServer
     ));
   }
