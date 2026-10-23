@@ -2128,7 +2128,6 @@ impl GatewayConnection for FakeGateway {
       GatewayClientMessage::Resume {
         session_id, last_seq, ..
       } => {
-        // The pending entry stays until resume succeeds, so `identify` can follow `session_invalid`.
         match state.sessions.get_mut(session_id) {
           Some(session) if session.user == self.user => {
             session.maybe_live = Some((self.connection, sender.clone()));
@@ -2147,7 +2146,10 @@ impl GatewayConnection for FakeGateway {
             state.sessions.remove(&pending_session(self.connection));
           },
           _ => {
+            // Like the server: `session_invalid`, then the connection closes; the client starts over
+            // with `identify` on a new one.
             let _ = sender.unbounded_send(GatewayServerMessage::SessionInvalid);
+            state.sessions.remove(&pending_session(self.connection));
           },
         }
       },
