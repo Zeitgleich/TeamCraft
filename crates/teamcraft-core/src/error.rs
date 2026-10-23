@@ -86,4 +86,9 @@ impl CoreError {
   pub fn is_transient(&self) -> bool {
     matches!(self, Self::Api(error) if error.is_transient())
   }
+
+  /// See [`ApiError::is_retry_later`].
+  pub fn is_retry_later(&self) -> bool {
+    matches!(self, Self::Api(error) if error.is_retry_later())
+  }
 }

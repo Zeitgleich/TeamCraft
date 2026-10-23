@@ -462,6 +462,13 @@ impl ApiError {
     }
   }
 
+  /// Worth retrying once the app has a fresh access token, too: after sleep the token has often
+  /// expired before the app refreshed it. Queued work (outbox, uploads) waits instead of failing
+  /// for good; the app handles the signed-out state itself.
+  pub fn is_retry_later(&self) -> bool {
+    self.is_transient() || matches!(self, Self::Token(_) | Self::Status { status: 401, .. })
+  }
+
   pub(crate) fn status(status: u16, code: ErrorCode, message: impl Into<String>) -> Self {
     Self::Status {
       status,

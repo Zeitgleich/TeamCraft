@@ -100,6 +100,8 @@ struct State {
   offline_users: HashSet<UserId>,
   /// Users whose REST calls fail while their gateway still connects.
   rest_failing_users: HashSet<UserId>,
+  /// Users whose access token the server rejects (401), as after an expired session.
+  signed_out_users: HashSet<UserId>,
   /// Heartbeats received, to check that a busy client keeps sending them.
   heartbeats: u64,
   next_connection: u64,
@@ -227,6 +229,16 @@ impl FakeServer {
       state.offline_users.insert(user);
     } else {
       state.offline_users.remove(&user);
+    }
+  }
+
+  /// While set, this user's REST calls are answered with 401 (an expired access token).
+  pub fn set_signed_out(&self, user: UserId, is_signed_out: bool) {
+    let mut state = self.lock();
+    if is_signed_out {
+      state.signed_out_users.insert(user);
+    } else {
+      state.signed_out_users.remove(&user);
     }
   }
 
@@ -502,6 +514,9 @@ impl FakeServerApi {
     let mut state = self.server.lock();
     if state.offline_users.contains(&self.user) || state.rest_failing_users.contains(&self.user) {
       return Err(ApiError::Network("fake server: client is offline".into()));
+    }
+    if state.signed_out_users.contains(&self.user) {
+      return Err(ApiError::status(401, ErrorCode::Unauthorized, "token expired"));
     }
     action(&mut state, self.user)
   }

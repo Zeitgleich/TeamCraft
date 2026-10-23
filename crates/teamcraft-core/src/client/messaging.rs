@@ -160,7 +160,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       match self.send_entry(&entry).await {
         Ok(true) => report.sent += 1,
         Ok(false) => report.pending += 1,
-        Err(error) if error.is_transient() => {
+        Err(error) if error.is_retry_later() => {
           is_offline = true;
           report.pending += 1;
         },

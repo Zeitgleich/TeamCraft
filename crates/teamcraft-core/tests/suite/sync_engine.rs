@@ -220,6 +220,27 @@ async fn outbox_survives_being_offline() {
 }
 
 #[tokio::test]
+async fn an_expired_token_keeps_queued_messages_pending() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "after sleep")
+    .await
+    .unwrap();
+
+  // The laptop woke up and the access token expired before the app refreshed it.
+  server.set_signed_out(alice.client.user_id(), true);
+  let _ = alice.client.send_text(channel, None, "first").await;
+  let _ = alice.client.send_text(channel, None, "second").await;
+  let report = alice.client.flush_outbox().await.unwrap();
+  assert_eq!((report.pending, report.failed), (2, 0));
+
+  server.set_signed_out(alice.client.user_id(), false);
+  assert_eq!(alice.client.flush_outbox().await.unwrap().sent, 2);
+}
+
+#[tokio::test]
 async fn gateway_resumes_and_falls_back_to_full_sync() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;

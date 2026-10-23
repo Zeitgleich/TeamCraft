@@ -259,7 +259,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         attachment.maybe_thumbnail = maybe_thumbnail.map(Base64Bytes::new);
         Ok(attachment)
       },
-      Err(error) if error.is_transient() => Err(UploadError::Retry(error)),
+      Err(error) if error.is_retry_later() => Err(UploadError::Retry(error)),
       Err(CoreError::Api(api))
         if api.error_code() == Some(&ErrorCode::PayloadTooLarge) || is_status(&api, 413) =>
       {
