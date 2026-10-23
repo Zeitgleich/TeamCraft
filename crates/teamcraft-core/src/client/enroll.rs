@@ -11,12 +11,13 @@ use rand_core::OsRng;
 use teamcraft_crypto::backup::{
   Argon2Settings, BackupKey, BackupKeyWrapper, PassphraseWrapper, WrapMethod, WrappedBackupKey,
 };
-use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair};
+use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair, SignedDeviceCertificate};
 use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBag, KeyBagBinding};
 use teamcraft_crypto::org_recovery::{RecoveryRequest, RecoveryRequestKey};
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  Base64Bytes, PutKeyBagRequest, RegisterDeviceRequest, UploadIdentityKeyRequest, UserId,
+  Base64Bytes, DeviceId, InitialKeyBag, PutKeyBagRequest, RegisterDeviceRequest, UploadIdentityKeyRequest,
+  UserId,
 };
 
 use super::{Client, ClientSettings};
@@ -24,7 +25,7 @@ use crate::api::ServerApi;
 use crate::clock::Clock;
 use crate::convert;
 use crate::error::CoreError;
-use crate::records::{self, Account, SyncState};
+use crate::records::{self, Account, PendingDevice, SyncState};
 use crate::store::{LocalStore, Table};
 
 /// Device ID used in the provisional certificate sent at registration, before the server has
@@ -96,6 +97,13 @@ impl PendingEnrollment {
   /// Registers this device and publishes everything. If the account already has an identity key
   /// on the server, the existing identity is recovered from the key bag with the passphrase
   /// instead (the pending identity is discarded).
+  ///
+  /// Safe to run again after any failure, also after a restart (e2ee.md §3.2): a new identity
+  /// reaches the server only together with its passphrase-wrapped key bag, the device key pair is
+  /// stored before it is registered so a retry reuses (or revokes) that registration, and the
+  /// account is stored only once the server holds everything needed to recover it. What remains
+  /// after that (key packages, device list) [`Client::finish_enrollment`] completes on the next
+  /// sync.
   pub async fn complete<A: ServerApi, S: LocalStore>(
     self,
     api: A,
@@ -110,28 +118,28 @@ impl PendingEnrollment {
       Err(error) if error.is_not_found() => None,
       Err(error) => return Err(error.into()),
     };
-    let (recovered, is_new_identity) = match existing {
-      None if !matches!(options.secret, EnrollmentSecret::Passphrase(_)) => {
-        return Err(CoreError::IdentityMissing);
-      },
-      None => (
-        Recovered {
-          key_bag: KeyBag::new(convert::user(me.id), self.identity),
-          backup_secret: SymmetricKey::generate(&mut OsRng),
-          version: 0,
-          sequence: 0,
-          wrapped_keys: Vec::new(),
+    let is_new_identity = existing.is_none();
+    let mut recovered = match existing {
+      None => match &options.secret {
+        EnrollmentSecret::Passphrase(passphrase) => {
+          new_identity(me.id, self.identity, passphrase, options.argon2)?
         },
-        true,
-      ),
+        _ => return Err(CoreError::IdentityMissing),
+      },
       Some(existing) => {
         let recovered = recover_key_bag(&api, me.id, &options).await?;
         if recovered.key_bag.identity().public_key().as_bytes().as_slice() != existing.public_key.as_slice() {
           return Err(CoreError::IdentityMismatch);
         }
-        (recovered, false)
+        recovered
       },
     };
+
+    let (device_id, device, certificate) =
+      ensure_device(&api, &store, me.id, recovered.key_bag.identity(), &options).await?;
+    if is_new_identity {
+      publish_identity(&api, &mut recovered, &certificate, &options).await?;
+    }
     let Recovered {
       key_bag,
       backup_secret,
@@ -139,8 +147,6 @@ impl PendingEnrollment {
       sequence: key_bag_sequence,
       wrapped_keys,
     } = recovered;
-
-    let (device_id, device, certificate) = register_device(&api, me.id, key_bag.identity(), &options).await?;
     let account = Account {
       user_id: me.id,
       device_id,
@@ -149,38 +155,12 @@ impl PendingEnrollment {
       backup_secret,
       key_bag,
     };
-    if is_new_identity {
-      api
-        .put_identity_key(&UploadIdentityKeyRequest {
-          public_key: Base64Bytes::new(account.identity_public_key().as_bytes().to_vec()),
-          // Proof of possession: the identity key's signature over this device's certificate.
-          signature: Base64Bytes::new(account.certificate.to_bytes()?),
-          maybe_attestation: options.maybe_attestation.clone(),
-          replace: false,
-        })
-        .await
-        .map_err(|error| match error.error_code() {
-          // Another device of this user enrolled first, between our check and now: the caller
-          // enrolls again, which then recovers that identity.
-          Some(teamcraft_proto::ErrorCode::Conflict) => CoreError::AlreadyEnrolled,
-          _ => CoreError::from(error),
-        })?;
-    }
-    records::save_account(&store, &account)?;
     let sync = SyncState {
       key_bag_version,
       key_bag_sequence,
+      is_enrollment_unfinished: true,
       ..SyncState::default()
     };
-    records::save_sync_state(&store, &sync)?;
-    if !is_new_identity {
-      records::put_json(
-        &store,
-        Table::SyncState,
-        WRAPPED_KEYS_KEY,
-        &Base64Bytes::new(wrapped_keys),
-      )?;
-    }
     let maybe_preview_fetcher = super::previews::default_fetcher(&settings.link_previews);
     let maybe_jwks_source = super::attested::default_jwks_source(settings.maybe_attestation.as_ref());
     let mut client = Client {
@@ -198,18 +178,17 @@ impl PendingEnrollment {
       maybe_preview_fetcher,
       maybe_jwks_source,
     };
-    match &options.secret {
-      EnrollmentSecret::Passphrase(passphrase) if is_new_identity => {
-        client.upload_key_bag_with(passphrase, options.argon2).await?;
-      },
-      // The admins who recovered the account saw its backup key (security review B5).
-      EnrollmentSecret::OrgRecovery { new_passphrase, .. } => {
-        client.rotate_backup_key(new_passphrase, options.argon2).await?;
-      },
-      _ => {},
+    client.persist_sync()?;
+    client.store_wrapped_keys_blob(&wrapped_keys)?;
+    // The admins who recovered the account saw its backup key (security review B5). Before the
+    // account is stored: interrupted, the device recovers again (with the new passphrase if the
+    // new bag reached the server).
+    if let EnrollmentSecret::OrgRecovery { new_passphrase, .. } = &options.secret {
+      client.rotate_backup_key(new_passphrase, options.argon2).await?;
     }
-    client.top_up_key_packages().await?;
-    client.publish_device_list(&[]).await?;
+    records::save_account(&client.store, &client.account)?;
+    records::delete_pending_device(&client.store)?;
+    client.finish_enrollment().await?;
     Ok(client)
   }
 }
@@ -237,6 +216,19 @@ impl std::fmt::Debug for EnrollmentOptions {
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Publishes what an enrollment that stopped after storing the account left out: key packages
+  /// and this device in the signed device list. Does nothing once done; [`Client::full_sync`] calls
+  /// it first.
+  pub async fn finish_enrollment(&mut self) -> Result<(), CoreError> {
+    if !self.sync.is_enrollment_unfinished {
+      return Ok(());
+    }
+    self.top_up_key_packages().await?;
+    self.publish_device_list(&[]).await?;
+    self.sync.is_enrollment_unfinished = false;
+    self.persist_sync()
+  }
+
   /// Encrypts the key bag and uploads it, wrapping the backup key with `passphrase` (replacing an
   /// earlier passphrase wrap; the other recovery factors stay).
   pub async fn upload_key_bag_with(
@@ -260,13 +252,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// (e2ee.md §6.3.1). The key bag is re-encrypted and wrapped with `passphrase` and, if the
   /// workspace has one, the current org recovery key; other factors (passkeys) must be enrolled
   /// again, and the user's other devices link again.
-  pub async fn rotate_backup_key(
+  ///
+  /// Only during enrollment, before the account is stored: the new backup key is stored with the
+  /// account once the bag encrypted with it is on the server.
+  pub(crate) async fn rotate_backup_key(
     &mut self,
     passphrase: &SecretBytes,
     argon2: Argon2Settings,
   ) -> Result<(), CoreError> {
     self.account.backup_secret = SymmetricKey::generate(&mut OsRng);
-    records::save_account(&self.store, &self.account)?;
     self.sync.is_key_bag_dirty = true;
     self.persist_sync()?;
     let mut keys = vec![self.passphrase_wrap(passphrase, argon2)?];
@@ -283,12 +277,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     passphrase: &SecretBytes,
     argon2: Argon2Settings,
   ) -> Result<WrappedBackupKey, CoreError> {
-    let wrapper = PassphraseWrapper::new(SecretBytes::new(passphrase.expose_secret().to_vec()), argon2)?;
-    Ok(wrapper.wrap_key(
-      convert::user(self.account.user_id),
+    passphrase_wrap(
+      self.account.user_id,
       &self.account.backup_key(),
-      &mut OsRng,
-    )?)
+      passphrase,
+      argon2,
+    )
   }
 
   /// The wrapped backup keys this device uploads, decoded.
@@ -298,8 +292,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The wrapped backup keys this device uploads next to the key bag: the stored ones, else the
-  /// server's, taken only after the bag stored with them opened (they are bound to it, B11), else
-  /// none (new identity).
+  /// server's, taken only after the bag stored with them opened (they are bound to it, B11).
   pub(crate) async fn wrapped_keys_blob(&mut self) -> Result<Vec<u8>, CoreError> {
     if let Some(stored) = records::get_json::<Base64Bytes>(&self.store, Table::SyncState, WRAPPED_KEYS_KEY)? {
       return Ok(stored.into_vec());
@@ -314,7 +307,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         )?;
         Ok(current.wrapped_backup_keys.into_vec())
       },
-      Err(error) if error.is_not_found() => encode_wrapped_keys(&[]),
+      // Enrollment uploads the first bag with the identity: an enrolled account without one lost
+      // it (or enrolled with an older client). A bag without wraps could never be recovered.
+      Err(error) if error.is_not_found() => Err(CoreError::KeyBagMissing),
       Err(error) => Err(error.into()),
     }
   }
@@ -417,7 +412,7 @@ struct Recovered {
 
 async fn recover_key_bag(
   api: &impl ServerApi,
-  user: teamcraft_proto::UserId,
+  user: UserId,
   options: &EnrollmentOptions,
 ) -> Result<Recovered, CoreError> {
   let crypto_user = convert::user(user);
@@ -484,42 +479,216 @@ async fn open_stored(
   })
 }
 
-async fn register_device(
+/// A new identity with a fresh backup key, wrapped with the passphrase (the only way to create one).
+fn new_identity(
+  user: UserId,
+  identity: IdentityKeyPair,
+  passphrase: &SecretBytes,
+  argon2: Argon2Settings,
+) -> Result<Recovered, CoreError> {
+  let backup_secret = SymmetricKey::generate(&mut OsRng);
+  let wrapped = passphrase_wrap(
+    user,
+    &BackupKey::from_key(backup_secret.duplicate()),
+    passphrase,
+    argon2,
+  )?;
+  Ok(Recovered {
+    key_bag: KeyBag::new(convert::user(user), identity),
+    backup_secret,
+    version: 0,
+    sequence: 0,
+    wrapped_keys: encode_wrapped_keys(&[wrapped])?,
+  })
+}
+
+/// Uploads the new identity key together with its first key bag, in one request (e2ee.md §3.2):
+/// the server never holds the identity without a way to recover it.
+async fn publish_identity(
   api: &impl ServerApi,
-  user: teamcraft_proto::UserId,
+  recovered: &mut Recovered,
+  certificate: &SignedDeviceCertificate,
+  options: &EnrollmentOptions,
+) -> Result<(), CoreError> {
+  let sequence = recovered.sequence + 1;
+  let encrypted = recovered.key_bag.encrypt(
+    &BackupKey::from_key(recovered.backup_secret.duplicate()),
+    KeyBagBinding {
+      sequence,
+      wrapped_keys: &recovered.wrapped_keys,
+    },
+    &mut OsRng,
+  )?;
+  let encrypted_key_bag = Base64Bytes::new(encrypted.to_bytes()?);
+  let wrapped_backup_keys = Base64Bytes::new(recovered.wrapped_keys.clone());
+  let stored = api
+    .put_identity_key(&UploadIdentityKeyRequest {
+      public_key: Base64Bytes::new(recovered.key_bag.identity().public_key().as_bytes().to_vec()),
+      // Proof of possession: the identity key's signature over this device's certificate.
+      signature: Base64Bytes::new(certificate.to_bytes()?),
+      maybe_attestation: options.maybe_attestation.clone(),
+      replace: false,
+      maybe_key_bag: Some(InitialKeyBag {
+        encrypted_key_bag: encrypted_key_bag.clone(),
+        wrapped_backup_keys: wrapped_backup_keys.clone(),
+      }),
+    })
+    .await
+    .map_err(|error| match error.error_code() {
+      // Another device of this user enrolled first, between our check and now: the caller
+      // enrolls again, which then recovers that identity.
+      Some(teamcraft_proto::ErrorCode::Conflict) => CoreError::AlreadyEnrolled,
+      _ => CoreError::from(error),
+    })?;
+  recovered.sequence = sequence;
+  recovered.version = match stored.maybe_key_bag_version {
+    Some(version) => version,
+    // A server older than the combined upload ignored the bag: store it right away (the
+    // window in which the identity has no bag is what the combined upload closes).
+    None => {
+      api
+        .put_key_bag(&PutKeyBagRequest {
+          expected_version: 0,
+          encrypted_key_bag,
+          wrapped_backup_keys,
+        })
+        .await?
+        .version
+    },
+  };
+  Ok(())
+}
+
+/// Registers this device's keys, or picks up the registration an interrupted attempt made with the
+/// same identity. A registration certified by another identity (one that never reached the
+/// server) is revoked, so no orphan device stays behind.
+async fn ensure_device(
+  api: &impl ServerApi,
+  store: &impl LocalStore,
+  user: UserId,
   identity: &IdentityKeyPair,
   options: &EnrollmentOptions,
-) -> Result<
-  (
-    teamcraft_proto::DeviceId,
-    DeviceKeyPair,
-    teamcraft_crypto::identity::SignedDeviceCertificate,
-  ),
-  CoreError,
-> {
-  let crypto_user = convert::user(user);
-  let provisional = DeviceKeyPair::generate(
-    crypto_user,
-    teamcraft_crypto::ids::DeviceId::new(PROVISIONAL_DEVICE_ID),
-    &mut OsRng,
-  );
-  let public = provisional.public_keys();
-  let mut public_key = public.signing_key.as_bytes().to_vec();
-  public_key.extend_from_slice(public.agreement_key.as_bytes());
+) -> Result<(DeviceId, DeviceKeyPair, SignedDeviceCertificate), CoreError> {
+  let provisional = teamcraft_crypto::ids::DeviceId::new(PROVISIONAL_DEVICE_ID);
+  let identity_public_key = *identity.public_key().as_bytes();
+  let maybe_pending =
+    records::load_pending_device(store, provisional)?.filter(|pending| pending.user_id == user);
+  let device = match maybe_pending {
+    Some(pending) => {
+      let maybe_registered = find_registered(api, user, &pending.device).await?;
+      match maybe_registered {
+        Some(id) if pending.identity_public_key == identity_public_key => {
+          return certify(user, identity, &pending.device, id);
+        },
+        Some(orphan) => {
+          revoke_orphan(api, orphan).await?;
+          new_pending_device(store, user, identity_public_key)?
+        },
+        // The registration never reached the server: register the same keys.
+        None if pending.identity_public_key == identity_public_key => pending.device,
+        None => new_pending_device(store, user, identity_public_key)?,
+      }
+    },
+    None => new_pending_device(store, user, identity_public_key)?,
+  };
+  let id = register_device(api, user, identity, &device, options).await?;
+  certify(user, identity, &device, id)
+}
+
+/// A fresh device key pair, stored before it is registered.
+fn new_pending_device(
+  store: &impl LocalStore,
+  user: UserId,
+  identity_public_key: [u8; 32],
+) -> Result<DeviceKeyPair, CoreError> {
+  let pending = PendingDevice {
+    user_id: user,
+    identity_public_key,
+    device: DeviceKeyPair::generate(
+      convert::user(user),
+      teamcraft_crypto::ids::DeviceId::new(PROVISIONAL_DEVICE_ID),
+      &mut OsRng,
+    ),
+  };
+  records::save_pending_device(store, &pending)?;
+  Ok(pending.device)
+}
+
+/// The server's ID for `device`, if it is registered and not revoked.
+async fn find_registered(
+  api: &impl ServerApi,
+  user: UserId,
+  device: &DeviceKeyPair,
+) -> Result<Option<DeviceId>, CoreError> {
+  let public_key = device_public_key(device);
+  let devices = api.list_user_devices(user).await?.devices;
+  Ok(
+    devices
+      .iter()
+      .find(|registered| registered.public_key.as_slice() == public_key.as_slice())
+      .map(|registered| registered.id),
+  )
+}
+
+async fn revoke_orphan(api: &impl ServerApi, orphan: DeviceId) -> Result<(), CoreError> {
+  tracing::info!(device_id = %orphan, "revoking the device an interrupted enrollment registered");
+  match api.revoke_device(orphan).await {
+    Ok(()) => Ok(()),
+    Err(error) if error.is_not_found() => Ok(()),
+    Err(error) => Err(error.into()),
+  }
+}
+
+async fn register_device(
+  api: &impl ServerApi,
+  user: UserId,
+  identity: &IdentityKeyPair,
+  device: &DeviceKeyPair,
+  options: &EnrollmentOptions,
+) -> Result<DeviceId, CoreError> {
   // The server assigns the device ID, so the certificate sent at registration can't contain it
   // yet. The final certificate (with the ID) is what MLS credentials carry.
-  let provisional_certificate = identity.certify_device(crypto_user, &public)?;
+  let provisional_certificate = identity.certify_device(convert::user(user), &device.public_keys())?;
   let registered = api
     .register_device(&RegisterDeviceRequest {
       name: options.device_name.clone(),
-      public_key: Base64Bytes::new(public_key),
+      public_key: Base64Bytes::new(device_public_key(device)),
       cross_signature: Base64Bytes::new(provisional_certificate.to_bytes()?),
     })
     .await?;
+  Ok(registered.id)
+}
+
+/// The device's keys under the ID the server assigned, with the final certificate.
+fn certify(
+  user: UserId,
+  identity: &IdentityKeyPair,
+  provisional: &DeviceKeyPair,
+  id: DeviceId,
+) -> Result<(DeviceId, DeviceKeyPair, SignedDeviceCertificate), CoreError> {
+  let crypto_user = convert::user(user);
   let (signing, agreement) = provisional.to_secrets();
-  let device = DeviceKeyPair::from_secrets(crypto_user, convert::device(registered.id), &signing, &agreement);
+  let device = DeviceKeyPair::from_secrets(crypto_user, convert::device(id), &signing, &agreement);
   let certificate = identity.certify_device(crypto_user, &device.public_keys())?;
-  Ok((registered.id, device, certificate))
+  Ok((id, device, certificate))
+}
+
+/// What the server stores as the device's public key: signing key, then agreement key.
+fn device_public_key(device: &DeviceKeyPair) -> Vec<u8> {
+  let public = device.public_keys();
+  let mut public_key = public.signing_key.as_bytes().to_vec();
+  public_key.extend_from_slice(public.agreement_key.as_bytes());
+  public_key
+}
+
+fn passphrase_wrap(
+  user: UserId,
+  backup_key: &BackupKey,
+  passphrase: &SecretBytes,
+  argon2: Argon2Settings,
+) -> Result<WrappedBackupKey, CoreError> {
+  let wrapper = PassphraseWrapper::new(SecretBytes::new(passphrase.expose_secret().to_vec()), argon2)?;
+  Ok(wrapper.wrap_key(convert::user(user), backup_key, &mut OsRng)?)
 }
 
 /// The server stores one opaque blob of wrapped backup keys; it holds a list (one per method).

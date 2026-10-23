@@ -44,6 +44,18 @@ pub async fn register_device(app: &TestApp, user: &TestUser) -> String {
   reply.id()
 }
 
+/// Publishes an identity key with its first key bag, as enrollment does (e2ee.md §3.2).
+pub async fn enroll_identity(app: &TestApp, user: &TestUser) {
+  let reply = app
+    .put(
+      user,
+      "/me/identity-key",
+      json!({"public_key": "a2V5", "signature": "c2ln", "key_bag": {"encrypted_key_bag": "YmFn", "wrapped_backup_keys": "d3JhcA=="}}),
+    )
+    .await;
+  assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
 pub async fn create_space(app: &TestApp, user: &TestUser, name: &str, join_policy: &str) -> String {
   let reply = app
     .post(user, "/spaces", json!({"name": name, "join_policy": join_policy}))

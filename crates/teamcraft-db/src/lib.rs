@@ -67,7 +67,7 @@ pub use device::{Device, NewDevice};
 pub use device_list::{DeviceList, DeviceListOutcome};
 pub use email_digest::{DueDigest, StoredEmailDigest};
 pub use error::DbError;
-pub use identity::{IdentityKey, IdentityKeyOutcome, NewIdentityKey};
+pub use identity::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};
 pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts};

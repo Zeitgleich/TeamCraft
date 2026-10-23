@@ -87,12 +87,13 @@ pub async fn link_device(owner: &mut Peer) -> TestClient {
     teamcraft_core::client::NewDeviceLink::connect(&api, &offer),
     owner.client.start_link_approval(&code)
   );
-  owner
-    .client
-    .complete_link_approval(owner_side.unwrap())
-    .await
-    .unwrap();
-  let link_options = linked_options(new_side.unwrap().receive_secrets().await.unwrap());
+  // The owner's device succeeds only once the new device confirmed the transfer.
+  let (approved, received) = tokio::join!(
+    owner.client.complete_link_approval(owner_side.unwrap()),
+    new_side.unwrap().receive_secrets()
+  );
+  approved.unwrap();
+  let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
     .complete(
       api,

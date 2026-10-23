@@ -11,6 +11,7 @@ mod chat_actions;
 mod common;
 mod dev_stack;
 mod devices;
+mod enrollment;
 mod files;
 mod link_previews;
 mod linking;

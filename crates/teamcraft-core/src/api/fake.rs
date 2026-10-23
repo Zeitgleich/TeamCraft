@@ -104,6 +104,8 @@ struct State {
   signed_out_users: HashSet<UserId>,
   /// Heartbeats received, to check that a busy client keeps sending them.
   heartbeats: u64,
+  /// A network cut armed per user: after the given number of calls, the next one fails.
+  network_cuts: HashMap<UserId, (u32, NetworkCut)>,
   next_connection: u64,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
@@ -116,6 +118,8 @@ struct State {
   revoked_gateway_tokens: Vec<Vec<u8>>,
   revoked_gateway_urls: Vec<String>,
   relays: HashMap<String, Relay>,
+  /// Relayed binary frames still to be lost on the way (a flaky connection during linking).
+  relay_frames_to_lose: u32,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -132,6 +136,15 @@ struct State {
   /// When people were last active, and who chose to hide it.
   last_seen: HashMap<UserId, i64>,
   hidden_last_seen: HashSet<UserId>,
+}
+
+/// How an armed network cut ([`FakeServer::cut_network_after`]) hits the call it catches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkCut {
+  /// The request never reaches the server.
+  BeforeRequest,
+  /// The server handles the request, the response is lost.
+  ResponseLost,
 }
 
 /// A device-linking relay: at most two endpoints of one user, frames held for an absent peer.
@@ -222,13 +235,15 @@ impl FakeServer {
     }
   }
 
-  /// While offline, every REST call of this user fails with a network error.
+  /// While offline, every REST call of this user fails with a network error. Coming back online
+  /// also disarms a network cut that hasn't hit yet.
   pub fn set_offline(&self, user: UserId, is_offline: bool) {
     let mut state = self.lock();
     if is_offline {
       state.offline_users.insert(user);
     } else {
       state.offline_users.remove(&user);
+      state.network_cuts.remove(&user);
     }
   }
 
@@ -259,6 +274,35 @@ impl FakeServer {
   }
 
   /// Serves another identity key for a user, as a server substituting its own would.
+  /// Lets `calls` more REST calls of `user` through, then cuts the network: the next call fails as
+  /// `cut` says and the user stays offline until [`Self::set_offline`] brings them back.
+  pub fn cut_network_after(&self, user: UserId, calls: u32, cut: NetworkCut) {
+    self.lock().network_cuts.insert(user, (calls, cut));
+  }
+
+  /// The next `count` binary frames sent over any relay are lost.
+  pub fn lose_relay_frames(&self, count: u32) {
+    self.lock().relay_frames_to_lose = count;
+  }
+
+  /// The user's devices that are not revoked.
+  pub fn active_devices(&self, user: UserId) -> Vec<DeviceId> {
+    self
+      .lock()
+      .devices_of(user)
+      .map(|device| device.response.id)
+      .collect()
+  }
+
+  pub fn identity_key_of(&self, user: UserId) -> Option<IdentityKeyResponse> {
+    self.lock().identity_keys.get(&user).cloned()
+  }
+
+  /// Drops the user's key bag, as on a server where an older client enrolled without one.
+  pub fn forget_key_bag(&self, user: UserId) {
+    self.lock().key_bags.remove(&user);
+  }
+
   pub fn replace_identity_key(&self, user: UserId, public_key: Vec<u8>) {
     if let Some(entry) = self.lock().identity_keys.get_mut(&user) {
       entry.public_key = Base64Bytes::new(public_key);
@@ -518,7 +562,14 @@ impl FakeServerApi {
     if state.signed_out_users.contains(&self.user) {
       return Err(ApiError::status(401, ErrorCode::Unauthorized, "token expired"));
     }
-    action(&mut state, self.user)
+    let Some(cut) = state.take_network_cut(self.user) else {
+      return action(&mut state, self.user);
+    };
+    if cut == NetworkCut::ResponseLost {
+      // Deliberately ignored: the client never learns the outcome.
+      let _ = action(&mut state, self.user);
+    }
+    Err(ApiError::Network("fake server: network cut".into()))
   }
 }
 
@@ -593,15 +644,37 @@ impl ServerApi for FakeServerApi {
       if state.identity_keys.contains_key(&me) && !request.replace {
         return Err(ApiError::status(409, ErrorCode::Conflict, "identity key exists"));
       }
-      let response = IdentityKeyResponse {
+      // Like the server: the key and its first key bag in one transaction.
+      let key_bag = request.maybe_key_bag.as_ref().ok_or_else(|| {
+        ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "a new identity key needs its key bag",
+        )
+      })?;
+      let version = state.key_bags.get(&me).map_or(0, |bag| bag.version) + 1;
+      state.key_bags.insert(
+        me,
+        KeyBagResponse {
+          version,
+          encrypted_key_bag: key_bag.encrypted_key_bag.clone(),
+          wrapped_backup_keys: key_bag.wrapped_backup_keys.clone(),
+          updated_at: UnixMillis(0),
+        },
+      );
+      let stored = IdentityKeyResponse {
         user_id: me,
         public_key: request.public_key.clone(),
         signature: request.signature.clone(),
         maybe_attestation: request.maybe_attestation.clone(),
         created_at: UnixMillis(0),
+        maybe_key_bag_version: None,
       };
-      state.identity_keys.insert(me, response.clone());
-      Ok(response)
+      state.identity_keys.insert(me, stored.clone());
+      Ok(IdentityKeyResponse {
+        maybe_key_bag_version: Some(version),
+        ..stored
+      })
     })
   }
 
@@ -1710,6 +1783,17 @@ impl ServerApi for FakeServerApi {
   ) -> Result<WorkspaceLogEntryResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, request.signer_device_id)?;
+      // Like the server: the root of trust must be recoverable.
+      if *kind == WorkspaceLogKind::Roster
+        && request.expected_version == 0
+        && !(state.identity_keys.contains_key(&me) && state.key_bags.contains_key(&me))
+      {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "no key bag for the root",
+        ));
+      }
       let created_at = UnixMillis(state.next_id::<UserId>().snowflake().get());
       let log = state.log_mut(kind);
       let current = log.len() as u64;
@@ -2346,6 +2430,10 @@ impl RendezvousConnection for FakeRendezvous {
       .clone()
       .ok_or_else(|| ApiError::Gateway("join first".into()))?;
     let mut state = self.server.lock();
+    if state.relay_frames_to_lose > 0 {
+      state.relay_frames_to_lose -= 1;
+      return Ok(());
+    }
     let relay = state.relays.entry(id).or_default();
     match relay
       .endpoints
@@ -2362,6 +2450,23 @@ impl RendezvousConnection for FakeRendezvous {
 
   async fn receive(&mut self) -> Option<Result<RendezvousFrame, ApiError>> {
     self.receiver.next().await.map(Ok)
+  }
+}
+
+/// Like the server: the other device learns that this one left, and the relay closes.
+impl Drop for FakeRendezvous {
+  fn drop(&mut self) {
+    let Some(id) = self.maybe_rendezvous_id.take() else {
+      return;
+    };
+    let mut state = self.server.lock();
+    if let Some(relay) = state.relays.remove(&id) {
+      for (connection, _, peer) in relay.endpoints {
+        if connection != self.connection {
+          let _ = peer.unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::PeerLeft));
+        }
+      }
+    }
   }
 }
 
@@ -2387,6 +2492,20 @@ impl State {
       .users
       .get(&user)
       .ok_or_else(|| ApiError::status(404, ErrorCode::UserNotFound, "unknown user"))
+  }
+
+  /// Counts a call against the user's armed network cut; returns the cut when it hits this call
+  /// (the user is offline from then on).
+  fn take_network_cut(&mut self, user: UserId) -> Option<NetworkCut> {
+    let (calls_left, cut) = self.network_cuts.get_mut(&user)?;
+    if *calls_left > 0 {
+      *calls_left -= 1;
+      return None;
+    }
+    let cut = *cut;
+    self.network_cuts.remove(&user);
+    self.offline_users.insert(user);
+    Some(cut)
   }
 
   fn devices_of(&self, user: UserId) -> impl Iterator<Item = &Device> {

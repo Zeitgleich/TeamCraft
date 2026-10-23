@@ -39,7 +39,7 @@ async fn a_fresh_device_needs_enrollment_and_reports_the_network() {
     Err(TeamCraftError::NoLinkInProgress)
   ));
   let code = teamcraft.start_device_link().await.unwrap();
-  assert!(code.starts_with("tclink1:"));
+  assert!(code.starts_with("tclink2:"));
   std::fs::remove_dir_all(&directory).unwrap();
 }
 

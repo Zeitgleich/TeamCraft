@@ -1,9 +1,12 @@
 //! Public identity keys and device certificates (e2ee.md §3). The server stores and serves them;
 //! whether to trust them is decided by clients (signatures, OIDC attestation, pinning).
+//!
+//! A new identity key comes with its first key bag and both are stored in one transaction
+//! (e2ee.md §3.2): an interrupted enrollment can't leave an identity nobody can recover.
 
-use teamcraft_db::{IdentityKeyOutcome, NewIdentityKey};
+use teamcraft_db::{IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 use teamcraft_proto::{
-  Base64Bytes, IdentityKeyResponse, ListDevicesResponse, UploadIdentityKeyRequest, UserId,
+  Base64Bytes, GatewayEvent, IdentityKeyResponse, ListDevicesResponse, UploadIdentityKeyRequest, UserId,
 };
 
 use super::convert::{device_response, unix_millis};
@@ -35,6 +38,11 @@ pub async fn put_identity_key(
   {
     return Err(ApiError::InvalidRequest("attestation is too long".into()));
   }
+  let key_bag = request
+    .maybe_key_bag
+    .as_ref()
+    .ok_or_else(|| ApiError::InvalidRequest("a new identity key needs its key bag".into()))?;
+  super::key_bag::check_size(state, &key_bag.encrypted_key_bag, &key_bag.wrapped_backup_keys)?;
 
   let outcome = state
     .database
@@ -48,14 +56,27 @@ pub async fn put_identity_key(
       signature: request.signature.as_slice(),
       maybe_attestation: request.maybe_attestation.as_deref(),
       replace: request.replace,
+      key_bag: InitialKeyBag {
+        encrypted_key_bag: key_bag.encrypted_key_bag.as_slice(),
+        wrapped_backup_keys: key_bag.wrapped_backup_keys.as_slice(),
+      },
     })
     .await?;
-  if outcome == IdentityKeyOutcome::AlreadyExists {
+  let IdentityKeyOutcome::Stored { key_bag_version } = outcome else {
     return Err(ApiError::Conflict(
       "an identity key exists; set replace to reset it".into(),
     ));
-  }
-  get_identity_key(state, caller, caller.user.id).await
+  };
+  // The user's other devices fetch the new bag (after a reset).
+  state.hub.publish(
+    [caller.user.id],
+    &GatewayEvent::KeyBagUpdate {
+      version: key_bag_version,
+    },
+  );
+  let mut response = get_identity_key(state, caller, caller.user.id).await?;
+  response.maybe_key_bag_version = Some(key_bag_version);
+  Ok(response)
 }
 
 pub async fn get_identity_key(
@@ -75,6 +96,7 @@ pub async fn get_identity_key(
     signature: Base64Bytes::new(key.signature),
     maybe_attestation: key.maybe_attestation,
     created_at: unix_millis(key.created_at),
+    maybe_key_bag_version: None,
   })
 }
 

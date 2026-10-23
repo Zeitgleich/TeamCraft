@@ -12,10 +12,11 @@ use crate::store::{LocalStore, Table};
 use crate::{read_state, records};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
-  /// Brings the store up to date after a fresh gateway session (or at start): spaces,
-  /// conversations and members, welcomes, MLS backlogs, new messages, then the outbox, key
-  /// packages and the key bag.
+  /// Brings the store up to date after a fresh gateway session (or at start): the last steps of an
+  /// interrupted enrollment, spaces, conversations and members, welcomes, MLS backlogs, new
+  /// messages, then the outbox, key packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
+    self.finish_enrollment().await?;
     self.sync_workspace().await?;
     self.refresh_spaces().await?;
     self.refresh_own_summary().await;

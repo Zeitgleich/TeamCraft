@@ -54,6 +54,9 @@ pub async fn append(
   {
     return Err(ApiError::device_not_found());
   }
+  if kind == WorkspaceLogKind::Roster && request.expected_version == 0 {
+    require_recoverable_root(state, caller).await?;
+  }
   let maybe_document = if kind == WorkspaceLogKind::Policy {
     let document = check_policy_payload(request.payload.as_slice(), request.expected_version + 1)?;
     check_org_backgrounds_exist(state, &document.policy.call_backgrounds).await?;
@@ -101,6 +104,20 @@ pub async fn append(
     .first()
     .map(entry_response)
     .ok_or_else(|| ApiError::Internal("appended entry missing".into()))
+}
+
+/// The genesis roster makes its signer the workspace root of trust (admin.md §2.3). Their identity
+/// must be recoverable: an identity key without a key bag (an enrollment interrupted by an older
+/// client) would pin a root whose owner can never sign again after losing the device.
+async fn require_recoverable_root(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
+  let has_identity = state.database.get_identity_key(caller.user.id).await?.is_some();
+  let has_key_bag = state.database.get_key_bag(caller.user.id).await?.is_some();
+  if !has_identity || !has_key_bag {
+    return Err(ApiError::Conflict(
+      "the first owner needs an identity key and a key bag before signing the roster".into(),
+    ));
+  }
+  Ok(())
 }
 
 pub async fn list(

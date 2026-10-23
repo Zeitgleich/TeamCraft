@@ -46,9 +46,13 @@ async fn new_laptop_is_linked_by_scanning_its_code() {
   let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
 
-  // The user confirmed the codes on the phone.
-  alice.client.complete_link_approval(phone_side).await.unwrap();
-  let secrets = laptop_side.receive_secrets().await.unwrap();
+  // The user confirmed the codes on the phone; the phone reports success once the laptop confirmed.
+  let (approved, received) = tokio::join!(
+    alice.client.complete_link_approval(phone_side),
+    laptop_side.receive_secrets()
+  );
+  approved.unwrap();
+  let secrets = received.unwrap();
   let link_options = linked_options(secrets);
   let mut laptop = PendingEnrollment::new()
     .complete(
@@ -80,12 +84,12 @@ async fn linked_device_refuses_to_create_an_identity() {
     NewDeviceLink::connect(&laptop_api, &offer),
     alice.client.start_link_approval(&code)
   );
-  alice
-    .client
-    .complete_link_approval(phone_side.unwrap())
-    .await
-    .unwrap();
-  let secrets = laptop_side.unwrap().receive_secrets().await.unwrap();
+  let (approved, received) = tokio::join!(
+    alice.client.complete_link_approval(phone_side.unwrap()),
+    laptop_side.unwrap().receive_secrets()
+  );
+  approved.unwrap();
+  let secrets = received.unwrap();
 
   // The server claims the account has no identity: a new one wrapped with a passphrase the
   // server could guess must not be created (security review B1).
@@ -119,4 +123,26 @@ async fn someone_else_cannot_take_over_the_relay() {
   let (laptop_side, mallory_side) = tokio::join!(waiting, mallory.client.start_link_approval(&code));
   assert!(mallory_side.is_err());
   assert!(laptop_side.is_err(), "no handshake without the right peer");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lost_transfer_frame_fails_on_both_devices() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let laptop_api = alice.api.clone();
+  let offer = LinkOffer::generate();
+  let code = offer.to_code();
+  let (laptop_side, phone_side) = tokio::join!(
+    NewDeviceLink::connect(&laptop_api, &offer),
+    alice.client.start_link_approval(&code)
+  );
+  // The frame with the keys never arrives. The phone waits for the receipt, gives up and leaves the
+  // relay; the laptop learns that the transfer is not coming.
+  server.lose_relay_frames(1);
+  let (approved, received) = tokio::join!(
+    alice.client.complete_link_approval(phone_side.unwrap()),
+    laptop_side.unwrap().receive_secrets()
+  );
+  assert!(matches!(approved, Err(CoreError::LinkNotConfirmed)));
+  assert!(received.is_err());
 }

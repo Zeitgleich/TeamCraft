@@ -50,6 +50,19 @@ pub enum CoreError {
   /// (security review B1).
   #[error("the server reports no identity key for this account, but this device expects one")]
   IdentityMissing,
+  /// The server has no key bag for an enrolled account: uploading one now would bind it to no
+  /// recovery factor, so the user sets a recovery passphrase again instead.
+  #[error("the server has no key bag for this account; set a recovery passphrase again")]
+  KeyBagMissing,
+  /// The two devices speak different versions of the device-linking protocol (e2ee.md §5).
+  #[error("the other device uses device linking version {theirs}, this one {ours}; update both apps")]
+  LinkVersionMismatch { ours: u32, theirs: u32 },
+  /// The new device never confirmed the transfer (a lost frame, a closed relay or a timeout).
+  #[error("the new device did not confirm that it received the keys; link it again")]
+  LinkNotConfirmed,
+  /// The new device received the transfer but could not open the key bag in it.
+  #[error("the new device could not open the keys it received; link it again")]
+  LinkRejected,
   /// The server offered a key bag older than one this device already saw.
   #[error("the server offered key bag {offered}, older than {seen} seen before")]
   KeyBagRollback { seen: u64, offered: u64 },

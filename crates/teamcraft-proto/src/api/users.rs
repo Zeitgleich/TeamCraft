@@ -180,6 +180,18 @@ pub struct UploadIdentityKeyRequest {
   /// Replaces an existing key. Only a full reset does this; other clients see the change.
   #[serde(default)]
   pub replace: bool,
+  /// The first key bag of the new identity, stored in the same transaction, so the server never
+  /// holds an identity whose keys can't be recovered (e2ee.md §3.2). Required: an upload without
+  /// it fails with `invalid_request`.
+  #[serde(rename = "key_bag", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_key_bag: Option<InitialKeyBag>,
+}
+
+/// The key bag uploaded together with a new identity key; becomes version 1 of the user's key bag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InitialKeyBag {
+  pub encrypted_key_bag: Base64Bytes,
+  pub wrapped_backup_keys: Base64Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -190,6 +202,9 @@ pub struct IdentityKeyResponse {
   #[serde(rename = "attestation", default, skip_serializing_if = "Option::is_none")]
   pub maybe_attestation: Option<String>,
   pub created_at: UnixMillis,
+  /// Version of the key bag stored with the key; only in the answer to the upload.
+  #[serde(rename = "key_bag_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_key_bag_version: Option<u64>,
 }
 
 wire_enum! {
