@@ -11,8 +11,9 @@ use crate::backend::Backend;
 use crate::calls::CallState;
 use crate::model::{Conversation, ConversationId, MessageId, SpaceId, ThreadId, User, UserId, id_from_raw};
 use crate::navigation::{Step, divider_index, next_unread};
+use crate::prefs::SidebarSort;
 use crate::reactive::get_if_observed;
-use crate::sections::build_sections;
+use crate::sections::{apply_favorite_order, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
 
@@ -35,6 +36,8 @@ pub struct Toast {
 pub enum Undo {
   /// Keep a message whose deletion is still waiting.
   RestoreMessage(MessageId),
+  /// Stay in a channel whose leaving is still waiting.
+  StayInChannel(ConversationId),
 }
 
 /// A message the user is replying to with a quote.
@@ -153,6 +156,8 @@ pub struct AppState {
   next_toast: StoredValue<u64>,
   /// Messages deleted with an undo window: hidden now, deleted when the window ends.
   pub hidden_messages: RwSignal<HashSet<MessageId>>,
+  /// Channels left with an undo window: gone from the sidebar now, left when the window ends.
+  pub hidden_conversations: RwSignal<HashSet<ConversationId>>,
   /// A conversation to open as soon as it appears in the lists (after joining it).
   pub pending_open: RwSignal<Option<ConversationId>>,
   pub jump_to_latest: RwSignal<u64>,
@@ -189,6 +194,7 @@ impl AppState {
       toasts: RwSignal::new(Vec::new()),
       next_toast: StoredValue::new(0),
       hidden_messages: RwSignal::new(HashSet::new()),
+      hidden_conversations: RwSignal::new(HashSet::new()),
       pending_open: RwSignal::new(None),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
@@ -396,8 +402,61 @@ impl AppState {
       Undo::RestoreMessage(message) => self.hidden_messages.update(|hidden| {
         hidden.remove(&message);
       }),
+      Undo::StayInChannel(conversation) => {
+        self.hidden_conversations.update(|hidden| {
+          hidden.remove(&conversation);
+        });
+        self.open_conversation(conversation);
+      },
     }
     self.dismiss_toast(toast);
+  }
+
+  /// Leaves a channel after the undo window; it disappears from the sidebar at once.
+  pub fn leave_with_undo(&self, conversation: ConversationId, text: String) {
+    let state = *self;
+    if self.current_conversation_id() == Some(conversation) {
+      let next = self
+        .navigable_conversations()
+        .into_iter()
+        .find(|candidate| candidate.id != conversation);
+      match next {
+        Some(next) => self.open_conversation(next.id),
+        None => self.open_threads(),
+      }
+    }
+    self.hidden_conversations.update(|hidden| {
+      hidden.insert(conversation);
+    });
+    let toast = self.push_toast(text, Some(Undo::StayInChannel(conversation)));
+    set_timeout(
+      move || {
+        state.dismiss_toast(toast);
+        let mut is_still_leaving = false;
+        state
+          .hidden_conversations
+          .update(|hidden| is_still_leaving = hidden.remove(&conversation));
+        if is_still_leaving {
+          state.write(|backend| backend.leave_channel(conversation));
+        }
+      },
+      UNDO_WINDOW,
+    );
+  }
+
+  /// Conversations as the sidebar shows them: without the ones being left, favorites in the user's
+  /// order.
+  pub fn sidebar_list(&self, mut list: Vec<Conversation>) -> Vec<Conversation> {
+    self
+      .hidden_conversations
+      .with(|hidden| list.retain(|conversation| !hidden.contains(&conversation.id)));
+    if self.settings.prefs.with(|prefs| prefs.sidebar.sort) == SidebarSort::Default {
+      self
+        .settings
+        .favorite_order
+        .with(|order| apply_favorite_order(&mut list, order));
+    }
+    list
   }
 
   fn push_toast(&self, text: String, maybe_undo: Option<Undo>) -> u64 {
@@ -514,11 +573,11 @@ impl AppState {
   pub fn navigable_conversations(&self) -> Vec<Conversation> {
     let space = self.space.get();
     let options = self.settings.sidebar_options(usize::MAX);
-    let all = self.read(|backend| {
+    let all = self.sidebar_list(self.read(|backend| {
       let mut list = backend.space_conversations(space);
       list.extend(backend.direct_conversations());
       list
-    });
+    }));
     build_sections(&all, &options)
       .into_iter()
       .flat_map(|section| section.conversations)

@@ -101,7 +101,7 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       None => Outcome::Notice(Notice::Text(i18n.t_with("slash-not-found", &[("name", &name)]))),
     },
     SlashCommand::Leave => {
-      state.write(|backend| backend.leave_channel(conversation));
+      state.leave_with_undo(conversation, left_text(state, i18n, conversation));
       Outcome::Done
     },
     SlashCommand::Kick(name) => match find_person(state, &name) {
@@ -267,4 +267,13 @@ pub fn due_reminders(now: i64) -> Vec<Reminder> {
     store_string(REMINDERS_KEY, &to_json(&waiting));
   }
   due
+}
+
+/// "Left #name" for the undo toast.
+pub fn left_text(state: AppState, i18n: I18n, conversation: ConversationId) -> String {
+  let name = state
+    .read(|backend| backend.conversation(conversation))
+    .map(|conv| conv.name)
+    .unwrap_or_default();
+  i18n.t_with("channel-left-toast", &[("name", &name)])
 }
