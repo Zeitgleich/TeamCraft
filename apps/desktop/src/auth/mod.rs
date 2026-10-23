@@ -14,6 +14,7 @@ pub(crate) mod integration_tests;
 
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use oauth2::basic::{BasicClient, BasicErrorResponseType, BasicTokenResponse};
 use oauth2::{
   AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
@@ -101,6 +102,14 @@ impl AuthError {
 pub struct ApiResponse {
   pub status: u16,
   pub body: String,
+}
+
+/// Response of an authenticated API call with a binary body; the bytes travel as base64.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ApiBytesResponse {
+  pub status: u16,
+  pub content_type: Option<String>,
+  pub body_base64: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -285,6 +294,47 @@ impl<S: TokenStore> AuthService<S> {
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
     Ok(ApiResponse { status, body })
+  }
+
+  /// `{method} {server}{path}` with a fresh access token and a binary body of the given type (brand
+  /// images); the answer's body is returned as bytes too.
+  pub async fn api_request_bytes(
+    &self,
+    method: ApiMethod,
+    path: &str,
+    maybe_body: Option<(String, Vec<u8>)>,
+  ) -> Result<ApiBytesResponse, AuthError> {
+    validate_api_path(path)?;
+    let token = self.access_token().await?;
+    let url = format!("{}{path}", self.config.server_url.trim_end_matches('/'));
+    let mut request = self
+      .http
+      .request(reqwest_method(method), url)
+      .bearer_auth(token.expose_secret());
+    if let Some((content_type, bytes)) = maybe_body {
+      request = request
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(bytes);
+    }
+    let response = request
+      .send()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    let status = response.status().as_u16();
+    let content_type = response
+      .headers()
+      .get(reqwest::header::CONTENT_TYPE)
+      .and_then(|value| value.to_str().ok())
+      .map(str::to_owned);
+    let bytes = response
+      .bytes()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    Ok(ApiBytesResponse {
+      status,
+      content_type,
+      body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
   }
 
   /// The current access token as text, refreshed when needed. For the in-process client core only:
