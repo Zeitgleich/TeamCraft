@@ -1179,7 +1179,10 @@ mod tests {
         maybe_active: Some(active()),
         ..CallState::default()
       });
-      let event = CallEngineEvent::UplinkEstimate { bps: 1 };
+      let event = CallEngineEvent::UplinkEstimate {
+        bps: 1,
+        loss_percent: 0,
+      };
       assert!(!apply_event(&mut Roster::default(), &state, event));
     }
   }

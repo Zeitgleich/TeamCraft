@@ -4,8 +4,17 @@
 //! The desktop app and the headless `teamcraft-call` client use it. Device streams (cpal) are not
 //! `Send` everywhere, so they live on a dedicated audio thread that exchanges samples with the call
 //! task over channels.
+//!
+//! Network changes (ARCHITECTURE.md §6.5): the socket is bound to the wildcard address, so when
+//! the device switches networks its packets leave through the new route and the SFU migrates the
+//! QUIC connection to the new path; nothing else changes. Apps report network changes with
+//! [`NativeCall::network_changed`]: if the path then stays silent, or it breaks in any other way,
+//! the driver gets a fresh join ticket and rejoins on a new connection within the SFU's grace
+//! period; devices, mute state and tracks carry over.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle as ThreadHandle;
@@ -20,6 +29,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use wtransport::config::ClientConfigBuilder;
 use wtransport::config::states::{WantsRootStore, WantsTransportConfigClient};
+use wtransport::datagram::Datagram;
+use wtransport::error::{ConnectionError, StreamReadExactError};
 use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 
@@ -30,6 +41,9 @@ use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer};
 use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
+};
+use crate::call_resilience::{
+  JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig,
 };
 use crate::jitter::JitterBufferConfig;
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
@@ -45,6 +59,10 @@ const TIMER_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_SIGNALING_BYTES: usize = 1024 * 1024;
 /// At most this much audio waits for the speakers (latency bound).
 const MAX_PLAYBACK_BUFFER_SAMPLES: usize = 48_000 / 5;
+/// QUIC application close code of a deliberate leave.
+const LEAVE: u32 = 0;
+/// How long a broken signaling stream waits for its connection's close reason.
+const STREAM_CLOSE_WAIT: Duration = Duration::from_millis(200);
 
 /// A running call.
 pub struct NativeCall {
@@ -72,6 +90,25 @@ pub struct NativeCallConfig {
   pub jitter: JitterBufferConfig,
   /// Echo cancellation, noise suppression and gain control for the microphone.
   pub maybe_processing: Option<crate::audio_processing::AudioProcessingConfig>,
+  /// Keep-alives, loss detection and rejoin timing.
+  pub resilience: ResilienceConfig,
+  /// Fresh join tickets for rejoining after a lost connection. Without one the first ticket is
+  /// used again, which works only while it is valid (development tools).
+  pub maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
+}
+
+/// Gets a fresh join ticket from `teamcraft-server` (a new token, possibly another SFU URL).
+pub trait JoinTicketSource: Send + Sync {
+  fn fetch(&self) -> TicketFuture;
+}
+
+/// A join ticket on its way.
+pub type TicketFuture = Pin<Box<dyn Future<Output = Result<JoinTicket, JoinTicketError>> + Send>>;
+
+impl std::fmt::Debug for dyn JoinTicketSource {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("JoinTicketSource")
+  }
 }
 
 #[derive(Debug, Error)]
@@ -90,6 +127,10 @@ pub enum NativeCallError {
   Capture(#[from] CaptureError),
   #[error(transparent)]
   SystemAudio(#[from] SystemAudioError),
+  #[error(transparent)]
+  Ticket(#[from] JoinTicketError),
+  #[error("the connection to the call was lost and could not be restored in time")]
+  ConnectionLost,
   #[error("the call task ended unexpectedly")]
   TaskEnded,
 }
@@ -109,6 +150,7 @@ enum Command {
     oneshot::Sender<Result<(), SystemAudioError>>,
   ),
   StopScreenAudio,
+  NetworkChanged,
   Leave,
 }
 
@@ -178,6 +220,8 @@ impl NativeCallConfig {
       opus: OpusEncoderConfig::default(),
       jitter: JitterBufferConfig::default(),
       maybe_processing: None,
+      resilience: ResilienceConfig::default(),
+      maybe_ticket_source: None,
     }
   }
 
@@ -204,16 +248,10 @@ impl NativeCallConfig {
 impl NativeCall {
   /// Connects, joins and starts sending and playing in the background.
   pub async fn join(config: NativeCallConfig) -> Result<Self, NativeCallError> {
-    let connection = connect(&config).await?;
-    let (send, recv) = connection
-      .open_bi()
-      .await
-      .map_err(|error| NativeCallError::Connect(error.to_string()))?
-      .await
-      .map_err(|error| NativeCallError::Connect(error.to_string()))?;
+    let link = Link::open(&config.sfu_url, config.maybe_certificate_hash, &config.resilience).await?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
-    let task = tokio::spawn(run_call(config, connection, send, recv, command_rx, event_tx));
+    let task = tokio::spawn(run_call(config, link, command_rx, event_tx));
     Ok(Self {
       commands,
       events,
@@ -310,6 +348,15 @@ impl NativeCall {
     Ok(done_rx.await.map_err(|_| NativeCallError::TaskEnded)??)
   }
 
+  /// The system reported a network change (Android `ConnectivityManager`, iOS `NWPathMonitor`, an
+  /// interface or route change on desktops). The connection then has to show it migrated to the
+  /// new path quickly, or the call rejoins on a new connection; while rejoining, the next attempt
+  /// starts at once.
+  pub fn network_changed(&self) {
+    // A closed channel means the call already ended.
+    let _ = self.commands.send(Command::NetworkChanged);
+  }
+
   fn video(&self, command: VideoCommand) {
     // A closed channel means the call already ended.
     let _ = self.commands.send(Command::Video(command));
@@ -349,28 +396,11 @@ fn with_trusted_roots(
   ))
 }
 
-async fn connect(config: &NativeCallConfig) -> Result<Connection, NativeCallError> {
-  let builder = ClientConfig::builder().with_bind_default();
-  let client_config = match config.maybe_certificate_hash {
-    Some(hash) => builder
-      .with_server_certificate_hashes([Sha256Digest::new(hash)])
-      .build(),
-    None => with_trusted_roots(builder).build(),
-  };
-  let endpoint =
-    Endpoint::client(client_config).map_err(|error| NativeCallError::Connect(error.to_string()))?;
-  endpoint
-    .connect(&config.sfu_url)
-    .await
-    .map_err(|error| NativeCallError::Connect(error.to_string()))
-}
-
-/// The call task: drives the engine from the network, the audio thread and timers.
+/// The call task: drives the engine from the network, the audio thread and timers, and gets the
+/// call back onto a new connection when the current one is lost.
 async fn run_call(
   config: NativeCallConfig,
-  connection: Connection,
-  send: SendStream,
-  recv: RecvStream,
+  link: Link,
   mut commands: mpsc::UnboundedReceiver<Command>,
   events: mpsc::UnboundedSender<CallEngineEvent>,
 ) -> Result<CallStats, NativeCallError> {
@@ -396,50 +426,46 @@ async fn run_call(
   }
   let mut source = config.source.clone();
   let mut devices = AudioDevices::open(&source, &config.sink)?;
-  let (signal_out, signal_out_rx) = mpsc::unbounded_channel::<CallClientMessage>();
-  let writer = tokio::spawn(write_signaling(send, signal_out_rx));
-  let (signal_in, mut signal_in_rx) = mpsc::unbounded_channel::<CallServerMessage>();
-  let reader = tokio::spawn(read_signaling(recv, signal_in));
+  let mut sinks = Sinks {
+    events,
+    mixer,
+    stats: CallStats::default(),
+    video: VideoState::default(),
+  };
+  let mut connection = CallConnection::new(&config, link, start);
 
-  let mut stats = CallStats::default();
   let mut tone_position = 0u64;
   let mut frame_tick = tokio::time::interval(FRAME_INTERVAL);
   let mut timer_tick = tokio::time::interval(TIMER_INTERVAL);
   engine.join(config.token.clone());
-  let mut video = VideoState::default();
   let mut maybe_screen_audio: Option<ScreenAudio> = None;
   let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
-  let mut io = DriverIo {
-    connection: &connection,
-    signal_out: &signal_out,
-    events: &events,
-    mixer: &mut mixer,
-    stats: &mut stats,
-    video: &mut video,
-  };
-  io.flush(&mut engine)?;
+  sinks.flush(&mut engine, &mut capture, connection.maybe_link.as_ref())?;
 
   let result = loop {
     tokio::select! {
-      maybe_message = signal_in_rx.recv() => {
-        let Some(message) = maybe_message else {
-          break Ok(());
-        };
-        if let Err(error) = engine.handle_signal(message, Instant::now()) {
-          break Err(error.into());
-        }
-      },
-      datagram = connection.receive_datagram() => {
-        match datagram {
-          Ok(datagram) => engine.handle_datagram(&datagram.payload(), Instant::now()),
-          Err(error) => break Err(NativeCallError::Signaling(error.to_string())),
-        }
+      event = connection.next_event() => match event {
+        ConnectionEvent::Input(LinkInput::Signal(message)) => {
+          if let Err(error) = engine.handle_signal(message, Instant::now()) {
+            break Err(error.into());
+          }
+        },
+        ConnectionEvent::Input(LinkInput::Datagram(datagram)) => {
+          engine.handle_datagram(&datagram.payload(), Instant::now());
+        },
+        ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Closed)) => break Ok(()),
+        ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Lost)) => connection.lose(&mut engine, Instant::now()),
+        ConnectionEvent::AttemptDue => connection.start_attempt(),
+        ConnectionEvent::AttemptFinished(Ok((link, ticket))) => {
+          connection.resume(&mut engine, link, ticket, Instant::now());
+        },
+        ConnectionEvent::AttemptFinished(Err(error)) => connection.on_failed_attempt(&error, Instant::now()),
       },
       maybe_samples = recv_capture(&mut devices.maybe_capture) => {
         if let Some(samples) = maybe_samples {
           for frame in capture.push(&samples)? {
             engine.send_audio(&frame, Instant::now());
-            io.stats.frames_sent += 1;
+            sinks.stats.frames_sent += 1;
           }
         }
       },
@@ -449,12 +475,12 @@ async fn run_call(
           tone_position += FRAME_SAMPLES_PER_CHANNEL as u64;
           for frame in capture.push(&samples)? {
             engine.send_audio(&frame, Instant::now());
-            io.stats.frames_sent += 1;
+            sinks.stats.frames_sent += 1;
           }
         }
-        let mix = io.mixer.next_frame()?;
+        let mix = sinks.mixer.next_frame()?;
         if mix.iter().any(|sample| sample.abs() > 0.01) {
-          io.stats.audible_frames_played += 1;
+          sinks.stats.audible_frames_played += 1;
         }
         if let Some(buffer) = &devices.maybe_playback {
           buffer.push(&mix);
@@ -463,7 +489,7 @@ async fn run_call(
       maybe_samples = recv_screen_audio(&mut maybe_screen_audio) => {
         match (maybe_samples, maybe_screen_audio.as_mut()) {
           (Some(samples), Some(screen_audio)) => {
-            io.mixer.push_echo_reference(&samples);
+            sinks.mixer.push_echo_reference(&samples);
             for frame in screen_audio.pipeline.push(&samples)? {
               engine.send_screen_audio(&frame, Instant::now());
             }
@@ -473,12 +499,17 @@ async fn run_call(
         }
       },
       _ = timer_tick.tick() => {
-        engine.on_timer(Instant::now());
+        let now = Instant::now();
+        engine.on_timer(now);
+        if connection.is_out_of_time(now) {
+          break Err(NativeCallError::ConnectionLost);
+        }
+        connection.watch_path(&mut engine, now);
         // A capture the system ended (the share stopped from the OS indicator or menu bar) ends
         // its track, and a screen share takes the computer's sound with it: nothing keeps sending
         // after the user saw the share end.
-        for kind in io.video.ended_kinds() {
-          io.video.stop(&mut engine, &kind);
+        for kind in sinks.video.ended_kinds() {
+          sinks.video.stop(&mut engine, &kind);
           if kind == VideoTrackKind::Screen {
             stop_screen_audio(&mut engine, &mut maybe_screen_audio);
           }
@@ -489,7 +520,7 @@ async fn run_call(
         }
       },
       Some((kind, frame)) = encoded_rx.recv() => {
-        if let Some(stream_id) = io.video.stream_of(&kind) {
+        if let Some(stream_id) = sinks.video.stream_of(&kind) {
           engine.send_video(stream_id, &frame, Instant::now());
         }
       },
@@ -501,7 +532,7 @@ async fn run_call(
           },
           Some(Command::Deafen(is_deafened)) => {
             engine.set_deafened(is_deafened);
-            io.mixer.set_deafened(is_deafened);
+            sinks.mixer.set_deafened(is_deafened);
           },
           Some(Command::SwitchAudio { source: new_source, sink, done }) => {
             // Open the new devices before closing the old ones, so a failure changes nothing.
@@ -515,7 +546,7 @@ async fn run_call(
             // The caller may have given up waiting.
             let _ = done.send(result);
           },
-          Some(Command::Video(command)) => handle_video(&mut engine, io.video, &encoded_tx, command),
+          Some(Command::Video(command)) => handle_video(&mut engine, &mut sinks.video, &encoded_tx, command),
           Some(Command::StartScreenAudio(capture, done)) => {
             stop_screen_audio(&mut engine, &mut maybe_screen_audio);
             let result = start_screen_audio(capture).map(|screen_audio| {
@@ -529,25 +560,302 @@ async fn run_call(
             let _ = done.send(result);
           },
           Some(Command::StopScreenAudio) => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
+          Some(Command::NetworkChanged) => connection.on_network_changed(Instant::now()),
           Some(Command::Leave) | None => break Ok(()),
         }
       },
     }
-    if let Err(error) = io.flush(&mut engine) {
+    if let Err(error) = sinks.flush(&mut engine, &mut capture, connection.maybe_link.as_ref()) {
       break Err(error);
     }
+    // The SFU refused the join (locked call, removed user, invalid token): the call is over.
+    if engine.is_refused() {
+      break Ok(());
+    }
+    connection.settle(&engine);
   };
 
   if let Some(mut screen_audio) = maybe_screen_audio {
     screen_audio.capture.stop();
   }
   devices.close();
-  reader.abort();
-  writer.abort();
-  connection.close(0u32.into(), b"leave");
+  connection.close();
+  let mut stats = sinks.stats;
   stats.maybe_privacy_code = engine.privacy_code();
   info!(?stats, "call ended");
   result.map(|()| stats)
+}
+
+/// The call's connection to the SFU: the current link, and the way back after losing it.
+struct CallConnection {
+  maybe_link: Option<Link>,
+  /// Lost links, kept open until the call is back: dropping one closes it, which the SFU would
+  /// take for a deliberate leave and free the slot (it keeps it only for lost connections).
+  lost_links: Vec<Link>,
+  monitor: PathMonitor,
+  maybe_schedule: Option<ReconnectSchedule>,
+  maybe_attempt: Option<JoinHandle<Result<(Link, JoinTicket), NativeCallError>>>,
+  ticket: JoinTicket,
+  maybe_certificate_hash: Option<[u8; 32]>,
+  resilience: ResilienceConfig,
+  maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
+}
+
+/// One QUIC connection with its signaling stream; reader tasks feed [`LinkInput`]s.
+struct Link {
+  connection: Connection,
+  signal_out: mpsc::UnboundedSender<CallClientMessage>,
+  inputs: mpsc::UnboundedReceiver<LinkInput>,
+  tasks: Vec<JoinHandle<()>>,
+}
+
+/// What happened to the call's connection.
+enum ConnectionEvent {
+  Input(LinkInput),
+  /// Time for the next rejoin attempt.
+  AttemptDue,
+  AttemptFinished(Result<(Link, JoinTicket), NativeCallError>),
+}
+
+/// What arrives on a link.
+enum LinkInput {
+  Signal(CallServerMessage),
+  Datagram(Datagram),
+  Ended(LinkEnd),
+}
+
+/// How a link ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkEnd {
+  /// The SFU closed it on purpose (host control, rejected join): the call is over.
+  Closed,
+  /// It broke (timeout, reset, silent path): rejoin.
+  Lost,
+}
+
+impl CallConnection {
+  fn new(config: &NativeCallConfig, link: Link, now: Instant) -> Self {
+    Self {
+      maybe_link: Some(link),
+      lost_links: Vec::new(),
+      monitor: PathMonitor::new(now),
+      maybe_schedule: None,
+      maybe_attempt: None,
+      ticket: JoinTicket {
+        sfu_url: config.sfu_url.clone(),
+        token: config.token.clone(),
+      },
+      maybe_certificate_hash: config.maybe_certificate_hash,
+      resilience: config.resilience,
+      maybe_ticket_source: config.maybe_ticket_source.clone(),
+    }
+  }
+
+  /// The next input of the current link, or else the next step of rejoining; pending while
+  /// there is nothing to wait for.
+  async fn next_event(&mut self) -> ConnectionEvent {
+    if let Some(link) = &mut self.maybe_link {
+      let input = link
+        .inputs
+        .recv()
+        .await
+        .unwrap_or(LinkInput::Ended(LinkEnd::Lost));
+      return ConnectionEvent::Input(input);
+    }
+    if let Some(attempt) = &mut self.maybe_attempt {
+      let result = attempt.await.unwrap_or(Err(NativeCallError::TaskEnded));
+      self.maybe_attempt = None;
+      return ConnectionEvent::AttemptFinished(result);
+    }
+    match &self.maybe_schedule {
+      Some(schedule) => {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(schedule.next_attempt_at())).await;
+        ConnectionEvent::AttemptDue
+      },
+      None => std::future::pending().await,
+    }
+  }
+
+  /// The link broke: media pauses and rejoining starts.
+  fn lose(&mut self, engine: &mut CallEngine, now: Instant) {
+    let Some(link) = self.maybe_link.take() else {
+      return;
+    };
+    warn!("lost the connection to the call, rejoining");
+    link.stop_reading();
+    self.lost_links.push(link);
+    engine.connection_lost();
+    if self.maybe_schedule.is_none() {
+      let grace = engine
+        .maybe_reconnect_grace()
+        .unwrap_or(self.resilience.default_reconnect_grace);
+      self.maybe_schedule = Some(ReconnectSchedule::new(now, grace));
+    }
+  }
+
+  /// Reads the path's packet count; a path silent for too long (or after a network change) is
+  /// lost.
+  fn watch_path(&mut self, engine: &mut CallEngine, now: Instant) {
+    let Some(link) = &self.maybe_link else {
+      return;
+    };
+    let received = link.connection.quic_connection().stats().udp_rx.datagrams;
+    self.monitor.on_received_packets(received, now);
+    if self.monitor.check(now, &self.resilience) == PathState::Dead {
+      self.lose(engine, now);
+    }
+  }
+
+  fn on_network_changed(&mut self, now: Instant) {
+    debug!("network changed");
+    if self.maybe_link.is_some() {
+      self.monitor.on_network_changed(now, &self.resilience);
+    } else if let Some(schedule) = &mut self.maybe_schedule {
+      // The network is back: don't wait for the back-off.
+      schedule.hurry(now);
+    }
+  }
+
+  fn start_attempt(&mut self) {
+    let maybe_source = self.maybe_ticket_source.clone();
+    let fallback = self.ticket.clone();
+    let maybe_hash = self.maybe_certificate_hash;
+    let resilience = self.resilience;
+    self.maybe_attempt = Some(tokio::spawn(async move {
+      let ticket = match maybe_source {
+        Some(source) => source.fetch().await?,
+        None => fallback,
+      };
+      let link = Link::open(&ticket.sfu_url, maybe_hash, &resilience).await?;
+      Ok((link, ticket))
+    }));
+  }
+
+  /// A new connection is up: rejoin on it.
+  fn resume(&mut self, engine: &mut CallEngine, link: Link, ticket: JoinTicket, now: Instant) {
+    info!(attempts = self.attempts(), "connected again, rejoining the call");
+    self.maybe_link = Some(link);
+    self.monitor = PathMonitor::new(now);
+    engine.rejoin(ticket.token.clone(), now);
+    self.ticket = ticket;
+  }
+
+  fn on_failed_attempt(&mut self, error: &NativeCallError, now: Instant) {
+    debug!(%error, "rejoin attempt failed");
+    if let Some(schedule) = &mut self.maybe_schedule {
+      schedule.on_failed_attempt(now, &self.resilience);
+    }
+  }
+
+  /// Once the engine is back in the call, the rejoin is over.
+  fn settle(&mut self, engine: &CallEngine) {
+    if self.maybe_schedule.is_some() && self.maybe_link.is_some() && engine.is_in_call() {
+      self.maybe_schedule = None;
+      // The slot is on the new connection now; the SFU no longer cares about the old ones.
+      self.lost_links.clear();
+      info!("back in the call");
+    }
+  }
+
+  /// Rejoining took longer than the SFU keeps the slot.
+  fn is_out_of_time(&self, now: Instant) -> bool {
+    self
+      .maybe_schedule
+      .as_ref()
+      .is_some_and(|schedule| schedule.has_expired(now))
+  }
+
+  fn attempts(&self) -> u32 {
+    self
+      .maybe_schedule
+      .as_ref()
+      .map_or(0, ReconnectSchedule::attempts)
+  }
+
+  /// Leaves: the SFU frees the slot at once.
+  fn close(self) {
+    if let Some(attempt) = self.maybe_attempt {
+      attempt.abort();
+    }
+    for link in self.maybe_link.into_iter().chain(self.lost_links) {
+      link.stop_reading();
+      link.connection.close(LEAVE.into(), b"leave");
+    }
+  }
+}
+
+impl Link {
+  /// Connects to the SFU and opens the signaling stream.
+  async fn open(
+    sfu_url: &str,
+    maybe_certificate_hash: Option<[u8; 32]>,
+    resilience: &ResilienceConfig,
+  ) -> Result<Self, NativeCallError> {
+    let connection = connect(sfu_url, maybe_certificate_hash, resilience).await?;
+    let (send, recv) = connection
+      .open_bi()
+      .await
+      .map_err(|error| NativeCallError::Connect(error.to_string()))?
+      .await
+      .map_err(|error| NativeCallError::Connect(error.to_string()))?;
+    let (signal_out, signal_out_rx) = mpsc::unbounded_channel::<CallClientMessage>();
+    let (input_tx, inputs) = mpsc::unbounded_channel();
+    let tasks = vec![
+      tokio::spawn(write_signaling(send, signal_out_rx)),
+      tokio::spawn(read_signaling(recv, connection.clone(), input_tx.clone())),
+      tokio::spawn(read_datagrams(connection.clone(), input_tx)),
+    ];
+    Ok(Self {
+      connection,
+      signal_out,
+      inputs,
+      tasks,
+    })
+  }
+
+  fn stop_reading(&self) {
+    for task in &self.tasks {
+      task.abort();
+    }
+  }
+}
+
+/// A socket bound to the wildcard address (it follows route changes, which lets QUIC migrate),
+/// with keep-alives for carrier NATs.
+async fn connect(
+  sfu_url: &str,
+  maybe_certificate_hash: Option<[u8; 32]>,
+  resilience: &ResilienceConfig,
+) -> Result<Connection, NativeCallError> {
+  let builder = ClientConfig::builder().with_bind_default();
+  let builder = match maybe_certificate_hash {
+    Some(hash) => builder.with_server_certificate_hashes([Sha256Digest::new(hash)]),
+    None => with_trusted_roots(builder),
+  };
+  let client_config = builder
+    .keep_alive_interval(Some(resilience.keep_alive_interval))
+    .max_idle_timeout(Some(resilience.idle_timeout))
+    .map_err(|error| NativeCallError::Connect(error.to_string()))?
+    .build();
+  let endpoint =
+    Endpoint::client(client_config).map_err(|error| NativeCallError::Connect(error.to_string()))?;
+  endpoint
+    .connect(sfu_url)
+    .await
+    .map_err(|error| NativeCallError::Connect(error.to_string()))
+}
+
+/// A deliberate close by the SFU ends the call; anything else is a loss to recover from.
+fn link_end(error: &ConnectionError) -> LinkEnd {
+  match error {
+    ConnectionError::ApplicationClosed(_)
+    | ConnectionError::LocallyClosed
+    | ConnectionError::LocalH3Error(_) => LinkEnd::Closed,
+    ConnectionError::ConnectionClosed(_)
+    | ConnectionError::TimedOut
+    | ConnectionError::QuicProto(_)
+    | ConnectionError::CidsExhausted => LinkEnd::Lost,
+  }
 }
 
 fn start_screen_audio(mut capture: Box<dyn SystemAudioCapture>) -> Result<ScreenAudio, SystemAudioError> {
@@ -612,29 +920,38 @@ fn handle_video(
   }
 }
 
-/// Where engine outputs go.
-struct DriverIo<'a> {
-  connection: &'a Connection,
-  signal_out: &'a mpsc::UnboundedSender<CallClientMessage>,
-  events: &'a mpsc::UnboundedSender<CallEngineEvent>,
-  mixer: &'a mut PlaybackMixer,
-  stats: &'a mut CallStats,
-  video: &'a mut VideoState,
+/// Where engine outputs go besides the network.
+struct Sinks {
+  events: mpsc::UnboundedSender<CallEngineEvent>,
+  mixer: PlaybackMixer,
+  stats: CallStats,
+  video: VideoState,
 }
 
-impl DriverIo<'_> {
-  fn flush(&mut self, engine: &mut CallEngine) -> Result<(), NativeCallError> {
+impl Sinks {
+  /// Sends what the engine produced. Without a link (rejoining), signaling and media are
+  /// dropped: the engine renews what matters when it is back.
+  fn flush(
+    &mut self,
+    engine: &mut CallEngine,
+    capture: &mut CapturePipeline,
+    maybe_link: Option<&Link>,
+  ) -> Result<(), NativeCallError> {
     while let Some(output) = engine.poll_output() {
       match output {
         EngineOutput::Signal(message) => {
-          self
-            .signal_out
-            .send(message)
-            .map_err(|_| NativeCallError::Signaling("writer stopped".into()))?;
+          if let Some(link) = maybe_link
+            && link.signal_out.send(message).is_err()
+          {
+            // The writer stopped with the connection; the reader reports the loss.
+            debug!("signaling writer stopped");
+          }
         },
         EngineOutput::Datagram(bytes) => {
           // Unreliable by design: a full send buffer drops the frame.
-          if let Err(error) = self.connection.send_datagram(&bytes) {
+          if let Some(link) = maybe_link
+            && let Err(error) = link.connection.send_datagram(&bytes)
+          {
             debug!(%error, "datagram dropped");
           }
         },
@@ -669,6 +986,8 @@ impl DriverIo<'_> {
             },
             CallEngineEvent::VideoUnpublished(stream_id) => {
               self.video.receivers.remove(stream_id);
+              // An own track the SFU dropped (rejoin without the slot) is published again.
+              self.video.on_unpublished(*stream_id);
             },
             CallEngineEvent::KeyframeRequested { stream_id, layer } => {
               if let Some(sender) = self.video.sender_of(*stream_id) {
@@ -679,6 +998,9 @@ impl DriverIo<'_> {
               if let Some(sender) = self.video.sender_of(*stream_id) {
                 sender.set_needed_layers(layers.clone());
               }
+            },
+            CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
+              capture.set_measured_loss_percent(*loss_percent)?;
             },
             _ => {},
           }
@@ -706,6 +1028,14 @@ impl VideoState {
       .iter()
       .find(|(_, maybe_stream)| *maybe_stream == Some(stream_id))
       .map(|(sender, _)| sender)
+  }
+
+  fn on_unpublished(&mut self, stream_id: MediaStreamId) {
+    for (_, maybe_stream) in &mut self.senders {
+      if *maybe_stream == Some(stream_id) {
+        *maybe_stream = None;
+      }
+    }
   }
 
   fn on_published(&mut self, kind: &VideoTrackKind, stream_id: MediaStreamId) {
@@ -839,28 +1169,65 @@ async fn write_signaling(mut send: SendStream, mut messages: mpsc::UnboundedRece
   }
 }
 
-async fn read_signaling(mut recv: RecvStream, messages: mpsc::UnboundedSender<CallServerMessage>) {
-  loop {
+/// Reads framed signaling messages; reports how the link ended when the stream does.
+async fn read_signaling(
+  mut recv: RecvStream,
+  connection: Connection,
+  inputs: mpsc::UnboundedSender<LinkInput>,
+) {
+  let end = loop {
     let mut length = [0u8; 4];
-    if recv.read_exact(&mut length).await.is_err() {
-      return;
+    if let Err(error) = recv.read_exact(&mut length).await {
+      break stream_end(&error, &connection).await;
     }
     let length = u32::from_be_bytes(length) as usize;
     if length > MAX_SIGNALING_BYTES {
       warn!(length, "signaling message too large");
-      return;
+      break LinkEnd::Lost;
     }
     let mut body = vec![0u8; length];
-    if recv.read_exact(&mut body).await.is_err() {
-      return;
+    if let Err(error) = recv.read_exact(&mut body).await {
+      break stream_end(&error, &connection).await;
     }
     match serde_json::from_slice::<CallServerMessage>(&body) {
       Ok(message) => {
-        if messages.send(message).is_err() {
+        if inputs.send(LinkInput::Signal(message)).is_err() {
           return;
         }
       },
       Err(error) => warn!(%error, "invalid signaling message"),
+    }
+  };
+  // The call task may be gone.
+  let _ = inputs.send(LinkInput::Ended(end));
+}
+
+/// The SFU finishes the signaling stream only on purpose (a refused join); a broken stream goes
+/// with its connection, whose close reason tells a loss from a deliberate close.
+async fn stream_end(error: &StreamReadExactError, connection: &Connection) -> LinkEnd {
+  if matches!(error, StreamReadExactError::FinishedEarly(_)) {
+    return LinkEnd::Closed;
+  }
+  match tokio::time::timeout(STREAM_CLOSE_WAIT, connection.closed()).await {
+    Ok(error) => link_end(&error),
+    // A connection without its signaling stream is of no use either.
+    Err(_) => LinkEnd::Lost,
+  }
+}
+
+async fn read_datagrams(connection: Connection, inputs: mpsc::UnboundedSender<LinkInput>) {
+  loop {
+    match connection.receive_datagram().await {
+      Ok(datagram) => {
+        if inputs.send(LinkInput::Datagram(datagram)).is_err() {
+          return;
+        }
+      },
+      Err(error) => {
+        // The call task may be gone.
+        let _ = inputs.send(LinkInput::Ended(link_end(&error)));
+        return;
+      },
     }
   }
 }

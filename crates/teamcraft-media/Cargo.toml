@@ -115,7 +115,7 @@ opus = { version = "0.4.0", optional = true }
 cpal = { version = "0.18.2", optional = true }
 # Native call driver: async runtime, WebTransport client and the JSON signaling encoding.
 tokio = { workspace = true, optional = true }
-wtransport = { version = "0.7.2", optional = true }
+wtransport = { version = "0.7.2", optional = true, features = ["quinn"] }
 serde_json = { workspace = true, optional = true }
 # Browser call driver: JS bindings, promises as futures, and channels into its single task.
 wasm-bindgen = { version = "0.2.129", optional = true }

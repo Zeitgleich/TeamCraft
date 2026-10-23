@@ -86,6 +86,11 @@ impl CapturePipeline {
     self.is_muted
   }
 
+  /// Adapts the encoder's forward error correction to the loss measured on the uplink.
+  pub fn set_measured_loss_percent(&mut self, measured_percent: u8) -> Result<(), AudioPipelineError> {
+    Ok(self.encoder.set_measured_loss_percent(measured_percent)?)
+  }
+
   /// Feeds mono 48 kHz samples (any chunk size); returns the frames that became complete.
   pub fn push(&mut self, samples: &[f32]) -> Result<Vec<EncodedAudioFrame>, AudioPipelineError> {
     if self.is_muted {
@@ -191,7 +196,11 @@ impl PlaybackMixer {
     for stream in self.streams.values_mut() {
       let maybe_pcm = match stream.jitter.pop() {
         Some(Playout::Packet { item, .. }) => Some(stream.decoder.decode(&item)?),
-        Some(Playout::Missing { .. }) => Some(stream.decoder.conceal(None)?),
+        // The next packet's in-band FEC recovers the lost one, if it is already here.
+        Some(Playout::Missing { .. }) => {
+          let maybe_next = stream.jitter.peek_next().map(Vec::as_slice);
+          Some(stream.decoder.conceal(maybe_next)?)
+        },
         None => None,
       };
       if let Some(pcm) = maybe_pcm.filter(|_| !self.is_deafened) {
@@ -277,6 +286,7 @@ mod tests {
       let mut mixer = PlaybackMixer::new(JitterBufferConfig {
         target_depth_packets: 1,
         max_depth_packets: 10,
+        max_excess_packets: 10,
       });
       let mut first = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
       let mut second = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
@@ -306,6 +316,7 @@ mod tests {
       let mut mixer = PlaybackMixer::new(JitterBufferConfig {
         target_depth_packets: 1,
         max_depth_packets: 10,
+        max_excess_packets: 10,
       });
       let mut voice = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
       let mut screen = CapturePipeline::new(OpusEncoderConfig::screen_audio()).unwrap();
@@ -340,6 +351,7 @@ mod tests {
       let mut mixer = PlaybackMixer::new(JitterBufferConfig {
         target_depth_packets: 1,
         max_depth_packets: 10,
+        max_excess_packets: 10,
       });
       let mut capture = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
       let frames = capture.push(&sine_tone(300.0, 0.5, 0, 960 * 3)).unwrap();

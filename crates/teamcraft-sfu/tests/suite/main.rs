@@ -4,7 +4,9 @@
 
 mod camera_call;
 mod dave_call;
+mod handover;
 mod host_controls;
 mod native_client;
+mod reconnect;
 mod reporting;
 mod video_call;
