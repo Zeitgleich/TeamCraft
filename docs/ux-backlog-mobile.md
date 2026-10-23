@@ -37,7 +37,7 @@ work stream).
 | Empty list: one line of text, no way forward                                     | Android, iOS | done   |
 | No offline indicator; nothing explains why new messages don't arrive             | Android      | done   |
 | Offline banner                                                                   | iOS          | done   |
-| Mute from the list (needs the per-conversation notification setting)             | Android, iOS | owner: push-quality |
+| Mute from the list (long-press → Notifications), shown right away (#99)            | Android      | done   |
 | Typing indicator ("Alice is typing…"), with a setting to not share one's own     | Android, iOS | done   |
 | Archive / hide a conversation from the list                                      | Android, iOS | open: core |
 | Multi-select (mark several read)                                                 | Android, iOS | open   |
@@ -75,7 +75,7 @@ work stream).
 | Images as large previews; a tap downloads and then opens Quick Look (zoom, share, save)    | iOS          | done   |
 | Mention highlighting in message text                                                      | Android      | done   |
 | Mention highlighting in message text                                                      | iOS          | done   |
-| Emoji autocomplete (`:smile:`)                                                            | Android, iOS | open   |
+| Emoji autocomplete (`:tad` → 🎉) and `:)`/`:tada:` on send, catalog shared with desktop | Android, iOS | done   |
 | Voice messages                                                                            | Android, iOS | open: core |
 | Image grid for several images in one message                                              | Android      | done   |
 | Image grid for several images in one message                                              | iOS          | open   |

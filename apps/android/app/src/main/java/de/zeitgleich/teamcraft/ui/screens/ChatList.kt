@@ -193,6 +193,7 @@ private fun SwipeableConversationRow(
   val haptics = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val actions = rowActions(viewModel, conversation, maybeEntry)
+  var isNotifying by remember { mutableStateOf(false) }
   val state = rememberSwipeToDismissBoxState()
   SwipeToDismissBox(
     state = state,
@@ -209,8 +210,10 @@ private fun SwipeableConversationRow(
       scope.launch { state.reset() }
     },
   ) {
-    ConversationRow(conversation, maybeEntry, actions, isSelected, onClick)
+    ConversationRow(conversation, maybeEntry, actions, isSelected, onClick, onNotifications = { isNotifying = true })
   }
+  // Mute or change notifications without opening the conversation.
+  if (isNotifying) ConversationNotificationsDialog(viewModel, conversation.id) { isNotifying = false }
 }
 
 /** What can be done with a row, shared by swipe, menu and accessibility. */
@@ -274,6 +277,7 @@ private fun ConversationRow(
   actions: RowActions,
   isSelected: Boolean,
   onClick: () -> Unit,
+  onNotifications: () -> Unit,
 ) {
   val haptics = LocalHapticFeedback.current
   var isMenuOpen by remember { mutableStateOf(false) }
@@ -317,6 +321,10 @@ private fun ConversationRow(
       DropdownMenuItem(text = { Text(favoriteLabel) }, onClick = {
         isMenuOpen = false
         actions.toggleFavorite()
+      })
+      DropdownMenuItem(text = { Text(stringResource(R.string.notifications_conversation)) }, onClick = {
+        isMenuOpen = false
+        onNotifications()
       })
     }
   }

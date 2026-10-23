@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -93,6 +94,7 @@ import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.Mentions
 import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
@@ -100,6 +102,8 @@ import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
 import de.zeitgleich.teamcraft.ui.sensitiveClip
+import uniffi.teamcraft_ffi.emojiConvert
+import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
 
 /** Quick reactions in the action sheet. */
@@ -746,7 +750,8 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
       alsoSendToChannel = alsoToChannel,
       files = files,
     )
-    viewModel.act(ChatActions.send(conversationId, text.trim(), options))
+    // `:)` and `:tada:` become emoji, as on desktop.
+    viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), options))
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
     text = ""
     files = emptyList()
@@ -776,6 +781,7 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
     if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) isConfirmingChannel = true else send()
   }
   Column(Modifier.fillMaxWidth()) {
+    EmojiSuggestions(text) { emoji -> text = EmojiInput.complete(text, emoji) }
     if (maybeQuery != null) {
       Mentions.suggestions(maybeQuery, members).forEach { user ->
         Text(
@@ -873,6 +879,25 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
   }
 }
 
+/** Emoji for the `:name` being typed, from the core's catalog; a tap puts the emoji in. */
+@Composable
+private fun EmojiSuggestions(text: String, onPick: (String) -> Unit) {
+  val maybeQuery = EmojiInput.activeQuery(text) ?: return
+  val suggestions = remember(maybeQuery) { emojiSuggestions(maybeQuery, MAX_EMOJI_SUGGESTIONS.toUInt()) }
+  if (suggestions.isEmpty()) return
+  LazyRow(
+    Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    items(suggestions, key = { it.emoji }) { suggestion ->
+      AssistChip(
+        onClick = { onPick(suggestion.emoji) },
+        label = { Text("${suggestion.emoji} :${suggestion.shortcode}:") },
+      )
+    }
+  }
+}
+
 /** Priority, read confirmation, silent and "also send to channel", in the composer's "+" sheet. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -947,6 +972,9 @@ private fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOpti
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
 }
+
+/** Emoji offered for a typed `:name`. */
+private const val MAX_EMOJI_SUGGESTIONS = 8
 
 /** How often the typing line is re-read while someone types (indicators last 6 s). */
 private const val TYPING_POLL_MS = 2000L

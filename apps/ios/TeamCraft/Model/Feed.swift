@@ -173,3 +173,19 @@ func typingText(_ names: [String]) -> LocalizedStringKey? {
   default: return "typing_several"
   }
 }
+
+/// The `:name` being typed at the end of the composer text (two characters at least, so `:)` and
+/// `:D` stay emoticons), or nothing.
+func activeEmojiQuery(_ text: String) -> String? {
+  let word = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).last.map(String.init) ?? ""
+  guard text.last.map({ !$0.isWhitespace }) ?? false, word.hasPrefix(":") else { return nil }
+  let name = word.dropFirst()
+  let isName = name.count >= 2 && name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "+" || $0 == "-" }
+  return isName ? String(name) : nil
+}
+
+/// Replaces the typed `:name` at the end with the emoji.
+func completeEmoji(in text: String, with emoji: String) -> String {
+  guard let start = text.lastIndex(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) else { return emoji + " " }
+  return String(text[...start]) + emoji + " "
+}

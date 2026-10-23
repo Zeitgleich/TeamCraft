@@ -78,6 +78,14 @@ pub struct MessageItem {
   pub reactions: Vec<ReactionItem>,
 }
 
+/// An emoji the composer offers for a typed `:name`.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EmojiSuggestion {
+  pub emoji: String,
+  /// Its name without colons (`thumbsup`).
+  pub shortcode: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ReactionItem {
   pub emoji: String,

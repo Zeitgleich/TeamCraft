@@ -208,6 +208,7 @@ struct ChatPane: View {
     if conversation.canPost {
       VStack(alignment: .leading, spacing: 6) {
         if let replying = maybeReplying { replyBar(replying) }
+        EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
         if !attachments.isEmpty { attachmentChips }
         HStack(alignment: .bottom, spacing: 8) {
           if maybeEditing != nil {
@@ -426,7 +427,8 @@ struct ChatPane: View {
   }
 
   private func submit() async {
-    let body = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    // `:)` and `:tada:` become emoji, as on desktop and Android.
+    let body = emojiConvert(text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
     if let editing = maybeEditing {
       guard !body.isEmpty else { return }
       draft = ""
@@ -759,5 +761,33 @@ struct ImageGrid: View {
       ForEach(images) { image in AttachmentView(file: image, isTile: true) }
     }
     .frame(maxWidth: 260)
+  }
+}
+
+/// Emoji for the `:name` being typed, from the core's catalog; a tap puts the emoji in.
+struct EmojiSuggestionBar: View {
+  let text: String
+  let onPick: (String) -> Void
+
+  var body: some View {
+    if let query = activeEmojiQuery(text) {
+      let suggestions = emojiSuggestions(query: query, limit: 8)
+      if !suggestions.isEmpty {
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 6) {
+            ForEach(suggestions, id: \.emoji) { suggestion in
+              Button { onPick(suggestion.emoji) } label: {
+                Text("\(suggestion.emoji) :\(suggestion.shortcode):")
+                  .font(.caption)
+                  .padding(.horizontal, 10).padding(.vertical, 6)
+                  .background(Theme.surface)
+                  .clipShape(Capsule())
+              }
+              .buttonStyle(.plain)
+            }
+          }
+        }
+      }
+    }
   }
 }
