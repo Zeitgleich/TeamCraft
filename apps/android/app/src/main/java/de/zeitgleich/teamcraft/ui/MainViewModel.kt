@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft.ui
 
 import android.app.Application
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
@@ -18,6 +19,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
@@ -31,6 +33,7 @@ import net.openid.appauth.AuthorizationException
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
@@ -70,9 +73,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The last action that failed, as a message to show once. */
   val lastFailure: StateFlow<Int?> = failures
 
+  private val brandStore = BrandStore(application, BuildConfig.SERVER_URL)
+  private val brand = MutableStateFlow<LoginBrand?>(null)
+
+  /** The server's brand for the sign-in screen; the cached one first, then the server's answer. */
+  val loginBrand: StateFlow<LoginBrand?> = brand
+
+  /** The server the app signs in to, as the sign-in screen names it. */
+  val serverHost: String = Uri.parse(BuildConfig.SERVER_URL).host ?: BuildConfig.SERVER_URL
+
   init {
     refresh()
+    viewModelScope.launch {
+      brand.value = withContext(Dispatchers.IO) { brandStore.cached() }
+      brand.value = brandStore.refresh()
+    }
   }
+
+  fun brandLogo(isDark: Boolean): Bitmap? = brandStore.logo(isDark)
 
   fun refresh() = launchBusy {
     state.value = if (!graph.auth.isSignedIn.value) AppState.SignedOut() else loadAccountState()

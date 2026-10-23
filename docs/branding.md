@@ -293,6 +293,8 @@ An optional label per user, taken from the identity provider.
 - The space settings dialog has no brand picker; the tag is set through the API.
 - Push notification texts do not name a brand yet; when they do they take the recipient's home brand from
   `BrandRegistry::for_email`.
-- Android and iOS shells call `GET /api/v1/brand` and run `teamcraft-client-api::brand` once they get a
-  server-URL screen; the server and the checks are ready.
+- Android and iOS show the brand on the sign-in screen only (name, logo, login title and text, links;
+  checked through the FFI's `login_brand`); colors and the in-app chrome don't follow it yet. The server
+  URL is fixed per build; a server-URL screen needs a public way to learn the OIDC issuer. SVG logos
+  aren't drawn on mobile (the name is shown instead).
 - One OIDC client for all brands (§10).

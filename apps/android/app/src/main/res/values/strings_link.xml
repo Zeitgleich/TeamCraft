@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="link_qr_description">QR code with the link code</string>
-  <string name="link_qr_hint">Scan this QR code on the other device, or enter the code below.</string>
   <string name="link_scan_qr">Scan QR code</string>
   <string name="link_scan_hint">Point the camera at the QR code on the new device.</string>
   <string name="link_camera_denied">Camera access was denied. Enter the code by hand instead.</string>

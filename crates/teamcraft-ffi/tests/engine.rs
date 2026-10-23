@@ -5,7 +5,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use teamcraft_ffi::{AppConfig, EventListener, TeamCraft, TeamCraftError, TokenProvider};
+use teamcraft_ffi::{AppConfig, EventListener, TeamCraft, TeamCraftError, TokenProvider, login_brand};
+
+/// A brand answer as the server sends it, with one asset path and one link that must be dropped.
+const BRAND_JSON: &str = r#"{
+  "id": "brand-a", "display_name": "Brand A", "origin": "https://chat.a.example.com",
+  "assets": {"logo": "/api/v1/brand/assets/logo", "icon": "https://elsewhere.example.com/icon.png"},
+  "login_title": {"en": "Welcome", "de": "Willkommen"},
+  "links": {"privacy": "https://a.example.com/privacy", "terms": "javascript:alert(1)"}
+}"#;
 
 /// Nothing listens on the discard port, so every request fails fast as a network error.
 const UNREACHABLE_SERVER: &str = "http://127.0.0.1:9";
@@ -85,6 +93,45 @@ struct Listener;
 
 impl EventListener for Listener {
   fn on_change(&self) {}
+}
+
+mod brand {
+  use super::*;
+
+  #[test]
+  fn the_login_brand_is_checked_and_localized() {
+    let brand = login_brand(
+      BRAND_JSON.into(),
+      "https://chat.example.com/".into(),
+      "de-AT".into(),
+    )
+    .unwrap();
+    assert_eq!(brand.display_name, "Brand A");
+    assert_eq!(brand.maybe_title.as_deref(), Some("Willkommen"));
+    assert_eq!(brand.maybe_text, None);
+    assert_eq!(
+      brand.maybe_logo_url.as_deref(),
+      Some("https://chat.example.com/api/v1/brand/assets/logo")
+    );
+    // No dark logo: the light one in both themes.
+    assert_eq!(brand.maybe_logo_dark_url, brand.maybe_logo_url);
+    assert_eq!(
+      brand.links.maybe_privacy.as_deref(),
+      Some("https://a.example.com/privacy")
+    );
+    assert_eq!(brand.links.maybe_terms, None);
+  }
+
+  #[test]
+  fn an_unusable_answer_has_no_brand() {
+    for json in ["", "{", "[]", r#"{"id": "a", "display_name": " ", "origin": ""}"#] {
+      assert_eq!(
+        login_brand(json.into(), "https://chat.example.com".into(), "en".into()),
+        None,
+        "{json}"
+      );
+    }
+  }
 }
 
 fn tokens(maybe_token: Option<&str>) -> Arc<dyn TokenProvider> {

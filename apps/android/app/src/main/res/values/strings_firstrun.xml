@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="sign_in_server">Server: %1$s</string>
+  <string name="brand_support">Help</string>
+  <string name="brand_privacy">Privacy</string>
+  <string name="brand_terms">Terms</string>
+  <string name="brand_imprint">Imprint</string>
+  <string name="passphrase_rule">At least %1$d characters. Keep it in a password manager or write it down: nobody, not even your admins, can read it back to you.</string>
+  <string name="passphrase_show">Show passphrase</string>
+  <string name="passphrase_hide">Hide passphrase</string>
+  <string name="restore_link_hint">Your account is already set up on another device. Link this phone from it: it\'s quickest, and your message history comes along.</string>
+  <string name="restore_passphrase_hint">No other device at hand? Enter your recovery passphrase.</string>
+  <string name="link_steps_phone">On your other phone: open TeamCraft, Settings → Devices → Link a device, and scan this code.</string>
+  <string name="link_steps_computer">On a computer: Settings → Devices and security → Link a new device, and enter this code.</string>
+  <string name="notification_prompt_title">Don\'t miss messages</string>
+  <string name="notification_prompt_text">Allow notifications to hear about direct messages, mentions and calls while TeamCraft is closed. Message content stays encrypted until it reaches this phone.</string>
+  <string name="notification_prompt_allow">Allow</string>
+  <string name="not_now">Not now</string>
+  <string name="new_chat">New chat</string>
+  <string name="browse_channels">Browse channels</string>
+  <string name="message_someone">Message someone</string>
+  <string name="browse_no_people">People you share a channel with appear here. Join a channel first, or ask a colleague to add you to one.</string>
+  <string name="browse_no_channels">Nobody has created a channel you can join here yet. Create one with New channel.</string>
+  <string name="browse_no_spaces">You aren\'t in a space yet. Ask your admin to add you to one.</string>
+</resources>

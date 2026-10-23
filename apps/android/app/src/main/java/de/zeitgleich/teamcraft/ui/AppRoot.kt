@@ -14,6 +14,7 @@ import androidx.compose.runtime.key
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.Text
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -24,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.remember
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -63,10 +65,15 @@ fun AppRoot(
 ) {
   val state by viewModel.appState.collectAsState()
   val isBusy by viewModel.isBusy.collectAsState()
+  val brand by viewModel.loginBrand.collectAsState()
+  val isDark = isSystemInDarkTheme()
   val scope = rememberCoroutineScope()
   when (val current = state) {
     AppState.Starting -> LoadingScreen()
     is AppState.SignedOut -> LoginScreen(
+      maybeBrand = brand,
+      maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
+      serverHost = viewModel.serverHost,
       maybeError = current.maybeError,
       isBusy = isBusy,
       onLogin = { scope.launch { runCatching { onLogin(viewModel.loginIntent()) } } },
@@ -224,8 +231,16 @@ private fun ReadyNavigation(
     composable("saved") {
       SavedScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
     }
-    composable("browse") {
-      BrowseScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
+    composable(
+      "browse?people={people}",
+      arguments = listOf(navArgument("people") { type = NavType.BoolType; defaultValue = false }),
+    ) { entry ->
+      BrowseScreen(
+        viewModel = viewModel,
+        onOpen = { navigation.navigate("conversation/$it") },
+        onBack = { navigation.popBackStack() },
+        isPeopleFirst = entry.arguments?.getBoolean("people") == true,
+      )
     }
     composable("meetings") {
       MeetingsScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })

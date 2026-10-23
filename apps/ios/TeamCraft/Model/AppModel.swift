@@ -81,6 +81,8 @@ final class AppModel {
   private(set) var pushStatus: PushStatus = .unknown
 
   let calls = CallManager()
+  /// The server's brand for the sign-in screen.
+  let brand = BrandStore(serverURL: AppEnvironment.current.serverURL)
 
   @ObservationIgnored private let vault = SessionVault()
   @ObservationIgnored private let container = SharedContainer()
@@ -417,6 +419,17 @@ final class AppModel {
     if granted { UIApplication.shared.registerForRemoteNotifications() }
   }
 
+  /// After sign-in: registers again when notifications are allowed. The first time, the chat list
+  /// asks with a line on why (`NotificationPromptCard`) instead of the bare system prompt.
+  private func resumePush() async {
+    let settings = await UNUserNotificationCenter.current().notificationSettings()
+    switch settings.authorizationStatus {
+    case .notDetermined: pushStatus = .unknown
+    case .denied: pushStatus = .denied
+    default: await enablePush()
+    }
+  }
+
   /// The APNs device token: registers it with the server (a fresh push key for the extension).
   func didRegister(deviceToken: Data) async {
     let token = deviceToken.hexString
@@ -587,6 +600,16 @@ final class AppModel {
     await answer(.permalink(conversationId: conversationId, messageId: messageId))?.maybeLink
   }
 
+  /// Spaces, people and conversations for Browse.
+  func browseSnapshot() async -> BrowseSnapshot? {
+    guard let json = try? await core().snapshot() else { return nil }
+    return Wire.decode(BrowseSnapshot.self, from: json)
+  }
+
+  func browseChannels(spaceId: String) async -> [BrowsableChannel] {
+    await answer(.browseChannels(spaceId: spaceId))?.channels ?? []
+  }
+
   /// Display names by user ID, for reply quotes.
   func displayNames() async -> [String: String] {
     guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
@@ -673,7 +696,7 @@ final class AppModel {
       await calls.attach(core: core)
     }
     await startSyncing()
-    await enablePush()
+    await resumePush()
   }
 
   private func startSyncing() async {

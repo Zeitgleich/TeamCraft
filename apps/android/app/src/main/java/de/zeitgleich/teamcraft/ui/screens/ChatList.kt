@@ -29,11 +29,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -63,6 +67,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -80,6 +85,9 @@ import de.zeitgleich.teamcraft.ui.selectionActions
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+
+/** Room below the last conversation so the New chat button doesn't cover it. */
+private val FAB_CLEARANCE = 88.dp
 
 @Composable
 fun ChatListScreen(
@@ -130,9 +138,19 @@ fun ChatListScreen(
         )
       }
     },
+    floatingActionButton = {
+      if (selection.isEmpty()) {
+        ExtendedFloatingActionButton(
+          onClick = { onNavigate("browse?people=true") },
+          icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+          text = { Text(stringResource(R.string.new_chat)) },
+        )
+      }
+    },
   ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
       OfflineBanner()
+      NotificationPermissionCard()
       LazyRow(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -146,8 +164,8 @@ fun ChatListScreen(
       val loaded = conversations
       when {
         loaded == null -> LoadingScreen()
-        loaded.isEmpty() -> EmptyChats(onBrowse = { onNavigate("browse") })
-        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+        loaded.isEmpty() -> EmptyChats(onBrowse = { onNavigate("browse") }, onMessage = { onNavigate("browse?people=true") })
+        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
           val lastActivity = previews.mapValues { it.value.preview.sentAt }
           for (section in sections(loaded, lastActivity)) {
             item(key = "section-${section.title}") { SectionHeader(section.title) }
@@ -175,20 +193,27 @@ fun ChatListScreen(
 }
 
 @Composable
-private fun EmptyChats(onBrowse: () -> Unit) {
+private fun EmptyChats(onBrowse: () -> Unit, onMessage: () -> Unit) {
   Column(
     Modifier.fillMaxSize().padding(32.dp),
-    verticalArrangement = Arrangement.Center,
+    verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
     horizontalAlignment = Alignment.CenterHorizontally,
   ) {
+    Icon(
+      Icons.Filled.Email,
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.primary,
+      modifier = Modifier.size(48.dp),
+    )
     Text(stringResource(R.string.no_conversations), style = MaterialTheme.typography.titleMedium)
     Text(
       stringResource(R.string.chats_empty_hint),
       style = MaterialTheme.typography.bodyMedium,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
-      modifier = Modifier.padding(top = 8.dp, bottom = 16.dp),
+      textAlign = TextAlign.Center,
     )
-    AssistChip(onClick = onBrowse, label = { Text(stringResource(R.string.browse_title)) })
+    Button(onClick = onBrowse, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.browse_channels)) }
+    OutlinedButton(onClick = onMessage, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.message_someone)) }
   }
 }
 

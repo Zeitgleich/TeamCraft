@@ -24,10 +24,10 @@ pub use error::TeamCraftError;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, EmojiSuggestion, MentionSettings, MessageItem,
-  NotificationSuppression, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification,
-  PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
-  TestPushOutcome, TestPushResult,
+  AccountState, AppConfig, BrandLinks, ConversationItem, ConversationKind, EmojiSuggestion, LoginBrand,
+  MentionSettings, MessageItem, NotificationSuppression, OrgRecoveryStart, Presence, PushDiagnosticsInfo,
+  PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode,
+  SegmentPrefetchResult, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -428,6 +428,28 @@ pub fn emoji_suggestions(query: String, limit: u32) -> Vec<EmojiSuggestion> {
 #[uniffi::export]
 pub fn emoji_convert(text: String) -> String {
   teamcraft_client_api::emoji::convert(&text)
+}
+
+/// The sign-in screen's brand (docs/branding.md §5) from the server's `GET /api/v1/brand` answer,
+/// checked like on every platform: image URLs only of the brand endpoint on `server_url`, https
+/// links only. `None` for an unusable answer (the app shows its own name).
+#[uniffi::export]
+pub fn login_brand(response_json: String, server_url: String, language: String) -> Option<LoginBrand> {
+  let response = serde_json::from_str(&response_json).ok()?;
+  let brand = teamcraft_client_api::brand::BrandView::from_response(response, &server_url)?;
+  Some(LoginBrand {
+    display_name: brand.display_name.clone(),
+    maybe_logo_url: brand.asset("logo", false).map(str::to_owned),
+    maybe_logo_dark_url: brand.asset("logo", true).map(str::to_owned),
+    maybe_title: brand.login_title(&language).map(str::to_owned),
+    maybe_text: brand.login_text(&language).map(str::to_owned),
+    links: BrandLinks {
+      maybe_support: brand.links.maybe_support.clone(),
+      maybe_privacy: brand.links.maybe_privacy.clone(),
+      maybe_terms: brand.links.maybe_terms.clone(),
+      maybe_imprint: brand.links.maybe_imprint.clone(),
+    },
+  })
 }
 
 /// Whether a link from content other members control (a bookmark) may be opened: web links only.

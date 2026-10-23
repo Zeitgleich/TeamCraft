@@ -10,7 +10,6 @@
   <string name="loading">Wird geladen …</string>
   <string name="enroll_title">Dieses Gerät einrichten</string>
   <string name="enroll_new_hint">Wähle eine Wiederherstellungs-Passphrase. Sie schützt deine Schlüsselsicherung; ohne sie (oder ein anderes Gerät) lässt sich dein Nachrichtenverlauf nicht wiederherstellen.</string>
-  <string name="enroll_recover_hint">Dein Konto hat bereits Schlüssel. Gib deine Wiederherstellungs-Passphrase ein oder verknüpfe dieses Telefon mit einem angemeldeten Gerät.</string>
   <string name="passphrase">Wiederherstellungs-Passphrase</string>
   <string name="passphrase_repeat">Passphrase wiederholen</string>
   <string name="passphrase_too_short">Verwende mindestens 12 Zeichen.</string>
@@ -20,7 +19,6 @@
   <string name="link_instead">Mit anderem Gerät verknüpfen</string>
   <string name="device_name">Android-Telefon</string>
   <string name="link_new_title">Dieses Telefon verknüpfen</string>
-  <string name="link_new_hint">Öffne auf einem angemeldeten Gerät Einstellungen → Gerät verknüpfen und gib diesen Code ein.</string>
   <string name="link_waiting">Warte auf das andere Gerät …</string>
   <string name="link_compare">Prüfe, ob das andere Gerät dieselbe Zahl zeigt:</string>
   <string name="link_confirm_on_other">Bestätige auf dem anderen Gerät, um abzuschließen.</string>

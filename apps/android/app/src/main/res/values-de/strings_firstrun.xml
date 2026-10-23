@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="sign_in_server">Server: %1$s</string>
+  <string name="brand_support">Hilfe</string>
+  <string name="brand_privacy">Datenschutz</string>
+  <string name="brand_terms">Nutzungsbedingungen</string>
+  <string name="brand_imprint">Impressum</string>
+  <string name="passphrase_rule">Mindestens %1$d Zeichen. Bewahre sie in einem Passwortmanager auf oder schreib sie auf: Niemand, auch nicht deine Admins, kann sie dir nennen.</string>
+  <string name="passphrase_show">Passphrase anzeigen</string>
+  <string name="passphrase_hide">Passphrase verbergen</string>
+  <string name="restore_link_hint">Dein Konto ist schon auf einem anderen Gerät eingerichtet. Verknüpfe dieses Telefon von dort: Das geht am schnellsten, und dein Nachrichtenverlauf kommt mit.</string>
+  <string name="restore_passphrase_hint">Kein anderes Gerät zur Hand? Gib deine Wiederherstellungs-Passphrase ein.</string>
+  <string name="link_steps_phone">Auf deinem anderen Telefon: TeamCraft öffnen, Einstellungen → Geräte → Gerät verknüpfen, und diesen Code scannen.</string>
+  <string name="link_steps_computer">Am Computer: Einstellungen → Geräte und Sicherheit → Neues Gerät verknüpfen, und diesen Code eingeben.</string>
+  <string name="notification_prompt_title">Keine Nachricht verpassen</string>
+  <string name="notification_prompt_text">Erlaube Mitteilungen, um bei Direktnachrichten, Erwähnungen und Anrufen benachrichtigt zu werden, auch wenn TeamCraft geschlossen ist. Inhalte bleiben verschlüsselt, bis sie auf diesem Telefon ankommen.</string>
+  <string name="notification_prompt_allow">Erlauben</string>
+  <string name="not_now">Nicht jetzt</string>
+  <string name="new_chat">Neuer Chat</string>
+  <string name="browse_channels">Kanäle durchsuchen</string>
+  <string name="message_someone">Jemandem schreiben</string>
+  <string name="browse_no_people">Hier erscheinen Personen, mit denen du einen Kanal teilst. Tritt zuerst einem Kanal bei oder lass dich von jemandem hinzufügen.</string>
+  <string name="browse_no_channels">Hier gibt es noch keinen Kanal, dem du beitreten kannst. Lege einen mit Neuer Kanal an.</string>
+  <string name="browse_no_spaces">Du bist noch in keinem Space. Bitte deine Admins, dich hinzuzufügen.</string>
+</resources>
