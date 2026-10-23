@@ -158,6 +158,9 @@ pub use linux::watch_actions;
 
 #[cfg(target_os = "linux")]
 mod linux {
+  use std::path::PathBuf;
+  use std::sync::OnceLock;
+
   use tauri::{AppHandle, Manager};
   use teamcraft_client_api::os_notify::{
     NotificationAction, NotificationActionEvent, NotificationTag, OsNotification, OsNotificationKind,
@@ -225,7 +228,7 @@ mod linux {
     let desktop = DesktopNotification {
       app_name: &app_name,
       app_icon: &app_icon,
-      desktop_entry: &config.identifier,
+      maybe_desktop_entry: desktop_entry(app).as_deref(),
       title: &notification.title,
       body: notification.maybe_body.as_deref().unwrap_or_default(),
       replaces_id,
@@ -246,6 +249,61 @@ mod linux {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .insert(tag.to_owned(), id);
     true
+  }
+
+  /// The `.desktop` entry the packages installed for this app, looked up once: the Flatpak's ID,
+  /// the identifier, the product name (Tauri's deb, rpm and AppImage name it `TeamCraft.desktop`)
+  /// or the executable's name.
+  fn desktop_entry(app: &AppHandle) -> &'static Option<String> {
+    static ENTRY: OnceLock<Option<String>> = OnceLock::new();
+    ENTRY.get_or_init(|| {
+      let config = app.config();
+      let mut candidates: Vec<String> = std::env::var("FLATPAK_ID").into_iter().collect();
+      candidates.push(config.identifier.clone());
+      candidates.extend(config.product_name.clone());
+      candidates.extend(
+        std::env::current_exe()
+          .ok()
+          .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned())),
+      );
+      let entry = installed_entry(&candidates, &application_dirs());
+      if entry.is_none() {
+        tracing::debug!("no installed .desktop entry: notifications name the app by its name only");
+      }
+      entry
+    })
+  }
+
+  /// The first candidate with a `<name>.desktop` in one of `dirs`.
+  pub(super) fn installed_entry(candidates: &[String], dirs: &[PathBuf]) -> Option<String> {
+    candidates
+      .iter()
+      .find(|name| {
+        dirs
+          .iter()
+          .any(|dir| dir.join(format!("{name}.desktop")).is_file())
+      })
+      .cloned()
+  }
+
+  /// `applications` below the XDG data directories, user first, as desktop environments search.
+  fn application_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+      .map(PathBuf::from)
+      .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+    let data_dirs =
+      std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+    data_home
+      .into_iter()
+      .chain(
+        data_dirs
+          .split(':')
+          .filter(|dir| !dir.is_empty())
+          .map(PathBuf::from),
+      )
+      .map(|dir| dir.join("applications"))
+      .collect()
   }
 
   /// The notification spec's category, which servers use for sounds, icons and grouping.
@@ -269,5 +327,34 @@ mod linux {
         .find(|(_, shown)| **shown == id)
         .map(|(tag, _)| tag.clone())
     }
+  }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+  use super::linux::installed_entry;
+
+  #[test]
+  fn the_desktop_entry_is_the_one_actually_installed() {
+    let dir = std::env::temp_dir().join(format!("teamcraft-desktop-entry-{}", std::process::id()));
+    let applications = dir.join("applications");
+    std::fs::create_dir_all(&applications).unwrap();
+    let candidates = ["de.zeitgleich.teamcraft".to_owned(), "TeamCraft".to_owned()];
+    assert_eq!(installed_entry(&candidates, &[applications.clone()]), None);
+    std::fs::write(applications.join("TeamCraft.desktop"), "[Desktop Entry]\n").unwrap();
+    assert_eq!(
+      installed_entry(&candidates, &[applications.clone()]).as_deref(),
+      Some("TeamCraft")
+    );
+    std::fs::write(
+      applications.join("de.zeitgleich.teamcraft.desktop"),
+      "[Desktop Entry]\n",
+    )
+    .unwrap();
+    assert_eq!(
+      installed_entry(&candidates, &[applications]).as_deref(),
+      Some("de.zeitgleich.teamcraft")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
   }
 }

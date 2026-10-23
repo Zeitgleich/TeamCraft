@@ -48,8 +48,9 @@ pub struct DesktopState {
 pub struct DesktopNotification<'a> {
   pub app_name: &'a str,
   pub app_icon: &'a str,
-  /// The `.desktop` entry of the app, so the server shows its name and icon.
-  pub desktop_entry: &'a str,
+  /// The installed `.desktop` entry of the app, so the server shows its name and icon. `None`
+  /// when none is installed: a hint naming a missing entry makes KDE show the raw ID as app name.
+  pub maybe_desktop_entry: Option<&'a str>,
   pub title: &'a str,
   pub body: &'a str,
   /// The notification this one replaces (0: none).
@@ -109,7 +110,9 @@ impl Buses {
     let session = self.session().await?;
     let has_inline_reply = self.has_capability(INLINE_REPLY).await;
     let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
-    hints.insert("desktop-entry", Value::from(notification.desktop_entry));
+    if let Some(entry) = notification.maybe_desktop_entry {
+      hints.insert("desktop-entry", Value::from(entry));
+    }
     hints.insert("category", Value::from(notification.category));
     let urgency = if notification.is_ringing {
       URGENCY_CRITICAL
@@ -463,7 +466,7 @@ mod tests {
     DesktopNotification {
       app_name: "TeamCraft",
       app_icon: "teamcraft-desktop",
-      desktop_entry: "de.zeitgleich.teamcraft",
+      maybe_desktop_entry: None,
       title: "Bob",
       body: "hello",
       replaces_id: 0,
