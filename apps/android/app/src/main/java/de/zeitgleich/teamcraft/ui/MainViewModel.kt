@@ -258,7 +258,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */
-  private fun stage(name: String, type: String, open: () -> InputStream?): PickedFile? {
+  private suspend fun stage(name: String, type: String, open: () -> InputStream?): PickedFile? {
     // The core deletes the copy once it is uploaded (or failed for good).
     val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
