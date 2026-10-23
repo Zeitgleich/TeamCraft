@@ -111,8 +111,9 @@ struct ConversationListView: View {
             .autocorrectionDisabled()
           homeChips
           if shownSections.isEmpty {
-            Text(LocalizedStringKey(dmFilter.isEmpty && homeChip == .all ? "dm_empty" : "dm_filter_empty")).foregroundStyle(Theme.textMuted)
-            if dmFilter.isEmpty && homeChip == .all {
+            let isUnfiltered = dmFilter.isEmpty && homeChip == .all
+            Text(LocalizedStringKey(isUnfiltered ? "dm_empty" : "dm_filter_empty")).foregroundStyle(Theme.textMuted)
+            if isUnfiltered {
               Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
             }
           }
@@ -180,7 +181,7 @@ struct ConversationListView: View {
     .padding(.vertical, 6)
   }
 
-  /// "Direct messages (3)": channels count only mentions, DMs every unread message.
+  /// "Home (3)": channels count only mentions, DMs every unread message.
   private func tabLabel(_ tab: ChatTab) -> String {
     let isDirect = tab == .home
     let name = isDirect ? String(localized: "home_title") : String(localized: "chats_tab_spaces")
