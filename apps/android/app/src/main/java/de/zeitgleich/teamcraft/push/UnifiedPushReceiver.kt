@@ -21,6 +21,7 @@ class UnifiedPushReceiver : MessagingReceiver() {
     val keys = endpoint.pubKeySet
     val token = PushSubscription.json(endpoint.url, keys?.pubKey, keys?.auth)
     UnifiedPushStatus(context).record(UnifiedPushStatus.State.REGISTERED)
+    UnifiedPushRecovery.onRegistered(context)
     TeamCraftApplication.graph(context).push.onToken(PushService.UNIFIED_PUSH, token)
   }
 
@@ -35,16 +36,19 @@ class UnifiedPushReceiver : MessagingReceiver() {
     }
   }
 
-  // The diagnostics show these; registering again is the user's choice there.
+  // The diagnostics show these; the app registers again by itself where another try can help.
   override fun onRegistrationFailed(context: Context, reason: FailedReason, instance: String) {
     UnifiedPushStatus(context).record(UnifiedPushStatus.State.FAILED, reason.name)
+    UnifiedPushRecovery.onRegistrationFailed(context, reason.name)
   }
 
   override fun onUnregistered(context: Context, instance: String) {
     UnifiedPushStatus(context).record(UnifiedPushStatus.State.UNREGISTERED)
+    UnifiedPushRecovery.onUnregistered(context)
   }
 
   override fun onTempUnavailable(context: Context, instance: String) {
     UnifiedPushStatus(context).record(UnifiedPushStatus.State.TEMPORARILY_UNAVAILABLE)
+    UnifiedPushRecovery.onTemporarilyUnavailable(context)
   }
 }
