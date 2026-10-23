@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::window_chrome::{TitleBar, WindowAction, WindowChrome};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -266,11 +267,32 @@ pub async fn set_zoom(percent: u16) {
   }
 }
 
-/// The desktop shell's own preferences (closing to the tray, starting minimized).
+/// The desktop shell's own preferences (closing to the tray, starting minimized, the title bar).
+/// Sent back whole, so every field the shell has must be here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPrefs {
   pub is_close_to_tray: bool,
   pub is_start_minimized: bool,
+  #[serde(default)]
+  pub title_bar: TitleBar,
+}
+
+/// Desktop only: who draws the title bar and which window controls the UI shows.
+pub async fn window_chrome() -> Option<WindowChrome> {
+  if !is_available() {
+    return None;
+  }
+  call::<WindowChrome>("window_chrome", &serde_json::json!({}))
+    .await
+    .inspect_err(|error| tracing::debug!(%error, "no window chrome"))
+    .ok()
+}
+
+/// Desktop only: minimize, maximize, close or move the window from the custom title bar.
+pub async fn window_action(action: WindowAction) {
+  if let Err(error) = call::<()>("window_action", &serde_json::json!({ "action": action })).await {
+    tracing::debug!(%error, ?action, "window action failed");
+  }
 }
 
 /// `None` outside the desktop app.

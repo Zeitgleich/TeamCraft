@@ -779,6 +779,167 @@ select.input {
   outline-color: #fff;
 }
 
+/* ---- Custom title bar (desktop app, components/window_controls.rs) ----
+   `data-titlebar="custom"` on <html> means the window has no native title bar and the top bar is
+   one. `--window-controls-left/right` hold the number of buttons on each side. */
+
+:root {
+  /* Windows' caption buttons; no target is smaller than 32px. */
+  --window-btn-w: 46px;
+  /* Room for the macOS traffic lights (positioned by the shell). */
+  --traffic-lights-w: 84px;
+}
+
+:root[data-platform="linux"] {
+  --window-btn-w: 38px;
+}
+
+/* The title bar is the window's top edge: banners go below it. */
+:root[data-titlebar="custom"] .app {
+  grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
+}
+
+:root[data-titlebar="custom"] .app > .top-bar {
+  grid-row: 1;
+}
+
+:root[data-titlebar="custom"] .app > .app-banners {
+  grid-row: 2;
+}
+
+:root[data-titlebar="custom"] .app > .app-body {
+  grid-row: 3;
+}
+
+:root[data-titlebar="custom"] .top-bar {
+  padding-left: calc(var(--window-controls-left, 0) * var(--window-btn-w));
+  padding-right: calc(12px + var(--window-controls-right, 0) * var(--window-btn-w));
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* However narrow the window, some of the title bar stays free to grab beside the search. */
+:root[data-titlebar="custom"] .search-btn {
+  width: min(560px, calc(100% - 32px));
+}
+
+:root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar {
+  grid-template-columns: var(--traffic-lights-w) minmax(0, 1fr) auto;
+}
+
+/* The traffic lights sit where the brand would be; fullscreen hides them and the brand returns. */
+:root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar .brand {
+  visibility: hidden;
+}
+
+.window-controls {
+  position: fixed;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  height: var(--topbar-h);
+}
+
+.window-controls.left {
+  left: 0;
+}
+
+.window-controls.right {
+  right: 0;
+}
+
+.window-btn {
+  display: grid;
+  place-items: center;
+  width: var(--window-btn-w);
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--chrome-text);
+}
+
+.window-btn .icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.4;
+}
+
+.window-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--chrome-strong);
+}
+
+.window-btn:active {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.window-btn:focus-visible {
+  outline: 2px solid var(--chrome-strong);
+  outline-offset: -4px;
+}
+
+:root[data-platform="windows"] .window-btn.close:hover,
+:root[data-platform="windows"] .window-btn.close:active {
+  background: #c42b1c;
+  color: #fff;
+}
+
+/* Linux: round buttons as GNOME and KDE draw them, inside a full-height target. */
+:root[data-platform="linux"] .window-btn .icon {
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  padding: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+:root[data-platform="linux"] .window-btn:hover,
+:root[data-platform="linux"] .window-btn:active {
+  background: transparent;
+}
+
+:root[data-platform="linux"] .window-btn:hover .icon {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+:root[data-platform="linux"] .window-btn:active .icon {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+/* Screens without the top bar (sign-in, guest join) get a strip to move the window by. */
+.window-drag-strip {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 199;
+  height: var(--topbar-h);
+}
+
+:root:has(.top-bar) .window-drag-strip {
+  display: none;
+}
+
+:root:not(:has(.top-bar)) .window-btn {
+  color: var(--text-muted);
+}
+
+:root:not(:has(.top-bar)) .window-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+/* Without a window manager frame the window needs its own edge (Windows draws one itself). */
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  pointer-events: none;
+}
+
 /* ---- Channel view ---- */
 
 .channel-view {

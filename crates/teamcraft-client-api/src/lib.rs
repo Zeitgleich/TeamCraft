@@ -23,3 +23,4 @@ pub mod remote;
 pub mod search;
 pub mod security;
 pub mod updates;
+pub mod window_chrome;
