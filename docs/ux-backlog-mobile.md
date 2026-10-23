@@ -71,7 +71,7 @@ work stream).
 | Composer started sentences in lower case                                                  | Android      | done   |
 | "Send with Enter" for hardware keyboards and tablets                                      | Android      | done   |
 | Quick reactions in the long-press sheet wrap onto two lines on narrow phones              | Android      | done   |
-| Edit history, forward, pin, save, copy link, mark unread                                  | iOS          | open   |
+| Edit history, forward, pin, save, copy link, mark unread; reply quotes shown            | iOS          | done   |
 | Images as large previews; a tap downloads and then opens Quick Look (zoom, share, save)    | iOS          | done   |
 | Mention highlighting in message text                                                      | Android      | done   |
 | Mention highlighting in message text                                                      | iOS          | done   |

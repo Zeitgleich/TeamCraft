@@ -13,6 +13,9 @@ enum ChatAction {
   case downloadFile(conversationId: String, messageId: String)
   /// Unread again from `fromMessageId` on (account data, synced to the user's devices).
   case markUnread(conversationId: String, fromMessageId: String)
+  case forward(fromConversationId: String, messageId: String, toConversationId: String)
+  case setPinned(conversationId: String, messageId: String, isPinned: Bool)
+  case setSaved(conversationId: String, messageId: String, isSaved: Bool)
   /// The user types (send while the text changes; the core throttles).
   case typing(conversationId: String)
   /// An own message the server rejected: send it again, or drop it.
@@ -46,6 +49,12 @@ enum ChatAction {
       object = ["action": "download_file", "conversation": conversation, "message": message]
     case .markUnread(let conversation, let message):
       object = ["action": "mark_unread", "conversation": conversation, "from": message]
+    case .forward(let from, let message, let to):
+      object = ["action": "forward_message", "from": from, "message": message, "to": to, "comment": ""]
+    case .setPinned(let conversation, let message, let isPinned):
+      object = ["action": "set_pinned", "conversation": conversation, "message": message, "is_pinned": isPinned]
+    case .setSaved(let conversation, let message, let isSaved):
+      object = ["action": "set_saved", "conversation": conversation, "message": message, "is_saved": isSaved]
     case .typing(let conversation):
       object = ["action": "typing", "conversation": conversation]
     case .retrySend(let conversation, let message):
@@ -102,6 +111,7 @@ enum ChatQuery {
   case maxUploadBytes
   case resolvePermalink(link: String)
   case typingUsers(conversationId: String)
+  case permalink(conversationId: String, messageId: String)
 
   var json: String {
     switch self {
@@ -115,6 +125,8 @@ enum ChatQuery {
       return jsonText(["kind": "resolve_permalink", "link": link])
     case .typingUsers(let conversation):
       return jsonText(["kind": "typing_users", "conversation": conversation])
+    case .permalink(let conversation, let message):
+      return jsonText(["kind": "permalink", "conversation": conversation, "message": message])
     }
   }
 }

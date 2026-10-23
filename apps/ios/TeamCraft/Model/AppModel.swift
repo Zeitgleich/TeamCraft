@@ -582,6 +582,20 @@ final class AppModel {
     await answer(.resolvePermalink(link: link))?.maybeTarget
   }
 
+  /// The link to a message ("Copy link"), once the server has it.
+  func permalink(conversationId: String, messageId: String) async -> String? {
+    await answer(.permalink(conversationId: conversationId, messageId: messageId))?.maybeLink
+  }
+
+  /// Display names by user ID, for reply quotes.
+  func displayNames() async -> [String: String] {
+    guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
+      return [:]
+    }
+    let everyone = (people.users ?? []) + [people.me]
+    return Dictionary(everyone.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+  }
+
   /// Names of the people typing in a conversation right now.
   func typingNames(conversationId: String) async -> [String] {
     guard let ids = await answer(.typingUsers(conversationId: conversationId))?.users, !ids.isEmpty else { return [] }

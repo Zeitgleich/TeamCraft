@@ -7,6 +7,8 @@ import SwiftUI
 struct AttachmentView: View {
   @Environment(AppModel.self) private var model
   let file: FileInfo
+  /// A square tile of an image grid instead of the large preview.
+  var isTile = false
 
   @State private var maybePreviewURL: URL?
   @State private var isWaitingToOpen = false
@@ -14,7 +16,7 @@ struct AttachmentView: View {
   var body: some View {
     Button(action: open) {
       if file.isImage, let data = file.maybeThumbnailData, let image = UIImage(data: data) {
-        imagePreview(image)
+        if isTile { tile(image) } else { imagePreview(image) }
       } else {
         fileRow
       }
@@ -27,6 +29,16 @@ struct AttachmentView: View {
       isWaitingToOpen = false
       if state == "local", let path = file.transfer.path { maybePreviewURL = URL(fileURLWithPath: path) }
     }
+  }
+
+  private func tile(_ image: UIImage) -> some View {
+    Color.clear
+      .aspectRatio(1, contentMode: .fit)
+      .overlay { Image(uiImage: image).resizable().scaledToFill() }
+      .clipShape(RoundedRectangle(cornerRadius: 8))
+      .overlay(alignment: .bottom) {
+        if let progress = file.transfer.maybeProgress { ProgressView(value: progress).padding(4) }
+      }
   }
 
   private func imagePreview(_ image: UIImage) -> some View {
