@@ -79,7 +79,7 @@ work stream).
 | Voice messages                                                                            | Android, iOS | open: core |
 | Image grid for several images in one message                                              | Android, iOS | open   |
 | Save an image to the gallery (the share sheet covers it for now)                          | Android      | open   |
-| A message that keeps failing shows "Sending…" forever; no retry or delete                 | Android, iOS | open: core reports outbox failures only in logs |
+| A message the server rejected showed "Sending…" forever; now "Not sent" with Retry/Delete | Android, iOS | done   |
 
 ## Sharing and navigation
 

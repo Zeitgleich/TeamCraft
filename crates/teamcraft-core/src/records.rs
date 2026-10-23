@@ -247,6 +247,51 @@ pub fn outbox(store: &impl LocalStore) -> Result<Vec<OutboxEntry>, CoreError> {
   list_json(store, Table::Outbox)
 }
 
+/// Whether the server rejected an own message for good; it then waits for "retry" or "delete".
+pub fn is_send_failed(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  client_message_id: ClientMessageId,
+) -> Result<bool, CoreError> {
+  let key = outbox_key(conversation, client_message_id);
+  Ok(
+    get_json::<OutboxEntry>(store, Table::Outbox, &key)?
+      .is_some_and(|entry| entry.maybe_last_error.is_some()),
+  )
+}
+
+/// Puts a failed outbox message back in line (the user tapped "retry"); the next flush sends it.
+pub fn retry_failed(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  client_message_id: ClientMessageId,
+) -> Result<(), CoreError> {
+  let key = outbox_key(conversation, client_message_id);
+  if let Some(mut entry) = get_json::<OutboxEntry>(store, Table::Outbox, &key)? {
+    entry.maybe_last_error = None;
+    put_json(store, Table::Outbox, &key, &entry)?;
+  }
+  Ok(())
+}
+
+/// Drops a failed outbox message (the user chose "delete"): it leaves the outbox and shows as
+/// deleted. Only failed ones: a message that may still be on its way can't be taken back here.
+pub fn discard_failed(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  client_message_id: ClientMessageId,
+) -> Result<(), CoreError> {
+  if !is_send_failed(store, conversation, client_message_id)? {
+    return Ok(());
+  }
+  store.delete(Table::Outbox, &outbox_key(conversation, client_message_id))?;
+  if let Some(mut message) = store.message(conversation, client_message_id)? {
+    message.content = MessageContent::Deleted;
+    store.upsert_message(&message)?;
+  }
+  Ok(())
+}
+
 /// The openmls provider storage holds group state and key package private keys. It is kept as one
 /// snapshot (all entries) and written after every MLS operation.
 pub fn save_mls_storage(store: &impl LocalStore, provider: &OpenMlsRustCrypto) -> Result<(), CoreError> {

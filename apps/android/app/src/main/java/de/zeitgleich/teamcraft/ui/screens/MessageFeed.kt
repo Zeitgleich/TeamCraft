@@ -50,6 +50,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -422,6 +423,8 @@ private fun MessageRow(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
     }
+    // A rejected message says "not sent" below instead of "sending…" forever.
+    val isSending = message.isPending && maybeExtras?.isSendFailed != true
     if (!isContinuation) {
       Row(verticalAlignment = Alignment.Bottom) {
         Text(
@@ -430,15 +433,15 @@ private fun MessageRow(
           modifier = Modifier.padding(end = 8.dp),
         )
         Text(
-          if (message.isPending) stringResource(R.string.pending) else DateUtils.formatDateTime(context, message.sentAt, DateUtils.FORMAT_SHOW_TIME),
+          if (isSending) stringResource(R.string.pending) else DateUtils.formatDateTime(context, message.sentAt, DateUtils.FORMAT_SHOW_TIME),
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Markers(maybeExtras)
       }
-    } else if (message.isPending || maybeExtras?.isPinned == true || maybeExtras?.priority != "normal") {
+    } else if (isSending || maybeExtras?.isPinned == true || (maybeExtras != null && maybeExtras.priority != "normal")) {
       Row(verticalAlignment = Alignment.Bottom) {
-        if (message.isPending) {
+        if (isSending) {
           Text(stringResource(R.string.pending), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Markers(maybeExtras)
@@ -450,6 +453,7 @@ private fun MessageRow(
       message.body.isNotEmpty() && !isOnlyFileLabel(message.body, maybeExtras) ->
         MessageText(message, snapshot, onOpenPermalink)
     }
+    if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
     maybeExtras?.files?.forEach { file -> FileAttachment(file, onOpenFile) }
     maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it) }
     if (message.reactions.isNotEmpty()) {
@@ -486,6 +490,25 @@ private fun MessageRow(
 /** The core labels file messages "📎 name"; with the file shown below, the label is noise. */
 private fun isOnlyFileLabel(body: String, maybeExtras: MessageExtras?): Boolean =
   maybeExtras?.files?.any { body.trim() == "📎 ${it.fileName}" } == true
+
+/** An own message the server rejected: say so, and offer to send it again or drop it. */
+@Composable
+private fun NotSentLine(viewModel: MainViewModel, message: Message) {
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    Text(
+      "⚠ " + stringResource(R.string.not_sent),
+      color = MaterialTheme.colorScheme.error,
+      style = MaterialTheme.typography.labelMedium,
+      modifier = Modifier.weight(1f, fill = false),
+    )
+    TextButton(onClick = { viewModel.act(ChatActions.retrySend(message.conversation, message.id)) }) {
+      Text(stringResource(R.string.not_sent_retry))
+    }
+    TextButton(onClick = { viewModel.act(ChatActions.discardUnsent(message.conversation, message.id)) }) {
+      Text(stringResource(R.string.not_sent_delete), color = MaterialTheme.colorScheme.error)
+    }
+  }
+}
 
 @Composable
 private fun Markers(maybeExtras: MessageExtras?) {

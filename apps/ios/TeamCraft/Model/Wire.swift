@@ -69,6 +69,8 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   let message: String
   let files: [FileInfo]?
   let maybeLinkPreview: LinkPreview?
+  /// The server rejected this own message; it waits for "retry" or "delete".
+  let isSendFailed: Bool?
 }
 
 /// The tagged answer of a `ChatQuery`; read the field that belongs to its `answer`.

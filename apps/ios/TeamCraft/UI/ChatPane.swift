@@ -400,7 +400,7 @@ struct MessageRow: View {
         AvatarView(name: message.authorName)
       }
       VStack(alignment: .leading, spacing: 4) {
-        if !isContinuation || message.isPending || message.isEdited {
+        if !isContinuation || (message.isPending && !isSendFailed) || message.isEdited {
           HStack(spacing: 6) {
             if !isContinuation {
               Text(isMine ? String(localized: "you") : message.authorName).font(.subheadline.weight(.semibold))
@@ -408,7 +408,9 @@ struct MessageRow: View {
                 .font(.caption).foregroundStyle(Theme.textMuted)
             }
             if message.isEdited { Text("edited").font(.caption).foregroundStyle(Theme.textMuted) }
-            if message.isPending { Text("pending").font(.caption).foregroundStyle(Theme.textMuted) }
+            if message.isPending && !isSendFailed {
+              Text("pending").font(.caption).foregroundStyle(Theme.textMuted)
+            }
           }
         }
         if !message.body.isEmpty || files.isEmpty {
@@ -418,6 +420,7 @@ struct MessageRow: View {
             .background(isMine ? Theme.ownBubble : Theme.surface)
             .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
         }
+        if isSendFailed { notSentLine }
         ForEach(files) { file in AttachmentView(file: file) }
         if let preview = maybeExtras?.maybeLinkPreview { LinkPreviewCard(preview: preview) }
         if !message.reactions.isEmpty { reactions }
@@ -431,6 +434,23 @@ struct MessageRow: View {
   }
 
   private var files: [FileInfo] { maybeExtras?.files ?? [] }
+
+  private var isSendFailed: Bool { maybeExtras?.isSendFailed == true }
+
+  /// An own message the server rejected: say so, and offer to send it again or drop it.
+  private var notSentLine: some View {
+    HStack(spacing: 12) {
+      Label("not_sent", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(Theme.danger)
+      Button("not_sent_retry") {
+        Task { await model.perform(.retrySend(conversationId: message.conversationId, messageId: message.id)) }
+      }
+      .font(.caption.weight(.semibold))
+      Button("not_sent_delete", role: .destructive) {
+        Task { await model.perform(.discardUnsent(conversationId: message.conversationId, messageId: message.id)) }
+      }
+      .font(.caption.weight(.semibold))
+    }
+  }
 
   private var reactions: some View {
     HStack(spacing: 6) {

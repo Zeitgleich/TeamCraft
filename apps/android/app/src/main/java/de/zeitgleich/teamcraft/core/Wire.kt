@@ -210,6 +210,8 @@ data class MessageExtras(
   val files: List<FileInfo> = emptyList(),
   @SerialName("maybe_link_preview") val maybeLinkPreview: LinkPreview? = null,
   @SerialName("maybe_workspace_event") val maybeWorkspaceEvent: JsonObject? = null,
+  /** The server rejected this own message; it waits for "retry" or "delete". */
+  @SerialName("is_send_failed") val isSendFailed: Boolean = false,
 )
 
 @Serializable

@@ -81,6 +81,18 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(unread, ["action": "mark_unread", "conversation": "1", "from": "9"])
   }
 
+  func testFailedSendActionsAndExtras() throws {
+    let retry = try JSONSerialization.jsonObject(
+      with: Data(ChatAction.retrySend(conversationId: "1", messageId: "9").json.utf8)) as? [String: String]
+    XCTAssertEqual(retry, ["action": "retry_send", "conversation": "1", "message": "9"])
+    let discard = try JSONSerialization.jsonObject(
+      with: Data(ChatAction.discardUnsent(conversationId: "1", messageId: "9").json.utf8)) as? [String: String]
+    XCTAssertEqual(discard, ["action": "discard_unsent", "conversation": "1", "message": "9"])
+    let failed = Wire.decode(MessageExtras.self, from: #"{"message":"9","is_send_failed":true}"#)
+    XCTAssertEqual(failed?.isSendFailed, true)
+    XCTAssertNil(Wire.decode(MessageExtras.self, from: #"{"message":"9"}"#)?.isSendFailed)
+  }
+
   func testAppLockClock() {
     var clock = AppLockClock()
     let start = ContinuousClock.now

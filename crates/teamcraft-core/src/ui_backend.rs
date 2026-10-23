@@ -935,6 +935,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_first_unread(conversation)
   }
 
+  fn retry_send(&self, conversation: ConversationId, message: MessageId) {
+    self.ui_retry_send(conversation, message);
+  }
+
+  fn discard_unsent(&self, conversation: ConversationId, message: MessageId) {
+    self.ui_discard_unsent(conversation, message);
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.command(CoreCommand::Acknowledge {
       conversation,
@@ -1202,6 +1210,37 @@ mod tests {
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
     );
+  }
+
+  #[test]
+  fn a_rejected_message_offers_retry_and_delete() {
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let conversation = id::<ConversationId>(10);
+    let backend = CoreChatBackend::new(store.clone(), id::<UserId>(1), Box::new(ManualClock::new(1_000)));
+    backend.post_message(conversation, None, "hello");
+    let posted = backend.messages(conversation, 0, 10).remove(0);
+    let is_failed = || backend.message_extras(conversation, &[posted.id])[0].is_send_failed;
+    assert!(!is_failed(), "a message on its way has not failed");
+
+    // What the flush does when the server rejects the message for good.
+    let mut entry = records::outbox(&store).unwrap().remove(0);
+    let key = records::outbox_key(conversation, entry.client_message_id);
+    entry.maybe_last_error = Some("rejected".into());
+    records::put_json(store.as_ref(), Table::Outbox, &key, &entry).unwrap();
+    assert!(is_failed());
+
+    backend.drain_commands();
+    backend.retry_send(conversation, posted.id);
+    assert!(!is_failed());
+    assert_eq!(backend.drain_commands(), vec![CoreCommand::FlushOutbox]);
+
+    // Delete only takes back a failed message, never one that may still be on its way.
+    backend.discard_unsent(conversation, posted.id);
+    assert_eq!(records::outbox(&store).unwrap().len(), 1);
+    records::put_json(store.as_ref(), Table::Outbox, &key, &entry).unwrap();
+    backend.discard_unsent(conversation, posted.id);
+    assert!(records::outbox(&store).unwrap().is_empty());
+    assert!(backend.message_extras(conversation, &[posted.id])[0].is_deleted);
   }
 
   #[tokio::test]

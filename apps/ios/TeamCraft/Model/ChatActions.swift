@@ -13,6 +13,9 @@ enum ChatAction {
   case downloadFile(conversationId: String, messageId: String)
   /// Unread again from `fromMessageId` on (account data, synced to the user's devices).
   case markUnread(conversationId: String, fromMessageId: String)
+  /// An own message the server rejected: send it again, or drop it.
+  case retrySend(conversationId: String, messageId: String)
+  case discardUnsent(conversationId: String, messageId: String)
 
   /// The wire form.
   var json: String {
@@ -41,6 +44,10 @@ enum ChatAction {
       object = ["action": "download_file", "conversation": conversation, "message": message]
     case .markUnread(let conversation, let message):
       object = ["action": "mark_unread", "conversation": conversation, "from": message]
+    case .retrySend(let conversation, let message):
+      object = ["action": "retry_send", "conversation": conversation, "message": message]
+    case .discardUnsent(let conversation, let message):
+      object = ["action": "discard_unsent", "conversation": conversation, "message": message]
     }
     return jsonText(object)
   }

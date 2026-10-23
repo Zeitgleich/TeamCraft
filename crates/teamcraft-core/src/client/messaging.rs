@@ -183,12 +183,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     client_message_id: ClientMessageId,
   ) -> Result<(), CoreError> {
-    let key = records::outbox_key(conversation, client_message_id);
-    if let Some(mut entry) = records::get_json::<OutboxEntry>(&self.store, Table::Outbox, &key)? {
-      entry.maybe_last_error = None;
-      records::put_json(&self.store, Table::Outbox, &key, &entry)?;
-    }
-    Ok(())
+    records::retry_failed(&self.store, conversation, client_message_id)
   }
 
   /// Loads one page of older history before the oldest message this device has. Returns how many
