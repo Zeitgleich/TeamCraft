@@ -146,16 +146,21 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
 
   let _ = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
+  let banners = NodeRef::<leptos::html::Div>::new();
+  track_banner_height(banners);
 
   view! {
     <a class="skip-link" href="#main-content">
       {move || i18n.t("skip-to-content")}
     </a>
     <div class="app">
-      <BundleBanner />
-      <OfflineBanner />
-      <AnnouncementBanner />
-      <UpdateNotice />
+      // One grid row for all banners, so the top bar and the body keep their own rows.
+      <div class="app-banners" node_ref=banners>
+        <BundleBanner />
+        <OfflineBanner />
+        <AnnouncementBanner />
+        <UpdateNotice />
+      </div>
       <TopBar />
       <div class="app-body">
         // The administration console takes the whole window, like a system console.
@@ -588,6 +593,43 @@ fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
 }
 
 /// Desktop: the user's call actions go to the shell, and calls that ring there show the dialog.
+/// Keeps `--banners-h` on the root element at the height of the banner row: overlays that are fixed
+/// below the top bar (call screens, side panels on narrow windows) start below the banners too.
+fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
+  let update = move || {
+    let Some(element) = banners.get_untracked() else {
+      return;
+    };
+    let height = element.get_bounding_client_rect().height();
+    let root = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.document_element())
+      .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok());
+    if let Some(root) = root
+      && root
+        .style()
+        .set_property("--banners-h", &format!("{height}px"))
+        .is_err()
+    {
+      tracing::debug!("could not set the banner height");
+    }
+  };
+  let callback = Closure::<dyn FnMut()>::new(update);
+  let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
+    tracing::debug!("ResizeObserver unavailable");
+    return;
+  };
+  let handle = StoredValue::new_local((observer, callback));
+  Effect::new(move |_| {
+    if let Some(element) = banners.get() {
+      handle.with_value(|(observer, _)| observer.observe(&element));
+    }
+  });
+  on_cleanup(move || {
+    handle.try_with_value(|(observer, _)| observer.disconnect());
+  });
+}
+
 fn connect_calls(state: AppState) {
   let call = state.call;
   call.set_handler(move |event| {

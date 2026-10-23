@@ -106,4 +106,52 @@ mod tests {
     }
     assert_eq!(depth, 0, "unclosed block in style/main.css");
   }
+
+  /// The shell is a grid of three rows: banners, top bar, body. A banner placed directly in the grid
+  /// takes the top bar's row and pushes the top bar over the channel header.
+  #[test]
+  fn shell_grid_has_a_row_for_banners_top_bar_and_body() {
+    let css = include_str!("../style/main.css");
+    let app_rule = css
+      .split("\n.app {")
+      .nth(1)
+      .and_then(|rest| rest.split('}').next())
+      .expect("style/main.css has an .app rule");
+    let rows = app_rule
+      .lines()
+      .find_map(|line| line.trim().strip_prefix("grid-template-rows:"))
+      .expect(".app sets grid-template-rows");
+    assert_eq!(
+      rows.trim().trim_end_matches(';'),
+      "auto var(--topbar-h) minmax(0, 1fr)"
+    );
+
+    let shell = include_str!("components/app.rs");
+    let grid = shell
+      .split("<div class=\"app\">")
+      .nth(1)
+      .and_then(|rest| rest.split("<div class=\"app-body\">").next())
+      .expect("the shell has the .app grid with its body");
+    // Direct children of the grid sit one indentation level below `<div class="app">`.
+    let children: Vec<&str> = grid
+      .lines()
+      .filter(|line| line.starts_with("      <") && !line.starts_with("      </"))
+      .map(str::trim)
+      .collect();
+    assert_eq!(
+      children,
+      ["<div class=\"app-banners\" node_ref=banners>", "<TopBar />"]
+    );
+    for banner in [
+      "<BundleBanner />",
+      "<OfflineBanner />",
+      "<AnnouncementBanner />",
+      "<UpdateNotice />",
+    ] {
+      assert!(
+        grid.contains(&format!("        {banner}")),
+        "{banner} is inside .app-banners"
+      );
+    }
+  }
 }
