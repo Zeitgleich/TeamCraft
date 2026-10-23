@@ -23,6 +23,8 @@ use teamcraft_server::testing::{FakeCalendar, FakeMailer, TestApp, TestUser};
 /// Operations that need no bearer token, and why.
 const PUBLIC: &[(&str, &str)] = &[
   ("get", "/api/v1/openapi.json"),
+  // Clients check the server version and the oldest supported client before they can sign in.
+  ("get", "/api/v1/client-compatibility"),
   // Public presentation of the host (name, colors, logo): the login screen needs it before sign-in.
   ("get", "/api/v1/brand"),
   ("get", "/api/v1/brand/theme.css"),
