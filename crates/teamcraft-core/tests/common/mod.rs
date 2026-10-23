@@ -84,15 +84,18 @@ pub async fn link_device(owner: &mut Peer) -> TestClient {
   let api = owner.api.clone();
   let offer = teamcraft_core::LinkOffer::generate();
   let code = offer.to_code();
-  let (new_side, owner_side) = tokio::join!(
+  // Not `tokio::join!`: this module is shared with the browser tests, which have no tokio.
+  let (new_side, owner_side) = futures_util::future::join(
     teamcraft_core::client::NewDeviceLink::connect(&api, &offer),
-    owner.client.start_link_approval(&code)
-  );
+    owner.client.start_link_approval(&code),
+  )
+  .await;
   // The owner's device succeeds only once the new device confirmed the transfer.
-  let (approved, received) = tokio::join!(
+  let (approved, received) = futures_util::future::join(
     owner.client.complete_link_approval(owner_side.unwrap()),
-    new_side.unwrap().receive_secrets()
-  );
+    new_side.unwrap().receive_secrets(),
+  )
+  .await;
   approved.unwrap();
   let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
