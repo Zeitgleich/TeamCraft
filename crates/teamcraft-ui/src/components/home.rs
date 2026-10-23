@@ -8,8 +8,9 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
-use crate::components::sidebar::shortcut_label;
+
 use crate::i18n::use_i18n;
+use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::model::{Conversation, ConversationKind, User, UserId};
 use crate::prefs::DmSort;
 use crate::sections::{DirectList, DirectSectionKind, HomeFilter, build_direct};
@@ -66,7 +67,7 @@ pub fn HomeSidebar() -> impl IntoView {
       <button class="jump-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
         <Icon name=IconName::Search />
         <span class="jump-label">{move || i18n.t("sidebar-jump")}</span>
-        <kbd>{shortcut_label("K")}</kbd>
+        <ShortcutKeys shortcut=QUICK_SWITCHER />
       </button>
       <div class="home-chips" role="group" aria-label=move || i18n.t("home-filters")>
         {HomeFilter::CHIPS
