@@ -20,6 +20,9 @@ pub const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "main";
 const MENU_SHOW: &str = "show";
 const MENU_QUIT: &str = "quit";
+/// Zoom limits; the UI offers steps between them.
+const MIN_ZOOM: f64 = 0.5;
+const MAX_ZOOM: f64 = 2.0;
 /// Side of the Windows taskbar overlay dot, in pixels.
 #[cfg(windows)]
 const DOT_SIZE: u32 = 16;
@@ -88,6 +91,17 @@ pub fn show_main_window(app: &AppHandle) {
     .and_then(|()| window.set_focus())
   {
     tracing::debug!(%error, "could not show the window");
+  }
+}
+
+/// Zooms the main window's webview (1.0 = normal); the UI keeps the user's choice.
+#[tauri::command]
+pub fn set_zoom(app: AppHandle, factor: f64) {
+  let factor = factor.clamp(MIN_ZOOM, MAX_ZOOM);
+  if let Some(window) = app.get_webview_window(MAIN_WINDOW)
+    && let Err(error) = window.set_zoom(factor)
+  {
+    tracing::debug!(%error, "could not zoom");
   }
 }
 

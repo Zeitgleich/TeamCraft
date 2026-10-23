@@ -58,7 +58,7 @@ exists).
 | Friction                                                                                          | State  |
 |---------------------------------------------------------------------------------------------------|--------|
 | No banner when the device is offline; sending silently waits                                      | done   |
-| No zoom shortcuts (Ctrl/Cmd + `+` / `-` / `0`) and no text size setting                           | done   |
+| No zoom in the desktop app (browsers have their own); now native webview zoom + setting           | done   |
 | The desktop window forgets its size and position                                                  | done   |
 | Tray icon with unread badge, close to tray, start minimised                                       | done   |
 | Clicking a desktop notification only focuses the app (Linux: now opens the conversation)          | partly |
@@ -80,6 +80,19 @@ exists).
 | Bug                                                                                               | State  |
 |---------------------------------------------------------------------------------------------------|--------|
 | Five desktop commands were refused by the Tauri ACL (notifications, attention, call video)        | done   |
+
+## Accessibility (keyboard, screen readers, contrast)
+
+| Finding                                                                                           | State  |
+|---------------------------------------------------------------------------------------------------|--------|
+| Controls without an accessible name (automated check over all views and overlays)                 | done   |
+| Mention badges: white on orange was 3.7:1; now 4.9:1                                              | done   |
+| Avatar initials on some hues were below 4.5:1                                                     | done   |
+| Light theme: code highlighting and call-effect headings below 4.5:1                               | done   |
+| Directory tabs were unstyled browser buttons (4.4:1 in dark)                                      | done   |
+| Interface zoom used CSS zoom: no reflow at large sizes, and it blocked the browser's own zoom     | done   |
+| Keyboard focus was lost after choosing a reaction in the emoji picker                             | done   |
+| Focus order and focus rings with the keyboard only (checked, no change needed)                    | done   |
 
 ## Already in place (checked)
 

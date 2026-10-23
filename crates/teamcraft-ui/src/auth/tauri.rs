@@ -212,6 +212,17 @@ pub async fn tray_update(unread: u32, tooltip: &str, show_label: &str, quit_labe
   }
 }
 
+/// Desktop only: zooms the webview (percent, 100 = normal).
+pub async fn set_zoom(percent: u16) {
+  if !is_available() {
+    return;
+  }
+  let args = serde_json::json!({ "factor": f64::from(percent) / 100.0 });
+  if let Err(error) = call::<()>("set_zoom", &args).await {
+    tracing::debug!(%error, "could not zoom");
+  }
+}
+
 /// The desktop shell's own preferences (closing to the tray, starting minimized).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPrefs {

@@ -755,6 +755,8 @@ pub fn DisplayTab() -> impl IntoView {
         }
       })
     />
+    // Desktop app only: browsers zoom with their own Ctrl/Cmd + +/-/0.
+    {crate::auth::tauri::is_available().then(|| view! {
     <div class="field">
       <label for="setting-zoom">{move || i18n.t("settings-zoom")}</label>
       <select
@@ -780,6 +782,7 @@ pub fn DisplayTab() -> impl IntoView {
       </select>
       <p class="muted-text small" id="setting-zoom-hint">{move || i18n.t("settings-zoom-hint")}</p>
     </div>
+    })}
     <fieldset class="settings-group">
       <legend>{move || i18n.t("settings-composer")}</legend>
       <label class="check-row">

@@ -858,6 +858,7 @@ pub fn Composer(
                   view! {
                     <EmojiPicker
                       anchor=anchor
+                      returns_focus=false
                       on_pick=Callback::new(insert_emoji)
                       on_close=Callback::new(move |()| {
                         maybe_emoji_anchor.set(None);

@@ -43,6 +43,7 @@
     "allow-autostart-set",
     "allow-shell-prefs-get",
     "allow-shell-prefs-set",
-    "allow-tray-update"
+    "allow-tray-update",
+    "allow-set-zoom"
   ]
 }

@@ -279,8 +279,10 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
       return;
     }
   }
+  // In a browser, Ctrl/Cmd + +/-/0 stays the browser's own zoom (it reflows the layout properly).
   if modifier
     && !ev.alt_key()
+    && tauri::is_available()
     && let Some(change) = zoom_change(&key)
   {
     ev.prevent_default();
@@ -396,26 +398,15 @@ fn apply_density(settings: Settings) {
   });
 }
 
-/// Scales the whole interface with CSS `zoom` on `<html>` (all sizes are in pixels).
+/// Desktop app: scales the webview natively, like browser zoom, so the layout reflows (narrow
+/// layouts apply at large sizes). Browsers have their own zoom, which the app leaves alone.
 fn apply_zoom(settings: Settings) {
+  if !tauri::is_available() {
+    return;
+  }
   Effect::new(move |_| {
     let percent = settings.prefs.get().display.zoom.percent();
-    let Some(root) = web_sys::window()
-      .and_then(|window| window.document())
-      .and_then(|doc| doc.document_element())
-      .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-      return;
-    };
-    let style = root.style();
-    let result = if percent == Zoom::DEFAULT.percent() {
-      style.remove_property("zoom").map(drop)
-    } else {
-      style.set_property("zoom", &format!("{percent}%"))
-    };
-    if result.is_err() {
-      tracing::debug!("could not apply zoom");
-    }
+    leptos::task::spawn_local(async move { tauri::set_zoom(percent).await });
   });
 }
 

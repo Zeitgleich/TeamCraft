@@ -40,6 +40,7 @@ const COMMANDS: &[&str] = &[
   "shell_prefs_get",
   "shell_prefs_set",
   "tray_update",
+  "set_zoom",
 ];
 
 fn main() {
