@@ -16,6 +16,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::upkeep::Upkeep;
 use teamcraft_crypto::attachment::decrypt_attachment;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_crypto::share_link::open_fragment;
@@ -110,6 +111,31 @@ async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
       reason: FileFailure::TooLarge
     }
   );
+}
+
+/// Every app's loop retries through the same upkeep (the desktop app once skipped uploads).
+#[tokio::test]
+async fn the_periodic_upkeep_uploads_and_sends_what_waited_for_the_network() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  server.set_offline(alice.client.user_id(), true);
+  alice_ui.send_message(with_files(
+    channel,
+    "written on the train",
+    vec![file("notes.txt", "text/plain", b"sand".to_vec())],
+  ));
+  for command in alice_ui.drain_commands() {
+    let _ = alice.client.run_ui_command(command).await;
+  }
+
+  server.set_offline(alice.client.user_id(), false);
+  let mut upkeep = Upkeep::new(std::time::Duration::from_secs(60));
+  assert!(upkeep.tick(&mut alice.client).await);
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  assert_eq!(received.body, "written on the train");
+  assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
 }
 
 #[tokio::test]

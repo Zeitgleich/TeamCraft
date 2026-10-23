@@ -36,6 +36,7 @@ mod ui_people;
 mod ui_search;
 #[cfg(feature = "ui")]
 mod ui_workspace;
+pub mod upkeep;
 #[cfg(target_arch = "wasm32")]
 pub mod web_push;
 pub mod workspace;

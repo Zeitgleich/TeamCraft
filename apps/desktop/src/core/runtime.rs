@@ -21,6 +21,7 @@ use teamcraft_core::connection::{
 use teamcraft_core::records;
 use teamcraft_core::store::{DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{
   CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
@@ -38,8 +39,11 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
-/// Outbox retries while offline or after a failed send; also the connection's regular check.
+/// Retries (outbox, uploads, previews), staggered commits and the other periodic upkeep; also the
+/// connection's regular check.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+/// How often account data (saved items, drafts) is pulled from the user's other devices.
+const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
 
 /// Where the core keeps its data and talks to.
 #[derive(Clone, Debug)]
@@ -374,6 +378,7 @@ struct Core {
   backend: Option<CoreChatBackend<Store>>,
   connection: ConnectionSupervisor<Gateway>,
   status: CoreStatus,
+  upkeep: Upkeep,
   link: Option<LinkRun>,
   /// Why the last link failed, until the user tries again.
   link_failure: LinkStatus,
@@ -416,6 +421,7 @@ impl Core {
       backend: None,
       connection,
       status: CoreStatus::NotStarted,
+      upkeep: Upkeep::new(ACCOUNT_SYNC),
       link: None,
       link_failure: LinkStatus::Idle,
       approval: None,
@@ -438,7 +444,7 @@ impl Core {
         frame = self.connection.receive() => self.on_frame(frame).await,
         _ = flush.tick(), if self.client.is_some() => {
           self.connection.on_tick(SystemClock.now_ms()).await;
-          self.flush().await;
+          self.upkeep().await;
         },
         () = sleep_for(maybe_deadline), if maybe_deadline.is_some() => {
           self.connection.on_tick(SystemClock.now_ms()).await;
@@ -877,10 +883,18 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    match client.flush_outbox().await {
-      Ok(report) if report.sent > 0 => self.changed(),
-      Ok(_) => {},
-      Err(error) => tracing::debug!(%error, "outbox flush did not finish"),
+    if upkeep::flush(client).await {
+      self.changed();
+    }
+  }
+
+  /// The periodic work besides the gateway, the same as in the other apps (teamcraft-core upkeep).
+  async fn upkeep(&mut self) {
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    if self.upkeep.tick(client).await {
+      self.changed();
     }
   }
 

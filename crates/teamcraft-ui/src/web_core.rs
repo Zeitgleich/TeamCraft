@@ -35,6 +35,7 @@ use teamcraft_core::records;
 use teamcraft_core::store::IndexedDbStore;
 use teamcraft_core::store::browser_database_key;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
@@ -388,7 +389,7 @@ struct Core {
   /// When the next tick is due. A deadline rather than a fresh sleep per wake-up, so a busy
   /// connection or a chatty UI can't postpone heartbeats until the server drops the connection.
   next_tick_ms: i64,
-  last_account_sync_ms: i64,
+  upkeep: Upkeep,
   link: Option<LinkRun>,
   /// The access token last written to the push session, so it is only stored when it changes.
   last_session_token: Option<String>,
@@ -422,7 +423,7 @@ impl Core {
       connection,
       status: CoreStatus::NotStarted,
       next_tick_ms: i64::MIN,
-      last_account_sync_ms: i64::MIN,
+      upkeep: Upkeep::new(ACCOUNT_SYNC),
       link: None,
       last_session_token: None,
       link_failure: LinkStatus::Idle,
@@ -937,29 +938,7 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if let Err(error) = client.generate_pending_previews().await {
-      tracing::debug!(%error, "link previews not made");
-    }
-    let mut is_changed = false;
-    match client.upload_pending().await {
-      Ok(uploaded) => is_changed |= uploaded > 0,
-      Err(error) => tracing::debug!(%error, "uploads did not finish"),
-    }
-    match client.flush_outbox().await {
-      Ok(report) => {
-        if report.pending > 0 || report.failed > 0 {
-          tracing::debug!(
-            sent = report.sent,
-            pending = report.pending,
-            failed = report.failed,
-            "outbox"
-          );
-        }
-        is_changed |= report.sent > 0;
-      },
-      Err(error) => tracing::debug!(%error, "outbox flush did not finish"),
-    }
-    if is_changed {
+    if upkeep::flush(client).await {
       notify_changed();
     }
   }
@@ -997,18 +976,9 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if client.is_key_bag_dirty() || now.saturating_sub(self.last_account_sync_ms) >= millis(ACCOUNT_SYNC) {
-      self.last_account_sync_ms = now;
-      match client.sync_account_data().await {
-        Ok(()) => notify_changed(),
-        Err(error) => tracing::debug!(%error, "account data not synced yet"),
-      }
+    if self.upkeep.tick(client).await {
+      notify_changed();
     }
-    // Staggered commits (a colleague's new device) come due without a gateway event.
-    if let Err(error) = client.apply_pending_changes().await {
-      tracing::debug!(%error, "pending membership changes not applied yet");
-    }
-    self.flush().await;
   }
 
   /// Tells the server whether this device is idle (docs/gateway.md); a failure ends the connection

@@ -19,6 +19,7 @@ use crate::platform;
 use crate::store::LocalStore;
 #[cfg(feature = "ui")]
 use crate::ui_backend::CoreCommand;
+use crate::upkeep::{self, Upkeep};
 
 /// Runs a client until it is stopped; see the module docs.
 pub struct SyncRunner<A: ServerApi, S> {
@@ -32,7 +33,7 @@ pub struct SyncRunner<A: ServerApi, S> {
   /// When the next tick is due. A deadline rather than a fresh sleep per wake-up, so a busy
   /// connection (a frame every few seconds) can't postpone heartbeats until the server drops it.
   next_tick_ms: i64,
-  last_account_sync_ms: i64,
+  upkeep: Upkeep,
   /// When the user's typing was last announced, to send at most one per [`TYPING_INTERVAL_MS`].
   #[cfg(feature = "ui")]
   last_typing: Option<(teamcraft_proto::ConversationId, i64)>,
@@ -102,6 +103,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     let mut connection = ConnectionSupervisor::new(settings.connection.clone(), ConnectionStatus::new());
     let notify = on_change.clone();
     connection.set_observer(Box::new(move |_| notify()));
+    let upkeep = Upkeep::new(settings.account_sync);
     let runner = Self {
       client,
       settings,
@@ -110,7 +112,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       connection,
       maybe_network: None,
       next_tick_ms: i64::MIN,
-      last_account_sync_ms: i64::MIN,
+      upkeep,
       #[cfg(feature = "ui")]
       last_typing: None,
     };
@@ -221,56 +223,14 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       return;
     }
     self.next_tick_ms = now.saturating_add(millis(self.settings.tick));
-    if self.client.is_key_bag_dirty()
-      || now.saturating_sub(self.last_account_sync_ms) >= millis(self.settings.account_sync)
-    {
-      self.last_account_sync_ms = now;
-      match self.client.sync_account_data().await {
-        Ok(()) => self.changed(),
-        Err(error) => tracing::debug!(%error, "account data not synced yet"),
-      }
-      // Owners keep the signed roster fresh (a no-op for everyone else and while it is).
-      if let Err(error) = self.client.refresh_workspace_signatures().await {
-        tracing::debug!(%error, "roster not re-signed yet");
-      }
-      if let Err(error) = self.client.check_workspace_head().await {
-        tracing::debug!(%error, "workspace head not checked yet");
-      }
-      // A rotated org recovery key: wrap the backup key to the new one (security review B4).
-      if let Err(error) = self.client.rewrap_for_current_org_key().await {
-        tracing::debug!(%error, "backup key not wrapped to the new org key yet");
-      }
+    if self.upkeep.tick(&mut self.client).await {
+      self.changed();
     }
-    // Last seen of people who went offline since the last tick, in one request.
-    match self.client.refresh_stale_last_seen().await {
-      Ok(true) => self.changed(),
-      Ok(false) => {},
-      Err(error) => tracing::debug!(%error, "reading last seen failed"),
-    }
-    // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
-    if let Err(error) = self.client.renew_key_packages_if_due().await {
-      tracing::debug!(%error, "key packages not renewed yet");
-    }
-    // Staggered commits (a colleague's new device) come due without a gateway event.
-    if let Err(error) = self.client.apply_pending_changes().await {
-      tracing::debug!(%error, "pending membership changes not applied yet");
-    }
-    self.flush().await;
   }
 
   async fn flush(&mut self) {
-    if let Err(error) = self.client.generate_pending_previews().await {
-      tracing::debug!(%error, "link previews not made");
-    }
-    match self.client.upload_pending().await {
-      Ok(uploaded) if uploaded > 0 => self.changed(),
-      Ok(_) => {},
-      Err(error) => tracing::debug!(%error, "uploads did not finish"),
-    }
-    match self.client.flush_outbox().await {
-      Ok(report) if report.sent > 0 => self.changed(),
-      Ok(_) => {},
-      Err(error) => tracing::debug!(%error, "outbox flush did not finish"),
+    if upkeep::flush(&mut self.client).await {
+      self.changed();
     }
   }
 
