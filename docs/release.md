@@ -189,6 +189,13 @@ them from the repository variables `TEAMCRAFT_ANDROID_SERVER_URL`, `TEAMCRAFT_AN
 `TEAMCRAFT_ANDROID_OIDC_CLIENT_ID` and `TEAMCRAFT_ANDROID_OIDC_REDIRECT_SCHEME`; without them the APKs
 point at the development defaults in `apps/android/gradle.properties`.
 
+The `full` flavor gets its Firebase project from the secrets `TEAMCRAFT_FCM_PROJECT_ID`,
+`TEAMCRAFT_FCM_APPLICATION_ID`, `TEAMCRAFT_FCM_API_KEY` and `TEAMCRAFT_FCM_SENDER_ID` (the values of the
+app's `google-services.json`; `teamcraft.fcm*` in `apps/android/README.md`). A release tag fails without
+them, a candidate tag builds without FCM and warns. Store builds seal their FCM token for the push
+gateway in the repository variable `TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL` (e.g.
+`https://push-gw.zeitgleich.de`); without it they use the gateway the server names.
+
 ## Checking locally
 
 ```sh

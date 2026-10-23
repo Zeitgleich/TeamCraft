@@ -243,8 +243,43 @@ jobs:
             printf '%s' "$KEYSTORE_BASE64" | base64 -d > apps/android/upload.keystore
             echo "HAS_UPLOAD_KEY=true" >> "$GITHUB_ENV"
           fi
+      # Firebase of the `full` flavor (apps/android/README.md, `teamcraft.fcm*`): without it the store
+      # build has no FCM and only UnifiedPush. Written into the build's Gradle user home (the
+      # container's GRADLE_USER_HOME), not onto the command line, and removed after the build.
+      # Required for a release; a candidate tag only warns.
+      - name: Firebase config (full flavor)
+        env:
+          IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
+          FCM_PROJECT_ID: ${{ secrets.TEAMCRAFT_FCM_PROJECT_ID }}
+          FCM_APPLICATION_ID: ${{ secrets.TEAMCRAFT_FCM_APPLICATION_ID }}
+          FCM_API_KEY: ${{ secrets.TEAMCRAFT_FCM_API_KEY }}
+          FCM_SENDER_ID: ${{ secrets.TEAMCRAFT_FCM_SENDER_ID }}
+        run: |
+          missing=()
+          [ -n "$FCM_PROJECT_ID" ] || missing+=(TEAMCRAFT_FCM_PROJECT_ID)
+          [ -n "$FCM_APPLICATION_ID" ] || missing+=(TEAMCRAFT_FCM_APPLICATION_ID)
+          [ -n "$FCM_API_KEY" ] || missing+=(TEAMCRAFT_FCM_API_KEY)
+          [ -n "$FCM_SENDER_ID" ] || missing+=(TEAMCRAFT_FCM_SENDER_ID)
+          if [ ${#missing[@]} -gt 0 ]; then
+            if [ "$IS_PRERELEASE" = true ]; then
+              echo "::warning::the full flavor is built without FCM (missing secrets: ${missing[*]})"
+              exit 0
+            fi
+            echo "::error::a release needs FCM in the full flavor; missing secrets: ${missing[*]}"
+            exit 1
+          fi
+          mkdir -p "$TEAMCRAFT_ANDROID_CACHE/gradle"
+          umask 077
+          {
+            echo "teamcraft.fcmProjectId=$FCM_PROJECT_ID"
+            echo "teamcraft.fcmApplicationId=$FCM_APPLICATION_ID"
+            echo "teamcraft.fcmApiKey=$FCM_API_KEY"
+            echo "teamcraft.fcmSenderId=$FCM_SENDER_ID"
+          } > "$TEAMCRAFT_ANDROID_CACHE/gradle/gradle.properties"
+          echo "Firebase config written for the full flavor."
       - name: Build APKs
         env:
+          PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL }}
           SERVER_URL: ${{ vars.TEAMCRAFT_ANDROID_SERVER_URL }}
           OIDC_ISSUER: ${{ vars.TEAMCRAFT_ANDROID_OIDC_ISSUER }}
           OIDC_CLIENT_ID: ${{ vars.TEAMCRAFT_ANDROID_OIDC_CLIENT_ID }}
@@ -255,6 +290,7 @@ jobs:
         run: |
           args=(assembleFullRelease assembleLibreRelease assembleFullDebug assembleLibreDebug)
           [ -n "$SERVER_URL" ] && args+=("-Pteamcraft.serverUrl=$SERVER_URL")
+          [ -n "$PUSH_GATEWAY_URL" ] && args+=("-Pteamcraft.pushGatewayUrl=$PUSH_GATEWAY_URL")
           [ -n "$OIDC_ISSUER" ] && args+=("-Pteamcraft.oidcIssuer=$OIDC_ISSUER")
           [ -n "$OIDC_CLIENT_ID" ] && args+=("-Pteamcraft.oidcClientId=$OIDC_CLIENT_ID")
           [ -n "$OIDC_REDIRECT_SCHEME" ] && args+=("-Pteamcraft.oidcRedirectScheme=$OIDC_REDIRECT_SCHEME")
@@ -265,6 +301,9 @@ jobs:
               "-Pteamcraft.uploadKeyPassword=$KEY_PASSWORD")
           fi
           apps/android/scripts/docker-build.sh "${args[@]}"
+      - name: Remove the Firebase config
+        if: always()
+        run: rm -f "$TEAMCRAFT_ANDROID_CACHE/gradle/gradle.properties"
       - name: Collect APKs
         run: |
           mkdir -p out
