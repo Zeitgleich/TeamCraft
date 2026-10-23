@@ -83,7 +83,11 @@ fn main() -> anyhow::Result<()> {
       ));
       match servers.startup_account() {
         Ok(Some(profile)) => {
-          tauri::async_runtime::block_on(service.set_server(Some(DesktopConfig::from_profile(&profile))));
+          let config = DesktopConfig::from_profile(&profile);
+          if let Err(error) = tauri::async_runtime::block_on(service.forget_origin_only_token(&config)) {
+            tracing::warn!(%error, "could not delete an outdated token entry");
+          }
+          tauri::async_runtime::block_on(service.set_server(Some(config)));
         },
         Ok(None) => {},
         Err(forbidden) => {

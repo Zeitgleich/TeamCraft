@@ -414,33 +414,53 @@ fn clean_display_name(name: &str) -> String {
     .to_owned()
 }
 
+/// Bidirectional formatting and zero-width characters: invisible, but they change how a name reads.
 fn is_bidi_control(ch: char) -> bool {
-  matches!(ch, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+  matches!(
+    ch,
+    '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+  )
 }
 
 /// The identity provider's host, and whether it lies outside the server's own domain. Signing in
 /// hands that provider's access token to this server; a provider elsewhere is shown with a
 /// warning on the confirmation (a server copying another instance's settings would show the real
-/// provider of that instance). Without the public suffix list, "the server's domain" is its host
-/// without the first label when it has three or more labels.
+/// provider of that instance). "The same domain" means the same registrable domain (one label
+/// below the public suffix, from the Public Suffix List: `sso.example.com` is inside for
+/// `team.example.com`, `auth.victim.co.uk` is not for `evil.co.uk`). IP addresses only match
+/// themselves.
 fn identity_provider(origin: &ServerOrigin, issuer: &str) -> (String, bool) {
-  let provider = Url::parse(issuer)
-    .ok()
-    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-    .unwrap_or_default();
-  let server = Url::parse(origin.as_str())
-    .ok()
-    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-    .unwrap_or_default();
-  let labels: Vec<&str> = server.split('.').collect();
-  let server_domain = if labels.len() >= 3 {
-    labels[1..].join(".")
-  } else {
-    server.clone()
+  let host_of = |url: &str| {
+    Url::parse(url)
+      .ok()
+      .and_then(|url| url.host().map(|host| host.to_owned()))
   };
-  let is_inside =
-    provider == server || provider == server_domain || provider.ends_with(&format!(".{server_domain}"));
-  (provider, !is_inside)
+  let maybe_provider = host_of(issuer);
+  let maybe_server = host_of(origin.as_str());
+  let shown = maybe_provider
+    .as_ref()
+    .map(|host| normalized_host(&host.to_string()))
+    .unwrap_or_default();
+  let is_inside = match (maybe_provider, maybe_server) {
+    (Some(Host::Domain(provider)), Some(Host::Domain(server))) => {
+      registrable_domain(&provider) == registrable_domain(&server)
+    },
+    (Some(provider), Some(server)) => provider == server,
+    _ => false,
+  };
+  (shown, !is_inside)
+}
+
+/// Lower case, without the trailing dot of a fully qualified name.
+fn normalized_host(host: &str) -> String {
+  host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The registrable domain (eTLD+1) of a host name; a name that is itself a public suffix, or has
+/// no known suffix structure (`localhost`), stands for itself.
+fn registrable_domain(host: &str) -> String {
+  let host = normalized_host(host);
+  psl::domain_str(&host).map_or_else(|| host.clone(), str::to_owned)
 }
 
 /// Whether an endpoint of the identity provider's discovery document may be used: `https`
@@ -472,10 +492,15 @@ pub fn check_discovery(
   if discovered_issuer != expected_issuer {
     return Err(DiscoveryError::IssuerMismatch);
   }
-  if endpoints
-    .iter()
-    .any(|endpoint| !is_provider_endpoint(endpoint, policy))
-  {
+  // A plain-http loopback endpoint only goes with a plain-http loopback issuer (development).
+  let is_issuer_local_http = Url::parse(expected_issuer)
+    .ok()
+    .is_some_and(|url| url.scheme() == "http" && url.host().is_some_and(|host| is_loopback(&host)));
+  let is_allowed = |endpoint: &str| {
+    is_provider_endpoint(endpoint, policy)
+      && (policy == HttpPolicy::Allowed || is_issuer_local_http || endpoint.starts_with("https://"))
+  };
+  if !endpoints.iter().all(|endpoint| is_allowed(endpoint)) {
     return Err(DiscoveryError::UnsafeEndpoint);
   }
   Ok(())
@@ -847,9 +872,36 @@ mod tests {
     }
 
     #[test]
+    fn the_server_domain_follows_the_public_suffix_list() {
+      let elsewhere = |server: &str, issuer: &str| {
+        let origin = ServerOrigin::parse(server, HttpPolicy::LoopbackOnly).unwrap();
+        identity_provider(&origin, issuer).1
+      };
+      // The usual setup: a provider on a sibling host of the same company domain.
+      assert!(!elsewhere("team.example.com", "https://sso.example.com/realms/x"));
+      assert!(!elsewhere(
+        "team.example.com",
+        "https://SSO.Example.COM./realms/x"
+      ));
+      assert!(!elsewhere("chat.example.co.uk", "https://auth.example.co.uk/"));
+      // A public suffix is never the shared domain.
+      assert!(elsewhere("evil.co.uk", "https://auth.victim.co.uk/"));
+      assert!(elsewhere("evil.com.au", "https://auth.victim.com.au/"));
+      assert!(elsewhere("evil.github.io", "https://victim.github.io/"));
+      // IP addresses match only themselves.
+      assert!(elsewhere("1.2.3.4", "https://2.3.4.5/"));
+      assert!(!elsewhere("1.2.3.4", "https://1.2.3.4:8443/"));
+      assert!(elsewhere("[2001:db8::1]", "https://[2001:db8::2]/"));
+      assert!(!elsewhere("[2001:db8::1]", "https://[2001:db8::1]/realms/x"));
+      assert!(elsewhere("1.2.3.4", "https://auth.example.com/"));
+    }
+
+    #[test]
     fn brand_names_lose_control_and_bidi_characters_and_are_capped() {
       let json = info_json(|info| info["brand"]["display_name"] = "Bank\u{202E}moc.elpmaxe\u{0007}".into());
       assert_eq!(check(200, &json).unwrap().profile.display_name, "Bankmoc.elpmaxe");
+      let hidden = info_json(|info| info["brand"]["display_name"] = "Ex\u{200B}am\u{2060}ple\u{FEFF}".into());
+      assert_eq!(check(200, &hidden).unwrap().profile.display_name, "Example");
       let long = info_json(|info| info["brand"]["display_name"] = "x".repeat(500).into());
       assert_eq!(
         check(200, &long).unwrap().profile.display_name.chars().count(),
@@ -885,6 +937,14 @@ mod tests {
         "http://127.0.0.1:8080/auth",
         HttpPolicy::LoopbackOnly
       ));
+      // A plain-http loopback endpoint needs a plain-http loopback issuer.
+      let local = ["http://127.0.0.1:8080/realms/dev/auth"];
+      assert_eq!(
+        check_discovery(issuer, issuer, &local, HttpPolicy::LoopbackOnly),
+        Err(DiscoveryError::UnsafeEndpoint)
+      );
+      let dev_issuer = "http://127.0.0.1:8080/realms/dev";
+      assert!(check_discovery(dev_issuer, dev_issuer, &local, HttpPolicy::LoopbackOnly).is_ok());
     }
 
     #[test]

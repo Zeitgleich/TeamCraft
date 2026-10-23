@@ -492,6 +492,12 @@ impl<S: TokenStore> AuthService<S> {
     self.session.lock().await.maybe_tokens.is_some()
   }
 
+  /// Deletes a refresh token stored under the server origin alone (the key before tokens were
+  /// kept per origin, issuer and client), so it can never be used for another provider.
+  pub async fn forget_origin_only_token(&self, server: &DesktopConfig) -> Result<(), AuthError> {
+    self.store.clear(&server.server_url).await
+  }
+
   /// Deletes the stored refresh token of `server` (leaving it, or its sign-in settings changed).
   pub async fn forget_tokens(&self, server: &DesktopConfig) -> Result<(), AuthError> {
     self.store.clear(&server.token_key()).await
