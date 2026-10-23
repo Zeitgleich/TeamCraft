@@ -1,8 +1,6 @@
 package de.zeitgleich.teamcraft.calls
 
 import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -16,6 +14,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.notifications.NotificationChannels
 
 /**
  * Keeps the process, the microphone and the camera alive while a call runs, with the ongoing-call
@@ -41,7 +40,6 @@ class CallService : Service() {
   }
 
   private fun notification(): Notification {
-    createChannel()
     val open = PendingIntent.getActivity(
       this,
       0,
@@ -55,7 +53,7 @@ class CallService : Service() {
       PendingIntent.FLAG_IMMUTABLE,
     )
     val caller = Person.Builder().setName(getString(R.string.call_ongoing)).build()
-    return NotificationCompat.Builder(this, CHANNEL_CALLS)
+    return NotificationCompat.Builder(this, NotificationChannels.CALLS)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentIntent(open)
       .setOngoing(true)
@@ -64,17 +62,7 @@ class CallService : Service() {
       .build()
   }
 
-  private fun createChannel() {
-    val channel = NotificationChannel(
-      CHANNEL_CALLS,
-      getString(R.string.call_channel),
-      NotificationManager.IMPORTANCE_DEFAULT,
-    )
-    getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-  }
-
   companion object {
-    private const val CHANNEL_CALLS = "calls"
     private const val NOTIFICATION_ID = 2001
     private const val ACTION_HANG_UP = "de.zeitgleich.teamcraft.calls.HANG_UP"
     private const val EXTRA_CAMERA = "camera"

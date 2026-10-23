@@ -2,11 +2,16 @@ package de.zeitgleich.teamcraft.push
 
 import android.content.Context
 import android.util.Log
+import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
-import de.zeitgleich.teamcraft.notifications.MessageNotifier
+import de.zeitgleich.teamcraft.notifications.PushHandler
 import uniffi.teamcraft_ffi.PushService
 
 /**
@@ -16,11 +21,14 @@ import uniffi.teamcraft_ffi.PushService
 class PushManager(
   private val context: Context,
   private val core: CoreRepository,
-  private val notifier: MessageNotifier,
+  private val handler: PushHandler,
   private val mentionPrefs: MentionPrefs,
   private val scope: CoroutineScope,
 ) {
   private val backends: List<PushBackend> = PushBackends.all()
+
+  /** Wake-ups being opened, by payload: a hand-over to [WakeUpWork] waits for the same run. */
+  private val running = ConcurrentHashMap<String, Deferred<Unit>>()
 
   /** Set while (and after) signing out: wake-ups arriving then show nothing. */
   @Volatile private var isSigningOut = false
@@ -55,6 +63,25 @@ class PushManager(
     }
   }
 
+  /**
+   * Starts opening a wake-up in the app's scope (or returns the run already going for the same
+   * payload), so it isn't cancelled when a receiver's time is up.
+   */
+  fun startWakeUp(payload: ByteArray): Deferred<Unit> {
+    val key = payload.contentHashCode().toString() + ":" + payload.size
+    val run = running.computeIfAbsent(key) {
+      scope.async(start = CoroutineStart.LAZY) {
+        try {
+          onWakeUp(payload)
+        } finally {
+          running.remove(key)
+        }
+      }
+    }
+    run.start()
+    return run
+  }
+
   /** Opens a wake-up and shows its notification. Never logs the payload or the text. */
   suspend fun onWakeUp(payload: ByteArray) {
     if (isSigningOut) return
@@ -62,14 +89,19 @@ class PushManager(
       val core = core.core()
       // Keywords and the first name are matched on the device (the server can't read the text).
       core.setMentionSettings(mentionPrefs.settings.value)
-      core.notificationForPush(payload)
+      core.notificationForPush(payload, utcOffsetMinutes())
     }
       // Checked again: sign-out may have started while the wake-up was being opened.
-      .onSuccess { if (!isSigningOut) notifier.show(it) }
+      .onSuccess { if (!isSigningOut) handler.handle(it) }
       .onFailure { Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}") }
   }
 
   private companion object {
     const val TAG = "TeamCraftPush"
+    const val MS_PER_MINUTE = 60_000
+
+    /** The device's offset from UTC now, for the core's DND check. */
+    fun utcOffsetMinutes(): Short =
+      (TimeZone.getDefault().getOffset(System.currentTimeMillis()) / MS_PER_MINUTE).toShort()
   }
 }

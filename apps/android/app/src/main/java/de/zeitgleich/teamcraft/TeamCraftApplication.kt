@@ -15,6 +15,9 @@ import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
+import de.zeitgleich.teamcraft.notifications.PushHandler
+import de.zeitgleich.teamcraft.notifications.PushStats
+import de.zeitgleich.teamcraft.notifications.ReadWatcher
 import de.zeitgleich.teamcraft.push.PushManager
 import de.zeitgleich.teamcraft.search.SegmentPrefetch
 import uniffi.teamcraft_ffi.AccountState
@@ -26,9 +29,12 @@ class AppGraph(context: Context) {
   val core = CoreRepository(context, auth)
   val notifier = MessageNotifier(context)
   val mentionPrefs = MentionPrefs(context)
-  val push = PushManager(context, core, notifier, mentionPrefs, scope)
   val calls = CallController(context, core, scope)
+  val pushStats = PushStats(context)
+  val pushHandler = PushHandler(context, notifier, calls, pushStats)
+  val push = PushManager(context, core, pushHandler, mentionPrefs, scope)
   val segmentPrefetch = SegmentPrefetch(context)
+  val readWatcher = ReadWatcher(core, notifier, scope)
 }
 
 class TeamCraftApplication : Application() {
@@ -39,6 +45,7 @@ class TeamCraftApplication : Application() {
     super.onCreate()
     graph = AppGraph(this)
     graph.segmentPrefetch.schedule()
+    graph.readWatcher.start()
     // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.
     graph.scope.launch(Dispatchers.IO) { File(cacheDir, "outgoing").deleteRecursively() }
     ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(graph))

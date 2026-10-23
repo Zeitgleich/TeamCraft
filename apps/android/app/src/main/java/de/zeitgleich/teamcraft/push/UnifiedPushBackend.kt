@@ -21,4 +21,20 @@ object UnifiedPushBackend : PushBackend {
   override fun unregister(context: Context) {
     if (UnifiedPush.getAckDistributor(context) != null) UnifiedPush.unregister(context)
   }
+
+  /** Package names of the installed distributors. */
+  fun distributors(context: Context): List<String> = UnifiedPush.getDistributors(context)
+
+  /** The distributor in use (acknowledged, or chosen and waiting for its answer). */
+  fun currentDistributor(context: Context): String? =
+    UnifiedPush.getAckDistributor(context) ?: UnifiedPush.getSavedDistributor(context)
+
+  /** Switches to another installed distributor; its new endpoint arrives as with [register]. */
+  fun selectDistributor(context: Context, packageName: String) {
+    if (packageName !in distributors(context) || packageName == UnifiedPush.getAckDistributor(context)) return
+    // The old distributor stops delivering to us; the new one registers from scratch.
+    if (UnifiedPush.getAckDistributor(context) != null) UnifiedPush.unregister(context)
+    UnifiedPush.saveDistributor(context, packageName)
+    UnifiedPush.register(context)
+  }
 }

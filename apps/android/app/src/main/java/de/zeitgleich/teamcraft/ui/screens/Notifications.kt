@@ -1,9 +1,15 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import java.text.DateFormat
+import java.util.Date
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -19,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ConversationNotificationSettings
@@ -44,19 +51,11 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
         val current = settings ?: return@Column
         for ((level, label) in LEVELS) {
           Row(verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(selected = current.level == level, onClick = { settings = current.copy(level = level) })
+            RadioButton(selected = current.level == level, onClick = { settings = current.copy(level = level, isInherited = false) })
             Text(stringResource(label))
           }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Switch(
-            checked = current.mutedUntil != null,
-            onCheckedChange = { isMuted ->
-              settings = current.copy(mutedUntil = if (isMuted) System.currentTimeMillis() + MUTE_FOREVER_MS else null)
-            },
-          )
-          Text(stringResource(R.string.notify_mute))
-        }
+        MutePresets(current) { settings = it }
       }
     },
     confirmButton = {
@@ -101,5 +100,53 @@ fun NotificationSettingsSection(viewModel: MainViewModel) {
   }
 }
 
+/** Mute until a preset time from now, or not at all; shows until when it is muted. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MutePresets(current: ConversationNotificationSettings, onChange: (ConversationNotificationSettings) -> Unit) {
+  val nowMs = remember { System.currentTimeMillis() }
+  val maybeUntil = current.mutedUntil?.takeIf { it > nowMs }
+  Text(stringResource(R.string.notify_mute), style = MaterialTheme.typography.titleSmall)
+  Text(
+    when {
+      maybeUntil == null -> stringResource(R.string.mute_off)
+      maybeUntil - nowMs > MUTE_FOREVER_THRESHOLD_MS -> stringResource(R.string.mute_forever_state)
+      else -> stringResource(
+        R.string.mute_until,
+        DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(maybeUntil)),
+      )
+    },
+    style = MaterialTheme.typography.bodySmall,
+  )
+  FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    FilterChip(
+      selected = maybeUntil == null,
+      onClick = { onChange(current.copy(mutedUntil = null, isInherited = false)) },
+      label = { Text(stringResource(R.string.mute_off)) },
+    )
+    for ((durationMs, label) in MUTE_PRESETS) {
+      FilterChip(
+        selected = false,
+        onClick = { onChange(current.copy(mutedUntil = System.currentTimeMillis() + durationMs, isInherited = false)) },
+        label = { Text(stringResource(label)) },
+      )
+    }
+  }
+}
+
+private const val HOUR_MS = 60L * 60 * 1000
+private const val DAY_MS = 24 * HOUR_MS
+
 /** "Muted" without an end: the server only knows times, so far in the future. */
-private const val MUTE_FOREVER_MS = 100L * 365 * 24 * 60 * 60 * 1000
+private const val MUTE_FOREVER_MS = 100L * 365 * DAY_MS
+
+/** A mute this far out was set as "forever". */
+private const val MUTE_FOREVER_THRESHOLD_MS = 10L * 365 * DAY_MS
+
+private val MUTE_PRESETS = listOf(
+  HOUR_MS to R.string.mute_one_hour,
+  8 * HOUR_MS to R.string.mute_eight_hours,
+  DAY_MS to R.string.mute_one_day,
+  7 * DAY_MS to R.string.mute_one_week,
+  MUTE_FOREVER_MS to R.string.mute_forever,
+)
