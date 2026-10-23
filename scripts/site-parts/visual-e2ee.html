@@ -1,0 +1,26 @@
+<!-- Feature illustration: one message as the devices see it and as the server stores it (docs/e2ee.md §4.4). -->
+<div class="visual visual-e2ee" role="img" aria-label="A message as your devices show it, and as the server stores it: ciphertext with only the metadata it needs for routing">
+  <div class="pane" aria-hidden="true">
+    <p class="pane-label"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>On your devices</p>
+    <div class="plain-message">
+      <i class="m-avatar a3">CD</i>
+      <div>
+        <p class="m-meta"><strong>Casey Diaz</strong><time>14:32</time></p>
+        <p>The signed contract is in the shared folder. Budget approved.</p>
+        <span class="m-file"><svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg><span><b>contract-final.pdf</b><small>212 kB</small></span></span>
+      </div>
+    </div>
+    <p class="search-chip"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg><span class="search-term">contract</span><span class="search-result">Found on this device</span></p>
+  </div>
+  <p class="cipher-step" aria-hidden="true"><span><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Encrypted and signed on the device</span></p>
+  <div class="pane pane-server" aria-hidden="true">
+    <p class="pane-label"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.5M8 16.5h.5"/></svg>On the server</p>
+    <dl class="cipher-meta">
+      <div><dt>Conversation</dt><dd>1842 7730 1265</dd></div>
+      <div><dt>Sender</dt><dd>user 5521 · device 3</dd></div>
+      <div><dt>Time</dt><dd>14:32:07</dd></div>
+      <div><dt>Size</dt><dd>1.2 kB</dd></div>
+    </dl>
+    <p class="ciphertext">5+7nYV7zXzDkm0guFcrnUAcgHhJhew/tp+Fkd5b/AivqjtAqgqF1kw8jN803lMUiCABtaxrwwMvWJWWKrCyfqgfRPER+MwUe7vlaYOVhQ9bEO8rXbACKmwprX8kzFUpt4oQEqJfFJSYuanwHvL7oQfdFxV1On3R/YVFkxvco1xg1NxOCesiD1/uWWSNAdPUlj2xoCCOJ</p>
+  </div>
+</div>

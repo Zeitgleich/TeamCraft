@@ -1,0 +1,112 @@
+<!-- Hero illustration: the desktop app, the Android app and a call, drawn with the app's own colours
+     (crates/teamcraft-ui/style/main.css). Sized in em so it scales with its container (style.css). -->
+<div class="showcase" role="img" aria-label="The TeamCraft desktop app with the engineering channel open and a huddle in progress, the Android app with an encrypted direct message, and an encrypted call">
+  <div class="showcase-stage" aria-hidden="true">
+    <div class="m-window">
+      <div class="m-titlebar">
+        <span class="m-dots"><i></i><i></i><i></i></span>
+        <span class="m-search"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>Search channels and people<span class="m-kbd">Ctrl+K</span></span>
+        <span class="m-me">AM</span>
+      </div>
+      <div class="m-app">
+        <div class="m-rail">
+          <span class="m-ws is-current">PA</span>
+          <span class="m-ws m-ws-b">PB<i class="m-count">1</i></span>
+          <span class="m-ws m-ws-add">+</span>
+        </div>
+        <div class="m-sidebar">
+          <p class="m-ws-name">Project A</p>
+          <p class="m-item m-item-strong"><svg class="icon" viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg>Threads<span class="m-badge">3</span></p>
+          <p class="m-group">Channels</p>
+          <p class="m-item is-unread"><span class="m-hash">#</span>general</p>
+          <p class="m-item is-current"><span class="m-hash">#</span>engineering</p>
+          <p class="m-item"><span class="m-hash">#</span>design</p>
+          <p class="m-item"><span class="m-hash">#</span>announcements</p>
+          <p class="m-group">Direct messages</p>
+          <p class="m-item is-unread"><i class="m-presence is-online"></i>Sam Rivera<span class="m-badge">2</span></p>
+          <p class="m-item"><i class="m-presence is-away"></i>Jordan Lee</p>
+          <p class="m-item"><i class="m-presence"></i>Kim Novak</p>
+          <p class="m-item"><i class="m-presence is-online"></i>Taylor Brooks</p>
+        </div>
+        <div class="m-main">
+          <div class="m-channel-head">
+            <strong><span class="m-hash">#</span>engineering</strong>
+            <span class="m-topic">Builds, reviews and incident follow-ups</span>
+            <span class="m-e2ee"><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Encrypted</span>
+          </div>
+          <div class="m-huddle">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/></svg>
+            <strong>Huddle in progress</strong>
+            <span class="m-stack"><i class="m-avatar a1">SR</i><i class="m-avatar a2">JL</i></span>
+            <span class="m-huddle-names">Sam Rivera, Jordan Lee</span>
+            <span class="m-join">Join huddle</span>
+          </div>
+          <div class="m-messages">
+            <p class="m-day"><span>Today</span></p>
+            <div class="m-msg">
+              <span class="m-avatar a3">CD</span>
+              <div class="m-msg-body">
+                <p class="m-meta"><strong>Casey Diaz</strong><time>09:12</time></p>
+                <p>Release notes for the next build are ready: three new features, two fixes.</p>
+                <span class="m-file"><svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg><span><b>release-notes.pdf</b><small>84 kB</small></span></span>
+                <p class="m-reacts"><span class="m-react is-mine"><svg class="icon" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>4</span><span class="m-react"><svg class="icon" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg>2</span><span class="m-replies">2 replies</span></p>
+              </div>
+            </div>
+            <div class="m-msg">
+              <span class="m-avatar a4">DP</span>
+              <div class="m-msg-body">
+                <p class="m-meta"><strong>Devon Park</strong><time>09:14</time></p>
+                <p>Thanks! I&rsquo;ll run the migration on staging after lunch.</p>
+              </div>
+            </div>
+            <div class="m-msg">
+              <span class="m-avatar a1">SR</span>
+              <div class="m-msg-body">
+                <p class="m-meta"><strong>Sam Rivera</strong><time>09:20</time></p>
+                <p>Could someone review the deploy checklist before Friday? <span class="m-mention">@Devon Park</span></p>
+              </div>
+            </div>
+          </div>
+          <div class="m-composer">
+            <span>Write to engineering</span>
+            <span class="m-send"><svg class="icon" viewBox="0 0 24 24"><path d="M4 12l16-8-6 16-2-6z"/></svg></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="m-call">
+      <div class="m-call-head"><strong>Call in design</strong><span>12:04</span></div>
+      <div class="m-call-grid">
+        <span class="m-tile is-speaking"><i class="m-avatar a5">RC</i><b>Robin Chen</b></span>
+        <span class="m-tile"><i class="m-avatar a6">KN</i><b>Kim Novak</b></span>
+        <span class="m-tile"><i class="m-avatar a2">JL</i><b>Jordan Lee</b></span>
+        <span class="m-tile m-tile-self"><i class="m-avatar a7">AM</i><b>You</b></span>
+      </div>
+      <div class="m-call-foot">
+        <span class="m-call-code"><svg class="icon" viewBox="0 0 24 24"><path d="M12 3l7 4v5c0 4.2-2.9 7.7-7 9-4.1-1.3-7-4.8-7-9V7z"/></svg>48 20 17</span>
+        <span class="m-ctrl"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></span>
+        <span class="m-ctrl"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/></svg></span>
+        <span class="m-ctrl m-leave"><svg class="icon" viewBox="0 0 24 24"><path d="M3 14c5-4 13-4 18 0l-2 3-4-1v-2.5a10 10 0 0 0-6 0V16l-4 1z"/></svg></span>
+      </div>
+    </div>
+
+    <div class="m-phone">
+      <div class="m-phone-status"><span>9:41</span><span class="m-phone-icons"><i></i><i></i><i></i></span></div>
+      <div class="m-phone-head">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+        <i class="m-avatar a1">SR</i>
+        <span><strong>Sam Rivera</strong><small><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>End-to-end encrypted</small></span>
+      </div>
+      <div class="m-phone-thread">
+        <p class="m-day"><span>Today</span></p>
+        <p class="m-bubble">Can you join the call with the new partner at 3?</p>
+        <p class="m-bubble is-mine">Yes, I&rsquo;ll bring the slides.</p>
+        <p class="m-bubble">Great. The guest link is in the invitation.</p>
+        <p class="m-bubble is-mine">Got it, see you there.</p>
+        <p class="m-seen">Seen</p>
+      </div>
+      <div class="m-phone-composer"><span>Message</span><span class="m-send"><svg class="icon" viewBox="0 0 24 24"><path d="M4 12l16-8-6 16-2-6z"/></svg></span></div>
+    </div>
+  </div>
+</div>

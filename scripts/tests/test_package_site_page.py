@@ -85,7 +85,7 @@ class RenderTest(unittest.TestCase):
         self.add_repositories("prerelease")
         html = self.render()
         self.assertIn("first stable release is coming soon", html)
-        self.assertIn("Beta (pre-releases)", html)
+        self.assertIn('id="linux-prerelease" data-tab-title="Beta" data-selected', html)
         self.assertIn("rpm/prerelease/teamcraft-prerelease.repo", html)
         self.assertIn('id="apt-prerelease"', html)
         self.assertIn("Switch back from beta to stable", html)
@@ -101,6 +101,8 @@ class RenderTest(unittest.TestCase):
         html = self.render()
         self.assertNotIn("coming soon", html)
         self.assertLess(html.index('id="apt-stable"'), html.index('id="apt-prerelease"'))
+        self.assertIn('id="linux-stable" data-tab-title="Stable" data-selected', html)
+        self.assertNotIn('data-tab-title="Beta" data-selected', html)
         self.assertIn("rpm/stable/teamcraft.repo", html)
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
@@ -126,6 +128,35 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("teamcraft-archive-keyring", html)
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
+    def test_test_build_warning_only_for_debug_signed_apks(self):
+        self.add_release("prerelease", "v1.0.0-rc.1", files=[
+            "teamcraft-android-1.0.0-rc.1-full-release-unsigned.apk",
+            "teamcraft-android-1.0.0-rc.1-full-debug-signed.apk",
+        ])
+        self.assertIn("throwaway key", self.render())
+
+    def test_signed_release_apks_have_no_test_build_warning(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        self.assertIn("teamcraft-android-1.0.1-full-release.apk", html)
+        self.assertNotIn("throwaway key", html)
+        self.assertNotIn("debug-signed", html)
+
+    def test_static_files_and_illustrations_are_published(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        for name in ("style.css", "site.js", "fonts/inter-latin-variable.woff2", "fonts/OFL.txt", "logo.png"):
+            self.assertTrue((self.site / name).is_file(), name)
+        self.assertIn('class="showcase"', html)
+        self.assertNotIn("<!--", html)
+        self.assertNotIn(' style="', html)
+        self.assertEqual(page.check_links(self.site, SITE_URL), [])
+
+    def test_app_store_tile_follows_the_environment(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        self.assertIn("Coming soon", self.render())
+        self.assertIn("App Store", self.render({"APP_STORE_URL": "https://apps.example.com/teamcraft"}))
+
     def test_html_in_release_names_is_escaped(self):
         self.add_release("prerelease", "v1.0.0-rc.1", name="<script>x</script>")
         self.assertNotIn("<script>x", self.render())
@@ -137,14 +168,14 @@ class RenderTest(unittest.TestCase):
         (self.site / "index.html").write_text(html, encoding="utf-8")
         return html
 
-    def add_release(self, channel, tag, name=None):
+    def add_release(self, channel, tag, name=None, files=None):
         (self.work / channel).mkdir(parents=True)
         release = {
             "tag_name": tag,
             "name": name or f"TeamCraft {tag}",
             "published_at": "2026-11-02T10:00:00Z",
             "html_url": f"https://github.com/{REPO}/releases/tag/{tag}",
-            "assets": assets(RELEASE_FILES, tag),
+            "assets": assets(files or RELEASE_FILES, tag),
         }
         (self.work / channel / "release.json").write_text(json.dumps(release), encoding="utf-8")
 
@@ -182,6 +213,12 @@ class CheckLinksTest(unittest.TestCase):
     def test_missing_site_url_in_a_snippet_fails(self):
         self.write_page(f"<pre>sudo curl -o x {SITE_URL}/rpm/stable/teamcraft.repo</pre>")
         self.assertEqual(len(page.check_links(self.site, SITE_URL)), 1)
+
+    def test_missing_file_in_a_style_sheet_fails(self):
+        self.write_page("")
+        (self.site / "style.css").write_text('@font-face { src: url("fonts/missing.woff2"); }\n'
+                                             'a { background: url(key.asc); }', encoding="utf-8")
+        self.assertEqual(page.check_links(self.site, SITE_URL), [("style.css", "fonts/missing.woff2")])
 
     def test_directory_link_without_index_fails(self):
         self.write_page('<a href="apt/">apt</a>')

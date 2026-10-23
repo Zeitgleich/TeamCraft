@@ -171,6 +171,7 @@ GitHub Pages site from the published releases, so the site never has state of it
 
 ```
 index.html, style.css, site.js    landing page with the downloads (scripts/package-site-page.py)
+fonts/                            the page's fonts (Inter, JetBrains Mono; SIL OFL), self-hosted
 updates/stable/latest.json        newest stable release
 updates/prerelease/latest.json    newest release of any kind
 apt/dists/{stable,prerelease}/    signed Release/InRelease, Packages for amd64 and arm64
@@ -222,8 +223,11 @@ also receives every stable release.
   the newest stable release and the newest prerelease (only files that exist; the visitor's system is
   preselected), setup snippets appear only for repositories that were built, and while there is no
   stable release the page says so and shows the prerelease channel. It is self-contained (no external
-  fonts, scripts or trackers; strict CSP). The workflow fails when any page links a file of the site
-  that doesn't exist (`package-site-page.py check`).
+  fonts, scripts or trackers; strict CSP). Its static files are in `scripts/site/`, its fixed
+  illustrations (drawn in HTML/CSS with the app's colours) in `scripts/site-parts/`. The workflow fails
+  when any page or style sheet links a file of the site that doesn't exist (`package-site-page.py
+  check`). Debug-signed APKs get a test-build warning; once a release has signed release APKs, only
+  those are offered.
 - Store listings appear once the repository variables `PLAY_STORE_URL` / `APP_STORE_URL` are set.
 - One-time setup: *Settings → Pages → Source: GitHub Actions*.
 - The deb/rpm "update available" notice reads the same `latest.json` as the self-updating installs, so
