@@ -63,21 +63,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         activity: DeviceActivity::Active,
       })
       .await?;
-    match receive(&mut connection).await? {
-      GatewayServerMessage::Ready { session_id, .. } => {
-        self.sync.maybe_gateway_session = Some(GatewaySession {
-          session_id,
-          last_seq: 0,
-        });
-        self.persist_sync()?;
-      },
+    let session_id = match receive(&mut connection).await? {
+      GatewayServerMessage::Ready { session_id, .. } => session_id,
       other => {
         return Err(CoreError::Gateway(format!(
           "unexpected answer to identify: {other:?}"
         )));
       },
-    }
+    };
+    // The session is kept only once the sync succeeded: a stored session makes the next connect
+    // resume instead of syncing, so a failed sync would otherwise leave its gap unfilled forever.
     self.full_sync().await?;
+    self.sync.maybe_gateway_session = Some(GatewaySession {
+      session_id,
+      last_seq: 0,
+    });
+    self.persist_sync()?;
     Ok((connection, GatewayOutcome::Fresh))
   }
 

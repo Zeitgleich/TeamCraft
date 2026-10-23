@@ -98,6 +98,8 @@ struct State {
   device_lists: HashMap<UserId, DeviceListResponse>,
   sessions: HashMap<String, Session>,
   offline_users: HashSet<UserId>,
+  /// Users whose REST calls fail while their gateway still connects.
+  rest_failing_users: HashSet<UserId>,
   next_connection: u64,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
@@ -223,6 +225,17 @@ impl FakeServer {
       state.offline_users.insert(user);
     } else {
       state.offline_users.remove(&user);
+    }
+  }
+
+  /// While set, this user's REST calls fail but the gateway still connects (REST timing out
+  /// behind a flaky proxy, or the sync after `ready` being cut off).
+  pub fn set_rest_failing(&self, user: UserId, is_failing: bool) {
+    let mut state = self.lock();
+    if is_failing {
+      state.rest_failing_users.insert(user);
+    } else {
+      state.rest_failing_users.remove(&user);
     }
   }
 
@@ -480,7 +493,7 @@ impl FakeServerApi {
   /// Runs `action` on the state if the user is online.
   fn with<R>(&self, action: impl FnOnce(&mut State, UserId) -> Result<R, ApiError>) -> Result<R, ApiError> {
     let mut state = self.server.lock();
-    if state.offline_users.contains(&self.user) {
+    if state.offline_users.contains(&self.user) || state.rest_failing_users.contains(&self.user) {
       return Err(ApiError::Network("fake server: client is offline".into()));
     }
     action(&mut state, self.user)
@@ -2086,10 +2099,14 @@ impl ServerApi for FakeServerApi {
 
   async fn connect_gateway(&self) -> Result<FakeGateway, ApiError> {
     let (sender, receiver) = unbounded();
-    let connection = self.with(|state, _| {
+    let connection = {
+      let mut state = self.server.lock();
+      if state.offline_users.contains(&self.user) {
+        return Err(ApiError::Network("fake server: client is offline".into()));
+      }
       state.next_connection += 1;
-      Ok(state.next_connection)
-    })?;
+      state.next_connection
+    };
     let gateway = FakeGateway {
       server: self.server.clone(),
       user: self.user,

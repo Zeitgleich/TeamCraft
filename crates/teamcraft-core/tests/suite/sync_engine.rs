@@ -267,6 +267,42 @@ async fn gateway_resumes_and_falls_back_to_full_sync() {
 }
 
 #[tokio::test]
+async fn a_full_sync_that_fails_is_repeated_on_the_next_connect() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "gap")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  // A server restart, and the sync after the new session breaks off.
+  server.expire_sessions();
+  server.drop_gateways(bob.client.user_id());
+  alice
+    .client
+    .send_text(channel, None, "missed during the restart")
+    .await
+    .unwrap();
+  server.set_rest_failing(bob.client.user_id(), true);
+  assert!(bob.client.connect_gateway().await.is_err());
+
+  // The next connect must not resume the half-synced session: it syncs again.
+  server.set_rest_failing(bob.client.user_id(), false);
+  let (gateway, outcome) = bob.client.connect_gateway().await.unwrap();
+  assert_eq!(outcome, GatewayOutcome::Fresh);
+  bob.gateway = gateway;
+  assert_eq!(bob.texts(channel), vec!["missed during the restart"]);
+}
+
+#[tokio::test]
 async fn direct_messages_work_both_ways() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
