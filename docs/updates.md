@@ -254,11 +254,14 @@ cat ~/.tauri/teamcraft-updater.key.pub                # into plugins.updater.pub
 Repository key:
 
 ```sh
-# RSA: rpm on older enterprise distributions cannot verify EdDSA signatures.
-gpg --quick-generate-key "TeamCraft packages <packages@example.com>" rsa4096 sign 3y
+gpg --quick-generate-key "TeamCraft packages <packages@example.com>" ed25519 sign 3y
 gpg --armor --export-secret-keys <fingerprint> | gh secret set LINUX_REPO_GPG_PRIVATE_KEY
 gh secret set LINUX_REPO_GPG_PASSPHRASE
 ```
+
+Ed25519 is supported by current APT and by rpm 4.16 and later (Fedora, RHEL 9 and newer); signing,
+repository metadata and installing were tested on Ubuntu 24.04 and Fedora 43. Older systems such as
+RHEL 8 (rpm 4.14) or Ubuntu 18.04 can't be served with it; to support them, use `rsa4096` instead.
 
 Keep offline backups of both private keys. Losing the updater key means every installed app has to be
 updated by hand once (a new key ships with that version); a leaked key means an attacker who also
