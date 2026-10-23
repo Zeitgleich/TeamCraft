@@ -11,7 +11,7 @@ use teamcraft_client_api::privacy::LastSeenVisibility;
 use crate::i18n::{Locale, use_i18n};
 use crate::model::{Conversation, DeviceId, UserId};
 use crate::prefs::{
-  CallPrefs, Density, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, SidebarSort, ThreadReplies,
+  CallPrefs, Density, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, SidebarSort, ThreadReplies, Zoom,
 };
 use crate::settings::{SendMode, Theme, load_string, store_string};
 use crate::state::{Overlay, use_app_state};
@@ -533,6 +533,31 @@ pub fn DisplayTab() -> impl IntoView {
         }
       })
     />
+    <div class="field">
+      <label for="setting-zoom">{move || i18n.t("settings-zoom")}</label>
+      <select
+        id="setting-zoom"
+        class="input"
+        aria-describedby="setting-zoom-hint"
+        on:change=move |ev| {
+          if let Ok(percent) = event_target_value(&ev).parse::<u16>() {
+            prefs.update(|all| all.display.zoom = Zoom::from_percent(percent));
+          }
+        }
+      >
+        {Zoom::STEPS
+          .into_iter()
+          .map(|percent| {
+            view! {
+              <option value=percent.to_string() selected=move || prefs.get().display.zoom.percent() == percent>
+                {move || i18n.t_with("settings-zoom-percent", &[("percent", &percent.to_string())])}
+              </option>
+            }
+          })
+          .collect_view()}
+      </select>
+      <p class="muted-text small" id="setting-zoom-hint">{move || i18n.t("settings-zoom-hint")}</p>
+    </div>
     <fieldset class="settings-group">
       <legend>{move || i18n.t("settings-composer")}</legend>
       <label class="check-row">

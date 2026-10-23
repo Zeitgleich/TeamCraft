@@ -73,6 +73,39 @@ pub fn complete(text: &str, trigger: &Trigger, cursor: usize, insert: &str) -> (
   (format!("{head}{replacement}{tail}"), new_cursor)
 }
 
+/// Replaces the selection `start..end` (UTF-16 offsets, as the browser reports them) with `insert`
+/// and returns the new text and the cursor after the insertion.
+pub fn replace_selection(text: &str, start: usize, end: usize, insert: &str) -> (String, usize) {
+  let (from, to) = (byte_index(text, start), byte_index(text, end.max(start)));
+  let new_cursor = start + insert.encode_utf16().count();
+  (format!("{}{insert}{}", &text[..from], &text[to..]), new_cursor)
+}
+
+/// Pasting a URL over selected text makes a Markdown link of it: `[selected](url)`. `None` when the
+/// paste is not a single http(s) URL, nothing is selected or the selection is a URL itself.
+pub fn link_over_selection(text: &str, start: usize, end: usize, pasted: &str) -> Option<(String, usize)> {
+  let url = pasted.trim();
+  let is_url = |value: &str| {
+    (value.starts_with("https://") || value.starts_with("http://"))
+      && value.len() > "https://".len()
+      && !value.contains(char::is_whitespace)
+  };
+  if end <= start || !is_url(url) {
+    return None;
+  }
+  let (from, to) = (byte_index(text, start), byte_index(text, end));
+  let selected = &text[from..to];
+  if is_url(selected.trim()) || selected.contains('\n') || selected.contains(['[', ']']) {
+    return None;
+  }
+  Some(replace_selection(
+    text,
+    start,
+    end,
+    &format!("[{selected}]({url})"),
+  ))
+}
+
 /// Wraps the selection `start..end` in `left` and `right` (an empty selection gets the markers with
 /// the cursor between them). Returns the new text and the new selection.
 pub fn wrap_selection(
@@ -141,5 +174,35 @@ mod tests {
       ("say **hi** now".to_owned(), 6, 8)
     );
     assert_eq!(wrap_selection("x", 1, 1, "`", "`"), ("x``".to_owned(), 2, 2));
+  }
+
+  #[test]
+  fn replacing_the_selection_counts_utf16() {
+    assert_eq!(replace_selection("ab", 1, 1, "🙂"), ("a🙂b".to_owned(), 3));
+    assert_eq!(
+      replace_selection("🙂 hi there", 3, 5, "yo"),
+      ("🙂 yo there".to_owned(), 5)
+    );
+  }
+
+  #[test]
+  fn pasting_a_url_over_a_selection_makes_a_link() {
+    let (text, cursor) =
+      link_over_selection("see the docs now", 8, 12, " https://example.com/a ").unwrap_or_default();
+    assert_eq!(text, "see the [docs](https://example.com/a) now");
+    assert_eq!(cursor, 37);
+  }
+
+  #[test]
+  fn link_paste_leaves_other_pastes_alone() {
+    assert_eq!(link_over_selection("docs", 0, 0, "https://example.com"), None);
+    assert_eq!(link_over_selection("docs", 0, 4, "not a url"), None);
+    assert_eq!(link_over_selection("docs", 0, 4, "https://a b"), None);
+    assert_eq!(
+      link_over_selection("https://old.example", 0, 19, "https://example.com"),
+      None
+    );
+    assert_eq!(link_over_selection("a\nb", 0, 3, "https://example.com"), None);
+    assert_eq!(link_over_selection("docs", 0, 4, "ftp://example.com"), None);
   }
 }

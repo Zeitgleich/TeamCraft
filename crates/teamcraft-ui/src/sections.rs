@@ -14,6 +14,18 @@ pub enum SectionKind {
 }
 
 impl SectionKind {
+  pub const ALL: [SectionKind; 5] = [
+    Self::Unreads,
+    Self::Favorites,
+    Self::Channels,
+    Self::Integrations,
+    Self::DirectMessages,
+  ];
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|kind| kind.slug() == slug)
+  }
+
   pub fn slug(self) -> &'static str {
     match self {
       Self::Unreads => "unreads",
@@ -176,6 +188,14 @@ pub fn build_grouped(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn section_slugs_round_trip() {
+    for kind in SectionKind::ALL {
+      assert_eq!(SectionKind::from_slug(kind.slug()), Some(kind));
+    }
+    assert_eq!(SectionKind::from_slug("nope"), None);
+  }
   use crate::model::{ConversationId, ConversationKind, id_from_raw};
 
   #[test]

@@ -15,6 +15,10 @@ use crate::state::{Overlay, SidePanel, use_app_state};
 /// How far back the seen line looks for the user's own latest message.
 const SEEN_LOOKBACK: usize = 50;
 
+/// Files dropped on a conversation, handed to its composer (provided by [`ChannelView`]).
+#[derive(Clone, Copy)]
+pub struct DroppedFiles(pub RwSignal<Vec<web_sys::File>, LocalStorage>);
+
 /// Header, bookmarks bar, message feed and composer of one conversation.
 #[component]
 pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
@@ -28,8 +32,61 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
     let name = conv.name.clone();
     let label_name = conv.name;
     let can_post = conv.can_post;
+    // Files dropped anywhere on the conversation go to its composer.
+    let dropped = DroppedFiles(RwSignal::new_local(Vec::new()));
+    provide_context(dropped);
+    let drag_depth = RwSignal::new(0_i32);
+    let has_files = |ev: &web_sys::DragEvent| {
+      ev.data_transfer().is_some_and(|transfer| {
+        transfer
+          .types()
+          .includes(&wasm_bindgen::JsValue::from_str("Files"), 0)
+      })
+    };
+    let is_dragging = move || can_post && drag_depth.get() > 0;
+    let on_dragenter = move |ev: web_sys::DragEvent| {
+      if can_post && has_files(&ev) {
+        drag_depth.update(|depth| *depth += 1);
+      }
+    };
+    let on_dragover = move |ev: web_sys::DragEvent| {
+      if can_post && has_files(&ev) {
+        ev.prevent_default();
+      }
+    };
+    let on_drop = move |ev: web_sys::DragEvent| {
+      drag_depth.set(0);
+      // The composer attached them already when they were dropped on it.
+      if ev.default_prevented() {
+        return;
+      }
+      let Some(files) = ev.data_transfer().and_then(|transfer| transfer.files()) else {
+        return;
+      };
+      if can_post && files.length() > 0 {
+        ev.prevent_default();
+        dropped.0.set(
+          (0..files.length())
+            .filter_map(|index| files.item(index))
+            .collect(),
+        );
+      }
+    };
     Some(view! {
-      <section class="channel-view" aria-label=move || i18n.t_with("channel-region-label", &[("name", &label_name)])>
+      <section
+        class="channel-view"
+        aria-label=move || i18n.t_with("channel-region-label", &[("name", &label_name)])
+        on:dragenter=on_dragenter
+        on:dragleave=move |_| drag_depth.update(|depth| *depth = (*depth - 1).max(0))
+        on:dragover=on_dragover
+        on:drop=on_drop
+      >
+        <Show when=is_dragging fallback=|| ()>
+          <div class="drop-overlay" aria-hidden="true">
+            <Icon name=IconName::Paperclip />
+            <span>{move || i18n.t("drop-files-here")}</span>
+          </div>
+        </Show>
         <ChannelHeader conversation=conversation info=info />
         <KeyChangeBanner conversation=conversation />
         <HuddleBar conversation=conversation />

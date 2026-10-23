@@ -7,6 +7,7 @@ use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
@@ -20,6 +21,8 @@ const OVERSCAN_PX: f64 = 700.0;
 const STICK_THRESHOLD_PX: f64 = 8.0;
 const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
 const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
+/// Space kept above the "New messages" divider when a conversation opens there.
+const DIVIDER_CONTEXT_PX: f64 = 48.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
 const MEASURE_EPSILON: f32 = 0.5;
 
@@ -123,8 +126,26 @@ pub fn MessageList(
   let viewport = RwSignal::new(800.0_f64);
   // Bumped whenever `heights` changed, so the window is recomputed.
   let layout_rev = RwSignal::new(0_u64);
-  let stick_to_bottom = RwSignal::new(true);
+  // Opened with unread messages: start at the "New messages" divider instead of the bottom.
+  let maybe_marker = state
+    .unread_marker
+    .get_untracked()
+    .filter(|marker| marker.conversation == conversation)
+    .map(|marker| marker.index);
+  // Otherwise return to where the reader was when they left this conversation scrolled up.
+  let maybe_saved_anchor = maybe_marker
+    .is_none()
+    .then(|| {
+      state
+        .scroll_anchors
+        .with_value(|anchors| anchors.get(&conversation).copied())
+    })
+    .flatten();
+  let stick_to_bottom = RwSignal::new(maybe_marker.is_none() && maybe_saved_anchor.is_none());
   let last_top = StoredValue::new(0.0_f64);
+  // The message count when the reader left the bottom (or where the unread ones began): what is
+  // newer is announced on the "Jump to latest" bar.
+  let away_from = RwSignal::new(maybe_marker);
 
   let window = Memo::new(move |_| {
     layout_rev.track();
@@ -252,12 +273,67 @@ pub fn MessageList(
       }
     });
   });
-  // Initial viewport size.
+  // Initial viewport size and position: the unread divider when the unread messages don't fit,
+  // the latest message otherwise.
   Effect::new(move |_| {
     if let Some(element) = container.get() {
-      viewport.set(f64::from(element.client_height()));
-      defer_while_alive(list_id, scroll_to_bottom);
+      let height = f64::from(element.client_height());
+      viewport.set(height);
+      let maybe_divider_top = maybe_marker.and_then(|index| {
+        let (top, total) = heights.with_value(|heights| {
+          let top: f32 = heights.iter().take(index).sum();
+          (f64::from(top), f64::from(heights.iter().sum::<f32>()))
+        });
+        (total - top > height).then_some(top)
+      });
+      let maybe_saved_top = maybe_saved_anchor.map(|index| {
+        let top: f32 = heights.with_value(|heights| heights.iter().take(index).sum());
+        f64::from(top) + DIVIDER_CONTEXT_PX
+      });
+      match maybe_divider_top.or(maybe_saved_top) {
+        Some(top) => {
+          let top = (top - DIVIDER_CONTEXT_PX).max(0.0);
+          element.set_scroll_top(top as i32);
+          scroll_top.set(f64::from(element.scroll_top()));
+          last_top.set_value(f64::from(element.scroll_top()));
+        },
+        None => {
+          stick_to_bottom.set(true);
+          defer_while_alive(list_id, scroll_to_bottom);
+        },
+      }
     }
+  });
+  // Remember where the reader left the bottom; back at the bottom, everything counts as seen.
+  Effect::new(move |_| {
+    if stick_to_bottom.get() {
+      away_from.set(None);
+    } else if away_from.get_untracked().is_none() {
+      away_from.set(Some(count.get_untracked()));
+    }
+  });
+  on_cleanup(move || {
+    let (Some(is_following), Some(window)) =
+      (stick_to_bottom.try_get_untracked(), window.try_get_untracked())
+    else {
+      return;
+    };
+    state.scroll_anchors.update_value(|anchors| {
+      if is_following {
+        anchors.remove(&conversation);
+      } else {
+        anchors.insert(conversation, window.first_visible);
+      }
+    });
+  });
+  let new_below = move || away_from.get().map_or(0, |from| count.get().saturating_sub(from));
+  // Rows grow after they were measured (reactions, edits, late-loading content). While following,
+  // stay at the bottom so the newest line is never cut off.
+  observe_row_growth(list_id, rows, move || {
+    if stick_to_bottom.get_untracked() {
+      scroll_to_bottom();
+    }
+    schedule_measure();
   });
   let _ = window_event_listener(ev::resize, move |_| {
     if let Some(element) = container.get_untracked() {
@@ -323,17 +399,47 @@ pub fn MessageList(
           }
         >
           <Icon name=IconName::ArrowDown />
-          <span>{move || i18n.t("jump-to-latest")}</span>
+          <span>
+            {move || match new_below() {
+              0 => i18n.t("jump-to-latest"),
+              count => i18n.t_count("jump-to-latest-new", count),
+            }}
+          </span>
         </button>
       </Show>
     </div>
   }
 }
 
+/// Calls `on_change` (on the next frame) whenever the rendered rows change size.
+fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn() + Copy + 'static) {
+  let callback = Closure::<dyn FnMut()>::new(move || defer_while_alive(list_id, on_change));
+  let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
+    tracing::debug!("ResizeObserver unavailable");
+    return;
+  };
+  let handle = StoredValue::new_local((observer, callback));
+  Effect::new(move |_| {
+    if let Some(element) = rows.get() {
+      handle.with_value(|(observer, _)| observer.observe(&element));
+    }
+  });
+  on_cleanup(move || {
+    handle.try_with_value(|(observer, _)| observer.disconnect());
+  });
+}
+
 /// Wrapper that carries the row index for measuring and re-renders only when its own data changes.
 #[component]
 fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl IntoView {
   let state = use_app_state();
+  let i18n = use_i18n();
+  let has_divider = move || {
+    state
+      .unread_marker
+      .get()
+      .is_some_and(|marker| marker.conversation == conversation && marker.index == index)
+  };
   let data = Memo::new(move |_| -> Option<(Message, Option<Message>)> {
     let start = index.saturating_sub(1);
     let mut messages = state.read(|backend| backend.messages(conversation, start, 2));
@@ -352,6 +458,11 @@ fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl In
   });
   view! {
     <div class="row" data-idx=index.to_string()>
+      <Show when=has_divider fallback=|| ()>
+        <div class="new-divider" role="separator">
+          <span>{move || i18n.t("new-messages")}</span>
+        </div>
+      </Show>
       {move || data.get().map(|(message, maybe_prev)| view! { <MessageRow message=message maybe_prev=maybe_prev /> })}
     </div>
   }
