@@ -23,6 +23,7 @@ use crate::store::{LocalStore, MessageContent, StoredMessage, Table};
 const ACCOUNT_KEY: &str = "account";
 const KEY_BAG_KEY: &str = "key_bag";
 const SYNC_KEY: &str = "sync";
+const PENDING_DEVICE_KEY: &str = "pending_device";
 const MLS_STORAGE_KEY: &str = "provider";
 
 /// This device's identity: the user's keys (inside the key bag) and the device's own keys.
@@ -54,6 +55,10 @@ pub struct SyncState {
   /// Highest key bag sequence this device uploaded or accepted; older bags are refused (B11).
   #[serde(default)]
   pub key_bag_sequence: u64,
+  /// The account is stored, but enrollment hasn't published the device list and key packages yet;
+  /// the next sync finishes it (e2ee.md §3.2).
+  #[serde(default)]
+  pub is_enrollment_unfinished: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +90,17 @@ pub struct PinnedIdentity {
   pub is_attested: bool,
 }
 
+/// A device key pair an unfinished enrollment registers (or is about to): stored before the
+/// registration request, so a retry reuses the registration or revokes it instead of leaving an
+/// orphan device on the server.
+pub struct PendingDevice {
+  pub user_id: UserId,
+  /// The identity key that certified the device at registration.
+  pub identity_public_key: [u8; 32],
+  /// Carries the provisional device ID; the server assigns the real one.
+  pub device: DeviceKeyPair,
+}
+
 /// Secret part of [`Account`] as stored (SQLCipher protects it at rest).
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct AccountRecord {
@@ -96,6 +112,16 @@ struct AccountRecord {
   device_agreement_secret: [u8; 32],
   certificate: Vec<u8>,
   backup_secret: [u8; 32],
+}
+
+/// [`PendingDevice`] as stored.
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+struct PendingDeviceRecord {
+  #[zeroize(skip)]
+  user_id: UserId,
+  identity_public_key: [u8; 32],
+  device_signing_secret: [u8; 32],
+  device_agreement_secret: [u8; 32],
 }
 
 impl Account {
@@ -173,6 +199,41 @@ pub fn load_account(store: &impl LocalStore) -> Result<Option<Account>, CoreErro
     backup_secret,
     key_bag,
   }))
+}
+
+pub fn save_pending_device(store: &impl LocalStore, pending: &PendingDevice) -> Result<(), CoreError> {
+  let (signing, agreement) = pending.device.to_secrets();
+  let record = PendingDeviceRecord {
+    user_id: pending.user_id,
+    identity_public_key: pending.identity_public_key,
+    device_signing_secret: *signing.expose_secret(),
+    device_agreement_secret: *agreement.expose_secret(),
+  };
+  put_json(store, Table::Account, PENDING_DEVICE_KEY, &record)
+}
+
+/// The pending device, with the provisional device ID `provisional`.
+pub fn load_pending_device(
+  store: &impl LocalStore,
+  provisional: teamcraft_crypto::ids::DeviceId,
+) -> Result<Option<PendingDevice>, CoreError> {
+  let Some(record) = get_json::<PendingDeviceRecord>(store, Table::Account, PENDING_DEVICE_KEY)? else {
+    return Ok(None);
+  };
+  Ok(Some(PendingDevice {
+    user_id: record.user_id,
+    identity_public_key: record.identity_public_key,
+    device: DeviceKeyPair::from_secrets(
+      convert::user(record.user_id),
+      provisional,
+      &SymmetricKey::from_bytes(record.device_signing_secret),
+      &SymmetricKey::from_bytes(record.device_agreement_secret),
+    ),
+  }))
+}
+
+pub fn delete_pending_device(store: &impl LocalStore) -> Result<(), CoreError> {
+  Ok(store.delete(Table::Account, PENDING_DEVICE_KEY)?)
 }
 
 pub fn load_sync_state(store: &impl LocalStore) -> Result<SyncState, CoreError> {

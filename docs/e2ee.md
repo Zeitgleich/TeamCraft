@@ -105,6 +105,39 @@ That makes it a second, independent trust anchor:
 Later option: a key transparency log (append-only, auditable) so that a malicious server can't show
 different identity keys to different users.
 
+### 3.2 Enrollment order and interruptions
+
+Enrollment is a series of requests, and the network can drop between any two of them. The order is
+chosen so that every state the server can be left in is recoverable, and a retry (also after a
+restart) finishes the job (`teamcraft-core::client::enroll`):
+
+1. **Device key pair stored locally, then registered** (`POST /devices`). If the response is lost,
+   the retry finds the registration by its public key (`GET /users/{id}/devices`) and keeps it. A
+   registration certified by an identity that never reached the server (the attempt generated a new
+   identity) is revoked, so interrupted attempts leave no orphan devices.
+2. **A new identity key and its first key bag in one request** (`PUT /me/identity-key` with
+   `key_bag`; the server stores both in one transaction and refuses an identity key without a bag).
+   The bag is encrypted with a fresh backup key that is already wrapped with the recovery passphrase.
+   So the server never holds an identity nobody can recover: a retry finds the identity and recovers
+   it with the passphrase, like any further device. A server older than this protocol ignores the
+   bag; the client then stores it with `PUT /me/key-bag` right away.
+3. **An organization recovery** switches to a fresh backup key (§6.3.1) before anything is stored
+   locally; interrupted, the device recovers again (with the new passphrase if the new bag reached
+   the server).
+4. **The account is stored locally** only now, marked as unfinished, with the wrapped backup keys
+   it uploaded.
+5. **Key packages and the signed device list** are published; an unfinished account does this
+   first on its next sync, then clears the mark.
+
+A device that finds no key bag on the server for an account it already uses refuses to upload one
+with no wraps (`KeyBagMissing`): such a bag could never be recovered. The user sets a recovery
+passphrase again instead.
+
+**The first owner.** The first roster entry makes its signer the workspace root of trust (admin.md
+§2.3); an owner who can't recover their identity could never sign the roster or policy again. The
+server therefore accepts the genesis roster only from a user who has both an identity key and a key
+bag, in addition to the ordering above.
+
 ## 4. Messages
 
 ### 4.1 Why not "MLS only"
@@ -351,8 +384,8 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
 - Not a port of libthreema's `d2d_rendezvous`: its path nomination isn't needed with one relay, and
   the construction above uses only primitives already in the crate. It still needs the security
   review security.md asks for.
-- The transfer carries the backup key and the encrypted key bag; the new device then registers and an
-  existing member adds it to the groups.
+- The transfer carries the backup key and the encrypted key bag; the new device then enrolls (§3.2)
+  and an existing member adds it to the groups.
 
 ## 6. Backup and recovery
 

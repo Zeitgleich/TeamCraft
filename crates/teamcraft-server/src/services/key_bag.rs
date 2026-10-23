@@ -13,15 +13,7 @@ pub async fn put_key_bag(
   caller: &AuthenticatedUser,
   request: PutKeyBagRequest,
 ) -> Result<KeyBagResponse, ApiError> {
-  if request.encrypted_key_bag.is_empty() || request.wrapped_backup_keys.is_empty() {
-    return Err(ApiError::InvalidRequest(
-      "key bag and wrapped backup keys must not be empty".into(),
-    ));
-  }
-  let max = state.settings.get().limits.max_key_bag_bytes;
-  if request.encrypted_key_bag.len() + request.wrapped_backup_keys.len() > max {
-    return Err(ApiError::PayloadTooLarge(format!("key bag exceeds {max} bytes")));
-  }
+  check_size(state, &request.encrypted_key_bag, &request.wrapped_backup_keys)?;
 
   let outcome = state
     .database
@@ -42,6 +34,24 @@ pub async fn put_key_bag(
     },
     KeyBagOutcome::VersionConflict { current_version } => Err(ApiError::VersionConflict { current_version }),
   }
+}
+
+/// A key bag needs both parts and stays within `limits.max_key_bag_bytes`.
+pub(crate) fn check_size(
+  state: &AppState,
+  encrypted_key_bag: &Base64Bytes,
+  wrapped_backup_keys: &Base64Bytes,
+) -> Result<(), ApiError> {
+  if encrypted_key_bag.is_empty() || wrapped_backup_keys.is_empty() {
+    return Err(ApiError::InvalidRequest(
+      "key bag and wrapped backup keys must not be empty".into(),
+    ));
+  }
+  let max = state.settings.get().limits.max_key_bag_bytes;
+  if encrypted_key_bag.len() + wrapped_backup_keys.len() > max {
+    return Err(ApiError::PayloadTooLarge(format!("key bag exceeds {max} bytes")));
+  }
+  Ok(())
 }
 
 pub async fn get_key_bag(state: &AppState, caller: &AuthenticatedUser) -> Result<KeyBagResponse, ApiError> {

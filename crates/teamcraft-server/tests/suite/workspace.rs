@@ -59,6 +59,7 @@ async fn only_owners_append_and_everybody_can_read_the_roster() {
     register_device(&app, &alice).await,
     register_device(&app, &bob).await,
   );
+  enroll_identity(&app, &alice).await;
 
   let denied = append(&app, &bob, &bob_device, "/workspace/roster", 0, b"admin-entry").await;
   assert_eq!(
@@ -87,6 +88,21 @@ async fn only_owners_append_and_everybody_can_read_the_roster() {
 }
 
 #[tokio::test]
+async fn the_root_of_trust_needs_a_recoverable_identity() {
+  let app = app!();
+  let alice = owner();
+  let device = register_device(&app, &alice).await;
+  // No identity key yet, or one from an older client without a key bag: the genesis roster would
+  // pin a root of trust nobody can recover (e2ee.md §3.2).
+  let refused = append(&app, &alice, &device, "/workspace/roster", 0, b"genesis").await;
+  assert_eq!(refused.error_code(), "conflict", "{}", refused.body);
+  enroll_identity(&app, &alice).await;
+  let first = append(&app, &alice, &device, "/workspace/roster", 0, b"genesis").await;
+  assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn the_signer_device_must_be_the_callers() {
   let app = app!();
   let (alice, bob) = (owner(), admin());
@@ -104,6 +120,7 @@ async fn stale_versions_conflict_and_concurrent_appends_have_one_winner() {
   let app = app!();
   let alice = owner();
   let device = register_device(&app, &alice).await;
+  enroll_identity(&app, &alice).await;
   append(&app, &alice, &device, "/workspace/roster", 0, b"one").await;
 
   let stale = append(&app, &alice, &device, "/workspace/roster", 0, b"again").await;
@@ -237,6 +254,7 @@ async fn connected_clients_are_told_about_new_entries() {
     register_device(&app, &alice).await,
     register_device(&app, &carol).await,
   );
+  enroll_identity(&app, &alice).await;
 
   let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
   socket.next().await;
