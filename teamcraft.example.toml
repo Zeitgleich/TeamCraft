@@ -153,9 +153,11 @@ max_frame_bytes = 65536
 # Relay that connects two devices of one user while linking a new device (/api/v1/rendezvous).
 [rendezvous]
 ttl_secs = 300
-max_frame_bytes = 16384
+# The new device receives the whole key bag in one frame: keep this above 4/3 of
+# limits.max_key_bag_bytes.
+max_frame_bytes = 2097152
 # Total bytes relayed per rendezvous (both directions) and frames held until the peer joins.
-max_total_bytes = 262144
+max_total_bytes = 3145728
 max_pending_frames = 8
 # Open relays per user.
 max_per_user = 5
