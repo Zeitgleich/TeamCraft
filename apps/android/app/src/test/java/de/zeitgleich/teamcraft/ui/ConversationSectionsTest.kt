@@ -48,6 +48,19 @@ class ConversationSectionsTest {
   }
 
   @Test
+  fun homeChipsPickUnreadPeopleOrGroups() {
+    val list = listOf(
+      item("1", "Amy", ConversationKind.DIRECT, unread = 1u),
+      item("2", "Bob", ConversationKind.DIRECT, unread = 4u, isMuted = true),
+      item("3", "Amy, Bob", ConversationKind.GROUP),
+    )
+    fun names(chip: HomeFilter) = directSections(list, chip = chip).flatMap { it.conversations }.map { it.name }
+    assertEquals(listOf("Amy"), names(HomeFilter.Unread))
+    assertEquals(listOf("Amy", "Bob"), names(HomeFilter.People))
+    assertEquals(listOf("Amy, Bob"), names(HomeFilter.Groups))
+  }
+
+  @Test
   fun emptySectionsAreLeftOut() {
     assertEquals(emptyList<Section>(), channelSections(emptyList()))
     assertEquals(emptyList<Section>(), channelSections(listOf(item("1", "Carol", ConversationKind.GROUP))))

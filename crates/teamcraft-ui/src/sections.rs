@@ -1,5 +1,5 @@
 //! Pure grouping of conversations into sidebar sections: the channels of a space, and the
-//! direct messages page (DMs and group DMs live outside spaces).
+//! Home (DMs and group DMs live outside spaces).
 
 use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs};
 use crate::prefs::{DmSort, SidebarSort};
@@ -104,7 +104,7 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   sections
 }
 
-/// The sections of the direct messages page, in display order.
+/// The sections of Home, in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DirectSectionKind {
   Favorites,
@@ -127,7 +127,46 @@ pub struct DirectSection {
   pub conversations: Vec<Conversation>,
 }
 
-/// The list of the direct messages page.
+/// The filter chips above the Home list (Element: Unread, People, Groups). One at a time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HomeFilter {
+  #[default]
+  All,
+  /// Conversations with unread messages (muted ones only with mentions).
+  Unread,
+  /// One-to-one DMs.
+  People,
+  /// Group DMs.
+  Groups,
+}
+
+impl HomeFilter {
+  /// The chips, in display order ("All" is no chip selected).
+  pub const CHIPS: [HomeFilter; 3] = [Self::Unread, Self::People, Self::Groups];
+
+  /// i18n key of the chip.
+  pub fn label_key(self) -> &'static str {
+    match self {
+      Self::All => "home-filter-all",
+      Self::Unread => "home-filter-unread",
+      Self::People => "home-filter-people",
+      Self::Groups => "home-filter-groups",
+    }
+  }
+
+  pub fn matches(self, conversation: &Conversation) -> bool {
+    match self {
+      Self::All => true,
+      Self::Unread => {
+        conversation.mention_count > 0 || (conversation.unread_count > 0 && !conversation.is_muted)
+      },
+      Self::People => conversation.kind == ConversationKind::Direct,
+      Self::Groups => conversation.kind == ConversationKind::Group,
+    }
+  }
+}
+
+/// The list of Home.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DirectList {
   pub sections: Vec<DirectSection>,
@@ -136,18 +175,20 @@ pub struct DirectList {
 }
 
 /// Lists DMs and group DMs (each with the time of its newest message): favorites, then the rest,
-/// both in `sort` order. Only names containing `filter` (any case) are kept; while filtering the
-/// limit doesn't apply. `limit` 0 shows all; unread conversations stay visible beyond it.
+/// both in `sort` order. Only those `chip` lets through and whose names contain `filter` (any case)
+/// are kept; while filtering the limit doesn't apply. `limit` 0 shows all; unread conversations stay
+/// visible beyond it.
 pub fn build_direct(
   conversations: Vec<(Conversation, Option<TimestampMs>)>,
   sort: DmSort,
   limit: usize,
   filter: &str,
+  chip: HomeFilter,
 ) -> DirectList {
   let needle = filter.trim().to_lowercase();
   let mut list: Vec<(Conversation, Option<TimestampMs>)> = conversations
     .into_iter()
-    .filter(|(conversation, _)| conversation.kind.is_direct_like())
+    .filter(|(conversation, _)| conversation.kind.is_direct_like() && chip.matches(conversation))
     .filter(|(conversation, _)| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
     .collect();
   match sort {
@@ -163,7 +204,8 @@ pub fn build_direct(
     .map(|(conversation, _)| conversation)
     .partition(|conversation| conversation.is_favorite);
   let mut hidden_count = 0;
-  let rest = if limit > 0 && needle.is_empty() && rest.len() > limit {
+  let is_filtering = !needle.is_empty() || chip != HomeFilter::All;
+  let rest = if limit > 0 && !is_filtering && rest.len() > limit {
     let (keep, cut): (Vec<_>, Vec<_>) = rest
       .into_iter()
       .enumerate()
@@ -463,7 +505,7 @@ mod tests {
 
     #[test]
     fn newest_first_without_channels() {
-      let list = build_direct(sample(), DmSort::Recent, 0, "");
+      let list = build_direct(sample(), DmSort::Recent, 0, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed", "Amy, bob", "Amy", "bob"]]);
       assert_eq!(list.hidden_count, 0);
     }
@@ -472,7 +514,7 @@ mod tests {
     fn alphabetical_with_favorites_first() {
       let mut conversations = sample();
       conversations[1].0.is_favorite = true;
-      let list = build_direct(conversations, DmSort::Alphabetical, 0, "");
+      let list = build_direct(conversations, DmSort::Alphabetical, 0, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed"], vec!["Amy", "Amy, bob", "bob"]]);
       assert_eq!(list.sections[0].kind, DirectSectionKind::Favorites);
     }
@@ -481,18 +523,36 @@ mod tests {
     fn the_limit_keeps_unread_ones() {
       let mut conversations = sample();
       conversations[2].0.unread_count = 1;
-      let list = build_direct(conversations, DmSort::Recent, 1, "");
+      let list = build_direct(conversations, DmSort::Recent, 1, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed", "bob"]]);
       assert_eq!(list.hidden_count, 2);
     }
 
     #[test]
+    fn chips_pick_unread_people_or_groups() {
+      let mut conversations = sample();
+      conversations[2].0.unread_count = 1;
+      conversations[0].0.unread_count = 3;
+      conversations[0].0.is_muted = true;
+      let unread = build_direct(conversations.clone(), DmSort::Recent, 1, "", HomeFilter::Unread);
+      assert_eq!(
+        names(&unread),
+        [vec!["bob"]],
+        "muted without a mention isn't unread; no limit"
+      );
+      let people = build_direct(conversations.clone(), DmSort::Recent, 0, "", HomeFilter::People);
+      assert_eq!(names(&people), [vec!["zed", "Amy", "bob"]]);
+      let groups = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::Groups);
+      assert_eq!(names(&groups), [vec!["Amy, bob"]]);
+    }
+
+    #[test]
     fn filtering_ignores_case_and_the_limit() {
-      let list = build_direct(sample(), DmSort::Recent, 1, " AMY ");
+      let list = build_direct(sample(), DmSort::Recent, 1, " AMY ", HomeFilter::All);
       assert_eq!(names(&list), [vec!["Amy, bob", "Amy"]]);
       assert_eq!(list.hidden_count, 0);
       assert!(
-        build_direct(sample(), DmSort::Recent, 0, "nobody")
+        build_direct(sample(), DmSort::Recent, 0, "nobody", HomeFilter::All)
           .sections
           .is_empty()
       );

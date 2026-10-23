@@ -37,6 +37,18 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(directSections(list, filter: " sAm").flatMap(\.conversations).map(\.id), ["2", "1"])
   }
 
+  func testHomeChipsPickUnreadPeopleOrGroups() {
+    let list = [
+      item("1", "Amy", kind: .direct, unread: 1),
+      item("2", "Bob", kind: .direct, unread: 4, muted: true),
+      item("3", "Amy, Bob", kind: .group),
+    ]
+    func names(_ chip: HomeFilter) -> [String] { directSections(list, chip: chip).flatMap(\.conversations).map(\.name) }
+    XCTAssertEqual(names(.unread), ["Amy"])
+    XCTAssertEqual(names(.people), ["Amy", "Bob"])
+    XCTAssertEqual(names(.groups), ["Amy, Bob"])
+  }
+
   func testEmptySectionsAreLeftOut() {
     XCTAssertTrue(channelSections([]).isEmpty)
     XCTAssertTrue(directSections([]).isEmpty)

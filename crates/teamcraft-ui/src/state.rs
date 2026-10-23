@@ -15,7 +15,7 @@ use crate::model::{
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
 use crate::reactive::get_if_observed;
-use crate::sections::{apply_favorite_order, build_direct, build_sections};
+use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
 use teamcraft_client_api::actions::{NewChannel, NewSpace};
@@ -80,8 +80,8 @@ pub struct UnreadMarker {
 /// The entry of the space rail that is selected, and so which sidebar shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RailEntry {
-  /// The direct messages page: DMs and group DMs, which live outside spaces.
-  DirectMessages,
+  /// Home: the DMs and group DMs, which live outside spaces (Element's and Discord's home).
+  Home,
   /// The space in [`AppState::space`] (or all spaces, in the grouped sidebar).
   Space,
 }
@@ -108,8 +108,8 @@ pub enum MainView {
   Directory,
   /// First steps for an empty workspace or space: create a space or channel, invite colleagues.
   GettingStarted,
-  /// The direct messages page with no conversation open.
-  DirectMessages,
+  /// Home with no conversation open.
+  Home,
 }
 
 /// What the right-hand panel shows.
@@ -447,16 +447,16 @@ impl AppState {
       | MainView::Activity
       | MainView::Calls
       | MainView::Directory => true,
-      MainView::Admin(_) | MainView::GettingStarted | MainView::DirectMessages => false,
+      MainView::Admin(_) | MainView::GettingStarted | MainView::Home => false,
     };
     if !belongs {
       self.open_first_conversation_of(space);
     }
   }
 
-  /// Shows the direct messages page: the most recent DM, or the page's start when there is none.
-  pub fn open_direct_messages(&self) {
-    self.rail.set(RailEntry::DirectMessages);
+  /// Shows Home: the most recent DM, or the page's start when there is none.
+  pub fn open_home(&self) {
+    self.rail.set(RailEntry::Home);
     let is_direct_open = self
       .current_conversation_id()
       .and_then(|id| self.read(|backend| backend.conversation(id)))
@@ -468,17 +468,17 @@ impl AppState {
     match maybe_recent {
       Some(conversation) => self.open_conversation(conversation.id),
       None => {
-        self.view.set(MainView::DirectMessages);
+        self.view.set(MainView::Home);
         self.panel.set(SidePanel::Closed);
       },
     }
   }
 
-  /// DMs and group DMs as the direct messages page lists them (favorites first, then by recency
+  /// DMs and group DMs as Home lists them (favorites first, then by recency
   /// or name), without the display limit.
   pub fn direct_list(&self) -> Vec<Conversation> {
     let sort = self.settings.prefs.with(|prefs| prefs.sidebar.dm_sort);
-    build_direct(self.direct_entries(), sort, 0, "")
+    build_direct(self.direct_entries(), sort, 0, "", HomeFilter::All)
       .sections
       .into_iter()
       .flat_map(|section| section.conversations)
@@ -529,7 +529,7 @@ impl AppState {
       | MainView::Calls
       | MainView::Directory
       | MainView::GettingStarted
-      | MainView::DirectMessages => None,
+      | MainView::Home => None,
     }
   }
 
@@ -542,7 +542,7 @@ impl AppState {
       self.space.set(space);
       self.rail.set(RailEntry::Space);
     } else if conversation.kind.is_direct_like() {
-      self.rail.set(RailEntry::DirectMessages);
+      self.rail.set(RailEntry::Home);
     }
     if let SidePanel::Thread {
       conversation: open, ..
@@ -853,10 +853,10 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
-  /// All conversations of the current sidebar in its order: the DMs on the direct messages page,
+  /// All conversations of the current sidebar in its order: the DMs on Home,
   /// otherwise the channels of the current space (of every space in the grouped sidebar).
   pub fn navigable_conversations(&self) -> Vec<Conversation> {
-    if self.rail.get() == RailEntry::DirectMessages {
+    if self.rail.get() == RailEntry::Home {
       return self.direct_list();
     }
     let space = self.space.get();

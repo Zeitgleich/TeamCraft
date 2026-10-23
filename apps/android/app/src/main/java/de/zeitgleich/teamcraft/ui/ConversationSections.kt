@@ -13,8 +13,24 @@ sealed interface SectionTitle {
 
 data class Section(val title: SectionTitle, val conversations: List<ConversationItem>)
 
-/** The two lists of the chats screen: channels by space, and the direct messages (outside spaces). */
-enum class ChatTab { Spaces, DirectMessages }
+/** The two lists of the chats screen: Home (the DMs, outside spaces) and the channels by space. */
+enum class ChatTab { Home, Spaces }
+
+/** The filter chips of Home (as in Element): one at a time, `All` is none selected. */
+enum class HomeFilter {
+  All,
+  Unread,
+  People,
+  Groups,
+  ;
+
+  fun matches(item: ConversationItem): Boolean = when (this) {
+    All -> true
+    Unread -> item.mentionCount > 0u || (item.unreadCount > 0u && !item.isMuted)
+    People -> item.kind == ConversationKind.DIRECT
+    Groups -> item.kind == ConversationKind.GROUP
+  }
+}
 
 /** DMs and group DMs live outside spaces and have their own tab. */
 val ConversationItem.isDirect: Boolean
@@ -39,20 +55,21 @@ fun channelSections(conversations: List<ConversationItem>): List<Section> {
 }
 
 /**
- * The direct messages tab: favorites, then the rest, each the most recent first (`lastActivity`:
- * newest message per conversation; by name without one). Only names containing `filter` (any
- * case) are kept. Empty sections are left out.
+ * The Home tab: favorites, then the rest, each the most recent first (`lastActivity`: newest
+ * message per conversation; by name without one). Only conversations `chip` lets through whose
+ * names contain `filter` (any case) are kept. Empty sections are left out.
  */
 fun directSections(
   conversations: List<ConversationItem>,
   lastActivity: Map<String, Long> = emptyMap(),
   filter: String = "",
+  chip: HomeFilter = HomeFilter.All,
 ): List<Section> {
   val needle = filter.trim()
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
   val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
   val direct = conversations
-    .filter { it.isDirect && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
+    .filter { it.isDirect && chip.matches(it) && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
     .sortedWith(byRecency)
   val (favorites, rest) = direct.partition { it.isFavorite }
   return buildList {

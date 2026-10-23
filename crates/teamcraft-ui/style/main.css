@@ -5305,3 +5305,62 @@ select.input {
 .new-message .input {
   width: 100%;
 }
+
+.home-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 12px 8px;
+}
+
+.home-chip {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 13px;
+  background: transparent;
+  color: var(--chrome-text);
+  font-size: 12.5px;
+}
+
+.home-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.home-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.home-avatar {
+  display: inline-flex;
+  flex: none;
+}
+
+.home-avatar-group {
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.home-avatar-group .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.dm-sidebar .sb-item .badge {
+  font-size: 10px;
+}
+
+/* Single avatars in lists, not the overlapping stack the small size is made for. */
+.home-avatar .avatar-sm,
+.person-item .avatar-sm {
+  width: 24px;
+  height: 24px;
+  margin-left: 0;
+  box-shadow: none;
+}

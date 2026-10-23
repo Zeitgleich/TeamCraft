@@ -15,9 +15,26 @@ struct ConversationSection: Identifiable {
   var id: SectionTitle { title }
 }
 
-/// The two lists of the chats screen: channels by space, and the direct messages (outside spaces).
+/// The two lists of the chats screen: Home (the DMs, outside spaces) and the channels by space.
 enum ChatTab: Hashable, CaseIterable {
-  case spaces, directMessages
+  case home, spaces
+}
+
+/// The filter chips of Home (as in Element): one at a time, `all` is none selected.
+enum HomeFilter: Hashable, CaseIterable {
+  case all, unread, people, groups
+
+  /// The chips, in display order.
+  static let chips: [HomeFilter] = [.unread, .people, .groups]
+
+  func matches(_ item: ConversationItem) -> Bool {
+    switch self {
+    case .all: return true
+    case .unread: return item.mentionCount > 0 || (item.unreadCount > 0 && !item.isMuted)
+    case .people: return item.kind == .direct
+    case .groups: return item.kind == .group
+    }
+  }
 }
 
 extension ConversationItem {
@@ -52,11 +69,12 @@ func channelSections(_ conversations: [ConversationItem]) -> [ConversationSectio
   return sections
 }
 
-/// The direct messages tab: favorites, then the rest, each the most recent first (`lastActivity`:
-/// newest message per conversation; by name without one). Only names containing `filter` (any case)
-/// are kept. Empty sections are left out.
+/// The Home tab: favorites, then the rest, each the most recent first (`lastActivity`: newest message
+/// per conversation; by name without one). Only conversations `chip` lets through whose names
+/// contain `filter` (any case) are kept. Empty sections are left out.
 func directSections(
-  _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], filter: String = ""
+  _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], filter: String = "",
+  chip: HomeFilter = .all
 ) -> [ConversationSection] {
   let needle = filter.trimmingCharacters(in: .whitespaces)
   func byRecency(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
@@ -65,7 +83,7 @@ func directSections(
     return left == right ? byName(lhs, rhs) : left > right
   }
   let direct = conversations
-    .filter { $0.isDirect && (needle.isEmpty || $0.name.localizedCaseInsensitiveContains(needle)) }
+    .filter { $0.isDirect && chip.matches($0) && (needle.isEmpty || $0.name.localizedCaseInsensitiveContains(needle)) }
     .sorted(by: byRecency)
   let favorites = direct.filter(\.isFavorite)
   let rest = direct.filter { !$0.isFavorite }

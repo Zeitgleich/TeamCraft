@@ -494,7 +494,7 @@ impl SidebarSort {
   }
 }
 
-/// How the direct messages page orders its conversations.
+/// How Home orders its conversations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DmSort {
@@ -524,7 +524,7 @@ impl DmSort {
 pub struct SidebarPrefs {
   /// Order of the channels in a space.
   pub sort: SidebarSort,
-  /// Order of the direct messages page.
+  /// Order of Home.
   pub dm_sort: DmSort,
   /// Direct messages shown before "show more"; 0 shows all.
   pub dm_limit: u32,

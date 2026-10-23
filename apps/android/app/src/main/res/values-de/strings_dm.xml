@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The direct messages tab: DMs and group DMs live outside spaces. -->
 <resources>
+  <string name="chats_tab_home">Startseite</string>
   <string name="chats_tab_spaces">Spaces</string>
+  <string name="home_filter_unread">Ungelesen</string>
+  <string name="home_filter_people">Personen</string>
+  <string name="home_filter_groups">Gruppen</string>
   <string name="chats_no_channels">Noch keine Kanäle. Durchsuche die Kanäle deiner Spaces, um einem beizutreten.</string>
   <string name="chat_tab_new">%1$s, neue Nachrichten</string>
   <plurals name="chat_tab_unread">

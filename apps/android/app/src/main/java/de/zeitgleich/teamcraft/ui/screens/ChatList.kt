@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PrimaryTabRow
@@ -85,6 +86,7 @@ import de.zeitgleich.teamcraft.ui.PreviewContent
 import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.SectionTitle
 import de.zeitgleich.teamcraft.ui.ChatTab
+import de.zeitgleich.teamcraft.ui.HomeFilter
 import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
@@ -114,13 +116,14 @@ fun ChatListScreen(
   var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
   var maybeNotifying by remember { mutableStateOf<String?>(null) }
   // DMs live outside spaces (as on desktop), so they have their own tab.
-  var tab by rememberSaveable { mutableStateOf(ChatTab.Spaces) }
+  var tab by rememberSaveable { mutableStateOf(ChatTab.Home) }
   var dmFilter by rememberSaveable { mutableStateOf("") }
+  var homeChip by rememberSaveable { mutableStateOf(HomeFilter.All) }
   BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
   // A conversation opened from elsewhere (notification, link) shows in its own tab.
   LaunchedEffect(maybeSelectedId, conversations) {
     conversations?.firstOrNull { it.id == maybeSelectedId }?.let { selected ->
-      tab = if (selected.isDirect) ChatTab.DirectMessages else ChatTab.Spaces
+      tab = if (selected.isDirect) ChatTab.Home else ChatTab.Spaces
     }
   }
   LaunchedEffect(Unit) {
@@ -160,7 +163,7 @@ fun ChatListScreen(
     floatingActionButton = {
       if (selection.isEmpty()) {
         when (tab) {
-          ChatTab.DirectMessages -> ExtendedFloatingActionButton(
+          ChatTab.Home -> ExtendedFloatingActionButton(
             onClick = { onNavigate("browse?people=true") },
             icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
             text = { Text(stringResource(R.string.dm_new)) },
@@ -189,21 +192,22 @@ fun ChatListScreen(
       }
       val loaded = conversations
       ChatTabs(tab, loaded.orEmpty(), onSelect = { tab = it })
-      if (tab == ChatTab.DirectMessages && !loaded.isNullOrEmpty()) {
+      if (tab == ChatTab.Home && !loaded.isNullOrEmpty()) {
         DirectFilter(dmFilter, onChange = { dmFilter = it })
+        HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it })
       }
       val lastActivity = previews.mapValues { it.value.preview.sentAt }
       val shown = loaded?.let {
         when (tab) {
           ChatTab.Spaces -> channelSections(it)
-          ChatTab.DirectMessages -> directSections(it, lastActivity, dmFilter)
+          ChatTab.Home -> directSections(it, lastActivity, dmFilter, homeChip)
         }
       }
       when {
         loaded == null || shown == null -> LoadingScreen()
         loaded.isEmpty() -> EmptyChats(onBrowse = { onNavigate("browse") }, onMessage = { onNavigate("browse?people=true") })
-        shown.isEmpty() && tab == ChatTab.DirectMessages && dmFilter.isNotBlank() -> EmptyHint(stringResource(R.string.dm_filter_empty))
-        shown.isEmpty() && tab == ChatTab.DirectMessages -> EmptyDirect(onMessage = { onNavigate("browse?people=true") })
+        shown.isEmpty() && tab == ChatTab.Home && (dmFilter.isNotBlank() || homeChip != HomeFilter.All) -> EmptyHint(stringResource(R.string.dm_filter_empty))
+        shown.isEmpty() && tab == ChatTab.Home -> EmptyDirect(onMessage = { onNavigate("browse?people=true") })
         shown.isEmpty() -> EmptyHint(stringResource(R.string.chats_no_channels))
         else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
           for (section in shown) {
@@ -262,7 +266,7 @@ private fun ChatTabs(selected: ChatTab, conversations: List<ConversationItem>, o
   val (direct, channels) = conversations.partition { it.isDirect }
   PrimaryTabRow(selectedTabIndex = selected.ordinal) {
     for (tab in ChatTab.entries) {
-      val label = stringResource(if (tab == ChatTab.Spaces) R.string.chats_tab_spaces else R.string.direct_messages)
+      val label = stringResource(if (tab == ChatTab.Spaces) R.string.chats_tab_spaces else R.string.chats_tab_home)
       val badge = tabBadge(if (tab == ChatTab.Spaces) channels else direct)
       // Channels show a count only for mentions; DMs count every unread message.
       val count = if (tab == ChatTab.Spaces) badge.mentions else maxOf(badge.mentions, badge.unread)
@@ -292,6 +296,20 @@ private fun ChatTabs(selected: ChatTab, conversations: List<ConversationItem>, o
           }
         },
       )
+    }
+  }
+}
+
+/** Unread / People / Groups; pressing the selected chip again shows everything. */
+@Composable
+private fun HomeChips(selected: HomeFilter, onSelect: (HomeFilter) -> Unit) {
+  Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    for ((chip, label) in listOf(
+      HomeFilter.Unread to R.string.home_filter_unread,
+      HomeFilter.People to R.string.home_filter_people,
+      HomeFilter.Groups to R.string.home_filter_groups,
+    )) {
+      FilterChip(selected = chip == selected, onClick = { onSelect(chip) }, label = { Text(stringResource(label)) })
     }
   }
 }

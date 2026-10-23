@@ -22,11 +22,11 @@ use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::calls_view::CallsView;
 use crate::components::channel_view::ChannelView;
-use crate::components::direct_messages::{DirectMessagesHome, DirectSidebar, NewMessageDialog};
 use crate::components::directory_view::DirectoryView;
 use crate::components::file_views::{FilesPanel, Gallery};
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
+use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::login::SessionGate;
@@ -167,8 +167,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
           <SpaceRail />
-          <Show when=move || state.rail.get() == RailEntry::DirectMessages fallback=|| view! { <Sidebar /> }>
-            <DirectSidebar />
+          <Show when=move || state.rail.get() == RailEntry::Home fallback=|| view! { <Sidebar /> }>
+            <HomeSidebar />
           </Show>
         </Show>
         <main id="main-content" class="main" tabindex="-1">
@@ -183,7 +183,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Calls => view! { <CallsView /> }.into_any(),
             MainView::Directory => view! { <DirectoryView /> }.into_any(),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
-            MainView::DirectMessages => view! { <DirectMessagesHome /> }.into_any(),
+            MainView::Home => view! { <HomeStart /> }.into_any(),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>

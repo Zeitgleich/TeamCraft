@@ -1,53 +1,46 @@
-//! The direct messages page. DMs and group DMs live outside spaces (PLAN.md, ARCHITECTURE.md:
+//! Home. DMs and group DMs live outside spaces (PLAN.md, ARCHITECTURE.md:
 //! `conversations.space_id` is null for them), so they get their own entry on the space rail and
 //! their own sidebar, as in Element or Discord: newest first, with a filter and "new message".
 
 use leptos::prelude::*;
 
-use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::sidebar::shortcut_label;
 use crate::i18n::use_i18n;
-use crate::model::{Conversation, ConversationKind, PresenceStatus, User, UserId};
+use crate::model::{Conversation, ConversationKind, User, UserId};
 use crate::prefs::DmSort;
-use crate::sections::{DirectList, DirectSectionKind, build_direct};
+use crate::sections::{DirectList, DirectSectionKind, HomeFilter, build_direct};
 use crate::state::{MainView, Overlay, use_app_state};
 
 /// Display limits offered for the list ("0" shows all).
 const LIMIT_OPTIONS: [u32; 4] = [0, 5, 10, 20];
 
-/// The sidebar of the direct messages page.
+/// The sidebar of Home.
 #[component]
-pub fn DirectSidebar() -> impl IntoView {
+pub fn HomeSidebar() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let filter = RwSignal::new(String::new());
   let show_all = RwSignal::new(false);
   let show_options = RwSignal::new(false);
+  let chip = RwSignal::new(HomeFilter::All);
   let list = Memo::new(move |_| {
     let (sort, limit) = state
       .settings
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
     let limit = if show_all.get() { 0 } else { limit };
-    build_direct(state.direct_entries(), sort, limit, &filter.get())
+    build_direct(state.direct_entries(), sort, limit, &filter.get(), chip.get())
   });
   let has_any = Memo::new(move |_| state.read(|backend| !backend.direct_conversations().is_empty()));
 
   view! {
-    <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("dm-page-label")>
+    <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("home-title")>
       <div class="sidebar-head">
-        <h2 class="space-name">{move || i18n.t("sidebar-direct-messages")}</h2>
-        <button
-          class="icon-btn"
-          aria-label=move || i18n.t("dm-new")
-          title=move || i18n.t("dm-new")
-          on:click=move |_| state.overlay.set(Overlay::NewMessage)
-        >
-          <Icon name=IconName::Compose />
-        </button>
+        <h2 class="space-name">{move || i18n.t("home-title")}</h2>
         <button
           class="icon-btn"
           aria-label=move || i18n.t("dm-options")
@@ -56,7 +49,15 @@ pub fn DirectSidebar() -> impl IntoView {
           aria-controls="dm-options"
           on:click=move |_| show_options.update(|shown| *shown = !*shown)
         >
-          <Icon name=IconName::Sliders />
+          <Icon name=IconName::More />
+        </button>
+        <button
+          class="icon-btn"
+          aria-label=move || i18n.t("dm-new")
+          title=move || i18n.t("dm-new")
+          on:click=move |_| state.overlay.set(Overlay::NewMessage)
+        >
+          <Icon name=IconName::Compose />
         </button>
       </div>
       <Show when=move || show_options.get() fallback=|| ()>
@@ -67,6 +68,26 @@ pub fn DirectSidebar() -> impl IntoView {
         <span class="jump-label">{move || i18n.t("sidebar-jump")}</span>
         <kbd>{shortcut_label("K")}</kbd>
       </button>
+      <div class="home-chips" role="group" aria-label=move || i18n.t("home-filters")>
+        {HomeFilter::CHIPS
+          .into_iter()
+          .map(|kind| {
+            view! {
+              <button
+                type="button"
+                class="home-chip"
+                aria-pressed=move || (chip.get() == kind).to_string()
+                on:click=move |_| chip.update(|current| {
+                  // Pressing the selected chip again shows everything.
+                  *current = if *current == kind { HomeFilter::All } else { kind };
+                })
+              >
+                {move || i18n.t(kind.label_key())}
+              </button>
+            }
+          })
+          .collect_view()}
+      </div>
       <div class="dm-filter">
         <label class="visually-hidden" for="dm-filter">{move || i18n.t("dm-filter")}</label>
         <input
@@ -201,7 +222,8 @@ fn section_slug(kind: DirectSectionKind) -> &'static str {
   }
 }
 
-/// One DM or group DM: presence (or the group icon), name, status and unread count.
+/// One DM or group DM: avatar with presence (or the group icon), name, bot marker, status and
+/// unread count; bold while unread.
 #[component]
 fn DirectItem(conversation: Conversation) -> impl IntoView {
   let state = use_app_state();
@@ -226,19 +248,24 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
     })
     .flatten();
   let leading = match maybe_other {
-    Some(other) => {
-      // Presence arrives later than the row is built, so it is read reactively.
-      let presence = move || {
-        state
-          .read(|backend| backend.user(other))
-          .map_or(PresenceStatus::Offline, |user| user.presence)
-      };
-      view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence() /> }}</span> }.into_any()
+    // Presence arrives later than the row is built, so the avatar is read reactively.
+    Some(other) => view! {
+      <span class="home-avatar">
+        {move || {
+          state
+            .read(|backend| backend.user(other))
+            .map(|user| view! { <Avatar user=user size=AvatarSize::Small show_presence=true /> })
+        }}
+      </span>
+    }
+    .into_any(),
+    None => {
+      view! { <span class="home-avatar home-avatar-group"><Icon name=IconName::Users /></span> }.into_any()
     },
-    None => view! { <Icon name=IconName::Users /> }.into_any(),
   };
-  let status_emoji = maybe_other
-    .and_then(|other| state.read(|backend| backend.user(other)))
+  let maybe_other_user = maybe_other.and_then(|other| state.read(|backend| backend.user(other)));
+  let is_bot = maybe_other_user.as_ref().is_some_and(|user| user.is_bot);
+  let status_emoji = maybe_other_user
     .and_then(|user| user.maybe_custom_status)
     .map(|status| status.emoji);
   let name = conversation.name.clone();
@@ -267,6 +294,7 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
     >
       {leading}
       <span class="sb-name" translate="no">{name}</span>
+      {is_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
       {status_emoji.map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
       {move || {
         maybe_other
@@ -293,15 +321,15 @@ fn DirectEmpty() -> impl IntoView {
   }
 }
 
-/// The main column of the direct messages page while no conversation is open.
+/// The main column of Home while no conversation is open.
 #[component]
-pub fn DirectMessagesHome() -> impl IntoView {
+pub fn HomeStart() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   view! {
     <section class="dm-home" aria-labelledby="dm-home-title">
-      <Icon name=IconName::Chats class="dm-home-icon" />
-      <h1 id="dm-home-title">{move || i18n.t("sidebar-direct-messages")}</h1>
+      <Icon name=IconName::Home class="dm-home-icon" />
+      <h1 id="dm-home-title">{move || i18n.t("home-title")}</h1>
       <p>{move || i18n.t("dm-home-hint")}</p>
       <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
         {move || i18n.t("dm-new")}
@@ -456,7 +484,7 @@ fn people_matching(mut users: Vec<User>, filter: &str) -> Vec<User> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::id_from_raw;
+  use crate::model::{PresenceStatus, id_from_raw};
 
   #[test]
   fn keys_built_from_options_exist() {

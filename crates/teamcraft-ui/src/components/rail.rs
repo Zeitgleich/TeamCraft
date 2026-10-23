@@ -22,7 +22,7 @@ pub fn SpaceRail() -> impl IntoView {
 
   view! {
     <nav class="space-rail" aria-label=move || i18n.t("rail-label")>
-      <DirectMessagesButton />
+      <HomeButton />
       <span class="rail-divider" aria-hidden="true"></span>
       <ul>
         {move || {
@@ -49,19 +49,19 @@ pub fn SpaceRail() -> impl IntoView {
   }
 }
 
-/// The direct messages page, with the number of unread DMs and mentions in them.
+/// Home (the DMs), with the number of unread DMs and mentions in them.
 #[component]
-fn DirectMessagesButton() -> impl IntoView {
+fn HomeButton() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let count = Memo::new(move |_| {
     let list = state.with_mutes(state.read(|backend| backend.direct_conversations()));
     badge_count(&list)
   });
-  let is_current = move || state.rail.get() == RailEntry::DirectMessages;
+  let is_current = move || state.rail.get() == RailEntry::Home;
   let label = move || match count.get() {
-    0 => i18n.t("sidebar-direct-messages"),
-    unread => i18n.t_with("rail-dm-unread", &[("count", &unread.to_string())]),
+    0 => i18n.t("home-title"),
+    unread => i18n.t_with("rail-home-unread", &[("count", &unread.to_string())]),
   };
   view! {
     <button
@@ -70,9 +70,9 @@ fn DirectMessagesButton() -> impl IntoView {
       aria-label=label
       title=label
       aria-current=move || is_current().then_some("true")
-      on:click=move |_| state.open_direct_messages()
+      on:click=move |_| state.open_home()
     >
-      <Icon name=IconName::Chats />
+      <Icon name=IconName::Home />
       {move || {
         let unread = count.get();
         (unread > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{unread}</span> })
@@ -81,7 +81,7 @@ fn DirectMessagesButton() -> impl IntoView {
   }
 }
 
-/// In the grouped sidebar: back from the direct messages to the channels of every space.
+/// In the grouped sidebar: back from Home to the channels of every space.
 #[component]
 fn AllSpacesButton() -> impl IntoView {
   let state = use_app_state();
