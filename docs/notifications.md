@@ -170,6 +170,36 @@ The device checks again (`teamcraft_core::push_guard`): a message shown before i
 (urgent repeats are), a conversation muted or DND active on the device keeps the push silent, and the
 diagnostics record when the last push arrived and how long it took.
 
+### Clients
+
+**Attention (desktop and web).** `teamcraft_ui::attention` decides: window focused, page visible,
+in-app input within the device setting `notifications.attention_input_secs` (default 120 s), OS idle
+below it, screen not locked. Sessions report every change, repeat it every 30 s while attentive, send
+`false` on page hide (best effort; the lease covers a lost frame) and repeat their last report after
+a reconnect.
+
+| Platform | OS idle                              | Screen lock                                    | Withdraw notifications read elsewhere    |
+|----------|--------------------------------------|------------------------------------------------|------------------------------------------|
+| Linux    | GNOME idle monitor, else ScreenSaver | logind `LockedHint`, ScreenSaver `GetActive`   | yes (freedesktop notification service)   |
+| macOS    | Core Graphics event source           | not read; locking takes focus from the window  | no: they stay until dismissed            |
+| Windows  | `GetLastInputInfo`                   | not read; locking takes focus from the window  | no: they stay until dismissed            |
+| Web      | none (in-app input only)             | none                                           | yes (page and service worker, by tag)    |
+
+Desktop and web withdraw their own notifications by conversation tag when a conversation becomes read
+or is opened, also service-worker notifications still on screen when the page loads.
+
+**DND editing.** The allow list and the urgent setting are stored even with the schedule off (a
+schedule without windows), so they apply to manual DND. Quick DND (1 h, tomorrow 08:00, custom) is
+presence `until`. Every client checks DND again at the device's own UTC offset.
+
+**iOS.** `call` arrives as a mutable alert through the notification service extension; without the
+filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with
+it the extension hands it to CallKit (`NSE_NOTIFICATION_FILTERING` in `Base.xcconfig`, together with
+`NSE_ENTITLEMENTS`). Without the entitlement iOS can't drop a notification, so muted, DND and duplicate
+pushes are shown passively (no sound, no banner). While the app is in the foreground it holds the store
+and opens pushes itself (`willPresent`). A `dismiss` without a thread removes only top-level
+notifications. The PushKit path is ready for when a VoIP token is registered.
+
 ### Diagnostics API
 
 - `POST /api/v1/devices/{id}/push/test`: sends a `test` wake-up to one of the caller's own devices and
