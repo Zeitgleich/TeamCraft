@@ -10,6 +10,7 @@
     "core:event:allow-unlisten",
     "allow-auth-restore",
     "allow-auth-login",
+    "allow-auth-login-local",
     "allow-auth-cancel",
     "allow-auth-logout",
     "allow-api-get",

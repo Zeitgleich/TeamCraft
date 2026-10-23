@@ -5,7 +5,9 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::GetMeResponse;
+use teamcraft_client_api::sign_in_page::SignInPage;
+use teamcraft_proto::{GetMeResponse, SignInMethod};
+use wasm_bindgen::JsCast;
 
 use crate::auth::tauri::{self, ServerCheck, ServerProblem};
 use crate::auth::{self, AppConfig};
@@ -26,6 +28,7 @@ use crate::remote_calls::RemoteCalls;
 use crate::server_backend::{LoadError, RestChat};
 use crate::session::{LocalSignInProblem, LoginProblem, SessionControl, SessionState};
 use crate::settings::Settings;
+use crate::sign_in_page::{SignInBlock, SignInPageState, blocks};
 use teamcraft_client_api::remote::{CoreStatus, LinkStatus};
 
 /// Shows the right screen for the sign-in state and the chat shell once the user is in.
@@ -73,6 +76,8 @@ pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
       .collect::<Vec<_>>()
     })
   };
+  // Effects run after the first render, when the screen's controls exist.
+  Effect::new(move |_| focus_autofocus());
   view! {
     <main class="auth-page">
       <BundleBanner />
@@ -102,7 +107,10 @@ pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
             .map(|text| view! { <p class="auth-brand-text muted-text">{text}</p> })
         }}
         {children()}
-        <p class="auth-foot muted-text small">{move || i18n.t("login-footer")}</p>
+        <p class="auth-foot muted-text small">
+          <Icon name=IconName::Lock />
+          <span>{move || i18n.t("login-footer")}</span>
+        </p>
         {move || {
           brand
             .with(|view| view.maybe_organization_name.clone())
@@ -157,6 +165,13 @@ fn SigningInScreen(control: SessionControl) -> impl IntoView {
 #[component]
 fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl IntoView {
   let i18n = use_i18n();
+  control.local_error.set(None);
+  let server_url = control
+    .server
+    .get_untracked()
+    .map_or_else(|| AppConfig::load().server_url, |server| server.origin);
+  let sign_in = SignInPageState::load(server_url);
+  let form = LocalForm::new();
   let is_role_problem = problem == Some(LoginProblem::NoTeamcraftRole);
   let detail = match &problem {
     Some(LoginProblem::Failed(text) | LoginProblem::CoreFailed(text)) => Some(text.clone()),
@@ -172,11 +187,12 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     Some(LoginProblem::CoreFailed(_)) => (Some("login-core-failed-title"), Some("login-core-failed-body")),
     None => (None, None),
   };
+  let subtitle = move || i18n.t(sign_in.page.with(subtitle_key));
 
   view! {
     <AuthFrame>
       <h1>{move || i18n.t("login-title")}</h1>
-      <p class="muted-text">{move || i18n.t("login-subtitle")}</p>
+      <p class="auth-subtitle muted-text">{subtitle}</p>
       {title_key
         .zip(body_key)
         .map(|(title, body)| {
@@ -191,30 +207,339 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
             </div>
           }
         })}
-      <div class="auth-actions">
-        {if is_role_problem {
-          view! {
+      {if is_role_problem {
+        view! {
+          <div class="auth-actions">
             <button class="btn btn-primary" data-autofocus on:click=move |_| control.sign_out()>
               {move || i18n.t("login-use-other-account")}
             </button>
-          }
-          .into_any()
-        } else {
-          view! {
-            <button class="btn btn-primary" data-autofocus on:click=move |_| control.sign_in()>
-              {move || i18n.t("login-sign-in")}
-            </button>
-          }
-          .into_any()
-        }}
-      </div>
-      <Show when=|| !tauri::is_available() fallback=|| ()>
-        <LocalSignIn control=control />
-      </Show>
+          </div>
+        }
+        .into_any()
+      } else {
+        view! { <SignInMethods state=sign_in control=control form=form /> }.into_any()
+      }}
+      <SignInHelp page=sign_in.page />
       <ServerLine control=control />
       {demo_switch()}
     </AuthFrame>
   }
+}
+
+/// The subtitle under "Sign in", by what the page offers.
+fn subtitle_key(page: &SignInPage) -> &'static str {
+  match (page.offers(&SignInMethod::Sso), page.offers(&SignInMethod::Local)) {
+    (true, true) => "login-subtitle-choice",
+    (false, true) => "login-subtitle-local",
+    _ => "login-subtitle",
+  }
+}
+
+/// The ways to sign in, in the server's order, with "or" between them. The first one's control has
+/// the focus.
+#[component]
+fn SignInMethods(state: SignInPageState, control: SessionControl, form: LocalForm) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_desktop = tauri::is_available();
+  let parts = Memo::new(move |_| state.page.with(|page| blocks(page, is_desktop)));
+  Effect::new(move |_| {
+    parts.track();
+    focus_autofocus();
+  });
+  view! {
+    <div class="auth-methods" aria-busy=move || state.is_loading.get().to_string()>
+      {move || {
+        parts
+          .get()
+          .into_iter()
+          .enumerate()
+          .map(|(index, part)| {
+            let is_first = index == 0;
+            match part {
+              SignInBlock::Sso { label, maybe_icon_url } => {
+                view! { <SsoButton label=label maybe_icon_url=maybe_icon_url is_first=is_first control=control /> }.into_any()
+              },
+              SignInBlock::Local { requires_code } => {
+                view! { <LocalSignInForm requires_code=requires_code is_first=is_first control=control form=form /> }.into_any()
+              },
+              SignInBlock::Divider => {
+                view! {
+                  <p class="auth-divider">
+                    <span>{move || i18n.t("login-or")}</span>
+                  </p>
+                }
+                .into_any()
+              },
+            }
+          })
+          .collect_view()
+      }}
+    </div>
+  }
+}
+
+/// "Sign in with {provider}": the identity provider, in the system browser on desktop.
+#[component]
+fn SsoButton(
+  label: String,
+  maybe_icon_url: Option<String>,
+  is_first: bool,
+  control: SessionControl,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let text = move || i18n.t_with("login-sso", &[("provider", &label)]);
+  view! {
+    <button
+      type="button"
+      class="btn btn-primary auth-sso"
+      data-autofocus=is_first
+      on:click=move |_| control.sign_in()
+    >
+      {maybe_icon_url.map(|url| {
+        view! {
+          <img
+            class="auth-sso-icon"
+            src=url
+            alt=""
+            on:error=|ev| {
+              // A missing icon leaves the label alone instead of a broken image.
+              if let Some(image) = ev.target().and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok()) {
+                drop(image.style().set_property("display", "none"));
+              }
+            }
+          />
+        }
+      })}
+      <span>{text}</span>
+    </button>
+  }
+}
+
+/// What the user typed into the local sign-in form; owned by the screen, so a reload of the
+/// server's page settings keeps it.
+#[derive(Clone, Copy)]
+struct LocalForm {
+  login: RwSignal<String>,
+  password: RwSignal<String>,
+  code: RwSignal<String>,
+  is_revealed: RwSignal<bool>,
+}
+
+impl LocalForm {
+  fn new() -> Self {
+    Self {
+      login: RwSignal::new(String::new()),
+      password: RwSignal::new(String::new()),
+      code: RwSignal::new(String::new()),
+      is_revealed: RwSignal::new(false),
+    }
+  }
+}
+
+/// Sign-in with e-mail, password and the one-time code of the authenticator app. The code field is
+/// always there: the server answers a missing code like a wrong password, so the form can't ask
+/// for it afterwards.
+#[component]
+fn LocalSignInForm(
+  requires_code: bool,
+  is_first: bool,
+  control: SessionControl,
+  form: LocalForm,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_busy = move || control.is_local_signing_in.get();
+  let submit = move |ev: web_sys::SubmitEvent| {
+    ev.prevent_default();
+    if control.is_local_signing_in.get_untracked() {
+      return;
+    }
+    let code = normalize_code(&form.code.get_untracked());
+    control.sign_in_local(
+      form.login.get_untracked().trim().to_owned(),
+      form.password.get_untracked(),
+      (!code.is_empty()).then_some(code),
+    );
+  };
+  // A refused code is spent; the next attempt needs the current one.
+  Effect::new(move |_| {
+    if control.local_error.get() == Some(LocalSignInProblem::Refused) {
+      form.code.set(String::new());
+    }
+  });
+  let has_error = move || control.local_error.with(Option::is_some);
+  let reveal_icon = Signal::derive(move || {
+    if form.is_revealed.get() {
+      IconName::EyeOff
+    } else {
+      IconName::Eye
+    }
+  });
+  view! {
+    <form class="auth-local" on:submit=submit aria-describedby=move || has_error().then_some("local-error")>
+      <div class="field">
+        <label for="local-login">{move || i18n.t("login-local-email")}</label>
+        <input
+          id="local-login"
+          class="input"
+          type="email"
+          name="username"
+          inputmode="email"
+          autocomplete="username"
+          autocapitalize="off"
+          spellcheck="false"
+          required
+          data-autofocus=is_first
+          prop:value=move || form.login.get()
+          on:input=move |ev| form.login.set(event_target_value(&ev))
+        />
+      </div>
+      <div class="field">
+        <label for="local-password">{move || i18n.t("login-local-password")}</label>
+        <div class="auth-password">
+          <input
+            id="local-password"
+            class="input"
+            type=move || if form.is_revealed.get() { "text" } else { "password" }
+            name="password"
+            autocomplete="current-password"
+            autocapitalize="off"
+            spellcheck="false"
+            required
+            prop:value=move || form.password.get()
+            on:input=move |ev| form.password.set(event_target_value(&ev))
+          />
+          <button
+            type="button"
+            class="auth-reveal"
+            aria-label=move || i18n.t("login-local-show-password")
+            title=move || i18n.t("login-local-show-password")
+            aria-pressed=move || form.is_revealed.get().to_string()
+            aria-controls="local-password"
+            on:click=move |_| form.is_revealed.update(|is_revealed| *is_revealed = !*is_revealed)
+          >
+            <Icon name=reveal_icon />
+          </button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="local-code">
+          {move || if requires_code { i18n.t("login-local-code") } else { i18n.t("login-local-code-optional") }}
+        </label>
+        <input
+          id="local-code"
+          class="input auth-code"
+          type="text"
+          name="one-time-code"
+          inputmode="numeric"
+          autocomplete="one-time-code"
+          autocapitalize="off"
+          spellcheck="false"
+          maxlength="10"
+          required=requires_code
+          aria-describedby="local-code-hint"
+          prop:value=move || form.code.get()
+          on:input=move |ev| form.code.set(event_target_value(&ev))
+        />
+        <p id="local-code-hint" class="muted-text small">{move || i18n.t("login-local-code-hint")}</p>
+      </div>
+      {move || {
+        control
+          .local_error
+          .get()
+          .map(|problem| {
+            let (key, maybe_detail) = local_problem_message(&problem);
+            view! {
+              <p id="local-error" class="auth-error" role="alert">
+                <Icon name=IconName::Alert />
+                <span>
+                  {move || i18n.t(key)}
+                  {maybe_detail.map(|detail| view! { <span class="small mono" translate="no">{detail}</span> })}
+                </span>
+              </p>
+            }
+          })
+      }}
+      <button
+        type="submit"
+        class="btn auth-submit"
+        class:btn-primary=is_first
+        prop:disabled=is_busy
+        aria-busy=move || is_busy().to_string()
+      >
+        <Show when=is_busy fallback=|| ()>
+          <span class="spinner" aria-hidden="true"></span>
+        </Show>
+        <span>{move || if is_busy() { i18n.t("login-local-working") } else { i18n.t("login-local-submit") }}</span>
+      </button>
+    </form>
+  }
+}
+
+/// The message of a local sign-in problem and, for unexpected failures, a details line.
+fn local_problem_message(problem: &LocalSignInProblem) -> (&'static str, Option<String>) {
+  match problem {
+    LocalSignInProblem::Refused => ("login-local-refused", None),
+    LocalSignInProblem::Disabled => ("login-local-disabled", None),
+    LocalSignInProblem::RateLimited => ("login-local-rate-limited", None),
+    LocalSignInProblem::Network => ("login-local-network", None),
+    LocalSignInProblem::Failed(detail) => ("login-local-failed", Some(detail.clone())),
+  }
+}
+
+/// "123 456" and "123-456" as authenticator apps show them: digits only.
+fn normalize_code(typed: &str) -> String {
+  typed
+    .chars()
+    .filter(|ch| !ch.is_whitespace() && *ch != '-')
+    .collect()
+}
+
+/// The server's help below the form: a text and a link to its help page.
+#[component]
+fn SignInHelp(page: Memo<SignInPage>) -> impl IntoView {
+  let i18n = use_i18n();
+  move || {
+    let (maybe_text, maybe_link) =
+      page.with(|page| (page.maybe_help_text.clone(), page.maybe_help_link.clone()));
+    (maybe_text.is_some() || maybe_link.is_some()).then(|| {
+      view! {
+        <div class="auth-help small">
+          {maybe_text.map(|text| view! { <p class="auth-help-text">{text}</p> })}
+          {maybe_link.map(|link| {
+            view! {
+              <a href=link target="_blank" rel="noopener noreferrer">
+                {move || i18n.t("login-help-link")}
+              </a>
+            }
+          })}
+        </div>
+      }
+    })
+  }
+}
+
+/// Focuses the control marked `data-autofocus` on the auth card, unless the user is already in a
+/// control (a late reload of the page settings must not steal the focus).
+fn focus_autofocus() {
+  request_animation_frame(|| {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+      return;
+    };
+    let is_idle = document
+      .active_element()
+      .is_none_or(|active| active.tag_name().eq_ignore_ascii_case("body"));
+    if !is_idle {
+      return;
+    }
+    if let Some(target) = document
+      .query_selector(".auth-card [data-autofocus]")
+      .ok()
+      .flatten()
+      .and_then(|found| found.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+      drop(target.focus());
+    }
+  });
 }
 
 /// Desktop: which server the sign-in is for, and the way to another one.
@@ -760,51 +1085,48 @@ fn default_device_name(i18n: crate::i18n::I18n) -> String {
   }
 }
 
-/// Sign-in for local accounts: guests who have no account at the identity provider.
-#[component]
-fn LocalSignIn(control: SessionControl) -> impl IntoView {
-  let i18n = use_i18n();
-  let is_open = RwSignal::new(false);
-  let login = RwSignal::new(String::new());
-  let password = RwSignal::new(String::new());
-  let code = RwSignal::new(String::new());
-  let submit = move |ev: web_sys::SubmitEvent| {
-    ev.prevent_default();
-    let totp = code.get_untracked();
-    control.sign_in_local(
-      login.get_untracked().trim().to_owned(),
-      password.get_untracked(),
-      (!totp.trim().is_empty()).then(|| totp.trim().to_owned()),
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn the_subtitle_follows_the_offered_methods() {
+    let mut page = SignInPage::sso_only("Example Chat");
+    assert_eq!(subtitle_key(&page), "login-subtitle");
+    page.methods = vec![SignInMethod::Local];
+    assert_eq!(subtitle_key(&page), "login-subtitle-local");
+    page.methods = vec![SignInMethod::Local, SignInMethod::Sso];
+    assert_eq!(subtitle_key(&page), "login-subtitle-choice");
+  }
+
+  #[test]
+  fn local_problems_have_one_message_each_and_details_only_for_failures() {
+    assert_eq!(
+      local_problem_message(&LocalSignInProblem::Refused),
+      ("login-local-refused", None)
     );
-  };
-  view! {
-    <Show
-      when=move || is_open.get()
-      fallback=move || view! { <button class="link-btn" on:click=move |_| is_open.set(true)>{move || i18n.t("login-local-open")}</button> }
-    >
-      <form class="auth-local" on:submit=submit>
-        <h2>{move || i18n.t("login-local-title")}</h2>
-        <label for="local-login">{move || i18n.t("login-local-email")}</label>
-        <input id="local-login" class="input" type="email" autocomplete="username" required data-autofocus prop:value=move || login.get() on:input=move |ev| login.set(event_target_value(&ev)) />
-        <label for="local-password">{move || i18n.t("login-local-password")}</label>
-        <input id="local-password" class="input" type="password" autocomplete="current-password" required prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) />
-        <Show when=move || control.local_error.get() == Some(LocalSignInProblem::CodeRequired) fallback=|| ()>
-          <label for="local-code">{move || i18n.t("login-local-code")}</label>
-          <input id="local-code" class="input" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required prop:value=move || code.get() on:input=move |ev| code.set(event_target_value(&ev)) />
-          <p class="muted-text small">{move || i18n.t("login-local-code-hint")}</p>
-        </Show>
-        {move || {
-          match control.local_error.get() {
-            Some(LocalSignInProblem::Refused) => Some(i18n.t("login-local-refused")),
-            Some(LocalSignInProblem::Failed(detail)) => Some(format!("{} ({detail})", i18n.t("login-local-failed"))),
-            _ => None,
-          }
-          .map(|message| view! { <p class="field-error" role="alert">{message}</p> })
-        }}
-        <button type="submit" class="btn btn-primary" prop:disabled=move || control.is_local_signing_in.get()>
-          {move || i18n.t("login-local-submit")}
-        </button>
-      </form>
-    </Show>
+    assert_eq!(
+      local_problem_message(&LocalSignInProblem::Disabled),
+      ("login-local-disabled", None)
+    );
+    assert_eq!(
+      local_problem_message(&LocalSignInProblem::RateLimited),
+      ("login-local-rate-limited", None)
+    );
+    assert_eq!(
+      local_problem_message(&LocalSignInProblem::Network),
+      ("login-local-network", None)
+    );
+    assert_eq!(
+      local_problem_message(&LocalSignInProblem::Failed("internal".into())),
+      ("login-local-failed", Some("internal".to_owned()))
+    );
+  }
+
+  #[test]
+  fn codes_are_sent_as_digits_only() {
+    assert_eq!(normalize_code(" 123 456 "), "123456");
+    assert_eq!(normalize_code("123-456"), "123456");
+    assert_eq!(normalize_code("   "), "");
   }
 }

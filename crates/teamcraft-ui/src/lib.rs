@@ -54,6 +54,7 @@ pub mod sections;
 pub mod server_backend;
 pub mod session;
 pub mod settings;
+pub mod sign_in_page;
 pub mod slash;
 pub mod state;
 #[cfg(target_arch = "wasm32")]

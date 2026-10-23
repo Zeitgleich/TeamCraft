@@ -147,6 +147,7 @@ fn main() -> anyhow::Result<()> {
     .invoke_handler(tauri::generate_handler![
       auth::commands::auth_restore,
       auth::commands::auth_login,
+      auth::commands::auth_login_local,
       auth::commands::auth_cancel,
       auth::commands::auth_logout,
       auth::commands::api_get,

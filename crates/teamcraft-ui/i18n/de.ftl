@@ -563,7 +563,6 @@ key-mark-verified = Als geprüft markieren
 ## Anmeldung
 login-title = Anmelden
 login-subtitle = Melde dich mit deinem Firmenkonto an.
-login-sign-in = Anmelden
 login-use-demo = Stattdessen Demodaten verwenden
 login-use-other-account = Abmelden und anderes Konto verwenden
 login-brand-links = Über diesen Dienst
@@ -1237,16 +1236,25 @@ history-title = Bearbeitungsverlauf
 history-current = Aktuelle Version
 history-replaced = Ersetzt { $time }
 
-# Local (guest) sign-in
-login-local-open = Mit einem Gastkonto anmelden
-login-local-title = Gastkonto
+# Sign-in card: methods, local accounts (e-mail, password, one-time code), help
 login-local-email = E-Mail-Adresse
 login-local-password = Passwort
-login-local-code = Code deiner Authenticator-App
-login-local-code-hint = Dieses Konto nutzt Zwei-Faktor-Authentifizierung.
-login-local-refused = E-Mail, Passwort oder Code ist falsch.
+login-local-code = Einmalcode
+login-local-code-hint = Der 6-stellige Code aus deiner Authenticator-App.
+login-local-refused = E-Mail-Adresse, Passwort oder Einmalcode ist falsch.
 login-local-failed = Die Anmeldung hat nicht funktioniert
 login-local-submit = Anmelden
+login-sso = Anmelden mit { $provider }
+login-or = oder
+login-subtitle-local = Melde dich mit deiner E-Mail-Adresse und deinem Passwort an.
+login-subtitle-choice = Wähle, wie du dich anmelden möchtest.
+login-local-show-password = Passwort anzeigen
+login-local-code-optional = Einmalcode (falls eingerichtet)
+login-local-disabled = Die Anmeldung mit E-Mail und Passwort ist auf diesem Server nicht verfügbar.
+login-local-rate-limited = Zu viele Versuche. Warte ein paar Minuten und versuche es dann erneut.
+login-local-network = Der Server ist nicht erreichbar. Prüfe deine Verbindung und versuche es dann erneut.
+login-local-working = Anmeldung läuft…
+login-help-link = Hilfe bei der Anmeldung
 
 ## Administration console: permissions, people, announcement, instance
 
@@ -1792,6 +1800,9 @@ admin-brands-slot-icon = App-Symbol
 admin-brands-slot-icon-dark = App-Symbol, dunkles Design
 admin-brands-slot-favicon = Favicon
 admin-brands-slot-favicon-dark = Favicon, dunkles Design
+admin-brands-slot-sso-icon = Symbol des Anmeldeanbieters
+admin-brands-sso-label = Anmeldeanbieter
+admin-brands-sso-label-hint = Steht auf der Anmeldeschaltfläche als „Anmelden mit …“, z. B. Microsoft. Leer: der Anzeigename.
 admin-brands-image-set = Bild gesetzt
 admin-brands-image-none = Kein Bild
 admin-brands-image-delete = Entfernen
@@ -1822,7 +1833,17 @@ settings-group-limits-hint = Größen und Anzahlen, die Personen bemerken.
 settings-group-integration = Integrationen
 settings-group-integration-hint = Aufbewahrung von Integrationskanälen. 0 behält alles.
 settings-group-local_accounts = Lokale Konten
-settings-group-local_accounts-hint = Regeln für Passwortkonten. Ob es sie gibt, bleibt in der Konfigurationsdatei.
+settings-group-local_accounts-hint = Regeln für Passwortkonten. Sie brauchen ein Sitzungsgeheimnis in der Konfigurationsdatei; hier schaltest du sie aus und ein.
+settings-group-sign_in_page = Anmeldeseite
+settings-group-sign_in_page-hint = Was die Anmeldeseite im Web und in den Apps anbietet. Anbietername und Symbol der SSO-Schaltfläche sind Marken-Einstellungen.
+settings-f-methods = Anmeldearten
+settings-methods-sso-local = Zuerst SSO, dann E-Mail und Passwort
+settings-methods-local-sso = Zuerst E-Mail und Passwort, dann SSO
+settings-methods-sso = Nur SSO
+settings-methods-local = Nur E-Mail und Passwort
+settings-f-help_text-en = Hilfetext (Englisch)
+settings-f-help_text-de = Hilfetext (Deutsch)
+settings-f-help_link = Hilfeseite
 settings-group-mail_texts = Einladungs- und Aktivierungsmail
 settings-group-mail_texts-hint = Texte der eigenen Mails des Servers. Platzhalter: inviter, space, role, url.
 settings-group-meeting_mail = Besprechungsmails
