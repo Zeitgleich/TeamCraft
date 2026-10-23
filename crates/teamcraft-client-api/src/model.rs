@@ -150,6 +150,15 @@ pub struct Space {
   pub mention_count: u32,
 }
 
+/// An open space the user is not in yet and may join.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinableSpace {
+  pub id: SpaceId,
+  pub name: String,
+  #[serde(default)]
+  pub maybe_description: Option<String>,
+}
+
 /// What kind of conversation a sidebar entry is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConversationKind {

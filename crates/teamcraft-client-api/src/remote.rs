@@ -451,6 +451,9 @@ pub enum ChatAction {
   JoinChannel {
     conversation: ConversationId,
   },
+  JoinSpace {
+    space: SpaceId,
+  },
   LeaveChannel {
     conversation: ConversationId,
   },
@@ -602,6 +605,7 @@ impl ChatAction {
         changes,
       } => backend.update_channel(conversation, changes),
       Self::JoinChannel { conversation } => backend.join_channel(conversation),
+      Self::JoinSpace { space } => backend.join_space(space),
       Self::LeaveChannel { conversation } => backend.leave_channel(conversation),
       Self::CreateCategory { space, name } => backend.create_category(space, &name),
       Self::RenameCategory {
@@ -669,6 +673,7 @@ pub enum ChatQuery {
   BrowseChannels {
     space: SpaceId,
   },
+  JoinableSpaces,
   Categories {
     space: SpaceId,
   },
@@ -711,30 +716,81 @@ pub enum ChatQuery {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum ChatAnswer {
-  MessageExtras { extras: Vec<MessageExtras> },
-  Messages { messages: Vec<Message> },
-  SavedItems { items: Vec<SavedItem> },
-  BackgroundImages { images: Vec<BackgroundImageInfo> },
-  OrgBackgrounds { backgrounds: OrgBackgrounds },
-  Link { maybe_link: Option<String> },
-  PermalinkTarget { maybe_target: Option<PermalinkTarget> },
-  Message { maybe_message: Option<MessageId> },
-  Draft { maybe_body: Option<String> },
-  Files { files: Vec<FileInfo> },
-  ShareLinks { links: Vec<ShareLink> },
-  Bytes { maybe_bytes: Option<u64> },
-  Channels { channels: Vec<BrowsableChannel> },
-  Categories { categories: Vec<CategoryInfo> },
-  SearchResults { results: SearchResults },
-  SearchHits { hits: Vec<SearchHit> },
-  SavedSearches { searches: Vec<SavedSearch> },
-  Flag { value: bool },
-  Threads { threads: Vec<ThreadSummary> },
-  Users { users: Vec<UserId> },
-  Activity { feed: ActivityFeed },
-  LastSeen { maybe_at: Option<TimestampMs> },
-  Privacy { settings: PrivacySettings },
-  CallHistory { calls: Vec<CallHistoryItem> },
+  MessageExtras {
+    extras: Vec<MessageExtras>,
+  },
+  Messages {
+    messages: Vec<Message>,
+  },
+  SavedItems {
+    items: Vec<SavedItem>,
+  },
+  BackgroundImages {
+    images: Vec<BackgroundImageInfo>,
+  },
+  OrgBackgrounds {
+    backgrounds: OrgBackgrounds,
+  },
+  Link {
+    maybe_link: Option<String>,
+  },
+  PermalinkTarget {
+    maybe_target: Option<PermalinkTarget>,
+  },
+  Message {
+    maybe_message: Option<MessageId>,
+  },
+  Draft {
+    maybe_body: Option<String>,
+  },
+  Files {
+    files: Vec<FileInfo>,
+  },
+  ShareLinks {
+    links: Vec<ShareLink>,
+  },
+  Bytes {
+    maybe_bytes: Option<u64>,
+  },
+  Channels {
+    channels: Vec<BrowsableChannel>,
+  },
+  JoinableSpaces {
+    spaces: Vec<crate::model::JoinableSpace>,
+  },
+  Categories {
+    categories: Vec<CategoryInfo>,
+  },
+  SearchResults {
+    results: SearchResults,
+  },
+  SearchHits {
+    hits: Vec<SearchHit>,
+  },
+  SavedSearches {
+    searches: Vec<SavedSearch>,
+  },
+  Flag {
+    value: bool,
+  },
+  Threads {
+    threads: Vec<ThreadSummary>,
+  },
+  Users {
+    users: Vec<UserId>,
+  },
+  Activity {
+    feed: ActivityFeed,
+  },
+  LastSeen {
+    maybe_at: Option<TimestampMs>,
+  },
+  Privacy {
+    settings: PrivacySettings,
+  },
+  CallHistory {
+    calls: Vec<CallHistoryItem>,
+  },
   Unsupported,
 }
 
@@ -792,6 +848,9 @@ impl ChatQuery {
       },
       Self::BrowseChannels { space } => ChatAnswer::Channels {
         channels: backend.browse_channels(space),
+      },
+      Self::JoinableSpaces => ChatAnswer::JoinableSpaces {
+        spaces: backend.joinable_spaces(),
       },
       Self::Categories { space } => ChatAnswer::Categories {
         categories: backend.categories(space),

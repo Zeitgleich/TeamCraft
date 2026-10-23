@@ -18,6 +18,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
     self.sync_workspace().await?;
     self.refresh_spaces().await?;
+    self.refresh_own_summary().await;
     let conversations = self.api.list_conversations().await?.conversations;
     let known: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
     for stale in known
@@ -115,6 +116,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )
       .await?;
     Ok(())
+  }
+
+  /// The user's own name and kind. Other people's summaries come with the member lists, but someone
+  /// who is in no conversation yet would otherwise have no name in the app.
+  pub(crate) async fn refresh_own_summary(&mut self) {
+    let me = self.user_id();
+    let key = me.to_string();
+    match records::get_json::<UserSummary>(&self.store, Table::Users, &key) {
+      Ok(Some(_)) => return,
+      Ok(None) => {},
+      Err(error) => {
+        tracing::debug!(%error, "could not read the own user summary");
+        return;
+      },
+    }
+    match self.api.user(me).await {
+      Ok(summary) => {
+        if let Err(error) = records::put_json(&self.store, Table::Users, &key, &summary) {
+          tracing::debug!(%error, "could not store the own user summary");
+        }
+      },
+      // Not fatal: the name arrives with the first member list.
+      Err(error) => tracing::debug!(%error, "could not load the own user summary"),
+    }
   }
 
   /// The user's spaces, and their members as the people the user can find and message (a new

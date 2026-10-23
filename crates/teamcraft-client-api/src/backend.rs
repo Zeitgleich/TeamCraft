@@ -253,6 +253,11 @@ pub trait ChatBackend {
     Vec::new()
   }
   fn join_channel(&self, _conversation: ConversationId) {}
+  /// Open spaces of the workspace the user is not in (members only; guests are invited).
+  fn joinable_spaces(&self) -> Vec<crate::model::JoinableSpace> {
+    Vec::new()
+  }
+  fn join_space(&self, _space: SpaceId) {}
   fn leave_channel(&self, _conversation: ConversationId) {}
   fn categories(&self, _space: SpaceId) -> Vec<CategoryInfo> {
     Vec::new()

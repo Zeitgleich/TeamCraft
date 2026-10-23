@@ -290,3 +290,13 @@ fn workspace_events(backend: &impl ChatBackend, conversation: ConversationId) ->
 fn all_messages(backend: &impl ChatBackend, conversation: ConversationId) -> Vec<Message> {
   backend.messages(conversation, 0, backend.message_count(conversation))
 }
+
+#[tokio::test]
+async fn someone_in_no_conversation_still_has_their_name() {
+  let server = FakeServer::new();
+  let mut erin = Peer::enroll(&server, "Erin").await;
+  erin.client.full_sync().await.unwrap();
+
+  let me = backend_of(&erin).me();
+  assert_eq!(me.display_name, "Erin");
+}

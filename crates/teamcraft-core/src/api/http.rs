@@ -453,6 +453,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.send_json(Method::PUT, "/me/key-bag", request).await
   }
 
+  async fn join_space(&self, space: SpaceId) -> Result<SpaceResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/spaces/{space}/join"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
   async fn join_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::POST, &format!("/conversations/{conversation}/join"), None)

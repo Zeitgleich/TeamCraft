@@ -17,7 +17,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, SpaceId, UserId};
-use crate::state::use_app_state;
+use crate::state::{Overlay, use_app_state};
 
 /// How the history choice of a new channel is picked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,14 +84,12 @@ pub fn NewSpaceDialog() -> impl IntoView {
     let Some(name) = non_empty(&name.get_untracked()) else {
       return;
     };
-    state.write(|backend| {
-      backend.create_space(NewSpace {
-        name,
-        maybe_description: non_empty(&description.get_untracked()),
-        is_open: is_open.get_untracked(),
-      })
-    });
     state.close_overlay();
+    state.create_space(NewSpace {
+      name,
+      maybe_description: non_empty(&description.get_untracked()),
+      is_open: is_open.get_untracked(),
+    });
   };
   view! {
     <Dialog title_key="space-new-title" class="modal-small">
@@ -111,6 +109,60 @@ pub fn NewSpaceDialog() -> impl IntoView {
         </footer>
       </form>
     </Dialog>
+  }
+}
+
+/// Open spaces the user can join, and the way to create a new one.
+#[component]
+pub fn JoinSpaceDialog() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <Dialog title_key="space-join-title" class="modal-small">
+      <JoinableSpaceList />
+      <footer class="modal-foot">
+        <button type="button" class="btn" on:click=move |_| state.overlay.set(Overlay::NewSpace)>
+          {move || i18n.t("space-join-create-instead")}
+        </button>
+      </footer>
+    </Dialog>
+  }
+}
+
+/// The open spaces with a Join button each (also on the getting-started page).
+#[component]
+pub fn JoinableSpaceList() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let spaces = Memo::new(move |_| state.read(|backend| backend.joinable_spaces()));
+  view! {
+    <ul class="browse-list">
+      <For each=move || spaces.get() key=|space| space.id let:space>
+        {
+          let (id, name) = (space.id, space.name.clone());
+          view! {
+            <li class="browse-row">
+              <div class="browse-text">
+                <span class="browse-name" translate="no">{space.name.clone()}</span>
+                <span class="browse-topic" translate="no">{space.maybe_description.clone().unwrap_or_default()}</span>
+              </div>
+              <button
+                class="btn btn-small btn-primary"
+                on:click=move |_| {
+                  state.close_overlay();
+                  state.join_space(id, name.clone());
+                }
+              >
+                {move || i18n.t("space-join")}
+              </button>
+            </li>
+          }
+        }
+      </For>
+      <Show when=move || spaces.with(Vec::is_empty) fallback=|| ()>
+        <li class="empty-state">{move || i18n.t("space-join-none")}</li>
+      </Show>
+    </ul>
   }
 }
 
@@ -134,17 +186,15 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
       .parse::<CategoryId>()
       .ok()
       .filter(|_| !category.get_untracked().is_empty());
-    state.write(|backend| {
-      backend.create_channel_with(NewChannel {
-        space,
-        name,
-        is_private: is_private.get_untracked(),
-        maybe_topic: non_empty(&topic.get_untracked()),
-        maybe_category,
-        maybe_history: history.get_untracked().policy(),
-      })
-    });
     state.close_overlay();
+    state.create_channel(NewChannel {
+      space,
+      name,
+      is_private: is_private.get_untracked(),
+      maybe_topic: non_empty(&topic.get_untracked()),
+      maybe_category,
+      maybe_history: history.get_untracked().policy(),
+    });
   };
   view! {
     <Dialog title_key="channel-new-title" class="modal-small">

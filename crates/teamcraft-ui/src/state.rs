@@ -16,6 +16,7 @@ use crate::reactive::get_if_observed;
 use crate::sections::{apply_favorite_order, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
+use teamcraft_client_api::actions::{NewChannel, NewSpace};
 
 /// How many of the newest messages are searched for the first unread one.
 const UNREAD_SCAN_LIMIT: usize = 500;
@@ -51,6 +52,21 @@ pub struct ReplyTarget {
   pub excerpt: String,
 }
 
+/// A space or channel the user just created; it opens as soon as it shows up (the server answers
+/// asynchronously and hands out the ID).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingCreation {
+  Space {
+    name: String,
+    known: Vec<SpaceId>,
+  },
+  Channel {
+    space: SpaceId,
+    name: String,
+    known: Vec<ConversationId>,
+  },
+}
+
 /// Where the unread messages began when a conversation was opened: the feed shows a "New messages"
 /// divider above this message index and starts there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +95,8 @@ pub enum MainView {
   Meetings,
   /// People and user groups.
   Directory,
+  /// First steps for an empty workspace or space: create a space or channel, invite colleagues.
+  GettingStarted,
 }
 
 /// What the right-hand panel shows.
@@ -118,6 +136,8 @@ pub enum Overlay {
   /// Pick a conversation to forward a message to.
   Forward(ConversationId, MessageId),
   NewSpace,
+  /// Open spaces to join, and the way to create a new one.
+  JoinSpace,
   NewChannel(SpaceId),
   BrowseChannels(SpaceId),
   ChannelSettings(ConversationId),
@@ -162,6 +182,11 @@ pub struct AppState {
   pub hidden_conversations: RwSignal<HashSet<ConversationId>>,
   /// A conversation to open as soon as it appears in the lists (after joining it).
   pub pending_open: RwSignal<Option<ConversationId>>,
+  /// A space or channel to open once it was created.
+  pub pending_creation: RwSignal<Option<PendingCreation>>,
+  /// Started on the getting-started page because nothing had loaded yet: the first conversation
+  /// opens once the data arrives.
+  awaits_first_conversation: RwSignal<bool>,
   pub jump_to_latest: RwSignal<u64>,
   /// A request to scroll a conversation's feed to a message index (jump to date).
   pub jump_to_index: RwSignal<Option<(ConversationId, usize)>>,
@@ -181,7 +206,7 @@ impl AppState {
   pub fn new(backend: Rc<dyn Backend>, settings: Settings, start: Option<(SpaceId, ConversationId)>) -> Self {
     let (space, view) = match start {
       Some((space, conversation)) => (space, MainView::Conversation(conversation)),
-      None => (id_from_raw(0), MainView::Threads),
+      None => (id_from_raw(0), MainView::GettingStarted),
     };
     Self {
       backend: StoredValue::new_local(backend),
@@ -200,6 +225,8 @@ impl AppState {
       hidden_messages: RwSignal::new(HashSet::new()),
       hidden_conversations: RwSignal::new(HashSet::new()),
       pending_open: RwSignal::new(None),
+      pending_creation: RwSignal::new(None),
+      awaits_first_conversation: RwSignal::new(start.is_none()),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
       unread_marker: RwSignal::new(None),
@@ -214,6 +241,8 @@ impl AppState {
   /// the desktop shell), so views re-read.
   pub fn backend_changed(&self) {
     self.revision.update(|revision| *revision += 1);
+    self.open_pending_creation();
+    self.open_first_loaded_conversation();
     if let Some(conversation) = self.pending_open.get_untracked()
       && self.read(|backend| backend.conversation(conversation)).is_some()
     {
@@ -225,6 +254,110 @@ impl AppState {
     {
       self.pending_dm.set(None);
       self.open_conversation(conversation);
+    }
+  }
+
+  /// Creates a space and switches to it once it exists.
+  pub fn create_space(&self, space: NewSpace) {
+    let known = self.read(|backend| backend.spaces().into_iter().map(|space| space.id).collect());
+    self.pending_creation.set(Some(PendingCreation::Space {
+      name: space.name.clone(),
+      known,
+    }));
+    self.write(|backend| backend.create_space(space));
+    self.open_pending_creation();
+  }
+
+  /// Joins an open space and switches to it once the server confirmed.
+  pub fn join_space(&self, space: SpaceId, name: String) {
+    let known = self.read(|backend| backend.spaces().into_iter().map(|space| space.id).collect());
+    self
+      .pending_creation
+      .set(Some(PendingCreation::Space { name, known }));
+    self.write(|backend| backend.join_space(space));
+    self.open_pending_creation();
+  }
+
+  /// Creates a channel and opens it once it exists.
+  pub fn create_channel(&self, channel: NewChannel) {
+    let known = self.read(|backend| {
+      backend
+        .space_conversations(channel.space)
+        .into_iter()
+        .map(|conversation| conversation.id)
+        .collect()
+    });
+    self.pending_creation.set(Some(PendingCreation::Channel {
+      space: channel.space,
+      name: channel.name.clone(),
+      known,
+    }));
+    self.write(|backend| backend.create_channel_with(channel));
+    self.open_pending_creation();
+  }
+
+  fn open_first_loaded_conversation(&self) {
+    if !self.awaits_first_conversation.get_untracked()
+      || self.view.get_untracked() != MainView::GettingStarted
+    {
+      return;
+    }
+    let first = self.backend.with_value(|backend| {
+      backend
+        .spaces()
+        .into_iter()
+        .find_map(|space| backend.space_conversations(space.id).into_iter().next())
+        .or_else(|| backend.direct_conversations().into_iter().next())
+    });
+    if let Some(conversation) = first {
+      self.open_conversation(conversation.id);
+    }
+  }
+
+  fn open_pending_creation(&self) {
+    let Some(pending) = self.pending_creation.get_untracked() else {
+      return;
+    };
+    match pending {
+      PendingCreation::Space { name, known } => {
+        let found = self.backend.with_value(|backend| {
+          backend
+            .spaces()
+            .into_iter()
+            .find(|space| space.name == name && !known.contains(&space.id))
+        });
+        if let Some(space) = found {
+          self.pending_creation.set(None);
+          self.space.set(space.id);
+          self.open_first_conversation_of(space.id);
+        }
+      },
+      PendingCreation::Channel { space, name, known } => {
+        let found = self.backend.with_value(|backend| {
+          backend
+            .space_conversations(space)
+            .into_iter()
+            .find(|conversation| conversation.name == name && !known.contains(&conversation.id))
+        });
+        if let Some(conversation) = found {
+          self.pending_creation.set(None);
+          self.open_conversation(conversation.id);
+        }
+      },
+    }
+  }
+
+  /// Opens the first channel of a space, or shows its getting-started page when it has none.
+  pub fn open_first_conversation_of(&self, space: SpaceId) {
+    let first = self
+      .backend
+      .with_value(|backend| backend.space_conversations(space).into_iter().next());
+    match first {
+      Some(conversation) => self.open_conversation(conversation.id),
+      None => {
+        self.view.set(MainView::GettingStarted);
+        self.panel.set(SidePanel::Closed);
+      },
     }
   }
 
@@ -283,11 +416,13 @@ impl AppState {
       | MainView::Saved
       | MainView::Activity
       | MainView::Calls
-      | MainView::Directory => None,
+      | MainView::Directory
+      | MainView::GettingStarted => None,
     }
   }
 
   pub fn open_conversation(&self, id: ConversationId) {
+    self.awaits_first_conversation.set(false);
     let Some(conversation) = self.read(|backend| backend.conversation(id)) else {
       return;
     };

@@ -421,6 +421,14 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.join_channel(conversation);
   }
 
+  fn joinable_spaces(&self) -> Vec<teamcraft_client_api::model::JoinableSpace> {
+    self.chat.joinable_spaces()
+  }
+
+  fn join_space(&self, space: SpaceId) {
+    self.chat.join_space(space);
+  }
+
   fn leave_channel(&self, conversation: ConversationId) {
     self.chat.leave_channel(conversation);
   }

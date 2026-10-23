@@ -4845,3 +4845,90 @@ select.input {
   gap: 6px;
   cursor: pointer;
 }
+
+/* Forms in the workspace dialogs (new space, new channel, settings): one field under the other. */
+.modal-body > form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-body > form > label:not(.check-row) {
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+.modal-body > form > label:first-child {
+  margin-top: 0;
+}
+
+/* ---- Getting started (empty workspace or space) ---- */
+
+.getting-started {
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 0 24px;
+  overflow-y: auto;
+}
+
+.getting-started h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+}
+
+.start-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.start-step {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.start-step:hover {
+  background: var(--surface-2);
+}
+
+.start-step > .icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  color: var(--accent);
+}
+
+.start-step-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* An input with a button beside it (show/hide the passphrase). */
+.input-with-action {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.input-with-action .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.start-heading {
+  margin: 24px 0 8px;
+  font-size: 15px;
+}

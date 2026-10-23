@@ -4,8 +4,8 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::org_badge::OrgBadge;
 use crate::i18n::use_i18n;
-use crate::model::ConversationId;
-use crate::state::{SidePanel, use_app_state};
+use crate::model::{ConversationId, ConversationKind};
+use crate::state::{Overlay, SidePanel, use_app_state};
 
 #[component]
 pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
@@ -24,6 +24,10 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
     })
   });
 
+  // Channels add people in their settings; direct messages start a new group instead.
+  let is_channel = state
+    .read(|backend| backend.conversation(conversation))
+    .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private));
   view! {
     <aside class="side-panel members-panel" aria-label=move || i18n.t("members-panel-label")>
       <header class="panel-header">
@@ -31,6 +35,15 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
           <h2>{move || i18n.t("members-title")}</h2>
           <span class="panel-subtitle">{move || i18n.t_count("members-count", members.get().len())}</span>
         </div>
+        {is_channel.then(|| view! {
+          <button
+            class="btn btn-small"
+            on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))
+          >
+            <Icon name=IconName::Plus />
+            {move || i18n.t("channel-add-people")}
+          </button>
+        })}
         <button
           class="icon-btn"
           aria-label=move || i18n.t("close")

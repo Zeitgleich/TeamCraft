@@ -20,14 +20,14 @@ use teamcraft_client_api::calls::{
   BackgroundImageInfo, OrgBackgroundInfo, OrgBackgroundRule, OrgBackgrounds,
 };
 use teamcraft_client_api::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageKind,
-  PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
-  ThreadSummary, TimestampMs, User, UserId,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinableSpace,
+  Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
+  SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
-  ConversationVisibility, Id, ListConversationMembersResponse, MessageId, NotificationLevel, PresenceState,
-  Snowflake, SpaceResponse, UserKind, UserSummary,
+  ConversationVisibility, Id, JoinPolicy, ListConversationMembersResponse, MessageId, NotificationLevel,
+  PresenceState, Snowflake, SpaceResponse, UserKind, UserSummary,
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
@@ -177,6 +177,9 @@ pub enum CoreCommand {
   },
   JoinChannel {
     conversation: ConversationId,
+  },
+  JoinSpace {
+    space: SpaceId,
   },
   LeaveChannel {
     conversation: ConversationId,
@@ -1022,6 +1025,29 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn join_channel(&self, conversation: ConversationId) {
     self.command(CoreCommand::JoinChannel { conversation });
+  }
+
+  fn joinable_spaces(&self) -> Vec<JoinableSpace> {
+    let spaces: Vec<SpaceResponse> = self.read(records::list_json(&self.store, Table::Spaces));
+    let conversations = self.conversations_raw();
+    spaces
+      .into_iter()
+      .filter(|space| {
+        space.maybe_my_role.is_none()
+          && space.join_policy == JoinPolicy::Open
+          && !space.is_archived
+          && !has_channel_in(&conversations, space.id)
+      })
+      .map(|space| JoinableSpace {
+        id: space.id,
+        name: space.name,
+        maybe_description: space.maybe_description,
+      })
+      .collect()
+  }
+
+  fn join_space(&self, space: SpaceId) {
+    self.command(CoreCommand::JoinSpace { space });
   }
 
   fn leave_channel(&self, conversation: ConversationId) {

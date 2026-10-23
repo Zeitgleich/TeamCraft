@@ -129,6 +129,8 @@ pub trait ServerApi {
     conversation: ConversationId,
     user: UserId,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Joins an open space (`POST /spaces/{id}/join`).
+  fn join_space(&self, space: SpaceId) -> impl Future<Output = Result<SpaceResponse, ApiError>>;
   /// Joins a public channel (`POST /conversations/{id}/join`).
   fn join_conversation(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
   /// Renames, converts, archives or recategorizes a channel (`PATCH /conversations/{id}`).

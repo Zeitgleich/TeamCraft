@@ -126,6 +126,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Joins a public channel: the server lets the user in, and a member adds this user's devices to
   /// the encryption group from the signed self-add this device posts (e2ee.md §4.6).
+  /// Joins an open space; the server may also add the user to its default channels.
+  pub async fn join_space(&mut self, space: SpaceId) -> Result<(), CoreError> {
+    let response = self.api.join_space(space).await?;
+    records::put_json(&self.store, Table::Spaces, &space.to_string(), &response)?;
+    // Picks up the space's default channels and their encryption groups.
+    self.full_sync().await
+  }
+
   pub async fn join_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.api.join_conversation(conversation).await?;
     let response = self.api.conversation(conversation).await?;

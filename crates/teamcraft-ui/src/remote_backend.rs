@@ -23,8 +23,8 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
-  Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId,
-  ThreadSummary, User, UserId,
+  Conversation, ConversationId, CustomStatus, JoinableSpace, Message, MessageId, PresenceStatus, Space,
+  SpaceId, ThreadId, ThreadSummary, User, UserId,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus,
@@ -615,6 +615,17 @@ impl ChatBackend for RemoteChat {
 
   fn join_channel(&self, conversation: ConversationId) {
     self.act(ChatAction::JoinChannel { conversation });
+  }
+
+  fn joinable_spaces(&self) -> Vec<JoinableSpace> {
+    match self.ask(ChatQuery::JoinableSpaces) {
+      Some(ChatAnswer::JoinableSpaces { spaces }) => spaces,
+      _ => Vec::new(),
+    }
+  }
+
+  fn join_space(&self, space: SpaceId) {
+    self.act(ChatAction::JoinSpace { space });
   }
 
   fn leave_channel(&self, conversation: ConversationId) {

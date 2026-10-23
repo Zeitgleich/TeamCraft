@@ -14,7 +14,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
-use crate::state::use_app_state;
+use crate::state::{Overlay, use_app_state};
 
 /// Extra pixels rendered above and below the viewport.
 const OVERSCAN_PX: f64 = 700.0;
@@ -424,6 +424,14 @@ pub fn MessageList(
   };
 
   let on_keydown = move |ev: web_sys::KeyboardEvent| handle_list_keys(&ev, container, rows);
+  let is_alone_in_channel = move || {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conv| {
+        matches!(conv.kind, ConversationKind::Public | ConversationKind::Private)
+          && conv.member_ids.len() <= 1
+      })
+  };
 
   view! {
     <div class="message-list-wrap">
@@ -439,7 +447,15 @@ pub fn MessageList(
         on:keydown=on_keydown
       >
         <Show when=move || count.get() == 0 fallback=|| ()>
-          <p class="empty-state">{move || i18n.t("channel-empty")}</p>
+          <div class="empty-state">
+            <p>{move || i18n.t("channel-empty")}</p>
+            // Alone in a new channel: the obvious next step is bringing the team in.
+            <Show when=is_alone_in_channel fallback=|| ()>
+              <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))>
+                {move || i18n.t("channel-add-people")}
+              </button>
+            </Show>
+          </div>
         </Show>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
         <div class="rows" node_ref=rows>
