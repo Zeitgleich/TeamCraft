@@ -1,34 +1,57 @@
 import QuickLook
 import SwiftUI
 
-/// A file in a message: thumbnail or icon, name, size, progress while it moves. A tap opens a
-/// downloaded file in Quick Look, or downloads it first (the core decrypts it into the app's
-/// private storage).
+/// A file in a message: images as a large preview, other files with icon, name and size; progress
+/// while it moves. A tap opens a downloaded file in Quick Look (zoom, share, save), or downloads it
+/// first (the core decrypts it into the app's private storage) and opens it once it is here.
 struct AttachmentView: View {
   @Environment(AppModel.self) private var model
   let file: FileInfo
 
   @State private var maybePreviewURL: URL?
+  @State private var isWaitingToOpen = false
 
   var body: some View {
     Button(action: open) {
-      HStack(spacing: 10) {
-        FileThumbnail(file: file, side: 56)
-        VStack(alignment: .leading, spacing: 2) {
-          Text(file.fileName).font(.subheadline.weight(.semibold)).lineLimit(2)
-          Text(FileSizeText.format(file.sizeBytes)).font(.caption).foregroundStyle(Theme.textMuted)
-          FileStateLine(file: file)
-        }
-        Spacer(minLength: 0)
+      if file.isImage, let data = file.maybeThumbnailData, let image = UIImage(data: data) {
+        imagePreview(image)
+      } else {
+        fileRow
       }
-      .padding(8)
-      .background(Theme.surface)
-      .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Theme.border))
-      .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
     }
     .buttonStyle(.plain)
     .accessibilityLabel(Text(file.fileName))
     .quickLookPreview($maybePreviewURL)
+    .onChange(of: file.transfer.state) { _, state in
+      guard isWaitingToOpen, state == "local" || state == "failed" else { return }
+      isWaitingToOpen = false
+      if state == "local", let path = file.transfer.path { maybePreviewURL = URL(fileURLWithPath: path) }
+    }
+  }
+
+  private func imagePreview(_ image: UIImage) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Image(uiImage: image).resizable().scaledToFit()
+        .frame(maxWidth: 260, maxHeight: 220, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+      FileStateLine(file: file)
+    }
+  }
+
+  private var fileRow: some View {
+    HStack(spacing: 10) {
+      FileThumbnail(file: file, side: 56)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(file.fileName).font(.subheadline.weight(.semibold)).lineLimit(2)
+        Text(FileSizeText.format(file.sizeBytes)).font(.caption).foregroundStyle(Theme.textMuted)
+        FileStateLine(file: file)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(8)
+    .background(Theme.surface)
+    .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Theme.border))
+    .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
   }
 
   private func open() {
@@ -36,6 +59,7 @@ struct AttachmentView: View {
     case "local":
       if let path = file.transfer.path { maybePreviewURL = URL(fileURLWithPath: path) }
     case "remote", "failed":
+      isWaitingToOpen = true
       Task { await model.perform(.downloadFile(conversationId: file.conversation, messageId: file.message)) }
     default:
       break

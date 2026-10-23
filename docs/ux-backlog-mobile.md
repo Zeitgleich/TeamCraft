@@ -21,9 +21,9 @@ work stream).
 
 | Friction                                                                              | Platform | Status |
 |---------------------------------------------------------------------------------------|----------|--------|
-| "Sign-in failed. Please try again." gives no reason (network, cancelled, wrong account) | Android  | open   |
+| "Sign-in failed. Please try again." gives no reason (network, cancelled, wrong account) | Android  | done   |
 | Notification permission asked on first start, before sign-in and without context      | Android  | owner: push-quality |
-| "Create keys" runs for several seconds without visible progress                       | Android  | open   |
+| "Create keys" runs for several seconds; the spinner sat under the keyboard              | Android  | done   |
 
 ## Chat list
 
@@ -36,7 +36,7 @@ work stream).
 | Direct messages sorted by name instead of recency                                | Android, iOS | done   |
 | Empty list: one line of text, no way forward                                     | Android, iOS | done   |
 | No offline indicator; nothing explains why new messages don't arrive             | Android      | done   |
-| Offline banner                                                                   | iOS          | open   |
+| Offline banner                                                                   | iOS          | done   |
 | Mute from the list (needs the per-conversation notification setting)             | Android, iOS | owner: push-quality |
 | Typing indicator (the core tracks typing; the FFI doesn't expose it)             | Android, iOS | open: FFI |
 | Archive / hide a conversation from the list                                      | Android, iOS | open: core |
@@ -70,10 +70,11 @@ work stream).
 | Reply did not focus the composer                                                          | Android, iOS | done   |
 | Composer started sentences in lower case                                                  | Android      | done   |
 | "Send with Enter" for hardware keyboards and tablets                                      | Android      | done   |
-| Quick reactions in the long-press sheet wrap onto two lines on narrow phones              | Android      | open   |
+| Quick reactions in the long-press sheet wrap onto two lines on narrow phones              | Android      | done   |
 | Edit history, forward, pin, save, copy link, mark unread                                  | iOS          | open   |
-| Full-screen image viewer                                                                  | iOS          | open   |
-| Mention highlighting in message text                                                      | Android, iOS | open   |
+| Images as large previews; a tap downloads and then opens Quick Look (zoom, share, save)    | iOS          | done   |
+| Mention highlighting in message text                                                      | Android      | done   |
+| Mention highlighting in message text                                                      | iOS          | open   |
 | Emoji autocomplete (`:smile:`)                                                            | Android, iOS | open   |
 | Voice messages                                                                            | Android, iOS | open: core |
 | Image grid for several images in one message                                              | Android, iOS | open   |
@@ -87,7 +88,9 @@ work stream).
 | Can't share text, links, photos or files from other apps into a conversation       | Android      | done   |
 | Share extension                                                                    | iOS          | open: needs an app extension target |
 | App shortcuts for recent conversations                                             | Android      | owner: push-quality (MessagingStyle conversation shortcuts) |
-| Permalinks don't open the app                                                      | Android, iOS | open   |
+| Message links in messages open the conversation at the message (in the app)        | Android      | done   |
+| Message links in messages                                                          | iOS          | open   |
+| Message links from other apps (`teamcraft:` deep links; decide with the launch-token rule) | Android, iOS | open |
 | Tablet / foldable two-pane layout                                                  | Android      | open   |
 | Open conversation lost after process death                                         | Android      | open   |
 

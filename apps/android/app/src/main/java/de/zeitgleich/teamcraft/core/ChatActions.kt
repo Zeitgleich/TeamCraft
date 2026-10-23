@@ -206,6 +206,8 @@ object ChatQueries {
     put("message", message)
   }
 
+  fun resolvePermalink(link: String) = query("resolve_permalink") { put("link", link) }
+
   fun firstUnread(conversation: String) = query("first_unread") { put("conversation", conversation) }
 
   fun draft(conversation: String, maybeThread: String?) = query("draft") {

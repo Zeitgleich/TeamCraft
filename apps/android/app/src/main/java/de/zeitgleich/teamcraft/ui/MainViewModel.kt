@@ -21,7 +21,10 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
+import de.zeitgleich.teamcraft.core.ChatQueries
+import net.openid.appauth.AuthorizationException
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
@@ -74,7 +77,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       graph.auth.completeLogin(result)
       loadAccountState()
     } catch (failure: Exception) {
-      AppState.SignedOut(R.string.sign_in_failed)
+      AppState.SignedOut(signInError(failure))
     }
   }
 
@@ -192,6 +195,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       failures.value = errorText(failure)
     }
   }
+
+  /** Shows a message once, like a failed action. */
+  fun showFailure(@StringRes message: Int) {
+    failures.value = message
+  }
+
+  /** Where a message link points, if this device is in that conversation and has the message. */
+  suspend fun resolvePermalink(link: String): PermalinkTarget? =
+    readChat { query(ChatQueries.resolvePermalink(link)).maybeTarget }
 
   fun failureShown() {
     failures.value = null
@@ -330,6 +342,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   companion object {
     const val MESSAGE_PAGE = 200
+
+    /** Why signing in failed, in words the user can act on; nothing when they cancelled it. */
+    @StringRes
+    fun signInError(failure: Exception): Int? = when {
+      failure is AuthorizationException && failure.code == AuthorizationException.GeneralErrors.USER_CANCELED_AUTH_FLOW.code -> null
+      failure is IllegalStateException && failure.message == "login cancelled" -> null
+      failure is AuthorizationException && failure.code == AuthorizationException.GeneralErrors.NETWORK_ERROR.code ->
+        R.string.sign_in_network
+      failure is java.io.IOException -> R.string.sign_in_network
+      failure is AuthorizationException && failure.type == AuthorizationException.TYPE_OAUTH_TOKEN_ERROR -> R.string.sign_in_rejected
+      failure is TeamCraftException.Network -> R.string.sign_in_network
+      else -> R.string.sign_in_failed
+    }
 
     @StringRes
     fun errorText(failure: TeamCraftException): Int = when (failure) {

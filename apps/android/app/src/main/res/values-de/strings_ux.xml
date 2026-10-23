@@ -57,4 +57,10 @@
   <string name="app_lock_locked">TeamCraft ist gesperrt</string>
   <string name="app_lock_unlock">Entsperren</string>
   <string name="send_with_enter">Mit Eingabetaste senden (Hardware-Tastatur)</string>
+
+  <!-- Message links and sign-in -->
+  <string name="permalink_unavailable">Diese Nachricht ist auf diesem Gerät nicht verfügbar.</string>
+  <string name="sign_in_network">Der Anmeldeserver ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.</string>
+  <string name="sign_in_rejected">Der Anmeldeserver hat die Anmeldung nicht angenommen. Versuche es erneut oder frag deine Administration.</string>
+  <string name="enroll_working">Schlüssel werden eingerichtet …</string>
 </resources>

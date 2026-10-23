@@ -105,3 +105,19 @@ struct DeviceSecuritySection: View {
     }
   }
 }
+
+/// A thin bar while the device is offline: new messages wait, sent ones stay in the outbox.
+struct OfflineBanner: View {
+  private let network = NetworkMonitor.shared
+
+  var body: some View {
+    if !network.isOnline {
+      Text("offline_banner")
+        .font(.footnote)
+        .foregroundStyle(Theme.danger)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal).padding(.vertical, 6)
+        .background(Theme.danger.opacity(0.12))
+    }
+  }
+}
