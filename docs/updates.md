@@ -211,7 +211,8 @@ sudo dnf install team-craft
 ```
 
 (openSUSE: put the same file into `/etc/zypp/repos.d/` and `zypper install team-craft`.) For release
-candidates use the suite or directory `prerelease`.
+candidates use the suite or directory `prerelease`, shown as "Beta" on the site and in the app; it
+also receives every stable release.
 
 - Candidate packages carry the release version (`1.0.0` for `v1.0.0-rc.2`), so the package manager
   doesn't move from a candidate to the release with the same number; reinstall in that case.

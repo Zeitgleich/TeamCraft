@@ -152,6 +152,13 @@ details.channel-more[open] { padding-bottom: 20px; }
 .store { align-self: start; min-height: 40px; padding: 8px 16px; }
 .hint { color: var(--text-muted); font-size: 0.9rem; margin: 0; }
 
+/* Repository channels */
+.repo-channel { margin-top: 28px; display: grid; gap: 10px; }
+.repo-channel h3 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 1.25rem; }
+.repo-channel .hint { max-width: 52em; }
+details.switch summary { cursor: pointer; font-weight: 600; color: var(--accent); margin-bottom: 8px; }
+details.switch .snippet { margin-bottom: 8px; }
+
 /* Snippets */
 .snippets { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; margin-bottom: 12px; }
 .snippet { margin: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--code-bg); overflow: hidden; min-width: 0; }

@@ -85,11 +85,12 @@ class RenderTest(unittest.TestCase):
         self.add_repositories("prerelease")
         html = self.render()
         self.assertIn("first stable release is coming soon", html)
-        self.assertIn("Pre-release", html)
+        self.assertIn("Beta (pre-releases)", html)
         self.assertIn("rpm/prerelease/teamcraft-prerelease.repo", html)
-        self.assertIn("Suites: prerelease", html)
+        self.assertIn('id="apt-prerelease"', html)
+        self.assertIn("Switch back from beta to stable", html)
         self.assertNotIn("rpm/stable", html)
-        self.assertNotIn("Suites: stable", html)
+        self.assertNotIn('id="apt-stable"', html)
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
     def test_with_stable_release_the_stable_channel_comes_first(self):
@@ -99,7 +100,7 @@ class RenderTest(unittest.TestCase):
         self.add_repositories("prerelease")
         html = self.render()
         self.assertNotIn("coming soon", html)
-        self.assertLess(html.index("Suites: stable"), html.index("Suites: prerelease"))
+        self.assertLess(html.index('id="apt-stable"'), html.index('id="apt-prerelease"'))
         self.assertIn("rpm/stable/teamcraft.repo", html)
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 

@@ -266,13 +266,13 @@ def render_downloads(maybe_stable, maybe_prerelease, env):
     else:
         parts.append("""<div class="notice">
     <strong>The first stable release is coming soon.</strong>
-    <span>Until then you can try the newest release candidate below. It is feature complete but may
-    still have rough edges.</span>
+    <span>Until then you can try the newest release candidate from the beta channel below. It is
+    feature complete but may still have rough edges.</span>
 </div>""")
     if maybe_prerelease and (not maybe_stable or maybe_prerelease.tag != maybe_stable.tag):
         if maybe_stable:
             parts.append(f"""<details class="channel-more">
-    <summary>Pre-release {esc(maybe_prerelease.tag)} {prerelease_badge()}</summary>
+    <summary>Beta {esc(maybe_prerelease.tag)} {prerelease_badge()}</summary>
     {render_channel(maybe_prerelease, env)}
 </details>""")
         else:
@@ -342,29 +342,49 @@ def render_download(download, channel):
 
 
 def render_linux_repositories(channels, site, site_url):
-    blocks = []
-    for channel in channels.values():
-        block = render_repository_channel(channel, site, site_url)
-        if not block:
-            continue
-        if channel.is_prerelease and "stable" in channels and blocks:
-            blocks.append(f"""<details class="channel-more">
-    <summary>Pre-release channel {prerelease_badge()}</summary>
-    {block}
-</details>""")
-        else:
-            blocks.append(block)
-    if not blocks:
+    """Stable and beta (the prerelease channel; its paths keep the name "prerelease") side by side."""
+    blocks = {name: render_repository_channel(c, site, site_url) for name, c in channels.items()}
+    if not any(blocks.values()):
         return ""
+    stable = blocks.get("stable") or """<p class="hint">The first stable release is coming soon. Until
+    then, use the beta channel; it receives the stable releases too.</p>"""
+    parts = [f"""<div class="repo-channel">
+    <h3>Stable <span class="badge stable">Recommended</span></h3>
+    {stable}
+</div>"""]
+    if blocks.get("prerelease"):
+        parts.append(f"""<div class="repo-channel">
+    <h3>Beta (pre-releases) {prerelease_badge()}</h3>
+    <p class="hint">Release candidates as soon as they are published ({esc(channels["prerelease"].tag)} today),
+    and every stable release as well, so beta is never behind stable.</p>
+    {blocks["prerelease"]}
+    {render_switch_to_stable()}
+</div>""")
     return f"""<section class="section alt" id="linux">
 <div class="wrap">
     <h2>Linux package repositories</h2>
     <p class="section-lead">Install TeamCraft with your package manager and get new versions with your
     system updates. Packages and repository metadata are signed with the
     <a href="#verify">repository key</a>.</p>
-    {"".join(blocks)}
+    {"".join(parts)}
 </div>
 </section>"""
+
+
+def render_switch_to_stable():
+    """Back from beta to stable: the APT sources file is shared, the rpm repositories have own files."""
+    text = """# APT: point the source at the stable suite
+sudo sed -i 's/^Suites: prerelease$/Suites: stable/' /etc/apt/sources.list.d/teamcraft.sources
+# DNF: remove the beta repository, then add the stable one (above)
+sudo rm /etc/yum.repos.d/teamcraft-prerelease.repo
+# zypper: remove the beta repository, then add the stable one (above)
+sudo zypper removerepo teamcraft-prerelease"""
+    return f"""<details class="switch">
+    <summary>Switch back from beta to stable</summary>
+    {render_snippet("switch-stable", "Leave the beta channel", text, is_wide=True)}
+    <p class="hint">The installed beta version stays until a newer stable version is published; to go
+    back right away, reinstall the package after switching.</p>
+</details>"""
 
 
 def render_repository_channel(channel, site, site_url):
@@ -373,11 +393,7 @@ def render_repository_channel(channel, site, site_url):
     has_rpm = (site / "rpm" / channel.name / f"{repo_name}.repo").is_file()
     if not has_apt and not has_rpm:
         return ""
-    parts = []
-    if channel.is_prerelease:
-        parts.append(f'<p class="channel-head">{prerelease_badge()} Release candidates and previews '
-                                  f'({esc(channel.tag)} today). Stable releases arrive here too.</p>')
-    parts.append('<div class="snippets">')
+    parts = ['<div class="snippets">']
     if has_apt:
         package = apt_package_name(site, channel.name)
         apt = f"""sudo curl -fsSLo /usr/share/keyrings/teamcraft-archive-keyring.gpg \\
@@ -524,7 +540,7 @@ def rpm_package_name(site, channel):
 
 
 def prerelease_badge():
-    return '<span class="badge pre">Pre-release</span>'
+    return '<span class="badge pre">Beta</span>'
 
 
 def format_size(size_bytes):
