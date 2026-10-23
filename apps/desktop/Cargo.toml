@@ -40,6 +40,8 @@ tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 # System notifications for mentions and direct messages (the UI decides what to show).
 tauri-plugin-notification = "2"
+# Opens the window with the size, position and maximized state it had when the app was closed.
+tauri-plugin-window-state = "2"
 # Refresh token in the OS keyring (Secret Service on Linux, Keychain on macOS).
 keyring = "4"
 reqwest = { workspace = true, features = ["form"] }
