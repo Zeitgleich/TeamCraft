@@ -136,7 +136,7 @@ web-sys = { version = "0.3.83", features = [
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 # A fake identity provider signing ES256 ID tokens in the attestation tests (both already in the
 # tree through teamcraft-crypto).
-p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 base64 = "0.22.1"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
