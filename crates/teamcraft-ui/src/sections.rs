@@ -1,6 +1,6 @@
 //! Pure grouping of conversations into sidebar sections.
 
-use crate::model::{Conversation, SidebarCategory, SpaceId};
+use crate::model::{Conversation, ConversationId, SidebarCategory, SpaceId};
 use crate::prefs::SidebarSort;
 
 /// Sidebar sections in display order.
@@ -134,6 +134,34 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   sections
 }
 
+/// Puts the favorites of `list` into the user's own order (IDs in `order` first, in that order; the
+/// rest after them as they were). Other conversations keep their places.
+pub fn apply_favorite_order(list: &mut [Conversation], order: &[ConversationId]) {
+  if order.is_empty() {
+    return;
+  }
+  let slots: Vec<usize> = (0..list.len()).filter(|index| list[*index].is_favorite).collect();
+  let mut favorites: Vec<Conversation> = slots.iter().map(|index| list[*index].clone()).collect();
+  favorites.sort_by_key(|conversation| {
+    order
+      .iter()
+      .position(|id| *id == conversation.id)
+      .unwrap_or(usize::MAX)
+  });
+  for (slot, conversation) in slots.into_iter().zip(favorites) {
+    list[slot] = conversation;
+  }
+}
+
+/// The new favorite order after moving `moved` to position `to` of the favorites as displayed.
+pub fn move_favorite(displayed: &[ConversationId], moved: ConversationId, to: usize) -> Vec<ConversationId> {
+  let mut order: Vec<ConversationId> = displayed.iter().copied().filter(|id| *id != moved).collect();
+  if displayed.contains(&moved) {
+    order.insert(to.min(order.len()), moved);
+  }
+  order
+}
+
 /// The channels of one space in the grouped sidebar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpaceGroup {
@@ -188,6 +216,64 @@ pub fn build_grouped(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod favorite_order {
+    use super::*;
+
+    fn ids(list: &[Conversation]) -> Vec<u64> {
+      list
+        .iter()
+        .map(|conversation| crate::model::raw_id(conversation.id))
+        .collect()
+    }
+
+    fn sample() -> Vec<Conversation> {
+      (1..=5)
+        .map(|raw| conversation(raw, SidebarCategory::Channels, 0, raw % 2 == 1))
+        .collect()
+    }
+
+    #[test]
+    fn favorites_follow_the_order_and_others_keep_their_place() {
+      // Favorites 1, 3, 5; 2 and 4 are not.
+      let mut list = sample();
+      apply_favorite_order(
+        &mut list,
+        &[crate::model::id_from_raw(5), crate::model::id_from_raw(1)],
+      );
+      assert_eq!(ids(&list), [5, 2, 1, 4, 3]);
+    }
+
+    #[test]
+    fn an_empty_order_changes_nothing() {
+      let mut list = sample();
+      apply_favorite_order(&mut list, &[]);
+      assert_eq!(ids(&list), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn moving_a_favorite() {
+      let shown: Vec<ConversationId> = [1, 3, 5].into_iter().map(crate::model::id_from_raw).collect();
+      let moved = move_favorite(&shown, crate::model::id_from_raw(5), 0);
+      assert_eq!(
+        moved
+          .iter()
+          .map(|id| crate::model::raw_id(*id))
+          .collect::<Vec<_>>(),
+        [5, 1, 3]
+      );
+      let clamped = move_favorite(&shown, crate::model::id_from_raw(1), 99);
+      assert_eq!(
+        clamped
+          .iter()
+          .map(|id| crate::model::raw_id(*id))
+          .collect::<Vec<_>>(),
+        [3, 5, 1]
+      );
+      let unknown = move_favorite(&shown, crate::model::id_from_raw(9), 0);
+      assert_eq!(unknown, shown);
+    }
+  }
 
   #[test]
   fn section_slugs_round_trip() {

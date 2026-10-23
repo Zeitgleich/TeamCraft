@@ -12,6 +12,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_proto::{CategoryId, HistoryPolicy};
 
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
+use crate::components::composer_commands::left_text;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
@@ -232,7 +233,7 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
       {if channel.is_member {
         view! {
           <button class="btn btn-small" on:click=move |_| { state.open_conversation(id); state.close_overlay(); }>{move || i18n.t("browse-open")}</button>
-          <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.leave_channel(id))>{move || i18n.t("browse-leave")}</button>
+          <button class="btn btn-small" on:click=move |_| state.leave_with_undo(id, left_text(state, i18n, id))>{move || i18n.t("browse-leave")}</button>
         }
         .into_any()
       } else {

@@ -1,14 +1,17 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::components::avatar::PresenceDot;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
-use crate::model::{Conversation, ConversationKind, PresenceStatus, SpaceId};
-use crate::sections::{GroupedSidebar, SectionKind, SpaceGroup, build_grouped, build_sections};
+use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
+use crate::sections::{
+  GroupedSidebar, SectionKind, SpaceGroup, build_grouped, build_sections, move_favorite,
+};
 use crate::settings::{load_json, store_json};
 use crate::state::{MainView, Overlay, use_app_state};
 
@@ -61,7 +64,7 @@ pub fn Sidebar() -> impl IntoView {
   let conversations = Memo::new(move |_| {
     let space = state.space.get();
     let is_grouped = is_grouped.get();
-    state.read(|backend| {
+    let list = state.read(|backend| {
       let mut list = if is_grouped {
         backend
           .spaces()
@@ -73,7 +76,8 @@ pub fn Sidebar() -> impl IntoView {
       };
       list.extend(backend.direct_conversations());
       list
-    })
+    });
+    state.sidebar_list(list)
   });
   let collapsed_spaces =
     RwSignal::new(load_json::<HashSet<SpaceId>>(KEY_COLLAPSED_SPACES).unwrap_or_default());
@@ -424,7 +428,11 @@ fn SidebarSection(
           })}
       </div>
       <ul id=list_id hidden=is_collapsed>
-        {conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
+        {if kind == SectionKind::Favorites {
+          view! { <FavoriteItems conversations=conversations /> }.into_any()
+        } else {
+          conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view().into_any()
+        }}
       </ul>
       {(hidden > 0)
         .then(|| {
@@ -435,6 +443,74 @@ fn SidebarSection(
           }
         })}
     </section>
+  }
+}
+
+/// Favorites can be put in order by dragging, or with Ctrl+Shift+↑/↓ on the focused one.
+#[component]
+fn FavoriteItems(conversations: Vec<Conversation>) -> impl IntoView {
+  let state = use_app_state();
+  let shown: Vec<ConversationId> = conversations.iter().map(|conv| conv.id).collect();
+  let shown = StoredValue::new(shown);
+  let dragged = RwSignal::new(None::<ConversationId>);
+  let move_to = move |moved: ConversationId, to: usize| {
+    let order = shown.with_value(|shown| move_favorite(shown, moved, to));
+    state.settings.favorite_order.set(order);
+    // The list is rebuilt; keep the keyboard focus on the moved item.
+    set_timeout(move || focus_sidebar_item(moved), std::time::Duration::ZERO);
+  };
+  conversations
+    .into_iter()
+    .enumerate()
+    .map(|(index, conv)| {
+      let id = conv.id;
+      view! {
+        <li
+          draggable="true"
+          on:dragstart=move |_| dragged.set(Some(id))
+          on:dragend=move |_| dragged.set(None)
+          on:dragover=move |ev| {
+            if dragged.get_untracked().is_some() {
+              ev.prevent_default();
+            }
+          }
+          on:drop=move |ev| {
+            if let Some(moving) = dragged.get_untracked() {
+              ev.prevent_default();
+              dragged.set(None);
+              move_to(moving, index);
+            }
+          }
+          on:keydown=move |ev| {
+            if !(ev.ctrl_key() && ev.shift_key()) {
+              return;
+            }
+            let maybe_to = match ev.key().as_str() {
+              "ArrowUp" => index.checked_sub(1),
+              "ArrowDown" => Some(index + 1),
+              _ => None,
+            };
+            if let Some(to) = maybe_to {
+              ev.prevent_default();
+              move_to(id, to);
+            }
+          }
+        >
+          <SidebarItem conversation=conv />
+        </li>
+      }
+    })
+    .collect_view()
+}
+
+fn focus_sidebar_item(conversation: ConversationId) {
+  let selector = format!("[data-conversation=\"{conversation}\"]");
+  if let Some(element) = web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.query_selector(&selector).ok().flatten())
+    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+  {
+    drop(element.focus());
   }
 }
 
@@ -505,6 +581,7 @@ fn SidebarItem(conversation: Conversation) -> impl IntoView {
       class:current=is_current
       class:unread=unread
       class:muted=conversation.is_muted
+      data-conversation=id.to_string()
       aria-current=move || is_current().then_some("page")
       aria-label=label
       on:click=move |_| state.open_conversation(id)

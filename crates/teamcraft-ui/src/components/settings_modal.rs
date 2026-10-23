@@ -216,7 +216,7 @@ fn AdvancedTab() -> impl IntoView {
 pub fn ShortcutsModal() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let rows: [(String, &'static str); 12] = [
+  let rows: [(String, &'static str); 13] = [
     (shortcut_label("K"), "shortcut-switcher"),
     (shortcut_label(","), "shortcut-settings"),
     (shortcut_label("/"), "shortcut-shortcuts"),
@@ -228,6 +228,7 @@ pub fn ShortcutsModal() -> impl IntoView {
     ("Alt+↑ / Alt+↓".to_owned(), "shortcut-prev-next"),
     ("Alt+Shift+↑ / Alt+Shift+↓".to_owned(), "shortcut-next-unread"),
     ("Alt+T".to_owned(), "shortcut-threads"),
+    ("Ctrl+Shift+↑ / Ctrl+Shift+↓".to_owned(), "shortcut-move-favorite"),
     ("Esc".to_owned(), "shortcut-close"),
     ("↑ / ↓".to_owned(), "shortcut-messages"),
     ("Enter".to_owned(), "shortcut-open-thread"),

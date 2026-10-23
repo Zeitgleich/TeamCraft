@@ -18,6 +18,7 @@ const KEY_BACKEND: &str = "teamcraft.backend";
 const KEY_PREFS: &str = "teamcraft.prefs";
 const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
 const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
+const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
 /// Conversations the quick switcher remembers as recently visited.
 const MAX_RECENT_CONVERSATIONS: usize = 20;
 /// Emoji the pickers offer as recently used.
@@ -133,6 +134,8 @@ pub struct Settings {
   pub recent_conversations: RwSignal<Vec<ConversationId>>,
   /// Recently used emoji, newest first (reactions and the composer's picker).
   pub recent_emoji: RwSignal<Vec<String>>,
+  /// The user's own order of favorites in the sidebar (this device).
+  pub favorite_order: RwSignal<Vec<ConversationId>>,
 }
 
 impl Settings {
@@ -170,6 +173,7 @@ impl Settings {
       prefs: RwSignal::new(load(KEY_PREFS, |text| Some(Preferences::from_json(text))).unwrap_or_default()),
       recent_conversations: RwSignal::new(load(KEY_RECENT_CONVERSATIONS, from_json).unwrap_or_default()),
       recent_emoji: RwSignal::new(load(KEY_RECENT_EMOJI, from_json).unwrap_or_default()),
+      favorite_order: RwSignal::new(load(KEY_FAVORITE_ORDER, from_json).unwrap_or_default()),
     };
     persist(KEY_THEME, settings.theme, |theme| theme.slug().to_owned());
     persist(KEY_LOCALE, settings.locale, |locale| locale.tag().to_owned());
@@ -185,6 +189,7 @@ impl Settings {
       to_json(&list)
     });
     persist(KEY_RECENT_EMOJI, settings.recent_emoji, |list| to_json(&list));
+    persist(KEY_FAVORITE_ORDER, settings.favorite_order, |list| to_json(&list));
     settings
   }
 }

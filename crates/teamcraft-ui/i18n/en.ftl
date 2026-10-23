@@ -1446,3 +1446,5 @@ undo = Undo
 message-deleted-toast = Message deleted
 hover-card-local-time = { $time } local time
 hover-card-profile = View profile
+channel-left-toast = You left { $name }
+shortcut-move-favorite = Move the focused favorite up or down
