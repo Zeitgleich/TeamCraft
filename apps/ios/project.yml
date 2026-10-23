@@ -120,6 +120,7 @@ targets:
             CFBundleURLSchemes: [$(TEAMCRAFT_OIDC_REDIRECT_SCHEME)]
         # Read by TeamCraft/App/AppEnvironment.swift.
         TCServerURL: $(TEAMCRAFT_SERVER_URL)
+        TCPushGatewayURL: $(TEAMCRAFT_PUSH_GATEWAY_URL)
         TCOidcIssuer: $(TEAMCRAFT_OIDC_ISSUER)
         TCOidcClientId: $(TEAMCRAFT_OIDC_CLIENT_ID)
         TCOidcRedirectScheme: $(TEAMCRAFT_OIDC_REDIRECT_SCHEME)

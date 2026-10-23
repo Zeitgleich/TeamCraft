@@ -82,6 +82,12 @@ pub struct ClientSettings {
   pub max_upload_bytes: u64,
   /// Where downloaded files are written (native apps); `None` disables downloads to disk.
   pub maybe_download_dir: Option<std::path::PathBuf>,
+  /// The push gateway this app was built for (a publisher's store app): device tokens are sealed for
+  /// it. `None`: use the gateway the server names (self-built apps).
+  pub maybe_push_gateway_url: Option<String>,
+  /// A sealed device token is sealed again after this long (it picks up a rotated gateway key and
+  /// the old one is revoked), well before it expires.
+  pub push_reseal_after: std::time::Duration,
   /// Where the app stages plaintext copies of files to upload (a phone copies picked documents
   /// out of other apps first); a copy there is deleted once its upload finished or failed for
   /// good. Files elsewhere (a desktop user's own documents) are never deleted.
@@ -132,6 +138,8 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
+      maybe_push_gateway_url: None,
+      push_reseal_after: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_upload_staging_dir: None,
       link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
@@ -174,6 +182,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_preview_fetcher,
       maybe_jwks_source,
     }))
+  }
+
+  /// A sealed device token is sealed again after this long (tests set it to zero to force it).
+  pub fn set_push_reseal_after(&mut self, after: std::time::Duration) {
+    self.settings.push_reseal_after = after;
   }
 
   /// Where downloaded files go (native apps; e.g. the user's downloads folder).

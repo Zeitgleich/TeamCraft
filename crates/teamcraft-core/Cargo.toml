@@ -34,6 +34,8 @@ teamcraft-crypto = { path = "../teamcraft-crypto" }
 openmls_rust_crypto = "0.6.0"
 openmls_traits = "0.6.0"
 serde.workspace = true
+# Sealed push tokens travel as base64url in the registration (docs/push-gateway.md).
+base64 = "0.22.1"
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

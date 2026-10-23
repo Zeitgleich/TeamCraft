@@ -26,8 +26,8 @@ use teamcraft_server::meetings::{MeetingBackends, MeetingService};
 use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{
   APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FcmSender, FcmSettings,
-  GatewayClient, GatewaySettings, PushDispatcher, ServiceAccount, UnifiedPushSender, Vapid, WebPushSender,
-  load_or_create_gateway_key, parse_gateway_key,
+  GatewayBinding, GatewayClient, GatewaySettings, PushDispatcher, ServiceAccount, UnifiedPushSender, Vapid,
+  WebPushSender, load_or_create_gateway_key, parse_gateway_key,
 };
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
@@ -504,6 +504,19 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
   } else if let Some(gateway) = &maybe_gateway {
     dispatcher = dispatcher.with_sender(&PushProvider::Fcm, Arc::new(gateway.sender(PushProvider::Fcm)));
   }
+  if let Some(gateway) = &maybe_gateway {
+    let providers: Vec<PushProvider> = [PushProvider::Apns, PushProvider::Fcm]
+      .into_iter()
+      .filter(|provider| dispatcher.is_gateway(provider))
+      .collect();
+    if !providers.is_empty() {
+      dispatcher = dispatcher.with_gateway_binding(GatewayBinding {
+        url: gateway.url().to_owned(),
+        server_id: gateway.server_id().to_owned(),
+        providers,
+      });
+    }
+  }
   if push.unified_push.is_enabled {
     // Distributors may check a VAPID token; the same key as Web Push signs it when there is one.
     let maybe_vapid = match &push.maybe_vapid_private_key {
@@ -544,6 +557,7 @@ fn build_gateway(config: &Config) -> anyhow::Result<Option<Arc<GatewayClient>>> 
     url,
     key,
     timeout: Duration::from_secs(push.request_timeout_secs),
+    accept_unbound_tokens: gateway.accept_unbound_tokens,
   })
   .context("push.gateway")?;
   info!(server_id = %client.server_id(), "push gateway enabled");

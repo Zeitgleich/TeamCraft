@@ -132,6 +132,12 @@ final class AppModel {
   func signOut() async {
     await busy {
       await stopSyncing()
+      // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
+      // and the registration on the server, so the server can't push to this phone any more.
+      // Best effort and at most a few seconds; offline, the push key is still gone.
+      if let core = try? core() {
+        await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
+      }
       if let account = container.activeAccount {
         try? factory.keys.delete(for: account)
       }
@@ -375,7 +381,9 @@ final class AppModel {
 
   // MARK: Push
 
-  private static let pushTokenKey = "apnsToken"
+  // "v2": sealed for the push gateway (docs/push-gateway.md); a registration made by an older version
+  // (the raw token) is replaced at the first launch.
+  private static let pushTokenKey = "apnsToken.v2"
   /// Search index segments kept on the phone by the background prefetch (newest months first).
   private static let segmentPrefetchCapBytes: UInt64 = 512 * 1024 * 1024
 
@@ -505,9 +513,30 @@ final class AppModel {
     processLock.release()
   }
 
+  /// Waits for `operation`, but no longer than `seconds`; a slower operation keeps running.
+  private static func awaitAtMost(seconds: Double, _ operation: @escaping @Sendable () async -> Void) async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+      let gate = ResumeOnce(continuation)
+      Task {
+        await operation()
+        gate.resume()
+      }
+      Task {
+        try? await Task.sleep(for: .seconds(seconds))
+        gate.resume()
+      }
+    }
+  }
+
   private func registerPushIfNeeded(token: String) async {
     let defaults = UserDefaults.standard
-    guard defaults.string(forKey: Self.pushTokenKey) != token, let core = try? core() else { return }
+    guard let core = try? core() else { return }
+    guard defaults.string(forKey: Self.pushTokenKey) != token else {
+      // Registered already: seals the token again when that is due (it is bound to one server and
+      // expires), at most one request otherwise.
+      _ = try? await core.refreshPush()
+      return
+    }
     do {
       try await core.registerPush(service: .apns, token: token)
       defaults.set(token, forKey: Self.pushTokenKey)
@@ -531,5 +560,23 @@ final class AppModel {
 
   private var deviceName: String {
     UIDevice.current.name
+  }
+}
+
+/// Resumes a continuation exactly once, whichever caller comes first.
+private final class ResumeOnce: @unchecked Sendable {
+  private let lock = NSLock()
+  private var maybeContinuation: CheckedContinuation<Void, Never>?
+
+  init(_ continuation: CheckedContinuation<Void, Never>) {
+    maybeContinuation = continuation
+  }
+
+  func resume() {
+    lock.lock()
+    let continuation = maybeContinuation
+    maybeContinuation = nil
+    lock.unlock()
+    continuation?.resume()
   }
 }

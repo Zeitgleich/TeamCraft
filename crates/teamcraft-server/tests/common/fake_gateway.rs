@@ -1,5 +1,6 @@
 //! A stand-in for a push gateway (docs/push-gateway.md; the contract is the gateway repository's
 //! docs/api.md): it checks the server's signatures like a real gateway does, remembers registered keys,
+//! opens sealed device tokens (and refuses them for another server, after expiry, or once revoked),
 //! records every push and answers with a scripted reply. The real gateway is tested in its own
 //! repository against the same JSON fixtures.
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
@@ -12,27 +13,42 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
-use teamcraft_crypto::push_gateway::{GatewayPublicKey, GatewayRequest};
+use teamcraft_crypto::push_gateway::{
+  BoundToken, GatewayPublicKey, GatewayRequest, open_bound_token, token_key_id, token_public_key,
+};
 use teamcraft_proto::{
-  GATEWAY_PUSH_PATH, GATEWAY_REGISTER_PATH, GATEWAY_SERVER_ID_HEADER, GATEWAY_SIGNATURE_HEADER,
-  GATEWAY_TIMESTAMP_HEADER, GatewayPushRequest, GatewayRegisterRequest,
+  GATEWAY_INFO_PATH, GATEWAY_PUSH_PATH, GATEWAY_REGISTER_PATH, GATEWAY_REVOKE_PATH, GATEWAY_SERVER_ID_HEADER,
+  GATEWAY_SIGNATURE_HEADER, GATEWAY_TIMESTAMP_HEADER, GatewayPushRequest, GatewayRegisterRequest,
+  GatewayRevokeRequest,
 };
 
 /// How far a request's timestamp may differ from the clock, as in the real gateway's defaults.
 const TIMESTAMP_WINDOW_MS: u64 = 300_000;
+/// The seed of the fake gateway's token key (any 32 bytes; the key is derived from it).
+const TOKEN_SEED: [u8; 32] = [0x42; 32];
+
+/// A push the fake accepted: the request as sent, and the opened sealed token inside it.
+#[derive(Clone)]
+pub struct ReceivedPush {
+  pub request: GatewayPushRequest,
+  /// `None` for a raw token.
+  pub maybe_bound: Option<BoundToken>,
+}
 
 #[derive(Default)]
 struct Inner {
   known: HashMap<String, GatewayPublicKey>,
   registrations: usize,
-  pushes: Vec<GatewayPushRequest>,
+  pushes: Vec<ReceivedPush>,
   /// Signed push requests that arrived, accepted or not.
   push_attempts: usize,
+  revoked: Vec<Vec<u8>>,
   reply: Option<(u16, Value)>,
+  accepts_unbound: bool,
 }
 
 #[derive(Clone, Default)]
@@ -47,6 +63,8 @@ impl FakeGateway {
     let router = Router::new()
       .route(GATEWAY_REGISTER_PATH, post(register))
       .route(GATEWAY_PUSH_PATH, post(push))
+      .route(GATEWAY_INFO_PATH, get(info))
+      .route(GATEWAY_REVOKE_PATH, post(revoke))
       .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -60,12 +78,12 @@ impl FakeGateway {
   }
 
   /// The pushes accepted so far, in order.
-  pub fn pushes(&self) -> Vec<GatewayPushRequest> {
+  pub fn pushes(&self) -> Vec<ReceivedPush> {
     self.inner.lock().unwrap().pushes.clone()
   }
 
   /// Waits for `count` pushes.
-  pub async fn wait_for(&self, count: usize) -> Vec<GatewayPushRequest> {
+  pub async fn wait_for(&self, count: usize) -> Vec<ReceivedPush> {
     for _ in 0..100 {
       if self.pushes().len() >= count {
         break;
@@ -73,6 +91,21 @@ impl FakeGateway {
       tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     self.pushes()
+  }
+
+  /// The public key apps seal device tokens to.
+  pub fn token_public_key(&self) -> [u8; 32] {
+    token_public_key(&TOKEN_SEED).unwrap()
+  }
+
+  /// Sealed tokens the apps revoked, in order.
+  pub fn revocations(&self) -> Vec<Vec<u8>> {
+    self.inner.lock().unwrap().revoked.clone()
+  }
+
+  /// Also accept raw device tokens, as a gateway in transition does.
+  pub fn accept_unbound(&self) {
+    self.inner.lock().unwrap().accepts_unbound = true;
   }
 
   pub fn registrations(&self) -> usize {
@@ -132,8 +165,67 @@ async fn push(State(fake): State<FakeGateway>, headers: HeaderMap, body: axum::b
   if let Some((status, body)) = inner.reply.clone() {
     return (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response();
   }
-  inner.pushes.push(request);
+  // Like the real gateway: a sealed token is opened and must name this server and be valid; a raw
+  // one is only taken during a transition.
+  let maybe_bound = match (&request.maybe_token, &request.maybe_bound_token) {
+    (Some(_), None) if inner.accepts_unbound => None,
+    (Some(_), None) => return error(410, "token_unbound"),
+    (None, Some(blob)) => {
+      if inner
+        .revoked
+        .iter()
+        .any(|revoked| revoked.as_slice() == blob.as_slice())
+      {
+        return error(410, "token_revoked");
+      }
+      let Ok(bound) = open_bound_token(&TOKEN_SEED, blob.as_slice()) else {
+        return error(410, "token_invalid");
+      };
+      if bound.server_id != server_id {
+        return error(410, "token_server_mismatch");
+      }
+      let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+      if bound.expires_at_ms <= now {
+        return error(410, "token_expired");
+      }
+      Some(bound)
+    },
+    _ => return error(400, "invalid_request"),
+  };
+  inner.pushes.push(ReceivedPush { request, maybe_bound });
   axum::Json(json!({"accepted": true})).into_response()
+}
+
+async fn info(State(fake): State<FakeGateway>) -> Response {
+  let public = fake.token_public_key();
+  let accepts_unbound = fake.inner.lock().unwrap().accepts_unbound;
+  axum::Json(json!({
+    "version": "1.0.0",
+    "providers": ["apns", "fcm"],
+    "is_registration_open": true,
+    "limits": {"pushes_per_second": 50, "burst": 200, "pushes_per_day": 200000, "pushes_per_token_per_minute": 30},
+    "token_key": {
+      "key_id": token_key_id(&public).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+      "algorithm": "hpke-x25519-hkdf-sha256-chacha20poly1305",
+      "public_key": STANDARD.encode(public),
+    },
+    "are_bound_tokens_required": !accepts_unbound,
+    "max_token_lifetime_secs": 7_776_000,
+  }))
+  .into_response()
+}
+
+async fn revoke(State(fake): State<FakeGateway>, body: axum::body::Bytes) -> Response {
+  let Ok(request) = serde_json::from_slice::<GatewayRevokeRequest>(&body) else {
+    return error(400, "invalid_request");
+  };
+  fake
+    .inner
+    .lock()
+    .unwrap()
+    .revoked
+    .push(request.bound_token.as_slice().to_vec());
+  axum::Json(json!({"revoked": true})).into_response()
 }
 
 fn signature_fits(headers: &HeaderMap, key: &GatewayPublicKey, path: &str, body: &[u8]) -> bool {

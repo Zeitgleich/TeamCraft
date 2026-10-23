@@ -162,6 +162,7 @@ pub async fn register_push(
       "push_key must be {PUSH_KEY_BYTES} bytes"
     )));
   }
+  check_bound_token(state, &request)?;
   if matches!(
     request.provider,
     PushProvider::WebPush | PushProvider::UnifiedPush
@@ -186,6 +187,25 @@ pub async fn register_push(
   } else {
     Err(ApiError::device_not_found())
   }
+}
+
+/// Tokens that the app sealed for the push gateway (`tcgw1:...`) only make sense where pushes go
+/// through the gateway, and a gateway takes nothing else, unless raw tokens are allowed during a
+/// transition. The apps ask `GET /api/v1/push/gateway` first.
+fn check_bound_token(state: &AppState, request: &RegisterPushRequest) -> Result<(), ApiError> {
+  let is_bound = request.token.starts_with(teamcraft_proto::BOUND_TOKEN_PREFIX);
+  let is_gateway = state.push.is_gateway(&request.provider);
+  if is_bound && !is_gateway {
+    return Err(ApiError::InvalidRequest(
+      "this server does not send this provider's pushes through a push gateway; register the device token itself".into(),
+    ));
+  }
+  if is_gateway && !is_bound && state.push.requires_bound_token(&request.provider) {
+    return Err(ApiError::InvalidRequest(
+      "this server sends pushes through a push gateway; register a device token sealed for it (GET /api/v1/push/gateway)".into(),
+    ));
+  }
+  Ok(())
 }
 
 pub async fn unregister_push(

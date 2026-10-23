@@ -5,6 +5,9 @@ import Foundation
 struct AppEnvironment: Equatable {
   /// The TeamCraft server, e.g. `https://chat.example.com`.
   let serverURL: URL
+  /// The push gateway this build seals its APNs token for (a publisher's store app); `nil` uses the
+  /// gateway the server names.
+  let pushGatewayURL: URL?
   /// OIDC issuer (Keycloak realm URL).
   let oidcIssuer: URL
   /// Public OIDC client (authorization code + PKCE).
@@ -26,6 +29,7 @@ struct AppEnvironment: Equatable {
       (bundle.object(forInfoDictionaryKey: key) as? String) ?? ""
     }
     serverURL = URL(string: string("TCServerURL")) ?? URL(string: "http://127.0.0.1:8081")!
+    pushGatewayURL = URL(string: string("TCPushGatewayURL")).flatMap { $0.scheme == nil ? nil : $0 }
     oidcIssuer = URL(string: string("TCOidcIssuer")) ?? URL(string: "http://127.0.0.1:8080")!
     oidcClientId = string("TCOidcClientId")
     oidcRedirectScheme = string("TCOidcRedirectScheme")
@@ -34,10 +38,11 @@ struct AppEnvironment: Equatable {
   }
 
   init(
-    serverURL: URL, oidcIssuer: URL, oidcClientId: String, oidcRedirectScheme: String,
-    appGroupId: String, keychainAccessGroup: String
+    serverURL: URL, pushGatewayURL: URL? = nil, oidcIssuer: URL, oidcClientId: String,
+    oidcRedirectScheme: String, appGroupId: String, keychainAccessGroup: String
   ) {
     self.serverURL = serverURL
+    self.pushGatewayURL = pushGatewayURL
     self.oidcIssuer = oidcIssuer
     self.oidcClientId = oidcClientId
     self.oidcRedirectScheme = oidcRedirectScheme

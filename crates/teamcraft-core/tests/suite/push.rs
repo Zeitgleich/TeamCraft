@@ -5,7 +5,8 @@
 
 use crate::common;
 
-use common::{Peer, settle};
+use common::{Peer, settings, settle};
+use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::push_preview::{PreviewContent, push_preview};
 use teamcraft_core::store::{LocalStore, MessageFilter};
@@ -177,4 +178,264 @@ fn wake_up_for(
     &mut rand_core::OsRng,
   )
   .unwrap()
+}
+
+/// Device tokens sealed for the push gateway (docs/push-gateway.md): the server only ever holds a
+/// blob that the gateway opens for this one server.
+mod sealed_tokens {
+  use super::*;
+
+  use base64::Engine as _;
+  use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+  use teamcraft_core::api::fake::FAKE_GATEWAY_TOKEN_SEED;
+  use teamcraft_crypto::push_gateway::{BoundToken, open_bound_token};
+  use teamcraft_proto::{BOUND_TOKEN_PREFIX, PushGatewayBinding};
+
+  const SERVER_ID: &str = "0123456789abcdef0123456789abcdef";
+  const APNS_TOKEN: &str = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
+
+  fn through_gateway(server: &FakeServer, providers: Vec<PushProvider>) {
+    server.set_push_gateway(Some(PushGatewayBinding {
+      url: "https://gateway.example.com".into(),
+      server_id: SERVER_ID.into(),
+      providers,
+    }));
+  }
+
+  /// What the gateway would learn from the registration.
+  fn opened(server: &FakeServer, peer: &Peer) -> BoundToken {
+    let registration = server.push_registration(peer.client.device_id()).unwrap();
+    let blob = URL_SAFE_NO_PAD
+      .decode(registration.token.strip_prefix(BOUND_TOKEN_PREFIX).unwrap())
+      .unwrap();
+    open_bound_token(&FAKE_GATEWAY_TOKEN_SEED, &blob).unwrap()
+  }
+
+  #[tokio::test]
+  async fn the_server_gets_a_sealed_token_bound_to_itself_never_the_raw_one() {
+    let server = FakeServer::new();
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    through_gateway(&server, vec![PushProvider::Apns, PushProvider::Fcm]);
+
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+
+    let registration = server.push_registration(bob.client.device_id()).unwrap();
+    assert!(registration.token.starts_with(BOUND_TOKEN_PREFIX));
+    assert!(!registration.token.contains(APNS_TOKEN));
+    let bound = opened(&server, &bob);
+    assert_eq!(bound.token, APNS_TOKEN);
+    assert_eq!(bound.provider, "apns");
+    assert_eq!(bound.server_id, SERVER_ID);
+    let now = i64::try_from(bound.expires_at_ms).unwrap();
+    assert!(now > 0);
+    settle(&mut [&mut bob]).await;
+  }
+
+  #[tokio::test]
+  async fn self_built_apps_give_servers_without_a_gateway_the_raw_token() {
+    let server = FakeServer::new();
+    let mut bob = Peer::enroll(&server, "Bob").await;
+
+    bob
+      .client
+      .register_push(PushProvider::Fcm, "fcm-token")
+      .await
+      .unwrap();
+    assert_eq!(
+      server.push_registration(bob.client.device_id()).unwrap().token,
+      "fcm-token"
+    );
+
+    // A gateway for FCM only: APNs goes to Apple directly, and Web Push never uses it.
+    through_gateway(&server, vec![PushProvider::Fcm]);
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+    assert_eq!(
+      server.push_registration(bob.client.device_id()).unwrap().token,
+      APNS_TOKEN
+    );
+    bob
+      .client
+      .register_push(PushProvider::WebPush, "{}")
+      .await
+      .unwrap();
+    assert_eq!(
+      server.push_registration(bob.client.device_id()).unwrap().token,
+      "{}"
+    );
+    settle(&mut [&mut bob]).await;
+  }
+
+  #[tokio::test]
+  async fn the_token_is_sealed_again_only_when_due_keeping_the_push_key() {
+    let server = FakeServer::new();
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    through_gateway(&server, vec![PushProvider::Apns]);
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+    let first = server.push_registration(bob.client.device_id()).unwrap();
+
+    // Nothing is due right after registering.
+    assert!(!bob.client.refresh_push().await.unwrap());
+    assert_eq!(
+      server.push_registration(bob.client.device_id()).unwrap().token,
+      first.token
+    );
+
+    // Sealed longer ago than the setting allows: a new blob, the same push key, the old blob revoked.
+    bob.client.set_push_reseal_after(std::time::Duration::ZERO);
+    assert!(bob.client.refresh_push().await.unwrap());
+    let second = server.push_registration(bob.client.device_id()).unwrap();
+    assert_ne!(second.token, first.token);
+    assert_eq!(second.push_key, first.push_key);
+    assert_eq!(opened(&server, &bob).token, APNS_TOKEN);
+    let old_blob = URL_SAFE_NO_PAD
+      .decode(first.token.strip_prefix(BOUND_TOKEN_PREFIX).unwrap())
+      .unwrap();
+    assert_eq!(server.revoked_gateway_tokens(), vec![old_blob]);
+    settle(&mut [&mut bob]).await;
+  }
+
+  #[tokio::test]
+  async fn a_server_that_changes_how_it_sends_has_the_registration_redone() {
+    let server = FakeServer::new();
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+    assert!(!bob.client.refresh_push().await.unwrap());
+
+    // The server moves to a gateway: the raw token is replaced by a sealed one.
+    through_gateway(&server, vec![PushProvider::Apns]);
+    assert!(bob.client.refresh_push().await.unwrap());
+    assert_eq!(opened(&server, &bob).token, APNS_TOKEN);
+
+    // Another server ID (the server's key changed): sealed again for the new one.
+    server.set_push_gateway(Some(PushGatewayBinding {
+      url: "https://gateway.example.com".into(),
+      server_id: "ffffffffffffffffffffffffffffffff".into(),
+      providers: vec![PushProvider::Apns],
+    }));
+    assert!(bob.client.refresh_push().await.unwrap());
+    assert_eq!(
+      opened(&server, &bob).server_id,
+      "ffffffffffffffffffffffffffffffff"
+    );
+    settle(&mut [&mut bob]).await;
+  }
+
+  #[tokio::test]
+  async fn leaving_the_server_ends_the_sealed_token_at_the_gateway() {
+    let server = FakeServer::new();
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    through_gateway(&server, vec![PushProvider::Apns]);
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+    let blob = URL_SAFE_NO_PAD
+      .decode(
+        server
+          .push_registration(bob.client.device_id())
+          .unwrap()
+          .token
+          .strip_prefix(BOUND_TOKEN_PREFIX)
+          .unwrap(),
+      )
+      .unwrap();
+
+    bob.client.unregister_push().await.unwrap();
+
+    assert!(server.push_registration(bob.client.device_id()).is_none());
+    assert_eq!(server.revoked_gateway_tokens(), vec![blob]);
+    // Nothing is left to renew.
+    assert!(!bob.client.refresh_push().await.unwrap());
+    settle(&mut [&mut bob]).await;
+  }
+
+  #[tokio::test]
+  async fn an_app_built_for_a_gateway_never_hands_out_its_raw_token() {
+    let server = FakeServer::new();
+    let mut bob = Peer::enroll_with_settings(
+      &server,
+      "Bob",
+      ClientSettings {
+        maybe_push_gateway_url: Some("https://store-app-gateway.example.com".into()),
+        ..settings()
+      },
+    )
+    .await;
+    // The server names no gateway (or none for this provider): no registration at all.
+    for providers in [None, Some(vec![PushProvider::Fcm])] {
+      server.set_push_gateway(providers.map(|providers| PushGatewayBinding {
+        url: "https://gateway.example.com".into(),
+        server_id: SERVER_ID.into(),
+        providers,
+      }));
+      assert!(
+        bob
+          .client
+          .register_push(PushProvider::Apns, APNS_TOKEN)
+          .await
+          .is_err()
+      );
+      assert!(server.push_registration(bob.client.device_id()).is_none());
+    }
+
+    // Registered sealed, then the server stops naming a gateway: the sealed registration stays,
+    // it is not replaced by the raw token.
+    through_gateway(&server, vec![PushProvider::Apns]);
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+    server.set_push_gateway(None);
+    assert!(bob.client.refresh_push().await.is_err());
+    let registered = server.push_registration(bob.client.device_id()).unwrap().token;
+    assert!(registered.starts_with(BOUND_TOKEN_PREFIX), "{registered}");
+    assert!(server.revoked_gateway_tokens().is_empty());
+    settle(&mut [&mut bob]).await;
+  }
+
+  #[tokio::test]
+  async fn the_gateway_an_app_was_built_for_wins_over_the_one_the_server_names() {
+    let server = FakeServer::new();
+    // The fake gateway answers for any URL; the server's own URL would be gateway.example.com.
+    let mut bob = Peer::enroll_with_settings(
+      &server,
+      "Bob",
+      ClientSettings {
+        maybe_push_gateway_url: Some("https://store-app-gateway.example.com".into()),
+        ..settings()
+      },
+    )
+    .await;
+    through_gateway(&server, vec![PushProvider::Apns]);
+    bob
+      .client
+      .register_push(PushProvider::Apns, APNS_TOKEN)
+      .await
+      .unwrap();
+    bob.client.unregister_push().await.unwrap();
+
+    assert_eq!(
+      server.revoked_gateway_urls(),
+      vec!["https://store-app-gateway.example.com".to_owned()]
+    );
+    settle(&mut [&mut bob]).await;
+  }
 }
