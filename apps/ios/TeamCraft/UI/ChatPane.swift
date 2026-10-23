@@ -35,6 +35,20 @@ struct ChatPane: View {
   private static let quickReaction = "👍"
 
   var body: some View {
+    screenWithDialogs
+    .task(id: model.changeCount) {
+      await reload()
+      await followTransfers()
+    }
+    .task { mentionNames = await model.mentionNames() }
+    .onAppear { model.visibleConversationId = conversation.id }
+    .onDisappear {
+      if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
+    }
+  }
+
+  /// The messages and the composer, with navigation and pickers.
+  private var screen: some View {
     VStack(spacing: 0) {
       OfflineBanner()
       messageList
@@ -60,6 +74,11 @@ struct ChatPane: View {
       result in
       Task { await attach(documents: result) }
     }
+  }
+
+  /// `screen` with its confirmations, alerts and the in-app handling of message links.
+  private var screenWithDialogs: some View {
+    screen
     .confirmationDialog("delete_confirm_title", isPresented: deletingBinding, titleVisibility: .visible, presenting: maybeDeleting) {
       message in
       Button("delete", role: .destructive) {
@@ -89,15 +108,6 @@ struct ChatPane: View {
       case .sendFailed: Text("attachment_send_failed")
       }
     }
-    .task(id: model.changeCount) {
-      await reload()
-      await followTransfers()
-    }
-    .task { mentionNames = await model.mentionNames() }
-    .onAppear { model.visibleConversationId = conversation.id }
-    .onDisappear {
-      if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
-    }
   }
 
   private var messageList: some View {
@@ -109,19 +119,7 @@ struct ChatPane: View {
             case .day(let date):
               DayChip(date: date)
             case .entry(let message, let isContinuation):
-              MessageRow(
-                message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
-                isContinuation: isContinuation, showsThreadLink: threadId == nil,
-                onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
-                mentionNames: mentionNames
-              )
-              .padding(.top, isContinuation ? 0 : 8)
-              .background(maybeHighlighted == message.id ? Theme.accentSoft : Color.clear)
-              .contentShape(Rectangle())
-              .onTapGesture(count: 2) { react(message, Self.quickReaction) }
-              .contextMenu { menu(for: message) }
-              .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
-              .id(message.id)
+              entryRow(message, isContinuation: isContinuation)
             }
           }
           // Visible exactly while the user reads at the bottom.
@@ -158,6 +156,26 @@ struct ChatPane: View {
   }
 
   private static let bottomId = "bottom"
+
+  /// One message with its gestures: double tap reacts, long press opens the menu.
+  private func entryRow(_ message: MessageItem, isContinuation: Bool) -> some View {
+    let row = MessageRow(
+      message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
+      isContinuation: isContinuation, showsThreadLink: threadId == nil,
+      onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
+      mentionNames: mentionNames
+    )
+    let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
+    return
+      row
+      .padding(.top, isContinuation ? 0 : 8)
+      .background(highlight)
+      .contentShape(Rectangle())
+      .onTapGesture(count: 2) { react(message, Self.quickReaction) }
+      .contextMenu { menu(for: message) }
+      .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
+      .id(message.id)
+  }
 
   @ViewBuilder
   private var composer: some View {
