@@ -87,6 +87,19 @@ pub trait PushSender: Send + Sync {
     target: &'a PushTarget,
     message: &'a PushMessage,
   ) -> BoxFuture<'a, Result<(), PushError>>;
+
+  /// Whether registrations for this sender must carry a device token that the app sealed for a push
+  /// gateway (`tcgw1:...`, docs/push-gateway.md); false for the senders that talk to the push
+  /// service themselves.
+  fn requires_bound_token(&self) -> bool {
+    false
+  }
+
+  /// Whether this sender is a push gateway, which takes only sealed tokens (or raw ones during a
+  /// transition) and never a token of another kind.
+  fn is_gateway(&self) -> bool {
+    false
+  }
 }
 
 /// Pushes one user may have in flight to endpoints they chose, unless configured otherwise.
@@ -107,6 +120,18 @@ pub struct PushDispatcher {
   health: ProviderHealthTracker,
   /// The VAPID public key browsers subscribe with (`applicationServerKey`), if Web Push is on.
   maybe_web_public_key: Option<String>,
+  /// How this server reaches its push gateway, if it has one (told to the apps).
+  maybe_gateway_binding: Option<GatewayBinding>,
+}
+
+/// The gateway a server sends through, as its apps need to know it.
+#[derive(Debug, Clone)]
+pub struct GatewayBinding {
+  pub url: String,
+  /// The ID the gateway knows this server by.
+  pub server_id: String,
+  /// The providers sent through the gateway.
+  pub providers: Vec<PushProvider>,
 }
 
 impl PushDispatcher {
@@ -118,6 +143,7 @@ impl PushDispatcher {
       per_user: PerUserLimit::new(DEFAULT_MAX_CONCURRENT_SENDS_PER_USER),
       health: ProviderHealthTracker::default(),
       maybe_web_public_key: None,
+      maybe_gateway_binding: None,
     }
   }
 
@@ -131,6 +157,33 @@ impl PushDispatcher {
   pub fn with_web_public_key(mut self, public_key: String) -> Self {
     self.maybe_web_public_key = Some(public_key);
     self
+  }
+
+  /// Tells the apps how this server reaches its push gateway (`GET /api/v1/push/gateway`).
+  pub fn with_gateway_binding(mut self, binding: GatewayBinding) -> Self {
+    self.maybe_gateway_binding = Some(binding);
+    self
+  }
+
+  pub fn gateway_binding(&self) -> Option<&GatewayBinding> {
+    self.maybe_gateway_binding.as_ref()
+  }
+
+  /// Whether the provider's sender is a push gateway, which only works with device tokens that the
+  /// app sealed for it.
+  pub fn is_gateway(&self, provider: &PushProvider) -> bool {
+    self.sender_of(provider).is_some_and(|sender| sender.is_gateway())
+  }
+
+  /// Whether registrations for the provider must carry a sealed token.
+  pub fn requires_bound_token(&self, provider: &PushProvider) -> bool {
+    self
+      .sender_of(provider)
+      .is_some_and(|sender| sender.requires_bound_token())
+  }
+
+  fn sender_of(&self, provider: &PushProvider) -> Option<&Arc<dyn PushSender>> {
+    known_name(provider).and_then(|name| self.senders.get(name))
   }
 
   /// Whether the provider has a sender.

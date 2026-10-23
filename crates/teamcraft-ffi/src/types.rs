@@ -18,6 +18,10 @@ pub struct AppConfig {
   pub account: String,
   /// 32 random bytes the app keeps wrapped in the Android Keystore (e2ee.md §9.2).
   pub database_key: Vec<u8>,
+  /// The push gateway this app was built for (a publisher's store app): device tokens for APNs and
+  /// FCM are sealed for it. `None` for self-built apps, which use the gateway their server names.
+  #[uniffi(default = None)]
+  pub push_gateway_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]

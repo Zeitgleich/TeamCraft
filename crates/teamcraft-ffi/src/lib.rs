@@ -221,6 +221,13 @@ impl TeamCraft {
   }
 
   /// Removes this device's push registration and its push key (sign-out).
+  /// Seals the registered APNs/FCM device token for the push gateway again when that is due (it
+  /// is sealed for one server and expires); call it when the app starts or returns to the
+  /// foreground. Returns whether the registration was renewed; a no-op without a registration.
+  pub async fn refresh_push(&self) -> Result<bool, TeamCraftError> {
+    self.call(|engine| Box::pin(engine.refresh_push())).await
+  }
+
   pub async fn unregister_push(&self) -> Result<(), TeamCraftError> {
     self.call(|engine| Box::pin(engine.unregister_push())).await
   }

@@ -29,9 +29,12 @@ Related: [e2ee.md §7](e2ee.md), [notifications.md](notifications.md), [operatio
  device ──registers token + push key──▶ teamcraft-server ──(sealed wake-up, token; signed)──▶ push gateway ──▶ APNs / FCM ──▶ device
 ```
 
-1. The app registers with the server as before (`PUT /api/v1/devices/{id}/push`): provider `apns` or
-   `fcm`, the platform token, a fresh 256-bit push key. Nothing changes in the apps.
-2. To wake the device the server seals the wake-up with the push key and posts it with the token to
+1. The app asks its server how it reaches the gateway (`GET /api/v1/push/gateway`: the gateway URL, the
+   server's ID there, the providers sent through it), gets the gateway's token key from the gateway
+   itself, **seals** its APNs or FCM token for that gateway bound to that server ID and an expiry (§3a), and
+   registers the sealed blob (`tcgw1:...`) with the server (`PUT /api/v1/devices/{id}/push`) together
+   with a fresh 256-bit push key. The server never holds a usable device token.
+2. To wake the device the server seals the wake-up with the push key and posts it with the sealed token to
    `POST /v1/push` of the gateway, signed with the server's gateway key.
 3. The gateway checks signature and limits and forwards to Apple or Google with the publisher's
    credentials; it answers whether the token is dead (`410 token_gone`).
@@ -49,6 +52,7 @@ url      = "https://push-gw.zeitgleich.de"   # the publisher's gateway for the o
 key_path = "/var/lib/teamcraft/push-gateway.key"   # created on first start, mode 0600
 ```
 
+`accept_unbound_tokens = false` (default) is the transition setting described in §3a.
 `key` (32 bytes, base64url, prefer `TEAMCRAFT_PUSH__GATEWAY__KEY`) works instead of `key_path`. The key
 is an Ed25519 key pair used only towards the gateway: its public half identifies the server there
 (an opaque ID, the hash of the public key), and the gateway's quota and any block follow it. Keep it;
@@ -62,20 +66,45 @@ URL is always configuration (the deployment playbook sets it by default).
 The admin console's push provider status shows APNs and FCM as active when the gateway answers and as
 failing when it refuses or is unreachable.
 
+### 3a. Bound device tokens
+
+An APNs or FCM token is a bearer secret. If the app gave the raw token to every server it signs in to,
+any of them (or a copy of its database) could push to the device through any gateway identity. So:
+
+- **The app seals** `{provider, server_id, expires_at, token}` to the gateway's token key (HPKE; format
+  and known answer in the gateway repository's api.md §6 and the shared fixtures). The key comes from
+  `GET /v1/info` of the gateway itself; a store app uses the gateway it was built for
+  (`push_gateway_url` of the app config: Android `-Pteamcraft.pushGatewayUrl`, iOS
+  `TEAMCRAFT_PUSH_GATEWAY_URL`) and only falls back to the one the server names.
+- **The server** stores and forwards the blob (`tcgw1:` + base64url) as the token of the registration.
+  It accepts only sealed tokens for providers it sends through a gateway, and refuses them for providers it
+  sends directly. A registration made before sealing existed (a raw token) is dead weight: the gateway
+  refuses it (`410`) and the server forgets it, and the app registers again, sealed.
+- **The gateway** opens the blob and checks that the authenticated server is the one named in it, that it
+  has not expired and has not been revoked.
+- **Renewal.** The app seals again after a week (it picks up a rotated gateway key; the token lives 30
+  days), when the server's ID or gateway changes, and on every start (`refresh_push`); the old blob is
+  revoked. When the user **leaves or removes the server** (sign-out, `unregister_push`), the app revokes
+  the blob at the gateway (`POST /v1/tokens/revoke`), so the server can't push any more.
+
+`[push.gateway] accept_unbound_tokens = true` is a **transition** for old apps that don't seal yet: the
+server then accepts and sends raw tokens (the gateway has to allow them, `tokens.accept_unbound`). It is
+off by default; with it on, a raw token can be used by any server that learns it.
+
 ## 4. How answers map onto the server's push errors
 
-| Gateway answer                                                                                   | Server                                                            |
-|--------------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
-| `200`                                                                                            | delivered                                                         |
-| `410 token_gone`                                                                                 | **forget the device's push registration**                         |
-| `401 unknown_server`                                                                             | register the key (once for all waiting pushes), retry once        |
-| `429 rate_limited`, `429 quota_exceeded`                                                         | dropped; no push is sent until `Retry-After` has passed           |
-| `429 token_rate_limited`, `400 invalid_request`                                                  | dropped; a problem of that token, not counted against the gateway |
-| `5xx`, `502 provider_unavailable`                                                                | dropped, shows in the provider health; nothing deleted            |
-| `403 server_blocked`, `401 unauthorized`, `502 provider_rejected`, `501 provider_not_configured` | dropped (rejected), shows as failing; nothing deleted             |
+| Gateway answer                                                                                                | Server                                                                      |
+|---------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
+| `200`                                                                                                         | delivered                                                                   |
+| `410 token_gone`, `token_unbound`, `token_expired`, `token_invalid`, `token_revoked`, `token_server_mismatch` | **forget the device's push registration** (the app registers again, sealed) |
+| `401 unknown_server`                                                                                          | register the key (once for all waiting pushes), retry once                  |
+| `429 rate_limited`, `429 quota_exceeded`                                                                      | dropped; no push is sent until `Retry-After` has passed                     |
+| `429 token_rate_limited`, `400 invalid_request`                                                               | dropped; a problem of that token, not counted against the gateway           |
+| `5xx`, `502 provider_unavailable`                                                                             | dropped, shows in the provider health; nothing deleted                      |
+| `403 server_blocked`, `401 unauthorized`, `502 provider_rejected`, `501 provider_not_configured`              | dropped (rejected), shows as failing; nothing deleted                       |
 
 A dropped push is not retried: wake-ups are hints, the app catches up when it runs. A bare `410`
-without `token_gone` (a proxy, a wrong URL) deletes nothing. After the gateway refuses to register
+without one of these codes (a proxy, a wrong URL) deletes nothing. After the gateway refuses to register
 the server, pushes fail at once for five minutes instead of trying again each time.
 
 Only `token_gone` deletes a registration: a gateway that blocks, rate-limits or breaks must never

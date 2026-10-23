@@ -28,6 +28,9 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
     buildConfigField("String", "SERVER_URL", "\"${setting("serverUrl")}\"")
+    // The push gateway of the publisher this build is made for (docs/push-gateway.md); empty: the
+    // gateway the server names.
+    buildConfigField("String", "PUSH_GATEWAY_URL", "\"${setting("pushGatewayUrl")}\"")
     buildConfigField("String", "OIDC_ISSUER", "\"${setting("oidcIssuer")}\"")
     buildConfigField("String", "OIDC_CLIENT_ID", "\"${setting("oidcClientId")}\"")
     // AppAuth's redirect activity listens on this scheme; the OIDC client must allow the URI.

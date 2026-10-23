@@ -43,6 +43,7 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
           dataDir = File(context.filesDir, "store").absolutePath,
           account = storeName(account),
           databaseKey = databaseKey(account),
+          pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
         ),
         Tokens(auth),
         Changes { changes.update { it + 1 } },

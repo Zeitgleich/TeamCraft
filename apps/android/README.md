@@ -109,6 +109,7 @@ Gradle properties (`gradle.properties` has the development defaults; override wi
 | Property                       | Meaning                                                              |
 |--------------------------------|----------------------------------------------------------------------|
 | `teamcraft.serverUrl`          | TeamCraft server                                                     |
+| `teamcraft.pushGatewayUrl`     | Push gateway the FCM token is sealed for (publisher builds); empty: the server's |
 | `teamcraft.oidcIssuer`         | OIDC issuer (Keycloak realm URL)                                     |
 | `teamcraft.oidcClientId`       | Public OIDC client with PKCE                                         |
 | `teamcraft.oidcRedirectScheme` | Redirect URI is `<scheme>:/oauth/callback`; the client must allow it |

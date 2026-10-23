@@ -58,6 +58,7 @@ the extension (each links the static library; they are separate processes).
 | Setting                          | Meaning                                                                                                       |
 |----------------------------------|---------------------------------------------------------------------------------------------------------------|
 | `TEAMCRAFT_SERVER_URL`           | TeamCraft server                                                                                              |
+| `TEAMCRAFT_PUSH_GATEWAY_URL`     | Push gateway the APNs token is sealed for (publisher builds); empty: the server's                             |
 | `TEAMCRAFT_OIDC_ISSUER`          | OIDC issuer (Keycloak realm URL)                                                                              |
 | `TEAMCRAFT_OIDC_CLIENT_ID`       | Public OIDC client with PKCE                                                                                  |
 | `TEAMCRAFT_OIDC_REDIRECT_SCHEME` | Redirect URI is `<scheme>:/oauth/callback`; the client must allow it                                          |

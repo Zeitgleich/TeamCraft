@@ -34,7 +34,7 @@ use crate::handlers::{
   get_conversation_retention_handler, get_email_digest_handler, get_identity_key_handler,
   get_key_bag_handler, get_me_handler, get_meeting_handler, get_my_lobby_state_handler,
   get_my_org_recovery_shares_handler, get_my_privacy_handler, get_my_profile_handler,
-  get_notification_settings_handler, get_policy_handler, get_read_receipts_handler,
+  get_notification_settings_handler, get_policy_handler, get_push_gateway_handler, get_read_receipts_handler,
   get_recovery_material_handler, get_recovery_request_handler, get_recovery_result_handler,
   get_security_log_handler, get_share_info_handler, get_space_handler,
   get_space_notification_settings_handler, get_space_retention_handler, get_unread_handler,
@@ -82,6 +82,7 @@ pub fn router(state: AppState) -> Router {
     .route("/organizations", get(list_organizations_handler))
     .route("/me", get(get_me_handler))
     .route("/push/web-key", get(get_web_push_key_handler))
+    .route("/push/gateway", get(get_push_gateway_handler))
     .route("/gateway", get(gateway_handler))
     .route("/rendezvous", get(rendezvous_handler))
     .route("/auth/backchannel-logout", post(backchannel_logout_handler))

@@ -375,7 +375,9 @@ final class AppModel {
 
   // MARK: Push
 
-  private static let pushTokenKey = "apnsToken"
+  // "v2": sealed for the push gateway (docs/push-gateway.md); a registration made by an older version
+  // (the raw token) is replaced at the first launch.
+  private static let pushTokenKey = "apnsToken.v2"
   /// Search index segments kept on the phone by the background prefetch (newest months first).
   private static let segmentPrefetchCapBytes: UInt64 = 512 * 1024 * 1024
 
@@ -507,7 +509,13 @@ final class AppModel {
 
   private func registerPushIfNeeded(token: String) async {
     let defaults = UserDefaults.standard
-    guard defaults.string(forKey: Self.pushTokenKey) != token, let core = try? core() else { return }
+    guard let core = try? core() else { return }
+    guard defaults.string(forKey: Self.pushTokenKey) != token else {
+      // Registered already: seals the token again when that is due (it is bound to one server and
+      // expires), at most one request otherwise.
+      _ = try? await core.refreshPush()
+      return
+    }
     do {
       try await core.registerPush(service: .apns, token: token)
       defaults.set(token, forKey: Self.pushTokenKey)

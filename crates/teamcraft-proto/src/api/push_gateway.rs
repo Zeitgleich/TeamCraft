@@ -18,6 +18,12 @@ pub const GATEWAY_SIGNATURE_HEADER: &str = "x-teamcraft-signature";
 pub const GATEWAY_PUSH_PATH: &str = "/v1/push";
 pub const GATEWAY_REGISTER_PATH: &str = "/v1/servers";
 pub const GATEWAY_INFO_PATH: &str = "/v1/info";
+pub const GATEWAY_REVOKE_PATH: &str = "/v1/tokens/revoke";
+
+/// Prefix of a device token that the app sealed for a push gateway (`GatewayPushRequest::bound_token`):
+/// `tcgw1:` followed by the base64url (no padding) of the sealed blob. Servers store it as the token of
+/// the registration and send the decoded blob to the gateway.
+pub const BOUND_TOKEN_PREFIX: &str = "tcgw1:";
 
 /// Length of [`GatewayPushRequest::request_id`].
 pub const GATEWAY_REQUEST_ID_LEN: usize = 16;
@@ -66,8 +72,13 @@ pub struct GatewayPushRequest {
   pub urgency: GatewayUrgency,
   /// How long the push service may hold the wake-up for an offline device.
   pub ttl_secs: u32,
-  /// The APNs device token (hex) or FCM registration token.
-  pub token: String,
+  /// The raw APNs device token (hex) or FCM registration token: only for gateways that still accept
+  /// unbound tokens. Exactly one of `token` and `bound_token` is set.
+  #[serde(rename = "token", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_token: Option<String>,
+  /// The device token sealed by the app, bound to this server (docs/api.md §6 of the gateway).
+  #[serde(rename = "bound_token", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_bound_token: Option<Base64Bytes>,
   /// The wake-up sealed to the device's push key; opaque to the gateway.
   pub sealed: Base64Bytes,
 }
@@ -98,6 +109,55 @@ pub struct GatewayInfoResponse {
   /// Whether unknown servers may register themselves.
   pub is_registration_open: bool,
   pub limits: GatewayLimits,
+  /// The key apps seal their device tokens to.
+  pub token_key: GatewayTokenKey,
+  /// `false` only while the gateway still accepts raw device tokens (transition).
+  pub are_bound_tokens_required: bool,
+  /// The longest validity a sealed token may claim.
+  pub max_token_lifetime_secs: u64,
+}
+
+/// The gateway's current token key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GatewayTokenKey {
+  /// 8 bytes as 16 hex characters.
+  pub key_id: String,
+  /// `hpke-x25519-hkdf-sha256-chacha20poly1305`.
+  pub algorithm: String,
+  /// The X25519 public key (32 bytes).
+  pub public_key: Base64Bytes,
+}
+
+/// `POST /v1/tokens/revoke`, unauthenticated: whoever holds a sealed token can end it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GatewayRevokeRequest {
+  pub bound_token: Base64Bytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GatewayRevokeResponse {
+  pub revoked: bool,
+}
+
+/// `GET /api/v1/push/gateway`: how this server reaches its push gateway, for the apps that seal their
+/// device tokens for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PushGatewayResponse {
+  /// Absent when the server sends to APNs and FCM directly (apps register raw tokens).
+  #[serde(rename = "gateway", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_gateway: Option<PushGatewayBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PushGatewayBinding {
+  /// Base URL of the gateway. Apps built for a publisher use the gateway they were built for and
+  /// only fall back to this one.
+  pub url: String,
+  /// The ID this server has at the gateway: the `server_id` to seal tokens for.
+  pub server_id: String,
+  /// The providers this server sends through the gateway: only tokens of these are sealed (the others
+  /// are registered as they are).
+  pub providers: Vec<PushProvider>,
 }
 
 wire_enum! {
@@ -119,6 +179,16 @@ wire_enum! {
     TokenRateLimited => "token_rate_limited",
     /// APNs or FCM says the token is dead (410): the server forgets the registration.
     TokenGone => "token_gone",
+    /// A raw device token was sent and the gateway only takes sealed ones.
+    TokenUnbound => "token_unbound",
+    /// The sealed token's expiry has passed.
+    TokenExpired => "token_expired",
+    /// The sealed token can't be opened.
+    TokenInvalid => "token_invalid",
+    /// The app ended this sealed token.
+    TokenRevoked => "token_revoked",
+    /// The sealed token names another server.
+    TokenServerMismatch => "token_server_mismatch",
     ProviderNotConfigured => "provider_not_configured",
     /// The gateway's credentials were rejected: the gateway operator's problem, not the token's.
     ProviderRejected => "provider_rejected",
@@ -161,6 +231,20 @@ mod tests {
     assert_eq!(request.ttl_secs, 3600);
     assert_eq!(request.request_id.as_slice(), [1u8; GATEWAY_REQUEST_ID_LEN]);
     assert_eq!(request.sealed.as_slice(), b"\x01hello");
+    let bound: GatewayPushRequest = check(include_str!(
+      "../../tests/fixtures/push_gateway/push_request_bound.json"
+    ));
+    assert!(bound.maybe_token.is_none() && bound.maybe_bound_token.is_some());
+    let _: GatewayRevokeRequest = check(include_str!(
+      "../../tests/fixtures/push_gateway/revoke_request.json"
+    ));
+    let _: GatewayRevokeResponse = check(include_str!(
+      "../../tests/fixtures/push_gateway/revoke_response.json"
+    ));
+    let expired: GatewayErrorBody = check(include_str!(
+      "../../tests/fixtures/push_gateway/error_token_expired.json"
+    ));
+    assert_eq!(expired.error_code, GatewayErrorCode::TokenExpired);
     let _: GatewayPushResponse = check(include_str!(
       "../../tests/fixtures/push_gateway/push_response.json"
     ));
@@ -209,7 +293,8 @@ mod tests {
       kind: PushKind::Call,
       urgency: GatewayUrgency::High,
       ttl_secs: 30,
-      token: "secret-token".into(),
+      maybe_token: Some("secret-token".into()),
+      maybe_bound_token: None,
       sealed: Base64Bytes::new(vec![2, 3]),
     };
     let json = serde_json::to_value(&request).unwrap();

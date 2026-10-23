@@ -14,9 +14,9 @@ use rand_core::{OsRng, RngCore};
 use teamcraft_crypto::push_gateway::{GatewayRequest, GatewayServerKey};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  Base64Bytes, GATEWAY_PUSH_PATH, GATEWAY_REGISTER_PATH, GATEWAY_REQUEST_ID_LEN, GATEWAY_SERVER_ID_HEADER,
-  GATEWAY_SIGNATURE_HEADER, GATEWAY_TIMESTAMP_HEADER, GatewayErrorBody, GatewayErrorCode, GatewayPushRequest,
-  GatewayRegisterRequest, GatewayUrgency, PushProvider,
+  BOUND_TOKEN_PREFIX, Base64Bytes, GATEWAY_PUSH_PATH, GATEWAY_REGISTER_PATH, GATEWAY_REQUEST_ID_LEN,
+  GATEWAY_SERVER_ID_HEADER, GATEWAY_SIGNATURE_HEADER, GATEWAY_TIMESTAMP_HEADER, GatewayErrorBody,
+  GatewayErrorCode, GatewayPushRequest, GatewayRegisterRequest, GatewayUrgency, PushProvider,
 };
 use tracing::{info, warn};
 use zeroize::Zeroizing;
@@ -30,6 +30,8 @@ const DEFAULT_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long to wait before registering again after the gateway refused to register us.
 const REGISTER_RETRY: Duration = Duration::from_secs(5 * 60);
+/// Largest sealed token a registration may carry (the gateway refuses more).
+const MAX_BOUND_TOKEN_BYTES: usize = 4096;
 /// Most of an error response that is read.
 const MAX_ERROR_BODY_BYTES: usize = 4096;
 
@@ -39,11 +41,15 @@ pub struct GatewaySettings {
   pub url: String,
   pub key: GatewayServerKey,
   pub timeout: Duration,
+  /// Also send device tokens that the apps did not seal (a transition for old apps; the gateway
+  /// must accept them too). Off by default.
+  pub accept_unbound_tokens: bool,
 }
 
 /// One server's connection to one gateway; the APNs and FCM senders share it.
 pub struct GatewayClient {
   base_url: String,
+  accept_unbound_tokens: bool,
   key: GatewayServerKey,
   server_id: String,
   http: reqwest::Client,
@@ -69,6 +75,7 @@ impl GatewayClient {
       .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
     Ok(Arc::new(Self {
       base_url: settings.url.trim_end_matches('/').to_owned(),
+      accept_unbound_tokens: settings.accept_unbound_tokens,
       server_id: settings.key.public_key().server_id(),
       key: settings.key,
       http,
@@ -83,6 +90,16 @@ impl GatewayClient {
       client: self.clone(),
       provider,
     }
+  }
+
+  /// The gateway's base URL.
+  pub fn url(&self) -> &str {
+    &self.base_url
+  }
+
+  /// Whether registrations may carry device tokens that the app did not seal.
+  pub fn accepts_unbound_tokens(&self) -> bool {
+    self.accept_unbound_tokens
   }
 
   /// The ID the gateway knows this server by (safe to log: it is a hash of the public key).
@@ -198,21 +215,21 @@ impl GatewayClient {
 }
 
 impl PushSender for GatewaySender {
+  fn requires_bound_token(&self) -> bool {
+    !self.client.accept_unbound_tokens
+  }
+
+  fn is_gateway(&self) -> bool {
+    true
+  }
+
   fn send<'a>(
     &'a self,
     target: &'a PushTarget,
     message: &'a PushMessage,
   ) -> BoxFuture<'a, Result<(), PushError>> {
     Box::pin(async move {
-      // Checked like the direct senders do: a junk registration never reaches the gateway.
-      let is_token = match self.provider {
-        PushProvider::Apns => super::apns::is_device_token(&target.token),
-        PushProvider::Fcm => super::fcm::is_registration_token(&target.token),
-        _ => false,
-      };
-      if !is_token {
-        return Err(PushError::Invalid("not a push token of this provider".into()));
-      }
+      let (maybe_token, maybe_bound_token) = self.token_fields(&target.token)?;
       let mut request_id = [0u8; GATEWAY_REQUEST_ID_LEN];
       OsRng.fill_bytes(&mut request_id);
       self
@@ -226,11 +243,43 @@ impl PushSender for GatewaySender {
             Urgency::High => GatewayUrgency::High,
           },
           ttl_secs: u32::try_from(message.ttl.as_secs()).unwrap_or(u32::MAX),
-          token: target.token.clone(),
+          maybe_token,
+          maybe_bound_token,
           sealed: Base64Bytes::new(message.sealed.clone()),
         })
         .await
     })
+  }
+}
+
+impl GatewaySender {
+  /// The token of a registration as the gateway wants it: the sealed blob of a token the app bound
+  /// to this server (`tcgw1:...`), or the raw token while unbound ones are accepted. A raw token
+  /// of a registration made before binding is dead weight: the app has to register again, sealed.
+  fn token_fields(&self, token: &str) -> Result<(Option<String>, Option<Base64Bytes>), PushError> {
+    if let Some(encoded) = token.strip_prefix(BOUND_TOKEN_PREFIX) {
+      let blob = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| PushError::Invalid("not a sealed push token".into()))?;
+      if blob.is_empty() || blob.len() > MAX_BOUND_TOKEN_BYTES {
+        return Err(PushError::Invalid("not a sealed push token".into()));
+      }
+      return Ok((None, Some(Base64Bytes::new(blob))));
+    }
+    if !self.client.accept_unbound_tokens {
+      return Err(PushError::Gone);
+    }
+    // Checked like the direct senders do: a junk registration never reaches the gateway.
+    let is_token = match self.provider {
+      PushProvider::Apns => super::apns::is_device_token(token),
+      PushProvider::Fcm => super::fcm::is_registration_token(token),
+      _ => false,
+    };
+    if is_token {
+      Ok((Some(token.to_owned()), None))
+    } else {
+      Err(PushError::Invalid("not a push token of this provider".into()))
+    }
   }
 }
 
@@ -297,7 +346,20 @@ impl From<GatewayFailure> for PushError {
 fn classify(status: u16, maybe_code: Option<GatewayErrorCode>, retry_after: Duration) -> GatewayFailure {
   let failure = match (status, &maybe_code) {
     (_, Some(GatewayErrorCode::UnknownServer)) => return GatewayFailure::UnknownServer,
-    (_, Some(GatewayErrorCode::TokenGone)) => PushError::Gone,
+    // The registration is no use for this server any more (the push service says so, or the sealed
+    // token is expired, revoked, bound to another server, unopenable or not sealed at all): the app
+    // registers again.
+    (
+      _,
+      Some(
+        GatewayErrorCode::TokenGone
+        | GatewayErrorCode::TokenUnbound
+        | GatewayErrorCode::TokenExpired
+        | GatewayErrorCode::TokenInvalid
+        | GatewayErrorCode::TokenRevoked
+        | GatewayErrorCode::TokenServerMismatch,
+      ),
+    ) => PushError::Gone,
     (_, Some(GatewayErrorCode::RateLimited | GatewayErrorCode::QuotaExceeded)) => {
       return GatewayFailure::Throttled { retry_after, status };
     },
