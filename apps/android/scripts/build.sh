@@ -3,8 +3,8 @@
 # image (scripts/docker-build.sh); arguments are Gradle tasks (default: debug APKs of both flavors and their unit tests).
 set -euo pipefail
 
-NDK_VERSION=27.2.12479018
-SDK_PACKAGES=("platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}")
+NDK_VERSION=28.2.13676358
+SDK_PACKAGES=("platform-tools" "platforms;android-37.0" "build-tools;36.0.0" "ndk;${NDK_VERSION}")
 RUST_PROFILE="${TEAMCRAFT_RUST_PROFILE:-release}"
 # Space-separated; the Kotlin bindings are generated from the x86_64 library, so it must stay in.
 read -r -a ABIS <<<"${TEAMCRAFT_ANDROID_ABIS:-arm64-v8a x86_64}"
