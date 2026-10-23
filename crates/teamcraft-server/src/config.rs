@@ -242,6 +242,13 @@ pub struct LimitsConfig {
   pub max_key_package_bytes: usize,
   /// Key packages in one upload.
   pub max_key_packages_per_upload: usize,
+  /// A key package is handed out only while it stays valid at least this long, so members who
+  /// process the commit that adds it later (a device offline for weeks) still accept it. Packages
+  /// below it are deleted (e2ee.md §4.3).
+  pub key_package_min_validity_secs: u64,
+  /// Key packages expiring within this window count as "expiring soon", not as available, so
+  /// devices upload replacements (and a new last-resort package) well before.
+  pub key_package_renewal_window_secs: u64,
   /// Size of one MLS commit, welcome, proposal or application message.
   pub max_mls_payload_bytes: usize,
   pub max_welcomes_per_commit: usize,
@@ -1234,6 +1241,8 @@ impl Default for LimitsConfig {
       max_key_packages_per_device: 200,
       max_key_package_bytes: 16 * 1024,
       max_key_packages_per_upload: 100,
+      key_package_min_validity_secs: 42 * 24 * 60 * 60,
+      key_package_renewal_window_secs: 56 * 24 * 60 * 60,
       max_mls_payload_bytes: 1024 * 1024,
       max_welcomes_per_commit: 500,
       max_key_bag_bytes: 1024 * 1024,

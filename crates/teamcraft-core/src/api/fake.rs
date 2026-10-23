@@ -56,9 +56,15 @@ use teamcraft_proto::{
 use teamcraft_proto::{NotificationSettings, PushKind, PushMode, TestPushOutcome, TestPushResponse};
 
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
+use crate::clock::{Clock, SystemClock};
 
 const PAGE_SIZE: usize = 50;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// The server's defaults: key packages are handed out while they stay valid this long, and count as
+/// "expiring soon" within the renewal window (e2ee.md §4.3).
+const KEY_PACKAGE_MIN_VALIDITY_MS: i64 = 42 * DAY_MS;
+const KEY_PACKAGE_RENEWAL_WINDOW_MS: i64 = 56 * DAY_MS;
 
 /// The seed of the fake gateway's token key, to open what the client sealed (tests).
 pub const FAKE_GATEWAY_TOKEN_SEED: [u8; 32] = [0x42; 32];
@@ -138,6 +144,18 @@ struct State {
   /// When people were last active, and who chose to hide it.
   last_seen: HashMap<UserId, i64>,
   hidden_last_seen: HashSet<UserId>,
+  /// How far the server's clock runs ahead of the system clock ([`FakeServer::advance_clock`]).
+  clock_offset_ms: i64,
+  /// Revoked devices stay listed with their key packages, as a stale or malicious server would.
+  is_ignoring_revocations: bool,
+  /// The next commit of these users is stored and fanned out, but the answer is lost.
+  losing_commit_answers: HashSet<UserId>,
+  /// The next commit of these users is lost on the way (never stored).
+  dropping_commits: HashSet<UserId>,
+  /// These users get the next commit (of anyone) garbled, so their client refuses it.
+  garbling_next_commit_for: HashSet<UserId>,
+  /// MLS entries each user gets garbled (gateway and backlog alike).
+  garbled_entries: HashMap<UserId, HashSet<teamcraft_proto::MlsMessageId>>,
 }
 
 /// How an armed network cut ([`FakeServer::cut_network_after`]) hits the call it catches.
@@ -187,8 +205,15 @@ struct Device {
 
 #[derive(Default)]
 struct KeyPackages {
-  regular: VecDeque<Base64Bytes>,
-  maybe_last_resort: Option<Base64Bytes>,
+  regular: VecDeque<StoredKeyPackage>,
+  maybe_last_resort: Option<StoredKeyPackage>,
+}
+
+/// A key package with its expiry on the server's clock.
+#[derive(Clone)]
+struct StoredKeyPackage {
+  bytes: Base64Bytes,
+  expires_at_ms: i64,
 }
 
 struct Conversation {
@@ -358,6 +383,56 @@ impl FakeServer {
   /// Revokes a device, as the device list or an admin would, and announces it like the server.
   pub fn revoke_device(&self, user: UserId, device: DeviceId) {
     self.lock().revoke_device(user, device);
+  }
+
+  /// Moves the server's clock forward (key package expiry). Packages keep the validity they had
+  /// left when they were uploaded, measured on this clock: the fake can't make openmls, which
+  /// checks lifetimes against the system clock, see the future.
+  pub fn advance_clock(&self, by: std::time::Duration) {
+    let by_ms = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
+    let mut state = self.lock();
+    state.clock_offset_ms = state.clock_offset_ms.saturating_add(by_ms);
+  }
+
+  /// The user's next commit is stored and fanned out, but the answer to the client is lost (a
+  /// timeout or a killed app right after sending).
+  pub fn lose_next_commit_answer(&self, user: UserId) {
+    self.lock().losing_commit_answers.insert(user);
+  }
+
+  /// The user's next commit is lost on the way: never stored, the client sees a network error.
+  pub fn drop_next_commit(&self, user: UserId) {
+    self.lock().dropping_commits.insert(user);
+  }
+
+  /// The next commit anyone makes reaches `user` garbled, so that client refuses it while the
+  /// others merge it: the device falls out of the group (a bug, a rolled-back store).
+  pub fn garble_next_commit_for(&self, user: UserId) {
+    self.lock().garbling_next_commit_for.insert(user);
+  }
+
+  /// From now on revoked devices stay listed and keep their key packages (a stale server).
+  pub fn ignore_revocations(&self) {
+    self.lock().is_ignoring_revocations = true;
+  }
+
+  /// Replaces the device's regular key packages with garbage, as a broken or malicious server
+  /// could.
+  pub fn corrupt_key_packages(&self, device: DeviceId) {
+    if let Some(packages) = self.lock().key_packages.get_mut(&device) {
+      for package in &mut packages.regular {
+        package.bytes = Base64Bytes::new(b"not a key package".to_vec());
+      }
+    }
+  }
+
+  /// Regular key packages the device has on the server, expired or not.
+  pub fn stored_key_packages(&self, device: DeviceId) -> usize {
+    self
+      .lock()
+      .key_packages
+      .get(&device)
+      .map_or(0, |packages| packages.regular.len())
   }
 
   /// Serves `list` as the user's device list, as a server holding back a newer one would.
@@ -744,25 +819,38 @@ impl ServerApi for FakeServerApi {
   ) -> Result<KeyPackageStatusResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, device)?;
+      let now = state.now_ms();
+      let regular = request
+        .key_packages
+        .iter()
+        .map(|bytes| stored_key_package(bytes, false, now))
+        .collect::<Result<Vec<_>, _>>()?;
+      let maybe_last_resort = request
+        .maybe_last_resort
+        .as_ref()
+        .map(|bytes| stored_key_package(bytes, true, now))
+        .transpose()?;
       let packages = state.key_packages.entry(device).or_default();
-      packages.regular.extend(request.key_packages.iter().cloned());
-      if let Some(last_resort) = &request.maybe_last_resort {
-        packages.maybe_last_resort = Some(last_resort.clone());
+      packages.regular.extend(regular);
+      if let Some(last_resort) = maybe_last_resort {
+        packages.maybe_last_resort = Some(last_resort);
       }
-      Ok(packages.status())
+      Ok(packages.status(now))
     })
   }
 
   async fn key_package_status(&self, device: DeviceId) -> Result<KeyPackageStatusResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, device)?;
+      let now = state.now_ms();
       Ok(
         state
           .key_packages
           .get(&device)
-          .map(KeyPackages::status)
+          .map(|packages| packages.status(now))
           .unwrap_or(KeyPackageStatusResponse {
             available: 0,
+            expiring_soon: 0,
             has_last_resort: false,
           }),
       )
@@ -790,22 +878,31 @@ impl ServerApi for FakeServerApi {
           "user is not a member",
         ));
       }
+      let valid_until = state.now_ms().saturating_add(KEY_PACKAGE_MIN_VALIDITY_MS);
       let devices: Vec<DeviceId> = state.devices_of(user).map(|device| device.response.id).collect();
       let mut packages = Vec::new();
       for device in devices {
         let Some(stock) = state.key_packages.get_mut(&device) else {
           continue;
         };
+        // Like the server: packages expiring too soon are deleted, never handed out.
+        stock
+          .regular
+          .retain(|package| package.expires_at_ms > valid_until);
         if let Some(key_package) = stock.regular.pop_front() {
           packages.push(ClaimedKeyPackage {
             device_id: device,
-            key_package,
+            key_package: key_package.bytes,
             is_last_resort: false,
           });
-        } else if let Some(last_resort) = &stock.maybe_last_resort {
+        } else if let Some(last_resort) = stock
+          .maybe_last_resort
+          .as_ref()
+          .filter(|package| package.expires_at_ms > valid_until)
+        {
           packages.push(ClaimedKeyPackage {
             device_id: device,
-            key_package: last_resort.clone(),
+            key_package: last_resort.bytes.clone(),
             is_last_resort: true,
           });
         }
@@ -1254,6 +1351,9 @@ impl ServerApi for FakeServerApi {
   ) -> Result<PostMlsCommitResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, request.device_id)?;
+      if state.dropping_commits.remove(&me) {
+        return Err(ApiError::Network("fake server: commit lost on the way".into()));
+      }
       let current_epoch = state.member_conversation(conversation, me)?.epoch;
       if request.epoch != current_epoch {
         return Err(ApiError::status(
@@ -1294,10 +1394,22 @@ impl ServerApi for FakeServerApi {
       entry.mls.push(commit.clone());
       let new_epoch = entry.epoch;
       let members: Vec<UserId> = entry.members.keys().copied().collect();
+      let garbled_for: Vec<UserId> = state.garbling_next_commit_for.drain().collect();
+      for user in &garbled_for {
+        state.garbled_entries.entry(*user).or_default().insert(commit_id);
+      }
+      let (garbled, plain): (Vec<UserId>, Vec<UserId>) =
+        members.into_iter().partition(|user| garbled_for.contains(user));
       state.publish(
-        members,
+        plain,
         &GatewayEvent::MlsMessage {
           message: commit.clone(),
+        },
+      );
+      state.publish(
+        garbled,
+        &GatewayEvent::MlsMessage {
+          message: garble(commit.clone()),
         },
       );
       for (maybe_owner, welcome) in welcomes {
@@ -1305,6 +1417,9 @@ impl ServerApi for FakeServerApi {
         if let Some(owner) = maybe_owner {
           state.publish([owner], &GatewayEvent::MlsMessage { message: welcome });
         }
+      }
+      if state.losing_commit_answers.remove(&me) {
+        return Err(ApiError::Network("fake server: the answer was lost".into()));
       }
       Ok(PostMlsCommitResponse { new_epoch, commit })
     })
@@ -1364,10 +1479,18 @@ impl ServerApi for FakeServerApi {
     self.with(|state, me| {
       let entry = state.member_conversation(conversation, me)?;
       let floor = entry.members.get(&me).map_or(0, |(_, floor)| *floor);
-      let visible = entry.mls.iter().filter(|message| {
-        message.id.snowflake().get() > floor && query.maybe_after.is_none_or(|after| message.id > after)
-      });
-      Ok(page(visible.cloned().collect(), query.maybe_limit, entry.epoch))
+      let maybe_garbled = state.garbled_entries.get(&me);
+      let visible = entry
+        .mls
+        .iter()
+        .filter(|message| {
+          message.id.snowflake().get() > floor && query.maybe_after.is_none_or(|after| message.id > after)
+        })
+        .map(|message| match maybe_garbled {
+          Some(garbled) if garbled.contains(&message.id) => garble(message.clone()),
+          _ => message.clone(),
+        });
+      Ok(page(visible.collect(), query.maybe_limit, entry.epoch))
     })
   }
 
@@ -2487,8 +2610,15 @@ impl FakeGateway {
 }
 
 impl State {
+  /// Time-sortable like the server's: the server's clock in the time bits, so clients reading an
+  /// ID's time get the server's time.
   fn next_id<T: Id>(&mut self) -> T {
-    self.next_id += 1;
+    let shift = teamcraft_proto::SNOWFLAKE_SEQUENCE_BITS + teamcraft_proto::SNOWFLAKE_WORKER_BITS;
+    let since_epoch = self
+      .now_ms()
+      .saturating_sub(teamcraft_proto::SNOWFLAKE_EPOCH_MS)
+      .max(0);
+    self.next_id = self.next_id.saturating_add(1).max(since_epoch << shift);
     T::from_snowflake(snowflake(self.next_id))
   }
 
@@ -2516,6 +2646,11 @@ impl State {
     self.network_cuts.remove(&user);
     self.offline_users.insert(user);
     Some(cut)
+  }
+
+  /// The server's clock: the system clock plus [`FakeServer::advance_clock`].
+  fn now_ms(&self) -> i64 {
+    SystemClock.now_ms().saturating_add(self.clock_offset_ms)
   }
 
   fn devices_of(&self, user: UserId) -> impl Iterator<Item = &Device> {
@@ -2557,8 +2692,10 @@ impl State {
 
   fn revoke_device(&mut self, user: UserId, device: DeviceId) {
     let state = self;
-    state.devices.remove(&device);
-    state.key_packages.remove(&device);
+    if !state.is_ignoring_revocations {
+      state.devices.remove(&device);
+      state.key_packages.remove(&device);
+    }
     let mut audience: HashSet<UserId> = state
       .conversations
       .values()
@@ -2749,12 +2886,63 @@ impl Conversation {
 }
 
 impl KeyPackages {
-  fn status(&self) -> KeyPackageStatusResponse {
+  /// Like the server: packages expiring within the renewal window are "expiring soon".
+  fn status(&self, now_ms: i64) -> KeyPackageStatusResponse {
+    let renew_before = now_ms.saturating_add(KEY_PACKAGE_RENEWAL_WINDOW_MS);
+    let count = |is_expiring: bool| {
+      let matching = self
+        .regular
+        .iter()
+        .filter(|package| package.expires_at_ms > now_ms)
+        .filter(|package| (package.expires_at_ms <= renew_before) == is_expiring)
+        .count();
+      u32::try_from(matching).unwrap_or(u32::MAX)
+    };
     KeyPackageStatusResponse {
-      available: u32::try_from(self.regular.len()).unwrap_or(u32::MAX),
-      has_last_resort: self.maybe_last_resort.is_some(),
+      available: count(false),
+      expiring_soon: count(true),
+      has_last_resort: self
+        .maybe_last_resort
+        .as_ref()
+        .is_some_and(|package| package.expires_at_ms > renew_before),
     }
   }
+}
+
+/// An MLS entry with its payload broken, as one client gets it ([`FakeServer::garble_next_commit_for`]).
+fn garble(mut message: MlsMessageResponse) -> MlsMessageResponse {
+  let mut payload = message.payload.into_vec();
+  if let Some(last) = payload.last_mut() {
+    *last ^= 0xff;
+  }
+  message.payload = Base64Bytes::new(payload);
+  message
+}
+
+/// Checks an uploaded package like the server and records its expiry on the fake's clock: the
+/// validity it has left now on the system clock, from `now_ms`.
+fn stored_key_package(
+  bytes: &Base64Bytes,
+  is_last_resort: bool,
+  now_ms: i64,
+) -> Result<StoredKeyPackage, ApiError> {
+  let invalid = |message: String| ApiError::status(400, ErrorCode::InvalidKeyPackage, message);
+  let info = teamcraft_crypto::mls::inspect_key_package(bytes.as_slice())
+    .map_err(|error| invalid(error.to_string()))?;
+  if info.is_last_resort != is_last_resort {
+    return Err(invalid("the last_resort extension does not match".into()));
+  }
+  let not_after_ms = i64::try_from(info.not_after_unix_secs)
+    .unwrap_or(i64::MAX)
+    .saturating_mul(1000);
+  let left_ms = not_after_ms.saturating_sub(SystemClock.now_ms());
+  if left_ms <= KEY_PACKAGE_MIN_VALIDITY_MS {
+    return Err(invalid("the key package expires too soon".into()));
+  }
+  Ok(StoredKeyPackage {
+    bytes: bytes.clone(),
+    expires_at_ms: now_ms.saturating_add(left_ms),
+  })
 }
 
 const PENDING_PREFIX: &str = "pending-";

@@ -248,6 +248,10 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       Ok(false) => {},
       Err(error) => tracing::debug!(%error, "reading last seen failed"),
     }
+    // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
+    if let Err(error) = self.client.renew_key_packages_if_due().await {
+      tracing::debug!(%error, "key packages not renewed yet");
+    }
     // Staggered commits (a colleague's new device) come due without a gateway event.
     if let Err(error) = self.client.apply_pending_changes().await {
       tracing::debug!(%error, "pending membership changes not applied yet");

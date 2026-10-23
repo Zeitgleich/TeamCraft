@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT key_package FROM key_packages WHERE device_id = $1 AND is_last_resort AND consumed_at IS NULL",
+  "query": "SELECT key_package FROM key_packages\n       WHERE device_id = $1 AND is_last_resort AND consumed_at IS NULL AND expires_at > $2",
   "describe": {
     "columns": [
       {
@@ -17,12 +17,13 @@
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Int8",
+        "Timestamptz"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "e3b84c157cc0f2a7c122f7dae3a03ce5ff340bd4cc1eaf1917443c3f99bf1ebc"
+  "hash": "982d3b13f8acf30b891b441f89aee0c02ff5331d187fcc88df7f6fc785e2a0c7"
 }

@@ -198,6 +198,35 @@ Result:
 - Admins can additionally lock the choice per space/channel (e.g. "never share history here").
 - Server membership change and MLS commit happen in one transaction from the server's point of view;
   if no member is online, the server queues the add and the next member who comes online completes it.
+- If the commit's answer is lost, the content keys the new member needs are sent once the commit is
+  merged (§4.6, "Lost commit answers"); if sending fails, they are queued and sent later.
+
+#### 4.3.1 Key package lifecycle
+
+Others add a device with one of its MLS key packages. Packages expire, so a device that stays enrolled
+for months must keep fresh ones on the server:
+
+- **Lifetime.** A package is valid for 83 days from its creation, starting one day before it (a
+  creator whose clock runs fast still makes packages others accept). That is the longest range
+  openmls accepts. openmls checks lifetimes against the system clock, so they are made from it.
+- **Server.** The server checks every uploaded package (encoding, signature, ciphersuite, lifetime)
+  and records its expiry. It hands out only packages that stay valid for at least
+  `key_package_min_validity_secs` (42 days), so members who process the add weeks later (a device
+  that was offline) still accept it, and it deletes the others. Packages that expire within
+  `key_package_renewal_window_secs` (56 days) count as "expiring soon", not as available, and an
+  expiring last-resort package counts as missing.
+- **Device.** A running client checks every 6 hours (and after every full sync) and uploads new
+  packages when fewer than its target are available, and a new last-resort package (replacing the
+  old one on the server) when it has none that stays valid. So regular packages are replaced after
+  about 27 days and the last-resort package rotates on the same schedule.
+- **One bad device.** The adder checks every claimed package (signature, lifetime, credential, the
+  user's signed device list, not revoked from this group, the device and user the server claims)
+  and leaves out bad ones with a warning, so a revoked or broken device doesn't keep its user's other
+  devices out. Adding a user fails only if none of their devices can be added.
+- **Joining.** A welcome is accepted without checking the lifetimes of the leaves already in the
+  group: a member whose leaf still comes from its key package would otherwise make the group
+  unjoinable once that package expired. A lifetime bounds when a package may be *added* (RFC 9420
+  §7.3); the committer and every member check that then. Credentials are verified as always.
 
 ### 4.4 What the server sees
 
@@ -290,8 +319,47 @@ its own. See [admin.md](admin.md) §2.
 - **Exception: further devices of existing members.** A commit may add devices of users who already
   have a device in the group without a signed change, because each device is cross-signed by its
   user's identity key (§3). Removing anything always needs a signed change.
+- **Exception: a device added back.** A device that fell out of the group (see below) can ask to be
+  added back with a request it signs with its device key: conversation, the group's epoch on the
+  server, a random 128-bit request ID and the device. A member commits "remove the device's old leaf,
+  add the same device from a fresh key package" with the signed request as the commit's
+  authenticated data. Every member merges it only if the request is signed by that very device
+  (certificate against the pinned identity, the same signing key as its leaf), is for this group,
+  is at most 32 epochs old, wasn't answered before, and the commit removes exactly that device's leaf
+  and adds exactly that device. Membership doesn't change, so no admin signature is needed; nobody
+  but the device can make it give up its leaf. Every member then switches to the new epoch's content
+  key, which the device derives from its welcome. Clients before this version refuse such commits;
+  all clients have to be updated.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
   external senders, or whose update changes a member's user or device are rejected.
+
+**Lost commit answers.** A device keeps its commit pending until it knows the outcome. Only an epoch
+conflict (another commit won) or a definite refusal discards it. If the answer is lost (timeout,
+killed app), the commit and the request that posted it are kept with the MLS state; the next look at
+the group's queue merges it when the queue shows the device's own commit with the same bytes,
+discards it when another commit took the epoch, and sends the same request again when the server
+never got it. No new commit is made while one is pending. So a lost answer no longer leaves the
+device an epoch behind its own commit.
+
+**Falling out and coming back.** A device can still miss or refuse a commit the others merged (a bug,
+a restored backup of the app's store, an old client). It notices when, with every earlier entry of the
+queue handled, an entry from a later epoch comes. Then it asks to be added back (above) and keeps its
+old group until the welcome arrives; it asks again after `rejoin_retry` (10 minutes) without one. The
+members queue the request like a new device of a colleague: ranked, so normally one commits. The
+cursor stays before the later entries, so nothing after the welcome is lost. Messages encrypted with
+content keys of epochs the device missed stay unreadable unless another device of the user had them
+in the key bag.
+
+**Server time for merge decisions.** Whether every member merges a commit must not depend on its own
+clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the
+server's time of the commit (its queue ID), and a device's removal time for refusing its later
+messages is the removal commit's time, compared with the server's time of each message. A server can
+stretch a stale roster's freshness only by back-dating its IDs, which every client also shows as
+message times. A device's own decision to commit still uses its own clock.
+
+**Outbox after catch-up.** After every new gateway connection the outbox sends into a conversation
+only after its MLS queue was caught up, so an offline message never goes out under a key that a member
+removed meanwhile still holds.
 
 ### 4.7 Converting a channel between private and public
 

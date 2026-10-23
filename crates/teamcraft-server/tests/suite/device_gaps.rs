@@ -21,9 +21,9 @@ macro_rules! app {
   };
 }
 
-fn package(text: &str) -> String {
-  use base64::Engine;
-  base64::engine::general_purpose::STANDARD.encode(text)
+/// A real key package; `text` only names it for the reader.
+fn package(_text: &str) -> String {
+  key_package()
 }
 
 mod certificate {

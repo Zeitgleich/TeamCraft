@@ -1,6 +1,11 @@
-//! MLS key packages (e2ee.md §4): uploaded in batches by devices, consumed once by members who add them.
+//! MLS key packages (e2ee.md §4, §4.3): uploaded in batches by devices, consumed once by members who
+//! add them. Each package's expiry is read from the package; only packages that stay valid for
+//! `key_package_min_validity_secs` are handed out, the rest are deleted.
 
-use teamcraft_db::AddPackagesOutcome;
+use std::time::Duration;
+
+use teamcraft_crypto::mls::inspect_key_package;
+use teamcraft_db::{AddPackagesOutcome, NewKeyPackage};
 use teamcraft_proto::{
   Base64Bytes, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, DeviceId, Id,
   KeyPackageStatusResponse, Snowflake, UploadKeyPackagesRequest, UserId,
@@ -40,18 +45,25 @@ pub async fn upload_key_packages(
     }
   }
 
-  let regular: Vec<(Snowflake, &[u8])> = request
-    .key_packages
-    .iter()
-    .map(|package| Ok((next_snowflake(state)?, package.as_slice())))
-    .collect::<Result<_, ApiError>>()?;
+  let now = time::OffsetDateTime::now_utc();
+  let valid_until = now + min_validity(state);
+  let mut regular = Vec::with_capacity(request.key_packages.len());
+  for package in &request.key_packages {
+    regular.push(new_package(state, package, false, valid_until)?);
+  }
   let last_resort = match &request.maybe_last_resort {
-    Some(package) => Some((next_snowflake(state)?, package.as_slice())),
+    Some(package) => Some(new_package(state, package, true, valid_until)?),
     None => None,
   };
   let outcome = state
     .database
-    .add_key_packages(device, &regular, last_resort, limits.max_key_packages_per_device)
+    .add_key_packages(
+      device,
+      &regular,
+      last_resort,
+      limits.max_key_packages_per_device,
+      now,
+    )
     .await?;
   if outcome == AddPackagesOutcome::OverLimit {
     return Err(ApiError::Conflict(format!(
@@ -70,9 +82,15 @@ pub async fn key_package_status(
   if !state.database.is_active_device_of(caller.user.id, device).await? {
     return Err(ApiError::device_not_found());
   }
-  let counts = state.database.key_package_counts(device).await?;
+  let now = time::OffsetDateTime::now_utc();
+  let renew_before = now + renewal_window(state);
+  let counts = state
+    .database
+    .key_package_counts(device, now, renew_before)
+    .await?;
   Ok(KeyPackageStatusResponse {
     available: u32::try_from(counts.available).unwrap_or(u32::MAX),
+    expiring_soon: u32::try_from(counts.expiring_soon).unwrap_or(u32::MAX),
     has_last_resort: counts.has_last_resort,
   })
 }
@@ -122,9 +140,11 @@ pub async fn claim_key_packages(
     return Ok(ClaimKeyPackagesResponse { packages: Vec::new() });
   }
 
+  // A package that expires soon would be refused by members who process the add late.
+  let valid_until = time::OffsetDateTime::now_utc() + min_validity(state);
   let mut packages = Vec::new();
   for device in candidates {
-    if let Some(claimed) = state.database.claim_key_package(device.id).await? {
+    if let Some(claimed) = state.database.claim_key_package(device.id, valid_until).await? {
       packages.push(ClaimedKeyPackage {
         device_id: device.id,
         key_package: Base64Bytes::new(claimed.key_package),
@@ -136,6 +156,61 @@ pub async fn claim_key_packages(
     return Err(ApiError::KeyPackageExhausted);
   }
   Ok(ClaimKeyPackagesResponse { packages })
+}
+
+/// Deletes key packages that can't be handed out any more. Run periodically.
+pub async fn sweep_expired(state: &AppState, now: time::OffsetDateTime) -> Result<u64, ApiError> {
+  Ok(
+    state
+      .database
+      .delete_expiring_key_packages(now + min_validity(state))
+      .await?,
+  )
+}
+
+/// Checks a package and reads its expiry; one that expires before it could be handed out is
+/// refused (the uploader's clock is far behind).
+fn new_package<'a>(
+  state: &AppState,
+  package: &'a Base64Bytes,
+  is_last_resort: bool,
+  valid_until: time::OffsetDateTime,
+) -> Result<NewKeyPackage<'a>, ApiError> {
+  let info = inspect_key_package(package.as_slice())
+    .map_err(|error| ApiError::InvalidKeyPackage(error.to_string()))?;
+  if info.is_last_resort != is_last_resort {
+    return Err(ApiError::InvalidKeyPackage(
+      "the last_resort extension does not match the upload field".into(),
+    ));
+  }
+  let expires_at = i64::try_from(info.not_after_unix_secs)
+    .ok()
+    .and_then(|secs| time::OffsetDateTime::from_unix_timestamp(secs).ok())
+    .ok_or_else(|| ApiError::InvalidKeyPackage("expiry out of range".into()))?;
+  if expires_at <= valid_until {
+    return Err(ApiError::InvalidKeyPackage(
+      "the key package expires too soon".into(),
+    ));
+  }
+  Ok(NewKeyPackage {
+    id: next_snowflake(state)?,
+    bytes: package.as_slice(),
+    expires_at,
+  })
+}
+
+fn min_validity(state: &AppState) -> Duration {
+  let limits = &state.settings.get().limits;
+  // Never more than the renewal window, or a fresh package could count as unusable.
+  Duration::from_secs(
+    limits
+      .key_package_min_validity_secs
+      .min(limits.key_package_renewal_window_secs),
+  )
+}
+
+fn renewal_window(state: &AppState) -> Duration {
+  Duration::from_secs(state.settings.get().limits.key_package_renewal_window_secs)
 }
 
 fn next_snowflake(state: &AppState) -> Result<Snowflake, ApiError> {

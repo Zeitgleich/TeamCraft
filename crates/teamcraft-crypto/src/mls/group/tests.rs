@@ -713,6 +713,66 @@ mod rejection {
   }
 }
 
+mod key_package_lifetime {
+  use super::*;
+  use crate::mls::{KEY_PACKAGE_LIFETIME_SECS, inspect_key_package};
+
+  const DAY_SECS: u64 = 24 * 60 * 60;
+
+  #[test]
+  fn lifetime_follows_the_creators_clock() {
+    let world = World::new();
+    let now = now_secs();
+    let info = inspect_key_package(&world.bob.key_package_at(now)).unwrap();
+    assert_eq!(info.not_after_unix_secs, now + KEY_PACKAGE_LIFETIME_SECS);
+    assert!(!info.is_last_resort);
+    let last_resort = crate::mls::create_last_resort_key_package(
+      &world.bob.provider,
+      &world.bob.user.device,
+      &world.bob.user.certificate,
+      now,
+    )
+    .unwrap();
+    assert!(inspect_key_package(&last_resort).unwrap().is_last_resort);
+  }
+
+  #[test]
+  fn an_expired_package_is_refused_by_server_and_committer() {
+    let mut world = World::new();
+    let expired = world.bob.key_package_at(now_secs() - 90 * DAY_SECS);
+    assert!(inspect_key_package(&expired).is_err());
+    let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+    let result = world.alice_group.commit_membership_change(
+      &world.alice.provider,
+      &world.alice.user.device,
+      &change,
+      &[expired],
+      &world.directory,
+      &world.authority,
+    );
+    assert!(result.is_err());
+    assert!(!world.alice_group.has_pending_commit());
+  }
+
+  #[test]
+  fn a_creator_clock_hours_ahead_is_tolerated() {
+    let mut world = World::new();
+    let ahead = world.bob.key_package_at(now_secs() + 6 * 60 * 60);
+    assert!(inspect_key_package(&ahead).is_ok());
+    let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+    let output = world.commit_change(&change, &[ahead]);
+    world.carol_processes(&output.commit).unwrap();
+    world.bob_joins(&output);
+  }
+
+  #[test]
+  fn garbage_is_not_a_key_package() {
+    for garbage in [&[][..], &[0, 1, 2], &[0xff; 64]] {
+      assert!(inspect_key_package(garbage).is_err());
+    }
+  }
+}
+
 /// Alice (admin) and Carol share a group; Bob and Dave are pinned but not members.
 struct World {
   alice: Client,
@@ -930,8 +990,26 @@ impl Client {
   }
 
   fn key_package(&self) -> Vec<u8> {
-    create_key_package(&self.provider, &self.user.device, &self.user.certificate).unwrap()
+    self.key_package_at(now_secs())
   }
+
+  /// A key package as made by a device whose clock shows `now_unix_secs`.
+  fn key_package_at(&self, now_unix_secs: u64) -> Vec<u8> {
+    create_key_package(
+      &self.provider,
+      &self.user.device,
+      &self.user.certificate,
+      now_unix_secs,
+    )
+    .unwrap()
+  }
+}
+
+fn now_secs() -> u64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs()
 }
 
 fn apply_keys(
@@ -974,7 +1052,7 @@ fn group_survives_reload_from_storage() {
   assert!(!world.alice_group.has_pending_commit());
 
   let history = ChangeHistory::from_bytes(&world.alice_group.change_history().to_bytes().unwrap()).unwrap();
-  let reloaded = ConversationGroup::load(&world.alice.provider, CONVERSATION, applied, history)
+  let reloaded = ConversationGroup::load(&world.alice.provider, CONVERSATION, applied, history, None)
     .unwrap()
     .unwrap();
   assert_eq!(reloaded.epoch(), world.alice_group.epoch());
@@ -989,11 +1067,224 @@ fn group_survives_reload_from_storage() {
       &world.alice.provider,
       ConversationId::new(99),
       [],
-      ChangeHistory::default()
+      ChangeHistory::default(),
+      None
     )
     .unwrap()
     .is_none()
   );
+}
+
+#[test]
+fn a_pending_commit_survives_a_reload_and_is_recognised_in_the_queue() {
+  let mut world = World::new();
+  let epoch = world.alice_group.epoch();
+  let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+  let output = world
+    .alice_group
+    .commit_membership_change(
+      &world.alice.provider,
+      &world.alice.user.device,
+      &change,
+      &[world.bob.key_package()],
+      &world.directory,
+      &world.authority,
+    )
+    .unwrap();
+  let pending =
+    PendingCommit::from_bytes(&world.alice_group.pending_commit().unwrap().to_bytes().unwrap()).unwrap();
+  let applied: Vec<ChangeId> = world.alice_group.applied_changes().copied().collect();
+  let history = world.alice_group.change_history().clone();
+
+  // The app restarts before the server's answer arrives; the commit shows up in the queue.
+  let mut reloaded = ConversationGroup::load(
+    &world.alice.provider,
+    CONVERSATION,
+    applied,
+    history,
+    Some(pending),
+  )
+  .unwrap()
+  .unwrap();
+  let pending = reloaded.pending_commit().unwrap();
+  assert!(pending.is_commit(&output.commit));
+  assert!(!pending.is_commit(b"another commit"));
+  let update = reloaded.confirm_commit(&world.alice.provider).unwrap();
+  assert_eq!(reloaded.epoch(), epoch + 1);
+  assert_eq!(
+    update.maybe_change.map(|change| change.change_id()),
+    Some(change.unverified().change_id())
+  );
+  assert!(reloaded.pending_commit().is_none());
+  // The other members merge the same commit and stay in step.
+  world.carol_processes(&output.commit).unwrap();
+  assert_eq!(world.carol_group.epoch(), reloaded.epoch());
+}
+
+mod rejoin {
+  use super::*;
+  use crate::mls::{RejoinRequest, SignedRejoinRequest};
+
+  #[test]
+  fn a_member_adds_back_a_device_that_asked() {
+    let mut world = World::new();
+    // Bob is a member too, and checks Alice's rejoin commit.
+    let change = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+    let output = world.commit_change(&change, &[world.bob.key_package()]);
+    world.carol_processes(&output.commit).unwrap();
+    let mut bob_group = world.bob_joins(&output);
+
+    // Carol's device lost its group state and starts from a fresh one.
+    let fresh = DefaultMlsProvider::default();
+    let request = world.carol_request(world.alice_group.epoch());
+    let carol = member(&world.carol.user);
+    assert_eq!(
+      world
+        .alice_group
+        .check_rejoin_request(&request, &world.directory)
+        .unwrap(),
+      carol
+    );
+    let output = world
+      .alice_group
+      .commit_rejoin(
+        &world.alice.provider,
+        &world.alice.user.device,
+        &request,
+        &world.carol_key_package_in(&fresh),
+        &world.directory,
+      )
+      .unwrap();
+    let update = world.alice_group.confirm_commit(&world.alice.provider).unwrap();
+    assert_eq!(update.maybe_rejoined, Some(carol));
+    assert_eq!(
+      (update.added.as_slice(), update.removed.as_slice()),
+      (&[carol][..], &[carol][..])
+    );
+
+    let GroupEvent::MembershipChanged(seen) = bob_group
+      .process_message(
+        &world.bob.provider,
+        &output.commit,
+        &world.directory,
+        &world.authority,
+      )
+      .unwrap()
+    else {
+      panic!("expected a membership change")
+    };
+    assert_eq!(seen.maybe_rejoined, Some(carol));
+    let carol_group = ConversationGroup::join(
+      &fresh,
+      &output.maybe_welcome.unwrap(),
+      CONVERSATION,
+      &world.directory,
+    )
+    .unwrap();
+    assert_eq!(carol_group.epoch(), world.alice_group.epoch());
+    assert_eq!(bob_group.epoch(), world.alice_group.epoch());
+    assert_eq!(carol_group.members().unwrap().len(), 3);
+    assert_eq!(
+      carol_group.epoch_content_key(&fresh).unwrap().id(),
+      bob_group.epoch_content_key(&world.bob.provider).unwrap().id()
+    );
+
+    // A request is answered once.
+    for group in [&world.alice_group, &bob_group] {
+      assert!(matches!(
+        group.check_rejoin_request(&request, &world.directory),
+        Err(MlsError::ReplayedChange(_))
+      ));
+    }
+  }
+
+  #[test]
+  fn only_the_device_itself_asks() {
+    let world = World::new();
+    let result = RejoinRequest::new(
+      CONVERSATION,
+      world.alice_group.epoch(),
+      member(&world.carol.user),
+      &mut OsRng,
+    )
+    .sign(&world.alice.user.device, world.alice.user.certificate.clone());
+    assert!(matches!(
+      result,
+      Err(MlsError::Membership(MembershipError::CertificateMismatch))
+    ));
+  }
+
+  #[test]
+  fn requests_for_other_epochs_groups_or_non_members_are_refused() {
+    let world = World::new();
+    let epoch = world.alice_group.epoch();
+    let future = world.carol_request(epoch + 1);
+    assert!(matches!(
+      world.alice_group.check_rejoin_request(&future, &world.directory),
+      Err(MlsError::StaleChange { .. })
+    ));
+    let other_group = RejoinRequest::new(
+      ConversationId::new(43),
+      epoch,
+      member(&world.carol.user),
+      &mut OsRng,
+    )
+    .sign(&world.carol.user.device, world.carol.user.certificate.clone())
+    .unwrap();
+    assert!(matches!(
+      world
+        .alice_group
+        .check_rejoin_request(&other_group, &world.directory),
+      Err(MlsError::WrongConversation { .. })
+    ));
+    let not_a_member = RejoinRequest::new(CONVERSATION, epoch, member(&world.bob.user), &mut OsRng)
+      .sign(&world.bob.user.device, world.bob.user.certificate.clone())
+      .unwrap();
+    assert!(matches!(
+      world
+        .alice_group
+        .check_rejoin_request(&not_a_member, &world.directory),
+      Err(MlsError::ChangeDoesNotMatchCommit)
+    ));
+  }
+
+  #[test]
+  fn a_rejoin_commit_must_re_add_exactly_the_asking_device() {
+    let mut world = World::new();
+    let request = world.carol_request(world.alice_group.epoch());
+    let mut aad = b"TCRJ".to_vec();
+    aad.extend_from_slice(&request.to_bytes().unwrap());
+    let carol_leaf = world.leaf_of(CAROL);
+
+    // Carol's leaf goes, Dave comes in instead.
+    let swapped = world.raw_alice_commit(&[world.dave.key_package()], &[carol_leaf], aad.clone());
+    world.expect_carol_rejects(&swapped, |error| {
+      matches!(error, MlsError::ChangeDoesNotMatchCommit)
+    });
+    // Only the removal.
+    let removal = world.raw_alice_commit(&[], &[carol_leaf], aad);
+    world.expect_carol_rejects(&removal, |error| {
+      matches!(error, MlsError::ChangeDoesNotMatchCommit)
+    });
+  }
+
+  impl World {
+    fn carol_request(&self, epoch: u64) -> SignedRejoinRequest {
+      RejoinRequest::new(CONVERSATION, epoch, member(&self.carol.user), &mut OsRng)
+        .sign(&self.carol.user.device, self.carol.user.certificate.clone())
+        .unwrap()
+    }
+
+    fn carol_key_package_in(&self, provider: &DefaultMlsProvider) -> Vec<u8> {
+      create_key_package(
+        provider,
+        &self.carol.user.device,
+        &self.carol.user.certificate,
+        now_secs(),
+      )
+      .unwrap()
+    }
+  }
 }
 
 #[test]
@@ -1003,6 +1294,7 @@ fn last_resort_key_package_can_be_used_twice() {
     &world.bob.provider,
     &world.bob.user.device,
     &world.bob.user.certificate,
+    now_secs(),
   )
   .unwrap();
   let add_bob = world.signed_change(ALICE, add(BOB, HistoryShare::Full));

@@ -66,7 +66,9 @@ could add itself to every channel.
   roster change, so an owner removed later can't sign a "back-dated" policy.
 - **Freshness.** Owners' clients sign the roster again regularly; when the newest roster a client has
   is older than the accepted age (default 30 days, a client setting), admins have no authority on that
-  client until an owner re-signs. A server that holds back a demotion gains at most that long.
+  client until an owner re-signs. A server that holds back a demotion gains at most that long. For
+  commits the age is judged at the server's time of the commit, so every member decides the same way
+  whatever its clock shows (e2ee.md §4.6).
 - **Fork detection.** Members send their verified roster and policy heads inside their encrypted
   messages. A colleague with a different entry for the same version, or with entries this client
   isn't shown, raises an alarm.

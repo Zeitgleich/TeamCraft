@@ -177,6 +177,8 @@ impl PendingEnrollment {
       maybe_call_sink: None,
       maybe_preview_fetcher,
       maybe_jwks_source,
+      last_key_package_check_ms: i64::MIN,
+      mls_current: Default::default(),
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;

@@ -158,6 +158,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         report.pending += 1;
         continue;
       }
+      // Never send under a key a member removed meanwhile still holds: catch up the group first
+      // (e2ee.md §4.6).
+      match self.ensure_mls_current(entry.conversation_id).await {
+        Ok(()) => {},
+        Err(error) if error.is_transient() => {
+          is_offline = true;
+          report.pending += 1;
+          continue;
+        },
+        // Not something a retry fixes; holding the message back for good would be worse.
+        Err(error) => {
+          tracing::warn!(conversation_id = %entry.conversation_id, %error, "sending without MLS catch-up")
+        },
+      }
       match self.send_entry(&entry).await {
         Ok(true) => report.sent += 1,
         Ok(false) => report.pending += 1,

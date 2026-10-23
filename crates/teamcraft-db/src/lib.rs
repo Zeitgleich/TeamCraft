@@ -70,7 +70,7 @@ pub use error::DbError;
 pub use identity::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};
-pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts};
+pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts, NewKeyPackage};
 pub use last_seen::StoredLastSeen;
 pub use local_account::{LOCAL_ISSUER, LocalAccount, SessionLimits, SessionState};
 pub use meeting::{
