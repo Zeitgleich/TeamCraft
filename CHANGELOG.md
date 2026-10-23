@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Added
+
+- **Desktop updates**: Windows, macOS and AppImage installs check for updates in the background,
+  download and verify them (minisign, bound to the version) and install them on restart or quit,
+  never during a call; Settings → Advanced → Updates offers automatic, notify only or off. deb and rpm installs
+  update from signed APT and RPM repositories on the project's Pages site, and the app shows the
+  command or asks PackageKit. Owners control updates in the signed policy (`client_updates`:
+  allowed/disabled, channel, pinned and minimum version, mirror), and the server announces the oldest
+  client it supports (`GET /api/v1/client-compatibility`); older apps ask for an update
+  ([docs/updates.md](docs/updates.md)).
+
 ## [1.0.0] - 2026-10-23
 
 First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the

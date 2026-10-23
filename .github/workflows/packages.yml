@@ -1,0 +1,94 @@
+# Package site (docs/updates.md §5): when a release is published, rebuilds the GitHub Pages site
+# with the desktop update manifests per channel (updates/{stable,prerelease}/latest.json) and the
+# signed APT and RPM repositories, from the newest published stable release and the newest
+# published release of any kind. Stateless: every run rebuilds everything from the releases.
+#
+# One-time setup: Settings > Pages > Source: GitHub Actions; the secrets LINUX_REPO_GPG_PRIVATE_KEY
+# (armored) and LINUX_REPO_GPG_PASSPHRASE. Without the key the site has the manifests only.
+name: Packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# One site build at a time; a newer one replaces a waiting one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Tools (apt-ftparchive, createrepo_c, rpmsign)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apt-utils createrepo-c rpm
+      - id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Download the packages of the newest releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: scripts/package-site.sh fetch "$RUNNER_TEMP/work"
+      - name: Repository key (optional)
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.LINUX_REPO_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.LINUX_REPO_GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then exit 0; fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+          printf '%s' "$GPG_PASSPHRASE" > "$GNUPGHOME/passphrase"
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          fingerprint="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ { print $10; exit }')"
+          {
+            echo "GNUPGHOME=$GNUPGHOME"
+            echo "GPG_KEY_ID=$fingerprint"
+            echo "GPG_PASSPHRASE_FILE=$GNUPGHOME/passphrase"
+          } >> "$GITHUB_ENV"
+      - name: Build the site
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+          REPO: ${{ github.repository }}
+        run: scripts/package-site.sh build "$RUNNER_TEMP/work" "$RUNNER_TEMP/site"
+      # The signatures must verify with the key the site publishes.
+      - name: Verify the site
+        working-directory: ${{ runner.temp }}/site
+        run: |
+          if [ ! -f teamcraft-archive-keyring.gpg ]; then ls -R updates; exit 0; fi
+          for suite in apt/dists/*/; do
+            gpgv --keyring ./teamcraft-archive-keyring.gpg "$suite/InRelease"
+            gpgv --keyring ./teamcraft-archive-keyring.gpg "$suite/Release.gpg" "$suite/Release"
+          done
+          for repo in rpm/*/; do
+            gpgv --keyring ./teamcraft-archive-keyring.gpg "$repo/repodata/repomd.xml.asc" "$repo/repodata/repomd.xml"
+          done
+          rpmdb="$(mktemp -d)"
+          rpm --dbpath "$rpmdb" --import teamcraft-archive-keyring.asc
+          rpm --dbpath "$rpmdb" -K rpm/*/*.rpm
+          du -sh .
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

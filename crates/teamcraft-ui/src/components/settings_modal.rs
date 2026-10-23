@@ -9,6 +9,7 @@ use crate::components::settings_tabs::{
   CallsTab, DevicesTab, DisplayTab, LanguageTab, NotificationsTab, PrivacyTab, SidebarTab,
 };
 use crate::components::sidebar::shortcut_label;
+use crate::components::update_notice::UpdatesSection;
 use crate::i18n::use_i18n;
 use crate::model::id_from_raw;
 use crate::security::DeviceApproval;
@@ -141,7 +142,7 @@ fn AdvancedTab() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   view! {
-    {tauri::is_available().then(|| view! { <DesktopSection /> })}
+    {tauri::is_available().then(|| view! { <DesktopSection /> <UpdatesSection /> })}
     <p class="muted-text">{move || i18n.t("settings-advanced-stub")}</p>
     <div class="field">
       <label for="setting-backend">{move || i18n.t("settings-backend")}</label>

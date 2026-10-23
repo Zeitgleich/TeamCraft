@@ -10,6 +10,7 @@ use crate::components::admin_people::PeopleSection;
 use crate::components::admin_permissions::PermissionsSection;
 use crate::components::admin_retention::RetentionSection;
 use crate::components::admin_security::SecuritySection;
+use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -58,6 +59,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Announcement, IconName::Bell)}
           {nav_item(AdminSection::Backgrounds, IconName::Image)}
           {nav_item(AdminSection::Retention, IconName::Clock)}
+          {nav_item(AdminSection::Updates, IconName::Download)}
           {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
@@ -82,6 +84,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Backgrounds => view! { <BackgroundsSection /> }.into_any(),
           AdminSection::Instance => view! { <InstanceSection /> }.into_any(),
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
+          AdminSection::Updates => view! { <UpdatesPolicySection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),
         }}
       </div>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-with-package-manager"
+description = "Enables the update_with_package_manager command without any pre-configured scope."
+commands.allow = ["update_with_package_manager"]
+
+[[permission]]
+identifier = "deny-update-with-package-manager"
+description = "Denies the update_with_package_manager command without any pre-configured scope."
+commands.deny = ["update_with_package_manager"]

@@ -141,6 +141,7 @@ Admins can't read reported content unless a member shows it to them:
 |-------------------------------------------------------------------------------------------------------------------|------|
 | Settings: name, logo, colors, space label ("Project"/"Space"/"Team"), file size limits                            | v1   |
 | Security policy: `admin_self_join`, org recovery (members/guests, admins required), guest rules, history defaults | v1   |
+| Desktop updates: allowed/disabled, channel, pinned/minimum version, mirror (`client_updates`, updates.md §4.4)    | v1   |
 | SFU nodes: registration token, health, load                                                                       | v1   |
 | Telephony: SIP trunks and their status, hotline config, queues                                                    | v1.x |
 | Storage usage (Postgres, S3) per space                                                                            | v1.x |

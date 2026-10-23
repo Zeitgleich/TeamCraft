@@ -15,6 +15,7 @@ mod freedesktop;
 mod notifications;
 mod shell_prefs;
 mod tray;
+mod updates;
 #[cfg(windows)]
 mod windows_shell;
 
@@ -32,6 +33,7 @@ use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, MediaFiles};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
 use crate::shell_prefs::ShellPrefsState;
+use crate::updates::UpdateHost;
 
 /// How often the core's token cache is refreshed from the login session.
 const TOKEN_REFRESH: Duration = Duration::from_secs(2);
@@ -55,6 +57,8 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
+    // The shell drives it (updates.rs); the webview gets no updater permission.
+    .plugin(tauri_plugin_updater::Builder::new().build())
     // Size, position and maximized state; visibility is ours (start minimized to the tray).
     .plugin(
       tauri_plugin_window_state::Builder::default()
@@ -79,6 +83,8 @@ fn main() -> anyhow::Result<()> {
       };
       app.manage(Arc::new(CallHost::new(notify, files)));
       app.manage(ShellPrefsState::load(app.handle()));
+      app.manage(Arc::new(UpdateHost::load(app.handle())));
+      UpdateHost::spawn(app.handle().clone());
       // Without a tray (some Linux desktops) the window must never be hidden.
       if let Err(error) = tray::install(app) {
         tracing::warn!(%error, "no tray icon");
@@ -141,17 +147,22 @@ fn main() -> anyhow::Result<()> {
       shell_prefs::shell_prefs_set,
       tray::tray_update,
       tray::set_zoom,
+      updates::update_status,
+      updates::update_check,
+      updates::update_set_preference,
+      updates::update_download,
+      updates::update_restart,
+      updates::update_with_package_manager,
     ])
     .build(tauri::generate_context!())
     .context("failed to build the TeamCraft desktop shell")?
-    .run(|app, event| {
+    .run(|app, event| match event {
+      // A downloaded update is installed when the app quits (docs/updates.md §4.3).
+      tauri::RunEvent::Exit => app.state::<Arc<UpdateHost>>().install_on_exit(app),
       // macOS: clicking the dock icon brings back a window that was closed to the tray.
       #[cfg(target_os = "macos")]
-      if let tauri::RunEvent::Reopen { .. } = event {
-        tray::show_main_window(app);
-      }
-      #[cfg(not(target_os = "macos"))]
-      let _ = (app, event);
+      tauri::RunEvent::Reopen { .. } => tray::show_main_window(app),
+      _ => {},
     });
   Ok(())
 }

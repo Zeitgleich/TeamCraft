@@ -2,6 +2,10 @@
 # artifacts. It publishes nothing itself (no Flathub, no notarization upload). release.yml calls it for
 # a tag `v*` and attaches the packages to the draft GitHub release; run it by hand (Actions > Desktop
 # release > Run workflow) to get the packages of a branch without a release.
+#
+# Update artifacts (the AppImages, the Windows installers and the macOS .app.tar.gz) are signed for
+# the in-app updater when the secret TAURI_SIGNING_PRIVATE_KEY exists (docs/updates.md §3.3); the
+# `.sig` files travel with the packages and release.yml turns them into latest.json.
 name: Desktop release
 
 on:
@@ -20,6 +24,8 @@ env:
   # Shipped binaries carry no symbol table (106 MB -> 78 MB for the Linux executable); release builds
   # have no debug info to keep separately.
   CARGO_PROFILE_RELEASE_STRIP: symbols
+  # Builds follow this repository's releases for updates (a fork's builds follow the fork's).
+  TEAMCRAFT_RELEASE_REPOSITORY: ${{ github.repository }}
 
 jobs:
   linux:
@@ -47,6 +53,13 @@ jobs:
         with:
           key: release-linux-${{ matrix.arch }}
           cache-bin: "false"
+      # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
+      # reports it and the update signatures bind it (docs/updates.md §3.1).
+      - name: Release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="$(scripts/check-versions.sh)"; fi
+          echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
       - name: Build packages
@@ -55,6 +68,12 @@ jobs:
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
+      # deb and rpm are updated by the package manager from the signed repositories instead.
+      - name: Sign the AppImage for the updater (optional)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" target/release/bundle/appimage/*.AppImage
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-packages-${{ matrix.arch }}
@@ -62,6 +81,7 @@ jobs:
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: error
       # The UI bundle is wasm32, the same for both architectures: keep one.
       - name: Keep the web UI bundle for the Flatpak job
@@ -120,6 +140,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: universal-apple-darwin
+      # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
+      # reports it and the update signatures bind it (docs/updates.md §3.1).
+      - name: Release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="$(scripts/check-versions.sh)"; fi
+          echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Meson and ninja (build WebRTC audio processing)
         run: brew install meson ninja pkg-config
       # The official universal GStreamer (both slices): development files to link against, and the
@@ -218,6 +245,17 @@ jobs:
           version="$(scripts/check-versions.sh)"
           mkdir -p target/dmg
           apps/desktop/packaging/macos/make-dmg.sh "$APP" "target/dmg/TeamCraft_${version}_universal.dmg"
+      # The updater replaces the whole app with this archive of the signed (and, with the secrets,
+      # notarized and stapled) app. No AppleDouble files: they would break the seal.
+      - name: Update archive of the app, signed for the updater (optional)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          version="$(scripts/check-versions.sh)"
+          archive="target/dmg/TeamCraft_${version}_universal.app.tar.gz"
+          COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$(dirname "$APP")" -czf "$archive" "$(basename "$APP")"
+          apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" "$archive"
       - name: Notarize the dmg (optional)
         if: env.MACOS_SIGNING_IDENTITY != ''
         env:
@@ -232,7 +270,10 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-universal
-          path: target/dmg/*.dmg
+          path: |
+            target/dmg/*.dmg
+            target/dmg/*.app.tar.gz
+            target/dmg/*.app.tar.gz.sig
           if-no-files-found: error
 
   windows:
@@ -259,6 +300,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
+      # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
+      # reports it and the update signatures bind it (docs/updates.md §3.1).
+      - name: Release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="$(scripts/check-versions.sh)"; fi
+          echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
       # OpenSSL for SQLCipher is built from source and needs NASM; Perl comes with the image.
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
       # Direct download: install-action's bash startup fails on the Windows image.
@@ -278,10 +326,21 @@ jobs:
         run: cargo tauri build --config tauri.models.conf.json --target ${{ matrix.target }} --bundles nsis,msi
         # Signing is left out on purpose (the installers are unsigned). To enable it, see
         # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
+      # The updater runs the new installer of the same kind (NSIS or MSI) the app came from.
+      - name: Sign the installers for the updater (optional)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" \
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe target/${{ matrix.target }}/release/bundle/msi/*.msi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-${{ matrix.target }}
           path: |
             target/${{ matrix.target }}/release/bundle/nsis/*.exe
             target/${{ matrix.target }}/release/bundle/msi/*.msi
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe.sig
+            target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
           if-no-files-found: error

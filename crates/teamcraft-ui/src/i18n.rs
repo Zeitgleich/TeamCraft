@@ -96,7 +96,7 @@ pub fn use_i18n() -> I18n {
   expect_context::<I18n>()
 }
 
-fn translate(locale: Locale, key: &str, maybe_args: Option<&FluentArgs>) -> String {
+pub(crate) fn translate(locale: Locale, key: &str, maybe_args: Option<&FluentArgs>) -> String {
   BUNDLES.with(|bundles| {
     // Fall back to English for messages a translation has not caught up with yet.
     for candidate in [locale, Locale::En] {

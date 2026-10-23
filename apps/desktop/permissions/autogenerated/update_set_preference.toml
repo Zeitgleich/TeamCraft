@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-set-preference"
+description = "Enables the update_set_preference command without any pre-configured scope."
+commands.allow = ["update_set_preference"]
+
+[[permission]]
+identifier = "deny-update-set-preference"
+description = "Denies the update_set_preference command without any pre-configured scope."
+commands.deny = ["update_set_preference"]

@@ -31,6 +31,19 @@ mod authentication_and_devices {
   }
 
   #[tokio::test]
+  async fn client_compatibility_is_public() {
+    let app = app!();
+    let reply = app.call(Method::GET, None, "/client-compatibility", None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body["server_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+      reply.body["minimum_client_version"],
+      teamcraft_server::handlers::MINIMUM_CLIENT_VERSION
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn users_without_a_teamcraft_role_are_rejected() {
     let app = app!();
     let nobody = teamcraft_server::testing::TestUser::new("frank", &[]);

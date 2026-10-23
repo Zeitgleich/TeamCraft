@@ -60,8 +60,10 @@ Windows MSI only allows numeric prereleases (set `bundle.windows.wix.version` th
    them under "Breaking changes". The section is the notes' "Highlights".
 4. **Merge** (squash) into main and wait for CI.
 5. **Candidate**: tag the merge commit `vX.Y.Z-rc.1` and push the tag. Check the draft prerelease (files,
-   notes, `images.txt`), install the images on a staging host and one desktop package, then delete the
-   draft (the candidate's images stay in GHCR under their own tag).
+   notes, `images.txt`, `latest.json`), install the images on a staging host and one desktop package,
+   then delete the draft (the candidate's images stay in GHCR under their own tag) – or publish it as
+   a prerelease, which hands it to the `prerelease` update channel and repositories
+   ([updates.md](updates.md) §3.2).
 6. **Release**: tag the same commit and push it:
 
    ```sh
@@ -69,7 +71,9 @@ Windows MSI only allows numeric prereleases (set `bundle.windows.wix.version` th
    git push origin vX.Y.Z
    ```
 
-7. **Review the draft release**, then **publish** it in the GitHub UI.
+7. **Review the draft release**, then **publish** it in the GitHub UI. Publishing runs `packages.yml`:
+   the Pages site with the update manifests and the APT/RPM repositories is rebuilt, and installed
+   desktop apps see the release (stable: `releases/latest/download/latest.json`).
 8. **Deploy**: release teamcraft-deploy with `teamcraft_version: "X.Y.Z"` (its own CHANGELOG and tag).
 
 A failed run can be re-run from the Actions UI; the last job uploads into the existing draft with
@@ -106,6 +110,9 @@ Dependabot's pull requests are left out. Edit the template when a known limitati
 | `teamcraft-desktop-<arch>.flatpak`                              | `desktop-release.yml`                            |
 | `TeamCraft_X.Y.Z_universal.dmg`                                 | `desktop-release.yml`, unsigned                  |
 | `TeamCraft_X.Y.Z_{x64,arm64}-setup.exe`, `.msi`                 | `desktop-release.yml`, unsigned                  |
+| `TeamCraft_X.Y.Z_universal.app.tar.gz`                          | `desktop-release.yml`, the macOS update archive  |
+| `*.sig` next to the AppImages, installers and `.app.tar.gz`     | updater signatures (with the updater key only)   |
+| `latest.json`                                                   | updater manifest (`scripts/updater-manifest.py`) |
 | `teamcraft-web-X.Y.Z.tar.gz`                                    | the web client (`[web] static_dir`)              |
 | `teamcraft-android-X.Y.Z-{full,libre}-release.apk`              | `android` job, signed with the upload key        |
 | `teamcraft-android-X.Y.Z-{full,libre}-release-unsigned.apk`     | instead, when no upload key is configured        |
@@ -165,7 +172,14 @@ timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to
 | macOS    | Ad-hoc signed, not notarized; Developer ID signing and notarization with the secrets above |
 | Windows  | Not code-signed (`apps/desktop/packaging/windows/README.md`)                               |
 | iOS      | Not built: build and sign it with your own Apple team (`apps/ios/README.md`)               |
-| Linux    | Packages are unsigned; checksums and attestations cover them                               |
+| Linux    | Packages are unsigned; checksums and attestations cover them; the repositories sign them   |
+| Updates  | minisign signatures for the updater when `TAURI_SIGNING_PRIVATE_KEY` exists (below)        |
+
+Updater and repository secrets (how to create them: [updates.md](updates.md) §7):
+`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the public key goes into
+`plugins.updater.pubkey` of `apps/desktop/tauri.conf.json`), `LINUX_REPO_GPG_PRIVATE_KEY`,
+`LINUX_REPO_GPG_PASSPHRASE`. Without the updater key a release has no `latest.json` and installed apps
+don't see it; without the repository key the Pages site has the manifests but no APT/RPM repositories.
 
 Upload key secrets: `ANDROID_UPLOAD_KEYSTORE_BASE64` (the keystore file, base64),
 `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD`.
