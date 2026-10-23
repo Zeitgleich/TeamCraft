@@ -119,16 +119,15 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: oidc
             CFBundleURLSchemes: [$(TEAMCRAFT_OIDC_REDIRECT_SCHEME)]
-        # Read by TeamCraft/App/AppEnvironment.swift.
-        TCServerURL: $(TEAMCRAFT_SERVER_URL)
+        # Read by Shared/AppEnvironment.swift. No server: the user enters it (or MDM sets it).
+        TCDefaultServerURL: $(TEAMCRAFT_DEFAULT_SERVER_URL)
         TCPushGatewayURL: $(TEAMCRAFT_PUSH_GATEWAY_URL)
-        TCOidcIssuer: $(TEAMCRAFT_OIDC_ISSUER)
-        TCOidcClientId: $(TEAMCRAFT_OIDC_CLIENT_ID)
         TCOidcRedirectScheme: $(TEAMCRAFT_OIDC_REDIRECT_SCHEME)
         TCAppGroupId: $(APP_GROUP_ID)
         TCKeychainAccessGroup: $(KEYCHAIN_ACCESS_GROUP)
         NSAppTransportSecurity:
-          # The dev stack runs on plain HTTP on loopback; production uses HTTPS only.
+          # The dev stack runs on plain HTTP on loopback; production uses HTTPS only (debug builds
+          # also accept http to other devices, which ATS still refuses outside the local network).
           NSAllowsLocalNetworking: true
     settings:
       base:
@@ -174,9 +173,6 @@ targets:
         TCNotificationFiltering: $(NSE_NOTIFICATION_FILTERING)
         TCAppGroupId: $(APP_GROUP_ID)
         TCKeychainAccessGroup: $(KEYCHAIN_ACCESS_GROUP)
-        TCServerURL: $(TEAMCRAFT_SERVER_URL)
-        TCOidcIssuer: $(TEAMCRAFT_OIDC_ISSUER)
-        TCOidcClientId: $(TEAMCRAFT_OIDC_CLIENT_ID)
         TCOidcRedirectScheme: $(TEAMCRAFT_OIDC_REDIRECT_SCHEME)
     settings:
       base:

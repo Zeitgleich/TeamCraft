@@ -15,7 +15,7 @@ photo and document pickers, Quick Look, the background prefetch task and CallKit
 | Path                   | What                                                                                                                             |
 |------------------------|----------------------------------------------------------------------------------------------------------------------------------|
 | `project.yml`          | XcodeGen project: app, notification extension, unit tests                                                                        |
-| `Config/Base.xcconfig` | Server, OIDC client, App Group and keychain group; local overrides in `Local.xcconfig`                                           |
+| `Config/Base.xcconfig` | Redirect scheme, push gateway, App Group and keychain group; local overrides in `Local.xcconfig`                                 |
 | `scripts/`             | `build-xcframework.sh` (Rust core + Swift bindings), `check-strings.py`                                                          |
 | `TeamCraft/App`        | `@main`, `AppDelegate` (APNs token, notification taps and actions)                                                               |
 | `TeamCraft/Auth`       | OIDC login: `ASWebAuthenticationSession`, PKCE                                                                                   |
@@ -57,15 +57,15 @@ the extension (each links the static library; they are separate processes).
 
 | Setting                          | Meaning                                                                                                       |
 |----------------------------------|---------------------------------------------------------------------------------------------------------------|
-| `TEAMCRAFT_SERVER_URL`           | TeamCraft server                                                                                              |
+| `TEAMCRAFT_DEFAULT_SERVER_URL`   | Optional server offered at the first start of a self-built app (`https:/$()/team.example.com`); empty: none   |
 | `TEAMCRAFT_PUSH_GATEWAY_URL`     | Push gateway the APNs token is sealed for (publisher builds); empty: the server's                             |
-| `TEAMCRAFT_OIDC_ISSUER`          | OIDC issuer (Keycloak realm URL)                                                                              |
-| `TEAMCRAFT_OIDC_CLIENT_ID`       | Public OIDC client with PKCE                                                                                  |
-| `TEAMCRAFT_OIDC_REDIRECT_SCHEME` | Redirect URI is `<scheme>:/oauth/callback`; the client must allow it                                          |
+| `TEAMCRAFT_OIDC_REDIRECT_SCHEME` | Redirect URI is `<scheme>:/oauth/callback`; the server must list it in its sign-in settings                   |
 | `DEVELOPMENT_TEAM`               | Your Apple team (signed builds)                                                                               |
 | `APP_GROUP_ID`                   | App Group shared by app and extension (change it with your bundle IDs)                                        |
 | `NSE_ENTITLEMENTS`               | `NotificationService/NotificationService.Filtering.entitlements` once Apple granted the filtering entitlement |
 | `NSE_NOTIFICATION_FILTERING`     | `YES` together with the filtering entitlements: the extension drops muted pushes and hands calls to CallKit   |
+
+No server, OIDC issuer or client is built in: see [Server address](#server-address).
 
 Bundle IDs are `de.zeitgleich.teamcraft` (app), `de.zeitgleich.teamcraft.notifications`,
 `de.zeitgleich.teamcraft.Tests`. Change them for your Apple account in `project.yml` together with
@@ -73,14 +73,40 @@ Bundle IDs are `de.zeitgleich.teamcraft` (app), `de.zeitgleich.teamcraft.notific
 
 ## How it works
 
+### Server address
+
+The app has no server built in (docs/operations.md "Server address in the apps"). At the first start it
+asks for the server address: `team.example.com`, a full URL, or a pasted invite or message link. The
+core normalises it (`normalizeServerAddress`), the app fetches `GET /api/v1/server-info` without
+following redirects and the core checks the answer (`checkServerInfo`): a TeamCraft server for this host,
+versions compatible, sign-in settings valid and this app's redirect URI allowed. The app shows the
+server's brand and host for confirmation, then signs in with the issuer, client and scopes the server
+announced. *Change server* on the sign-in screen leads back to the entry; signing out keeps the server.
+
+- **Stored per account** in the App Group defaults (`ServerStore`: a list of accounts and the active
+  one, read back through `storedServer`, which checks it again), so the extension opens the core for the
+  same server. Keychain items (`oidc-session.<storage key>`, `database-key.<storage key>.<subject>`),
+  the data folder (`servers/<storage key>` in the App Group container) and the cached brand are keyed by
+  server. A session of a build with a built-in server is deleted at start; that user signs in again.
+- **Managed app configuration** (MDM): `server_url` (string) and `lock_server` (boolean) in
+  `com.apple.configuration.managed`. Without an account, the app checks that server and asks for
+  confirmation. With `lock_server`, *Change server* is hidden, other addresses are refused, and an
+  account on another server is signed out at start. It takes precedence over `TEAMCRAFT_DEFAULT_SERVER_URL`,
+  which acts like a managed server that isn't locked.
+- **https only**, except to loopback (the dev stack on the simulator). Debug builds also accept plain
+  `http` to other hosts, as far as App Transport Security allows (`NSAllowsLocalNetworking`).
+- **Errors** say what to do: not a valid address, https only, not a TeamCraft server, unreachable or
+  offline (retry), TLS problem, captive portal (sign in to the network first), server unavailable, app or
+  server too old, invalid sign-in settings, server not set up for this app.
+
 ### Data and keys
 
 - One Rust engine per signed-in account owns the sealed SQLite store (docs/e2ee.md §9.2), the sync loop
   and the calls. Calls into it are `async`; the core tells the app to re-read through `EventListener`.
 - The 256-bit **database key** is generated on first sign-in and kept in the Keychain
   (`AfterFirstUnlockThisDeviceOnly`, shared access group), so the extension can open the store while
-  the phone is locked. The **OIDC session** (access and refresh token) is in the Keychain too;
-  `SessionVault` refreshes it and hands the core access tokens.
+  the phone is locked. The **OIDC session** (access and refresh token) is in the Keychain too, one per
+  server; `SessionVault` refreshes it and hands the core access tokens.
 - Database and lock file live in the **App Group container**. Without the entitlement (an unsigned
   simulator build) the app falls back to its own Application Support folder and the Keychain's default
   group; push then only works inside the app.
@@ -237,7 +263,11 @@ There is no signing, fastlane or upload automation yet.
 Run against the dev stack (`docker-compose.dev.yml`, README of the repo) or a real server. First on
 a **device** (push, CallKit and memory only work there), then the simulator.
 
-1. **Build and launch.** `make core && make generate`, run on the device. The app starts at the sign-in screen.
+1. **Build and launch.** `make core && make generate`, run on the device. The app asks for the server
+   address. Try a wrong host (unreachable), `example.com` (not a TeamCraft server), airplane mode
+   (unreachable, *Continue* retries), then the real address or an invite link: the confirmation shows the
+   server's brand and host; *Use another server* goes back. With `TEAMCRAFT_DEFAULT_SERVER_URL` or a
+   managed configuration, the confirmation appears directly (locked: no *Change server*).
 2. **Login.** *Sign in* opens the system browser sheet, log in, the sheet closes, the app shows *Set up
    this device*. Cancelling the sheet returns to sign-in without an error.
 3. **Enrollment.** A fresh user: passphrase under 12 characters or mismatching is refused; a good one
@@ -259,7 +289,7 @@ a **device** (push, CallKit and memory only work there), then the simulator.
    lock screen; hang up. Receive a call with the app open, in the background and killed (needs the server
    `call` wake-up): the system's incoming-call screen, answer joins; decline stops ringing on the caller.
    If you have CarPlay (or the simulator's CarPlay window): the call appears there, answer works.
-10. **Sign out.** *Settings → Sign out* returns to sign-in; the Keychain items and the account are gone from the shared defaults; signing in again as the same user restores the chats.
+10. **Sign out.** *Settings → Sign out* returns to sign-in for the same server; the Keychain items and the account are gone from the shared defaults; signing in again as the same user restores the chats. *Change server* then leads to the server entry.
 11. **Files.** Attach a photo, a video and a PDF from the Files app (also two at once): chips show above the
     composer, sending shows the files with a progress bar; the other side (desktop) receives them. A file
     from the desktop shows *Tap to download*, a tap downloads and opens it in Quick Look; the gallery

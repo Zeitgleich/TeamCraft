@@ -10,8 +10,9 @@ struct OidcSession: Codable, Equatable {
   /// The OIDC subject: the account key for local data.
   var subject: String
   var displayName: String?
-  /// Endpoints, so a refresh needs no discovery round trip.
+  /// Endpoint and client, so a refresh needs neither discovery nor the server profile.
   var tokenEndpoint: URL
+  var clientId: String
 
   /// Valid for at least `leeway` more seconds.
   func isFresh(leeway: TimeInterval = 30, now: Date = Date()) -> Bool {
@@ -64,9 +65,13 @@ struct IdTokenClaims: Equatable {
 }
 
 /// Discovery, code exchange and refresh against the issuer (RFC 6749, OIDC Core, PKCE RFC 7636).
-/// The browser part of the login lives in the app target (`WebLogin`).
+/// Issuer, client and scopes come from the server's checked profile (`StoredServer`). The browser
+/// part of the login lives in the app target (`WebLogin`).
 struct OidcClient {
-  let environment: AppEnvironment
+  let issuer: URL
+  let clientId: String
+  let scopes: [String]
+  let redirectURI: URL
   var urlSession: URLSession = .shared
 
   struct Endpoints: Decodable, Equatable {
@@ -80,7 +85,7 @@ struct OidcClient {
   }
 
   func discover() async throws -> Endpoints {
-    let url = environment.oidcIssuer.appendingPathComponent(".well-known/openid-configuration")
+    let url = issuer.appendingPathComponent(".well-known/openid-configuration")
     do {
       let (data, response) = try await urlSession.data(from: url)
       guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw OidcError.discoveryFailed }
@@ -93,33 +98,36 @@ struct OidcClient {
   }
 
   func exchange(code: String, verifier: String, endpoints: Endpoints) async throws -> OidcSession {
-    let response = try await tokenRequest(
+    let response = try await Self.tokenRequest(
       endpoints.tokenEndpoint,
       [
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": environment.oidcRedirectURI.absoluteString,
-        "client_id": environment.oidcClientId,
+        "redirect_uri": redirectURI.absoluteString,
+        "client_id": clientId,
         "code_verifier": verifier,
-      ])
+      ],
+      urlSession: urlSession)
     guard let idToken = response.idToken, let claims = IdTokenClaims(jwt: idToken) else {
       throw OidcError.invalidResponse
     }
     return OidcSession(
       accessToken: response.accessToken, refreshToken: response.refreshToken,
       expiresAt: Date().addingTimeInterval(response.expiresIn ?? 300), subject: claims.subject,
-      displayName: claims.name, tokenEndpoint: endpoints.tokenEndpoint)
+      displayName: claims.name, tokenEndpoint: endpoints.tokenEndpoint, clientId: clientId)
   }
 
-  func refresh(_ session: OidcSession) async throws -> OidcSession {
+  /// Renews the access token with the session's own endpoint and client.
+  static func refresh(_ session: OidcSession, urlSession: URLSession = .shared) async throws -> OidcSession {
     guard let refreshToken = session.refreshToken else { throw OidcError.sessionExpired }
     let response = try await tokenRequest(
       session.tokenEndpoint,
       [
         "grant_type": "refresh_token",
         "refresh_token": refreshToken,
-        "client_id": environment.oidcClientId,
-      ])
+        "client_id": session.clientId,
+      ],
+      urlSession: urlSession)
     var renewed = session
     renewed.accessToken = response.accessToken
     // The provider may rotate the refresh token; keep the old one if it doesn't.
@@ -128,7 +136,9 @@ struct OidcClient {
     return renewed
   }
 
-  private func tokenRequest(_ endpoint: URL, _ form: [String: String]) async throws -> TokenResponse {
+  private static func tokenRequest(
+    _ endpoint: URL, _ form: [String: String], urlSession: URLSession
+  ) async throws -> TokenResponse {
     var request = URLRequest(url: endpoint)
     request.httpMethod = "POST"
     request.timeoutInterval = 15
@@ -159,32 +169,61 @@ struct OidcClient {
   }
 }
 
-/// Keeps the session in the shared keychain and hands the core access tokens, refreshing when
-/// needed. Used by both processes; refreshes run under the cross-process lock's protection by the
-/// callers (the engine only asks while its process holds the lock).
+extension OidcClient {
+  /// The client for `server`'s sign-in settings; `nil` when its issuer is not a URL (the core
+  /// checked it, so only a damaged profile gets here).
+  init?(server: StoredServer, environment: AppEnvironment = .current) {
+    guard let issuer = URL(string: server.issuer) else { return nil }
+    self.init(
+      issuer: issuer, clientId: server.clientId, scopes: server.scopes,
+      redirectURI: environment.oidcRedirectURI)
+  }
+}
+
+enum SessionVaultError: Error, Equatable {
+  /// No active server to keep a session for.
+  case noServer
+}
+
+/// Keeps the session of the active server's account in the shared keychain (one item per server,
+/// `oidc-session.<storage key>`) and hands the core access tokens, refreshing when needed. Used by
+/// both processes; refreshes run under the cross-process lock's protection by the callers (the
+/// engine only asks while its process holds the lock).
 final class SessionVault {
-  private static let account = "oidc-session"
+  /// The single item of builds that had one server baked in.
+  private static let legacyAccount = "oidc-session"
+  private static let accountPrefix = "oidc-session."
 
   private let keychain: KeychainStore
-  private let oidc: OidcClient
+  private let servers: ServerStore
   private let queue = DispatchQueue(label: "de.zeitgleich.teamcraft.session")
 
-  init(keychain: KeychainStore = KeychainStore(), oidc: OidcClient = OidcClient(environment: .current)) {
+  init(keychain: KeychainStore = KeychainStore(), servers: ServerStore = ServerStore()) {
     self.keychain = keychain
-    self.oidc = oidc
+    self.servers = servers
   }
 
   func load() -> OidcSession? {
-    guard let data = try? keychain.read(Self.account) else { return nil }
+    guard let account = activeItem, let data = try? keychain.read(account) else { return nil }
     return try? JSONDecoder().decode(OidcSession.self, from: data)
   }
 
   func save(_ session: OidcSession) throws {
-    try keychain.write(JSONEncoder().encode(session), for: Self.account)
+    guard let account = activeItem else { throw SessionVaultError.noServer }
+    try keychain.write(JSONEncoder().encode(session), for: account)
   }
 
   func clear() {
-    try? keychain.delete(Self.account)
+    guard let account = activeItem else { return }
+    try? keychain.delete(account)
+  }
+
+  /// Deletes the session of a build before server entry; `true` if there was one (its account
+  /// then signs in again).
+  func removeLegacySession() -> Bool {
+    guard (try? keychain.read(Self.legacyAccount)) != nil else { return false }
+    try? keychain.delete(Self.legacyAccount)
+    return true
   }
 
   /// A valid access token, refreshed if it is about to expire; `nil` when signed out or the
@@ -196,9 +235,8 @@ final class SessionVault {
       guard session.refreshToken != nil else { return nil }
       let semaphore = DispatchSemaphore(value: 0)
       let box = ResultBox()
-      let oidc = self.oidc
       Task.detached {
-        do { box.outcome = .success(try await oidc.refresh(session)) } catch { box.outcome = .failure(error) }
+        do { box.outcome = .success(try await OidcClient.refresh(session)) } catch { box.outcome = .failure(error) }
         semaphore.signal()
       }
       _ = semaphore.wait(timeout: .now() + 20)
@@ -212,6 +250,10 @@ final class SessionVault {
         return nil
       }
     }
+  }
+
+  private var activeItem: String? {
+    servers.active.map { Self.accountPrefix + $0.storageKey }
   }
 }
 

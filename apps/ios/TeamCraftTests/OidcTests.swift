@@ -4,10 +4,8 @@ import XCTest
 
 final class OidcTests: XCTestCase {
   private let environment = AppEnvironment(
-    serverURL: URL(string: "https://chat.example.com")!,
-    oidcIssuer: URL(string: "https://id.example.com/realms/team")!,
-    oidcClientId: "teamcraft", oidcRedirectScheme: "de.zeitgleich.teamcraft",
-    appGroupId: "group.de.zeitgleich.teamcraft", keychainAccessGroup: "")
+    oidcRedirectScheme: "de.zeitgleich.teamcraft", appGroupId: "group.de.zeitgleich.teamcraft",
+    keychainAccessGroup: "", clientVersion: "1.0.0")
 
   func testPkceMatchesTheRfcTestVector() {
     // RFC 7636 appendix B.
@@ -27,13 +25,17 @@ final class OidcTests: XCTestCase {
     let endpoints = OidcClient.Endpoints(
       authorizationEndpoint: URL(string: "https://id.example.com/auth")!,
       tokenEndpoint: URL(string: "https://id.example.com/token")!)
-    let url = WebLogin.authorizationURL(
-      endpoints: endpoints, environment: environment, pkce: Pkce(verifier: "v"), state: "s1")
+    let client = OidcClient(
+      issuer: URL(string: "https://id.example.com/realms/team")!, clientId: "teamcraft",
+      scopes: ["openid", "profile", "email", "offline_access"], redirectURI: environment.oidcRedirectURI)
+    let url = WebLogin.authorizationURL(endpoints: endpoints, client: client, pkce: Pkce(verifier: "v"), state: "s1")
     let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
     func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
     XCTAssertEqual(value("response_type"), "code")
     XCTAssertEqual(value("client_id"), "teamcraft")
     XCTAssertEqual(value("redirect_uri"), "de.zeitgleich.teamcraft:/oauth/callback")
+    // The scopes the server announced, not a fixed list.
+    XCTAssertEqual(value("scope"), "openid profile email offline_access")
     XCTAssertEqual(value("code_challenge_method"), "S256")
     XCTAssertEqual(value("state"), "s1")
   }
@@ -67,7 +69,7 @@ final class OidcTests: XCTestCase {
     let now = Date()
     let session = OidcSession(
       accessToken: "t", refreshToken: nil, expiresAt: now.addingTimeInterval(20), subject: "s",
-      displayName: nil, tokenEndpoint: URL(string: "https://id.example.com/token")!)
+      displayName: nil, tokenEndpoint: URL(string: "https://id.example.com/token")!, clientId: "teamcraft")
     XCTAssertFalse(session.isFresh(leeway: 30, now: now))
     XCTAssertTrue(session.isFresh(leeway: 10, now: now))
   }

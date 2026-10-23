@@ -4,23 +4,22 @@ import UIKit
 
 /// The browser half of the OIDC login: authorization code with PKCE in an
 /// `ASWebAuthenticationSession` (the system browser's cookies give single sign-on), then the code
-/// exchange through `OidcClient`.
+/// exchange through `OidcClient`, with the sign-in settings the server announced.
 @MainActor
 final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding {
   private let environment: AppEnvironment
-  private let oidc: OidcClient
   private var maybeSession: ASWebAuthenticationSession?
 
   init(environment: AppEnvironment = .current) {
     self.environment = environment
-    self.oidc = OidcClient(environment: environment)
   }
 
-  func login() async throws -> OidcSession {
+  func login(server: StoredServer) async throws -> OidcSession {
+    guard let oidc = OidcClient(server: server, environment: environment) else { throw OidcError.discoveryFailed }
     let endpoints = try await oidc.discover()
     let pkce = Pkce.generate()
     let state = Pkce.randomState()
-    let url = Self.authorizationURL(endpoints: endpoints, environment: environment, pkce: pkce, state: state)
+    let url = Self.authorizationURL(endpoints: endpoints, client: oidc, pkce: pkce, state: state)
     let callback = try await present(url)
     let code = try Self.authorizationCode(from: callback, expectedState: state)
     return try await oidc.exchange(code: code, verifier: pkce.verifier, endpoints: endpoints)
@@ -55,15 +54,15 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
   }
 
   static func authorizationURL(
-    endpoints: OidcClient.Endpoints, environment: AppEnvironment, pkce: Pkce, state: String
+    endpoints: OidcClient.Endpoints, client: OidcClient, pkce: Pkce, state: String
   ) -> URL {
     var components = URLComponents(url: endpoints.authorizationEndpoint, resolvingAgainstBaseURL: false)!
     var items = components.queryItems ?? []
     items += [
       URLQueryItem(name: "response_type", value: "code"),
-      URLQueryItem(name: "client_id", value: environment.oidcClientId),
-      URLQueryItem(name: "redirect_uri", value: environment.oidcRedirectURI.absoluteString),
-      URLQueryItem(name: "scope", value: "openid profile email"),
+      URLQueryItem(name: "client_id", value: client.clientId),
+      URLQueryItem(name: "redirect_uri", value: client.redirectURI.absoluteString),
+      URLQueryItem(name: "scope", value: client.scopes.joined(separator: " ")),
       URLQueryItem(name: "code_challenge", value: pkce.challenge),
       URLQueryItem(name: "code_challenge_method", value: "S256"),
       URLQueryItem(name: "state", value: state),
