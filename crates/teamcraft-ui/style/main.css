@@ -5897,12 +5897,13 @@ ol.md-list {
 .modal-settings { width: min(720px, calc(100vw - 32px)); }
 .modal-settings .modal-body { min-height: 420px; }
 .settings-subject { margin: 0 0 var(--space-2, 8px); }
-.section-tabs { padding: 0; margin: 0 0 var(--space-3, 12px); overflow-x: auto; }
+.section-tabs { padding: 0; margin: 0 0 var(--space-3, 12px); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 .section-panel > h3:first-child { margin-top: 0; }
 .settings-form, .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-3, 12px); }
 .settings-form label, .field label { font-weight: 600; font-size: var(--text-sm, .875rem); }
 .settings-row { display: flex; align-items: center; gap: var(--space-2, 8px); margin-bottom: var(--space-2, 8px); }
 .settings-member-list { list-style: none; margin: 0; padding: 0; }
+.settings-member .member-name { flex: none; }
 .settings-member { display: flex; align-items: center; gap: var(--space-2, 8px); padding: 6px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .inline-actions { display: flex; gap: var(--space-2, 8px); margin: 6px 0; }
 .switch-row { display: flex; align-items: flex-start; gap: 10px; margin: var(--space-3, 12px) 0; cursor: pointer; }

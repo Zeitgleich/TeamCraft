@@ -643,27 +643,25 @@ fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> 
     <Show when=move || current_space.is_some() && !targets.get().is_empty() fallback=|| ()>
       <h3>{move || i18n.t("channel-move-space")}</h3>
       <p class="hint">{move || i18n.t("channel-move-space-hint")}</p>
-      <select
-        class="input"
-        aria-label=move || i18n.t("channel-move-space")
-        on:change=move |ev| {
-          chosen.set(event_target_value(&ev));
-          is_confirming.set(false);
-        }
-      >
-        <option value="">{move || i18n.t("channel-move-space-choose")}</option>
-        <For each=move || targets.get() key=|space| space.id let:space>
-          <option value=space.id.to_string() translate="no">{space.name.clone()}</option>
-        </For>
-      </select>
-      <Show
-        when=move || is_confirming.get()
-        fallback=move || view! {
-          <button class="btn" prop:disabled=move || chosen.get().is_empty() on:click=move |_| is_confirming.set(true)>
-            {move || i18n.t("channel-move-space-action")}
-          </button>
-        }
-      >
+      <div class="inline-form">
+        <select
+          class="input"
+          aria-label=move || i18n.t("channel-move-space")
+          on:change=move |ev| {
+            chosen.set(event_target_value(&ev));
+            is_confirming.set(false);
+          }
+        >
+          <option value="">{move || i18n.t("channel-move-space-choose")}</option>
+          <For each=move || targets.get() key=|space| space.id let:space>
+            <option value=space.id.to_string() translate="no">{space.name.clone()}</option>
+          </For>
+        </select>
+        <button class="btn" prop:disabled=move || chosen.get().is_empty() || is_confirming.get() on:click=move |_| is_confirming.set(true)>
+          {move || i18n.t("channel-move-space-action")}
+        </button>
+      </div>
+      <Show when=move || is_confirming.get() fallback=|| ()>
         <p role="alert">{move || i18n.t("channel-move-space-confirm")}</p>
         <div class="inline-actions">
           <button class="btn btn-primary" on:click=move_now>{move || i18n.t("confirm")}</button>

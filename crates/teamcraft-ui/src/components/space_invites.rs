@@ -512,11 +512,17 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
     });
   let space_id = maybe_space.as_ref().map(|space| space.id);
   let adds_to_space = maybe_space.as_ref().is_some_and(|space| space.can_add_members);
+  let adds_guests_to_space = maybe_space.as_ref().is_some_and(|space| space.can_invite_guests);
   let add = move || {
-    let users: Vec<UserId> = chosen.with_untracked(|list| list.iter().map(|user| user.id).collect());
-    if users.is_empty() {
+    let picked = chosen.get_untracked();
+    if picked.is_empty() {
       return;
     }
+    // Guest accounts can only be guests of the space.
+    let (guests, members): (Vec<&User>, Vec<&User>) = picked.iter().partition(|user| user.is_guest);
+    let ids = |list: Vec<&User>| list.into_iter().map(|user| user.id).collect::<Vec<UserId>>();
+    let (guests, members) = (ids(guests), ids(members));
+    let users: Vec<UserId> = picked.iter().map(|user| user.id).collect();
     let history = if shares_history.get_untracked() {
       HistoryPolicy::Full
     } else {
@@ -526,8 +532,13 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
     // state only lives in the dialog, its end after unmount is ignored.
     PendingAction::new().run(|| {
       // The core runs commands in order, so the space membership is there before the channel add.
-      if let Some(space) = space_id.filter(|_| adds_to_space) {
-        state.write(|backend| backend.add_space_members(space, users.clone(), false));
+      if let Some(space) = space_id {
+        if adds_to_space && !members.is_empty() {
+          state.write(|backend| backend.add_space_members(space, members, false));
+        }
+        if adds_guests_to_space && !guests.is_empty() {
+          state.write(|backend| backend.add_space_members(space, guests, true));
+        }
       }
       for user in users {
         state.write(|backend| backend.add_member_with_history(conversation, user, history.clone()));
