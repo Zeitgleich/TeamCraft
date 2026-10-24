@@ -1261,7 +1261,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Who may make signed changes in the group, with the signed roster's freshness judged at
   /// `at_ms` (the server's time of the commit being checked).
   /// The users with a device in the conversation's group.
-  fn group_users(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
+  pub(crate) fn group_users(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
     let mut users = Vec::new();
     for member in self.group_or_error(conversation)?.members()? {
       let user = convert::user_from_crypto(member.user_id)?;

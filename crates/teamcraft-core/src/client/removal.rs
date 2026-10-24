@@ -145,6 +145,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if user == self.account.user_id {
       // Leaving: posted also without a group here, for this user's other devices in it. The
       // members commit it (moot if none of them is in the group).
+      if self.has_group(conversation)? && !self.has_other_users(conversation)? {
+        // Nobody else in the group to commit it, or to read anything after.
+        return Ok(RemovalStep::Server);
+      }
       let signed_epoch = self.post_admin_change(conversation, action).await?;
       return Ok(if self.has_group(conversation)? {
         RemovalStep::AwaitCommit { signed_epoch }
@@ -177,6 +181,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(epoch) = self.mls_epoch(conversation)? else {
       return Ok(true);
     };
+    if !self.has_other_users(conversation)? {
+      // The others left meanwhile: nobody is left to commit it.
+      return Ok(true);
+    }
     if epoch.saturating_sub(signed_epoch) >= MAX_CHANGE_AGE_EPOCHS / 2 {
       let action = MembershipAction::RemoveUser {
         user_id: convert::user(self.account.user_id),
@@ -190,6 +198,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )?;
     }
     Ok(false)
+  }
+
+  /// Whether the group has a device of a user other than this one.
+  fn has_other_users(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+    let me = self.account.user_id;
+    Ok(self.group_users(conversation)?.iter().any(|user| *user != me))
   }
 
   /// Runs a revocation from `step` on; also continues one from the pending queue. A group whose

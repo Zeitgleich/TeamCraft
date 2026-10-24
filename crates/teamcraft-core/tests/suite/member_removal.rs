@@ -314,6 +314,20 @@ mod leaving {
     assert_removed(channel, &mut alice, &mut bob, &mut carol).await;
   }
 
+  /// Nobody else in the group could commit the removal: the leave doesn't wait for one.
+  #[tokio::test]
+  async fn leaving_a_channel_nobody_else_is_in_does_not_wait() {
+    let server = FakeServer::new();
+    let (mut alice, _, _) = three(&server).await;
+    let channel = channel_with(&mut alice, &mut []).await;
+
+    // Done at once: the server dropped the membership, and its removal event ends the group here.
+    alice.client.leave_channel(channel).await.unwrap();
+    assert!(alice.api.list_members(channel).await.is_err());
+    settle(&mut [&mut alice]).await;
+    assert!(!alice.client.has_group(channel).unwrap());
+  }
+
   /// Carol's phone never joined the group, her laptop did: leaving from the phone still gets the
   /// laptop removed.
   #[tokio::test]
