@@ -216,6 +216,7 @@ async fn create_open_space(
 ) -> teamcraft_proto::SpaceId {
   let http = reqwest::Client::new();
   let request = CreateSpaceRequest {
+    maybe_idempotency_key: None,
     name: format!("Mobile {}", SystemClock.now_ms()),
     maybe_icon: None,
     maybe_color: None,
