@@ -3,13 +3,26 @@
 
 use leptos::prelude::*;
 
-use crate::brand::{Brand, image_src};
+use crate::brand::{Brand, image_src, request_image};
 
 /// The brand image, or `fallback` while there is none (no asset, still loading, failed to load).
 #[component]
 pub fn BrandLogo(class: &'static str, #[prop(into)] fallback: ViewFn) -> impl IntoView {
   let brand = Brand::use_current().0;
   let failed = RwSignal::new(false);
+  // Desktop: fetch the images through the shell (an effect, not while rendering); a new brand
+  // (another server) also gets a fresh try after a failed one.
+  Effect::new(move |_| {
+    brand.with(|view| {
+      for url in [view.header_image(false), view.header_image(true)]
+        .into_iter()
+        .flatten()
+      {
+        request_image(url);
+      }
+    });
+    failed.set(false);
+  });
   let light = Memo::new(move |_| brand.with(|view| view.header_image(false).and_then(image_src)));
   let dark = Memo::new(move |_| {
     brand.with(|view| {
@@ -18,11 +31,6 @@ pub fn BrandLogo(class: &'static str, #[prop(into)] fallback: ViewFn) -> impl In
         .filter(|dark| Some(*dark) != view.header_image(false))
         .and_then(image_src)
     })
-  });
-  // A new brand (after changing the server) gets a fresh try.
-  Effect::new(move |_| {
-    light.track();
-    failed.set(false);
   });
   let name = move || brand.with(|view| view.display_name.clone());
   move || {
