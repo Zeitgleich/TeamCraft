@@ -21,6 +21,8 @@ pub const DRAG_ATTRIBUTE: &str = "data-window-drag";
 /// Number of window buttons on each side, for the stylesheet.
 const CONTROLS_LEFT_PROPERTY: &str = "--window-controls-left";
 const CONTROLS_RIGHT_PROPERTY: &str = "--window-controls-right";
+/// How far (in CSS pixels, per axis) the pointer may move with the button down and still be a click.
+const CLICK_SLOP_PX: i32 = 4;
 
 /// What the shell said about the window; `None` in the browser and until it answered.
 #[derive(Clone, Copy)]
@@ -83,6 +85,83 @@ pub fn window_drag_handler() -> impl Fn(MouseEvent) + Copy + 'static {
       start_window_drag(&event);
     }
   }
+}
+
+/// Click or drag on an element that does both (the brand: a link that also moves the window).
+/// Starting the native drag on press would swallow the release, so no click would ever arrive;
+/// instead the drag starts once the pointer has moved past [`CLICK_SLOP_PX`] with the button down.
+#[derive(Clone, Copy)]
+pub struct ClickOrDrag {
+  maybe_press: StoredValue<Option<(i32, i32)>>,
+  was_drag: StoredValue<bool>,
+  maybe_state: Option<WindowChromeState>,
+}
+
+impl ClickOrDrag {
+  pub fn new() -> Self {
+    Self {
+      maybe_press: StoredValue::new(None),
+      was_drag: StoredValue::new(false),
+      maybe_state: use_context::<WindowChromeState>(),
+    }
+  }
+
+  /// `mousedown`: remembers where the press started.
+  pub fn press(&self, event: &MouseEvent) {
+    self.was_drag.set_value(false);
+    let is_primary = event.button() == 0;
+    self
+      .maybe_press
+      .set_value((is_primary && self.is_custom_title_bar()).then(|| position_of(event)));
+  }
+
+  /// `mousemove`: starts moving the window once the press became a drag.
+  pub fn moved(&self, event: &MouseEvent) {
+    let Some(start) = self.maybe_press.get_value() else {
+      return;
+    };
+    if event.buttons() & 1 == 0 {
+      self.maybe_press.set_value(None);
+    } else if is_drag(start, position_of(event)) {
+      self.maybe_press.set_value(None);
+      self.was_drag.set_value(true);
+      leptos::task::spawn_local(tauri::window_action(WindowAction::StartDragging));
+    }
+  }
+
+  /// `mouseup` or `mouseleave`: the press is over.
+  pub fn release(&self) {
+    self.maybe_press.set_value(None);
+  }
+
+  /// `click`: whether it ended a drag (and must not navigate).
+  pub fn take_was_drag(&self) -> bool {
+    let was_drag = self.was_drag.get_value();
+    self.was_drag.set_value(false);
+    was_drag
+  }
+
+  fn is_custom_title_bar(&self) -> bool {
+    self
+      .maybe_state
+      .and_then(|state| state.0.get_untracked())
+      .is_some_and(|chrome| chrome.title_bar == TitleBar::Custom)
+  }
+}
+
+impl Default for ClickOrDrag {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+/// Whether a pointer that went down at `start` and is now at `now` is dragging, not clicking.
+fn is_drag(start: (i32, i32), now: (i32, i32)) -> bool {
+  (now.0 - start.0).abs() > CLICK_SLOP_PX || (now.1 - start.1).abs() > CLICK_SLOP_PX
+}
+
+fn position_of(event: &MouseEvent) -> (i32, i32) {
+  (event.screen_x(), event.screen_y())
 }
 
 fn start_window_drag(event: &MouseEvent) {
@@ -199,4 +278,26 @@ fn apply_root_attributes(maybe_chrome: Option<&WindowChrome>) {
   // The top bar keeps its content clear of the controls (button counts; the stylesheet sizes them).
   drop(style.set_property(CONTROLS_LEFT_PROPERTY, &chrome.controls.left.len().to_string()));
   drop(style.set_property(CONTROLS_RIGHT_PROPERTY, &chrome.controls.right.len().to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_press_without_movement_is_a_click() {
+    assert!(!is_drag((100, 50), (100, 50)));
+  }
+
+  #[test]
+  fn jitter_within_the_slop_is_still_a_click() {
+    assert!(!is_drag((100, 50), (104, 46)));
+  }
+
+  #[test]
+  fn moving_past_the_slop_in_any_direction_is_a_drag() {
+    assert!(is_drag((100, 50), (105, 50)));
+    assert!(is_drag((100, 50), (100, 44)));
+    assert!(is_drag((100, 50), (60, 90)));
+  }
 }

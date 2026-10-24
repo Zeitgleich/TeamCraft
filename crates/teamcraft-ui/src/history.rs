@@ -105,6 +105,26 @@ pub fn travel(travel: Travel) {
   }
 }
 
+/// Goes back to the view before the current one when that entry is the app's own, otherwise Home.
+/// A page opened by a link (or a fresh tab) has nothing in-app to go back to.
+pub fn back_or_home(state: AppState) {
+  if depth_of_current_entry() > 0 {
+    travel(Travel::Back);
+  } else {
+    state.open_home();
+  }
+}
+
+/// How many entries the app itself pushed before the current one, kept in the entry's state;
+/// `0` for the entry the page was opened on.
+fn depth_of_current_entry() -> u32 {
+  web_sys::window()
+    .and_then(|window| window.history().ok())
+    .and_then(|history| history.state().ok())
+    .and_then(|value| value.as_f64())
+    .map_or(0, |depth| depth as u32)
+}
+
 /// Shows the route of the current URL (start, Back, Forward).
 fn follow_location(state: AppState, bar: AddressBar) {
   let path = web_sys::window()
@@ -169,10 +189,15 @@ fn write_address_bar(step: HistoryStep, path: &str) {
   let Some(history) = web_sys::window().and_then(|window| window.history().ok()) else {
     return;
   };
+  let depth = depth_of_current_entry();
   let result = match step {
     HistoryStep::Keep => return,
-    HistoryStep::Push => history.push_state_with_url(&JsValue::NULL, "", Some(path)),
-    HistoryStep::Replace => history.replace_state_with_url(&JsValue::NULL, "", Some(path)),
+    HistoryStep::Push => {
+      history.push_state_with_url(&JsValue::from_f64(f64::from(depth + 1)), "", Some(path))
+    },
+    HistoryStep::Replace => {
+      history.replace_state_with_url(&JsValue::from_f64(f64::from(depth)), "", Some(path))
+    },
   };
   if result.is_err() {
     tracing::debug!(?step, "could not update the address bar");
