@@ -16,6 +16,12 @@ compatible within 1.x; database migrations run by themselves and are forward-onl
 
 ### Added
 
+- **One Home and the brand everywhere**: Home holds the global entries (threads, activity, calls,
+  meetings, people, saved, search) above the direct messages and is where a new workspace starts.
+  The top bar, the sign-in card and the favicon show the brand's logo (light or dark) and name from
+  the admin console.
+- **Linux without a tray**: the desktop app starts without libayatana-appindicator and then runs
+  without a tray icon; deb and rpm only recommend the library.
 - **Server entry in the apps**: the desktop, Android and iOS apps no longer have a server built in.
   On first start they ask for the server address (a host name, URL or any link into the server),
   show the server's name and host for confirmation and sign in with the settings the server
