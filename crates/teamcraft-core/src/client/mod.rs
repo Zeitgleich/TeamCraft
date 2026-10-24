@@ -14,6 +14,7 @@ pub mod devices;
 mod enroll;
 pub mod files;
 mod gateway;
+mod group_health;
 mod groups;
 mod linking;
 mod member_device;
@@ -44,6 +45,9 @@ pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
+pub use group_health::{
+  RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
+};
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
@@ -104,9 +108,20 @@ pub struct ClientSettings {
   /// A device that fell out of a group asks again to be added back after this long without a
   /// welcome (e2ee.md §4.6).
   pub rejoin_retry: std::time::Duration,
+  /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
+  /// request, up to this.
+  pub rejoin_retry_max: std::time::Duration,
   /// A removal whose server side the server refused after the MLS side was done (the remover lost
   /// the right meanwhile) is tried again after this long (e2ee.md §4.6, removal order).
   pub removal_retry: std::time::Duration,
+  /// The delay before the next try of a refused removal doubles each time, up to this.
+  pub removal_retry_max: std::time::Duration,
+  /// Refusals before a removal shows as failed and waits for the user's "retry"; also how often
+  /// an admin outside the group signs its removal again at most.
+  pub removal_attempts: u32,
+  /// How long an admin outside the group keeps checking that its posted removal doesn't get too
+  /// old to be committed (it can't see the members' commit).
+  pub removal_watch: std::time::Duration,
   /// Larger MLS group information is not sent with a commit (it would push the commit over the
   /// server's payload limit); a further device then waits for a member instead.
   pub max_group_info_bytes: usize,
@@ -169,7 +184,11 @@ impl Default for ClientSettings {
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
+      rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
+      removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      removal_attempts: 6,
+      removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       max_group_info_bytes: 256 * 1024,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
@@ -347,6 +366,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &groups::rejoin_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &group_health::leftovers_key(conversation))?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &group_health::queue_refused_key(conversation),
+    )?;
     self.mls_current.remove(&conversation);
     records::save_mls_storage(&self.store, &self.provider)
   }

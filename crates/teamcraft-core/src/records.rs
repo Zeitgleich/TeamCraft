@@ -265,9 +265,27 @@ pub fn enqueue_message(
   now_ms: i64,
   draft: Draft,
 ) -> Result<ClientMessageId, CoreError> {
+  let client_message_id = new_client_message_id();
+  enqueue_message_as(store, sender, now_ms, draft, client_message_id)?;
+  Ok(client_message_id)
+}
+
+/// A fresh random ID for an own message.
+pub(crate) fn new_client_message_id() -> ClientMessageId {
   let mut bytes = [0u8; 16];
   rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut bytes);
-  let client_message_id = ClientMessageId::from_bytes(bytes);
+  ClientMessageId::from_bytes(bytes)
+}
+
+/// [`enqueue_message`] with an ID chosen before: writing the same message again replaces it, and
+/// the server deduplicates on the ID, so a retry after a crash never sends it twice.
+pub(crate) fn enqueue_message_as(
+  store: &impl LocalStore,
+  sender: UserId,
+  now_ms: i64,
+  draft: Draft,
+  client_message_id: ClientMessageId,
+) -> Result<(), CoreError> {
   // Outbox messages are ordered by time written; keep that order strict even within a millisecond
   // (a reaction toggled twice quickly must apply in order).
   // Only the outbox is looked at: reading the whole conversation made every send cost as much as
@@ -306,8 +324,7 @@ pub fn enqueue_message(
     Table::Outbox,
     &outbox_key(draft.conversation_id, client_message_id),
     &entry,
-  )?;
-  Ok(client_message_id)
+  )
 }
 
 pub fn outbox(store: &impl LocalStore) -> Result<Vec<OutboxEntry>, CoreError> {

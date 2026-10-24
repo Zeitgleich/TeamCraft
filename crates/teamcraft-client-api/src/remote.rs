@@ -20,8 +20,8 @@ use crate::calls::{
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
-  ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
+  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{SavedSearch, SearchHit, SearchResults};
@@ -570,6 +570,14 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  RetryRemoval {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  DiscardRemoval {
+    conversation: ConversationId,
+    user: UserId,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -718,6 +726,8 @@ impl ChatAction {
         history,
       } => backend.add_member_with_history(conversation, user, history),
       Self::RemoveMember { conversation, user } => backend.remove_member(conversation, user),
+      Self::RetryRemoval { conversation, user } => backend.retry_removal(conversation, user),
+      Self::DiscardRemoval { conversation, user } => backend.discard_removal(conversation, user),
       Self::SetBookmarks {
         conversation,
         bookmarks,
@@ -758,6 +768,10 @@ pub enum ChatQuery {
   IsWaitingForDevice {
     conversation: ConversationId,
   },
+  MembershipIssues {
+    conversation: ConversationId,
+  },
+  UnconfirmedRemovals,
   Draft {
     conversation: ConversationId,
     #[serde(default)]
@@ -896,6 +910,12 @@ pub enum ChatAnswer {
   Devices {
     devices: Vec<DeviceInfo>,
   },
+  MembershipIssues {
+    issues: Vec<MembershipIssue>,
+  },
+  UnconfirmedRemovals {
+    removals: Vec<(ConversationId, UserId)>,
+  },
   Unsupported,
 }
 
@@ -932,6 +952,12 @@ impl ChatQuery {
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),
+      },
+      Self::MembershipIssues { conversation } => ChatAnswer::MembershipIssues {
+        issues: backend.membership_issues(conversation),
+      },
+      Self::UnconfirmedRemovals => ChatAnswer::UnconfirmedRemovals {
+        removals: backend.unconfirmed_removals(),
       },
       Self::FirstUnread { conversation } => ChatAnswer::Message {
         maybe_message: backend.first_unread(conversation),

@@ -5,6 +5,7 @@ use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 use crate::admin::{AdminChannel, SelfJoinOutcome, format_bytes};
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
+use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, UserId};
@@ -52,6 +53,44 @@ impl ChannelFilter {
   }
 }
 
+/// This admin's removals from channels it isn't in that can't be confirmed (e2ee.md §4.6): the
+/// admin removes again or keeps the person; the client never settles it on the server's word.
+#[component]
+fn UnconfirmedRemovals(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let removals = Memo::new(move |_| state.read(|backend| backend.unconfirmed_removals()));
+  move || {
+    removals
+      .get()
+      .into_iter()
+      .map(|(conversation, user)| {
+        let channel = channels
+          .get()
+          .into_iter()
+          .find(|channel| channel.id == conversation)
+          .map(|channel| channel.name)
+          .unwrap_or_default();
+        let name = state
+          .read(|backend| backend.user(user))
+          .map(|user| user.display_name)
+          .filter(|name| !name.is_empty())
+          .unwrap_or_else(|| i18n.t("left-in-group-unknown"));
+        let text = i18n.t_with("removal-unconfirmed", &[("name", &name), ("channel", &channel)]);
+        view! {
+          <div class="key-banner" role="alert">
+            <Icon name=IconName::Lock />
+            <div class="key-banner-text">
+              <strong translate="no">{text}</strong>
+            </div>
+            <UnconfirmedRemovalActions conversation=conversation user=user />
+          </div>
+        }
+      })
+      .collect_view()
+  }
+}
+
 /// All spaces and channels including private ones, with metadata only.
 #[component]
 pub fn ChannelsSection() -> impl IntoView {
@@ -88,6 +127,7 @@ pub fn ChannelsSection() -> impl IntoView {
       title=Signal::derive(move || i18n.t("admin-channels-title"))
       subtitle=Signal::derive(move || i18n.t("admin-channels-subtitle"))
     />
+    <UnconfirmedRemovals channels=channels />
     <div class="admin-toolbar">
       <label class="visually-hidden" for="admin-channel-search">{move || i18n.t("admin-search")}</label>
       <input

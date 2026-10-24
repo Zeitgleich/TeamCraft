@@ -159,6 +159,30 @@ pub struct JoinableSpace {
   pub maybe_description: Option<String>,
 }
 
+/// Something about who is in a conversation's encryption group that the user should see or act
+/// on (e2ee.md §4.6, removal order).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MembershipIssue {
+  /// This device's removal of `user` (the user's own leave when it is them) is on its way.
+  RemovalPending { user: UserId },
+  /// That removal or leave was refused too often; "retry" ([`crate::backend::ChatBackend::retry_removal`]).
+  RemovalFailed { user: UserId },
+  /// An admin's removal from outside the group that can't be confirmed: the server lists `user`
+  /// again, or somebody may have added them back since. "Remove" signs it afresh
+  /// ([`crate::backend::ChatBackend::retry_removal`]), "keep" drops it
+  /// ([`crate::backend::ChatBackend::discard_removal`]).
+  RemovalUnconfirmed { user: UserId },
+  /// `user` is still in the encryption group though the server no longer lists them; shown to
+  /// admins, who can sign the removal again.
+  LeftInGroup { user: UserId },
+  /// The server lists the user but refuses this device the encryption group: new messages may be
+  /// missing.
+  GroupRefused,
+  #[serde(other)]
+  Unknown,
+}
+
 /// What kind of conversation a sidebar entry is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConversationKind {
@@ -360,6 +384,21 @@ pub struct ThreadSummary {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn membership_issues_keep_their_wire_form_and_tolerate_new_kinds() {
+    let issue = MembershipIssue::LeftInGroup { user: id_from_raw(7) };
+    let json = serde_json::to_value(&issue).unwrap_or_default();
+    assert_eq!(json["type"], "left_in_group");
+    assert_eq!(
+      serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "group_refused" })).ok(),
+      Some(MembershipIssue::GroupRefused)
+    );
+    assert_eq!(
+      serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "from_a_newer_core" })).ok(),
+      Some(MembershipIssue::Unknown)
+    );
+  }
 
   #[test]
   fn pending_ids_are_recognized() {

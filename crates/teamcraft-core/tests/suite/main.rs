@@ -26,6 +26,7 @@ mod org_recovery;
 mod push;
 mod push_guard;
 mod queries;
+mod removal_followups;
 mod runner;
 mod search;
 mod sync_engine;

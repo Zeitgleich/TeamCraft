@@ -524,6 +524,31 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn membership_issues(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MembershipIssue> {
+    match self.ask(ChatQuery::MembershipIssues { conversation }) {
+      Some(ChatAnswer::MembershipIssues { issues }) => issues,
+      _ => Vec::new(),
+    }
+  }
+
+  fn retry_removal(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::RetryRemoval { conversation, user });
+  }
+
+  fn discard_removal(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::DiscardRemoval { conversation, user });
+  }
+
+  fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
+    match self.ask(ChatQuery::UnconfirmedRemovals) {
+      Some(ChatAnswer::UnconfirmedRemovals { removals }) => removals,
+      _ => Vec::new(),
+    }
+  }
+
   fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
     match self.ask(ChatQuery::FirstUnread { conversation }) {
       Some(ChatAnswer::Message { maybe_message }) => maybe_message,

@@ -383,6 +383,25 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.is_waiting_for_device(conversation)
   }
 
+  fn membership_issues(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MembershipIssue> {
+    self.chat.membership_issues(conversation)
+  }
+
+  fn retry_removal(&self, conversation: ConversationId, user: UserId) {
+    self.chat.retry_removal(conversation, user);
+  }
+
+  fn discard_removal(&self, conversation: ConversationId, user: UserId) {
+    self.chat.discard_removal(conversation, user);
+  }
+
+  fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
+    self.chat.unconfirmed_removals()
+  }
+
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
     self.chat.draft(conversation, maybe_thread)
   }

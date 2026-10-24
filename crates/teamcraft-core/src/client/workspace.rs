@@ -6,19 +6,19 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::membership::{MembershipAction, MembershipChange, SignedMembershipChange};
 use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry};
 use teamcraft_proto::{
-  AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ConversationId, DeviceId, ErrorCode,
-  Id, ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest, PresenceState, UserId,
-  WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
+  AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ClientMessageId, ConversationId,
+  DeviceId, ErrorCode, Id, ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest, PresenceState,
+  UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
 };
 
 use super::Client;
 use super::groups::{ADMIN_CHANGE_MAGIC, ChangeSource};
-use super::removal::{RemovalProgress, is_worth_retrying};
+use super::removal::{RemovalProgress, RemovalRun, is_worth_retrying};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
-use crate::store::{LocalStore, Table};
+use crate::store::{ConversationEvent, LocalStore, Table};
 use crate::workspace::{
   ChainedPolicyDocument, RosterDocument, RosterMember, RosterRole, WorkspaceHead, WorkspaceState,
 };
@@ -82,6 +82,17 @@ pub(crate) enum PendingChange {
     /// the server side; 0 for right away.
     #[serde(default)]
     not_before_ms: i64,
+    /// Definite refusals so far (or, while watching, re-signings); each pushes the next try
+    /// further out, up to `removal_retry_max`.
+    #[serde(default)]
+    attempts: u32,
+    #[serde(default)]
+    state: RemovalState,
+    /// The goodbye or the announcement of the removal, with the message ID chosen up front, so a
+    /// retry after a crash sends it once (sent before the group step for a goodbye, after it for
+    /// an announcement).
+    #[serde(default)]
+    maybe_announcement: Option<PendingAnnouncement>,
   },
   /// A revocation of another device of this user: the server first, then the signed device list
   /// and the groups. Kept until all are done.
@@ -105,6 +116,48 @@ pub(crate) enum RemovalStep {
   AwaitCommit { signed_epoch: u64 },
   /// The group side is done; drop the server's membership.
   Server,
+  /// An admin outside the group posted the signed removal for `signed_epoch`: drop the server's
+  /// membership, then watch whether the change gets too old to be committed.
+  ServerThenWatch { signed_epoch: u64 },
+  /// An admin outside the group can't see the members' commit: until `removal_watch` after
+  /// `since_ms` (the first signing), it checks the group's epoch (the epoch-conflict answer tells it) and signs
+  /// the removal again before members would refuse it as too old (`MAX_CHANGE_AGE_EPOCHS`).
+  /// Signing again is harmless when the first one was committed: members find nobody to remove.
+  Watch {
+    signed_epoch: u64,
+    since_ms: i64,
+    /// Checks so far, for the backoff between them.
+    probes: u32,
+  },
+}
+
+/// Whether a [`PendingChange::Removal`] is still being tried.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RemovalState {
+  #[default]
+  Retrying,
+  /// Refused `removal_attempts` times: shown as failed until the user tries again.
+  Failed,
+  /// Can't be confirmed from here (an admin outside the group: the server lists the user again,
+  /// or the server step resumed later, when somebody may have added them back): waits for the
+  /// admin's "remove" or "keep", never settled on the server's word.
+  Unconfirmed,
+}
+
+/// A message that belongs to a removal: the leaver's goodbye or the remover's announcement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PendingAnnouncement {
+  pub(crate) client_message_id: ClientMessageId,
+  pub(crate) event: ConversationEvent,
+}
+
+impl PendingAnnouncement {
+  /// A goodbye goes out before the removal (the leaver can't write afterwards); an announcement
+  /// after the key rotation, so the removed person doesn't read it.
+  pub(crate) fn is_before_group_step(&self) -> bool {
+    matches!(self.event, ConversationEvent::Left)
+  }
 }
 
 /// The next step of a [`PendingChange::Revocation`].
@@ -372,6 +425,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     user: UserId,
   ) -> Result<(), CoreError> {
+    self.cancel_removal_on_add(conversation, user)?;
     self
       .api
       .add_member(
@@ -562,12 +616,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user_id,
         step,
         not_before_ms,
+        state,
+        ..
       } => {
-        if self.now_ms() < *not_before_ms {
+        // A failed one waits for the user's "retry" ([`Client::retry_removal`]).
+        if matches!(state, RemovalState::Failed | RemovalState::Unconfirmed) || self.now_ms() < *not_before_ms
+        {
           return Ok(PendingOutcome::Later(change.clone()));
         }
-        let result = self.run_removal(*conversation_id, *user_id, *step).await;
         let key = PendingChange::removal_key(*conversation_id, *user_id);
+        // Dropped earlier in this round (the user was added again).
+        if self.stored_pending(&key)?.is_none() {
+          return Ok(PendingOutcome::Done);
+        }
+        let result = self
+          .run_removal(*conversation_id, *user_id, *step, RemovalRun::Resumed)
+          .await;
         return self.removal_outcome(&key, change, result);
       },
       PendingChange::Revocation {
@@ -826,7 +890,7 @@ fn head_or_genesis(maybe_head: Option<Base64Bytes>) -> Base64Bytes {
 
 /// Reads "the group is in epoch N" from an `epoch_conflict` answer (the body has no field for it
 /// yet; crate README, server gaps).
-fn current_epoch_of(error: &ApiError) -> Option<u64> {
+pub(crate) fn current_epoch_of(error: &ApiError) -> Option<u64> {
   let ApiError::Status {
     maybe_body: Some(body),
     ..

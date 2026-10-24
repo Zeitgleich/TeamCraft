@@ -441,22 +441,72 @@ lists them:
 The client records the removal and the step it reached in its pending queue before step 2 and
 finishes it on the next round (after a restart, on the next sync), so a lost answer or a killed app
 is repaired by the device that started it. If the server refuses step 3 after step 2 (the remover
-lost the right meanwhile), the entry stays and is tried again after `removal_retry` (1 hour).
+lost the right meanwhile), the entry stays and is tried again after `removal_retry` (1 hour), twice
+as long after each further refusal up to `removal_retry_max` (24 hours). After `removal_attempts`
+(6) refusals it shows as failed in the conversation ("removal failed – retry") and waits for the
+user; until then a removal or leave on its way shows as pending, also a leave that waits for the
+members' commit.
+
+The goodbye of somebody leaving and the announcement of a removal belong to the pending entry, with
+the message ID chosen when the entry is recorded: the goodbye goes out before step 2 (the leaver
+can't write afterwards, so step 2 waits until it reached the server), the announcement after the
+group's key rotation. A second round, a restart or the user leaving again finds the message in the
+store and doesn't write it again, and the server deduplicates on the ID: neither is sent twice, and
+a removal finished on a later round still announces it.
 
 When the remover commits (a member removing somebody, or the leaver's device that waits for the
 commit), every state in between is safe: before step 2 nothing changed; after it the removed devices
 have no secret of the new epoch, whose key every member switches to (§4.2), even while the server
 still lists the user. Two cases rest on a signed change that a member still has to commit after the
 server's membership is gone: an admin outside the group, who can't see the group's queue, and a
-leaving device that isn't in the group. If no member commits it in time (it is refused as stale
-after 32 epochs, see Freshness), the user stays in the group without a server membership; members
-detecting that is #231. Members' clients don't claim key packages for a user the server lists but
-who has no device in the group. A device that joins from a welcome made before somebody's removal
-pins the identities of everybody the welcome's tree holds, not only of whom the server lists, and
-verifies every leaf as before; the removal commit follows in the queue. A revocation runs in the
-other order on purpose: the server first, so a lost device loses its session at once, then the
-signed device list and the groups, again from the pending queue; a group whose commit fails doesn't
-stop the others, and it is tried again.
+leaving device that isn't in the group. An admin outside the group keeps watching its change for
+`removal_watch` (30 days from the first signing; signing again doesn't extend it): at growing intervals it learns the group's current epoch from the
+epoch-conflict answer to a post for an epoch the group has left (nothing is stored), and signs the
+removal again once the group is half as many epochs past it as members accept
+(`MAX_CHANGE_AGE_EPOCHS`, see Freshness), at most `removal_attempts` times. Signing again is
+harmless when the first change was committed: members find nobody to remove. Once the server lists
+the user again (an instance admin may see the member list) it neither signs again nor forgets the
+removal: a hostile server could list the user while holding the change back. The removal shows as
+unconfirmed in the admin console and the conversation until the admin chooses "remove again" (signed
+and sent afresh) or "keep". The same holds for its server step resumed later (after a refusal or a
+restart): the admin can't see whether somebody added the user back since, so the step isn't sent on
+its own. A leaver's other devices drop the group when the server's removal
+reaches them.
+
+A later addition wins over a pending removal: the remover's own addition of the user, or a signed
+addition its device sees committed (which Freshness makes newer than the removal), drops the
+pending entry, and a server step tried again finds the user back in the remover's group and is
+dropped too, so a retry days later never undoes the new membership.
+
+Members notice anybody who is in the group but not in the server's member list and whose removal
+isn't on its way (no pending removal of their own, no admin's signed change waiting in their
+queue): a removal whose signed change got lost or was refused as stale. They never sign that
+removal on the server's word (security review A8). Admins see "X is still in the encrypted group of
+#channel" with a button that, after a confirmation naming the person and that it rests on the
+server's word, signs the removal themselves; the client checks the admin's role in the signed roster
+and asks the server again whether it still doesn't list the user. Members' clients don't claim key packages for a user the server lists
+but who has no device in the group.
+
+A device that joins from a welcome made before somebody's removal pins the identities of everybody
+the welcome's tree holds, not only of whom the server lists, and verifies every leaf as before; the
+removal commit follows in the queue. openmls spends the device's key package while it decrypts the
+welcome, before the tree can be read, so these identities can't be pinned first. If pinning them
+fails for a network reason after that, the welcome can't be opened again; the device's leaf is in
+the members' tree, so it asks to be added back like a device that fell out (below; signed for the
+current epoch, which it learns from the conflict answer without a group), and asks again on a later
+sync, after `rejoin_retry` doubled with every request up to `rejoin_retry_max` (24 hours), also
+when posting the request failed.
+
+The server refusing a member the group's queue (403/404) is quiet only when that is expected: the
+device's own leave waits for the members' commit, or the server says the user is no longer in the
+conversation at all (the conversation goes, as on the server's removal event, which the user sees).
+Otherwise the group isn't marked caught up, the refusal is logged, and the conversation shows that
+the server refuses this device the encrypted group and new messages may be missing: a server can't
+make a member stop following a group unnoticed.
+
+A revocation runs in the other order on purpose: the server first, so a lost device loses its
+session at once, then the signed device list and the groups, again from the pending queue; a group
+whose commit fails doesn't stop the others, and it is tried again.
 
 **Falling out and coming back.** A device can still miss or refuse a commit the others merged (a bug,
 a restored backup of the app's store, an old client). It notices when, with every earlier entry of the
