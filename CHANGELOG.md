@@ -8,14 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
-### Fixed
-
-- **Release candidates upgrade through `dnf` and `apt`**: candidate packages were built with the final
-  version (`1.0.0-1`), so a package manager never saw an update between candidates or from a candidate
-  to the release. Candidates now carry `1.0.0~rc.N` (deb) and `1.0.0-0.rc.N` (rpm), which sort before
-  the release. Machines that installed a candidate of 1.0.0 need
-  `sudo dnf reinstall team-craft` or `sudo apt install --reinstall team-craft` once; after that
-  updates arrive normally.
+## [1.0.1] - 2026-10-24
 
 ### Added
 
@@ -26,6 +19,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   pages through its images, with a switch to all images of the conversation. Save, forward, sender
   and time; `Esc` or a click beside the image closes it. Only the image on screen is held at full
   size; its `blob:` URL is released when the viewer moves on or closes.
+
+### Fixed
+
+- **Release candidates upgrade through `dnf` and `apt`**: candidate packages were built with the final
+  version (`1.0.0-1`), so a package manager never saw an update between candidates or from a candidate
+  to the release. Candidates now carry `1.0.0~rc.N` (deb) and `1.0.0-0.rc.N` (rpm), which sort before
+  the release. Machines that installed a candidate of 1.0.0 need
+  `sudo dnf reinstall team-craft` or `sudo apt install --reinstall team-craft` once; after that
+  updates arrive normally.
+- **Desktop sign-in on a new device**: right after signing in, the app opened its encrypted store
+  before the sign-in token had reached it and stayed on "Deine verschlüsselten Daten konnten nicht
+  geöffnet werden" ("no access token"), with "Change server" blocked. The store now reads the
+  live token, shows "Connecting …" while it waits, recovers by itself, and the error card offers
+  Retry and Sign out.
+- **Web app on large workspaces**: a change re-reads and re-renders only what changed instead of the
+  whole workspace, and the channel list shows from the local store while a sync catches up instead
+  of after it.
+- **Server**: waits for Postgres at start (backoff, `[database] startup_wait_secs`, default 300)
+  instead of exiting into a restart loop, answers 503 while the database is briefly away, and drops
+  gateway clients that stop reading after 30 s instead of holding their buffers.
+- **Direct messages whose setup was cut short** (a crash, a lost answer, or two devices founding the
+  same DM at once) are repaired when the DM is opened or on the next sync. A device that lost the
+  race joins the winning group, after checking its welcome, instead of writing into a group of one
+  that nobody else could read ([docs/e2ee.md](docs/e2ee.md) §4.6).
+- The tray menu shows "Open" and "Quit" in the system language from the start; on KDE it showed
+  a bare "×".
+- The brand in the top bar links to Home, and Administration has Back at the top; there was no way
+  back from it.
+- The shortcut hint in the top bar search no longer stretches across the field.
 
 ## [1.0.0] - 2026-10-24
 
@@ -221,5 +243,6 @@ compatible within 1.x; database migrations run by themselves and are forward-onl
 - Releases ship SBOMs (SPDX and CycloneDX), SHA-256 checksums and build provenance attestations; the
   container images are signed with Sigstore (keyless). CI actions are pinned to commit SHAs.
 
-[Unreleased]: https://github.com/Zeitgleich/TeamCraft/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Zeitgleich/TeamCraft/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Zeitgleich/TeamCraft/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Zeitgleich/TeamCraft/releases/tag/v1.0.0
