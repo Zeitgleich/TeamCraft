@@ -33,8 +33,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
-  CategoryId, ConversationNotificationSettings, CreateSpaceRequest, HistoryPolicy, MoveChannelRequest,
-  UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
+  CategoryId, ConversationNotificationSettings, CreateSpaceRequest, EffectiveNotifications, HistoryPolicy,
+  MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
 };
 
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
@@ -349,7 +349,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.read(records::list_json(&self.store, Table::Conversations))
   }
 
-  fn members(&self, conversation: ConversationId) -> Vec<UserId> {
+  pub(crate) fn members(&self, conversation: ConversationId) -> Vec<UserId> {
     let maybe: Option<ListConversationMembersResponse> = self.read(records::get_json(
       &self.store,
       Table::Members,
@@ -390,6 +390,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     preferences: &MentionPreferences,
   ) -> Conversation {
+    let unread = self.unread_messages(response);
+    self.conversation_view(response, users, preferences, &unread)
+  }
+
+  /// A conversation's entry with its unread messages already picked.
+  pub(crate) fn conversation_view(
+    &self,
+    response: &ConversationResponse,
+    users: &BTreeMap<UserId, UserSummary>,
+    preferences: &MentionPreferences,
+    unread: &[StoredMessage],
+  ) -> Conversation {
     let member_ids = self.members(response.id);
     let kind = match (&response.kind, &response.visibility) {
       (ConversationKindProto::Dm, _) => ConversationKind::Direct,
@@ -429,7 +441,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
       others.sort();
       others.join(", ")
     });
-    let unread = self.unread_messages(response);
     Conversation {
       id: response.id,
       maybe_space: response.maybe_space_id,
@@ -439,11 +450,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
       topic: response.maybe_topic.clone().unwrap_or_default(),
       member_ids,
       unread_count: u32::try_from(unread.len()).unwrap_or(u32::MAX),
-      mention_count: self.mention_count(&unread, users.get(&self.me), preferences),
+      mention_count: self.mention_count(unread, users.get(&self.me), preferences),
       is_favorite,
       is_muted: self.is_muted(response),
       can_post: true,
       bookmarks: self.bookmarks_of(response.id),
+      is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
     }
   }
 
@@ -451,9 +463,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// not passed yet, with the space's setting standing in for a conversation the member never
   /// configured.
   fn is_muted(&self, response: &ConversationResponse) -> bool {
-    let Some(membership) = &response.maybe_my_membership else {
+    let Some(effective) = self.effective_notifications(response) else {
       return false;
     };
+    effective.level == NotificationLevel::None
+      || effective
+        .maybe_muted_until
+        .is_some_and(|until| until.0 > self.now_ms())
+  }
+
+  /// When a mute that is on now ends by itself (Unix milliseconds): the conversation's entry
+  /// changes then without any write (issue #246, the snapshot cache reads it again).
+  pub(crate) fn mute_end(&self, response: &ConversationResponse) -> Option<i64> {
+    let until = self.effective_notifications(response)?.maybe_muted_until?.0;
+    (until > self.now_ms()).then_some(until)
+  }
+
+  fn effective_notifications(&self, response: &ConversationResponse) -> Option<EffectiveNotifications> {
+    let membership = response.maybe_my_membership.as_ref()?;
     let own = ConversationNotificationSettings {
       level: membership.notification_level.clone(),
       maybe_muted_until: membership.maybe_muted_until,
@@ -462,16 +489,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_space: Option<SpaceResponse> = response
       .maybe_space_id
       .and_then(|space| self.read(records::get_json(&self.store, Table::Spaces, &space.to_string())));
-    let effective = effective_notifications(
+    Some(effective_notifications(
       &own,
       maybe_space
         .as_ref()
         .and_then(|space| space.maybe_my_notifications.as_ref()),
-    );
-    effective.level == NotificationLevel::None
-      || effective
-        .maybe_muted_until
-        .is_some_and(|until| until.0 > self.now_ms())
+    ))
   }
 
   /// The bookmarks bar of a conversation, as the newest applied `Bookmarks` message set it.
@@ -553,16 +576,30 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_mark = self
       .read(crate::client::stored_account_data(&self.store))
       .unread_mark(response.id);
+    self.unread_among(response, maybe_mark, self.top_level(response.id))
+  }
+
+  /// A conversation's top-level messages, deleted ones included.
+  pub(crate) fn top_level(&self, conversation: ConversationId) -> Vec<StoredMessage> {
+    self.read(
+      self
+        .store
+        .messages(conversation, MessageFilter::TopLevel)
+        .map_err(CoreError::from),
+    )
+  }
+
+  /// The unread ones of a conversation's top-level `messages`, given the user's "mark unread".
+  pub(crate) fn unread_among(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    messages: Vec<StoredMessage>,
+  ) -> Vec<StoredMessage> {
     let maybe_last_read = response
       .maybe_my_membership
       .as_ref()
       .and_then(|membership| membership.maybe_last_read_message_id);
-    let messages = self.read(
-      self
-        .store
-        .messages(response.id, MessageFilter::TopLevel)
-        .map_err(CoreError::from),
-    );
     messages
       .into_iter()
       .filter(
@@ -1377,7 +1414,7 @@ fn has_channel_in(conversations: &[ConversationResponse], space: SpaceId) -> boo
   })
 }
 
-fn is_deleted(message: &StoredMessage) -> bool {
+pub(crate) fn is_deleted(message: &StoredMessage) -> bool {
   matches!(message.content, MessageContent::Deleted)
 }
 

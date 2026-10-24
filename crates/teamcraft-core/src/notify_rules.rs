@@ -9,7 +9,7 @@ use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
-const MENTION_PREFERENCES_RECORD: &str = "mention_rules";
+pub(crate) const MENTION_PREFERENCES_RECORD: &str = "mention_rules";
 
 /// What counts as a mention besides `@username`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1093,6 +1093,13 @@ select.input {
   font-size: var(--text-sm);
 }
 
+/* Still catching up after being away (issue #247): a still mark, no animation while it waits. */
+.sb-catching-up {
+  display: inline-grid;
+  place-items: center;
+  opacity: 0.6;
+}
+
 .sb-threads {
   width: calc(100% - 16px);
 }

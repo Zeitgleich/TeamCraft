@@ -50,9 +50,10 @@ pub struct RunnerSettings {
   pub tick: Duration,
   /// Heartbeats, backoff and timeouts of the gateway connection.
   pub connection: ConnectionSettings,
-  /// How often account data (saved items, drafts, saved searches) is pulled from the user's other
-  /// devices; local changes are pushed on the next tick regardless.
-  pub account_sync: Duration,
+  /// How long a failed account data sync waits before it is retried, and how often the roster's
+  /// age is checked locally ([`Upkeep`]). Account data is read after each gateway connection and on
+  /// `key_bag_update`, local changes are pushed on the next tick.
+  pub upkeep_interval: Duration,
 }
 
 /// Sends commands to a running [`SyncRunner`].
@@ -86,7 +87,7 @@ impl Default for RunnerSettings {
     Self {
       tick: Duration::from_secs(5),
       connection: ConnectionSettings::default(),
-      account_sync: Duration::from_secs(60),
+      upkeep_interval: Duration::from_secs(60),
     }
   }
 }
@@ -103,7 +104,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     let mut connection = ConnectionSupervisor::new(settings.connection.clone(), ConnectionStatus::new());
     let notify = on_change.clone();
     connection.set_observer(Box::new(move |_| notify()));
-    let upkeep = Upkeep::new(settings.account_sync);
+    let upkeep = Upkeep::new(settings.upkeep_interval);
     let runner = Self {
       client,
       settings,

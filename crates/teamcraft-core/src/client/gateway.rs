@@ -126,7 +126,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     });
     self.persist_sync()?;
     // The full sync already read the counters; the UI still reads what only it keeps.
-    read_state::update_marks(&self.store, |marks| marks.connections += 1)?;
+    self.finish_connection().await?;
     Ok(GatewayStart {
       connection,
       outcome: GatewayOutcome::Fresh,
@@ -144,7 +144,40 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Err(error) = self.refresh_read_state().await {
       tracing::warn!(%error, "could not read the unread counts after resuming");
     }
+    self.finish_connection().await
+  }
+
+  /// Every connection, once caught up: presence is read again (events in between were lost), then
+  /// the connection is counted, which tells the UI and the upkeep to do their once-per-connection
+  /// reads. A failed presence read doesn't fail the connection; the next one retries.
+  async fn finish_connection(&mut self) -> Result<(), CoreError> {
+    if let Err(error) = self.refresh_known_presence().await {
+      tracing::warn!(%error, "could not read presence after connecting");
+    }
     read_state::update_marks(&self.store, |marks| marks.connections += 1)
+  }
+
+  /// How many gateway connections this device made (fresh or resumed), counted once each was
+  /// caught up. Work that only has to happen once per connection compares it with the value it
+  /// saw last ([`crate::upkeep::Upkeep`]). `None` if the store can't be read.
+  pub fn gateway_connections(&self) -> Option<u64> {
+    read_state::marks(&self.store)
+      .inspect_err(|error| tracing::warn!(%error, "could not read the connection count"))
+      .ok()
+      .map(|marks| marks.connections)
+  }
+
+  /// The roster changed: a rotated org recovery key needs the backup key wrapped to it (security
+  /// review B4), now rather than at the next connection.
+  async fn sync_workspace_and_recovery(&mut self) -> Result<(), CoreError> {
+    let before = self.workspace()?.roster.maybe_org_recovery_key;
+    self.sync_workspace().await?;
+    if self.workspace()?.roster.maybe_org_recovery_key != before
+      && let Err(error) = self.rewrap_for_current_org_key().await
+    {
+      tracing::warn!(%error, "could not wrap the backup key to the new org recovery key");
+    }
+    Ok(())
   }
 
   /// The token the handshake sends (`identify`/`resume`).
@@ -302,11 +335,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         )?;
         if state == teamcraft_proto::PresenceState::Offline {
           // The server records "last seen" when the person stops being active; the event doesn't
-          // carry it. Read in one batch on the next tick, so a burst of people going offline (or
-          // someone toggling "appear offline") costs one request, not one per event.
-          self.stale_last_seen.insert(user_id);
+          // carry it. Forgotten here and read when the UI shows the person (`ui_last_seen`), so
+          // people going offline cost no request while nobody looks (issue #252).
+          self
+            .store
+            .delete(Table::Presence, &super::people::last_seen_key(user_id))?;
         } else {
-          self.stale_last_seen.remove(&user_id);
           let record = super::people::LastSeenRecord {
             maybe_at_ms: None,
             fetched_at_ms: self.now_ms(),
@@ -323,7 +357,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::SpaceUpdate { .. }
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
-      GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace().await,
+      GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace_and_recovery().await,
       // The user's own device that revoked it signs the removal (`Client::revoke_device`); the
       // user's other devices finish it if the signed device list says so (#232).
       GatewayEvent::DeviceRemove { user_id, device_id } => {
@@ -366,7 +400,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user_id,
       } => read_state::note_acknowledgement(&self.store, conversation_id, message_id, user_id),
       // Another of the user's devices changed the key bag (account data: saved items, drafts,
-      // backgrounds, pins): take it now instead of at the next periodic sync.
+      // backgrounds, pins): the only way it arrives between connections (issue #252).
       GatewayEvent::KeyBagUpdate { version } if version > self.sync.key_bag_version => {
         self.sync_account_data().await
       },

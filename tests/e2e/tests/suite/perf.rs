@@ -14,7 +14,9 @@
 //! PERF_SCALE=large cargo test -p teamcraft-e2e --features browser --test suite -- --nocapture perf::
 //! ```
 //!
-//! Every run writes its numbers to `target/e2e-artifacts/perf-<scale>.json`.
+//! Every run writes its numbers to `target/e2e-artifacts/perf-<scale>.json`, and prints the idle CPU
+//! per kind of browser process. `PERF_SECOND_IDLE=1` watches a second idle period of the same length
+//! afterwards (after a large catch-up the browser stays busy for a few minutes, docs/performance.md).
 
 use std::time::{Duration, Instant};
 
@@ -62,6 +64,13 @@ const MIB: f64 = 1024.0 * 1024.0;
 const BASELINE_IDLE: Duration = Duration::from_secs(30);
 /// How long the app may take to come back after a navigation (a large catch-up).
 const LONG_WAIT: Duration = Duration::from_secs(900);
+/// Connected and without an API request this long, the client counts as done with what it was
+/// doing.
+const QUIET: Duration = Duration::from_secs(10);
+/// The whole browser below this much CPU (percent of one core) over [`SETTLE_WINDOW`] counts as
+/// settled: what a catch-up left behind (IndexedDB writing, decoding) is done.
+const SETTLED_CPU_PERCENT: f64 = 3.0;
+const SETTLE_WINDOW: Duration = Duration::from_secs(10);
 /// Counts tasks that block the page's thread for more than 50 ms (`[count, total ms, longest ms]`).
 const LONG_TASK_RECORDER: &str = "window.__longTasks = [0, 0, 0];
   new PerformanceObserver(list => {
@@ -162,6 +171,13 @@ struct Report {
   seconds_sign_in_and_unlock: f64,
   seconds_return_to_channel_list: f64,
   seconds_return_until_all_channels_read: f64,
+  /// Until the first channel opened shows its newest message (issue #247: the open channel is
+  /// caught up first).
+  seconds_return_first_channel_read: f64,
+  /// Until the client stopped asking the server: every conversation caught up.
+  seconds_return_until_caught_up: f64,
+  /// From then until the whole browser went quiet (IndexedDB has written the catch-up).
+  seconds_return_until_browser_settled: f64,
   /// 1 when the identity provider's session had expired while Carol was away (she signed in again,
   /// which is part of `seconds_return_to_channel_list`).
   signed_in_again: f64,
@@ -169,6 +185,9 @@ struct Report {
   return_long_task_total_ms: f64,
   return_longest_task_ms: f64,
   seconds_reload_to_channel_list: f64,
+  /// From the channel list after the reload until the browser went quiet; the switches and the
+  /// idle period are measured after that.
+  seconds_reload_until_browser_settled: f64,
   pss_mib_empty_browser: f64,
   empty_browser_idle_cpu_percent: f64,
   empty_browser_idle_wakeups_per_second: f64,
@@ -192,6 +211,11 @@ struct Report {
   idle_task_ms_per_minute: f64,
   /// HTTP requests of the page while idle (the budget: none besides the gateway heartbeat).
   idle_http_requests_per_minute: f64,
+  /// Of those, requests to TeamCraft's API (the rest: token renewal at the identity provider).
+  /// Issue #252: none at all.
+  idle_api_requests_per_minute: f64,
+  /// CSS animations running when the idle period starts (none expected).
+  idle_running_animations: f64,
   /// Gateway frames in both directions while idle (heartbeats and their answers).
   idle_gateway_frames_per_minute: f64,
   wasm_kib: f64,
@@ -459,20 +483,29 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   let had_to_sign_in = come_back(page, &seeded.first_space_channels[1].0).await;
   report.signed_in_again = if had_to_sign_in { 1.0 } else { 0.0 };
   report.seconds_return_to_channel_list = started.elapsed().as_secs_f64();
-  for (name, last) in &seeded.first_space_channels {
+  for (index, (name, last)) in seeded.first_space_channels.iter().enumerate() {
     switch_within(page, name, last, Duration::from_secs(280)).await;
+    if index == 0 {
+      report.seconds_return_first_channel_read = started.elapsed().as_secs_f64();
+    }
   }
   report.seconds_return_until_all_channels_read = started.elapsed().as_secs_f64();
+  // The rest of the workspace is caught up in the background (issue #247): until the sync lets go
+  // of the connection and the client stops asking the server.
+  report.seconds_return_until_caught_up = wait_until_done(page).await.duration_since(started).as_secs_f64();
   let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
   report.return_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
   report.return_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
   report.return_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  report.seconds_return_until_browser_settled = wait_until_browser_settled(profile).await.as_secs_f64();
 
   // Cold start of a signed-in client: reload until the channel list is back.
   let started = Instant::now();
   page.evaluate("location.reload()").await.unwrap();
   wait_long_for_text(page, &seeded.first_space_channels[1].0).await;
   report.seconds_reload_to_channel_list = started.elapsed().as_secs_f64();
+  wait_until_done(page).await;
+  report.seconds_reload_until_browser_settled = wait_until_browser_settled(profile).await.as_secs_f64();
   settle(page).await;
   report.pss_mib_after_start = mib(ProcessUsage::of_matching(profile).pss_bytes);
   report.js_heap_mib_after_start = metric(page, "JSHeapUsedSize").await / MIB;
@@ -510,12 +543,24 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   report.js_heap_mib_after_more_switches = metric(page, "JSHeapUsedSize").await / MIB;
   report.pss_mib_after_switches = mib(ProcessUsage::of_matching(profile).pss_bytes);
 
-  // Idle in the foreground: nothing happens, so the client should not use the CPU.
+  // Idle in the foreground: nothing happens, so the client should not use the CPU. What the reload
+  // and the switches started is finished first.
+  wait_until_done(page).await;
+  report.idle_running_animations = running_animations(page).await;
+  let kinds_before = ProcessUsage::by_kind(profile);
   let usage_before = ProcessUsage::of_matching(profile);
   let tasks_before = metric(page, "TaskDuration").await;
-  let (http_requests, gateway_frames) = count_traffic(page, scale.idle).await;
+  let traffic = count_traffic(page, scale.idle).await;
   let usage_after = ProcessUsage::of_matching(profile);
   let tasks_after = metric(page, "TaskDuration").await;
+  for (kind, after) in ProcessUsage::by_kind(profile) {
+    let before = kinds_before.get(&kind).copied().unwrap_or_default();
+    eprintln!(
+      "idle cpu {kind}: {:.1} %, {:.0} wakeups/s",
+      after.cpu_time.saturating_sub(before.cpu_time).as_secs_f64() / scale.idle.as_secs_f64() * 100.0,
+      after.context_switches.saturating_sub(before.context_switches) as f64 / scale.idle.as_secs_f64()
+    );
+  }
   let idle_seconds = scale.idle.as_secs_f64();
   report.idle_seconds = idle_seconds;
   report.idle_cpu_percent =
@@ -525,8 +570,21 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
     .saturating_sub(usage_before.context_switches)) as f64
     / idle_seconds;
   report.idle_task_ms_per_minute = (tasks_after - tasks_before) * 1000.0 * 60.0 / idle_seconds;
-  report.idle_http_requests_per_minute = http_requests * 60.0 / idle_seconds;
-  report.idle_gateway_frames_per_minute = gateway_frames * 60.0 / idle_seconds;
+  report.idle_http_requests_per_minute = traffic.http_requests * 60.0 / idle_seconds;
+  report.idle_api_requests_per_minute = traffic.api_requests * 60.0 / idle_seconds;
+  report.idle_gateway_frames_per_minute = traffic.gateway_frames * 60.0 / idle_seconds;
+  if std::env::var_os("PERF_SECOND_IDLE").is_some() {
+    // By hand: does the idle CPU fall further once the browser has digested the catch-up?
+    let before = ProcessUsage::by_kind(profile);
+    tokio::time::sleep(scale.idle).await;
+    for (kind, after) in ProcessUsage::by_kind(profile) {
+      let earlier = before.get(&kind).copied().unwrap_or_default();
+      eprintln!(
+        "second idle cpu {kind}: {:.1} %",
+        after.cpu_time.saturating_sub(earlier.cpu_time).as_secs_f64() / scale.idle.as_secs_f64() * 100.0
+      );
+    }
+  }
   report.wasm_kib = wasm_bytes() as f64 / 1024.0;
   report
 }
@@ -545,7 +603,7 @@ fn percentile(sorted: &[f64], percent: usize) -> f64 {
 
 /// Waits `period` while counting the page's HTTP requests and gateway frames (DevTools network
 /// events; the service worker's own requests are not the page's and are not counted).
-async fn count_traffic(page: &Page, period: Duration) -> (f64, f64) {
+async fn count_traffic(page: &Page, period: Duration) -> Traffic {
   page.execute(NetworkEnableParams::default()).await.unwrap();
   let mut requests = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
   let mut sent = page.event_listener::<EventWebSocketFrameSent>().await.unwrap();
@@ -553,18 +611,108 @@ async fn count_traffic(page: &Page, period: Duration) -> (f64, f64) {
     .event_listener::<EventWebSocketFrameReceived>()
     .await
     .unwrap();
-  let (mut http_requests, mut frames) = (0.0, 0.0);
+  let mut traffic = Traffic::default();
   let deadline = tokio::time::sleep(period);
   tokio::pin!(deadline);
   loop {
     tokio::select! {
       () = &mut deadline => break,
-      Some(_) = requests.next() => http_requests += 1.0,
-      Some(_) = sent.next() => frames += 1.0,
-      Some(_) = received.next() => frames += 1.0,
+      Some(request) = requests.next() => {
+        traffic.http_requests += 1.0;
+        if request.request.url.starts_with(&format!("{WEB_ORIGIN}/api/")) {
+          eprintln!("request while idle: {}", request.request.url);
+          traffic.api_requests += 1.0;
+        }
+      },
+      Some(_) = sent.next() => traffic.gateway_frames += 1.0,
+      Some(_) = received.next() => traffic.gateway_frames += 1.0,
     }
   }
-  (http_requests, frames)
+  traffic
+}
+
+/// What the page sent and received over a period.
+#[derive(Debug, Default)]
+struct Traffic {
+  http_requests: f64,
+  api_requests: f64,
+  gateway_frames: f64,
+}
+
+/// Waits until the client is done with what it was doing: connected (no connection banner for
+/// [`QUIET`]: a sync holds the connection, and the banner shows "connecting" after 3 s) and no API
+/// request for [`QUIET`]. Returns when the connection banner went away for good.
+async fn wait_until_done(page: &Page) -> Instant {
+  let deadline = Instant::now() + LONG_WAIT;
+  let mut maybe_connected_since: Option<Instant> = None;
+  loop {
+    assert!(Instant::now() < deadline, "the client never settled");
+    let has_banner = evaluate_value(page, "!!document.querySelector('.offline-banner')".into())
+      .await
+      .as_bool()
+      .unwrap_or(true);
+    match (has_banner, maybe_connected_since) {
+      (true, _) => maybe_connected_since = None,
+      (false, None) => maybe_connected_since = Some(Instant::now()),
+      (false, Some(since)) if since.elapsed() >= QUIET => break,
+      (false, Some(_)) => {},
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+  }
+  let connected_at = maybe_connected_since.unwrap_or_else(Instant::now);
+  wait_until_quiet(page).await;
+  connected_at
+}
+
+/// CSS animations running on the page (a spinner or a loading placeholder left on screen keeps
+/// the compositor busy while the page is idle); prints what they animate.
+async fn running_animations(page: &Page) -> f64 {
+  let found = evaluate_value(
+    page,
+    "document.getAnimations().filter(a => a.playState === 'running').map(a => { \
+       const el = a.effect && a.effect.target; \
+       return el ? `${el.tagName.toLowerCase()}.${el.className} in ${el.closest('[data-conversation], .row, section')?.className ?? '-'}` : '?'; \
+     })"
+      .into(),
+  )
+  .await;
+  let found = found.as_array().cloned().unwrap_or_default();
+  for animation in found.iter().take(10) {
+    eprintln!("running animation: {animation}");
+  }
+  found.len() as f64
+}
+
+/// Waits until the page made no API request for [`QUIET`] (at most [`LONG_WAIT`]).
+async fn wait_until_quiet(page: &Page) {
+  page.execute(NetworkEnableParams::default()).await.unwrap();
+  let mut requests = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
+  let deadline = Instant::now() + LONG_WAIT;
+  let api = format!("{WEB_ORIGIN}/api/");
+  loop {
+    match tokio::time::timeout(QUIET, requests.next()).await {
+      Err(_) => return,
+      Ok(Some(request)) if request.request.url.starts_with(&api) => {
+        assert!(Instant::now() < deadline, "the client never went quiet");
+      },
+      Ok(Some(_)) => {},
+      Ok(None) => return,
+    }
+  }
+}
+
+/// Waits until the browser's processes together stay under [`SETTLED_CPU_PERCENT`] for a
+/// [`SETTLE_WINDOW`] (at most [`LONG_WAIT`]); returns how long that took.
+async fn wait_until_browser_settled(profile: &str) -> Duration {
+  let started = Instant::now();
+  loop {
+    let (cpu, _) = idle_usage(profile, SETTLE_WINDOW).await;
+    if cpu < SETTLED_CPU_PERCENT {
+      return started.elapsed().saturating_sub(SETTLE_WINDOW);
+    }
+    eprintln!("browser still busy: {cpu:.1} % CPU");
+    assert!(started.elapsed() < LONG_WAIT, "the browser never settled");
+  }
 }
 
 /// CPU (percent of one core) and wakeups per second of the browser's processes over `period`.
@@ -762,8 +910,24 @@ impl Report {
         self.seconds_return_to_channel_list,
       ),
       (
+        "seconds_return_first_channel_read",
+        self.seconds_return_first_channel_read,
+      ),
+      (
         "seconds_return_until_all_channels_read",
         self.seconds_return_until_all_channels_read,
+      ),
+      (
+        "seconds_return_until_browser_settled",
+        self.seconds_return_until_browser_settled,
+      ),
+      (
+        "seconds_reload_until_browser_settled",
+        self.seconds_reload_until_browser_settled,
+      ),
+      (
+        "seconds_return_until_caught_up",
+        self.seconds_return_until_caught_up,
       ),
       ("signed_in_again", self.signed_in_again),
       ("return_long_task_count", self.return_long_task_count),
@@ -806,6 +970,7 @@ impl Report {
       ),
       ("pss_mib_after_switches", self.pss_mib_after_switches),
       ("idle_seconds", self.idle_seconds),
+      ("idle_running_animations", self.idle_running_animations),
       ("idle_cpu_percent", self.idle_cpu_percent),
       ("idle_wakeups_per_second", self.idle_wakeups_per_second),
       ("idle_task_ms_per_minute", self.idle_task_ms_per_minute),
@@ -813,6 +978,7 @@ impl Report {
         "idle_http_requests_per_minute",
         self.idle_http_requests_per_minute,
       ),
+      ("idle_api_requests_per_minute", self.idle_api_requests_per_minute),
       (
         "idle_gateway_frames_per_minute",
         self.idle_gateway_frames_per_minute,
@@ -853,5 +1019,10 @@ impl Report {
       "heap grows with channel switches: {self:#?}"
     );
     assert!(self.idle_cpu_percent < 5.0, "busy while idle: {self:#?}");
+    // Issue #252: nothing is read on a timer while connected.
+    assert_eq!(
+      self.idle_api_requests_per_minute, 0.0,
+      "requests while idle: {self:#?}"
+    );
   }
 }

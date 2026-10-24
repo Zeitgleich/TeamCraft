@@ -277,6 +277,7 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
       .is_some_and(|membership| membership.notification_level == teamcraft_proto::NotificationLevel::None),
     can_post: !conversation.is_archived,
     bookmarks: Vec::new(),
+    is_catching_up: false,
   }
 }
 

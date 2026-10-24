@@ -29,6 +29,7 @@
     "allow-core-network-changed",
     "allow-core-enroll",
     "allow-core-snapshot",
+    "allow-core-snapshot-changes",
     "allow-core-link-start",
     "allow-core-link-status",
     "allow-core-link-cancel",

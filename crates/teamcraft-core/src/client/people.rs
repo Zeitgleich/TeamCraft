@@ -5,14 +5,14 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
   CallHistoryEntry, LastSeenVisibility, ListCallHistoryQuery, PresenceState, PrivacyResponse,
-  UpdatePrivacyRequest, UserId, UserSummary,
+  UpdatePrivacyRequest, UserId, UserPresence, UserSummary,
 };
 
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-use crate::records;
 use crate::store::{LocalStore, Table};
+use crate::{read_state, records};
 
 /// Key of the privacy record in [`Table::SyncState`].
 pub const PRIVACY_KEY: &str = "privacy";
@@ -95,6 +95,23 @@ pub fn last_seen_key(user: UserId) -> String {
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Presence and custom status of everyone this device knows (the people of its spaces and
+  /// conversations), in batches of 200, once per gateway connection: `presence_update` events
+  /// missed while disconnected are repaired here, and the UI takes the result from the presence
+  /// log instead of asking the server itself (issue #252).
+  pub(crate) async fn refresh_known_presence(&mut self) -> Result<(), CoreError> {
+    let users: Vec<UserId> = self
+      .store
+      .list(Table::Users)?
+      .into_iter()
+      .filter_map(|(key, _)| key.parse().ok())
+      .collect();
+    for batch in users.chunks(MAX_PRESENCE_BATCH) {
+      self.refresh_presence(batch).await?;
+    }
+    Ok(())
+  }
+
   /// Asks the server for the presence and last seen of the given people (at most 200 at once).
   pub async fn refresh_presence(&mut self, users: &[UserId]) -> Result<(), CoreError> {
     if users.is_empty() {
@@ -103,6 +120,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let response = self.api.list_presence(users).await?;
     let fetched_at_ms = self.now_ms();
     for presence in response.presences {
+      // The log carries state and status; last seen is read on its own (`ui_last_seen`).
+      read_state::note_announced_presence(
+        &self.store,
+        UserPresence {
+          maybe_last_seen: None,
+          ..presence.clone()
+        },
+        self.settings.max_announced_presence,
+      )?;
       let state = presence.state.clone();
       records::put_json(
         &self.store,
@@ -124,37 +150,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )?;
     }
     Ok(())
-  }
-
-  /// After a fresh session: everyone whose presence this device shows may have changed unseen
-  /// (presence events of the time away are gone). They are read again a batch per upkeep tick,
-  /// like last seen, instead of all at once.
-  pub(crate) fn mark_known_presence_stale(&mut self) -> Result<(), CoreError> {
-    for (key, _) in self.store.list(Table::Presence)? {
-      if let Ok(user) = key.parse::<UserId>() {
-        self.stale_last_seen.insert(user);
-      }
-    }
-    Ok(())
-  }
-
-  /// Reads the last seen of the people who went offline since the last call, in one request (the
-  /// runner calls it every tick). Returns whether anything was read.
-  pub async fn refresh_stale_last_seen(&mut self) -> Result<bool, CoreError> {
-    if self.stale_last_seen.is_empty() {
-      return Ok(false);
-    }
-    let users: Vec<UserId> = self
-      .stale_last_seen
-      .iter()
-      .take(MAX_PRESENCE_BATCH)
-      .copied()
-      .collect();
-    self.refresh_presence(&users).await?;
-    for user in &users {
-      self.stale_last_seen.remove(user);
-    }
-    Ok(true)
   }
 
   /// Asks the directory for people matching `query` and keeps them in the [`DirectoryCache`], so

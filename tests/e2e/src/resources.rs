@@ -45,6 +45,40 @@ impl ProcessUsage {
       })
   }
 
+  /// Like [`Self::of_matching`], per kind of process: Chrome's `--type` (renderer, gpu-process,
+  /// utility) with its `--utility-sub-type` (e.g. the storage service that holds IndexedDB); the
+  /// browser process has neither.
+  pub fn by_kind(needle: &str) -> std::collections::BTreeMap<String, Self> {
+    let mut kinds = std::collections::BTreeMap::<String, Self>::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+      return kinds;
+    };
+    for entry in entries.filter_map(Result::ok) {
+      let line = command_line(&entry.path());
+      if !line.contains(needle) {
+        continue;
+      }
+      let flag = |name: &str| {
+        line
+          .split_whitespace()
+          .find_map(|part| part.strip_prefix(name))
+          .map(str::to_owned)
+      };
+      let kind = match (flag("--type="), flag("--utility-sub-type=")) {
+        (Some(kind), Some(sub)) => format!("{kind}:{sub}"),
+        (Some(kind), None) => kind,
+        (None, _) => "browser".to_owned(),
+      };
+      let usage = Self::of_process(&entry.path());
+      let sum = kinds.entry(kind).or_default();
+      sum.pss_bytes += usage.pss_bytes;
+      sum.cpu_time += usage.cpu_time;
+      sum.context_switches += usage.context_switches;
+      sum.process_count += 1;
+    }
+    kinds
+  }
+
   fn of_process(dir: &Path) -> Self {
     Self {
       pss_bytes: pss_bytes(dir),

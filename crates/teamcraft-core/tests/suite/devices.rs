@@ -198,6 +198,7 @@ mod read_state_events {
         unread_thread_count: 0,
         thread_mention_count: 0,
         maybe_max_counted: Some(1000),
+        maybe_counted_through: None,
       },
     );
 
