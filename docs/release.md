@@ -97,6 +97,19 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
 7. **Review the draft release**, then **publish** it in the GitHub UI. Publishing runs `packages.yml`:
    the Pages site with the update manifests and the APT/RPM repositories is rebuilt, and installed
    desktop apps see the release (stable: `releases/latest/download/latest.json`).
+
+   GitHub Pages ignores a deployment of a commit it has already deployed, and the candidate was
+   deployed from this very commit, so the final release's site may not go live although the deploy
+   reports success. The *Publish* job therefore waits until the live site serves its build
+   (`site-build.txt`) and fails after 10 minutes if it doesn't. When it fails, rebuild the site from
+   the default branch:
+
+   ```sh
+   gh workflow run packages.yml --ref main
+   ```
+
+   If `main` still points at the release commit, that run is ignored as well; the site then goes live
+   with the next run after `main` moves on.
 8. **Deploy**: release teamcraft-deploy with `teamcraft_version: "X.Y.Z"` (its own CHANGELOG and tag).
 
 A failed run can be re-run from the Actions UI; the last job uploads into the existing draft with
