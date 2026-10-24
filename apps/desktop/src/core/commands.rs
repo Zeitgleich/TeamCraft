@@ -58,10 +58,13 @@ impl CoreHost {
     }
     if let Some(runtime) = self.running_for(server_url, user)? {
       let status = runtime.status().await;
-      if !matches!(status, CoreStatus::Failed { .. }) {
+      if !matches!(status, CoreStatus::Failed { .. } | CoreStatus::Stopped) {
         return Ok(status);
       }
-      tracing::info!("the core failed to open before; starting it again");
+      tracing::info!(
+        ?status,
+        "the core failed to open or stopped before; starting it again"
+      );
       // Stopped here, not when the last handle goes: the new core needs the store lock now.
       runtime.shutdown();
       drop(runtime);
@@ -411,6 +414,40 @@ mod tests {
     assert!(matches!(first, CoreStatus::Failed { .. }), "{first:?}");
     assert!(matches!(second, CoreStatus::NeedsEnrollment { .. }), "{second:?}");
     drop(still_held);
+    host.stop().expect("stop");
+    drop(std::fs::remove_dir_all(&directory));
+  }
+
+  #[tokio::test]
+  async fn a_stopped_core_reports_stopped_and_is_replaced_on_the_next_start() {
+    let (server_url, _) = spawn_not_found_server().await;
+    let service = signed_in_service(&server_url).await;
+    let host = CoreHost::new(TokenCache::live(service.clone()));
+    let directory = scratch_dir("stopped");
+    host
+      .start(&service, &server_url, user(1), |tokens| {
+        runtime(&server_url, directory.clone(), tokens)
+      })
+      .await
+      .expect("first start");
+    // Its thread gone, as after a panic: an internal error, not a keystore problem.
+    let gone = host.current().expect("running core");
+    gone.shutdown();
+    let stopped = gone.status().await;
+    drop(gone);
+
+    let restarted = host
+      .start(&service, &server_url, user(1), |tokens| {
+        runtime(&server_url, directory.clone(), tokens)
+      })
+      .await
+      .expect("second start");
+
+    assert_eq!(stopped, CoreStatus::Stopped);
+    assert!(
+      matches!(restarted, CoreStatus::NeedsEnrollment { .. }),
+      "{restarted:?}"
+    );
     host.stop().expect("stop");
     drop(std::fs::remove_dir_all(&directory));
   }

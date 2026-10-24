@@ -923,6 +923,8 @@ calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gese
 ## Einrichtung der Schlüssel
 login-core-failed-title = Deine verschlüsselten Daten konnten nicht geöffnet werden
 login-core-failed-body = Die lokale Datenbank oder der Schlüsselbund des Systems ist nicht verfügbar. Prüfe, ob ein Schlüsselbund-Dienst (zum Beispiel GNOME Keyring) läuft, und versuche es erneut.
+login-core-stopped-title = TeamCraft hat einen internen Fehler
+login-core-stopped-body = Deine verschlüsselten Daten sind sicher, aber die App wurde unerwartet beendet. Versuche es erneut oder starte TeamCraft neu. Wenn das wieder passiert, melde es bitte.
 login-core-no-token-title = Die Anmeldung ist noch nicht abgeschlossen
 login-core-no-token-body = TeamCraft hat deine Anmeldung nicht rechtzeitig erhalten, um deine verschlüsselten Daten zu öffnen. Versuche es erneut oder melde dich ab und wieder an.
 login-core-retry = Erneut versuchen

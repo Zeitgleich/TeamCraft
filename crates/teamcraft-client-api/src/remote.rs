@@ -308,9 +308,11 @@ pub enum CoreStatus {
     /// Fingerprint of the account's identity key.
     identity_fingerprint: String,
   },
-  Failed {
-    message: String,
-  },
+  /// The encrypted data could not be opened (keystore, database); `message` is for details.
+  Failed { message: String },
+  /// The client core ended unexpectedly (an internal error such as a panic), not because of the
+  /// keystore or the database: the user is asked to restart the app and report it.
+  Stopped,
 }
 
 /// Where the core's gateway connection stands, for the connection banner (the core's
@@ -1270,6 +1272,10 @@ mod tests {
         has_existing_identity: true,
         was_data_lost: true
       }
+    );
+    assert_eq!(
+      serde_json::to_string(&CoreStatus::Stopped).expect("serialize"),
+      r#"{"state":"stopped"}"#
     );
   }
 

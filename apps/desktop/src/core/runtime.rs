@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::cell::RefCell;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -324,7 +326,12 @@ impl CoreRuntime {
           on_call_event,
         };
         let core = Core::new(config, user, key, tokens, hooks, status);
-        runtime.block_on(core.run(receiver));
+        // A panic ends the core for good: logged here, and `status` then answers `Stopped`, so the
+        // UI shows an internal error instead of a keystore problem.
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(core.run(receiver))));
+        if let Err(payload) = outcome {
+          tracing::error!(panic = %panic_text(payload.as_ref()), "the client core panicked and stopped");
+        }
       })
       .ok();
     Self {
@@ -354,10 +361,9 @@ impl CoreRuntime {
     drop(self.requests.send(Request::NetworkChanged));
   }
 
+  /// Where the core stands; `Stopped` when its thread is gone (it panicked or was shut down).
   pub async fn status(&self) -> CoreStatus {
-    self.ask(Request::Status).await.unwrap_or(CoreStatus::Failed {
-      message: "the core is not running".into(),
-    })
+    self.ask(Request::Status).await.unwrap_or(CoreStatus::Stopped)
   }
 
   pub async fn enroll(&self, request: EnrollRequest) -> Result<(), String> {
@@ -565,6 +571,15 @@ fn security_of(client: &Client<Api, Store>) -> Result<SecuritySnapshot, String> 
 
 fn stopped() -> String {
   "the core is not running".to_owned()
+}
+
+/// The message of a panic payload (`panic!` with a literal or a formatted message).
+fn panic_text(payload: &(dyn Any + Send)) -> &str {
+  payload
+    .downcast_ref::<&str>()
+    .copied()
+    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+    .unwrap_or("non-text panic payload")
 }
 
 struct Core {
