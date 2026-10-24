@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-24
+
+First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the
+server only ever sees ciphertext. From here on the wire format, the API and the database stay
+compatible within 1.x; database migrations run by themselves and are forward-only.
+
 ### Added
 
 - **Owner warnings in the console**: Administration → Security lists the owners of the signed roster
@@ -19,29 +25,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   Administration → Security and sign the change on their device; differences to the identity
   provider's roles are listed; every change is confirmed with user ID and key fingerprint before
   signing, and an edit of an outdated roster is refused. Admins can't sign (#261).
-
-### Fixed
-
-- **The last owner can't be removed**: a roster without an owner is refused by the owner's app
-  before signing, by the server, and by every client verifying the roster, so the workspace can't
-  end up without anyone who can administer it (#188).
-- **Removals that don't go through at once** (e2ee.md §4.6): a removal or leave on its way shows as
-  pending in the conversation; one the server keeps refusing backs off up to a day and then shows
-  as failed with "retry". Admins see people who are still in a channel's encrypted group although
-  the server no longer lists them, and remove them with one click; an admin outside the group signs
-  its removal again before members would refuse it as too old. The goodbye and the removal
-  announcement are never sent twice after a crash, and a removal finished later still announces
-  it. A server that refuses a member the encrypted group is shown instead of going unnoticed, and
-  a device whose join from a welcome was cut off asks to be added back instead of staying out.
-
-## [1.0.0] - 2026-10-24
-
-First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the
-server only ever sees ciphertext. From here on the wire format, the API and the database stay
-compatible within 1.x; database migrations run by themselves and are forward-only.
-
-### Added
-
+- **Addresses for every view**: the web and desktop apps put the open channel, DM, thread or page
+  into the URL; reload keeps the place, back and forward (also the mouse buttons) work, and links
+  to a channel or message can be shared. Only public IDs are in the path.
+- **Android main screen**: the brand's logo, name and accent color in the top bar, the avatar for
+  account and settings, one bottom navigation (Home, Activity, Spaces), Home with threads, saved,
+  meetings and people above the direct messages, and one "New message" button.
+- **Live counters over the gateway**: unread and mention counts and presence arrive as gateway
+  events instead of a 30 s poll; after a reconnect the app reads them once.
 - **One Home and the brand everywhere**: Home holds the global entries (threads, activity, calls,
   meetings, people, saved, search) above the direct messages and is where a new workspace starts.
   The top bar, the sign-in card and the favicon show the brand's logo (light or dark) and name from
@@ -172,6 +163,24 @@ compatible within 1.x; database migrations run by themselves and are forward-onl
   (trixie); health checks; dual-stack networking; the deployment playbook
   [Zeitgleich/teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy); an end-to-end and v1
   acceptance suite. Building needs Rust 1.98 or newer.
+
+### Fixed
+
+- **The last owner can't be removed**: a roster without an owner is refused by the owner's app
+  before signing, by the server, and by every client verifying the roster, so the workspace can't
+  end up without anyone who can administer it (#188).
+- **Removals that don't go through at once** (e2ee.md §4.6): a removal or leave on its way shows as
+  pending in the conversation; one the server keeps refusing backs off up to a day and then shows
+  as failed with "retry". Admins see people who are still in a channel's encrypted group although
+  the server no longer lists them, and remove them with one click; an admin outside the group signs
+  its removal again before members would refuse it as too old. The goodbye and the removal
+  announcement are never sent twice after a crash, and a removal finished later still announces
+  it. A server that refuses a member the encrypted group is shown instead of going unnoticed, and
+  a device whose join from a welcome was cut off asks to be added back instead of staying out.
+- Mention badges count mentions again; they were always 0.
+- "Download" in the web app saves the decrypted file through the browser (files up to 256 MiB).
+- Creating a space, channel or meeting twice (a retry after a lost answer, a double click) creates
+  it once.
 
 ### Security
 
