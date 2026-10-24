@@ -158,6 +158,45 @@
   outline-offset: 2px;
 }
 
+/* The script-free way out (index.html): invisible and unfocusable until the delay has passed, so
+   a slow but working load never shows it; loader.js removes it when it starts. */
+.tc-loader-reload {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--surface-2, rgba(127, 127, 127, 0.15));
+  color: var(--text, #1b2230);
+  opacity: 0;
+  visibility: hidden;
+  animation: tc-loader-reveal 240ms ease-out 30s forwards;
+}
+
+.tc-loader-reload:hover {
+  background: var(--surface-3, rgba(127, 127, 127, 0.25));
+}
+
+.tc-loader-reload:focus-visible {
+  outline: 2px solid var(--focus, #0b7f78);
+  outline-offset: 2px;
+}
+
+.tc-loader.has-failed .tc-loader-reload {
+  display: none;
+}
+
+@keyframes tc-loader-reveal {
+  from {
+    opacity: 0;
+    visibility: visible;
+  }
+  to {
+    opacity: 1;
+    visibility: visible;
+  }
+}
+
 @keyframes tc-loader-bounce {
   0%,
   80%,
@@ -200,5 +239,10 @@
   .tc-loader-progress {
     transform: none;
     opacity: 0.6;
+  }
+
+  /* Same delay, no fade. */
+  .tc-loader-reload {
+    animation-duration: 1ms;
   }
 }
