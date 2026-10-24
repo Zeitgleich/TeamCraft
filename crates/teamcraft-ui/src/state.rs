@@ -1615,6 +1615,53 @@ mod tests {
     }
   }
 
+  /// Issue #322: the core answers, a timer fires or the backend reports a change after the shell
+  /// was unmounted (sign-out, a new session). Nothing may panic then.
+  mod after_the_shell_is_gone {
+    use super::*;
+
+    #[test]
+    fn callbacks_from_outside_the_reactive_tree_do_nothing() {
+      let owner = Owner::new();
+      let state = owner.with(test_state);
+      owner.cleanup();
+      state.backend_changed();
+      state.show_error("refused".into(), "detail".into());
+      state.dismiss_toast(0);
+      assert!(state.try_write(|backend| backend.spaces()).is_none());
+    }
+
+    #[test]
+    fn while_the_shell_lives_try_write_writes() {
+      let owner = Owner::new();
+      owner.with(|| {
+        let state = test_state();
+        assert!(state.try_write(|backend| backend.spaces()).is_some());
+      });
+    }
+  }
+
+  mod error_toasts {
+    use super::*;
+
+    #[test]
+    fn an_error_shows_with_its_detail_and_a_repeat_shows_once() {
+      let state = test_state();
+      state.show_error("refused".into(), "detail".into());
+      state.show_error("refused".into(), "detail".into());
+      let toasts = state.toasts.get_untracked();
+      assert_eq!(toasts.len(), 1);
+      assert_eq!(
+        toasts[0].tone,
+        ToastTone::Error {
+          detail: "detail".into()
+        }
+      );
+      state.show_error("refused".into(), "other detail".into());
+      assert_eq!(state.toasts.get_untracked().len(), 2);
+    }
+  }
+
   fn test_state() -> AppState {
     let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(NOW));
     let start = first_of(backend.as_ref());

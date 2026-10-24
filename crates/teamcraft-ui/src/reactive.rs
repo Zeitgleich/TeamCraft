@@ -127,3 +127,30 @@ pub fn use_debounced(source: RwSignal<String>, delay_ms: u64) -> ReadSignal<Stri
   });
   value
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Issue #322: an upload or a core answer finishes after its component was unmounted.
+  #[test]
+  fn writes_after_the_owner_is_gone_do_nothing() {
+    let owner = Owner::new();
+    let (value, list) = owner.with(|| (RwSignal::new(1), RwSignal::new(Vec::<u32>::new())));
+    owner.cleanup();
+    value.set_if_alive(2);
+    list.update_if_alive(|list| list.push(3));
+    assert_eq!(value.try_get_untracked(), None);
+  }
+
+  #[test]
+  fn writes_while_the_owner_lives_go_through() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let list = RwSignal::new(Vec::<u32>::new());
+      list.update_if_alive(|list| list.push(3));
+      list.set_if_alive(vec![4]);
+      assert_eq!(list.get_untracked(), vec![4]);
+    });
+  }
+}
