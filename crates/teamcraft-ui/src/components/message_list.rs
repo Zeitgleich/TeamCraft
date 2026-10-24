@@ -42,6 +42,7 @@ thread_local! {
 /// the meantime. Touching signals of a disposed list would panic.
 fn defer_while_alive(list_id: u64, callback: impl FnOnce() + 'static) {
   request_animation_frame(move || {
+    // async-ok: a thread-local Cell, not a signal.
     if ACTIVE_LIST.get() == list_id {
       callback();
     }

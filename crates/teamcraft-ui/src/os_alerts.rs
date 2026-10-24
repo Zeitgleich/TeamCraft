@@ -378,11 +378,22 @@ impl MeetingWatch {
   fn check(self: &Rc<Self>) {
     let watch = self.clone();
     leptos::task::spawn_local(async move {
+      // A timer of a shell that is gone (signed out): nothing to remind of any more.
+      if !watch.is_alive() {
+        return;
+      }
       let me = watch.state.me().id;
       watch.hub.refresh(me, now_ms()).await;
+      if !watch.is_alive() {
+        return;
+      }
       remind_due(watch.state, watch.i18n, watch.hub);
       watch.plan_next();
     });
+  }
+
+  fn is_alive(&self) -> bool {
+    self.state.is_alive() && !self.hub.clock.is_disposed()
   }
 
   fn plan_next(self: &Rc<Self>) {

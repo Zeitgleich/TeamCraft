@@ -119,7 +119,7 @@ pub fn watch(state: RwSignal<BundleState>) {
   let container = window.navigator().service_worker();
   let listener = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
     if let Some(next) = BundleState::from_message(&event.data()) {
-      state.set(next);
+      state.set_if_alive(next);
     }
   });
   if container
@@ -152,11 +152,12 @@ pub fn watch_releases(state: RwSignal<ReleaseUpdate>) {
   let Some(window) = web_sys::window() else { return };
   let container = window.navigator().service_worker();
   let on_controller_change = Closure::<dyn FnMut()>::new(move || {
+    // async-ok: a thread-local Cell, not a signal.
     if IS_RELOADING.get() {
       reload();
     } else {
       // Another tab reloaded into the new release; this page still runs the old one.
-      state.set(ReleaseUpdate::Ready);
+      state.set_if_alive(ReleaseUpdate::Ready);
     }
   });
   if container
@@ -256,7 +257,7 @@ fn follow_installs(registration: &web_sys::ServiceWorkerRegistration, state: RwS
       let worker = installing.clone();
       let on_state_change = Closure::<dyn FnMut()>::new(move || {
         if worker.state() == web_sys::ServiceWorkerState::Installed && has_controller() {
-          state.set(ReleaseUpdate::Ready);
+          state.set_if_alive(ReleaseUpdate::Ready);
         }
       });
       drop(

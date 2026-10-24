@@ -46,6 +46,17 @@ pub fn report_failure(failure: ActionFailure) {
   }
 }
 
+/// Shows a failure of work the core does in the background for a read (loading history, a search
+/// segment), which no button waits for. Network failures stay quiet: the offline banner already
+/// says so, and scrolling while offline must not stack up toasts.
+pub fn report_background_failure(failure: ActionFailure) {
+  if failure.kind == FailureKind::Network {
+    tracing::debug!(detail = %failure.detail, "background command failed offline");
+    return;
+  }
+  report_failure(failure);
+}
+
 /// Where [`report_failure`] sends failures until the current reactive owner is cleaned up.
 pub fn set_failure_sink(sink: impl Fn(ActionFailure) + 'static) {
   let number = NEXT_SINK.with(|next| next.replace(next.get() + 1));

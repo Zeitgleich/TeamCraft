@@ -28,6 +28,8 @@ const UNREAD_SCAN_LIMIT: usize = 500;
 
 /// How long a message opened from search or a link stays highlighted.
 const HIGHLIGHT_DURATION: Duration = Duration::from_millis(2_500);
+/// Toasts shown at once; a new one closes the oldest beyond this.
+const MAX_TOASTS: usize = 4;
 /// How long a deleted message can be restored before it is deleted for everyone.
 const UNDO_WINDOW: Duration = Duration::from_secs(6);
 
@@ -355,6 +357,17 @@ impl AppState {
     }
   }
 
+  /// Forgets that `conversation` opens once it shows up, after its join was refused: a later join
+  /// from elsewhere must not jump into it (issue #328). Called when the core answered, possibly
+  /// after the shell is gone.
+  pub fn forget_pending_open(&self, conversation: ConversationId) {
+    let _ = self.pending_open.try_update(|maybe_open| {
+      if *maybe_open == Some(conversation) {
+        *maybe_open = None;
+      }
+    });
+  }
+
   /// Creates a space and switches to it once it exists.
   pub fn create_space(&self, space: NewSpace) {
     let known = self.read(|backend| backend.spaces().into_iter().map(|space| space.id).collect());
@@ -600,6 +613,12 @@ impl AppState {
     result
   }
 
+  /// Whether the shell that owns this state is still mounted. Timers and tasks that call several
+  /// methods check it once instead of guarding each (issue #322).
+  pub fn is_alive(&self) -> bool {
+    !self.revision.is_disposed()
+  }
+
   /// [`Self::write`] for async tasks: nothing happens once the shell is gone (issue #322).
   pub fn try_write<R>(&self, write: impl FnOnce(&dyn Backend) -> R) -> Option<R> {
     let result = self.backend.try_with_value(|backend| write(backend.as_ref()))?;
@@ -748,17 +767,20 @@ impl AppState {
       return;
     };
     let _ = self.toasts.try_update(|list| {
-      let is_repeat = list.last().is_some_and(|last| {
-        last.text == text && matches!(&last.tone, ToastTone::Error { detail: shown } if *shown == detail)
+      let is_shown = list.iter().any(|shown| {
+        shown.text == text && matches!(&shown.tone, ToastTone::Error { detail: shown } if *shown == detail)
       });
-      if !is_repeat {
+      if !is_shown {
         self.next_toast.set_value(id + 1);
-        list.push(Toast {
-          id,
-          text,
-          maybe_undo: None,
-          tone: ToastTone::Error { detail },
-        });
+        push_capped(
+          list,
+          Toast {
+            id,
+            text,
+            maybe_undo: None,
+            tone: ToastTone::Error { detail },
+          },
+        );
       }
     });
   }
@@ -871,12 +893,15 @@ impl AppState {
     let id = self.next_toast.get_value();
     self.next_toast.set_value(id + 1);
     self.toasts.update(|list| {
-      list.push(Toast {
-        id,
-        text,
-        maybe_undo,
-        tone: ToastTone::Info,
-      })
+      push_capped(
+        list,
+        Toast {
+          id,
+          text,
+          maybe_undo,
+          tone: ToastTone::Info,
+        },
+      )
     });
     id
   }
@@ -1169,7 +1194,8 @@ impl AppState {
 
   /// Stops waiting for `route` if it never loaded: Home with a notice.
   pub fn give_up_route(&self, route: Route) {
-    if self.pending_route.get_untracked() != Some(route) {
+    // Called by a timer, which may fire after the shell is gone.
+    if self.pending_route.try_get_untracked() != Some(Some(route)) {
       return;
     }
     self.pending_route.set(None);
@@ -1341,6 +1367,18 @@ fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
     && members
       .iter()
       .all(|member| *member == me || users.contains(member))
+}
+
+/// Adds a toast and closes the oldest beyond [`MAX_TOASTS`]. Toasts with an Undo stay: closing
+/// one would take away the only way back.
+fn push_capped(list: &mut Vec<Toast>, toast: Toast) {
+  list.push(toast);
+  while list.len() > MAX_TOASTS {
+    let Some(oldest) = list.iter().position(|toast| toast.maybe_undo.is_none()) else {
+      break;
+    };
+    list.remove(oldest);
+  }
 }
 
 #[cfg(test)]
@@ -1659,6 +1697,28 @@ mod tests {
       );
       state.show_error("refused".into(), "other detail".into());
       assert_eq!(state.toasts.get_untracked().len(), 2);
+    }
+
+    #[test]
+    fn a_repeat_of_any_shown_error_shows_once() {
+      let state = test_state();
+      state.show_error("one".into(), "a".into());
+      state.show_error("two".into(), "b".into());
+      state.show_error("one".into(), "a".into());
+      assert_eq!(state.toasts.get_untracked().len(), 2);
+    }
+
+    #[test]
+    fn the_oldest_toast_closes_beyond_the_cap_but_undo_toasts_stay() {
+      let state = test_state();
+      state.push_toast("deleted".into(), Some(Undo::RestoreMessage(id_from_raw(1))));
+      for index in 0..10 {
+        state.show_error(format!("error {index}"), String::new());
+      }
+      let toasts = state.toasts.get_untracked();
+      assert_eq!(toasts.len(), MAX_TOASTS);
+      assert!(toasts[0].maybe_undo.is_some(), "the undo toast stays");
+      assert_eq!(toasts.last().map(|toast| toast.text.as_str()), Some("error 9"));
     }
   }
 

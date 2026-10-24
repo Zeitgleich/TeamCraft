@@ -620,6 +620,7 @@ impl AdminLive {
     let live = self.clone();
     set_timeout(
       move || {
+        // async-ok: a Cell, not a signal.
         live.refresh_queued.set(false);
         spawn_local(async move { live.refresh().await });
       },

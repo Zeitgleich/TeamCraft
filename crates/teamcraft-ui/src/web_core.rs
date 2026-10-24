@@ -385,6 +385,7 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
       drop(generation);
     });
     // Replacing a running core (another account signed in) drops its sender, which stops it.
+    // async-ok: a thread-local, not a signal.
     RUNNING.with(|running| {
       *running.borrow_mut() = Some(Running::Owner {
         user,
@@ -899,9 +900,15 @@ impl Core {
         drop(reply.send(result));
         // A read can ask for data it doesn't have yet (messages found only in shared index
         // segments, last seen, the call history): tell the UI to read again when it arrived.
-        // A failed read command still changed what there is to read (it was answered as failed).
-        if !matches!(self.run_queued_commands().await, Ok(0)) {
-          notify_changed();
+        // A failed read command still changed what there is to read (it was answered as failed),
+        // and its failure goes to the UI too, which nobody there waits for (issue #322).
+        match self.run_queued_commands().await {
+          Ok(0) => {},
+          Ok(_) => notify_changed(),
+          Err(error) => {
+            notify_changed();
+            crate::feedback::report_background_failure(error.to_failure());
+          },
         }
       },
     }

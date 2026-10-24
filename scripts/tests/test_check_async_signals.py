@@ -44,6 +44,21 @@ class CheckAsyncSignalsTest(unittest.TestCase):
         source = "spawn_local(async move { value.set(1) });\n#[cfg(test)]\nspawn_local(async { x.await; v.set(1) });\n"
         self.assertEqual(findings(source), [])
 
+    def test_a_timer_callback_is_checked_as_a_whole(self):
+        source = "set_timeout(\n  move || value.set(1),\n  DELAY,\n);\n"
+        self.assertEqual(findings(source), ["x.rs:2: move || value.set(1),"])
+
+    def test_typed_js_closures_and_animation_frames_are_checked(self):
+        source = (
+            "let f = Closure::<dyn FnMut()>::new(move || flag.set(true));\n"
+            "request_animation_frame(move || list.update(|l| l.clear()));\n"
+        )
+        self.assertEqual(len(findings(source)), 2)
+
+    def test_async_fn_bodies_are_checked_after_their_first_await(self):
+        source = "async fn load(&self) {\n  self.busy.set(true);\n  fetch().await;\n  self.data.set(1);\n}\n"
+        self.assertEqual(findings(source), ["x.rs:4: self.data.set(1);"])
+
 
 if __name__ == "__main__":
     unittest.main()

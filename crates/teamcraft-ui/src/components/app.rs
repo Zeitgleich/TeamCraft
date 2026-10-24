@@ -245,42 +245,42 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         _ => None,
       }}
       <IncomingCallDialog />
-      <Show when=move || !state.toasts.with(Vec::is_empty) fallback=|| ()>
-        <div class="toasts" role="status">
-          <For each=move || state.toasts.get() key=|toast| toast.id let:toast>
-            {
-              let id = toast.id;
-              let node = NodeRef::<leptos::html::Div>::new();
-              use_leave_ghost(node);
-              let is_error = matches!(toast.tone, ToastTone::Error { .. });
-              view! {
-                <div class=if is_error { "toast toast-error" } else { "toast" } role=is_error.then_some("alert") node_ref=node>
-                  <div class="toast-body">
-                    <span>{toast.text}</span>
-                    {match toast.tone {
-                      ToastTone::Info => None,
-                      ToastTone::Error { detail } => Some(view! {
-                        <details class="toast-details">
-                          <summary>{move || i18n.t("error-details")}</summary>
-                          <code class="toast-detail-text">{detail}</code>
-                        </details>
-                      }),
-                    }}
-                  </div>
-                  {toast.maybe_undo.map(|undo| view! {
-                    <button class="btn btn-small" on:click=move |_| state.undo(id, undo)>
-                      {move || i18n.t("undo")}
-                    </button>
-                  })}
-                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
-                    <Icon name=IconName::Close />
-                  </button>
+      // Always in the page: screen readers only announce changes in a live region that already
+      // existed when the toast arrived.
+      <div class="toasts" role="status">
+        <For each=move || state.toasts.get() key=|toast| toast.id let:toast>
+          {
+            let id = toast.id;
+            let node = NodeRef::<leptos::html::Div>::new();
+            use_leave_ghost(node);
+            let is_error = matches!(toast.tone, ToastTone::Error { .. });
+            view! {
+              <div class=if is_error { "toast toast-error" } else { "toast" } role=is_error.then_some("alert") node_ref=node>
+                <div class="toast-body">
+                  <span>{toast.text}</span>
+                  {match toast.tone {
+                    ToastTone::Info => None,
+                    ToastTone::Error { detail } => Some(view! {
+                      <details class="toast-details">
+                        <summary>{move || i18n.t("error-details")}</summary>
+                        <code class="toast-detail-text">{detail}</code>
+                      </details>
+                    }),
+                  }}
                 </div>
-              }
+                {toast.maybe_undo.map(|undo| view! {
+                  <button class="btn btn-small" on:click=move |_| state.undo(id, undo)>
+                    {move || i18n.t("undo")}
+                  </button>
+                })}
+                <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
+                  <Icon name=IconName::Close />
+                </button>
+              </div>
             }
-          </For>
-        </div>
-      </Show>
+          }
+        </For>
+      </div>
       {move || match state.overlay.get() {
         Overlay::QuickSwitcher => view! { <QuickSwitcher /> }.into_any(),
         Overlay::CustomStatus => view! { <CustomStatusDialog /> }.into_any(),

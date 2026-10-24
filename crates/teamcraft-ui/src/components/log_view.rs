@@ -195,7 +195,7 @@ fn FilteredLog(
     // Touching a disposed node would panic, so the callback checks that the view still exists.
     request_animation_frame(move || {
       if is_alive.load(Ordering::Relaxed)
-        && let Some(element) = container.get_untracked()
+        && let Some(element) = container.try_get_untracked().flatten()
       {
         element.set_scroll_top(element.scroll_height());
       }

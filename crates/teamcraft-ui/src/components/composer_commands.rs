@@ -5,6 +5,7 @@ use teamcraft_client_api::actions::ChannelChanges;
 use teamcraft_proto::{HistoryPolicy, IdempotencyKey};
 
 use crate::clock::{end_of_local_day, now_ms};
+use crate::feedback::PendingAction;
 use crate::i18n::I18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{ConversationId, CustomStatus, StatusExpiry, User};
@@ -198,10 +199,16 @@ fn join_channel(state: AppState, i18n: I18n, current: ConversationId, name: &str
   });
   match found {
     Some(channel) => {
+      let conversation = channel.conversation;
+      // Set first: a backend that refuses at once calls the cleanup inside `run_or_else`.
+      state.pending_open.set(Some(conversation));
       if !channel.is_member {
-        state.write(|backend| backend.join_channel(channel.conversation));
+        // A refused join shows its error and forgets the open (issues #322, #328).
+        PendingAction::new().run_or_else(
+          || state.write(|backend| backend.join_channel(conversation)),
+          move |_| state.forget_pending_open(conversation),
+        );
       }
-      state.pending_open.set(Some(channel.conversation));
       Outcome::Done
     },
     None => Outcome::Notice(Notice::Text(i18n.t_with("slash-not-found", &[("name", name)]))),

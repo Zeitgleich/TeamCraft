@@ -2130,9 +2130,9 @@ error-conflict = Jemand hat das gleichzeitig geändert. Sieh dir den aktuellen S
 error-not-found = Das gibt es nicht mehr. Es wurde vielleicht gelöscht oder verschoben.
 action-running = Läuft…
 panic-title = Etwas ist schiefgelaufen
-panic-body = Die App ist auf einen Fehler gestoßen und muss neu geladen werden. Deine Nachrichten und Entwürfe bleiben erhalten.
+panic-body = Die App ist auf einen Fehler gestoßen und muss neu geladen werden. Was du gerade getippt hast, kann verloren gehen.
 panic-reload = Neu laden
-panic-details-label = Details für deinen Admin (ohne Nachrichteninhalte)
+panic-details-label = Technische Details für deinen Admin (Version und wo der Fehler auftrat)
 
 ## Anmelde-Rückkehrseite: der Browser-Tab, den die Desktop-App nach dem Anmeldedienst zeigt
 ## (nur Text, keine Platzhalter; die Desktop-Shell liest diese Zeilen selbst)

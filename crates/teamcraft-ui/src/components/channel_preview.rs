@@ -12,7 +12,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, SpaceId};
-use crate::reactive::{SetIfAlive, UpdateIfAlive};
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// After this long without the channel showing up, "Join channel" can be pressed again.
@@ -49,11 +49,7 @@ pub fn ChannelPreview(space: SpaceId, channel: ConversationId) -> impl IntoView 
     pending.run_or_else(
       || state.write(|backend| backend.join_channel(channel)),
       move |_| {
-        state.pending_open.update_if_alive(|maybe_open| {
-          if *maybe_open == Some(channel) {
-            *maybe_open = None;
-          }
-        });
+        state.forget_pending_open(channel);
         is_joining.set_if_alive(false);
       },
     );
