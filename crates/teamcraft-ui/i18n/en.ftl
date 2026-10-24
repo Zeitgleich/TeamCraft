@@ -85,6 +85,18 @@ dm-new-hint = Pick one person for a direct message, or several for a group.
 dm-new-start = Open conversation
 dm-new-start-group = Start group
 
+## Compact layout (phones): bottom navigation, back, menus; calls in the browser
+back = Back
+bottom-nav-label = Main navigation
+bottom-nav-spaces = Spaces
+bottom-nav-you = You
+conversation-more = More
+composer-camera = Take a photo or video
+composer-photos = Photos and videos
+calls-browser-title = Calls in the browser are coming soon
+calls-browser-body = For now, call from the TeamCraft desktop or mobile app. Your conversations are there too.
+calls-browser-download = Get the app
+
 ## Sidebar
 sidebar-label = Channels and direct messages
 sidebar-threads = Threads
@@ -2009,6 +2021,7 @@ admin-brands-link-support = Support
 admin-brands-link-privacy = Privacy
 admin-brands-link-terms = Terms
 admin-brands-link-imprint = Imprint
+admin-brands-link-download = App download page
 admin-brands-mail = Mail sender
 admin-brands-mail-hint = Mail that goes out as this brand. Without an address the default sender of the mail server is used.
 admin-brands-sender-name = Sender name

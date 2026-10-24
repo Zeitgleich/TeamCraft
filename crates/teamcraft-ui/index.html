@@ -2,13 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- interactive-widget: Chrome shrinks the layout for the on-screen keyboard, so the composer stays above it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="light dark" />
     <title>TeamCraft</title>
     <link data-trunk rel="css" href="style/main.css" />
     <link data-trunk rel="css" href="style/loader.css" />
     <!-- The brand of the host name this page is served from (colors only; docs/branding.md §4). After main.css so it wins. 404 in the desktop shell, which applies the brand from code. -->
     <link rel="stylesheet" href="/api/v1/brand/theme.css" />
+    <!-- Installing the web app (add to home screen): name, theme color and icons of the brand (docs/branding.md §4).
+         theme-color is updated to the current theme by viewport.rs. -->
+    <link rel="manifest" href="/api/v1/brand/manifest.webmanifest" />
+    <meta name="theme-color" content="#111926" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link data-trunk rel="copy-dir" href="icons" />
     <link data-trunk rel="copy-file" href="sw.js" />
     <!-- Thumbnails of the photo backgrounds, loaded lazily by the picker (the full pictures are only in the desktop app). -->
     <link data-trunk rel="copy-dir" href="../../assets/backgrounds/thumbs" data-target-path="backgrounds" />

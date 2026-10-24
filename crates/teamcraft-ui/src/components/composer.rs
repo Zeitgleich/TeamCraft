@@ -28,6 +28,7 @@ use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
 use crate::state::use_app_state;
+use crate::viewport::is_touch_primary;
 
 /// How long typing pauses before the draft is stored.
 const DRAFT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
@@ -685,7 +686,9 @@ pub fn Composer(
     }
     ev.prevent_default();
     let modifier = ev.ctrl_key() || ev.meta_key();
+    // On touch screens Enter is a newline and the send button sends, as in the phones' messengers.
     let should_send = match state.settings.send_mode.get_untracked() {
+      _ if is_touch_primary() => modifier,
       SendMode::Enter => !ev.shift_key() && !modifier,
       SendMode::CtrlEnter => modifier,
     };

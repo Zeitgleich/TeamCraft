@@ -45,6 +45,7 @@ pub enum IconName {
   Maximize,
   Minimize,
   Image,
+  Camera,
   Volume,
   Shield,
   Clock,
@@ -55,7 +56,6 @@ pub enum IconName {
   CodeBlock,
   AtSign,
   Slash,
-  Camera,
   Key,
   Layers,
   Alert,
@@ -167,6 +167,9 @@ impl IconName {
         "M8 3v3a2 2 0 0 1-2 2H3 M21 8h-3a2 2 0 0 1-2-2V3 M3 16h3a2 2 0 0 1 2 2v3 M16 21v-3a2 2 0 0 1 2-2h3"
       },
       Self::Image => "M3 3h18v18H3z M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z M21 15l-5-5L5 21",
+      Self::Camera => {
+        "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"
+      },
       Self::Volume => "M11 5L6 9H2v6h4l5 4z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14",
       Self::Shield => "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
       Self::Clock => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 7v5l3 3",
@@ -179,9 +182,6 @@ impl IconName {
       Self::CodeBlock => "M3 4h18v16H3z M10 9l-3 3 3 3 M14 9l3 3-3 3",
       Self::AtSign => "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9",
       Self::Slash => "M4 4h16v16H4z M15 7l-6 10",
-      Self::Camera => {
-        "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"
-      },
       Self::Key => "M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8z M15.5 7.5l3 3L22 7l-3-3",
       Self::Layers => "M12 2l10 5-10 5L2 7z M2 17l10 5 10-5 M2 12l10 5 10-5",
       Self::Alert => {

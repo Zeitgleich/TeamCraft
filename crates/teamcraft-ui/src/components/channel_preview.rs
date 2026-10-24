@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 
+use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::feedback::PendingAction;
@@ -81,6 +82,7 @@ pub fn ChannelPreview(space: SpaceId, channel: ConversationId) -> impl IntoView 
       <section class="channel-preview" aria-label=move || i18n.t_with("preview-label", &[("name", &listing.name)])>
         <header class="channel-header">
           <div class="header-main">
+            <CompactBack />
             <h1 class="header-title" translate="no"><Icon name=IconName::Hash class="header-icon" />{name.clone()}</h1>
             <span class="badge">{move || i18n.t("preview-badge")}</span>
             {has_topic.then(|| view! {

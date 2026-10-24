@@ -364,6 +364,9 @@ served_hostnames = []
 # privacy_url = "https://brand-a.example.com/privacy"
 # terms_url = "https://brand-a.example.com/terms"
 # imprint_url = "https://brand-a.example.com/imprint"
+# Where the desktop and mobile apps are offered; the web app links it where it can't do something
+# itself yet (calls). Default: the TeamCraft project's download page.
+# download_url = "https://brand-a.example.com/apps"
 # connect_origins = []                        # extra connect-src origins for this brand only
 # content_security_policy = "..."             # replaces [web].content_security_policy for this brand
 # [brands.login_title]                        # language code -> text; "en" is the fallback

@@ -39,3 +39,5 @@ mod server_robustness;
 mod threads_policy;
 #[cfg(feature = "browser")]
 mod web;
+#[cfg(feature = "browser")]
+mod web_mobile;

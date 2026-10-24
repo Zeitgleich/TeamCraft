@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
+use wasm_bindgen::JsCast;
 
 use crate::clock::{format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -20,6 +21,7 @@ use crate::markdown;
 use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, is_pending, thread_id_of};
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
+use crate::viewport::is_touch_primary;
 
 /// Messages by the same author closer together than this share one header.
 const GROUP_WINDOW_MS: i64 = 5 * 60_000;
@@ -655,6 +657,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       data-nav="row"
       aria-label=aria_label
       on:keydown=on_keydown
+      on:contextmenu=open_actions_on_long_press
     >
       <div class="msg-gutter">{gutter}</div>
       <div class="msg-main">
@@ -730,6 +733,22 @@ fn date_divider(message: &Message, maybe_prev: Option<&Message>) -> Option<i64> 
   match maybe_prev {
     Some(prev) if local_day(prev.sent_at) == local_day(message.sent_at) => None,
     _ => Some(message.sent_at),
+  }
+}
+
+/// A long press on a touch screen shows the message's actions (the row takes focus, as on a tap)
+/// instead of the browser's context menu. A right click with a mouse keeps the browser's menu.
+fn open_actions_on_long_press(ev: web_sys::MouseEvent) {
+  if !is_touch_primary() {
+    return;
+  }
+  ev.prevent_default();
+  if let Some(row) = ev
+    .current_target()
+    .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok())
+    && row.focus().is_err()
+  {
+    tracing::debug!("could not focus the message");
   }
 }
 

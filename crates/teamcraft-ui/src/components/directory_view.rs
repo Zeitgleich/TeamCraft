@@ -8,6 +8,7 @@ use teamcraft_proto::{
 
 use crate::auth::ApiMethod;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::compact_back::CompactBack;
 use crate::components::skeleton::ListSkeleton;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
@@ -58,6 +59,7 @@ pub fn DirectoryView() -> impl IntoView {
   view! {
     <section class="directory" aria-label=move || i18n.t("directory-title")>
       <header class="panel-header">
+        <CompactBack />
         <div class="panel-title"><h1>{move || i18n.t("directory-title")}</h1></div>
         <div class="tabs" role="tablist" aria-label=move || i18n.t("directory-title") on:keydown=on_keydown>
           {DirectoryTab::ALL

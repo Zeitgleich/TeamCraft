@@ -73,6 +73,7 @@ pub mod slash;
 pub mod space_images;
 pub mod state;
 pub mod sync_reads;
+pub mod viewport;
 #[cfg(target_arch = "wasm32")]
 pub mod web_core;
 #[cfg(target_arch = "wasm32")]
@@ -151,10 +152,12 @@ mod tests {
     );
 
     let shell = include_str!("components/app.rs");
+    // The opening tag spans several lines (its data attributes); the children follow its `>`.
     let grid = shell
-      .split("<div class=\"app\">")
+      .split("class=\"app\"")
       .nth(1)
-      .and_then(|rest| rest.split("<div class=\"app-body\">").next())
+      .and_then(|rest| rest.split_once("\n    >\n"))
+      .and_then(|(_, rest)| rest.split("<div class=\"app-body\">").next())
       .expect("the shell has the .app grid with its body");
     // Direct children of the grid sit one indentation level below `<div class="app">`.
     let children: Vec<&str> = grid

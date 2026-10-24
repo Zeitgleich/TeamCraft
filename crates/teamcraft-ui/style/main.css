@@ -7588,3 +7588,506 @@ ol.md-list {
 .view-tabs [role="tab"][aria-selected="true"]::after {
   animation: motion-fade-in var(--dur-fast) var(--ease-standard);
 }
+
+/* ---- Compact layout (phones, issue #307) ----
+   `data-layout` on <html> comes from viewport.rs (below 768px wide, or short and not wide): one
+   pane at a time. `.app[data-pane]` says which: the list (Home's DMs or a space's channels), the
+   main column, or the side panel over its conversation. The top bar and the bottom navigation
+   show on the top-level pages only; deeper pages have a back button in their header. */
+
+.compact-back,
+.bottom-nav,
+.compact-only {
+  display: none;
+}
+
+:root[data-layout="compact"] {
+  --topbar-h: 52px;
+  --touch: 44px;
+  --sidebar-w: 100%;
+  /* No room to scroll the page itself: everything scrolls inside its pane. */
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+:root[data-layout="compact"] body {
+  overflow: hidden;
+}
+
+/* The visible part of the window: it ends at the on-screen keyboard (viewport.rs). */
+:root[data-layout="compact"] .app {
+  position: fixed;
+  top: var(--vv-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--vv-height, 100dvh);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  background: var(--chrome);
+}
+
+:root[data-layout="compact"] .app > .app-banners {
+  grid-row: 1;
+}
+
+:root[data-layout="compact"] .app > .top-bar {
+  grid-row: 2;
+  height: var(--topbar-h);
+}
+
+:root[data-layout="compact"] .app > .app-body {
+  grid-row: 3;
+  background: var(--surface);
+}
+
+:root[data-layout="compact"] .app > .bottom-nav {
+  grid-row: 4;
+}
+
+/* Pages without the bottom navigation end above the home indicator. */
+:root[data-layout="compact"] .app:not(.has-bottom-nav) {
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--surface);
+}
+
+/* Deeper pages have their own header with a back button instead of the top bar. The desktop
+   app's own title bar (window controls) always stays. */
+:root[data-layout="compact"]:not([data-titlebar="custom"]) .app:not(.has-bottom-nav) > .top-bar {
+  display: none;
+}
+
+/* The top bar: brand, the search as an icon, nothing else (the account is "You" below). */
+:root[data-layout="compact"] .top-bar {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-2);
+  padding: 0 var(--space-2) 0 0;
+}
+
+:root[data-layout="compact"] .top-bar .brand {
+  max-width: none;
+}
+
+:root[data-layout="compact"] .search-btn {
+  grid-column: 2;
+  justify-self: end;
+  justify-content: center;
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+:root[data-layout="compact"] .search-btn > span,
+:root[data-layout="compact"] .search-btn kbd,
+:root[data-layout="compact"] .search-btn .shortcut,
+:root[data-layout="compact"] .top-actions {
+  display: none;
+}
+
+/* Panes: exactly one fills the body. */
+:root[data-layout="compact"] .app-body > * {
+  display: none;
+}
+
+:root[data-layout="compact"] .app[data-pane="list"] > .app-body > .sidebar,
+:root[data-layout="compact"] .app[data-pane="main"] > .app-body > .main,
+:root[data-layout="compact"] .app[data-pane="panel"] > .app-body > .side-panel {
+  display: flex;
+}
+
+/* A space's list keeps the rail beside it to switch spaces; Home's list stands alone. */
+:root[data-layout="compact"] .app[data-pane="list"][data-rail="space"] > .app-body > .space-rail {
+  display: flex;
+}
+
+:root[data-layout="compact"] .rail-destinations,
+:root[data-layout="compact"] .rail-divider {
+  display: none;
+}
+
+:root[data-layout="compact"] .sidebar {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+:root[data-layout="compact"] .side-panel,
+:root[data-layout="compact"] .side-panel:not(.embedded) {
+  position: static;
+  flex: 1;
+  width: auto;
+  max-width: none;
+  border-left: 0;
+  box-shadow: none;
+}
+
+:root[data-layout="compact"] .compact-back,
+:root[data-layout="compact"] .compact-only {
+  display: inline-grid;
+}
+
+/* The bottom navigation: four tabs, each a full-height touch target. */
+:root[data-layout="compact"] .bottom-nav {
+  display: flex;
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--chrome);
+}
+
+.bottom-nav-tab {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 56px;
+  padding: 6px 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--chrome-text);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bottom-nav-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 30px;
+  border-radius: var(--radius-pill);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+
+.bottom-nav-tab.current {
+  color: var(--chrome-strong);
+}
+
+.bottom-nav-tab.current .bottom-nav-icon {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.bottom-nav-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bottom-nav .badge-count {
+  position: absolute;
+  right: 6px;
+  top: -4px;
+  box-shadow: 0 0 0 2px var(--chrome);
+}
+
+/* Headers: the back button first, everything sized for a finger. */
+:root[data-layout="compact"] .channel-header,
+:root[data-layout="compact"] .panel-header {
+  gap: var(--space-1);
+  min-height: var(--topbar-h);
+  height: auto;
+  padding: 0 var(--space-1) 0 var(--space-1);
+}
+
+:root[data-layout="compact"] .channel-header .header-main > :not(.header-title):not(.compact-back),
+:root[data-layout="compact"] .channel-header .header-actions > .header-btn:not(.compact-keep) {
+  display: none;
+}
+
+:root[data-layout="compact"] .header-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Touch targets of at least 44px wherever a finger is the pointer. */
+:root[data-layout="compact"] .icon-btn,
+:root[data-layout="compact"] .header-btn {
+  min-width: var(--touch);
+  min-height: var(--touch);
+}
+
+:root[data-layout="compact"] .sb-item,
+:root[data-layout="compact"] .switcher-row,
+:root[data-layout="compact"] .menu-item {
+  min-height: var(--touch);
+}
+
+:root[data-layout="compact"] .home-chip,
+:root[data-layout="compact"] .btn {
+  min-height: var(--touch);
+}
+
+:root[data-layout="compact"] .space-btn {
+  width: var(--touch);
+  height: var(--touch);
+}
+
+:root[data-layout="compact"] .space-rail {
+  width: 64px;
+}
+
+/* The composer: wide send button, no keyboard hints, room for the home indicator. */
+:root[data-layout="compact"] .composer {
+  padding: 0 var(--space-2) var(--space-2);
+}
+
+:root[data-layout="compact"] .composer-hint:not(.also-send),
+:root[data-layout="compact"] .markdown-hint {
+  display: none;
+}
+
+:root[data-layout="compact"] .composer-toolbar {
+  gap: 0;
+}
+
+:root[data-layout="compact"] .composer-toolbar .also-send {
+  flex: 1;
+  min-width: 0;
+}
+
+:root[data-layout="compact"] .composer-toolbar > .send-btn {
+  width: var(--touch);
+  height: var(--touch);
+  margin-left: auto;
+}
+
+/* iOS zooms into fields with text under 16px; it never needs to here. */
+:root[data-layout="compact"] input,
+:root[data-layout="compact"] textarea,
+:root[data-layout="compact"] select {
+  font-size: max(16px, 1em);
+}
+
+/* Messages: the actions show on tap (the row takes focus) and on long press, as a bar that fits a
+   finger; no hover-only controls. */
+:root[data-layout="compact"] .msg-actions {
+  right: var(--space-2);
+  top: -20px;
+  max-width: calc(100% - var(--space-4));
+  overflow-x: auto;
+}
+
+:root[data-layout="compact"] .msg-actions .icon-btn {
+  min-width: var(--touch);
+  min-height: var(--touch);
+}
+
+@media (hover: none) {
+  .msg-user:hover .msg-actions {
+    display: none;
+  }
+
+  .msg-user:focus-within .msg-actions,
+  .msg-user:focus .msg-actions {
+    display: flex;
+  }
+
+  .msg-user {
+    -webkit-touch-callout: none;
+  }
+}
+
+/* Dialogs and the search become full-screen sheets. */
+:root[data-layout="compact"] .modal-backdrop {
+  align-items: stretch;
+  padding: 0;
+}
+
+:root[data-layout="compact"] .modal,
+:root[data-layout="compact"] .modal-switcher {
+  width: 100%;
+  max-width: none;
+  height: var(--vv-height, 100dvh);
+  max-height: none;
+  margin-top: var(--vv-top, 0px);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  border: 0;
+  border-radius: 0;
+}
+
+:root[data-layout="compact"] .modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+:root[data-layout="compact"] .switcher-results {
+  flex: 1;
+  max-height: none;
+}
+
+:root[data-layout="compact"] .switcher-foot {
+  display: none;
+}
+
+/* The account menu: a sheet from the bottom, above the navigation. */
+:root[data-layout="compact"] .status-menu {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: 0;
+  width: auto;
+  max-height: 85dvh;
+  overflow-y: auto;
+  padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom));
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  animation: sheet-in var(--dur-base) var(--ease-emphasized);
+}
+
+:root[data-layout="compact"] .popover-backdrop {
+  background: rgba(8, 12, 20, 0.45);
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+
+/* Nothing scrolls sideways: long words, code and tables wrap or scroll inside themselves. */
+:root[data-layout="compact"] .msg-body,
+:root[data-layout="compact"] .rich-text {
+  overflow-wrap: anywhere;
+}
+
+:root[data-layout="compact"] .rich-text pre,
+:root[data-layout="compact"] .rich-text table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+:root[data-layout="compact"] .toasts {
+  left: var(--space-2);
+  right: var(--space-2);
+  bottom: calc(72px + env(safe-area-inset-bottom));
+}
+
+:root[data-layout="compact"] .main,
+:root[data-layout="compact"] .side-panel {
+  min-width: 0;
+}
+
+.conversation-more {
+  position: relative;
+}
+
+.conversation-menu {
+  width: min(280px, calc(100vw - var(--space-4)));
+}
+
+:root[data-layout="compact"] .switcher-input {
+  padding: 0 var(--space-2) 0 var(--space-1);
+}
+
+:root[data-layout="compact"] .switcher-search-icon {
+  display: none;
+}
+
+/* A phone in landscape: little height, so the bars get slimmer and the tabs lose their labels. */
+@media (max-height: 499.98px) {
+  :root[data-layout="compact"] {
+    --topbar-h: 44px;
+  }
+
+  :root[data-layout="compact"] .bottom-nav-tab {
+    min-height: var(--touch);
+    padding: 2px 0;
+  }
+
+  :root[data-layout="compact"] .bottom-nav-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+
+/* Settings and the administration console: their side navigation becomes a strip of tabs that
+   scrolls sideways on its own, above the content. */
+:root[data-layout="compact"] .settings-layout,
+:root[data-layout="compact"] .admin {
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+:root[data-layout="compact"] .settings-tabs,
+:root[data-layout="compact"] .admin-nav,
+:root[data-layout="compact"] .admin-nav ul {
+  flex-direction: row;
+  align-items: center;
+}
+
+:root[data-layout="compact"] .settings-tabs,
+:root[data-layout="compact"] .admin-nav {
+  width: auto;
+  padding: var(--space-1) var(--space-2);
+  overflow-x: auto;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+
+:root[data-layout="compact"] .admin-nav ul {
+  display: flex;
+  gap: 2px;
+}
+
+:root[data-layout="compact"] .admin-nav h1 {
+  display: none;
+}
+
+:root[data-layout="compact"] .settings-tabs [role="tab"],
+:root[data-layout="compact"] .admin-nav-item,
+:root[data-layout="compact"] .admin-back {
+  flex: none;
+  width: auto;
+  height: auto;
+  min-height: var(--touch);
+  white-space: nowrap;
+}
+
+:root[data-layout="compact"] .settings-panel,
+:root[data-layout="compact"] .admin-content {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-4) var(--space-3);
+  overflow-y: auto;
+}
+
+/* The search page: saved searches and mentions stay on wider screens; the search itself fills the
+   window with a back button in its field. */
+:root[data-layout="compact"] .search-side {
+  display: none;
+}
+
+:root[data-layout="compact"] .search-main {
+  padding: var(--space-2) var(--space-3);
+}
+
+/* A short notice stays a card, also on phones. */
+.modal-notice {
+  width: min(440px, 100%);
+}
+
+:root[data-layout="compact"] .modal-backdrop:has(.modal-notice) {
+  align-items: center;
+  padding: var(--space-4);
+}
+
+:root[data-layout="compact"] .modal.modal-notice {
+  height: auto;
+  margin-top: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}

@@ -18,9 +18,11 @@ use crate::components::activity_view::ActivityView;
 use crate::components::admin_console::AdminConsole;
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bookmarks::BookmarksDialog;
+use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
+use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
 use crate::components::channel_preview::ChannelPreview;
 use crate::components::channel_view::ChannelView;
@@ -48,6 +50,7 @@ use crate::components::settings_tabs::apply_call_prefs;
 use crate::components::sidebar::Sidebar;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
 use crate::components::status_menu::CustomStatusDialog;
+use crate::components::status_menu::StatusMenu;
 use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
@@ -70,6 +73,7 @@ use crate::reactive::use_interval;
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
+use crate::viewport::CompactPane;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -81,6 +85,7 @@ pub fn App() -> impl IntoView {
   apply_density(settings);
   apply_zoom(settings);
   apply_language_attribute();
+  crate::viewport::sync_theme_color(move || settings.theme.track());
   crate::brand::provide_brand(settings);
   provide_window_chrome();
   if tauri::is_available() {
@@ -126,6 +131,15 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let change_source = backend.clone();
   let state = AppState::new(backend, settings, start);
   provide_context(state);
+  crate::viewport::watch_layout(state.layout);
+  crate::viewport::track_visual_viewport();
+  Effect::new(move |previous: Option<()>| {
+    let layout = state.layout.get();
+    if previous.is_some() {
+      untrack(|| state.layout_changed(layout));
+    }
+  });
+  focus_new_compact_pane(state);
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
@@ -175,7 +189,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
 
-  let _ = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
+  let listener = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
   let banners = NodeRef::<leptos::html::Div>::new();
   track_banner_height(banners);
 
@@ -183,7 +199,12 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     <a class="skip-link" href="#main-content">
       {move || i18n.t("skip-to-content")}
     </a>
-    <div class="app">
+    <div
+      class="app"
+      data-pane=move || state.compact_pane().slug()
+      data-rail=move || if state.rail.get() == RailEntry::Home { "home" } else { "space" }
+      class:has-bottom-nav=move || has_bottom_nav(state)
+    >
       // One grid row for all banners, so the top bar and the body keep their own rows.
       <div class="app-banners" node_ref=banners>
         <BundleBanner />
@@ -215,6 +236,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Directory => view! { <DirectoryView /> }.into_any(),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
             MainView::Home => view! { <HomeStart /> }.into_any(),
+            // Only the compact layout shows a space without a channel; its list is the sidebar.
+            MainView::Space => ().into_any(),
             MainView::ChannelPreview(space, channel) => view! { <ChannelPreview space=space channel=channel /> }.into_any(),
           }}
         </main>
@@ -235,6 +258,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           }}
         </Show>
       </div>
+      <Show when=move || has_bottom_nav(state) fallback=|| ()>
+        <BottomNav />
+      </Show>
+      // On phones the account menu is a sheet over the bottom navigation's "You".
+      <Show when=move || state.is_compact() && state.overlay.get() == Overlay::StatusMenu fallback=|| ()>
+        <StatusMenu />
+      </Show>
       {move || match state.call.phase.get() {
         CallPhase::PreJoin => {
           state.call.maybe_request.get().map(|request| view! { <PreJoinScreen request=request /> }.into_any())
@@ -306,10 +336,61 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
         Overlay::EditProfile => view! { <EditProfileDialog /> }.into_any(),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
+        Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
     </div>
   }
+}
+
+/// Phones show one pane at a time: when another one comes up, focus moves to its heading, so
+/// screen readers announce it and the keyboard starts there (the old pane's focus is gone).
+fn focus_new_compact_pane(state: AppState) {
+  Effect::new(move |previous: Option<Option<CompactPane>>| {
+    let maybe_pane = state.is_compact().then(|| state.compact_pane());
+    let has_changed = previous.is_some_and(|before| before.is_some() && before != maybe_pane);
+    if let Some(pane) = maybe_pane
+      && has_changed
+      && untrack(|| state.overlay.get()) == Overlay::None
+    {
+      request_animation_frame(move || focus_pane_heading(pane));
+    }
+    maybe_pane
+  });
+}
+
+fn focus_pane_heading(pane: CompactPane) {
+  let selectors = match pane {
+    CompactPane::List => ".app-body > .sidebar .space-name",
+    CompactPane::Main => "#main-content h1, #main-content .header-title, #main-content",
+    CompactPane::Panel => ".app-body > .side-panel h2, .app-body > .side-panel h1, .app-body > .side-panel",
+  };
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  let Some(target) = document
+    .query_selector(selectors)
+    .ok()
+    .flatten()
+    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+  else {
+    return;
+  };
+  // Headings aren't focusable by themselves; -1 keeps them out of the Tab order.
+  if !target.has_attribute("tabindex") && target.set_attribute("tabindex", "-1").is_err() {
+    return;
+  }
+  if target.focus().is_err() {
+    tracing::debug!("could not focus the new pane");
+  }
+}
+
+/// The compact layout's bottom navigation shows on the top-level pages: the lists, Activity and
+/// the welcome page. Deeper pages have a back button instead.
+fn has_bottom_nav(state: AppState) -> bool {
+  state.is_compact()
+    && (state.compact_pane() == CompactPane::List
+      || matches!(state.view.get(), MainView::Activity | MainView::GettingStarted))
 }
 
 fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
@@ -847,7 +928,7 @@ pub(crate) fn on_document(event: &str, callback: impl Fn() + 'static) {
   listen_on(&document, event, callback);
 }
 
-fn listen_on(target: &web_sys::EventTarget, event: &str, callback: impl Fn() + 'static) {
+pub(crate) fn listen_on(target: &web_sys::EventTarget, event: &str, callback: impl Fn() + 'static) {
   let listener = Closure::<dyn Fn()>::new(callback);
   if target
     .add_event_listener_with_callback(event, listener.as_ref().unchecked_ref())

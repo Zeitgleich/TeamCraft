@@ -886,6 +886,8 @@ pub struct BrandConfig {
   pub maybe_terms_url: Option<String>,
   #[serde(rename = "imprint_url", skip_serializing_if = "Option::is_none")]
   pub maybe_imprint_url: Option<String>,
+  #[serde(rename = "download_url", skip_serializing_if = "Option::is_none")]
+  pub maybe_download_url: Option<String>,
   /// Language code -> text; `en` is the fallback.
   pub login_title: BTreeMap<String, String>,
   pub login_text: BTreeMap<String, String>,

@@ -350,9 +350,9 @@ async fn a_full_quota_is_shown_and_recovers() {
 
 /// The stack with the web build, the browser and the data the browser will show: Alice owns a
 /// channel she shares with Carol.
-struct Rig {
+pub(crate) struct Rig {
   stack: Stack,
-  browser: BrowserSession,
+  pub(crate) browser: BrowserSession,
   alice: Peer,
   carol: Peer,
   channel: ConversationId,
@@ -360,7 +360,7 @@ struct Rig {
 }
 
 impl Rig {
-  async fn start() -> Option<Self> {
+  pub(crate) async fn start() -> Option<Self> {
     let Some(web_dir) = web_dir() else {
       let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
       assert!(!is_required, "no web build: run tests/e2e/web/build.sh");
@@ -398,7 +398,7 @@ impl Rig {
     })
   }
 
-  async fn finish(self) {
+  pub(crate) async fn finish(self) {
     self.browser.close().await;
     self.stack.stop().await;
   }
@@ -520,7 +520,7 @@ async fn wait_for_text_gone(page: &Page, needle: &str) {
 }
 
 /// Saves a screenshot as `target/e2e-artifacts/<name>.png` (kept after passing runs too).
-async fn shot(page: &Page, name: &str) {
+pub(crate) async fn shot(page: &Page, name: &str) {
   use chromiumoxide::page::ScreenshotParams;
   let dir = teamcraft_e2e::browser::artifact_dir();
   let _ = std::fs::create_dir_all(&dir);
@@ -579,7 +579,7 @@ pub(crate) async fn wait_for_element(page: &Page, selector: &str) -> chromiumoxi
   }
 }
 
-async fn body_text(page: &Page) -> String {
+pub(crate) async fn body_text(page: &Page) -> String {
   page
     .evaluate("document.body ? document.body.innerText : ''")
     .await

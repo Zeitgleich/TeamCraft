@@ -92,6 +92,7 @@ impl BrandView {
         maybe_privacy: safe_link(response.links.maybe_privacy),
         maybe_terms: safe_link(response.links.maybe_terms),
         maybe_imprint: safe_link(response.links.maybe_imprint),
+        maybe_download: safe_link(response.links.maybe_download),
       },
     })
   }
@@ -338,6 +339,7 @@ mod tests {
       maybe_privacy: Some("https://user:pw@example.com/".into()),
       maybe_terms: Some("http://example.com/terms".into()),
       maybe_imprint: Some("https://example.com/imprint".into()),
+      maybe_download: Some("https://example.com/download".into()),
     };
     let view = BrandView::from_response(hostile, "https://chat.a.example.com").unwrap();
     assert_eq!(view.light, [("--chrome".to_owned(), "#123".to_owned())]);

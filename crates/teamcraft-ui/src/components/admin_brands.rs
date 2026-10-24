@@ -272,6 +272,13 @@ fn BrandEditor(
   let privacy = bind(draft, show_errors, "privacy", |d| &d.privacy, |d| &mut d.privacy);
   let terms = bind(draft, show_errors, "terms", |d| &d.terms, |d| &mut d.terms);
   let imprint = bind(draft, show_errors, "imprint", |d| &d.imprint, |d| &mut d.imprint);
+  let download = bind(
+    draft,
+    show_errors,
+    "download",
+    |d| &d.download,
+    |d| &mut d.download,
+  );
   let sender_name = bind(
     draft,
     show_errors,
@@ -421,6 +428,7 @@ fn BrandEditor(
         <LinkField id="brand-link-privacy" label="admin-brands-link-privacy" bound=privacy />
         <LinkField id="brand-link-terms" label="admin-brands-link-terms" bound=terms />
         <LinkField id="brand-link-imprint" label="admin-brands-link-imprint" bound=imprint />
+        <LinkField id="brand-link-download" label="admin-brands-link-download" bound=download />
       </fieldset>
       <fieldset class="policy-group" prop:disabled=is_read_only>
         <legend>{move || i18n.t("admin-brands-mail")}</legend>
@@ -848,6 +856,7 @@ struct BrandDraft {
   privacy: String,
   terms: String,
   imprint: String,
+  download: String,
   sender_name: String,
   from_address: String,
   light: [String; 7],
@@ -888,6 +897,7 @@ impl BrandDraft {
       privacy: optional(&settings.links.maybe_privacy),
       terms: optional(&settings.links.maybe_terms),
       imprint: optional(&settings.links.maybe_imprint),
+      download: optional(&settings.links.maybe_download),
       sender_name: optional(&settings.mail.maybe_sender_name),
       from_address: optional(&settings.mail.maybe_from_address),
       light: colors_of(&settings.colors.light),
@@ -916,6 +926,7 @@ impl BrandDraft {
         maybe_privacy: optional(&self.privacy),
         maybe_terms: optional(&self.terms),
         maybe_imprint: optional(&self.imprint),
+        maybe_download: optional(&self.download),
       },
       mail: BrandMailSettings {
         maybe_sender_name: optional(&self.sender_name),
@@ -986,6 +997,7 @@ impl Validated for BrandDraft {
       ("privacy", &self.privacy),
       ("terms", &self.terms),
       ("imprint", &self.imprint),
+      ("download", &self.download),
     ] {
       let link = link.trim();
       if !link.is_empty() && !is_web_url(link) {
@@ -1412,6 +1424,7 @@ mod tests {
       "admin-brands-link-privacy",
       "admin-brands-link-terms",
       "admin-brands-link-imprint",
+      "admin-brands-link-download",
       "admin-brands-mail",
       "admin-brands-mail-hint",
       "admin-brands-sender-name",
