@@ -524,6 +524,42 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.invite_to_space(invite);
   }
 
+  fn space_members(&self, space: SpaceId) -> teamcraft_client_api::model::SpaceRoster {
+    self.chat.space_members(space)
+  }
+
+  fn space_invites(&self, space: SpaceId) -> Vec<teamcraft_client_api::model::PendingInvite> {
+    self.chat.space_invites(space)
+  }
+
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self
+      .chat
+      .add_people_to_channel(conversation, people, history, joins_space);
+  }
+
+  fn refresh_space_roster(&self, space: SpaceId) {
+    self.chat.refresh_space_roster(space);
+  }
+
+  fn set_space_role(&self, space: SpaceId, user: UserId, role: teamcraft_client_api::model::SpaceRole) {
+    self.chat.set_space_role(space, user, role);
+  }
+
+  fn remove_space_member(&self, space: SpaceId, user: UserId) {
+    self.chat.remove_space_member(space, user);
+  }
+
+  fn revoke_space_invite(&self, space: SpaceId, invite: teamcraft_client_api::model::InviteId) {
+    self.chat.revoke_space_invite(space, invite);
+  }
+
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
     self.chat.add_space_members(space, users, is_guest);
   }

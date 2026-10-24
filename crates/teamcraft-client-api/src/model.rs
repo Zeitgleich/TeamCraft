@@ -2,8 +2,8 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
-pub use teamcraft_proto::JoinPolicy;
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
+pub use teamcraft_proto::{InviteId, JoinPolicy, SpaceRole};
 
 /// Builds a typed ID from a small integer. Mock data and tests use it; real IDs come from the server.
 pub fn id_from_raw<T: Id>(raw: u64) -> T {
@@ -187,6 +187,39 @@ pub struct Space {
   /// Whether the user may invite guests to the space (the server checks again).
   #[serde(default)]
   pub can_invite_guests: bool,
+  /// Whether the user may change the space's name, picture, join policy and archive it (the
+  /// server checks again).
+  #[serde(default)]
+  pub can_manage_space: bool,
+}
+
+/// A member of a space as the space settings list them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceMember {
+  pub user: UserId,
+  pub display_name: String,
+  pub is_guest: bool,
+  pub role: SpaceRole,
+}
+
+/// The member list of a space as far as the user may see it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "members", rename_all = "snake_case")]
+pub enum SpaceRoster {
+  /// Not loaded yet ([`crate::backend::ChatBackend::refresh_space_roster`]).
+  #[default]
+  Loading,
+  /// The user may not see who is in the space (guests, people outside it).
+  Hidden,
+  Loaded(Vec<SpaceMember>),
+}
+
+/// An invitation by e-mail that nobody has signed in with yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingInvite {
+  pub id: InviteId,
+  pub email: String,
+  pub role: SpaceRole,
 }
 
 /// What a space from an older peer is taken for: nothing to share as a link.
@@ -249,6 +282,7 @@ impl JoinableSpace {
       join_policy: JoinPolicy::Open,
       can_add_members: false,
       can_invite_guests: false,
+      can_manage_space: false,
     }
   }
 }

@@ -180,6 +180,8 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
 fn classify(table: Table, key: &str) -> Change {
   match table {
     Table::Spaces | Table::Conversations | Table::Users | Table::Categories => Change::Everything,
+    // The space settings read them; written when they open and after each change.
+    Table::SpaceRosters | Table::SpaceInvites => Change::Everything,
     Table::Workspace => Change::Workspace,
     Table::Members => conversation_of(key),
     // Keyed `conversation/…`: shown with the conversation's messages.

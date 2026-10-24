@@ -211,6 +211,7 @@ pub fn build_snapshot(
       join_policy: space.join_policy.clone(),
       can_add_members: space.can_add_members,
       can_invite_guests: space.can_invite_guests,
+      can_manage_space: space.can_manage_space,
     })
     .collect();
 

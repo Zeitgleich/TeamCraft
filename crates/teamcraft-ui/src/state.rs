@@ -20,6 +20,7 @@ use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
+use crate::unread_divider::{DividerEvent, next_divider};
 use crate::viewport::{CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
 use teamcraft_proto::Role;
@@ -733,6 +734,10 @@ impl AppState {
       self.panel.set(SidePanel::Closed);
     }
     if self.view.get_untracked() != MainView::Conversation(id) {
+      // Leaving a conversation removes its divider; the new one is placed from its read marker.
+      if let MainView::Conversation(previous) = self.view.get_untracked() {
+        self.divider_event(previous, DividerEvent::Left);
+      }
       self.unread_marker.set(self.unread_marker_for(&conversation));
       self.settings.remember_conversation(id);
       self.linked_message.set(None);
@@ -742,6 +747,24 @@ impl AppState {
     if conversation.unread_count > 0 || conversation.mention_count > 0 {
       self.write(|backend| backend.mark_read(id));
     }
+  }
+
+  /// Moves or removes the "New messages" divider after something happened in `conversation`.
+  pub fn divider_event(&self, conversation: ConversationId, event: DividerEvent) {
+    let Some(current) = self.unread_marker.try_get_untracked() else {
+      return;
+    };
+    let next = next_divider(current, conversation, event);
+    if next != current {
+      self.unread_marker.try_set(next);
+    }
+  }
+
+  /// Esc in a conversation: everything is read and the divider goes (#321). The read marker only
+  /// moves forward (the core's queue, #159).
+  pub fn mark_conversation_read(&self, conversation: ConversationId) {
+    self.write(|backend| backend.mark_read(conversation));
+    self.divider_event(conversation, DividerEvent::MarkedRead);
   }
 
   /// Where the "New messages" divider of a conversation goes, before opening marks it as read.
@@ -1936,6 +1959,125 @@ mod tests {
       let state = test_state();
       state.layout.set(Layout::Compact);
       state
+    }
+  }
+
+  mod unread_divider {
+    use super::*;
+
+    #[test]
+    fn sending_removes_the_divider() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.open_conversation(unread);
+      place_divider(&state, unread);
+      state.divider_event(unread, DividerEvent::Sent);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    #[test]
+    fn coming_back_with_nothing_new_shows_no_divider() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.open_conversation(unread);
+      place_divider(&state, unread);
+      state.open_conversation(first_dm(&state));
+      assert!(
+        state
+          .unread_marker
+          .get_untracked()
+          .is_none_or(|marker| marker.conversation != unread)
+      );
+      // Opening marked it read: nothing is new now.
+      state.open_conversation(unread);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    #[test]
+    fn esc_marks_read_and_removes_the_divider() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      place_divider(&state, unread);
+      state.mark_conversation_read(unread);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert_eq!(after.unread_count, 0);
+    }
+
+    #[test]
+    fn only_a_real_conversation_change_counts_as_leaving() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.open_conversation(unread);
+      place_divider(&state, unread);
+      // Opening the same conversation again (a remount, a route written another way) keeps it.
+      state.open_conversation(unread);
+      assert_eq!(
+        state
+          .unread_marker
+          .get_untracked()
+          .map(|marker| marker.conversation),
+        Some(unread)
+      );
+      state.open_conversation(first_dm(&state));
+      assert!(
+        state
+          .unread_marker
+          .get_untracked()
+          .is_none_or(|marker| marker.conversation != unread)
+      );
+    }
+
+    #[test]
+    fn the_divider_never_moves_the_read_marker_back() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.mark_conversation_read(unread);
+      // News while away places a divider; that is view state only, nothing becomes unread again.
+      state.divider_event(
+        unread,
+        DividerEvent::ArrivedWhileAway {
+          first_new: 2,
+          is_own: false,
+          has_seen_divider: true,
+        },
+      );
+      assert_eq!(
+        state.unread_marker.get_untracked().map(|marker| marker.index),
+        Some(2)
+      );
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert_eq!(after.unread_count, 0);
+      state.divider_event(unread, DividerEvent::DwelledAtBottom);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    fn place_divider(state: &AppState, conversation: ConversationId) {
+      state.unread_marker.set(Some(UnreadMarker {
+        conversation,
+        index: 3,
+      }));
+    }
+
+    fn unread_conversation(state: &AppState) -> ConversationId {
+      state
+        .read(|backend| {
+          let mut all: Vec<Conversation> = backend
+            .spaces()
+            .into_iter()
+            .flat_map(|space| backend.space_conversations(space.id))
+            .collect();
+          all.extend(backend.direct_conversations());
+          all
+        })
+        .into_iter()
+        .find(|conversation| conversation.unread_count > 0)
+        .map(|conversation| conversation.id)
+        .expect("demo data has unread messages")
     }
   }
 

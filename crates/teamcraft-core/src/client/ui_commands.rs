@@ -214,6 +214,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .invite_to_space(space, &email, is_guest, channels, maybe_expires_at, maybe_message)
           .await
       },
+      CoreCommand::AddPeopleToChannel {
+        conversation,
+        people,
+        history,
+        joins_space,
+      } => {
+        self
+          .add_people_to_channel(conversation, &people, history, joins_space)
+          .await
+      },
+      CoreCommand::RefreshSpaceRoster { space } => {
+        self.refresh_space_roster(space).await?;
+        self.refresh_space_invites(space).await
+      },
+      CoreCommand::SetSpaceRole { space, user, role } => self.set_space_role(space, user, role).await,
+      CoreCommand::RemoveSpaceMember { space, user } => self.remove_space_member(space, user).await,
+      CoreCommand::RevokeSpaceInvite { space, invite } => self.revoke_space_invite(space, invite).await,
       CoreCommand::AddSpaceMembers {
         space,
         users,

@@ -930,6 +930,7 @@ impl Core {
         len,
         reply,
       } => {
+        // async-ok: the core's catch-up focus (a shared cell), not a signal.
         self.catch_up_focus.set(conversation);
         drop(reply.send(self.window(conversation, start, len)));
       },
@@ -1678,6 +1679,7 @@ fn watch_page_lifecycle(store: &Rc<IndexedDbStore>) {
     if event.type_() == "visibilitychange" && is_page_visible() {
       return;
     }
+    // async-ok: a thread-local weak reference to the store, not a signal.
     if let Some(store) = LIFECYCLE_STORE.with(|current| current.borrow().upgrade()) {
       store.write_now();
     }

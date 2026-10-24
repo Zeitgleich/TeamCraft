@@ -364,6 +364,30 @@ pub trait ChatBackend {
   /// Adds people from the directory to a space as members or guests; people already in it are
   /// skipped.
   fn add_space_members(&self, _space: SpaceId, _users: Vec<UserId>, _is_guest: bool) {}
+  /// Adds people to a channel (`(user, is_guest_account)`), first to its space when `joins_space`;
+  /// someone whose space add failed is not added to the channel.
+  fn add_people_to_channel(
+    &self,
+    _conversation: ConversationId,
+    _people: Vec<(UserId, bool)>,
+    _history: HistoryPolicy,
+    _joins_space: bool,
+  ) {
+  }
+  /// The members of a space with their roles, as far as the user may see them.
+  fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {
+    crate::model::SpaceRoster::Loading
+  }
+  /// The space's pending e-mail invitations (empty for people who may not manage members).
+  fn space_invites(&self, _space: SpaceId) -> Vec<crate::model::PendingInvite> {
+    Vec::new()
+  }
+  /// Loads the members and pending invitations of a space afresh (the space settings opened).
+  fn refresh_space_roster(&self, _space: SpaceId) {}
+  fn set_space_role(&self, _space: SpaceId, _user: UserId, _role: crate::model::SpaceRole) {}
+  /// Removes someone from the space and, on the server, from its channels.
+  fn remove_space_member(&self, _space: SpaceId, _user: UserId) {}
+  fn revoke_space_invite(&self, _space: SpaceId, _invite: crate::model::InviteId) {}
   /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
   /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
   fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}

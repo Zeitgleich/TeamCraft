@@ -162,6 +162,7 @@ fn browsable(conversation: &ConversationResponse, space: SpaceId, is_member: boo
     is_member,
     is_archived: conversation.is_archived,
     has_external_people: conversation.contains_guests,
+    maybe_category: conversation.maybe_category_id,
   }
 }
 

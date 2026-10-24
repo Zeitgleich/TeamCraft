@@ -343,6 +343,7 @@ mod tests {
       member_count: 1,
       can_add_members: false,
       can_invite_guests: false,
+      can_manage_space: false,
     };
     records::put_json(&store, Table::Spaces, &space.to_string(), &project).unwrap();
     let conversation = ConversationResponse {

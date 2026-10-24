@@ -23,14 +23,14 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
-  JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction,
-  SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
-  hue_from_hex,
+  JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PendingInvite, PresenceStatus,
+  Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
+  TimestampMs, User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
-  ConversationVisibility, Id, JoinPolicy, ListConversationMembersResponse, MessageId, NotificationLevel,
-  PresenceState, Snowflake, SpaceResponse, UserKind, UserSummary,
+  ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
+  MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
@@ -41,7 +41,7 @@ use teamcraft_proto::{
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 
 use crate::client::bookmarks_key;
-use crate::client::workspace_admin::ChannelOptions;
+use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
 use crate::error::CoreError;
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
@@ -246,6 +246,30 @@ pub enum CoreCommand {
     channels: Vec<ConversationId>,
     maybe_expires_at: Option<i64>,
     maybe_message: Option<String>,
+  },
+  /// People join a channel, first its space when asked (the add-people dialog).
+  AddPeopleToChannel {
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  },
+  /// The members and pending invitations of a space, for its settings.
+  RefreshSpaceRoster {
+    space: SpaceId,
+  },
+  SetSpaceRole {
+    space: SpaceId,
+    user: UserId,
+    role: SpaceRole,
+  },
+  RemoveSpaceMember {
+    space: SpaceId,
+    user: UserId,
+  },
+  RevokeSpaceInvite {
+    space: SpaceId,
+    invite: InviteId,
   },
   /// People picked from the directory join a space (those already in it are skipped).
   AddSpaceMembers {
@@ -788,6 +812,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         join_policy: space.join_policy,
         can_add_members: space.can_add_members,
         can_invite_guests: space.can_invite_guests,
+        can_manage_space: space.can_manage_space,
       })
       .collect()
   }
@@ -1396,6 +1421,80 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       maybe_expires_at: invite.maybe_expires_at,
       maybe_message: invite.maybe_message,
     });
+  }
+
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
+    let stored: Option<StoredRoster> = self.read(records::get_json(
+      &self.store,
+      Table::SpaceRosters,
+      &space.to_string(),
+    ));
+    let roster = match stored {
+      None => return SpaceRoster::Loading,
+      Some(StoredRoster::Hidden) => return SpaceRoster::Hidden,
+      Some(StoredRoster::Visible(roster)) => roster,
+    };
+    let mut members: Vec<SpaceMember> = roster
+      .members
+      .into_iter()
+      .map(|member| SpaceMember {
+        user: member.user.id,
+        is_guest: member.user.kind == UserKind::Guest,
+        display_name: member.user.display_name,
+        role: member.role,
+      })
+      .collect();
+    members.sort_by_key(|member| member.display_name.to_lowercase());
+    SpaceRoster::Loaded(members)
+  }
+
+  fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {
+    let invites: Option<ListInvitesResponse> = self.read(records::get_json(
+      &self.store,
+      Table::SpaceInvites,
+      &space.to_string(),
+    ));
+    invites
+      .map(|list| list.invites)
+      .unwrap_or_default()
+      .into_iter()
+      .map(|invite| PendingInvite {
+        id: invite.id,
+        email: invite.email,
+        role: invite.role,
+      })
+      .collect()
+  }
+
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self.command(CoreCommand::AddPeopleToChannel {
+      conversation,
+      people,
+      history,
+      joins_space,
+    });
+  }
+
+  fn refresh_space_roster(&self, space: SpaceId) {
+    self.command(CoreCommand::RefreshSpaceRoster { space });
+  }
+
+  fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
+    self.command(CoreCommand::SetSpaceRole { space, user, role });
+  }
+
+  fn remove_space_member(&self, space: SpaceId, user: UserId) {
+    self.command(CoreCommand::RemoveSpaceMember { space, user });
+  }
+
+  fn revoke_space_invite(&self, space: SpaceId, invite: InviteId) {
+    self.command(CoreCommand::RevokeSpaceInvite { space, invite });
   }
 
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {

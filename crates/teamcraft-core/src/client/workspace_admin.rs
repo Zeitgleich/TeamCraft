@@ -5,9 +5,10 @@ use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, ConversationId, ConversationKind, ConversationResponse,
   ConversationVisibility, CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest,
-  CreateSpaceRequest, HistoryPolicy, IdempotencyKey, ListCategoriesResponse, ListConversationsResponse,
-  MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest,
-  UpdateConversationRequest, UpdateSpaceRequest, UserId,
+  CreateSpaceRequest, HistoryPolicy, IdempotencyKey, InviteId, ListCategoriesResponse,
+  ListConversationsResponse, ListInvitesResponse, ListSpaceMembersResponse, MoveChannelRequest, SpaceId,
+  SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest, UpdateConversationRequest,
+  UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId,
 };
 
 use super::Client;
@@ -17,6 +18,15 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
+
+/// A space's member list as the store keeps it (`Table::SpaceRosters`).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "roster", rename_all = "snake_case")]
+pub(crate) enum StoredRoster {
+  Visible(ListSpaceMembersResponse),
+  /// The server doesn't show this user the members.
+  Hidden,
+}
 
 /// A new channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,35 +305,154 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_message,
     };
     self.api.create_invite(space, &request).await?;
+    self.refresh_space_invites(space).await
+  }
+
+  /// The space's members with their roles, kept for the space settings. Guests and people outside
+  /// the space may not list them: that is kept as hidden, not an error.
+  pub async fn refresh_space_roster(&mut self, space: SpaceId) -> Result<(), CoreError> {
+    let stored = match self.api.list_space_members(space).await {
+      Ok(roster) => StoredRoster::Visible(roster),
+      Err(ApiError::Status {
+        status: 403 | 404, ..
+      }) => StoredRoster::Hidden,
+      Err(error) => return Err(error.into()),
+    };
+    records::put_json(&self.store, Table::SpaceRosters, &space.to_string(), &stored)?;
     Ok(())
   }
 
-  /// Adds people from the directory to a space, as members or guests. People already in the space
-  /// are skipped: adding them again would change their role. Space membership is directory data;
-  /// the space's channels are joined one by one through their encryption groups (e2ee.md §4.6).
+  /// The space's pending invitations. Only member managers may list them; for everybody else the
+  /// list is empty rather than an error.
+  pub async fn refresh_space_invites(&mut self, space: SpaceId) -> Result<(), CoreError> {
+    let invites = match self.api.list_invites(space).await {
+      Ok(invites) => invites,
+      Err(ApiError::Status {
+        status: 403 | 404, ..
+      }) => ListInvitesResponse { invites: Vec::new() },
+      Err(error) => return Err(error.into()),
+    };
+    records::put_json(&self.store, Table::SpaceInvites, &space.to_string(), &invites)?;
+    Ok(())
+  }
+
+  /// Changes a member's role in the space (member, guest, space admin).
+  pub async fn set_space_role(
+    &mut self,
+    space: SpaceId,
+    user: UserId,
+    role: SpaceRole,
+  ) -> Result<(), CoreError> {
+    let request = UpdateSpaceMemberRequest {
+      role,
+      maybe_expires_at: None,
+      clears_expiry: false,
+    };
+    self.api.update_space_member(space, user, &request).await?;
+    self.refresh_space_roster(space).await
+  }
+
+  /// Removes someone from the space; the server also takes them out of its channels, whose
+  /// members' clients then remove their devices from the encryption groups (e2ee.md §4.6).
+  pub async fn remove_space_member(&mut self, space: SpaceId, user: UserId) -> Result<(), CoreError> {
+    self.api.remove_space_member(space, user).await?;
+    self.refresh_space_roster(space).await?;
+    self.refresh_spaces().await
+  }
+
+  /// Withdraws a pending invitation.
+  pub async fn revoke_space_invite(&mut self, space: SpaceId, invite: InviteId) -> Result<(), CoreError> {
+    self.api.delete_invite(space, invite).await?;
+    self.refresh_space_invites(space).await
+  }
+
+  /// Adds people from the directory to a space, as members or guests. The server's add is
+  /// idempotent and never changes the role of someone already in the space (it answers 409), so
+  /// people already in it count as added. Space membership is directory data; the space's channels
+  /// are joined one by one through their encryption groups (e2ee.md §4.6).
   pub async fn add_space_members(
     &mut self,
     space: SpaceId,
     users: &[UserId],
     is_guest: bool,
   ) -> Result<(), CoreError> {
-    let members = self.api.list_space_members(space).await?;
+    let (_, maybe_first_error) = self.add_to_space(space, users, is_guest).await;
+    // The member count, the roster and the people the user can find changed.
+    self.refresh_spaces().await?;
+    self.refresh_space_roster(space).await?;
+    maybe_first_error.map_or(Ok(()), |error| Err(error.into()))
+  }
+
+  /// Adds people to a channel through its encryption group, first to the channel's space when
+  /// `joins_space` (members as members, guest accounts as guests). Someone whose space add failed
+  /// is not added to the channel: the server would refuse it anyway. Returns the first error.
+  pub async fn add_people_to_channel(
+    &mut self,
+    conversation: ConversationId,
+    people: &[(UserId, bool)],
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) -> Result<(), CoreError> {
+    let mut ready: Vec<UserId> = people.iter().map(|(user, _)| *user).collect();
+    let mut maybe_first_error: Option<CoreError> = None;
+    let maybe_space = self
+      .cached_conversations()?
+      .get(&conversation)
+      .and_then(|c| c.maybe_space_id);
+    if let Some(space) = maybe_space.filter(|_| joins_space) {
+      ready.clear();
+      for is_guest in [false, true] {
+        let users: Vec<UserId> = people
+          .iter()
+          .filter(|(_, guest)| *guest == is_guest)
+          .map(|(user, _)| *user)
+          .collect();
+        let (added, maybe_error) = self.add_to_space(space, &users, is_guest).await;
+        ready.extend(added);
+        if let Some(error) = maybe_error {
+          maybe_first_error.get_or_insert(error.into());
+        }
+      }
+      self.refresh_spaces().await?;
+    }
+    for user in ready {
+      if let Err(error) = self
+        .add_member_with_history(conversation, user, Some(history.clone()))
+        .await
+      {
+        tracing::warn!(%error, conversation_id = %conversation, "adding a person to the channel failed");
+        maybe_first_error.get_or_insert(error);
+      }
+    }
+    maybe_first_error.map_or(Ok(()), Err)
+  }
+
+  /// Adds each user once; returns who is in the space now and the first refusal. A 409 (already
+  /// in the space with another role) counts as in.
+  async fn add_to_space(
+    &mut self,
+    space: SpaceId,
+    users: &[UserId],
+    is_guest: bool,
+  ) -> (Vec<UserId>, Option<ApiError>) {
+    let mut added = Vec::new();
     let mut maybe_first_error = None;
-    for user in users_to_add(users, members.members.iter().map(|member| member.user.id)) {
+    for user in users_to_add(users, std::iter::empty()) {
       let request = AddSpaceMemberRequest {
         user_id: user,
         role: space_role(is_guest),
         maybe_expires_at: None,
       };
-      // One refusal (a deactivated account, a guest as member) doesn't stop the others.
-      if let Err(error) = self.api.add_space_member(space, &request).await {
-        tracing::warn!(%error, space_id = %space, "adding a person to the space failed");
-        maybe_first_error.get_or_insert(error);
+      match self.api.add_space_member(space, &request).await {
+        Ok(_) | Err(ApiError::Status { status: 409, .. }) => added.push(user),
+        // One refusal (a deactivated account, a guest as member) doesn't stop the others.
+        Err(error) => {
+          tracing::warn!(%error, space_id = %space, "adding a person to the space failed");
+          maybe_first_error.get_or_insert(error);
+        },
       }
     }
-    // The member count and the people the user can find changed.
-    self.refresh_spaces().await?;
-    maybe_first_error.map_or(Ok(()), |error| Err(error.into()))
+    (added, maybe_first_error)
   }
 
   /// Sends a system message about a change, encrypted like any message.

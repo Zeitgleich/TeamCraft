@@ -14,13 +14,13 @@ use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
   ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
   CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage,
-  GetMeResponse, IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse,
-  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
-  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
-  ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SearchUsersResponse,
-  SendMessageRequest, SpaceId, SpaceMemberResponse, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
-  UserId, UserSummary,
+  GetMeResponse, IdentityKeyResponse, InviteId, KeyBagResponse, KeyPackageStatusResponse,
+  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListInvitesResponse,
+  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
+  ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
+  UpdateSpaceMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -707,6 +707,33 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   ) -> Result<InviteResponse, ApiError> {
     self
       .send_json(Method::POST, &format!("/spaces/{space}/invites"), request)
+      .await
+  }
+
+  async fn list_invites(&self, space: SpaceId) -> Result<ListInvitesResponse, ApiError> {
+    self.get(&format!("/spaces/{space}/invites")).await
+  }
+
+  async fn delete_invite(&self, space: SpaceId, invite: InviteId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}/invites/{invite}"), None)
+      .await
+  }
+
+  async fn update_space_member(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    request: &UpdateSpaceMemberRequest,
+  ) -> Result<SpaceMemberResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/spaces/{space}/members/{user}"), request)
+      .await
+  }
+
+  async fn remove_space_member(&self, space: SpaceId, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}/members/{user}"), None)
       .await
   }
 

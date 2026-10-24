@@ -19,10 +19,10 @@ use crate::backend::ChatBackend;
 use crate::calls::BackgroundImageInfo;
 use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinPolicy,
-  JoinableSpace, LogLevel, Message, MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space,
-  SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId, id_from_raw, raw_id,
-  root_message_of, thread_id_of,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, InviteId, JoinPolicy,
+  JoinableSpace, LogLevel, Message, MessageId, MessageKind, PendingInvite, PresenceStatus, Reaction,
+  SidebarCategory, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
+  TimestampMs, User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
 };
 
 /// Number of lines in the large log channel.
@@ -207,6 +207,11 @@ struct State {
   share_links: HashMap<String, ShareLink>,
   /// Open spaces the user isn't in yet.
   joinable: Vec<JoinableSpace>,
+  /// Space roles other than member, and people removed from a space (the demo has everyone in
+  /// every space otherwise).
+  space_roles: HashMap<(SpaceId, UserId), SpaceRole>,
+  space_leavers: HashSet<(SpaceId, UserId)>,
+  invites: Vec<(SpaceId, PendingInvite)>,
 }
 
 impl MockBackend {
@@ -228,6 +233,7 @@ impl MockBackend {
           join_policy: JoinPolicy::Open,
           can_add_members: true,
           can_invite_guests: true,
+          can_manage_space: true,
         },
         Space {
           id: space_b(),
@@ -242,6 +248,7 @@ impl MockBackend {
           join_policy: JoinPolicy::InviteOnly,
           can_add_members: false,
           can_invite_guests: false,
+          can_manage_space: false,
         },
       ],
       conversations: demo_conversations(),
@@ -260,6 +267,16 @@ impl MockBackend {
         maybe_image_version: None,
         member_count: 12,
       }],
+      space_roles: HashMap::new(),
+      space_leavers: HashSet::new(),
+      invites: vec![(
+        space_a(),
+        PendingInvite {
+          id: id_from_raw(900),
+          email: "new.colleague@example.com".into(),
+          role: SpaceRole::Member,
+        },
+      )],
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -373,6 +390,7 @@ impl ChatBackend for MockBackend {
         is_member: true,
         is_archived: false,
         has_external_people: false,
+        maybe_category: None,
       })
       .collect();
     if space == space_a() {
@@ -384,6 +402,7 @@ impl ChatBackend for MockBackend {
         is_member: false,
         is_archived: false,
         has_external_people: true,
+        maybe_category: None,
       });
     }
     list
@@ -467,6 +486,57 @@ impl ChatBackend for MockBackend {
 
   fn spaces(&self) -> Vec<Space> {
     self.state.borrow().spaces.clone()
+  }
+
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
+    let state = self.state.borrow();
+    let mut members: Vec<SpaceMember> = state
+      .users
+      .iter()
+      .filter(|user| !user.is_bot && !state.space_leavers.contains(&(space, user.id)))
+      .map(|user| SpaceMember {
+        user: user.id,
+        display_name: user.display_name.clone(),
+        is_guest: user.is_guest,
+        role: state
+          .space_roles
+          .get(&(space, user.id))
+          .cloned()
+          .unwrap_or(if user.is_guest {
+            SpaceRole::Guest
+          } else {
+            SpaceRole::Member
+          }),
+      })
+      .collect();
+    members.sort_by_key(|member| member.display_name.to_lowercase());
+    SpaceRoster::Loaded(members)
+  }
+
+  fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {
+    let state = self.state.borrow();
+    state
+      .invites
+      .iter()
+      .filter(|(of, _)| *of == space)
+      .map(|(_, invite)| invite.clone())
+      .collect()
+  }
+
+  fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
+    self.state.borrow_mut().space_roles.insert((space, user), role);
+  }
+
+  fn remove_space_member(&self, space: SpaceId, user: UserId) {
+    self.state.borrow_mut().space_leavers.insert((space, user));
+  }
+
+  fn revoke_space_invite(&self, space: SpaceId, invite: InviteId) {
+    self
+      .state
+      .borrow_mut()
+      .invites
+      .retain(|(of, candidate)| !(*of == space && candidate.id == invite));
   }
 
   fn joinable_spaces(&self) -> Vec<JoinableSpace> {

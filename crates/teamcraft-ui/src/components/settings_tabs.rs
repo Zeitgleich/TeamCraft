@@ -886,6 +886,19 @@ pub fn DisplayTab() -> impl IntoView {
       value=Signal::derive(move || prefs.get().display.show_status_in_messages)
       on_change=Callback::new(move |value: bool| prefs.update(|all| all.display.show_status_in_messages = value))
     />
+    <SelectField
+      id="setting-divider-dwell"
+      label="settings-divider-dwell"
+      options=options(&["5", "10", "30", "never"], "settings-divider-dwell-")
+      value=Signal::derive(move || {
+        prefs.get().display.maybe_divider_dwell_secs.map_or_else(|| "never".to_owned(), |secs| secs.to_string())
+      })
+      on_change=Callback::new(move |slug: String| {
+        let maybe_secs = slug.parse::<u16>().ok();
+        prefs.update(|all| all.display.maybe_divider_dwell_secs = maybe_secs);
+      })
+      hint="settings-divider-dwell-hint"
+    />
   }
 }
 
