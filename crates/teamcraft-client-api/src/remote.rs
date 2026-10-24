@@ -31,6 +31,9 @@ pub const CORE_CHANGED_EVENT: &str = "core-changed";
 /// Event name the host emits whenever call state changed (ringing, roster, media).
 pub const CALL_CHANGED_EVENT: &str = "call-changed";
 
+/// A `teamcraft:` link the operating system handed to the desktop app; the payload is the link.
+pub const DEEP_LINK_EVENT: &str = "teamcraft://deep-link";
+
 /// Everything the call UI shows, in one piece.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CallSnapshot {

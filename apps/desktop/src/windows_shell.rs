@@ -14,8 +14,8 @@ use tracing::{debug, warn};
 
 use crate::tray;
 
-/// Event with the link (a string) that opened or re-opened the app.
-pub const DEEP_LINK_EVENT: &str = "teamcraft://deep-link";
+/// Event with the link (a string) that opened or re-opened the app; the UI listens for it.
+pub use teamcraft_client_api::remote::DEEP_LINK_EVENT;
 
 /// Adds the Windows plugins, after the single-instance plugin.
 pub fn plugins(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {

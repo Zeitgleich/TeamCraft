@@ -29,6 +29,7 @@ pub mod diff;
 pub use teamcraft_client_api::{emoji, emoji_catalog};
 pub mod groups;
 pub mod highlight;
+pub mod history;
 pub mod hybrid;
 pub mod i18n;
 pub mod keys;
