@@ -1782,7 +1782,8 @@ select.input {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  box-shadow: 0 2px 8px rgba(16, 24, 40, 0.12);
+  /* The same frame as the picture toolbar (.media-toolbar). */
+  box-shadow: var(--shadow-card, 0 2px 8px rgba(16, 24, 40, 0.12));
 }
 
 .msg-toolbar .icon-btn.is-on {

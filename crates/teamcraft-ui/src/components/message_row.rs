@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
+use wasm_bindgen::JsCast;
 
 use crate::clock::{format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -715,7 +716,13 @@ impl LongPress {
 
   fn start(&self, ev: &web_sys::PointerEvent) {
     self.has_fired.set_value(false);
-    if ev.pointer_type() != "touch" {
+    // Pictures have their own long-press actions (the media toolbar).
+    let is_on_picture = ev
+      .target()
+      .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+      .and_then(|element| element.closest(".media-tile").ok().flatten())
+      .is_some();
+    if ev.pointer_type() != "touch" || is_on_picture {
       return;
     }
     let generation = self.bump();
