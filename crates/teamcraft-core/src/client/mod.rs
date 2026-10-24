@@ -351,6 +351,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       group.delete(&self.provider)?;
     }
+    self.forget_group_records(conversation)
+  }
+
+  /// The part of [`Self::drop_group`] outside the MLS state: what this device noted about the
+  /// group next to it. Alone for a group whose MLS state a joined group took over.
+  fn forget_group_records(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.groups.remove(&conversation);
     self
       .store
       .delete(Table::AppliedChanges, &conversation.to_string())?;

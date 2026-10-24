@@ -24,7 +24,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 pub use content_keys::ContentKeyBundle;
 pub use group::{
   ChangeHistory, CommitOutput, ConversationGroup, GroupEvent, MAX_CHANGE_AGE_EPOCHS, MembershipUpdate,
-  PendingCommit, StagedJoin,
+  PendingCommit, StagedJoin, VerifiedWelcome,
 };
 pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
 

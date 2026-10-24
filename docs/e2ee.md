@@ -523,6 +523,22 @@ cursor stays before the later entries, so nothing after the welcome is lost. Mes
 content keys of epochs the device missed stay unreadable unless another device of the user had them
 in the key bag.
 
+**Founding a DM, and finishing it.** A DM or group DM has no creator who must found it: whichever
+participant's device first commits at epoch 0 owns the group, and the server keeps only that commit.
+The device that opened the DM keeps a setup record until its group holds every participant it asked
+for (from the user's own request, never the server's member list), and finishes a setup cut short
+(crash, lost network) on the next open, or on a sync at `rejoin_retry` doubled per attempt, up to
+`rejoin_retry_max`. It founds only when the server shows no group (epoch 0) and it has none. A group
+of one that this device founded and nobody joined is given up only for a welcome that checks out:
+every leaf verified against the pinned identities and active by its user's newest signed device
+list, the tree holding exactly this user and the DM's other participants, and made by one of those
+participants or by another device of this user, which a signed device list must name (fails closed:
+a revoked device can't hand out the group). The founded group goes only after the join succeeded. The
+server's word alone (an epoch conflict, a later epoch in the queue) never makes it drop the group,
+so a server can't make devices drop and found again in a loop; it can only delay the DM. On giving
+up, the founding content key stops being current but stays in the ring (and the account's key bag,
+which merges by union), and the winner's key becomes current when it arrives.
+
 **Server time for merge decisions.** Whether every member merges a commit must not depend on its own
 clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the
 server's time of the commit (its queue ID), and a device's removal time for refusing its later

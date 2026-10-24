@@ -164,7 +164,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// [`Self::join_channel`], once per channel. Returns how many were requested.
   pub async fn join_missing_groups(&mut self) -> Result<usize, CoreError> {
     let mut requested = 0;
-    let mut maybe_first_error = None;
+    // DMs this device created whose group setup was cut short (issue #228).
+    let mut maybe_first_error = self.repair_dm_setups().await.err();
     for response in self.cached_conversations()?.into_values() {
       if response.maybe_my_membership.is_some()
         && !self.has_group(response.id)?

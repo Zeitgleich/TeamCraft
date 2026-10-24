@@ -4,12 +4,13 @@
 use std::collections::BTreeSet;
 
 use rand_core::OsRng;
+use teamcraft_crypto::content_key::{ContentKey, ContentKeyId};
 use teamcraft_crypto::membership::{
   HistoryShare, MembershipAction, MembershipChange, SignedMembershipChange,
 };
 use teamcraft_crypto::mls::{
   CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent, GroupMember, MembershipUpdate, MlsError,
-  RejoinRequest, SignedRejoinRequest,
+  RejoinRequest, SignedRejoinRequest, VerifiedWelcome,
 };
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
@@ -46,6 +47,8 @@ pub(crate) const REJOIN_REQUEST_MAGIC: &[u8] = b"TCRJ";
 const PENDING_COMMIT_ROUNDS: u32 = 3;
 /// Tries of a create request whose answer was lost; all carry the same idempotency key.
 pub(crate) const CREATE_ATTEMPTS: u32 = 3;
+/// Key prefix of [`DmSetupRecord`]s in the sync state.
+const DM_SETUP_PREFIX: &str = "dm-setup/";
 
 /// This device's commit, merged: what it did and when the server stored it.
 struct OwnCommit {
@@ -69,6 +72,21 @@ struct RejoinRecord {
   /// wait before the next, up to `rejoin_retry_max`.
   #[serde(default)]
   attempts: u32,
+}
+
+/// A DM or group DM this device created whose MLS group doesn't hold everybody yet: kept until
+/// it does, so a setup cut short is finished later (issue #228).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct DmSetupRecord {
+  /// Who the user opened it with (from the user's own request, not the server's member list).
+  others: Vec<UserId>,
+  tried_at_ms: i64,
+  /// Attempts so far: each doubles the wait before the next, up to `rejoin_retry_max`.
+  attempts: u32,
+  /// The content key this device made when it founded the group, while it may still lose the
+  /// founding race; it stops being current if it does.
+  #[serde(default)]
+  maybe_founding_key_id: Option<[u8; 16]>,
 }
 
 /// What became of opening a welcome.
@@ -164,7 +182,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Stores a DM or group DM and founds its MLS group with `others`, unless this device already
-  /// has it or someone else founded it first.
+  /// has it or someone else founded it first. Until the group holds everybody, a setup record
+  /// stays behind so that a setup cut short (crash, lost network) is finished on a later sync
+  /// ([`Self::repair_dm_setups`]).
   async fn found_participants_group(
     &mut self,
     conversation: teamcraft_proto::ConversationResponse,
@@ -172,23 +192,122 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<ConversationId, CoreError> {
     let id = conversation.id;
     records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
-    if self.has_group(id)? {
+    let maybe_setup = records::get_json::<DmSetupRecord>(&self.store, Table::SyncState, &dm_setup_key(id))?;
+    if self.has_group(id)? && maybe_setup.is_none() {
       return Ok(id);
+    }
+    // Opened by the user: tried now, whatever the backoff of an earlier attempt says.
+    let setup = DmSetupRecord {
+      others: others.to_vec(),
+      tried_at_ms: self.now_ms(),
+      attempts: maybe_setup
+        .as_ref()
+        .map_or(0, |record| record.attempts)
+        .saturating_add(1),
+      maybe_founding_key_id: maybe_setup.and_then(|record| record.maybe_founding_key_id),
+    };
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
+    self.finish_dm_setup(id, others).await?;
+    Ok(id)
+  }
+
+  /// Finishes the MLS setup of DMs this device created whose setup was cut short, at a growing
+  /// interval per DM (`rejoin_retry` doubled per attempt, up to `rejoin_retry_max`). One DM
+  /// failing doesn't keep the others from being repaired. Returns how many were completed.
+  pub(crate) async fn repair_dm_setups(&mut self) -> Result<usize, CoreError> {
+    let mut repaired = 0;
+    let mut maybe_first_error = None;
+    let conversations = self.cached_conversations()?;
+    let setups: Vec<(String, DmSetupRecord)> =
+      records::list_json_with_prefix(&self.store, Table::SyncState, DM_SETUP_PREFIX)?;
+    for (key, setup) in setups {
+      let Some(id) = key
+        .strip_prefix(DM_SETUP_PREFIX)
+        .and_then(|id| id.parse::<ConversationId>().ok())
+      else {
+        continue;
+      };
+      let is_member = conversations
+        .get(&id)
+        .is_some_and(|response| response.maybe_my_membership.is_some());
+      if !is_member {
+        // Gone or left: nothing to set up any more.
+        self.store.delete(Table::SyncState, &key)?;
+        continue;
+      }
+      let now = self.now_ms();
+      if now.saturating_sub(setup.tried_at_ms) < self.rejoin_wait_ms(setup.attempts) {
+        continue;
+      }
+      records::put_json(
+        &self.store,
+        Table::SyncState,
+        &key,
+        &DmSetupRecord {
+          tried_at_ms: now,
+          attempts: setup.attempts.saturating_add(1),
+          ..setup.clone()
+        },
+      )?;
+      match self.finish_dm_setup(id, &setup.others).await {
+        Ok(true) => repaired += 1,
+        Ok(false) => {},
+        // Network trouble fails the sync (it is retried); anything else waits for the next try
+        // here instead of failing every sync.
+        Err(error) if error.is_transient() => {
+          maybe_first_error.get_or_insert(error);
+        },
+        Err(error) => {
+          tracing::warn!(conversation_id = %id, %error, "could not finish setting up a DM");
+        },
+      }
+    }
+    maybe_first_error.map_or(Ok(repaired), Err)
+  }
+
+  /// One idempotent step towards a complete DM group: settles a commit whose answer was lost,
+  /// joins a group someone else founded, founds the group only when neither the server nor this
+  /// device has one, and adds whoever is missing. A group of one this device founded is given up
+  /// only for a verified welcome of the winner's group ([`Self::join_from_welcome`]), never on
+  /// the server's word, so the group never forks and a server can't make devices found again and
+  /// again (e2ee.md §4.6). `Ok(true)` once everybody is in.
+  async fn finish_dm_setup(&mut self, id: ConversationId, others: &[UserId]) -> Result<bool, CoreError> {
+    if self.has_group(id)? {
+      self.resolve_pending_commit(id).await?;
     }
     self.sync_welcomes().await?;
-    if self.has_group(id)? {
-      return Ok(id);
+    let query = ListMlsMessagesQuery {
+      maybe_after: None,
+      maybe_limit: Some(1),
+    };
+    let server_epoch = self.api.list_mls_messages(id, &query).await?.current_epoch;
+    match self.mls_epoch(id)? {
+      Some(0) if server_epoch > 0 => {
+        // Another founding won, says the server: this device waits for the winner's welcome.
+        // Adding now would only lose the epoch again and spend the others' key packages.
+        tracing::info!(conversation_id = %id, "waiting for the welcome of the DM group that was founded first");
+        if self.has_requested_rejoin(id)? {
+          // That welcome was opened but not joined (its key package is spent): ask the members
+          // again, at the rejoin backoff; their new welcome replaces this group once it checks out.
+          self.request_rejoin(id, server_epoch).await?;
+        }
+        return self.complete_dm_setup(id, others);
+      },
+      Some(_) => {},
+      None if server_epoch == 0 => self.found_dm_group(id)?,
+      None => {
+        // Someone else founded it: their welcome is on the way, or another device of this user is
+        // in the group and adds this one.
+        if let Err(error) = self.join_as_member_device(id).await {
+          tracing::debug!(conversation_id = %id, %error, "not joined as a further device");
+        }
+        return self.complete_dm_setup(id, others);
+      },
     }
-    let backlog = self
-      .api
-      .list_mls_messages(id, &ListMlsMessagesQuery::default())
-      .await?;
-    if backlog.current_epoch > 0 {
-      // Someone else founded it; their welcome for this device is on the way.
-      return Ok(id);
-    }
-    self.found_group(id)?;
     for user in others {
+      if self.group_users(id)?.contains(user) {
+        continue;
+      }
       self
         .commit_change(
           id,
@@ -198,8 +317,85 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           }),
         )
         .await?;
+      if self.is_unfinished_dm_founding(id)? {
+        // Nothing went in (another founding won the epoch, or no key packages): try later.
+        break;
+      }
     }
-    Ok(id)
+    self.complete_dm_setup(id, others)
+  }
+
+  /// Founds a DM's group. A content key this device makes for it is noted in the setup record
+  /// first, so that giving the group up later (another founding won) can stop using it.
+  fn found_dm_group(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    let has_current = self
+      .account
+      .key_bag
+      .ring(convert::conversation(id))
+      .is_some_and(|ring| ring.current().is_some());
+    let maybe_key = (!has_current).then(|| ContentKey::generate(&mut OsRng));
+    if let Some(key) = &maybe_key
+      && let Some(setup) = self.dm_setup(id)?
+    {
+      let setup = DmSetupRecord {
+        maybe_founding_key_id: Some(*key.id().as_bytes()),
+        ..setup
+      };
+      records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
+    }
+    self.found_group_with_key(id, maybe_key)
+  }
+
+  /// Forgets the setup record once this device is in a group that holds everybody.
+  fn complete_dm_setup(&mut self, id: ConversationId, others: &[UserId]) -> Result<bool, CoreError> {
+    if !self.has_group(id)? {
+      return Ok(false);
+    }
+    let users = self.group_users(id)?;
+    if !others.iter().all(|user| users.contains(user)) {
+      return Ok(false);
+    }
+    self.store.delete(Table::SyncState, &dm_setup_key(id))?;
+    Ok(true)
+  }
+
+  /// Gives up a group of one that lost the founding race, once the winner's welcome checked out.
+  /// The founding content key stops being current, or this device would keep encrypting with a
+  /// key nobody else has; it stays in the ring (and the key bag) for what was encrypted with it.
+  fn give_up_founded_group(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    // The joined group took over the MLS state stored under this group ID: only the records
+    // about the founded one go, deleting its MLS state would delete the joined group's.
+    self.forget_group_records(id)?;
+    let Some(setup) = self.dm_setup(id)? else {
+      return Ok(());
+    };
+    if let Some(key_id) = setup.maybe_founding_key_id {
+      self
+        .account
+        .key_bag
+        .ring_mut(convert::conversation(id))
+        .unset_current(ContentKeyId::from_bytes(key_id));
+      self.persist_keys()?;
+    }
+    let setup = DmSetupRecord {
+      maybe_founding_key_id: None,
+      ..setup
+    };
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)
+  }
+
+  /// Whether this device holds a DM group it founded and nobody else is in: still at epoch 0, no
+  /// commit of its own in flight, and the DM's setup not finished.
+  fn is_unfinished_dm_founding(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    Ok(
+      self.store.get(Table::SyncState, &dm_setup_key(id))?.is_some()
+        && self.mls_epoch(id)? == Some(0)
+        && !self.has_pending_commit(id)?,
+    )
+  }
+
+  fn dm_setup(&self, id: ConversationId) -> Result<Option<DmSetupRecord>, CoreError> {
+    records::get_json(&self.store, Table::SyncState, &dm_setup_key(id))
   }
 
   /// Adds `user` to the conversation on the server and in the MLS group, and shares history keys
@@ -335,6 +531,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// server never got it. A device that can't follow the group any more asks to be added back
   /// (e2ee.md §4.6).
   pub async fn sync_mls(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.is_unfinished_dm_founding(conversation)? {
+      // Nobody else is in this group, so the queue can only hold another founding's group
+      // (whose welcome replaces this one) or nothing: following it would only refuse its entries
+      // and ask to be added back to a group this device was never in.
+      return Ok(());
+    }
     let mut catch_up = match self.catch_up_mls(conversation).await {
       Ok(catch_up) => catch_up,
       // The server no longer lets this user read the queue: removed, with the removal commit
@@ -570,6 +772,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Founds the MLS group of a conversation this device created, with a first content key.
   fn found_group(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.found_group_with_key(conversation, None)
+  }
+
+  /// Like [`Self::found_group`], with `maybe_key` as the first content key; without one, a new
+  /// key is made unless the conversation has a current key already.
+  fn found_group_with_key(
+    &mut self,
+    conversation: ConversationId,
+    maybe_key: Option<ContentKey>,
+  ) -> Result<(), CoreError> {
     let group = ConversationGroup::create(
       &self.provider,
       &self.account.device,
@@ -578,8 +790,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )?;
     self.groups.insert(conversation, group);
     let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
-    if ring.current().is_none() {
-      ring.rotate(&mut OsRng);
+    match maybe_key {
+      Some(key) => {
+        let key_id = key.id();
+        ring.insert(key)?;
+        ring.set_current(key_id)?;
+      },
+      None if ring.current().is_none() => {
+        ring.rotate(&mut OsRng);
+      },
+      None => {},
     }
     self.persist_group(conversation)?;
     self.persist_keys()
@@ -706,8 +926,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         };
       }
       if is_founding_commit {
-        // Both sides founded the group (DM opened at once): theirs won, join it via welcome.
-        self.drop_group(conversation)?;
+        // Another founding won the epoch, says the server (a DM opened on both sides at once).
+        // The winner's welcome replaces this group once it checks out (`join_from_welcome`);
+        // nothing is dropped on the server's word alone (e2ee.md §4.6).
         return self.sync_welcomes().await;
       }
       self.sync_mls(conversation).await?;
@@ -1106,7 +1327,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.is_welcome_outdated(conversation, welcome)? {
       return self.welcome_handled(welcome);
     }
-    if self.has_group(conversation)? && !self.has_requested_rejoin(conversation)? {
+    // A DM group of one this device founded and nobody joined (setup cut short, or opened on both
+    // sides at once): a welcome may be of the group that was founded first. It replaces ours only
+    // once it checks out (`join_welcome_group`); without this, it would be dropped as one for a
+    // group this device already follows.
+    let maybe_founded_for = match self.is_unfinished_dm_founding(conversation)? {
+      true => self.dm_setup(conversation)?.map(|setup| setup.others),
+      false => None,
+    };
+    if maybe_founded_for.is_none()
+      && self.has_group(conversation)?
+      && !self.has_requested_rejoin(conversation)?
+    {
       // A welcome to a later epoch of a group this device follows: the queue decides first. A
       // commit that replaced this device's leaf comes before its welcome and drops the group.
       self.sync_mls(conversation).await?;
@@ -1115,14 +1347,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     let is_rejoin = self.has_requested_rejoin(conversation)?;
-    if self.has_group(conversation)? {
+    if maybe_founded_for.is_none() && self.has_group(conversation)? {
       if !is_rejoin {
         return self.welcome_handled(welcome);
       }
       // This device asked to be added back: the welcome replaces the group it can't follow.
       self.drop_group(conversation)?;
     }
-    match self.join_welcome_group(conversation, welcome).await? {
+    match self
+      .join_welcome_group(conversation, welcome, maybe_founded_for.as_deref())
+      .await?
+    {
       WelcomeJoin::Joined(joined) => {
         let (group, directory) = *joined;
         // The joining epoch's key: the members switched to it if they shared history from the
@@ -1187,10 +1422,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// somebody removed after the welcome was made is still in its tree, their removal commit next in
   /// the queue, while the server dropped them already (its membership goes after the MLS removal,
   /// e2ee.md §4.6). Every leaf is verified against its user's pinned identity either way.
+  /// `maybe_founded_for`: the DM's other participants, when this device holds a group of one it
+  /// founded for it, which the welcome's group replaces only if it is that DM's group, made by one
+  /// of its participants (e2ee.md §4.6). A welcome that doesn't check out leaves the group as is.
   async fn join_welcome_group(
     &mut self,
     conversation: ConversationId,
     welcome: &MlsMessageResponse,
+    maybe_founded_for: Option<&[UserId]>,
   ) -> Result<WelcomeJoin, CoreError> {
     // Pinned before the welcome is opened, which takes this device's key package: a network error
     // here leaves the welcome for the next try.
@@ -1198,7 +1437,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .pin_identities(members.members.iter().map(|member| member.user.id))
       .await?;
-    let staged = match ConversationGroup::stage_join(
+    if let Some(others) = maybe_founded_for {
+      // The newest device lists of everybody the DM's group may hold, before the welcome is
+      // opened: a revoked device must not be the one that replaces this device's group.
+      let me = self.user_id();
+      self.trusted_directory(others.iter().copied().chain([me])).await?;
+    }
+    let stage = match maybe_founded_for {
+      Some(_) => ConversationGroup::stage_join_replacing,
+      None => ConversationGroup::stage_join,
+    };
+    let staged = match stage(
       &self.provider,
       welcome.payload.as_slice(),
       convert::conversation(conversation),
@@ -1222,10 +1471,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => return Err(error),
     };
-    Ok(match staged.complete(&self.provider, &directory) {
-      Ok(group) => WelcomeJoin::Joined(Box::new((group, directory))),
-      Err(error) => WelcomeJoin::Rejected(error),
-    })
+    if let Some(others) = maybe_founded_for {
+      let me = self.own_member();
+      let checked = staged
+        .verify(&directory)
+        .and_then(|verified| check_dm_welcome(&verified, me, others));
+      if let Err(error) = checked {
+        return Ok(WelcomeJoin::Rejected(error));
+      }
+    }
+    let group = match staged.complete(&self.provider, &directory) {
+      Ok(group) => group,
+      Err(error) => return Ok(WelcomeJoin::Rejected(error)),
+    };
+    if maybe_founded_for.is_some() {
+      // Only now that the join went through: a failed one leaves the founded group as it was.
+      tracing::info!(conversation_id = %conversation, "joined the DM group that was founded first");
+      self.give_up_founded_group(conversation)?;
+    }
+    Ok(WelcomeJoin::Joined(Box::new((group, directory))))
   }
 
   /// Whether this device's group is already at or past the welcome's epoch.
@@ -1702,6 +1966,37 @@ fn conversation_members(users: &[UserId], me: UserId) -> Vec<UserId> {
     .collect()
 }
 
+/// Whether a verified welcome is of the DM this device founded a group of one for: its tree holds
+/// exactly this user and the DM's other participants (this device among them), and one of those
+/// participants, or another device of this user, made it.
+fn check_dm_welcome(verified: &VerifiedWelcome, me: GroupMember, others: &[UserId]) -> Result<(), MlsError> {
+  let in_tree: BTreeSet<_> = verified.members.iter().map(|member| member.user_id).collect();
+  let expected: BTreeSet<_> = others
+    .iter()
+    .map(|user| convert::user(*user))
+    .chain([me.user_id])
+    .collect();
+  if in_tree != expected {
+    return Err(MlsError::UnexpectedMessage(
+      "the welcome's group isn't the DM's participants",
+    ));
+  }
+  if !verified.members.contains(&me) {
+    return Err(MlsError::UnexpectedMessage(
+      "the welcome's group doesn't hold this device",
+    ));
+  }
+  let sender = verified.sender;
+  let is_participant = sender.user_id != me.user_id && expected.contains(&sender.user_id);
+  let is_own_other_device = sender.user_id == me.user_id && sender.device_id != me.device_id;
+  if !is_participant && !is_own_other_device {
+    return Err(MlsError::UnexpectedMessage(
+      "the welcome wasn't made by another participant",
+    ));
+  }
+  Ok(())
+}
+
 /// Devices a commit took out of the group for good (a rejoining device stays).
 fn left_members(update: &MembershipUpdate) -> Vec<GroupMember> {
   update
@@ -1712,7 +2007,116 @@ fn left_members(update: &MembershipUpdate) -> Vec<GroupMember> {
     .collect()
 }
 
+/// Where this device notes a DM setup it hasn't finished.
+fn dm_setup_key(conversation: ConversationId) -> String {
+  format!("{DM_SETUP_PREFIX}{conversation}")
+}
+
 /// Where this device notes that it asked to be added back to a group.
 pub(crate) fn rejoin_key(conversation: ConversationId) -> String {
   format!("rejoin/{conversation}")
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::Snowflake;
+
+  use super::*;
+
+  const ME: i64 = 10;
+  const BOB: i64 = 20;
+  const CAROL: i64 = 30;
+  const MY_PHONE: i64 = 1;
+  const MY_LAPTOP: i64 = 2;
+  const BOB_PHONE: i64 = 3;
+  const CAROL_PHONE: i64 = 4;
+
+  mod dm_welcome {
+    use super::*;
+
+    #[test]
+    fn the_other_participants_welcome_checks_out() {
+      let welcome = welcome_of(
+        &[member(ME, MY_PHONE), member(BOB, BOB_PHONE)],
+        member(BOB, BOB_PHONE),
+      );
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_ok());
+    }
+
+    #[test]
+    fn another_device_of_the_user_may_have_made_it() {
+      let welcome = welcome_of(
+        &[
+          member(ME, MY_PHONE),
+          member(ME, MY_LAPTOP),
+          member(BOB, BOB_PHONE),
+        ],
+        member(ME, MY_LAPTOP),
+      );
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_ok());
+    }
+
+    #[test]
+    fn a_tree_with_someone_else_is_refused() {
+      let welcome = welcome_of(
+        &[
+          member(ME, MY_PHONE),
+          member(BOB, BOB_PHONE),
+          member(CAROL, CAROL_PHONE),
+        ],
+        member(BOB, BOB_PHONE),
+      );
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+    }
+
+    #[test]
+    fn a_tree_without_a_participant_is_refused() {
+      let welcome = welcome_of(
+        &[member(ME, MY_PHONE), member(CAROL, CAROL_PHONE)],
+        member(CAROL, CAROL_PHONE),
+      );
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+      let group_dm = welcome_of(
+        &[member(ME, MY_PHONE), member(BOB, BOB_PHONE)],
+        member(BOB, BOB_PHONE),
+      );
+      assert!(check_dm_welcome(&group_dm, member(ME, MY_PHONE), &[user(BOB), user(CAROL)]).is_err());
+    }
+
+    #[test]
+    fn a_tree_without_this_device_is_refused() {
+      let welcome = welcome_of(
+        &[member(ME, MY_LAPTOP), member(BOB, BOB_PHONE)],
+        member(BOB, BOB_PHONE),
+      );
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+    }
+
+    #[test]
+    fn a_welcome_this_device_made_itself_is_refused() {
+      let welcome = welcome_of(
+        &[member(ME, MY_PHONE), member(BOB, BOB_PHONE)],
+        member(ME, MY_PHONE),
+      );
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+    }
+  }
+
+  fn welcome_of(members: &[GroupMember], sender: GroupMember) -> VerifiedWelcome {
+    VerifiedWelcome {
+      members: members.to_vec(),
+      sender,
+    }
+  }
+
+  fn member(user_id: i64, device_id: i64) -> GroupMember {
+    GroupMember {
+      user_id: convert::user(user(user_id)),
+      device_id: convert::device(DeviceId::from_snowflake(Snowflake::new(device_id).unwrap())),
+    }
+  }
+
+  fn user(id: i64) -> UserId {
+    UserId::from_snowflake(Snowflake::new(id).unwrap())
+  }
 }

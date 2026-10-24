@@ -65,6 +65,15 @@ pub struct StagedJoin {
   staged: StagedWelcome,
 }
 
+/// The verified members of a staged welcome's group ([`StagedJoin::verify`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedWelcome {
+  /// Every device in the group, this one included.
+  pub members: Vec<GroupMember>,
+  /// The member whose commit made the welcome.
+  pub sender: GroupMember,
+}
+
 /// What this device saw of the group's signed changes, persisted with the MLS state: a change
 /// signed before this device joined, or before a later change to the same user, is refused
 /// (security review A3).
@@ -165,6 +174,28 @@ impl ConversationGroup {
     welcome: &[u8],
     conversation_id: ConversationId,
   ) -> Result<StagedJoin, MlsError> {
+    Self::stage_join_inner(provider, welcome, conversation_id, false)
+  }
+
+  /// Like [`Self::stage_join`] while this device still holds a group for the conversation (one it
+  /// founded that lost the founding race). That group is left as it is until the caller
+  /// [`StagedJoin::verify`]s the welcome and decides: [`StagedJoin::complete`] then replaces the
+  /// stored state of the old group (same group ID; the old [`ConversationGroup`] must not be
+  /// used or [`Self::delete`]d afterwards), while dropping the staged join keeps it.
+  pub fn stage_join_replacing(
+    provider: &impl OpenMlsProvider,
+    welcome: &[u8],
+    conversation_id: ConversationId,
+  ) -> Result<StagedJoin, MlsError> {
+    Self::stage_join_inner(provider, welcome, conversation_id, true)
+  }
+
+  fn stage_join_inner(
+    provider: &impl OpenMlsProvider,
+    welcome: &[u8],
+    conversation_id: ConversationId,
+    is_replacing: bool,
+  ) -> Result<StagedJoin, MlsError> {
     let MlsMessageBodyIn::Welcome(welcome) = MlsMessageIn::tls_deserialize_exact(welcome)?.extract() else {
       return Err(MlsError::UnexpectedMessage("expected a welcome"));
     };
@@ -175,9 +206,15 @@ impl ConversationGroup {
     // checking it would make every group unjoinable once such a member's package expired. A
     // lifetime only bounds when a package may be *added* (RFC 9420 §7.3, openmls #1810), which
     // the committer and every member checked then; credentials are verified on completion.
-    let staged = StagedWelcome::build_from_welcome(provider, &config, welcome)
+    let mut builder = StagedWelcome::build_from_welcome(provider, &config, welcome)
       .map_err(|error| MlsError::openmls("welcome processing", error))?
-      .skip_lifetime_validation()
+      .skip_lifetime_validation();
+    if is_replacing {
+      // Only lifts openmls' check that no group with this ID is stored; nothing is written
+      // until the join completes.
+      builder = builder.replace_old_group();
+    }
+    let staged = builder
       .build()
       .map_err(|error| MlsError::openmls("welcome processing", error))?;
     if staged.group_context().group_id() != &group_id(conversation_id) {
@@ -1073,6 +1110,36 @@ impl StagedJoin {
       }
     }
     Ok(users)
+  }
+
+  /// Verifies every leaf against its user's pinned identity without joining yet: who is in the
+  /// welcome's group and which member made the welcome. For a decision that has to be made
+  /// before this device gives up a group it holds for the same conversation (e2ee.md §4.6).
+  ///
+  /// Stricter than [`Self::complete`]: every device must be active by its user's signed device
+  /// list, and the sender, on whose word alone the group replaces another, must be named by one
+  /// (fails closed), so a revoked device can't hand out the group (membership.rs).
+  pub fn verify(&self, directory: &impl IdentityDirectory) -> Result<VerifiedWelcome, MlsError> {
+    let sender_index = self.staged.welcome_sender_index();
+    let mut members = Vec::new();
+    let mut maybe_sender = None;
+    for member in self.staged.members() {
+      let device = credential::verify(&member.credential, &member.signature_key, directory)?;
+      if !directory.is_active_device(&device) {
+        return Err(MlsError::InactiveDevice(device.device_id()));
+      }
+      if member.index == sender_index {
+        if !directory.is_listed_device(&device) {
+          return Err(MlsError::InactiveDevice(device.device_id()));
+        }
+        maybe_sender = Some(GroupMember::from(&device));
+      }
+      members.push(GroupMember::from(&device));
+    }
+    let sender = maybe_sender.ok_or(MlsError::UnexpectedMessage(
+      "the welcome's sender isn't in its group",
+    ))?;
+    Ok(VerifiedWelcome { members, sender })
   }
 
   /// Verifies every leaf against its user's pinned identity and joins the group.

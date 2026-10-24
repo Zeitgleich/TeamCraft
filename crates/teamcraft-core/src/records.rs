@@ -457,6 +457,21 @@ pub fn list_json<T: DeserializeOwned>(store: &impl LocalStore, table: Table) -> 
     .collect()
 }
 
+/// The entries of a table whose keys start with `prefix`, with their keys (a table that holds
+/// records of several kinds under different prefixes).
+pub fn list_json_with_prefix<T: DeserializeOwned>(
+  store: &impl LocalStore,
+  table: Table,
+  prefix: &str,
+) -> Result<Vec<(String, T)>, CoreError> {
+  store
+    .list(table)?
+    .into_iter()
+    .filter(|(key, _)| key.starts_with(prefix))
+    .map(|(key, value)| decode(&value).map(|decoded| (key, decoded)))
+    .collect()
+}
+
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CoreError> {
   serde_json::from_slice(bytes).map_err(|error| CoreError::Corrupt(error.to_string()))
 }
