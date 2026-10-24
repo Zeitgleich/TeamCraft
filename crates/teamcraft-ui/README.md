@@ -97,7 +97,34 @@ Demo triggers (`demo` builds only): Settings > Advanced simulates an incoming ca
 linking screen and a chat with a changed security key.
 
 Shortcuts: `Ctrl/Cmd+K` switcher, `Ctrl/Cmd+,` settings, `Ctrl/Cmd+/` shortcuts, `Alt+Up/Down`
-previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
+previous/next conversation, `Alt+T` threads, `Alt+Left/Right` back/forward, `Esc` close dialog or
+side panel.
+
+**URLs** (`src/route.rs`, `src/history.rs`): every main view has a path, so reload, Back/Forward,
+bookmarks and "open in new tab" work. Paths hold public IDs only, never names, message text or
+search queries; the message paths are the permalinks' (`teamcraft:/c/{c}/m/{m}[/t/{t}]`). The
+desktop app uses the same paths in its webview and maps the mouse's back/forward buttons and
+`Alt+Left/Right` to the history itself. The server answers every non-API path with `index.html`.
+
+| Path                              | Shows                                                   |
+|-----------------------------------|---------------------------------------------------------|
+| `/`                               | The start: first channel or the getting-started page    |
+| `/home`                           | Home                                                    |
+| `/s/{space}`                      | A space (lands in its first channel)                    |
+| `/s/{space}/c/{channel}`          | A channel                                               |
+| `/dm/{conversation}`              | A DM or group DM                                        |
+| `/c/{conversation}`               | A conversation whose kind hasn't loaded yet             |
+| `/c/{conversation}/t/{thread}`    | A conversation with a thread open                       |
+| `/c/{conversation}/m/{message}`   | A message (`/t/{thread}` appended for thread replies)   |
+| `/threads`, `/activity`, `/calls` | Threads inbox, activity, calls                          |
+| `/meetings`, `/people`, `/saved`  | Meetings, people and groups, saved messages             |
+| `/search`                         | Search (the query stays out of the URL)                 |
+| `/settings/{tab}`                 | The settings dialog on a tab                            |
+| `/admin/{section}`                | A section of the administration console (admins)        |
+
+A path the app doesn't know, or an ID that doesn't exist or isn't the user's, shows Home with a
+notice. IDs that haven't loaded yet are waited for (up to 20 s on an empty store). Sign-in returns
+to the path it started on.
 
 ## Layout of the crate
 
@@ -115,6 +142,8 @@ previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
 | `src/web_core.rs`       | Web build: runs the client core in the page, answers the `core_*` commands |
 | `src/calls.rs`          | `CallState` (session state of the user's call)                          |
 | `src/state.rs`          | `AppState` (context): current space, view, panel, overlay, backend      |
+| `src/route.rs`          | `Route`: the app's places as URL paths, parsing and formatting          |
+| `src/history.rs`        | Address bar and history in step with `AppState`, Back and Forward       |
 | `src/settings.rs`       | Per-device preferences (theme, language, send mode) in `localStorage`   |
 | `src/i18n.rs`           | Fluent bundles, `I18n::t`, `t_with`, `t_count`                          |
 | `src/markdown.rs`       | Safe Markdown subset producing a tree (no HTML injection)               |

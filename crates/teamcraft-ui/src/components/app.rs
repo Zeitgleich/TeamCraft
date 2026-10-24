@@ -56,6 +56,7 @@ use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, JoinSpaceDialog, NewChannelDialog, NewSpaceDialog,
   SpaceSettingsDialog,
 };
+use crate::history::{Travel, travel};
 use crate::i18n::{provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
 use crate::model::TimestampMs;
@@ -132,6 +133,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if tauri::is_available() {
     sync_tray(state, i18n);
   }
+  if let Some((_, conversation)) = start {
+    state.open_conversation(conversation);
+  }
+  // The URL's place wins over the start; a notification click (below) wins over the URL.
+  crate::history::start(state, i18n);
   if !tauri::is_available() {
     open_conversations_from_notifications(state);
   }
@@ -159,9 +165,6 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   // Call defaults follow the settings (and set the initial state of the call session).
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
-  if let Some((_, conversation)) = start {
-    state.open_conversation(conversation);
-  }
 
   let _ = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
   let banners = NodeRef::<leptos::html::Div>::new();
@@ -300,6 +303,10 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
     };
     if let Some(overlay) = overlay {
       ev.prevent_default();
+      if overlay == Overlay::Settings && state.overlay.get_untracked() != Overlay::Settings {
+        state.open_settings();
+        return;
+      }
       state.overlay.update(|current| {
         *current = if *current == overlay {
           Overlay::None
@@ -364,6 +371,16 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
       "KeyT" => {
         ev.prevent_default();
         state.open_threads();
+      },
+      // Browsers do this themselves; the desktop webviews don't. In a text field Alt+←/→ moves
+      // the cursor (by word on macOS).
+      "ArrowLeft" | "ArrowRight" if tauri::is_available() && !is_text_input_focused() => {
+        ev.prevent_default();
+        travel(if ev.code() == "ArrowLeft" {
+          Travel::Back
+        } else {
+          Travel::Forward
+        });
       },
       _ => {},
     }

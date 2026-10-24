@@ -201,6 +201,7 @@ shortcut-settings = Einstellungen öffnen
 shortcut-shortcuts = Tastenkürzel anzeigen
 shortcut-prev-next = Vorherige oder nächste Unterhaltung
 shortcut-threads = Threads öffnen
+shortcut-back-forward = Zurück oder vorwärts
 shortcut-close = Dialog oder Seitenbereich schließen
 shortcut-messages = Zwischen Nachrichten wechseln
 shortcut-open-thread = Thread der markierten Nachricht öffnen
@@ -1063,6 +1064,7 @@ composer-file-too-large = { $name } überschreitet das Upload-Limit von { $limit
 composer-file-unreadable = { $name } konnte nicht gelesen werden.
 permalink-label = Nachricht in { $name }
 permalink-unavailable = Link zu einer Unterhaltung, in der du nicht Mitglied bist
+route-unavailable = Diese Seite ist nicht verfügbar. Vielleicht wurde sie entfernt, oder du hast keinen Zugriff darauf.
 
 # Workspace management
 create = Erstellen
@@ -1920,6 +1922,8 @@ key-enter = Enter
 key-escape = Esc
 key-up = Pfeil hoch
 key-down = Pfeil runter
+key-left = Pfeil links
+key-right = Pfeil rechts
 key-plus-word = plus
 calls-unavailable = Anrufe sind vorerst nur in der TeamCraft-Desktop-App möglich.
 admin-recovery-unavailable = Eine Organisationswiederherstellung kann noch nicht aus der Konsole gestartet werden.

@@ -76,7 +76,17 @@ async fn the_shell_is_served_at_the_root_and_for_client_side_routes_without_cach
   let site = Site::create();
   let Some(app) = start(&site).await else { return };
 
-  for path in ["/", "/index.html", "/c/some/channel", "/meeting/42"] {
+  for path in [
+    "/",
+    "/index.html",
+    "/c/some/channel",
+    "/meeting/42",
+    "/s/1/c/2",
+    "/dm/3",
+    "/c/2/m/4/t/5",
+    "/settings/privacy",
+    "/admin/users",
+  ] {
     let (status, headers, body) = get(&app, path).await;
     assert_eq!(status, StatusCode::OK, "{path}");
     assert_eq!(String::from_utf8(body).unwrap(), INDEX, "{path}");
@@ -94,6 +104,32 @@ async fn the_shell_is_served_at_the_root_and_for_client_side_routes_without_cach
     );
     assert_eq!(header(&headers, "x-content-type-options"), "nosniff");
     assert_eq!(header(&headers, "referrer-policy"), "no-referrer");
+  }
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn health_probes_and_well_known_paths_never_get_the_shell() {
+  let site = Site::create();
+  let Some(app) = start(&site).await else { return };
+
+  for path in ["/healthz", "/readyz"] {
+    let (status, headers, body) = get(&app, path).await;
+    assert_eq!(status, StatusCode::OK, "{path}");
+    assert!(
+      header(&headers, "content-type").starts_with("application/json"),
+      "{path}"
+    );
+    assert_ne!(String::from_utf8(body).unwrap(), INDEX, "{path}");
+  }
+  for path in [
+    "/.well-known/assetlinks.json",
+    "/.well-known/apple-app-site-association",
+    "/.well-known/security.txt",
+  ] {
+    let (status, _, body) = get(&app, path).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    assert_ne!(String::from_utf8(body).unwrap(), INDEX, "{path}");
   }
   app.stop().await;
 }

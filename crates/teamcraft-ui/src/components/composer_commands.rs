@@ -167,7 +167,7 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       Outcome::Done
     },
     SlashCommand::Settings => {
-      state.overlay.set(Overlay::Settings);
+      state.open_settings();
       Outcome::Done
     },
     SlashCommand::Shortcuts => {
