@@ -409,12 +409,14 @@ pub fn MessageList(
     }
     schedule_measure();
   });
-  let _ = window_event_listener(ev::resize, move |_| {
+  let listener = window_event_listener(ev::resize, move |_| {
     if let Some(element) = container.get_untracked() {
       viewport.set(f64::from(element.client_height()));
       schedule_measure();
     }
   });
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
 
   let on_scroll = move |_| {
     let Some(element) = container.get_untracked() else {
@@ -467,7 +469,7 @@ pub fn MessageList(
           {move || {
             let maybe_action = is_alone_in_channel().then_some(EmptyAction {
               label_key: "channel-add-people",
-              on_click: Callback::new(move |()| state.overlay.set(Overlay::ChannelSettings(conversation))),
+              on_click: Callback::new(move |()| state.overlay.set(Overlay::AddToChannel(conversation))),
             });
             view! { <EmptyState icon=IconName::Smile title_key="channel-empty-title" body_key="channel-empty" maybe_action=maybe_action /> }
           }}

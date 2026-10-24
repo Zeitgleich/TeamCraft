@@ -524,6 +524,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.invite_to_space(invite);
   }
 
+  fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
+    self.chat.add_space_members(space, users, is_guest);
+  }
+
   fn has_external_people(&self, conversation: ConversationId) -> bool {
     self.chat.has_external_people(conversation)
   }

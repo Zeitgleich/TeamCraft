@@ -288,6 +288,27 @@ async fn the_theme_is_a_stylesheet_of_the_brands_colors() {
 }
 
 #[tokio::test]
+async fn the_web_manifest_names_the_request_brand() {
+  let files = Files::create();
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
+  let (status, headers, body) = get_as(&app, Some(HOST_B), "/api/v1/brand/manifest.webmanifest").await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(headers["content-type"], "application/manifest+json");
+  let manifest = json(&body);
+  let (_, _, brand) = get_as(&app, Some(HOST_B), "/api/v1/brand").await;
+  assert_eq!(manifest["name"], json(&brand)["display_name"]);
+  assert_eq!(manifest["display"], "standalone");
+  assert_eq!(manifest["start_url"], "/");
+  assert!(
+    !String::from_utf8_lossy(&body).contains(HOST_B),
+    "no host name in the manifest"
+  );
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn the_web_client_gets_the_policy_of_its_brand() {
   let files = Files::create();
   let Some(app) = start(&files, UnknownHostPolicy::Default).await else {

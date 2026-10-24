@@ -24,7 +24,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
     })
   });
 
-  // Channels add people in their settings; direct messages start a new group instead.
+  // Channels add people here; direct messages start a new group instead.
   let is_channel = state
     .read(|backend| backend.conversation(conversation))
     .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private));
@@ -38,7 +38,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
         {is_channel.then(|| view! {
           <button
             class="btn btn-small"
-            on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))
+            on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))
           >
             <Icon name=IconName::Plus />
             {move || i18n.t("channel-add-people")}

@@ -50,6 +50,8 @@ pub struct SpaceView {
   pub maybe_role: Option<SpaceRole>,
   /// The viewer's notification setting for the space (default for non-members).
   pub notifications: StoredSpaceNotifications,
+  /// Members whose membership hasn't expired.
+  pub member_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +197,10 @@ impl Database {
       r#"SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,
                 s.image_key, s.image_version, s.image_size_bytes,
                 s.archived_at IS NOT NULL AS "is_archived!", m.role AS "role?",
-                m.notification_level AS "notification_level?", m.muted_until AS "muted_until?"
+                m.notification_level AS "notification_level?", m.muted_until AS "muted_until?",
+                (SELECT count(*) FROM space_members c
+                  WHERE c.space_id = s.id AND (c.expires_at IS NULL OR c.expires_at > now()))
+                  AS "member_count!"
          FROM spaces s
          LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1
               AND (m.expires_at IS NULL OR m.expires_at > now())
@@ -230,6 +235,7 @@ impl Database {
             maybe_level: row.notification_level.map(NotificationLevel::from),
             maybe_muted_until: row.muted_until,
           },
+          member_count: u32::try_from(row.member_count).unwrap_or(u32::MAX),
         })
       })
       .collect()

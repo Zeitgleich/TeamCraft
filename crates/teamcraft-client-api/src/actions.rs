@@ -455,6 +455,9 @@ pub struct SpaceInvite {
   pub channels: Vec<ConversationId>,
   #[serde(default)]
   pub maybe_expires_at: Option<TimestampMs>,
+  /// A personal note for the invitation e-mail.
+  #[serde(default)]
+  pub maybe_message: Option<String>,
 }
 
 /// Workspace events shown as system messages.

@@ -1,5 +1,5 @@
 use serde_json::json;
-use teamcraft_db::{ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing};
+use teamcraft_db::{ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing, SpaceView};
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
   GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
@@ -8,7 +8,7 @@ use teamcraft_proto::{
 };
 use time::OffsetDateTime;
 
-use super::access::{is_guest, is_instance_admin, load_space, require};
+use super::access::{is_guest, is_instance_admin, load_space, require, space_target};
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{category_response, offset_date_time, space_response, unix_millis, user_summary};
 use super::{validate_name, validate_text};
@@ -32,7 +32,10 @@ pub async fn list_spaces(
     .list_spaces_for_user(caller.user.id, listing)
     .await?;
   Ok(ListSpacesResponse {
-    spaces: views.iter().map(space_response).collect(),
+    spaces: views
+      .iter()
+      .map(|view| space_for_caller(state, caller, view))
+      .collect(),
   })
 }
 
@@ -85,7 +88,7 @@ pub async fn create_space(
     .await?;
   }
   let access = load_space(state, caller, created.id).await?;
-  Ok(space_response(&access.view))
+  Ok(space_for_caller(state, caller, &access.view))
 }
 
 pub async fn get_space(
@@ -93,7 +96,24 @@ pub async fn get_space(
   caller: &AuthenticatedUser,
   id: SpaceId,
 ) -> Result<SpaceResponse, ApiError> {
-  Ok(space_response(&load_space(state, caller, id).await?.view))
+  Ok(space_for_caller(
+    state,
+    caller,
+    &load_space(state, caller, id).await?.view,
+  ))
+}
+
+/// The space as the caller sees it, with what they may do in it (UI hints; every request is checked
+/// again).
+fn space_for_caller(state: &AppState, caller: &AuthenticatedUser, view: &SpaceView) -> SpaceResponse {
+  let target = space_target(Some(view.space.id), view.maybe_role.clone());
+  let is_open_for_changes = !view.space.is_archived;
+  let may = |permission| is_open_for_changes && require(state, caller, permission, &target).is_ok();
+  SpaceResponse {
+    can_add_members: may(Permission::ManageSpaceMembers),
+    can_invite_guests: may(Permission::InviteGuest),
+    ..space_response(view)
+  }
 }
 
 pub async fn update_space(

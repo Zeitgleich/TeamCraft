@@ -82,7 +82,8 @@ pub fn TopBar() -> impl IntoView {
           >
             {move || view! { <Avatar user=me.get() size=AvatarSize::Medium show_presence=true /> }}
           </button>
-          <Show when=menu_open fallback=|| ()>
+          // On phones the menu opens from the bottom navigation instead (app.rs).
+          <Show when=move || menu_open() && !state.is_compact() fallback=|| ()>
             <StatusMenu />
           </Show>
         </div>

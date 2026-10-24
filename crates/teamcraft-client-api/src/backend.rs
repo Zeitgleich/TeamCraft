@@ -361,6 +361,9 @@ pub trait ChatBackend {
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
+  /// Adds people from the directory to a space as members or guests; people already in it are
+  /// skipped.
+  fn add_space_members(&self, _space: SpaceId, _users: Vec<UserId>, _is_guest: bool) {}
   /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
   /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
   fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}

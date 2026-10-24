@@ -245,6 +245,13 @@ pub enum CoreCommand {
     is_guest: bool,
     channels: Vec<ConversationId>,
     maybe_expires_at: Option<i64>,
+    maybe_message: Option<String>,
+  },
+  /// People picked from the directory join a space (those already in it are skipped).
+  AddSpaceMembers {
+    space: SpaceId,
+    users: Vec<UserId>,
+    is_guest: bool,
   },
   /// "Jump to date": load the history from `at_ms` on and note that the request is answered.
   LoadHistoryAt {
@@ -776,6 +783,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         maybe_image_version: space.maybe_image.map(|image| image.version),
         unread_count: 0,
         mention_count: 0,
+        maybe_description: space.maybe_description,
+        member_count: space.member_count,
+        join_policy: space.join_policy,
+        can_add_members: space.can_add_members,
+        can_invite_guests: space.can_invite_guests,
       })
       .collect()
   }
@@ -1315,8 +1327,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       })
       .map(|space| JoinableSpace {
         id: space.id,
+        hue: space
+          .maybe_color
+          .as_deref()
+          .and_then(hue_from_hex)
+          .unwrap_or_else(|| hue(space.id)),
         name: space.name,
         maybe_description: space.maybe_description,
+        maybe_image_version: space.maybe_image.map(|image| image.version),
+        member_count: space.member_count,
       })
       .collect()
   }
@@ -1375,6 +1394,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       is_guest: invite.is_guest,
       channels: invite.channels,
       maybe_expires_at: invite.maybe_expires_at,
+      maybe_message: invite.maybe_message,
+    });
+  }
+
+  fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
+    self.command(CoreCommand::AddSpaceMembers {
+      space,
+      users,
+      is_guest,
     });
   }
 

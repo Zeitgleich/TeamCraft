@@ -145,11 +145,15 @@ pub fn OfflineBanner() -> impl IntoView {
 /// The browser (or the desktop webview) saw the network come back, the page become visible again
 /// or resume after being frozen or restored from the back/forward cache.
 fn report_network_changes(is_online: RwSignal<bool>) {
-  let _ = window_event_listener(ev::online, move |_| {
+  let listener = window_event_listener(ev::online, move |_| {
     is_online.set(true);
     network_changed();
   });
-  let _ = window_event_listener(ev::offline, move |_| is_online.set(false));
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
+  let listener = window_event_listener(ev::offline, move |_| is_online.set(false));
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
   on_window("pageshow", network_changed);
   on_document("resume", network_changed);
   on_document("visibilitychange", || {

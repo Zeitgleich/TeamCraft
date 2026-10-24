@@ -524,7 +524,8 @@ pub struct MailConfig {
   pub smtp: Option<SmtpConfig>,
   /// Public base URL of the web client, without trailing slash; the link in invitation e-mail.
   pub public_base_url: String,
-  /// Placeholders of both texts: `{inviter}`, `{space}`, `{role}` and `{url}`.
+  /// Placeholders of both texts: `{inviter}`, `{space}`, `{role}` and `{url}`. The body may also
+  /// place `{message}`, the inviter's personal note; without it the note is quoted below the text.
   pub invite_subject: String,
   pub invite_body: String,
   /// Activation e-mail of local guest accounts. Placeholders: `{inviter}`, `{space}` and `{url}`
@@ -885,6 +886,8 @@ pub struct BrandConfig {
   pub maybe_terms_url: Option<String>,
   #[serde(rename = "imprint_url", skip_serializing_if = "Option::is_none")]
   pub maybe_imprint_url: Option<String>,
+  #[serde(rename = "download_url", skip_serializing_if = "Option::is_none")]
+  pub maybe_download_url: Option<String>,
   /// Language code -> text; `en` is the fallback.
   pub login_title: BTreeMap<String, String>,
   pub login_text: BTreeMap<String, String>,

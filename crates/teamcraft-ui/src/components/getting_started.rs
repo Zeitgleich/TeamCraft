@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use teamcraft_proto::Role;
 
 use crate::components::icons::{Icon, IconName};
-use crate::components::workspace_dialogs::JoinableSpaceList;
+use crate::components::space_invites::JoinableSpaceList;
 use crate::i18n::use_i18n;
 use crate::state::{Overlay, use_app_state};
 
@@ -63,6 +63,7 @@ pub fn GettingStarted() -> impl IntoView {
             None => {
               if !is_guest.get() {
                 steps.push(step(IconName::Plus, "start-create-space", "start-create-space-hint", move || state.overlay.set(Overlay::NewSpace)).into_any());
+                steps.push(step(IconName::Grid, "start-browse-spaces", "start-browse-spaces-hint", move || state.overlay.set(Overlay::BrowseSpaces(None))).into_any());
               }
             },
             Some((id, _)) => {
@@ -71,7 +72,8 @@ pub fn GettingStarted() -> impl IntoView {
               }
               steps.push(step(IconName::List, "start-browse-channels", "start-browse-channels-hint", move || state.overlay.set(Overlay::BrowseChannels(id))).into_any());
               if !is_guest.get() {
-                steps.push(step(IconName::Users, "start-invite", "start-invite-hint", move || state.overlay.set(Overlay::SpaceSettings(id))).into_any());
+                steps.push(step(IconName::UserPlus, "start-invite", "start-invite-hint", move || state.overlay.set(Overlay::InvitePeople(id))).into_any());
+                steps.push(step(IconName::Grid, "start-browse-spaces", "start-browse-spaces-hint", move || state.overlay.set(Overlay::BrowseSpaces(None))).into_any());
               }
             },
           }

@@ -5,6 +5,7 @@ use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::clock::format_date_time;
+use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -41,6 +42,7 @@ pub fn CallsView() -> impl IntoView {
   view! {
     <section class="calls-view" aria-label=move || i18n.t("calls-title")>
       <header class="panel-header">
+        <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("calls-title")}</h1>
         </div>

@@ -23,6 +23,7 @@ use crate::message_links::{as_permalink, own_hosts};
 use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, is_pending, thread_id_of};
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
+use crate::viewport::is_touch_primary;
 
 /// Messages by the same author closer together than this share one header.
 const GROUP_WINDOW_MS: i64 = 5 * 60_000;
@@ -682,7 +683,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       on:pointercancel=move |_| long_press.cancel()
       on:contextmenu=move |ev| {
         // The browser's own long-press menu would cover the action sheet.
-        if long_press.has_fired() {
+        if long_press.has_fired() || is_touch_primary() {
           ev.prevent_default();
         }
       }

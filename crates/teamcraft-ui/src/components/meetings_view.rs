@@ -7,6 +7,7 @@ use teamcraft_proto::{IdempotencyKey, LobbyEntry, MeetingId, MeetingResponse, Me
 
 use crate::calls::{CallKind, CallRequest};
 use crate::clock::{format_date, format_local_datetime_input, format_time, local_day, now_ms};
+use crate::components::compact_back::CompactBack;
 use crate::components::icons::{Icon, IconName};
 use crate::components::meeting_controls::{HostControls, RsvpList};
 use crate::components::modal::Modal;
@@ -55,6 +56,7 @@ pub fn MeetingsView() -> impl IntoView {
   view! {
     <section class="meetings-view" aria-label=move || i18n.t("meetings-title")>
       <header class="panel-header">
+        <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("meetings-title")}</h1>
         </div>
