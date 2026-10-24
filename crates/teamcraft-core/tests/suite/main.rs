@@ -12,6 +12,7 @@ mod common;
 mod connection;
 mod dev_stack;
 mod devices;
+mod dm_setup;
 mod enrollment;
 mod files;
 mod key_packages;

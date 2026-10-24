@@ -170,6 +170,12 @@ impl KeyBag {
       .or_insert_with(|| ContentKeyRing::new(conversation_id))
   }
 
+  /// Forgets a conversation's keys: for a group this device founded that nobody else ever joined
+  /// (it lost the founding race), whose keys protect nothing anyone else can read.
+  pub fn remove_ring(&mut self, conversation_id: ConversationId) {
+    self.conversations.remove(&conversation_id);
+  }
+
   pub fn conversations(&self) -> impl Iterator<Item = &ContentKeyRing> {
     self.conversations.values()
   }
