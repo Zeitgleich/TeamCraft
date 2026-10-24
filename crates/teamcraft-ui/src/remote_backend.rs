@@ -25,8 +25,8 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
-  Conversation, ConversationId, CustomStatus, JoinableSpace, Message, MessageId, PresenceStatus, Space,
-  SpaceId, ThreadId, ThreadSummary, User, UserId,
+  Conversation, ConversationId, CustomStatus, InviteId, JoinableSpace, Message, MessageId, PendingInvite,
+  PresenceStatus, Space, SpaceId, SpaceRole, SpaceRoster, ThreadId, ThreadSummary, User, UserId,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -960,6 +960,51 @@ impl ChatBackend for RemoteChat {
 
   fn invite_to_space(&self, invite: SpaceInvite) {
     self.act(ChatAction::InviteToSpace { invite });
+  }
+
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
+    match self.ask(ChatQuery::SpaceMembers { space }) {
+      Some(ChatAnswer::SpaceMembers { roster }) => roster,
+      _ => SpaceRoster::Loading,
+    }
+  }
+
+  fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {
+    match self.ask(ChatQuery::SpaceInvites { space }) {
+      Some(ChatAnswer::SpaceInvites { invites }) => invites,
+      _ => Vec::new(),
+    }
+  }
+
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self.act(ChatAction::AddPeopleToChannel {
+      conversation,
+      people,
+      history,
+      joins_space,
+    });
+  }
+
+  fn refresh_space_roster(&self, space: SpaceId) {
+    self.act(ChatAction::RefreshSpaceRoster { space });
+  }
+
+  fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
+    self.act(ChatAction::SetSpaceRole { space, user, role });
+  }
+
+  fn remove_space_member(&self, space: SpaceId, user: UserId) {
+    self.act(ChatAction::RemoveSpaceMember { space, user });
+  }
+
+  fn revoke_space_invite(&self, space: SpaceId, invite: InviteId) {
+    self.act(ChatAction::RevokeSpaceInvite { space, invite });
   }
 
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {

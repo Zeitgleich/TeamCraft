@@ -41,9 +41,9 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
-  CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
-  InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
-  UpdateSpaceRequest,
+  CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest, InviteId,
+  InviteResponse, ListCategoriesResponse, ListInvitesResponse, SpaceResponse, UpdateCategoryRequest,
+  UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
 };
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
@@ -207,6 +207,19 @@ pub trait ServerApi {
     space: SpaceId,
     request: &CreateInviteRequest,
   ) -> impl Future<Output = Result<InviteResponse, ApiError>>;
+  /// Pending invitations of a space (`GET /spaces/{id}/invites`, member managers only).
+  fn list_invites(&self, space: SpaceId) -> impl Future<Output = Result<ListInvitesResponse, ApiError>>;
+  /// Withdraws a pending invitation (`DELETE /spaces/{id}/invites/{invite}`).
+  fn delete_invite(&self, space: SpaceId, invite: InviteId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Changes a space member's role (`PATCH /spaces/{id}/members/{user}`).
+  fn update_space_member(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    request: &UpdateSpaceMemberRequest,
+  ) -> impl Future<Output = Result<SpaceMemberResponse, ApiError>>;
+  /// Removes someone from a space and its channels (`DELETE /spaces/{id}/members/{user}`).
+  fn remove_space_member(&self, space: SpaceId, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
   /// A member's role, or the caller's own preferences (favorite, notification level).
   fn update_member(
     &self,

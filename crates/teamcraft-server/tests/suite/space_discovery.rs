@@ -79,10 +79,12 @@ mod browsing {
     let as_admin = space_of(&app, &carol, &space).await;
     assert_eq!(as_admin["can_add_members"], json!(true));
     assert_eq!(as_admin["can_invite_guests"], json!(true));
+    assert_eq!(as_admin["can_manage_space"], json!(true));
     assert_eq!(as_admin["member_count"], json!(3));
     let as_member = space_of(&app, &dave, &space).await;
     assert_eq!(as_member["can_add_members"], json!(false));
     assert_eq!(as_member["can_invite_guests"], json!(false));
+    assert_eq!(as_member["can_manage_space"], json!(false));
 
     let reply = app
       .patch(&alice, &format!("/spaces/{space}"), json!({"is_archived": true}))
@@ -125,6 +127,31 @@ mod inviting {
         .await;
       assert_eq!(reply.status, StatusCode::FORBIDDEN, "{role}: {}", reply.body);
     }
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn adding_someone_twice_never_changes_their_role() {
+    let app = app!();
+    let (alice, carol) = (owner(), member("carol"));
+    let space = create_space(&app, &alice, "Project A", "invite_only").await;
+    let carol_id = user_id(&app, &carol).await;
+    add_space_member(&app, &alice, &space, &carol_id, "space_admin").await;
+
+    // The same role again is fine (a retried request); another one is a conflict.
+    add_space_member(&app, &alice, &space, &carol_id, "space_admin").await;
+    let reply = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/members"),
+        json!({"user_id": carol_id, "role": "member"}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(
+      space_of(&app, &carol, &space).await["my_role"],
+      json!("space_admin")
+    );
     app.stop().await;
   }
 

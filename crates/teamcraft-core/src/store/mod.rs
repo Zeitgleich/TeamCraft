@@ -90,6 +90,10 @@ pub enum Table {
   Categories,
   /// Public channels the user could join, per space (the channel browser).
   ChannelBrowser,
+  /// The members of a space with their roles, per space (space settings).
+  SpaceRosters,
+  /// Pending invitations of a space, per space (space settings, member managers only).
+  SpaceInvites,
   /// Users' signed device lists, newest seen (security review A4).
   DeviceLists,
   /// Verified signing keys of devices, `{user}/{device}`, to check message signatures (A10).
@@ -536,7 +540,7 @@ impl StoredMessage {
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 32] = [
+  pub const ALL: [Self; 34] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -564,6 +568,8 @@ impl Table {
     Self::PendingPreviews,
     Self::Categories,
     Self::ChannelBrowser,
+    Self::SpaceRosters,
+    Self::SpaceInvites,
     Self::DeviceLists,
     Self::DeviceKeys,
     Self::RemovedSenders,
@@ -606,6 +612,8 @@ impl Table {
       Self::PendingPreviews => "pending_previews",
       Self::Categories => "categories",
       Self::ChannelBrowser => "channel_browser",
+      Self::SpaceRosters => "space_rosters",
+      Self::SpaceInvites => "space_invites",
       Self::DeviceLists => "device_lists",
       Self::DeviceKeys => "device_keys",
       Self::RemovedSenders => "removed_senders",

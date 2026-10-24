@@ -843,6 +843,7 @@ mod tests {
       join_policy: JoinPolicy::InviteOnly,
       can_add_members: false,
       can_invite_guests: false,
+      can_manage_space: false,
     }
   }
 

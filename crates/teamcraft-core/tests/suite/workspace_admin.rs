@@ -10,7 +10,7 @@ use crate::common;
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::actions::{ChannelChanges, NewChannel, NewSpace, SpaceInvite, WorkspaceEvent};
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::model::{Message, MessageKind, SystemEvent};
+use teamcraft_client_api::model::{Message, MessageKind, SpaceRoster, SystemEvent};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_proto::{ConversationId, HistoryPolicy, IdempotencyKey, SpaceId, SpaceRole};
 
@@ -241,6 +241,34 @@ async fn members_added_from_join_miss_earlier_messages() {
 }
 
 #[tokio::test]
+async fn adding_to_a_channel_brings_people_into_the_space_first() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let space = alice.space().await;
+  let channel = create_public_channel(&mut alice, space, "Ops").await;
+  server.make_space_outsider(carol.client.user_id());
+  let alice_ui = backend_of(&alice);
+
+  alice_ui.add_people_to_channel(
+    channel,
+    vec![(carol.client.user_id(), false)],
+    HistoryPolicy::FromJoin,
+    true,
+  );
+  run_commands(&mut alice, &alice_ui).await;
+  settle_and_flush(&mut [&mut alice, &mut carol]).await;
+  alice_ui.post_message(channel, None, "welcome");
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut carol]).await;
+
+  let adds = server.space_member_adds();
+  assert_eq!(adds.len(), 1, "{adds:?}");
+  assert_eq!(adds[0].1.user_id, carol.client.user_id());
+  assert_eq!(carol.texts(channel), ["welcome"]);
+}
+
+#[tokio::test]
 async fn categories_invitations_and_external_badge() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
@@ -332,6 +360,63 @@ async fn guests_are_added_with_the_guest_role_and_invitations_carry_the_message(
 }
 
 #[tokio::test]
+async fn space_settings_list_change_and_remove_members_and_withdraw_invitations() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob = server.add_user("Bob");
+  let space = alice.space().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.invite_to_space(SpaceInvite {
+    space,
+    email: "new@example.com".into(),
+    is_guest: false,
+    channels: Vec::new(),
+    maybe_expires_at: None,
+    maybe_message: None,
+  });
+  run_commands(&mut alice, &alice_ui).await;
+
+  assert_eq!(
+    alice_ui.space_members(space),
+    SpaceRoster::Loading,
+    "nothing until the settings ask"
+  );
+  alice_ui.refresh_space_roster(space);
+  run_commands(&mut alice, &alice_ui).await;
+  let members = loaded(alice_ui.space_members(space));
+  assert!(
+    members
+      .iter()
+      .any(|member| member.user == bob.user_id() && member.role == SpaceRole::Member)
+  );
+  let invites = alice_ui.space_invites(space);
+  assert_eq!(invites.len(), 1);
+  assert_eq!(invites[0].email, "new@example.com");
+
+  alice_ui.set_space_role(space, bob.user_id(), SpaceRole::SpaceAdmin);
+  run_commands(&mut alice, &alice_ui).await;
+  let bob_now = |ui: &dyn ChatBackend| {
+    loaded(ui.space_members(space))
+      .into_iter()
+      .find(|member| member.user == bob.user_id())
+  };
+  assert_eq!(
+    bob_now(&alice_ui).map(|member| member.role),
+    Some(SpaceRole::SpaceAdmin)
+  );
+
+  alice_ui.remove_space_member(space, bob.user_id());
+  alice_ui.revoke_space_invite(space, invites[0].id);
+  run_commands(&mut alice, &alice_ui).await;
+  assert_eq!(
+    bob_now(&alice_ui),
+    None,
+    "the roster is reloaded after the removal"
+  );
+  assert!(alice_ui.space_invites(space).is_empty());
+}
+
+#[tokio::test]
 async fn the_people_of_my_spaces_are_known_without_a_shared_conversation() {
   let server = FakeServer::new();
   let alice = Peer::enroll(&server, "Alice").await;
@@ -344,6 +429,13 @@ async fn the_people_of_my_spaces_are_known_without_a_shared_conversation() {
   let bob_ui = backend_of(&bob);
   let names: Vec<String> = bob_ui.users().into_iter().map(|user| user.display_name).collect();
   assert!(names.contains(&"Alice".to_string()), "{names:?}");
+}
+
+fn loaded(roster: SpaceRoster) -> Vec<teamcraft_client_api::model::SpaceMember> {
+  match roster {
+    SpaceRoster::Loaded(members) => members,
+    other => panic!("the roster is {other:?}"),
+  }
 }
 
 async fn create_public_channel(peer: &mut Peer, space: SpaceId, name: &str) -> ConversationId {
