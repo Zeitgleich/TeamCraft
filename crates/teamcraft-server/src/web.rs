@@ -316,6 +316,71 @@ mod tests {
     drop(std::fs::remove_dir_all(&dir));
   }
 
+  /// The web client's routes (teamcraft-ui `route.rs`) are client-side: a reload or a deep link on
+  /// any of them gets the app shell, never cached, while files and the API keep their own answers.
+  #[tokio::test]
+  async fn client_routes_get_the_app_shell() {
+    let dir = std::env::temp_dir().join(format!("teamcraft-web-routes-{}", std::process::id()));
+    drop(std::fs::remove_dir_all(&dir));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(INDEX), "<!doctype html><title>shell</title>").unwrap();
+    std::fs::write(dir.join("favicon.ico"), b"ico").unwrap();
+    let base = serve(router(&WebConfig {
+      maybe_static_dir: Some(dir.clone()),
+      ..WebConfig::default()
+    }))
+    .await;
+    let client = reqwest::Client::new();
+    for path in [
+      "/",
+      "/home",
+      "/s/1000001",
+      "/s/1000001/c/2000002",
+      "/c/2000002",
+      "/c/2000002/t/4000004",
+      "/c/2000002/m/3000003",
+      "/c/2000002/m/3000003/t/4000004",
+      "/dm/2000002",
+      "/threads",
+      "/activity",
+      "/calls",
+      "/meetings",
+      "/people",
+      "/saved",
+      "/search",
+      "/settings",
+      "/settings/privacy",
+      "/admin",
+      "/admin/users",
+      "/home/",
+      // Unknown paths get the shell too; the app shows its own notice.
+      "/no/such/page",
+    ] {
+      let response = client.get(format!("{base}{path}")).send().await.unwrap();
+      assert_eq!(response.status(), StatusCode::OK, "{path}");
+      let header = |name: &str| {
+        response
+          .headers()
+          .get(name)
+          .and_then(|value| value.to_str().ok())
+          .unwrap_or("")
+          .to_owned()
+      };
+      assert!(header("content-type").starts_with("text/html"), "{path}");
+      assert_eq!(header("cache-control"), REVALIDATE, "{path}");
+      assert_eq!(
+        response.text().await.unwrap(),
+        "<!doctype html><title>shell</title>",
+        "{path}"
+      );
+    }
+    let icon = client.get(format!("{base}/favicon.ico")).send().await.unwrap();
+    assert_eq!(icon.bytes().await.unwrap().as_ref(), b"ico");
+    let api = client.get(format!("{base}/api/v1/nothing")).send().await.unwrap();
+    assert_eq!(api.status(), StatusCode::NOT_FOUND);
+    drop(std::fs::remove_dir_all(&dir));
+  }
+
   /// Serves `router` on a local port and returns its base URL.
   async fn serve(router: Router) -> String {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))

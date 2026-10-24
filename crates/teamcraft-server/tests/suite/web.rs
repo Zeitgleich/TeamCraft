@@ -76,7 +76,17 @@ async fn the_shell_is_served_at_the_root_and_for_client_side_routes_without_cach
   let site = Site::create();
   let Some(app) = start(&site).await else { return };
 
-  for path in ["/", "/index.html", "/c/some/channel", "/meeting/42"] {
+  for path in [
+    "/",
+    "/index.html",
+    "/c/some/channel",
+    "/meeting/42",
+    "/s/1/c/2",
+    "/dm/3",
+    "/c/2/m/4/t/5",
+    "/settings/privacy",
+    "/admin/users",
+  ] {
     let (status, headers, body) = get(&app, path).await;
     assert_eq!(status, StatusCode::OK, "{path}");
     assert_eq!(String::from_utf8(body).unwrap(), INDEX, "{path}");
