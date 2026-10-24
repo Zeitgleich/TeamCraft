@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::membership::{MembershipAction, MembershipChange, SignedMembershipChange};
 use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry};
 use teamcraft_proto::{
-  AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ConversationId, DeviceId, Id,
-  ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest, PresenceState, UserId,
+  AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ConversationId, DeviceId, ErrorCode,
+  Id, ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest, PresenceState, UserId,
   WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
 };
 
@@ -167,6 +167,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }))
   }
 
+  /// The owners of the verified roster and the console's warning lead (admin.md §2.3).
+  #[cfg(feature = "ui")]
+  pub fn owner_roster_status(&self) -> Option<teamcraft_client_api::admin::OwnerRosterStatus> {
+    crate::workspace::owner_roster_status(
+      &self.store,
+      self.settings.workspace_max_age,
+      self.settings.workspace_expiry_warning,
+    )
+  }
+
   /// The verified workspace policy; the default policy if none was signed yet.
   pub fn workspace_policy(&self) -> Result<WorkspacePolicy, CoreError> {
     Ok(self.workspace()?.policy)
@@ -301,8 +311,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Signs `document` as the next roster version, then the current policy again under it, so a
-  /// policy signed under an older roster (by an owner removed since) is refused (A7).
+  /// policy signed under an older roster (by an owner removed since) is refused (A7). A roster
+  /// without an owner is never signed: nobody could change it again (admin.md §2.3).
   async fn append_roster(&mut self, mut document: RosterDocument) -> Result<(), CoreError> {
+    if document.owner_count() == 0 {
+      return Err(CoreError::LastOwner);
+    }
     let state = self.workspace()?;
     document.version = state.roster.version + 1;
     document.maybe_prev_hash = Some(head_or_genesis(state.heads.maybe_roster_hash));
@@ -760,7 +774,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       signature: Base64Bytes::new(signature),
       signer_device_id: self.account.device_id,
     };
-    self.api.append_workspace_log(&kind, &request).await?;
+    self
+      .api
+      .append_workspace_log(&kind, &request)
+      .await
+      .map_err(|error| match error.error_code() {
+        // The server's sanity check (an older client of this user may have built the roster).
+        Some(ErrorCode::LastOwner) => CoreError::LastOwner,
+        _ => error.into(),
+      })?;
     self.sync_workspace().await
   }
 }

@@ -427,6 +427,21 @@ policy-recovery-hint = Lets admins restore access when someone loses all devices
 policy-recovery-members = Allow for members
 policy-recovery-guests = Allow for guests
 policy-recovery-approvals = Admins that must approve
+policy-owners = Owners
+policy-owners-hint = Owners sign the admin roster and this policy. Keep at least two: if the only owner leaves or loses all devices and the recovery passphrase, nobody can manage the workspace again. To replace an owner, add the successor first, then remove the old owner.
+policy-owners-unknown = This device has not verified an admin roster yet.
+policy-owners-last-signed = last signed { $time }
+policy-owners-never-signed = no signature seen on this device yet
+policy-owners-valid-until = Admin rights stay valid on members' devices until { $time }. An owner's app signs again by itself well before that whenever it is open.
+policy-owners-too-few = { $count } of the recommended { $minimum } owners. Add another owner so the workspace can still be managed if one leaves or loses their devices.
+policy-owners-expires-soon = No owner has signed for a while: members' devices stop accepting the admins on { $time }. An owner needs to open TeamCraft before then.
+policy-owners-expired = No owner signed in time: members' devices no longer accept the admins. An owner needs to open TeamCraft to sign again.
+policy-owners-minimum = Recommended number of owners
+policy-owners-minimum-hint = Fewer owners than this shows a warning here. 1 switches the warning off.
+policy-owners-count = { $count ->
+    [one] { $count } owner
+   *[other] { $count } owners
+  }
 policy-admins = { $count } admins
 policy-signin = Sign-in
 policy-mfa = Require multi-factor authentication
@@ -940,6 +955,7 @@ policy-blocked-not-owner = Only owners can change the signed policy. You can rea
 policy-blocked-no-keys = The policy is signed with your encryption keys. Open the desktop app to change it.
 policy-not-stored = Not part of the signed policy yet. These rules come from your identity provider.
 admin-error = The last request failed: { $detail }
+admin-error-last-owner = This change would leave the workspace without an owner, and nobody could manage it again. Add the new owner first, then remove the old one.
 audit-member-added = Member added
 audit-member-removed = Member removed
 audit-member-role-changed = Role changed

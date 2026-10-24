@@ -71,6 +71,10 @@ could add itself to every channel.
   client until an owner re-signs. A server that holds back a demotion gains at most that long. For
   commits the age is judged at the server's time of the commit, so every member decides the same way
   whatever its clock shows (e2ee.md §4.6).
+- **Never without an owner.** A roster must name at least one owner with a usable identity key:
+  nobody could sign the next roster or policy otherwise. Owners' clients refuse to sign such a
+  roster (`last_owner`), the server refuses to store one, and every client refuses to apply one even
+  when it is validly signed (an older or compromised owner device), keeping the last verified roster.
 - **Fork detection.** Members send their verified roster and policy heads inside their encrypted
   messages. A colleague with a different entry for the same version, or with entries this client
   isn't shown, raises an alarm.
@@ -78,6 +82,29 @@ could add itself to every channel.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.
+
+#### 2.3.1 Owner lifecycle
+
+The workspace can only be administered while an owner with a working device exists: owners sign
+every roster and policy, and admin authority lapses on member clients 30 days after the newest owner
+signature (freshness above).
+
+- **Keep at least two owners.** The Security section of the console lists the owners with the time
+  each last signed a roster or policy, as this device verified it, and warns when there are fewer
+  than the recommended number. That number is part of the signed policy (`owners.recommended_minimum`,
+  default 2; 1 switches the warning off).
+- **When an owner leaves, add the successor first, then remove the old owner.** Removing the last
+  owner is refused, so a handover always passes through a roster with both. The first roster takes
+  every owner and admin the server lists when the first policy is signed, so a second owner is best
+  given the role in the identity provider before that; the console has no roster editor yet.
+- **Keep an owner's app in use.** An owner's client signs the roster again by itself when half of
+  the 30 days have passed. The console warns a week before the window runs out (a client setting,
+  `workspace_expiry_warning`) and once it has: then an owner only needs to open TeamCraft.
+- **All owners lost** (every owner left, or lost all devices and the recovery passphrase): nobody can
+  sign a roster or policy again, and a new genesis is refused by every client that pinned the root of
+  trust (`RootChanged`). Admins keep their authority until the freshness window runs out; after that
+  the workspace can't be administered. A recovery path is still open (issue #188); until it exists,
+  the only way out is setting the workspace up from scratch (operations.md, "Owners").
 
 ### 2.4 Admins joining private channels
 
@@ -310,7 +337,8 @@ Groups that are stored and reset as a whole:
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org
 recovery, history and retention defaults, session rules, directory privacy, presence, threads, guest
 rules (allowed e-mail domains, default expiry, DMs only with shared conversations), the shortest
-password, push content, call backgrounds and desktop updates. Everything in this section is enforced
+password, push content, call backgrounds, desktop updates and the recommended number of owners.
+Everything in this section is enforced
 by the server alone (the server sends the mail, checks the sizes, applies invites): a compromised
 server could ignore these settings whether they were signed or not, so a signature would protect
 nothing. Brands, mail and calendar are server-side presentation and transport for the same reason.

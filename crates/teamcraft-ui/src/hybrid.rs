@@ -547,6 +547,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.push_content_mode()
   }
 
+  fn owner_roster(&self) -> Option<teamcraft_client_api::admin::OwnerRosterStatus> {
+    self.chat.owner_roster()
+  }
+
   fn current_announcement(&self) -> Option<AnnouncementResponse> {
     self.maybe_live.as_ref().and_then(LiveServer::announcement)
   }
@@ -908,6 +912,11 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
       return Some(PolicyBlocker::NotOwner);
     }
     (!self.chat.can_sign_workspace()).then_some(PolicyBlocker::NoSigningKeys)
+  }
+
+  fn admin_owner_roster(&self) -> Option<teamcraft_client_api::admin::OwnerRosterStatus> {
+    self.maybe_admin.as_ref()?;
+    self.chat.owner_roster()
   }
 
   fn admin_brands(&self) -> Option<AdminBrandsResponse> {

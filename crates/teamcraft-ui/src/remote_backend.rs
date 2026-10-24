@@ -758,6 +758,10 @@ impl ChatBackend for RemoteChat {
     self.mirror.borrow().snapshot.security.clone()
   }
 
+  fn owner_roster(&self) -> Option<teamcraft_client_api::admin::OwnerRosterStatus> {
+    self.mirror.borrow().snapshot.security.maybe_owners.clone()
+  }
+
   fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
     self
       .mirror

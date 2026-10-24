@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::admin::AdminSection;
+use crate::admin::{AdminSection, admin_error_i18n_key};
 use crate::components::admin_announcement::AnnouncementSection;
 use crate::components::admin_audit::AuditSection;
 use crate::components::admin_backgrounds::BackgroundsSection;
@@ -79,9 +79,13 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
       </nav>
       <div class="admin-content">
         {move || {
-          maybe_error
-            .get()
-            .map(|detail| view! { <p class="auth-alert" role="alert">{i18n.t_with("admin-error", &[("detail", &detail)])}</p> })
+          maybe_error.get().map(|detail| {
+            let text = match admin_error_i18n_key(&detail) {
+              Some(key) => i18n.t(key),
+              None => i18n.t_with("admin-error", &[("detail", &detail)]),
+            };
+            view! { <p class="auth-alert" role="alert">{text}</p> }
+          })
         }}
         {move || match section {
           AdminSection::Channels => view! { <ChannelsSection /> }.into_any(),

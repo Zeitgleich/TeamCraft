@@ -11,6 +11,7 @@ pub mod admin_console;
 pub mod admin_fields;
 pub mod admin_instance;
 pub mod admin_mail;
+pub mod admin_owners;
 pub mod admin_people;
 pub mod admin_permissions;
 pub mod admin_policy;

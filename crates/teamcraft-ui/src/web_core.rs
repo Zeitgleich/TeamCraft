@@ -1007,6 +1007,7 @@ impl Core {
       my_fingerprint: client.identity_fingerprint(),
       contacts,
       maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
+      maybe_owners: client.owner_roster_status(),
     })
   }
 

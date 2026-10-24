@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Added
+
+- **Owner warnings in the console**: Administration → Security lists the owners of the signed roster
+  with the time each last signed, warns when there are fewer than the recommended number (a signed
+  policy setting, default 2) and a week before admin authority would lapse for lack of a fresh
+  owner signature.
+
+### Fixed
+
+- **The last owner can't be removed**: a roster without an owner is refused by the owner's app
+  before signing, by the server, and by every client verifying the roster, so the workspace can't
+  end up without anyone who can administer it (#188).
+
 ## [1.0.0] - 2026-10-24
 
 First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the

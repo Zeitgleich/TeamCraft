@@ -17,7 +17,7 @@ use teamcraft_proto::{
 use super::{MockBackend, dm_first, id_from_raw};
 use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, GuestInfo,
-  Retention, SelfJoinOutcome, SettingsTestKind,
+  OwnerRosterStatus, OwnerSigning, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::backend::{AdminBackend, CallBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevice, MediaDevices, Participant};
@@ -156,6 +156,19 @@ impl AdminBackend for MockBackend {
   fn workspace_policy(&self) -> (u64, WorkspacePolicy) {
     let ops = self.ops.borrow();
     (ops.policy_version, ops.policy.clone())
+  }
+
+  /// Demo: the signed-in user is the only owner, so the console shows the "too few owners" warning.
+  fn admin_owner_roster(&self) -> Option<OwnerRosterStatus> {
+    Some(OwnerRosterStatus {
+      owners: vec![OwnerSigning {
+        user: crate::backend::ChatBackend::me(self).id,
+        maybe_last_signed_at: Some(self.now - 3 * DAY),
+      }],
+      maybe_expires_at: Some(self.now + 27 * DAY),
+      recommended_minimum: self.ops.borrow().policy.owners.recommended_minimum,
+      warning_lead_ms: 7 * DAY,
+    })
   }
 
   fn set_workspace_policy(&self, policy: WorkspacePolicy) {

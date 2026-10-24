@@ -117,6 +117,8 @@ pub struct ClientSettings {
   /// (a server holding back a demotion gets at most this long, security review A6). Owners'
   /// clients re-sign the roster after half of it.
   pub workspace_max_age: std::time::Duration,
+  /// How long before `workspace_max_age` runs out the admin console warns that no owner signed.
+  pub workspace_expiry_warning: std::time::Duration,
   /// The identity provider that attests identity keys; `None`: trust on first use.
   pub maybe_attestation: Option<AttestationSettings>,
   /// Show messages from before senders signed them (their sender is only "some member"). Off by
@@ -177,6 +179,7 @@ impl Default for ClientSettings {
       link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
       workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      workspace_expiry_warning: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_attestation: None,
       accept_unsigned_messages: false,
       max_announced_presence: 500,

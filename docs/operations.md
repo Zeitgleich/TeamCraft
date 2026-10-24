@@ -150,6 +150,31 @@ harmless; rows without an object show up as failed downloads.
    passphrase (the bot's backup key is on the server, so a lost bridge database is recoverable).
 4. Clients reconnect and run a full sync; devices whose rows were lost re-register.
 
+## Owners
+
+Owners (the role `owner` in the identity provider, `just ensure-admin` above) sign the workspace's
+admin roster and policy with their devices (admin.md §2.3). The server can't do it for them, and
+there is no operator override: an operator with full access to the server and database still can't
+make someone an owner.
+
+- Make sure there are **at least two owners** with a set-up device and recovery passphrase. Give the
+  second person the owner role in the identity provider before the first owner signs the first
+  policy: the first roster takes every owner and admin the server lists then. The console
+  (Administration → Security → Owners) warns when the signed roster has fewer owners than
+  recommended and shows when each owner last signed.
+- **Handing over:** the successor goes into the signed roster as owner first, the old owner is
+  removed afterwards. A roster without an owner is refused by the apps and the server
+  (`last_owner`). The console has no roster editor yet; later roster changes are made through the
+  client core (`publish_roster`).
+- An owner's app re-signs the roster every 15 days while it is in use. If no owner opens TeamCraft
+  for 30 days, member clients stop accepting the admins until an owner does; the console warns a
+  week ahead.
+- **If every owner is lost** (left, or lost all devices and the recovery passphrase), the workspace
+  can't be administered any more: chat keeps working, admin actions don't. Restoring a backup does
+  not help, and a new first owner is refused by every client. A recovery procedure is not
+  available yet (issue #188); until then the only way out is a new workspace (fresh database, new
+  enrollment of every user).
+
 ## Upgrades
 
 - Images are pinned by digest in the deployment; build or pull the new ones, never `latest`.

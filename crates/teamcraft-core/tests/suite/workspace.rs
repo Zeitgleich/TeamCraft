@@ -54,6 +54,96 @@ async fn roster_and_policy_are_verified_and_forgeries_ignored() {
   assert!(workspace.maybe_rejection.is_some());
 }
 
+mod last_owner {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_last_owner_cannot_be_removed_but_can_hand_over() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+
+    // Demoting the only owner: refused before anything is signed (the fake server has no check).
+    let refused = alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Admin), (bob_id, RosterRole::Admin)])
+      .await;
+    assert!(matches!(refused, Err(teamcraft_core::CoreError::LastOwner)));
+    let refused = alice.client.publish_roster(&[]).await;
+    assert!(matches!(refused, Err(teamcraft_core::CoreError::LastOwner)));
+    assert_eq!(alice.client.workspace().unwrap().roster.version, 1);
+
+    // The successor first, then the old owner goes (docs/admin.md, owner lifecycle).
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    bob
+      .client
+      .publish_roster(&[(bob_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let workspace = alice.client.workspace().unwrap();
+    assert_eq!(workspace.roster.version, 3);
+    assert_eq!(workspace.maybe_rejection, None);
+    assert!(!workspace.is_admin(alice_id));
+    let status = workspace.owner_status(i64::MAX / 2).unwrap();
+    assert_eq!(status.owners.len(), 1);
+    assert_eq!(status.owners[0].0, bob_id);
+    assert!(status.owners[0].1.is_some(), "bob's signing time is known");
+  }
+
+  #[tokio::test]
+  async fn a_zero_owner_roster_from_a_hostile_server_is_refused() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut carol]).await;
+
+    // The server appends a roster that continues the chain but names no owner.
+    let mut orphaned = carol.client.workspace().unwrap().roster;
+    orphaned.version = 2;
+    orphaned.maybe_prev_hash = carol.client.workspace().unwrap().heads.maybe_roster_hash;
+    for member in &mut orphaned.members {
+      member.role = RosterRole::Admin;
+    }
+    server.inject_workspace_entry(
+      WorkspaceLogKind::Roster,
+      serde_json::to_vec(&orphaned).unwrap(),
+      vec![1, 2, 3],
+    );
+    settle(&mut [&mut alice, &mut carol]).await;
+    for peer in [&alice, &carol] {
+      let workspace = peer.client.workspace().unwrap();
+      assert_eq!(workspace.roster.version, 1, "the verified roster stays");
+      assert!(workspace.is_admin(alice_id));
+      assert!(
+        workspace
+          .maybe_rejection
+          .as_deref()
+          .is_some_and(|reason| reason.contains("has no owner")),
+        "{:?}",
+        workspace.maybe_rejection
+      );
+    }
+  }
+}
+
 #[tokio::test]
 async fn a_policy_edited_from_something_unverified_is_not_signed() {
   let server = FakeServer::new();
