@@ -37,6 +37,17 @@ pub struct Toast {
   pub id: u64,
   pub text: String,
   pub maybe_undo: Option<Undo>,
+  pub tone: ToastTone,
+}
+
+/// How a toast looks and is announced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastTone {
+  Info,
+  /// A failed action (issue #322), with the technical detail behind a "Details" toggle.
+  Error {
+    detail: String,
+  },
 }
 
 /// What the Undo button of a toast reverts.
@@ -320,7 +331,11 @@ impl AppState {
   /// Tells every reader that the backend changed on its own (data arrived over the network or from
   /// the desktop shell), so views re-read.
   pub fn backend_changed(&self) {
-    self.revision.update(|revision| *revision += 1);
+    // Called by the backend from outside the reactive tree, possibly after this shell is gone
+    // (sign-out, a new session): then there is nothing to update (issue #322).
+    if self.revision.try_update(|revision| *revision += 1).is_none() {
+      return;
+    }
     self.open_pending_creation();
     if let Some(route) = self.pending_route.get_untracked() {
       self.follow_route(route);
@@ -718,6 +733,29 @@ impl AppState {
     self.push_toast(text, None);
   }
 
+  /// Shows a failed action until the user closes it. Called from outside the reactive tree (the
+  /// core answered), so it does nothing once the shell is gone. The same error twice in a row
+  /// shows once.
+  pub fn show_error(&self, text: String, detail: String) {
+    let Some(id) = self.next_toast.try_get_value() else {
+      return;
+    };
+    let _ = self.toasts.try_update(|list| {
+      let is_repeat = list.last().is_some_and(|last| {
+        last.text == text && matches!(&last.tone, ToastTone::Error { detail: shown } if *shown == detail)
+      });
+      if !is_repeat {
+        self.next_toast.set_value(id + 1);
+        list.push(Toast {
+          id,
+          text,
+          maybe_undo: None,
+          tone: ToastTone::Error { detail },
+        });
+      }
+    });
+  }
+
   pub fn dismiss_toast(&self, id: u64) {
     self.toasts.update(|list| list.retain(|toast| toast.id != id));
   }
@@ -824,9 +862,14 @@ impl AppState {
   fn push_toast(&self, text: String, maybe_undo: Option<Undo>) -> u64 {
     let id = self.next_toast.get_value();
     self.next_toast.set_value(id + 1);
-    self
-      .toasts
-      .update(|list| list.push(Toast { id, text, maybe_undo }));
+    self.toasts.update(|list| {
+      list.push(Toast {
+        id,
+        text,
+        maybe_undo,
+        tone: ToastTone::Info,
+      })
+    });
     id
   }
 

@@ -898,7 +898,8 @@ impl Core {
         drop(reply.send(result));
         // A read can ask for data it doesn't have yet (messages found only in shared index
         // segments, last seen, the call history): tell the UI to read again when it arrived.
-        if self.run_queued_commands().await > 0 {
+        // A failed read command still changed what there is to read (it was answered as failed).
+        if !matches!(self.run_queued_commands().await, Ok(0)) {
           notify_changed();
         }
       },
@@ -1098,21 +1099,30 @@ impl Core {
           .create_channel(*space, name)
           .await
           .map(|_| ())
-          .map_err(describe);
+          .map_err(describe_failure);
       },
-      ChatAction::OpenDm { user } => return client.open_dm(*user).await.map(|_| ()).map_err(describe),
+      ChatAction::OpenDm { user } => {
+        return client.open_dm(*user).await.map(|_| ()).map_err(describe_failure);
+      },
       ChatAction::OpenGroupDm { users } => {
-        return client.open_group_dm(users).await.map(|_| ()).map_err(describe);
+        return client
+          .open_group_dm(users)
+          .await
+          .map(|_| ())
+          .map_err(describe_failure);
       },
       ChatAction::AddMember { conversation, user } => {
-        return client.add_member(*conversation, *user).await.map_err(describe);
+        return client
+          .add_member(*conversation, *user)
+          .await
+          .map_err(describe_failure);
       },
       ChatAction::ChangePassphrase { passphrase } => {
         let passphrase = SecretBytes::new(passphrase.clone().into_bytes());
         return client
           .upload_key_bag_with(&passphrase, Argon2Settings::default())
           .await
-          .map_err(describe);
+          .map_err(describe_failure);
       },
       ChatAction::SetActivity { is_idle } => {
         self.send_activity(*is_idle).await;
@@ -1123,12 +1133,12 @@ impl Core {
         return Ok(());
       },
       ChatAction::AcceptKeyChange { user } => {
-        let mut pinned = records::pinned_identities(client.store()).map_err(describe)?;
+        let mut pinned = records::pinned_identities(client.store()).map_err(describe_failure)?;
         if let Some(entry) = pinned.get_mut(user)
           && let Some(new_key) = entry.maybe_changed_to.take()
         {
           entry.public_key = new_key;
-          records::pin_identity(client.store(), *user, entry).map_err(describe)?;
+          records::pin_identity(client.store(), *user, entry).map_err(describe_failure)?;
         }
         return Ok(());
       },
@@ -1141,7 +1151,7 @@ impl Core {
         return client
           .publish_policy_with_genesis(base, policy.clone(), owners, admins)
           .await
-          .map_err(describe);
+          .map_err(describe_failure);
       },
       ChatAction::PublishRoster {
         base_version,
@@ -1151,11 +1161,14 @@ impl Core {
         return client
           .publish_roster_based_on(*base_version, &roles)
           .await
-          .map_err(describe);
+          .map_err(describe_failure);
       },
       ChatAction::AdminJoinChannel { conversation } => {
         let me = client.user_id();
-        return client.admin_add_member(*conversation, me).await.map_err(describe);
+        return client
+          .admin_add_member(*conversation, me)
+          .await
+          .map_err(describe_failure);
       },
       _ => {},
     }
@@ -1200,29 +1213,33 @@ impl Core {
         }
       },
     }
-    self.run_queued_commands().await;
+    let ran = self.run_queued_commands().await;
     // New messages go out right away; failures stay in the outbox for the periodic retry.
     self.flush().await;
-    Ok(())
+    ran.map(|_| ()).map_err(describe_failure)
   }
 
-  /// Runs what the UI adapter queued; returns how many commands there were.
-  async fn run_queued_commands(&mut self) -> usize {
+  /// Runs what the UI adapter queued; returns how many commands there were, or the first failure.
+  /// Every command runs even when one fails: they are independent user actions. The failure goes
+  /// back to the UI, which shows it (issue #322: a failed action never passes silently).
+  async fn run_queued_commands(&mut self) -> Result<usize, CoreError> {
     let commands: Vec<CoreCommand> = self
       .backend
       .as_ref()
       .map(CoreChatBackend::drain_commands)
       .unwrap_or_default();
     let Some(client) = self.client.as_mut() else {
-      return 0;
+      return Ok(0);
     };
     let count = commands.len();
+    let mut maybe_failure = None;
     for command in commands {
       if let Err(error) = client.run_ui_command(command).await {
         tracing::warn!(%error, "UI command failed");
+        maybe_failure.get_or_insert(error);
       }
     }
-    count
+    maybe_failure.map_or(Ok(count), Err)
   }
 
   async fn flush(&mut self) {
@@ -1467,6 +1484,11 @@ fn not_set_up() -> String {
 /// Error text for the UI: the cause, without internal type names.
 fn describe(error: CoreError) -> String {
   error.to_string()
+}
+
+/// Error text of a failed user action: its kind first, so the UI words it (`ActionFailure`).
+fn describe_failure(error: CoreError) -> String {
+  error.to_failure().to_wire()
 }
 
 /// Waits for the existing device to answer, shows the short code, then waits for the keys.

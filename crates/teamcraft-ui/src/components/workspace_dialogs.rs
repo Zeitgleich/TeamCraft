@@ -18,7 +18,9 @@ use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::composer_commands::left_text;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::pending_button::PendingButton;
 use crate::components::space_tile::SpaceTile;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, SpaceId, UserId, hue_from_hex};
 use crate::space_images::{ImagePickError, check_pick, prepare_upload, use_space_images};
@@ -674,6 +676,7 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
   let i18n = use_i18n();
   let chosen = RwSignal::new(String::new());
   let shares_history = RwSignal::new(false);
+  let pending = PendingAction::new();
   let candidates = Memo::new(move |_| {
     let members = state
       .read(|backend| backend.conversation(conversation))
@@ -694,7 +697,8 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
     } else {
       HistoryPolicy::FromJoin
     };
-    state.write(|backend| backend.add_member_with_history(conversation, user, history));
+    // Pending until the core answered; a refusal shows as an error toast (issue #322).
+    pending.run(|| state.write(|backend| backend.add_member_with_history(conversation, user, history)));
     chosen.set(String::new());
   };
   view! {
@@ -711,7 +715,9 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
       <span>{move || i18n.t("channel-share-history")}</span>
     </label>
     <p class="hint">{move || if shares_history.get() { i18n.t("channel-share-history-on") } else { i18n.t("channel-share-history-off") }}</p>
-    <button class="btn btn-primary" prop:disabled=move || chosen.get().is_empty() on:click=add>{move || i18n.t("channel-add")}</button>
+    <PendingButton pending=pending class="btn btn-primary" is_disabled=Signal::derive(move || chosen.get().is_empty()) on_click=add>
+      {move || i18n.t("channel-add")}
+    </PendingButton>
   }
 }
 

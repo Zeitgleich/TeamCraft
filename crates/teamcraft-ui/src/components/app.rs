@@ -69,7 +69,7 @@ use crate::prefs::Zoom;
 use crate::reactive::use_interval;
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
-use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel};
+use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -128,6 +128,10 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   provide_context(state);
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
+  // A failed action is never silent (issue #322).
+  crate::feedback::set_failure_sink(move |failure| {
+    state.show_error(crate::feedback::failure_message(i18n, &failure), failure.detail);
+  });
   // Preferences the server enforces (push, do not disturb, mutes) follow the account on the server.
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
@@ -248,9 +252,21 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
               let id = toast.id;
               let node = NodeRef::<leptos::html::Div>::new();
               use_leave_ghost(node);
+              let is_error = matches!(toast.tone, ToastTone::Error { .. });
               view! {
-                <div class="toast" node_ref=node>
-                  <span>{toast.text}</span>
+                <div class=if is_error { "toast toast-error" } else { "toast" } role=is_error.then_some("alert") node_ref=node>
+                  <div class="toast-body">
+                    <span>{toast.text}</span>
+                    {match toast.tone {
+                      ToastTone::Info => None,
+                      ToastTone::Error { detail } => Some(view! {
+                        <details class="toast-details">
+                          <summary>{move || i18n.t("error-details")}</summary>
+                          <code class="toast-detail-text">{detail}</code>
+                        </details>
+                      }),
+                    }}
+                  </div>
                   {toast.maybe_undo.map(|undo| view! {
                     <button class="btn btn-small" on:click=move |_| state.undo(id, undo)>
                       {move || i18n.t("undo")}

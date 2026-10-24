@@ -113,9 +113,7 @@ pub async fn add_member(
   };
   let maybe_space_role = state.database.space_role(space, user.id).await?;
   let Some(space_role) = maybe_space_role else {
-    return Err(ApiError::InvalidRequest(
-      "the user is not a member of the space".into(),
-    ));
+    return Err(ApiError::NotSpaceMember);
   };
   if space_role == SpaceRole::Guest && is_privileged(&role) {
     return Err(ApiError::InvalidRequest(
