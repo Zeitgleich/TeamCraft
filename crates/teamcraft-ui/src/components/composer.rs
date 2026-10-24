@@ -28,6 +28,7 @@ use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
 use crate::state::use_app_state;
+use crate::unread_divider::DividerEvent;
 use crate::viewport::is_touch_primary;
 
 /// How long typing pauses before the draft is stored.
@@ -421,6 +422,7 @@ pub fn Composer(
     if maybe_thread.is_none() {
       state.jump_to_latest.update(|value| *value += 1);
     }
+    state.divider_event(conversation, DividerEvent::Sent);
   };
   let send = move || send_checked(false);
 
@@ -670,6 +672,16 @@ pub fn Composer(
       && edit_last_message()
     {
       ev.prevent_default();
+      return;
+    }
+    // Esc in the empty composer of a conversation marks it read, as in the feed (#321); a reply
+    // being quoted is cancelled first.
+    if ev.key() == "Escape" && !has_modifier && maybe_thread.is_none() && is_empty.get_untracked() {
+      if state.reply_target.get_untracked().is_some() {
+        state.reply_target.set(None);
+        return;
+      }
+      state.mark_conversation_read(conversation);
       return;
     }
     if ev.key() == "ArrowDown"

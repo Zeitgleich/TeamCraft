@@ -140,6 +140,7 @@ pub fn watch_layout(layout: RwSignal<Layout>) {
       continue;
     };
     let handler = Closure::<dyn Fn()>::new(move || {
+      // async-ok: a thread-local `Cell`; the signal inside is only touched with try_ below.
       let Some(layout) = WATCHED_LAYOUT.get() else {
         return;
       };
