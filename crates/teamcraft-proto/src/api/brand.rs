@@ -119,6 +119,8 @@ pub struct BrandLinks {
   pub maybe_terms: Option<String>,
   #[serde(rename = "imprint", default, skip_serializing_if = "Option::is_none")]
   pub maybe_imprint: Option<String>,
+  #[serde(rename = "download", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_download: Option<String>,
 }
 
 #[cfg(test)]

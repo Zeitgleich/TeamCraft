@@ -51,6 +51,7 @@ support_url = "https://support.brand-a.example.com"
 privacy_url = "https://brand-a.example.com/privacy"
 terms_url = "https://brand-a.example.com/terms"
 imprint_url = "https://brand-a.example.com/imprint"
+download_url = "https://brand-a.example.com/apps"   # where the apps are; default: the project's download page
 connect_origins = []                   # extra CSP connect-src origins of this brand only
 # content_security_policy = "..."      # replaces [web].content_security_policy for this brand
 
@@ -149,7 +150,7 @@ of the request host:
   "colors": { "light": { "accent": "#0b7f78" }, "dark": { "accent": "#35c6ba" } },
   "login_title": { "en": "Welcome to Brand A", "de": "Willkommen bei Brand A" },
   "login_text": { "en": "..." },
-  "links": { "support": "...", "privacy": "...", "terms": "...", "imprint": "..." }
+  "links": { "support": "...", "privacy": "...", "terms": "...", "imprint": "...", "download": "..." }
 }
 ```
 

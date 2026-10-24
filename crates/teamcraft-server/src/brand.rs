@@ -509,6 +509,7 @@ impl Brand {
       maybe_privacy: checked_url(config.maybe_privacy_url.as_deref(), "privacy_url", &id)?,
       maybe_terms: checked_url(config.maybe_terms_url.as_deref(), "terms_url", &id)?,
       maybe_imprint: checked_url(config.maybe_imprint_url.as_deref(), "imprint_url", &id)?,
+      maybe_download: checked_url(config.maybe_download_url.as_deref(), "download_url", &id)?,
     };
     for texts in [&config.login_title, &config.login_text] {
       for (language, text) in texts {

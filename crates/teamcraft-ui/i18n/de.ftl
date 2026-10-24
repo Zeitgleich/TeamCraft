@@ -1927,6 +1927,7 @@ admin-brands-link-support = Support
 admin-brands-link-privacy = Datenschutz
 admin-brands-link-terms = Nutzungsbedingungen
 admin-brands-link-imprint = Impressum
+admin-brands-link-download = Download-Seite der Apps
 admin-brands-mail = Mail-Absender
 admin-brands-mail-hint = Mails, die unter dieser Marke versendet werden. Ohne Adresse gilt der Standardabsender des Mailservers.
 admin-brands-sender-name = Absendername

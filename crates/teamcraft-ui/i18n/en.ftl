@@ -1927,6 +1927,7 @@ admin-brands-link-support = Support
 admin-brands-link-privacy = Privacy
 admin-brands-link-terms = Terms
 admin-brands-link-imprint = Imprint
+admin-brands-link-download = App download page
 admin-brands-mail = Mail sender
 admin-brands-mail-hint = Mail that goes out as this brand. Without an address the default sender of the mail server is used.
 admin-brands-sender-name = Sender name

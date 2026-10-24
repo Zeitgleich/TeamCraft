@@ -510,6 +510,7 @@ fn apply_settings(
   config.maybe_privacy_url = non_empty(settings.links.maybe_privacy);
   config.maybe_terms_url = non_empty(settings.links.maybe_terms);
   config.maybe_imprint_url = non_empty(settings.links.maybe_imprint);
+  config.maybe_download_url = non_empty(settings.links.maybe_download);
   config.mail.maybe_sender_name = non_empty(settings.mail.maybe_sender_name);
   config.mail.maybe_from_address = non_empty(settings.mail.maybe_from_address);
   config.maybe_sso_label = non_empty(settings.maybe_sso_label);
@@ -534,6 +535,7 @@ fn settings_of(config: &BrandConfig) -> BrandSettings {
       maybe_privacy: config.maybe_privacy_url.clone(),
       maybe_terms: config.maybe_terms_url.clone(),
       maybe_imprint: config.maybe_imprint_url.clone(),
+      maybe_download: config.maybe_download_url.clone(),
     },
     mail: BrandMailSettings {
       maybe_sender_name: config.mail.maybe_sender_name.clone(),
