@@ -10,19 +10,16 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::SpaceInvite;
 use teamcraft_proto::{HistoryPolicy, Role};
 
-use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
+use crate::components::people_picker::PeoplePicker;
 use crate::components::space_tile::SpaceTile;
 use crate::components::workspace_dialogs::Dialog;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, DeviceSetup, JoinPolicy, JoinableSpace, Space, SpaceId, User, UserId};
-use crate::reactive::use_debounced;
+use crate::model::{ConversationId, JoinPolicy, JoinableSpace, Space, SpaceId, User, UserId};
 use crate::state::{Overlay, use_app_state};
 
-/// Typing in the people picker asks the directory after this pause.
-const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 /// More addresses than this in one go are most likely a pasted list by mistake.
 const MAX_EMAILS_PER_INVITE: usize = 50;
 
@@ -388,7 +385,7 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
               <p class="hint">{move || i18n.t("invite-guests-only")}</p>
             })}
             <h3>{move || i18n.t("invite-from-directory")}</h3>
-            <PeoplePicker chosen=chosen accepts=Signal::derive(move || role.get()) excluded=Signal::derive(HashSet::new) />
+            <PeoplePicker chosen=chosen chosen_label_key="invite-chosen" allows_guest_accounts=Signal::derive(move || role.get().is_guest()) />
             <h3>{move || i18n.t("invite-by-email")}</h3>
             <label class="visually-hidden" for="invite-emails">{move || i18n.t("invite-by-email")}</label>
             <textarea
@@ -490,7 +487,8 @@ fn SpaceLink(link: String) -> impl IntoView {
 }
 
 /// Adds people to a channel through its encryption group; "share history" decides whether they
-/// can read what was written before (e2ee.md).
+/// can read what was written before (e2ee.md). Channel members must be in the channel's space: when
+/// the user may add people to the space, picked people who aren't in it yet join it first.
 #[component]
 pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -505,9 +503,16 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
   });
   let maybe_space = state
     .read(|backend| backend.conversation(conversation))
-    .and_then(|info| info.maybe_space);
-  let add = move |ev: leptos::ev::SubmitEvent| {
-    ev.prevent_default();
+    .and_then(|info| info.maybe_space)
+    .and_then(|id| {
+      state
+        .read(|backend| backend.spaces())
+        .into_iter()
+        .find(|space| space.id == id)
+    });
+  let space_id = maybe_space.as_ref().map(|space| space.id);
+  let adds_to_space = maybe_space.as_ref().is_some_and(|space| space.can_add_members);
+  let add = move || {
     let users: Vec<UserId> = chosen.with_untracked(|list| list.iter().map(|user| user.id).collect());
     if users.is_empty() {
       return;
@@ -517,8 +522,13 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
     } else {
       HistoryPolicy::FromJoin
     };
-    // A refusal shows as an error toast (issue #322), also after the dialog closed.
+    // A refusal shows as an error toast (issue #322), also after the dialog closed: the pending
+    // state only lives in the dialog, its end after unmount is ignored.
     PendingAction::new().run(|| {
+      // The core runs commands in order, so the space membership is there before the channel add.
+      if let Some(space) = space_id.filter(|_| adds_to_space) {
+        state.write(|backend| backend.add_space_members(space, users.clone(), false));
+      }
       for user in users {
         state.write(|backend| backend.add_member_with_history(conversation, user, history.clone()));
       }
@@ -527,17 +537,25 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
   };
   view! {
     <Dialog title_key="channel-add-people">
-      <form on:submit=add>
-        // Members and guests can be added alike; the server keeps guests out of what they may not see.
-        <PeoplePicker chosen=chosen accepts=Signal::derive(|| InviteRole::Guest) excluded=members />
-        <label class="check-row">
-          <input type="checkbox" prop:checked=move || shares_history.get() on:change=move |ev| shares_history.set(event_target_checked(&ev)) />
-          <span>{move || i18n.t("channel-share-history")}</span>
+      <form on:submit=move |ev: leptos::ev::SubmitEvent| { ev.prevent_default(); add(); }>
+        <PeoplePicker
+          chosen=chosen
+          chosen_label_key="channel-add-chosen"
+          allows_guest_accounts=true
+          already_in=members
+          already_in_key="channel-already-member"
+          on_submit=Callback::new(move |()| add())
+        />
+        <label class="switch-row">
+          <input type="checkbox" role="switch" prop:checked=move || shares_history.get() on:change=move |ev| shares_history.set(event_target_checked(&ev)) />
+          <span class="switch-text">
+            <strong>{move || i18n.t("channel-share-history")}</strong>
+            <small class="muted-text">{move || if shares_history.get() { i18n.t("channel-share-history-on") } else { i18n.t("channel-share-history-off") }}</small>
+          </span>
         </label>
-        <p class="hint">{move || if shares_history.get() { i18n.t("channel-share-history-on") } else { i18n.t("channel-share-history-off") }}</p>
-        {maybe_space.map(|space| view! {
+        {space_id.map(|space| view! {
           <p class="hint">
-            {move || i18n.t("channel-add-not-found")}
+            {move || if adds_to_space { i18n.t("channel-add-joins-space") } else { i18n.t("channel-add-space-only") }}
             " "
             <button type="button" class="link-btn" on:click=move |_| state.overlay.set(Overlay::InvitePeople(space))>
               {move || i18n.t("invite-title")}
@@ -554,143 +572,10 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
   }
 }
 
-/// Picks several people from the directory: chips for the picked ones, a search field and the
-/// matches. `accepts` decides who can be picked for the role; `excluded` are already in.
-#[component]
-fn PeoplePicker(
-  chosen: RwSignal<Vec<User>>,
-  #[prop(into)] accepts: Signal<InviteRole>,
-  #[prop(into)] excluded: Signal<HashSet<UserId>>,
-) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let filter = RwSignal::new(String::new());
-  let directory_query = use_debounced(filter, DIRECTORY_DEBOUNCE_MS);
-  let input = NodeRef::<leptos::html::Input>::new();
-  let candidates = Memo::new(move |_| {
-    let me = state.me().id;
-    let role = accepts.get();
-    let picked: HashSet<UserId> = chosen.with(|list| list.iter().map(|user| user.id).collect());
-    let excluded = excluded.get();
-    let users = state.read(|backend| backend.search_people(directory_query.get().trim()));
-    pickable(users, me, role, &picked, &excluded, &filter.get())
-  });
-  let pick = move |user: User| {
-    chosen.update(|list| list.push(user));
-    filter.set(String::new());
-    if let Some(element) = input.get_untracked() {
-      drop(element.focus());
-    }
-  };
-  let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
-    let is_filter_empty = filter.get_untracked().trim().is_empty();
-    match ev.key().as_str() {
-      // Enter picks the first match instead of sending the form.
-      "Enter" if !is_filter_empty => {
-        ev.prevent_default();
-        if let Some(first) = candidates.get_untracked().into_iter().next() {
-          pick(first);
-        }
-      },
-      // Backspace in the empty field takes back the last person, as in other pickers.
-      "Backspace" if is_filter_empty => chosen.update(|list| {
-        list.pop();
-      }),
-      _ => {},
-    }
-  };
-  view! {
-    <ul class="chip-list" aria-label=move || i18n.t("invite-chosen")>
-      <For each=move || chosen.get() key=|user| user.id let:user>
-        {
-          let id = user.id;
-          let remove_label = {
-            let name = user.display_name.clone();
-            move || i18n.t_with("dm-new-remove", &[("name", &name)])
-          };
-          view! {
-            <li class="chip">
-              <span translate="no">{user.display_name.clone()}</span>
-              <button
-                type="button"
-                class="icon-btn icon-btn-small"
-                aria-label=remove_label.clone()
-                title=remove_label
-                on:click=move |_| chosen.update(|list| list.retain(|user| user.id != id))
-              >
-                <Icon name=IconName::Close />
-              </button>
-            </li>
-          }
-        }
-      </For>
-    </ul>
-    <label class="visually-hidden" for="people-picker-filter">{move || i18n.t("dm-new-filter")}</label>
-    <input
-      id="people-picker-filter"
-      node_ref=input
-      class="input"
-      data-autofocus
-      autocomplete="off"
-      placeholder=move || i18n.t("dm-new-filter")
-      prop:value=move || filter.get()
-      on:input=move |ev| filter.set(event_target_value(&ev))
-      on:keydown=on_keydown
-    />
-    <ul class="forward-list people-picker" role="listbox" aria-multiselectable="true" aria-label=move || i18n.t("dm-new-people")>
-      <For each=move || candidates.get() key=|user| user.id let:user>
-        {
-          let picked = user.clone();
-          view! {
-            <li role="option" aria-selected="false">
-              <button type="button" class="forward-item person-item" on:click=move |_| pick(picked.clone())>
-                <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
-                <span translate="no">{user.display_name.clone()}</span>
-                {(!user.username.is_empty()).then(|| view! { <span class="muted-text" translate="no">{format!("@{}", user.username)}</span> })}
-                {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
-                {(user.device_setup == DeviceSetup::NoDevices).then(|| view! { <span class="muted-text">{move || i18n.t("directory-no-devices")}</span> })}
-              </button>
-            </li>
-          }
-        }
-      </For>
-      <Show when=move || candidates.with(Vec::is_empty) fallback=|| ()>
-        <li class="empty-state">{move || i18n.t("invite-nobody-found")}</li>
-      </Show>
-    </ul>
-  }
-}
-
-/// The people the picker offers: not the user, not picked yet, not already in, fitting the role,
-/// and matching the filter, by name.
-fn pickable(
-  mut users: Vec<User>,
-  me: UserId,
-  role: InviteRole,
-  picked: &HashSet<UserId>,
-  excluded: &HashSet<UserId>,
-  filter: &str,
-) -> Vec<User> {
-  let needle = filter.trim().to_lowercase();
-  users.retain(|user| {
-    user.id != me
-      && role.fits(user)
-      && !picked.contains(&user.id)
-      && !excluded.contains(&user.id)
-      && (needle.is_empty()
-        || user.display_name.to_lowercase().contains(&needle)
-        || user.username.to_lowercase().contains(&needle))
-  });
-  users.sort_by_key(|user| user.display_name.to_lowercase());
-  users
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::{PresenceStatus, id_from_raw};
-
-  const ME: u64 = 1;
+  use crate::model::{DeviceSetup, PresenceStatus, id_from_raw};
 
   mod emails {
     use super::*;
@@ -762,42 +647,6 @@ mod tests {
       assert!(InviteRole::Guest.fits(&guest));
       assert!(!InviteRole::Guest.fits(&bot));
       assert!(InviteRole::Member.fits(&person(4, "Member")));
-    }
-  }
-
-  mod picker {
-    use super::*;
-
-    #[test]
-    fn the_picker_leaves_out_me_picked_and_existing_members() {
-      let users = vec![
-        person(ME, "Me"),
-        person(2, "Bea"),
-        person(3, "Al"),
-        person(4, "Cy"),
-      ];
-      let picked = HashSet::from([id_from_raw(2)]);
-      let excluded = HashSet::from([id_from_raw(4)]);
-      let names: Vec<String> = pickable(users, id_from_raw(ME), InviteRole::Member, &picked, &excluded, "")
-        .into_iter()
-        .map(|user| user.display_name)
-        .collect();
-      assert_eq!(names, ["Al"]);
-    }
-
-    #[test]
-    fn the_filter_matches_name_or_username() {
-      let users = vec![person(2, "Bea Smith"), person(3, "Al Jones")];
-      let found = pickable(
-        users,
-        id_from_raw(ME),
-        InviteRole::Member,
-        &HashSet::new(),
-        &HashSet::new(),
-        "JONES",
-      );
-      assert_eq!(found.len(), 1);
-      assert_eq!(found[0].display_name, "Al Jones");
     }
   }
 
