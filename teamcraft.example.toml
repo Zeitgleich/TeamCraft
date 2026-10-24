@@ -168,6 +168,9 @@ heartbeat_timeout_secs = 90
 resume_window_secs = 120
 resume_buffer_events = 1000
 resume_buffer_bytes = 16777216
+# Bytes all sessions' buffers may hold together. Beyond it the slowest sessions are dropped first
+# (those waiting to resume, then those furthest behind); their clients sync afresh.
+max_buffered_bytes = 536870912
 identify_timeout_secs = 10
 # Connections are closed after this long so a fresh token is checked; clients resume.
 connection_max_age_secs = 3600

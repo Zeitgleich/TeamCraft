@@ -41,7 +41,9 @@ impl Default for PresenceSnapshot {
 ///
 /// Memory: each event is serialized once and shared ([`SharedEvent`]) by every session's buffer
 /// and queue; a buffer holds at most `buffer_events` events and `buffer_bytes` of them, and a
-/// connection that falls behind its buffer is dropped (issue #156).
+/// connection that falls behind its buffer is dropped (issue #156). All buffers together reference
+/// at most `max_total_buffer_bytes`; beyond it the slowest sessions go first (see
+/// [`Hub::enforce_total_budget`]).
 pub struct Hub {
   options: HubOptions,
   inner: Mutex<Inner>,
@@ -58,6 +60,9 @@ pub struct HubOptions {
   /// Bytes of events one session's resume buffer may reference. Events are shared, so this bounds
   /// what a single stalled or disconnected session keeps alive, not a copy per session.
   pub buffer_bytes: usize,
+  /// Bytes all resume buffers of the process may reference together (counted per session, so a
+  /// shared event counts once for every session that holds it: the real memory is at most this).
+  pub max_total_buffer_bytes: usize,
   /// Sessions one device may have; opening more drops the oldest (waiting ones first).
   pub max_sessions_per_device: usize,
   pub max_sessions_per_user: usize,
@@ -158,6 +163,8 @@ struct Inner {
   last_aggregate: HashMap<UserId, DeviceAggregate>,
   next_created_seq: u64,
   next_connection_id: u64,
+  /// Sum of every session's `buffer_bytes`.
+  total_buffer_bytes: usize,
   /// Busy periods from the users' calendars, as last polled.
   busy: HashMap<UserId, Vec<(OffsetDateTime, OffsetDateTime)>>,
 }
@@ -316,7 +323,7 @@ impl Hub {
         // Waiting (detached) sessions go first, then the oldest.
         candidates.sort();
         let victim = candidates.remove(0).2;
-        inner.sessions.remove(&victim);
+        inner.forget_session(&victim);
         if let Some(set) = inner.by_user.get_mut(&user) {
           set.remove(&victim);
         }
@@ -514,10 +521,67 @@ impl Hub {
       };
       for session_id in ids {
         if let Some(session) = inner.sessions.get_mut(session_id) {
+          let before = session.buffer_bytes;
           session.push(&shared, &self.options);
+          inner.total_buffer_bytes = (inner.total_buffer_bytes + session.buffer_bytes).saturating_sub(before);
         }
       }
     }
+    self.enforce_total_budget(inner);
+  }
+
+  /// Keeps all buffers together within `max_total_buffer_bytes` (issue #156): many sessions that
+  /// each stay within their own budget must not add up to more than the process can hold. The
+  /// slowest go first, so the healthy majority keeps its resume buffers:
+  ///
+  /// 1. sessions waiting to be resumed, the longest-waiting first (they get `session_invalid` and
+  ///    sync afresh);
+  /// 2. connected sessions that are behind, the most bytes behind first (dropped the same way);
+  /// 3. events connected sessions already took, the largest buffers first (they only matter to a
+  ///    resume of a connection that breaks right now, which then syncs afresh).
+  fn enforce_total_budget(&self, inner: &mut Inner) {
+    let limit = self.options.max_total_buffer_bytes;
+    if inner.total_buffer_bytes <= limit {
+      return;
+    }
+    let before = inner.total_buffer_bytes;
+    let mut dropped_sessions = 0_usize;
+    for victim in inner.sessions_slowest_first() {
+      if inner.total_buffer_bytes <= limit {
+        break;
+      }
+      if let Some(session) = inner.forget_session(&victim) {
+        if let Some(ids) = inner.by_user.get_mut(&session.user) {
+          ids.remove(&victim);
+          if ids.is_empty() {
+            inner.by_user.remove(&session.user);
+          }
+        }
+        dropped_sessions += 1;
+      }
+    }
+    let mut largest: Vec<(usize, String)> = inner
+      .sessions
+      .iter()
+      .map(|(id, session)| (session.buffer_bytes, id.clone()))
+      .collect();
+    largest.sort_by(|left, right| right.cmp(left));
+    for (_, id) in largest {
+      if inner.total_buffer_bytes <= limit {
+        break;
+      }
+      if let Some(session) = inner.sessions.get_mut(&id) {
+        let freed = session.trim_delivered();
+        inner.total_buffer_bytes = inner.total_buffer_bytes.saturating_sub(freed);
+      }
+    }
+    warn!(
+      before_bytes = before,
+      after_bytes = inner.total_buffer_bytes,
+      limit_bytes = limit,
+      dropped_sessions,
+      "gateway buffers over their process-wide budget; the slowest sessions were dropped"
+    );
   }
 
   /// Delivers the event to the live connections of `users` only: no sequence number, nothing to
@@ -556,7 +620,7 @@ impl Hub {
     if let Some(ids) = inner.by_user.remove(&user) {
       for id in ids {
         // Dropping the sender closes the connection's receiver, which ends the connection.
-        inner.sessions.remove(&id);
+        inner.forget_session(&id);
       }
     }
     inner.last_presence.remove(&user);
@@ -591,7 +655,7 @@ impl Hub {
       .map(|(id, session)| (id.clone(), session.user))
       .collect();
     for (id, user) in ids {
-      inner.sessions.remove(&id);
+      inner.forget_session(&id);
       if let Some(set) = inner.by_user.get_mut(&user) {
         set.remove(&id);
       }
@@ -615,7 +679,7 @@ impl Hub {
       .cloned()
       .collect();
     for id in ids {
-      inner.sessions.remove(&id);
+      inner.forget_session(&id);
       if let Some(set) = inner.by_user.get_mut(&user) {
         set.remove(&id);
       }
@@ -668,7 +732,7 @@ impl Hub {
       .map(|(id, session)| (id.clone(), session.user))
       .collect();
     for (id, user) in &expired {
-      inner.sessions.remove(id);
+      inner.forget_session(id);
       if let Some(ids) = inner.by_user.get_mut(user) {
         ids.remove(id);
         if ids.is_empty() {
@@ -683,6 +747,42 @@ impl Hub {
     // The state is plain maps; a panic in another thread can't leave it half-updated in a way that
     // matters more than dropping the whole gateway.
     self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+}
+
+impl Inner {
+  /// Removes a session and its buffer from the byte count. The caller updates `by_user`.
+  fn forget_session(&mut self, id: &str) -> Option<Session> {
+    let session = self.sessions.remove(id)?;
+    self.total_buffer_bytes = self.total_buffer_bytes.saturating_sub(session.buffer_bytes);
+    Some(session)
+  }
+
+  /// Sessions that may be dropped for the process-wide budget, slowest first: waiting ones by how
+  /// long they wait, then connected ones that are behind by how many bytes. Connected sessions
+  /// that took everything but the newest event are not listed.
+  fn sessions_slowest_first(&self) -> Vec<String> {
+    let mut waiting: Vec<(Instant, &String)> = Vec::new();
+    let mut behind: Vec<(usize, &String)> = Vec::new();
+    for (id, session) in &self.sessions {
+      match (&session.maybe_connection, session.maybe_detached_at) {
+        (None, maybe_detached_at) => waiting.push((maybe_detached_at.unwrap_or_else(Instant::now), id)),
+        (Some(connection), _) => {
+          let delivered = connection.link.delivered_seq.load(Ordering::Acquire);
+          let undelivered = session.bytes_behind(delivered);
+          if undelivered > 0 {
+            behind.push((undelivered, id));
+          }
+        },
+      }
+    }
+    waiting.sort();
+    behind.sort_by(|left, right| right.cmp(left));
+    waiting
+      .into_iter()
+      .map(|(_, id)| id.clone())
+      .chain(behind.into_iter().map(|(_, id)| id.clone()))
+      .collect()
   }
 }
 
@@ -719,6 +819,37 @@ impl Session {
       self.maybe_connection = None;
       self.maybe_detached_at = Some(Instant::now());
     }
+  }
+}
+
+impl Session {
+  /// Bytes of the buffered events after `delivered` that the connection has not taken, not
+  /// counting the newest (it is on its way right now; a healthy connection is never behind by it).
+  fn bytes_behind(&self, delivered: u64) -> usize {
+    let newest = self.next_seq.saturating_sub(1);
+    self
+      .buffer
+      .iter()
+      .filter(|(seq, _)| *seq > delivered && *seq < newest)
+      .map(|(_, event)| event.byte_len())
+      .sum()
+  }
+
+  /// Drops the buffered events the connection already took; returns the bytes freed. Nothing for a
+  /// session without a connection (all of its buffer is still to be replayed).
+  fn trim_delivered(&mut self) -> usize {
+    let Some(connection) = &self.maybe_connection else {
+      return 0;
+    };
+    let delivered = connection.link.delivered_seq.load(Ordering::Acquire);
+    let mut freed = 0;
+    while self.buffer.front().is_some_and(|(seq, _)| *seq <= delivered) {
+      if let Some((_, event)) = self.buffer.pop_front() {
+        freed += event.byte_len();
+      }
+    }
+    self.buffer_bytes = self.buffer_bytes.saturating_sub(freed);
+    freed
   }
 }
 
@@ -825,6 +956,7 @@ mod tests {
     resume_window: Duration::from_secs(60),
     buffer_events: 3,
     buffer_bytes: 1024 * 1024,
+    max_total_buffer_bytes: 1024 * 1024 * 1024,
     max_sessions_per_device: 100,
     max_sessions_per_user: 100,
     attention_lease: Duration::from_secs(75),
@@ -1257,6 +1389,95 @@ mod tests {
     }
 
     /// A 16 KiB event, like a message near a moderate size limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_process_budget_drops_waiting_sessions_first_then_those_most_behind() {
+      let event_bytes = big_event_bytes();
+      let budget = 25 * event_bytes + event_bytes / 2;
+      let hub = Hub::new(HubOptions {
+        buffer_events: 1000,
+        buffer_bytes: 20 * event_bytes,
+        max_total_buffer_bytes: budget,
+        ..OPTIONS
+      });
+      let mut healthy = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let waiting = hub.open_session(user(2), device(2), DeviceActivity::Active);
+      hub.detach(&waiting.session_id, waiting.connection_id);
+      let mut stalled = hub.open_session(user(3), device(3), DeviceActivity::Active);
+      let everyone = [user(1), user(2), user(3)];
+
+      // 3 × 9 events are over the budget: the waiting session goes, the others stay.
+      for n in 11..=19 {
+        hub.publish(everyone, &big_event(n));
+        take_all(&mut healthy);
+        assert_within_budget(&hub, budget);
+      }
+      assert_eq!(
+        hub
+          .resume_session(&waiting.session_id, user(2), device(2), 0)
+          .err(),
+        Some(ResumeError::Unknown),
+        "the waiting session was dropped: its client syncs afresh"
+      );
+      assert_eq!(hub.device_aggregate(user(3)), DeviceAggregate::Active);
+
+      // Two buffers of 9 grow to 13 each: over the budget again, and the stalled one goes.
+      for n in 21..=24 {
+        hub.publish(everyone, &big_event(n));
+        take_all(&mut healthy);
+        assert_within_budget(&hub, budget);
+      }
+      assert_eq!(hub.device_aggregate(user(3)), DeviceAggregate::NoDevice);
+      seqs(&mut stalled);
+      assert!(stalled.next_outgoing().await.is_none(), "its task ends");
+      // The healthy one kept its connection and its buffer for a resume.
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+      hub.publish([user(1)], &big_event(25));
+      assert_eq!(take_all(&mut healthy), vec![14]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_only_healthy_sessions_the_events_they_took_are_trimmed() {
+      let event_bytes = big_event_bytes();
+      let budget = 10 * event_bytes + event_bytes / 2;
+      let hub = Hub::new(HubOptions {
+        buffer_events: 1000,
+        buffer_bytes: 100 * event_bytes,
+        max_total_buffer_bytes: budget,
+        ..OPTIONS
+      });
+      let mut sessions: Vec<Attached> = (1..=3)
+        .map(|n| hub.open_session(user(n), device(n), DeviceActivity::Active))
+        .collect();
+      for n in 11..=30 {
+        hub.publish([user(1), user(2), user(3)], &big_event(n));
+        for attached in &mut sessions {
+          take_all(attached);
+        }
+        assert_within_budget(&hub, budget);
+      }
+      for n in 1..=3 {
+        assert_eq!(hub.device_aggregate(user(n)), DeviceAggregate::Active);
+      }
+    }
+
+    fn take_all(attached: &mut Attached) -> Vec<u64> {
+      let seqs = seqs(attached);
+      if let Some(last) = seqs.last() {
+        attached.delivered(*last);
+      }
+      seqs
+    }
+
+    fn assert_within_budget(hub: &Hub, budget: usize) {
+      let inner = hub.lock();
+      let sum: usize = inner.sessions.values().map(|session| session.buffer_bytes).sum();
+      assert_eq!(
+        inner.total_buffer_bytes, sum,
+        "the running total matches the buffers"
+      );
+      assert!(sum <= budget, "{sum} bytes buffered, budget {budget}");
+    }
+
     fn big_event(n: i64) -> GatewayEvent {
       GatewayEvent::MembershipAdd {
         conversation_id: ConversationId::from_snowflake(Snowflake::new(n).unwrap()),

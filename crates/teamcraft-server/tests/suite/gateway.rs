@@ -514,6 +514,56 @@ mod resuming {
     app.stop().await;
   }
 
+  #[tokio::test]
+  async fn after_a_real_restart_a_resume_gets_session_invalid_and_the_client_syncs_afresh() {
+    let mut app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    send(&app, &s.carol, &s.channel, &s.carol_device, 1).await;
+    alice
+      .event_where(|event| matches!(event, GatewayEvent::MessageCreate { .. }).then_some(()))
+      .await;
+    let (session_id, seen) = (alice.session_id.clone(), alice.last_seq);
+
+    // SIGTERM, and a new process: its hub knows no session.
+    app.state.drain.begin();
+    assert_eq!(close_code(&mut alice.socket).await, Some(1012));
+    assert!(
+      app.restart_after_drain_with_fresh_memory(WAIT).await,
+      "every socket closed in time"
+    );
+    let missed = send(&app, &s.carol, &s.channel, &s.carol_device, 2).await;
+    let (_, answer) = Gateway::resume(&app, &s.alice, &s.alice_device, &session_id, seen).await;
+    assert!(
+      matches!(answer, GatewayServerMessage::SessionInvalid),
+      "{answer:?}"
+    );
+
+    // The client identifies again and refetches over REST: the missed message is there.
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    let history = app
+      .get(&s.alice, &format!("/conversations/{}/messages", s.channel))
+      .await;
+    assert_eq!(history.status, StatusCode::OK);
+    let ids: Vec<&str> = history.body["messages"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter_map(|message| message["id"].as_str())
+      .collect();
+    assert!(ids.contains(&missed.as_str()), "{ids:?}");
+    // And the fresh session gets new events.
+    let next = send(&app, &s.carol, &s.channel, &s.carol_device, 3).await;
+    let received = alice
+      .event_where(|event| match event {
+        GatewayEvent::MessageCreate { message } => Some(message.id.to_string()),
+        _ => None,
+      })
+      .await;
+    assert_eq!(received, next);
+    app.stop().await;
+  }
+
   async fn readiness(app: &TestApp) -> StatusCode {
     app
       .http

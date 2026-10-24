@@ -148,6 +148,7 @@ async fn run() -> anyhow::Result<()> {
       resume_window: Duration::from_secs(config.gateway.resume_window_secs),
       buffer_events: config.gateway.resume_buffer_events,
       buffer_bytes: config.gateway.resume_buffer_bytes,
+      max_total_buffer_bytes: config.gateway.max_buffered_bytes,
       max_sessions_per_device: config.gateway.max_sessions_per_device,
       max_sessions_per_user: config.gateway.max_sessions_per_user,
       attention_lease: Duration::from_secs(config.notifications.attention_lease_secs),

@@ -304,6 +304,9 @@ pub struct GatewayConfig {
   /// every session, so this bounds what one stalled or disconnected session keeps alive; a
   /// connection that falls further behind is dropped (it syncs afresh).
   pub resume_buffer_bytes: usize,
+  /// Bytes all sessions' resume buffers may hold together (counted per session). Beyond it the
+  /// slowest sessions are dropped first: those waiting to resume, then those furthest behind.
+  pub max_buffered_bytes: usize,
   /// Time a new connection has to identify.
   pub identify_timeout_secs: u64,
   /// Connections are closed after this long so that a fresh token is checked; clients resume.
@@ -1330,6 +1333,7 @@ impl Default for GatewayConfig {
       resume_window_secs: 120,
       resume_buffer_events: 1000,
       resume_buffer_bytes: 16 * 1024 * 1024,
+      max_buffered_bytes: 512 * 1024 * 1024,
       identify_timeout_secs: 10,
       connection_max_age_secs: 3600,
       presence_offline_grace_secs: 5,

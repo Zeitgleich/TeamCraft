@@ -27,7 +27,11 @@ that can't keep up is dropped the same way and resumes: as soon as its queue is 
 taken yet falls out of its buffer.
 
 Each event is serialized once and shared by every session it goes to, so a big channel costs the event once,
-not once per member; the byte limit bounds what one stalled session keeps alive.
+not once per member; the byte limit bounds what one stalled session keeps alive. `max_buffered_bytes` bounds all
+buffers of the process together (counted per session, so the real memory stays below it). When it is reached
+the slowest sessions go first: those waiting to be resumed (longest waiting first), then connected ones that are
+behind (most bytes behind first); they get `session_invalid` and sync afresh. If only healthy sessions are left,
+the events they already took are dropped from their buffers.
 
 `typing_start` is ephemeral: it comes with `seq` `0`, is not buffered and is never replayed (a late typing
 indicator is wrong anyway). Clients keep the highest `seq` they saw, so `0` leaves their resume position alone.
