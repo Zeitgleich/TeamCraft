@@ -22,6 +22,12 @@ const CARET_WINDOW: usize = 256;
 /// Deeper elements are read as their text only; the walk recurses, and pasted HTML can nest deeply.
 const MAX_READ_DEPTH: usize = 128;
 
+/// `NodeFilter.SHOW_TEXT`.
+const SHOW_TEXT: u32 = 0x4;
+
+/// How much of a text node the empty check reads before it reads the rest (only white space so far).
+const BLANK_PROBE: u32 = 64;
+
 /// Block elements the editor makes, from the innermost one at the caret outwards.
 const BLOCK_SELECTOR: &str = "h1, h2, h3, h4, h5, h6, blockquote, li, pre, p, div";
 
@@ -48,17 +54,32 @@ pub fn clear(editor: &HtmlElement) {
   editor.set_text_content(None);
 }
 
-/// Whether the editor shows nothing but white space. Stops at the first block with text, so it costs
-/// one block, not the whole draft.
+/// Whether the editor shows nothing but white space. Stops at the first text with something in it and
+/// looks at its start only, so a keystroke doesn't read the draft.
 pub fn is_blank(editor: &HtmlElement) -> bool {
-  let children = editor.child_nodes();
-  (0..children.length())
-    .filter_map(|index| children.item(index))
-    .all(|child| {
-      child
-        .text_content()
-        .is_none_or(|text| text.chars().all(|ch| ch.is_whitespace() || ch == '\u{200B}'))
-    })
+  let Some(document) = editor.owner_document() else {
+    return true;
+  };
+  let Ok(walker) = document.create_tree_walker_with_what_to_show(editor, SHOW_TEXT) else {
+    return true;
+  };
+  while let Ok(Some(node)) = walker.next_node() {
+    let Some(text) = node.dyn_ref::<web_sys::Text>() else {
+      continue;
+    };
+    let length = text.length();
+    let head = text
+      .substring_data(0, length.min(BLANK_PROBE))
+      .unwrap_or_default();
+    if !is_blank_text(&head) || (length > BLANK_PROBE && !is_blank_text(&text.data())) {
+      return false;
+    }
+  }
+  true
+}
+
+fn is_blank_text(text: &str) -> bool {
+  text.chars().all(|ch| ch.is_whitespace() || ch == '\u{200B}')
 }
 
 /// Content of a paste, as the subset. `html` is parsed into an inert document (no scripts run, nothing

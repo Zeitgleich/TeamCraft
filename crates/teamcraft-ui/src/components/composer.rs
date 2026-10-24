@@ -37,6 +37,9 @@ const EDIT_LAST_SCAN: usize = 50;
 /// The newest messages that are certainly rendered while the feed follows the bottom.
 const ON_SCREEN_ROWS: usize = 3;
 
+/// `keyCode` of a key press the input method handles (all browsers report it while composing).
+const IME_KEY_CODE: u32 = 229;
+
 /// Inline styles the toolbar shows a pressed state for.
 const INLINE_STYLES: [InlineStyle; 5] = [
   InlineStyle::Bold,
@@ -191,6 +194,17 @@ pub fn Composer(
       .enumerate()
       .collect::<Vec<(usize, Suggestion)>>()
   });
+  let has_just_composed = StoredValue::new(false);
+  let on_composition_end = move |_| {
+    has_just_composed.set_value(true);
+    // Cleared once the task that ended the composition is over.
+    set_timeout(
+      move || {
+        has_just_composed.try_set_value(false);
+      },
+      std::time::Duration::ZERO,
+    );
+  };
   let show_formatting = Memo::new(move |_| state.settings.prefs.get().composer.show_formatting);
   let active_formats = RwSignal::new(ActiveFormats::default());
   // The editor's selection while a dialog, menu or picker has the focus.
@@ -596,7 +610,16 @@ pub fn Composer(
   };
 
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
-    if ev.is_composing() {
+    // An input method owns the key while composing. WebKit (Safari, the macOS app, iOS) ends the
+    // composition before the Enter that confirms it arrives, with `isComposing` already false: that
+    // Enter has key code 229, or comes in the same task as `compositionend`. It must not send.
+    if ev.is_composing() || ev.key_code() == IME_KEY_CODE {
+      return;
+    }
+    if has_just_composed.get_value() {
+      if ev.key() == "Enter" {
+        ev.prevent_default();
+      }
       return;
     }
     let listed = suggestions.with_untracked(Vec::len);
@@ -1077,6 +1100,7 @@ pub fn Composer(
             }
             node_ref=editor
             on:keydown=on_keydown
+            on:compositionend=on_composition_end
             on:input=on_input
             on:click=move |_| {
               refresh_suggestions();

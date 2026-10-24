@@ -275,8 +275,16 @@ fn link_at(rest: &str) -> Option<&str> {
   let prefix = LINK_PREFIXES
     .into_iter()
     .find(|prefix| rest.starts_with(prefix))?;
-  let raw = rest.split(char::is_whitespace).next().unwrap_or(rest);
-  let url = raw.trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
+  let mut url = rest.split(char::is_whitespace).next().unwrap_or(rest);
+  // Trailing punctuation ends the sentence, not the link; a `)` only when it closes nothing in the
+  // URL, so `(see https://example.com/a)` loses it and `…/Rust_(language)` keeps it.
+  loop {
+    url = url.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    match url.strip_suffix(')') {
+      Some(shorter) if url.matches(')').count() > url.matches('(').count() => url = shorter,
+      _ => break,
+    }
+  }
   (url.len() > prefix.len()).then_some(url)
 }
 
@@ -298,11 +306,21 @@ fn labeled_link(rest: &str) -> Option<(Inline, usize)> {
   let used = label_end + 1 + 1 + url_end + 1;
   Some((
     Inline::LabeledLink {
-      url: url.to_owned(),
+      url: decode_parens(url),
       label,
     },
     used,
   ))
+}
+
+/// Parentheses in a `[label](url)` target are written as `%28` and `%29` (the first `)` ends the
+/// target), and read back as they were; percent-encoded and plain parentheses address the same thing.
+fn encode_parens(url: &str) -> String {
+  url.replace('(', "%28").replace(')', "%29")
+}
+
+fn decode_parens(url: &str) -> String {
+  url.replace("%28", "(").replace("%29", ")")
 }
 
 fn unescape(text: &str) -> String {
@@ -433,7 +451,7 @@ fn write_inline(out: &mut String, inline: &Inline, escaping: Escaping) {
         out.push(ch);
       }
       out.push_str("](");
-      out.push_str(url);
+      out.push_str(&encode_parens(url));
       out.push(')');
     },
     Inline::Mention(name) => {
@@ -687,6 +705,33 @@ mod tests {
   }
 
   #[test]
+  fn parentheses_in_links() {
+    assert_eq!(
+      parse_inline("see https://en.wikipedia.org/wiki/Rust_(programming_language)."),
+      [
+        Inline::Text("see ".into()),
+        Inline::Link("https://en.wikipedia.org/wiki/Rust_(programming_language)".into()),
+        Inline::Text(".".into()),
+      ]
+    );
+    assert_eq!(
+      parse_inline("(see https://example.com/a)"),
+      [
+        Inline::Text("(see ".into()),
+        Inline::Link("https://example.com/a".into()),
+        Inline::Text(")".into()),
+      ]
+    );
+    assert_eq!(
+      parse_inline("[Rust](https://en.wikipedia.org/wiki/Rust_%28programming_language%29)"),
+      [Inline::LabeledLink {
+        url: "https://en.wikipedia.org/wiki/Rust_(programming_language)".into(),
+        label: "Rust".into()
+      }]
+    );
+  }
+
+  #[test]
   fn unsafe_schemes_are_plain_text() {
     assert_eq!(
       parse_inline("javascript:alert(1)"),
@@ -856,6 +901,19 @@ mod tests {
         parse(&to_source(&blocks)),
         [Block::Paragraph(vec![vec![Inline::Text("a`b".into())]])]
       );
+    }
+
+    #[test]
+    fn labeled_links_with_parentheses() {
+      let blocks = vec![Block::Paragraph(vec![vec![
+        Inline::LabeledLink {
+          url: "https://en.wikipedia.org/wiki/Rust_(programming_language)".into(),
+          label: "Rust".into(),
+        },
+        Inline::Text(" and ".into()),
+        Inline::Link("https://en.wikipedia.org/wiki/C_(language)".into()),
+      ]])];
+      assert_round_trip(&blocks);
     }
 
     #[test]
