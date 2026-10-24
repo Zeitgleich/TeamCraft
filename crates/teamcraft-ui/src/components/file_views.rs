@@ -10,7 +10,7 @@ use teamcraft_client_api::admin::format_bytes;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
 use crate::i18n::use_i18n;
-use crate::lightbox::ImageKey;
+use crate::lightbox::{MediaKey, MediaKind};
 use crate::model::ConversationId;
 use crate::object_url::ObjectUrl;
 use crate::state::{Overlay, SidePanel, use_app_state};
@@ -21,7 +21,7 @@ const MAX_ALBUM_TILES: usize = 4;
 /// The files attached to one message: several images form an album, everything else gets a card.
 #[component]
 pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
-  let is_album_image = |file: &FileInfo| ImageKey::of(file).is_some();
+  let is_album_image = |file: &FileInfo| MediaKey::of(file).is_some();
   let (album, cards): (Vec<FileInfo>, Vec<FileInfo>) =
     match files.iter().filter(|file| is_album_image(file)).count() {
       0 | 1 => (Vec::new(), files),
@@ -47,7 +47,7 @@ fn AlbumGrid(images: Vec<FileInfo>) -> impl IntoView {
     .take(MAX_ALBUM_TILES)
     .enumerate()
     .filter_map(|(index, file)| {
-      let key = ImageKey::of(&file)?;
+      let key = MediaKey::of(&file)?;
       // An image without a thumbnail still gets its tile, with a placeholder, so "+N" stays true.
       let maybe_url = file
         .maybe_thumbnail_png
@@ -59,6 +59,7 @@ fn AlbumGrid(images: Vec<FileInfo>) -> impl IntoView {
       let conversation = file.conversation;
       let (position, total, name) = ((index + 1).to_string(), count.to_string(), file.file_name);
       let maybe_more = (index + 1 == MAX_ALBUM_TILES && hidden > 0).then(|| format!("+{hidden}"));
+      let is_video = MediaKind::of(&file.media_type) == Some(MediaKind::Video);
       Some(view! {
         <button
           class="album-tile"
@@ -69,6 +70,7 @@ fn AlbumGrid(images: Vec<FileInfo>) -> impl IntoView {
             Some(src) => view! { <img src=src alt="" loading="lazy" /> }.into_any(),
             None => view! { <span class="album-placeholder"><Icon name=IconName::Image /></span> }.into_any(),
           }}
+          {is_video.then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
           {maybe_more.map(|more| view! { <span class="album-more" aria-hidden="true">{more}</span> })}
         </button>
       })
@@ -87,8 +89,8 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let (conversation, message) = (file.conversation, file.message);
-  let is_image = file.media_type.starts_with("image/");
-  let maybe_key = ImageKey::of(&file);
+  let maybe_kind = MediaKind::of(&file.media_type);
+  let maybe_key = MediaKey::of(&file);
   let thumbnail = file
     .maybe_thumbnail_png
     .as_deref()
@@ -96,13 +98,15 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
   let maybe_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
   // Revoked when the card leaves the screen.
   StoredValue::new_local(thumbnail);
-  let file_id = file.file_id.clone();
+  let file_id = StoredValue::new(file.file_id.clone());
   let name = file.file_name.clone();
   let share_link = Memo::new(move |_| {
-    state
-      .read(|backend| backend.share_links(conversation, message))
-      .into_iter()
-      .find(|link| link.file_id == file_id)
+    file_id.with_value(|file_id| {
+      state
+        .read(|backend| backend.share_links(conversation, message, file_id))
+        .into_iter()
+        .next()
+    })
   });
   let status = match &file.transfer {
     FileTransfer::Remote => view! {
@@ -144,11 +148,23 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
             on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
           >
             <img src=src alt=name.clone() loading="lazy" />
+            {(maybe_kind == Some(MediaKind::Video)).then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
           </button>
         }
         .into_any(),
         (Some(src), None) => view! { <span class="file-thumb is-static"><img src=src alt=name.clone() loading="lazy" /></span> }.into_any(),
-        (None, _) => view! { <span class="file-icon"><Icon name=if is_image { IconName::Image } else { IconName::File } /></span> }.into_any(),
+        // A video or picture without a preview still opens in the lightbox.
+        (None, Some(key)) => view! {
+          <button
+            class="file-icon file-open"
+            aria-label=move || i18n.t("file-preview")
+            on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
+          >
+            <Icon name=file_icon(maybe_kind) />
+          </button>
+        }
+        .into_any(),
+        (None, None) => view! { <span class="file-icon"><Icon name=file_icon(maybe_kind) /></span> }.into_any(),
       }}
       <div class="file-meta">
         <span class="file-name" translate="no">{file.file_name.clone()}</span>
@@ -170,7 +186,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
           None => view! {
             <button
               class="btn btn-small"
-              on:click=move |_| state.write(|backend| backend.create_share_link(conversation, message, ShareLinkOptions::default()))
+              on:click=move |_| file_id.with_value(|file_id| state.write(|backend| backend.create_share_link(conversation, message, file_id, ShareLinkOptions::default())))
             >
               <Icon name=IconName::Link />
               <span>{move || i18n.t("file-share")}</span>
@@ -238,6 +254,14 @@ pub fn FilesPanel(conversation: ConversationId) -> impl IntoView {
         </Show>
       </div>
     </aside>
+  }
+}
+
+fn file_icon(maybe_kind: Option<MediaKind>) -> IconName {
+  match maybe_kind {
+    Some(MediaKind::Video) => IconName::Video,
+    Some(MediaKind::Image | MediaKind::Animated) => IconName::Image,
+    None => IconName::File,
   }
 }
 

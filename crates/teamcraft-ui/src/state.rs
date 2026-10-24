@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use crate::admin::AdminSection;
 use crate::backend::Backend;
 use crate::calls::CallState;
-use crate::lightbox::ImageKey;
+use crate::lightbox::MediaKey;
 use crate::model::{
   Conversation, ConversationId, MessageId, SpaceId, ThreadId, TimestampMs, User, UserId, id_from_raw,
 };
@@ -161,7 +161,7 @@ pub enum Overlay {
   ChannelSettings(ConversationId),
   SpaceSettings(SpaceId),
   /// The image lightbox over a conversation, opened on this image.
-  Lightbox(ConversationId, ImageKey),
+  Lightbox(ConversationId, MediaKey),
   /// The versions of an edited message.
   EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.

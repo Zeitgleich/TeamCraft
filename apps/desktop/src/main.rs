@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use tauri::path::BaseDirectory;
+use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 use tracing_subscriber::EnvFilter;
@@ -234,7 +235,11 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     .title("TeamCraft")
     .visible(!is_hidden)
     .inner_size(1360.0, 860.0)
-    .min_inner_size(720.0, 520.0);
+    .min_inner_size(720.0, 520.0)
+    .on_new_window(|url, _features| match is_allowed_new_window(&url) {
+      true => NewWindowResponse::Allow,
+      false => NewWindowResponse::Deny,
+    });
   let window = window_chrome::configure(window, prefs.title_bar);
   app.manage(WindowChromeState::new(prefs.title_bar));
   #[cfg(debug_assertions)]
@@ -252,6 +257,13 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     tracing::debug!(%error, "could not minimize the window");
   }
   Ok(())
+}
+
+/// `window.open` from the UI: only the blank window the image viewer fills from memory ("open in a
+/// new window") may open; it never loads anything, so decrypted files stay in the app. Links go
+/// through the system browser instead.
+fn is_allowed_new_window(url: &tauri::Url) -> bool {
+  url.as_str() == "about:blank"
 }
 
 /// The client core reads its access token synchronously; this keeps a copy current (the login code
@@ -288,6 +300,22 @@ fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>) {
 
 #[cfg(test)]
 mod tests {
+  use super::is_allowed_new_window;
+
+  #[test]
+  fn only_the_blank_viewer_window_may_open() {
+    let allowed = |url: &str| url.parse().is_ok_and(|url| is_allowed_new_window(&url));
+    assert!(allowed("about:blank"));
+    for refused in [
+      "https://example.com/",
+      "about:blank#x",
+      "file:///etc/passwd",
+      "tauri://localhost/",
+    ] {
+      assert!(!allowed(refused), "{refused}");
+    }
+  }
+
   /// Tauri refuses an app command that has no permission once the app has an ACL manifest, and
   /// nothing fails at build time: every registered command must be in `build.rs` and allowed in
   /// the capability.

@@ -9,7 +9,6 @@ use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, CreateAttachmentRequest, ThreadId};
 
 use super::Client;
-use super::files::MAX_DOWNLOAD_BYTES;
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::store::{AttachmentRef, LocalStore, MessageContent};
@@ -24,6 +23,11 @@ pub struct OutgoingFile {
 
 /// Room above the plaintext cap for nonce, tag and framing of an encrypted attachment.
 const CIPHERTEXT_OVERHEAD_BYTES: u64 = 1024;
+
+/// Largest file the in-memory viewer (the image and video lightbox) opens, on every platform: the
+/// decrypted bytes are held in memory, and the webview copies them once more into a `Blob`. Saving
+/// to disk is not limited by this. The UI offers "Save" instead for bigger files.
+pub const MAX_VIEWER_BYTES: u64 = 128 * 1024 * 1024;
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Encrypts and uploads a file, then posts the message that carries its key.
@@ -58,9 +62,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Downloads and decrypts one file for showing it (the image viewer); nothing is written to disk.
   /// The reference comes from [`crate::ui_backend::CoreChatBackend::attachment_ref`].
   pub async fn open_attachment(&self, attachment: &AttachmentRef) -> Result<SecretBytes, CoreError> {
+    // A file that says it is too big is not fetched at all.
+    if attachment.size_bytes > MAX_VIEWER_BYTES {
+      return Err(CoreError::InvalidRequest("the file is too large to show".into()));
+    }
     // The sender-declared size can't be trusted: the cap applies to the bytes actually received.
     self
-      .download_decrypted_capped(attachment, MAX_DOWNLOAD_BYTES)
+      .download_decrypted_capped(attachment, Some(MAX_VIEWER_BYTES))
       .await
   }
 

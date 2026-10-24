@@ -1174,12 +1174,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_download_attachment(conversation, message, file_id);
   }
 
-  fn create_share_link(&self, conversation: ConversationId, message: MessageId, options: ShareLinkOptions) {
-    self.ui_create_share_link(conversation, message, options);
+  fn create_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    options: ShareLinkOptions,
+  ) {
+    self.ui_create_share_link(conversation, message, file_id, options);
   }
 
-  fn share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
-    self.ui_share_links(conversation, message)
+  fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
+    self.ui_share_links(conversation, message, file_id)
   }
 
   fn max_upload_bytes(&self) -> Option<u64> {
@@ -1409,6 +1415,14 @@ mod tests {
   use super::*;
   use crate::clock::ManualClock;
   use crate::store::MemoryStore;
+
+  #[test]
+  fn the_viewer_cap_the_ui_checks_is_the_one_the_core_enforces() {
+    assert_eq!(
+      teamcraft_client_api::actions::MAX_VIEWER_BYTES,
+      crate::MAX_VIEWER_BYTES
+    );
+  }
 
   #[test]
   fn posting_and_reacting_go_through_the_outbox() {

@@ -440,12 +440,20 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.download_file(conversation, message);
   }
 
-  fn create_share_link(&self, conversation: ConversationId, message: MessageId, options: ShareLinkOptions) {
-    self.chat.create_share_link(conversation, message, options);
+  fn create_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    options: ShareLinkOptions,
+  ) {
+    self
+      .chat
+      .create_share_link(conversation, message, file_id, options);
   }
 
-  fn share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
-    self.chat.share_links(conversation, message)
+  fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
+    self.chat.share_links(conversation, message, file_id)
   }
 
   fn max_upload_bytes(&self) -> Option<u64> {

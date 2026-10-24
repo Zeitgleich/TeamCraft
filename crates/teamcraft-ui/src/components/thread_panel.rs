@@ -15,6 +15,9 @@ pub fn ThreadPanel(
   /// Embedded in the threads inbox, where closing returns to the empty state.
   #[prop(default = false)]
   embedded: bool,
+  /// What the close button does instead of closing the side panel (the lightbox hides its own).
+  #[prop(optional)]
+  maybe_on_close: Option<Callback<()>>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -60,7 +63,10 @@ pub fn ThreadPanel(
           class="icon-btn"
           aria-label=move || i18n.t("close")
           title=move || i18n.t("close")
-          on:click=move |_| state.panel.set(SidePanel::Closed)
+          on:click=move |_| match maybe_on_close {
+            Some(on_close) => on_close.run(()),
+            None => state.panel.set(SidePanel::Closed),
+          }
         >
           <Icon name=IconName::Close />
         </button>

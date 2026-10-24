@@ -775,18 +775,26 @@ impl ChatBackend for RemoteChat {
     });
   }
 
-  fn create_share_link(&self, conversation: ConversationId, message: MessageId, options: ShareLinkOptions) {
+  fn create_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    options: ShareLinkOptions,
+  ) {
     self.act(ChatAction::CreateShareLink {
       conversation,
       message,
+      file_id: file_id.to_owned(),
       options,
     });
   }
 
-  fn share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
+  fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
     match self.ask(ChatQuery::ShareLinks {
       conversation,
       message,
+      file_id: file_id.to_owned(),
     }) {
       Some(ChatAnswer::ShareLinks { links }) => links,
       _ => Vec::new(),
