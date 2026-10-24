@@ -35,10 +35,13 @@ use teamcraft_proto::{
   UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
 };
 
+use teamcraft_client_api::notify::{MentionRules, is_mentioned};
+
 use crate::client::bookmarks_key;
 use crate::client::workspace_admin::ChannelOptions;
 use crate::clock::Clock;
 use crate::error::CoreError;
+use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
@@ -390,6 +393,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       others.sort();
       others.join(", ")
     });
+    let unread = self.unread_messages(response);
     Conversation {
       id: response.id,
       maybe_space: response.maybe_space_id,
@@ -398,8 +402,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       name,
       topic: response.maybe_topic.clone().unwrap_or_default(),
       member_ids,
-      unread_count: self.unread_count(response),
-      mention_count: 0,
+      unread_count: u32::try_from(unread.len()).unwrap_or(u32::MAX),
+      mention_count: self.mention_count(&unread, users.get(&self.me)),
       is_favorite,
       is_muted: self.is_muted(response),
       can_post: true,
@@ -467,9 +471,38 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  fn unread_count(&self, response: &ConversationResponse) -> u32 {
-    let unread = self.unread_messages(response).len();
-    u32::try_from(unread).unwrap_or(u32::MAX)
+  /// How many of the unread messages mention the user: an explicit mention, or, decided on the
+  /// decrypted text, `@username`, `@channel`/`@here`/`@all`, the first name or a keyword
+  /// (docs/notifications.md). Derived from the unread set, so a read marker resets it and a replayed
+  /// event can't raise it twice. Muted conversations count too.
+  fn mention_count(&self, unread: &[StoredMessage], maybe_me: Option<&UserSummary>) -> u32 {
+    let preferences = match load_mention_preferences(&self.store) {
+      Ok(preferences) => preferences,
+      Err(error) => {
+        tracing::warn!(%error, "mention preferences unreadable, using defaults");
+        MentionPreferences::default()
+      },
+    };
+    let rules = MentionRules {
+      username: maybe_me
+        .and_then(|me| me.maybe_username.as_deref())
+        .unwrap_or_default(),
+      display_name: maybe_me.map_or("", |me| me.display_name.as_str()),
+      first_name_is_mention: preferences.first_name_is_mention,
+      channel_mentions_notify: preferences.channel_mentions_notify,
+      keywords: &preferences.keywords,
+    };
+    let count = unread
+      .iter()
+      .filter(|message| message.sender_user_id != self.me)
+      .filter(|message| match &message.content {
+        MessageContent::Text { body, mentions, .. } => {
+          mentions.contains(&self.me) || is_mentioned(body, &rules)
+        },
+        _ => false,
+      })
+      .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
   }
 
   /// Top-level messages the user hasn't read: others' messages after the server's read position,
@@ -1408,6 +1441,148 @@ mod tests {
   fn out_of_range_pages_are_clipped() {
     let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
     assert!(backend.messages(id(10), 5, 10).is_empty());
+  }
+
+  mod mention_counts {
+    use super::*;
+
+    #[test]
+    fn counts_explicit_mentions_channel_words_and_keywords_but_not_own_or_plain_messages() {
+      let (backend, conversation, users) = mention_fixture(&[
+        (2, "hello everyone", &[]),
+        (2, "ping @alice", &[]),
+        (2, "@here standup", &[]),
+        (2, "no text match", &[1]),
+        (1, "@alice my own message", &[1]),
+      ]);
+      let counted = backend.to_conversation(&conversation, &users);
+      assert_eq!(counted.unread_count, 4);
+      assert_eq!(counted.mention_count, 3);
+    }
+
+    #[test]
+    fn keywords_count_and_replayed_messages_do_not_raise_the_count() {
+      let (backend, conversation, users) = mention_fixture(&[(2, "deploy failed", &[])]);
+      let preferences = MentionPreferences {
+        keywords: vec!["deploy".into()],
+        ..MentionPreferences::default()
+      };
+      crate::notify_rules::save_mention_preferences(&backend.store, &preferences).unwrap();
+      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 1);
+      // The same event arriving again is the same stored message.
+      store_message(&backend, &conversation, 0, 2, "deploy failed", &[]);
+      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 1);
+    }
+
+    #[test]
+    fn messages_at_or_before_the_read_position_do_not_count() {
+      let (backend, mut conversation, users) =
+        mention_fixture(&[(2, "@alice one", &[]), (2, "@alice two", &[])]);
+      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 2);
+      let mut membership = test_membership();
+      membership.maybe_last_read_message_id = Some(id(101));
+      conversation.maybe_my_membership = Some(membership);
+      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 1);
+      conversation
+        .maybe_my_membership
+        .as_mut()
+        .unwrap()
+        .maybe_last_read_message_id = Some(id(102));
+      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 0);
+    }
+
+    #[test]
+    fn muted_conversations_still_show_mentions() {
+      let (backend, mut conversation, users) = mention_fixture(&[(2, "@alice look", &[])]);
+      let mut membership = test_membership();
+      membership.notification_level = teamcraft_proto::NotificationLevel::None;
+      conversation.maybe_my_membership = Some(membership);
+      let counted = backend.to_conversation(&conversation, &users);
+      assert!(counted.is_muted);
+      assert_eq!(counted.mention_count, 1);
+    }
+
+    fn test_membership() -> teamcraft_proto::MyMembership {
+      teamcraft_proto::MyMembership {
+        role: teamcraft_proto::ChannelRole::Member,
+        notification_level: teamcraft_proto::NotificationLevel::All,
+        is_favorite: false,
+        maybe_last_read_message_id: None,
+        maybe_muted_until: None,
+        is_notification_inherited: false,
+      }
+    }
+
+    /// Alice (1) is the user; messages are `(sender, body, explicit mentions)` with server IDs 101...
+    fn mention_fixture(
+      messages: &[(i64, &str, &[i64])],
+    ) -> (
+      CoreChatBackend<MemoryStore>,
+      ConversationResponse,
+      BTreeMap<UserId, UserSummary>,
+    ) {
+      let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
+      let channel = id::<ConversationId>(10);
+      let conversation = ConversationResponse {
+        id: channel,
+        maybe_space_id: None,
+        kind: ConversationKindProto::Channel,
+        maybe_name: Some("general".into()),
+        maybe_topic: None,
+        maybe_description: None,
+        visibility: ConversationVisibility::Public,
+        history_policy: teamcraft_proto::HistoryPolicy::Full,
+        maybe_category_id: None,
+        is_archived: false,
+        moderation: Default::default(),
+        is_integration: false,
+        contains_guests: false,
+        maybe_my_membership: None,
+        participants: Vec::new(),
+      };
+      for (index, (sender, body, mentions)) in messages.iter().enumerate() {
+        store_message(&backend, &conversation, index, *sender, body, mentions);
+      }
+      let me = UserSummary {
+        id: id(1),
+        maybe_username: Some("alice".into()),
+        display_name: "Alice Example".into(),
+        kind: teamcraft_proto::UserKind::Member,
+        maybe_email: None,
+        maybe_organization: None,
+      };
+      (backend, conversation, BTreeMap::from([(me.id, me)]))
+    }
+
+    fn store_message(
+      backend: &CoreChatBackend<MemoryStore>,
+      conversation: &ConversationResponse,
+      index: usize,
+      sender: i64,
+      body: &str,
+      mentions: &[i64],
+    ) {
+      let number = u8::try_from(index).unwrap() + 1;
+      backend
+        .store
+        .upsert_message(&StoredMessage {
+          conversation_id: conversation.id,
+          client_message_id: ClientMessageId::from_bytes([number; 16]),
+          maybe_server_id: Some(id(100 + i64::from(number))),
+          sender_user_id: id(sender),
+          maybe_thread_id: None,
+          sent_at_ms: 1_000 * i64::from(number),
+          content: MessageContent::Text {
+            body: body.into(),
+            mentions: mentions.iter().map(|raw| id(*raw)).collect(),
+            meta: Default::default(),
+          },
+          is_edited: false,
+          edits: Vec::new(),
+          is_pinned: false,
+        })
+        .unwrap();
+    }
   }
 
   fn id<T: Id>(raw: i64) -> T {
