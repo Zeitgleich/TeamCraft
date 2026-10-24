@@ -2,14 +2,16 @@
 //! by two spacer heights. Row heights are estimated first and corrected by measuring rendered rows.
 
 use std::cell::Cell;
+use std::time::Duration;
 
 use leptos::ev;
 use leptos::html;
+use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::clock::format_date;
+use crate::clock::{format_date, now_ms};
 use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
@@ -19,6 +21,7 @@ use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::state::{Overlay, use_app_state};
+use crate::unread_divider::{DividerEvent, DwellClock};
 
 /// Extra pixels rendered above and below the viewport.
 const OVERSCAN_PX: f64 = 700.0;
@@ -26,6 +29,8 @@ const OVERSCAN_PX: f64 = 700.0;
 const STICK_THRESHOLD_PX: f64 = 8.0;
 const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
 const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
+/// New messages looked at for the first one from somebody else (the divider goes there).
+const MAX_NEW_SCAN: usize = 50;
 /// Measure passes after a jump that keep the target row in place while heights settle.
 const ALIGN_PASSES: u8 = 6;
 /// Space kept above the "New messages" divider when a conversation opens there.
@@ -441,7 +446,18 @@ pub fn MessageList(
     (window.first..window.end).collect::<Vec<usize>>()
   };
 
-  let on_keydown = move |ev: web_sys::KeyboardEvent| handle_list_keys(&ev, container, rows);
+  track_unread_divider(conversation, count, stick_to_bottom);
+  let on_keydown = move |ev: web_sys::KeyboardEvent| {
+    // Esc marks everything read and removes the "New messages" divider (#321), unless it is used
+    // for something else (an editor, a menu, closing the side panel or a dialog).
+    if ev.key() == "Escape" {
+      if is_escape_free(&ev) {
+        state.mark_conversation_read(conversation);
+      }
+      return;
+    }
+    handle_list_keys(&ev, container, rows);
+  };
   let is_alone_in_channel = move || {
     state
       .read(|backend| backend.conversation(conversation))
@@ -502,6 +518,126 @@ pub fn MessageList(
       </Show>
     </div>
   }
+}
+
+/// Moves or removes the "New messages" divider as the user reads (#321, `unread_divider`):
+/// staying at the bottom of the focused window for the dwell time removes it, and messages that
+/// arrive while the window is blurred or hidden move it to the first one from somebody else.
+/// Leaving the conversation is handled where it happens (`AppState::open_conversation`), so a
+/// remount of this list (layout change, thread pane) keeps it. One timer, only while the user sits
+/// at the bottom with a divider shown; it is cancelled when that ends or the list goes away.
+fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_bottom: RwSignal<bool>) {
+  let state = use_app_state();
+  let is_focused = RwSignal::new(is_window_focused());
+  // Whether the user was at the bottom (had seen the divider) when they looked away.
+  let was_at_bottom_when_away = StoredValue::new(false);
+  let on_focus_change = move || {
+    let focused = is_window_focused();
+    if !focused && is_focused.try_get_untracked() == Some(true) {
+      was_at_bottom_when_away.try_set_value(is_at_bottom.try_get_untracked().unwrap_or(false));
+    }
+    is_focused.try_set(focused);
+  };
+  let _ = window_event_listener(ev::focus, move |_| on_focus_change());
+  let _ = window_event_listener(ev::blur, move |_| on_focus_change());
+  let _ = window_event_listener(ev::visibilitychange, move |_| on_focus_change());
+
+  // News while the user looks elsewhere.
+  Effect::new(move |previous: Option<usize>| {
+    let total = count.get();
+    if let Some(previous) = previous
+      && total > previous
+      && !is_focused.get_untracked()
+    {
+      let me = state.me().id;
+      let len = (total - previous).min(MAX_NEW_SCAN);
+      let maybe_first_foreign = state
+        .read(|backend| backend.messages(conversation, previous, len))
+        .iter()
+        .position(|message| message.author != me);
+      state.divider_event(
+        conversation,
+        DividerEvent::ArrivedWhileAway {
+          first_new: previous + maybe_first_foreign.unwrap_or(0),
+          is_own: maybe_first_foreign.is_none(),
+          has_seen_divider: was_at_bottom_when_away.get_value(),
+        },
+      );
+    }
+    total
+  });
+
+  let maybe_dwell = Memo::new(move |_| {
+    state
+      .settings
+      .prefs
+      .with(|prefs| prefs.display.maybe_divider_dwell_secs)
+      .map(|secs| Duration::from_secs(u64::from(secs)))
+  });
+  let clock = StoredValue::new(DwellClock::default());
+  let timer = StoredValue::new(None::<TimeoutHandle>);
+  let cancel_timer = move || {
+    if let Some(Some(handle)) = timer.try_update_value(Option::take) {
+      handle.clear();
+    }
+  };
+  on_cleanup(cancel_timer);
+  Effect::new(move |_| {
+    let has_divider = state
+      .unread_marker
+      .get()
+      .is_some_and(|marker| marker.conversation == conversation);
+    let is_reading = has_divider && is_at_bottom.get() && is_focused.get();
+    let maybe_dwell = maybe_dwell.get();
+    cancel_timer();
+    let now = now_ms();
+    clock.update_value(|clock| clock.update(is_reading && maybe_dwell.is_some(), now));
+    let Some(dwell) = maybe_dwell else { return };
+    let Some(remaining) = clock.with_value(|clock| clock.remaining(now, dwell)) else {
+      return;
+    };
+    let fire = move || {
+      timer.try_set_value(None);
+      let is_due = clock
+        .try_with_value(|clock| clock.remaining(now_ms(), dwell))
+        .flatten()
+        .is_some_and(|left| left.is_zero());
+      if is_due {
+        state.divider_event(conversation, DividerEvent::DwelledAtBottom);
+      }
+    };
+    match set_timeout_with_handle(fire, remaining) {
+      Ok(handle) => timer.set_value(Some(handle)),
+      Err(error) => tracing::debug!(?error, "no timer for the divider"),
+    }
+  });
+}
+
+/// Whether an Esc that reached the feed has no other job: nothing handled it yet, it doesn't come
+/// from a text field, and there is no dialog or side panel for it to close.
+fn is_escape_free(ev: &web_sys::KeyboardEvent) -> bool {
+  let state = use_app_state();
+  let is_from_text_field = ev
+    .target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .is_some_and(|element| {
+      element
+        .closest("input, textarea, select, [contenteditable]")
+        .ok()
+        .flatten()
+        .is_some()
+    });
+  !ev.default_prevented()
+    && !is_from_text_field
+    && state.overlay.get_untracked() == Overlay::None
+    && state.panel.get_untracked() == crate::state::SidePanel::Closed
+}
+
+/// Whether the window has the focus and the page is visible.
+fn is_window_focused() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .is_some_and(|document| !document.hidden() && document.has_focus().unwrap_or(true))
 }
 
 /// Calls `on_change` (on the next frame) whenever the rendered rows change size.

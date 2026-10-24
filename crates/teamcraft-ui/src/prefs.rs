@@ -445,6 +445,9 @@ pub struct DisplayPrefs {
   pub show_status_in_messages: bool,
   /// Size of the whole interface, Ctrl/Cmd + `+` / `-` / `0`.
   pub zoom: Zoom,
+  /// Seconds at the bottom of the focused conversation before the "New messages" divider goes;
+  /// `None` keeps it until the user sends, presses Esc or leaves (#321).
+  pub maybe_divider_dwell_secs: Option<u16>,
 }
 
 impl Default for DisplayPrefs {
@@ -454,9 +457,13 @@ impl Default for DisplayPrefs {
       image_size: ImageSize::Large,
       show_status_in_messages: true,
       zoom: Zoom::DEFAULT,
+      maybe_divider_dwell_secs: Some(DEFAULT_DIVIDER_DWELL_SECS),
     }
   }
 }
+
+/// Default of [`DisplayPrefs::maybe_divider_dwell_secs`].
+pub const DEFAULT_DIVIDER_DWELL_SECS: u16 = 10;
 
 /// Interface zoom in percent, one of [`Zoom::STEPS`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
