@@ -22,6 +22,10 @@ pub struct SignInLook {
   /// The brand image for the dark theme, when the brand has a separate one.
   #[serde(rename = "logo_dark", default, skip_serializing_if = "Option::is_none")]
   pub maybe_logo_dark: Option<String>,
+  /// The logo is a wordmark that carries the name: the page shows it without the name beside it
+  /// (the name stays its alternative text). False for an icon.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_wordmark: bool,
 }
 
 /// The theme the user picked in the app.

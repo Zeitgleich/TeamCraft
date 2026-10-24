@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use teamcraft_client_api::brand::BrandView;
 use teamcraft_client_api::sign_in_page::SignInPage;
 use teamcraft_proto::{GetMeResponse, SignInMethod};
 use wasm_bindgen::JsCast;
@@ -74,7 +75,6 @@ pub(crate) fn AuthFrame(
   let i18n = use_i18n();
   let brand = Brand::use_current().0;
   let language = move || i18n.locale().tag();
-  let name = move || brand.with(|view| view.display_name.clone());
   let links = move || {
     brand.with(|view| {
       [
@@ -96,11 +96,7 @@ pub(crate) fn AuthFrame(
       <section class="auth-card">
         {(!hide_brand).then(|| view! {
           <div class="auth-brand" translate="no">
-            <BrandLogo
-              class="auth-logo-img"
-              fallback=move || view! { <span class="auth-logo" aria-hidden="true">{move || name().chars().next().map(String::from).unwrap_or_default()}</span> }
-            />
-            <span class="auth-brand-name">{name}</span>
+            {move || brand_mark(brand)}
           </div>
           {move || {
             brand
@@ -137,6 +133,32 @@ pub(crate) fn AuthFrame(
       </section>
     </main>
   }
+}
+
+/// The top of the card: no server brand yet → the product mark and "TeamCraft"; a logo (a
+/// wordmark) → the logo alone; an icon → the icon with the name beside it; nothing → the name.
+fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
+  let name = move || brand.with(|view| view.display_name.clone());
+  let (is_product, has_wordmark) = brand.with(|view| (view.is_fallback(), view.has_wordmark()));
+  if is_product {
+    return view! {
+      <img class="auth-logo-img auth-product-icon" src=crate::brand::product_icon() alt="" />
+      <span class="auth-brand-name">{name}</span>
+    }
+    .into_any();
+  }
+  if has_wordmark {
+    // Until the logo is there, or when it fails, the name stands in for it.
+    return view! {
+      <BrandLogo class="auth-logo-img" fallback=move || view! { <span class="auth-brand-name">{name}</span> } />
+    }
+    .into_any();
+  }
+  view! {
+    <BrandLogo class="auth-logo-img auth-icon-img" fallback=|| () />
+    <span class="auth-brand-name">{name}</span>
+  }
+  .into_any()
 }
 
 #[component]
@@ -387,12 +409,23 @@ fn SsoButton(
         .header_image(true)
         .filter(|dark| Some(*dark) != view.header_image(false))
         .and_then(image_src);
-      (view.display_name.clone(), maybe_light, maybe_dark)
+      (
+        view.display_name.clone(),
+        maybe_light,
+        maybe_dark,
+        view.has_wordmark(),
+      )
     })
   });
   let start = move |_| {
-    let (name, maybe_logo, maybe_logo_dark) = logos.get_untracked();
-    control.sign_in(sign_in_look(i18n, Some(name), maybe_logo, maybe_logo_dark));
+    let (name, maybe_logo, maybe_logo_dark, is_wordmark) = logos.get_untracked();
+    control.sign_in(sign_in_look(
+      i18n,
+      Some(name),
+      maybe_logo,
+      maybe_logo_dark,
+      is_wordmark,
+    ));
   };
   view! {
     <button
@@ -677,6 +710,11 @@ fn ServerEntryScreen(
   control: SessionControl,
 ) -> impl IntoView {
   let i18n = use_i18n();
+  // No server is chosen here: the product's look, never a server's (a cached one or one the user
+  // just left). The web client has no server entry; it keeps its server's brand.
+  if tauri::is_available() {
+    crate::brand::show_product_brand();
+  }
   let checked_address = maybe_address.unwrap_or_default();
   let address = RwSignal::new(checked_address.clone());
   let is_checking = move || control.is_checking_server.get();
@@ -829,10 +867,17 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
     .maybe_logo_dark
     .clone()
     .filter(|url| is_data_image(url) && Some(url) != maybe_logo.as_ref());
+  // A logo is a wordmark and stands for the name; an icon gets the name below it.
+  let is_wordmark =
+    BrandView::from_response(check.brand.clone(), "").is_some_and(|brand| brand.has_wordmark());
+  let has_logo = maybe_logo.is_some();
   let logo_failed = RwSignal::new(false);
   let hide_on_error = move |_| logo_failed.set(true);
+  let shows_name = move || !(is_wordmark && has_logo && !logo_failed.get());
+  let logo_alt = if is_wordmark { name.clone() } else { String::new() };
   let look_logos = (maybe_logo.clone(), maybe_logo_dark.clone());
   let look_name = name.clone();
+  let name = StoredValue::new(name);
   let check = StoredValue::new(check);
   let confirm = move |_| {
     let look = sign_in_look(
@@ -840,6 +885,7 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
       Some(look_name.clone()),
       look_logos.0.clone(),
       look_logos.1.clone(),
+      is_wordmark,
     );
     control.confirm_server(check.get_value(), look);
   };
@@ -849,14 +895,16 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
         <Show when=move || !logo_failed.get() fallback=|| ()>
           {maybe_logo.clone().map(|light| {
             view! {
-              <img class="auth-identity-logo brand-light" src=light alt="" on:error=hide_on_error />
+              <img class="auth-identity-logo brand-light" class:auth-identity-icon=!is_wordmark src=light alt=logo_alt.clone() on:error=hide_on_error />
               {maybe_logo_dark.clone().map(|dark| view! {
-                <img class="auth-identity-logo brand-dark" src=dark alt="" aria-hidden="true" on:error=hide_on_error />
+                <img class="auth-identity-logo brand-dark" class:auth-identity-icon=!is_wordmark src=dark alt="" aria-hidden="true" on:error=hide_on_error />
               })}
             }
           })}
         </Show>
-        <p class="auth-identity-name">{name}</p>
+        <Show when=shows_name fallback=|| ()>
+          <p class="auth-identity-name">{name.get_value()}</p>
+        </Show>
         <p class="auth-identity-host mono">{host}</p>
       </div>
       <h1 class="auth-center">{move || i18n.t("server-entry-confirm-title")}</h1>
@@ -941,6 +989,7 @@ fn sign_in_look(
   maybe_brand_name: Option<String>,
   maybe_logo: Option<String>,
   maybe_logo_dark: Option<String>,
+  is_wordmark: bool,
 ) -> SignInLook {
   SignInLook {
     maybe_locale: Some(i18n.locale().tag().to_owned()),
@@ -948,6 +997,7 @@ fn sign_in_look(
     maybe_brand_name,
     maybe_logo: maybe_logo.filter(|url| is_data_image(url)),
     maybe_logo_dark: maybe_logo_dark.filter(|url| is_data_image(url)),
+    is_wordmark,
   }
 }
 

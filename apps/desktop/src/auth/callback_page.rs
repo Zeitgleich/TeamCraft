@@ -173,21 +173,32 @@ fn brand_block(look: &SignInLook, maybe_name: Option<&str>) -> String {
     .maybe_logo_dark
     .as_deref()
     .filter(|url| is_safe_logo(url) && Some(*url) != maybe_light);
+  let has_logo = maybe_light.is_some() || maybe_dark.is_some();
+  // A wordmark carries the name: it is the image's alternative text instead of a second line.
+  let is_wordmark = look.is_wordmark && has_logo;
+  let alt = if is_wordmark {
+    escape(maybe_name.unwrap_or_default())
+  } else {
+    String::new()
+  };
   let mut block = String::new();
   match (maybe_light, maybe_dark) {
     (Some(light), Some(dark)) => {
       block.push_str(&format!(
-        "<img class=\"logo logo-light\" src=\"{}\" alt=\"\"><img class=\"logo logo-dark\" src=\"{}\" alt=\"\">",
+        "<img class=\"logo logo-light\" src=\"{}\" alt=\"{alt}\"><img class=\"logo logo-dark\" src=\"{}\" alt=\"{alt}\">",
         escape(light),
         escape(dark)
       ));
     },
     (Some(only), None) | (None, Some(only)) => {
-      block.push_str(&format!("<img class=\"logo\" src=\"{}\" alt=\"\">", escape(only)));
+      block.push_str(&format!(
+        "<img class=\"logo\" src=\"{}\" alt=\"{alt}\">",
+        escape(only)
+      ));
     },
     (None, None) => {},
   }
-  if let Some(name) = maybe_name {
+  if let Some(name) = maybe_name.filter(|_| !is_wordmark) {
     block.push_str(&format!(
       "<p class=\"brand\" translate=\"no\">{}</p>",
       escape(name)
@@ -391,6 +402,28 @@ mod tests {
       let page = render(CallbackOutcome::SignedIn, &look(Some("en")), None);
       assert!(!page.contains("<header>") && !page.contains("<img"));
       assert!(page.contains("<title>Sign-in</title>"));
+    }
+
+    #[test]
+    fn a_wordmark_replaces_the_name_and_an_icon_keeps_it() {
+      let mut branded = look(Some("en"));
+      branded.maybe_brand_name = Some("Example Chat".to_owned());
+      branded.maybe_logo = Some(LOGO.to_owned());
+      branded.is_wordmark = true;
+      let page = render(CallbackOutcome::SignedIn, &branded, None);
+      assert!(page.contains("alt=\"Example Chat\""));
+      assert!(!page.contains("class=\"brand\""));
+      assert!(page.contains("<title>Sign-in · Example Chat</title>"));
+
+      branded.is_wordmark = false;
+      let page = render(CallbackOutcome::SignedIn, &branded, None);
+      assert!(page.contains("alt=\"\"") && page.contains("class=\"brand\""));
+
+      // A wordmark that failed the checks: the name is shown after all.
+      branded.is_wordmark = true;
+      branded.maybe_logo = Some("https://example.com/logo.png".to_owned());
+      let page = render(CallbackOutcome::SignedIn, &branded, None);
+      assert!(page.contains("class=\"brand\""));
     }
 
     #[test]
