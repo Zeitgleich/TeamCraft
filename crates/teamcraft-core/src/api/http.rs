@@ -1338,6 +1338,7 @@ mod tests {
     }
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test]
   async fn a_plain_http_server_gets_no_request_and_no_token() {
     let api = HttpServerApi::new("http://chat.example.com", PanickingToken);
@@ -1351,6 +1352,7 @@ mod tests {
     ));
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test(start_paused = true)]
   async fn a_server_that_never_answers_the_websocket_handshake_times_out() {
     let listener = loopback_listener().await;
@@ -1365,6 +1367,7 @@ mod tests {
     assert!(matches!(result, Err(ApiError::Network(message)) if message.contains("timed out")));
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test(start_paused = true)]
   async fn an_api_call_to_a_server_that_never_answers_times_out() {
     let listener = loopback_listener().await;
@@ -1416,6 +1419,7 @@ mod tests {
 
   /// Serves one HTTP response per connection: `body`, with or without a content length.
   /// IPv6 loopback, or IPv4 on hosts whose kernel has no IPv6 (some CI sandboxes).
+  #[cfg(not(target_arch = "wasm32"))]
   async fn loopback_listener() -> tokio::net::TcpListener {
     match tokio::net::TcpListener::bind("[::1]:0").await {
       Ok(listener) => listener,
@@ -1423,6 +1427,7 @@ mod tests {
     }
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   async fn blob_server(body: Vec<u8>, has_length: bool) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1447,6 +1452,7 @@ mod tests {
     format!("http://{address}/blob")
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test]
   async fn capped_downloads_stop_at_the_cap() {
     let api = HttpServerApi::new("http://[::1]:1", StaticToken("t".into()));
@@ -1464,8 +1470,10 @@ mod tests {
     ));
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   struct PanickingToken;
 
+  #[cfg(not(target_arch = "wasm32"))]
   impl AccessTokenSource for PanickingToken {
     fn access_token(&self) -> Result<String, ApiError> {
       panic!("no token may be read for an insecure server");

@@ -1,5 +1,7 @@
 //! A member the server put into a channel (an instance default) claims the place with a signed
 //! self-add, which only ever asks for history from the join on.
+// Runs on tokio; the wasm tests are web.rs and web_service_worker.rs.
+#![cfg(not(target_arch = "wasm32"))]
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 

@@ -81,11 +81,13 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Wasm build (browser crates)
+      # Lints the browser crates' tests too (wasm-only tests and native-only gates).
+      - name: Wasm clippy (browser crates)
         if: matrix.arch == 'x86_64'
         run: >
-          cargo check --target wasm32-unknown-unknown
+          cargo clippy --target wasm32-unknown-unknown --all-targets
           -p teamcraft-proto -p teamcraft-crypto -p teamcraft-media -p teamcraft-core -p teamcraft-ui
+          -- -D warnings
 
   # Tests in their own job: a fresh disk, and test binaries without debug info (every integration
   # test binary links the whole dependency tree). cargo-nextest runs every test in its own process

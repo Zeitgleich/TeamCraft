@@ -1547,6 +1547,7 @@ mod tests {
     assert!(backend.message_extras(conversation, &[posted.id])[0].is_deleted);
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test]
   async fn commands_reach_the_server() {
     use crate::api::ServerApi;
