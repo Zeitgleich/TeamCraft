@@ -38,17 +38,38 @@ Google Play and the App Store need strictly increasing integers:
 
 ### Tags
 
-| Tag on a tree with version `1.0.0` | Result                                                                                                        |
-|------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| `v1.0.0`                           | release: images get `1.0.0`, `1.0` and `latest`                                                               |
-| `v1.0.0-rc.1`                      | candidate: the same pipeline as a prerelease; images get `1.0.0-rc.1` only, packages carry the tree's `1.0.0` |
-| anything else                      | the first job fails                                                                                           |
+| Tag on a tree with version `1.0.0` | Result                                                                                                           |
+|------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `v1.0.0`                           | release: images get `1.0.0`, `1.0` and `latest`                                                                  |
+| `v1.0.0-rc.1`                      | candidate: the same pipeline as a prerelease; images get `1.0.0-rc.1` only, deb `1.0.0~rc.1`, rpm `1.0.0-0.rc.1` |
+| anything else                      | the first job fails                                                                                              |
 
 A candidate tag tests the whole pipeline on exactly the tree that becomes the release. A tree with a
 prerelease version (`1.1.0-beta.1`) is released with exactly that tag.
 
-Prerelease versions in the tree have packaging limits: rpm writes the `-` as is (fine for betas), and
-Windows MSI only allows numeric prereleases (set `bundle.windows.wix.version` then; NSIS has no limit).
+Prerelease versions in the tree have packaging limits: Windows MSI only allows numeric prereleases
+(set `bundle.windows.wix.version` then; NSIS has no limit).
+
+### Linux package versions
+
+Tauri names the deb and rpm after the tree's version, so a candidate would carry the release's
+version and `dnf`/`apt` would never upgrade between candidates or from a candidate to the release.
+`desktop-release.yml` therefore maps the tag with `scripts/linux-package-version.sh`:
+
+| Tag           | deb          | rpm (version-release) | Update manifest (`latest.json`) |
+|---------------|--------------|-----------------------|---------------------------------|
+| `v1.0.0-rc.2` | `1.0.0~rc.2` | `1.0.0-0.rc.2`        | `1.0.0-rc.2`                    |
+| `v1.0.0`      | `1.0.0`      | `1.0.0-1`             | `1.0.0`                         |
+
+The rpm gets `bundle.linux.rpm.release` through a `--config` override (Tauri 2 has no per-package
+version override, and the config version must stay semver); the deb is repacked with the new
+`Version` after the build. The `Version` job of `release.yml` checks with `rpm` and
+`dpkg --compare-versions` that the candidate sorts before the release (and `rc.2` before `rc.10`).
+Candidates are only published in the `prerelease` repositories; `stable` gets the release.
+
+Candidate installs of 1.0.0 (`1.0.0-1` rpm / `1.0.0` deb, built before this mapping) have the same
+version as the final 1.0.0 and as each other: reinstall once with `sudo dnf reinstall team-craft` or
+`sudo apt install --reinstall team-craft`; later releases upgrade normally.
 
 ## Release procedure
 
