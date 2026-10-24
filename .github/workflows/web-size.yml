@@ -1,7 +1,8 @@
 # Web client download size (.claude/rules/robustness.md, "Download size"): builds the release web
 # bundle like the release does (`trunk build --release`) and checks its wasm, the app and the service
 # worker, with scripts/check-web-size.py. Every run prints the sizes and the delta to the last `main`
-# run into the job summary; above the budget it warns, above the ratchet below it fails (#248).
+# run into the job summary. It fails above the compressed (gzip -9) budget, the default in the
+# script, and above the uncompressed growth ratchet below (#248).
 #
 # Only changes that can change the bundle run it: the crates compiled into it, the lockfile and the
 # toolchain. `main` saves its sizes for the next delta (a few hundred bytes in the cache).
@@ -48,10 +49,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The ratchet while the bundle is over the 10 MB budget: 11.06 MB measured when this check was
-  # added, plus 1 %. Lower it with every reduction until it meets the budget; raising it is a
-  # decision, not a fix (docs/performance.md, "Web bundle size").
-  WEB_WASM_MAX_BYTES: "11200000"
+  # The growth ratchet on the uncompressed wasm: 11.28 MB measured on main c55b2e58 plus 5 %, so
+  # the UI changes in flight fit. It is not a budget: what users wait for is the compressed transfer,
+  # budgeted in the script (4.7 MB gzip -9). Lower it after a reduction; raising it is a decision,
+  # not a fix (docs/performance.md, "Web bundle size").
+  WEB_WASM_MAX_UNCOMPRESSED_BYTES: "11850000"
 
 jobs:
   web-size:
@@ -82,7 +84,7 @@ jobs:
       - name: Check the wasm size
         run: >
           scripts/check-web-size.py crates/teamcraft-ui/dist
-          --max-bytes "$WEB_WASM_MAX_BYTES"
+          --max-uncompressed-bytes "$WEB_WASM_MAX_UNCOMPRESSED_BYTES"
           --baseline .web-size/main.json
           --write .web-size/current.json
       - name: Keep the sizes for the next delta

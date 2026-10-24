@@ -1,4 +1,5 @@
 """Tests of scripts/check-web-size.py: python3 -m unittest discover -s scripts/tests"""
+import gzip
 import importlib.util
 import io
 import json
@@ -20,35 +21,56 @@ SERVICE_WORKER = "teamcraft-web-sw-4567ef_bg.wasm"
 
 
 class BudgetTest(unittest.TestCase):
+    """Random bytes don't compress: gzip -9 is a little above the uncompressed size."""
+
     def test_within_the_budget_passes_and_prints_the_sizes(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
-            code, out, _ = run(str(dist), "--budget-bytes", "1000")
+            code, out, _ = run(str(dist), "--budget-bytes", "2000")
         self.assertEqual(code, 0)
         self.assertIn("| app ", out)
         self.assertIn("| total ", out)
-        self.assertIn("headroom", out)
+        self.assertIn("gzip -9; headroom", out)
+        self.assertNotIn("::warning::", out)
 
-    def test_over_the_budget_fails_counting_both_files(self):
+    def test_over_the_compressed_budget_fails_counting_both_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=500)
             code, _, err = run(str(dist), "--budget-bytes", "1000")
         self.assertEqual(code, 1)
-        self.assertIn("1,100 bytes", err)
+        self.assertIn("gzip -9, over the budget of 1,000", err)
 
-    def test_over_the_budget_but_under_the_maximum_only_warns(self):
+    def test_close_to_the_compressed_budget_only_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=500)
-            code, out, _ = run(str(dist), "--budget-bytes", "1000", "--max-bytes", "1200")
+            gzip_total = gzip_total_of(dist)
+            code, out, _ = run(str(dist), "--budget-bytes", str(gzip_total + 10))
         self.assertEqual(code, 0)
         self.assertIn("::warning::", out)
 
-    def test_over_the_maximum_fails(self):
+    def test_compressible_wasm_is_judged_by_its_compressed_size(self):
         with tempfile.TemporaryDirectory() as tmp:
-            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=500)
-            code, _, err = run(str(dist), "--budget-bytes", "1000", "--max-bytes", "1050")
+            dist = dist_with(tmp, app_bytes=600_000, service_worker_bytes=50_000, compressible=True)
+            code, out, _ = run(str(dist), "--budget-bytes", "100000")
+        self.assertEqual(code, 0)
+        self.assertNotIn("::warning::", out)
+
+    def test_over_the_uncompressed_ratchet_fails_even_within_the_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600_000, service_worker_bytes=50_000, compressible=True)
+            code, out, err = run(str(dist), "--budget-bytes", "100000",
+                                 "--max-uncompressed-bytes", "640000")
         self.assertEqual(code, 1)
-        self.assertIn("maximum of 1,050", err)
+        self.assertIn("uncompressed, over the ratchet of 640,000", err)
+        self.assertIn("Uncompressed ratchet", out)
+
+    def test_under_the_uncompressed_ratchet_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600_000, service_worker_bytes=50_000, compressible=True)
+            code, _, err = run(str(dist), "--budget-bytes", "100000",
+                               "--max-uncompressed-bytes", "650000")
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
 
     def test_a_missing_file_is_an_error_not_a_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,10 +84,11 @@ class BaselineTest(unittest.TestCase):
     def test_the_delta_to_the_baseline_is_printed_and_the_sizes_written(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=3000, service_worker_bytes=100)
+            gzip_total = gzip_total_of(dist)
             baseline = pathlib.Path(tmp) / "main.json"
             baseline.write_text(json.dumps({
-                "app": {"bytes": 1000, "gzip_bytes": 10},
-                "service_worker": {"bytes": 100, "gzip_bytes": 10},
+                "app": {"bytes": 1000, "gzip_bytes": gzip_total - 2100},
+                "service_worker": {"bytes": 100, "gzip_bytes": 100},
             }))
             written = pathlib.Path(tmp) / "sizes.json"
             code, out, _ = run(str(dist), "--baseline", str(baseline), "--write", str(written))
@@ -84,12 +107,17 @@ class BaselineTest(unittest.TestCase):
         self.assertIn("–", out)
 
 
-def dist_with(tmp, app_bytes, service_worker_bytes):
+def dist_with(tmp, app_bytes, service_worker_bytes, compressible=False):
     dist = pathlib.Path(tmp) / "dist"
     dist.mkdir()
-    (dist / APP).write_bytes(os.urandom(app_bytes))
-    (dist / SERVICE_WORKER).write_bytes(os.urandom(service_worker_bytes))
+    content = (lambda size: b"\0" * size) if compressible else os.urandom
+    (dist / APP).write_bytes(content(app_bytes))
+    (dist / SERVICE_WORKER).write_bytes(content(service_worker_bytes))
     return dist
+
+
+def gzip_total_of(dist):
+    return sum(len(gzip.compress(path.read_bytes(), compresslevel=9)) for path in dist.iterdir())
 
 
 def run(*argv):
