@@ -506,6 +506,13 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   };
   let is_toolbar_on = move || maybe_host.is_some_and(|host| host.is_active(message_id));
   let long_press = LongPress::new(move || {
+    // A deleted message has nothing to act on, as on hover.
+    let is_deleted = extras
+      .try_with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted))
+      .unwrap_or(true);
+    if is_deleted {
+      return;
+    }
     if let Some(host) = maybe_host {
       host.open_sheet(active.get_value());
     }

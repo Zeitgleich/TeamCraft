@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::local_store::LOOKUP_ID_LEN;
 use teamcraft_crypto::local_store::{LocalStoreKeys, LookupId};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId};
+use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId};
 
 use super::{LocalStore, MemoryStore, MessageFilter, StoreError, StoredMessage, Table};
 
@@ -164,6 +164,14 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     client_message_id: ClientMessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
     self.cache.message(conversation, client_message_id)
+  }
+
+  fn message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    self.cache.message_by_server_id(conversation, server_id)
   }
 
   fn messages(

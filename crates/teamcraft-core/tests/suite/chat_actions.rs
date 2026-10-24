@@ -247,6 +247,12 @@ async fn linked_messages_preview_for_members_and_follow_edits_and_deletes() {
     bob_ui.linked_message("https://example.com/"),
     Some(LinkedMessage::Unavailable)
   );
+  // A member whose device doesn't have the message gets a neutral notice, not "no access".
+  let missing = format!("teamcraft:/c/{channel}/m/999999999");
+  assert!(matches!(
+    bob_ui.linked_message(&missing),
+    Some(LinkedMessage::NotLoaded { .. })
+  ));
 
   // A thread reply says where it lives.
   let detail = alice_ui.thread(channel, thread_id_of(plan.id))[1].clone();

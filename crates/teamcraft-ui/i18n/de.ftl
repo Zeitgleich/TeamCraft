@@ -2213,6 +2213,8 @@ callback-failed-body = Die Anmeldung konnte nicht abgeschlossen werden. Details 
 action-with-shortcut = { $action } ({ $shortcut })
 action-copy-text = Text kopieren
 action-copied = Kopiert
+action-copy-failed = Konnte nicht in die Zwischenablage kopieren
+action-copy-link-unready = Der Link ist noch nicht bereit. Versuch es gleich noch einmal.
 message-action-sheet = Aktionen für diese Nachricht
 
 ## Previews of linked messages (#319)
@@ -2220,4 +2222,5 @@ linked-message-from = In { $conversation }
 linked-message-from-thread = Aus einem Thread in { $conversation }
 linked-message-open = Zur Nachricht
 linked-message-deleted = Diese Nachricht wurde gelöscht
+linked-message-not-loaded = Nachricht nicht geladen
 linked-message-unavailable = Nachricht aus einem Gespräch, das du nicht sehen kannst

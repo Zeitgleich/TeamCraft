@@ -7656,7 +7656,8 @@ ol.md-list {
 }
 
 .linked-unavailable,
-.linked-deleted {
+.linked-deleted,
+.linked-not-loaded {
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;

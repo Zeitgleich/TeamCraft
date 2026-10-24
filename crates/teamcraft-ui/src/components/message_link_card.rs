@@ -57,6 +57,20 @@ fn MessageLinkCard(link: String) -> impl IntoView {
       </div>
     }
     .into_any(),
+    // A member whose device doesn't have the message yet: no lock, it isn't about access.
+    Some(LinkedMessage::NotLoaded { target }) => {
+      let (conversation, id, maybe_thread) = (target.conversation, target.message, target.maybe_thread);
+      view! {
+        <div class="linked-message linked-not-loaded" role="note">
+          <SourceLine target=target is_reply=target.maybe_thread.is_some() />
+          <span>{move || i18n.t("linked-message-not-loaded")}</span>
+          <button class="link-btn linked-jump" on:click=move |_| state.open_message(conversation, id, maybe_thread)>
+            {move || i18n.t("linked-message-open")}
+          </button>
+        </div>
+      }
+      .into_any()
+    },
     Some(LinkedMessage::Visible {
       target,
       message,

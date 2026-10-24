@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
-use teamcraft_proto::{ClientMessageId, ConversationId};
+use teamcraft_proto::{ClientMessageId, ConversationId, MessageId};
 
 use super::{LocalStore, MessageFilter, StoreError, StoredMessage, Table};
 
@@ -17,6 +17,8 @@ pub struct MemoryStore {
 struct Inner {
   tables: BTreeMap<(Table, String), Vec<u8>>,
   messages: BTreeMap<(ConversationId, [u8; 16]), StoredMessage>,
+  /// Client message ID of each message the server confirmed, by its server ID.
+  by_server_id: BTreeMap<(ConversationId, MessageId), [u8; 16]>,
 }
 
 impl MemoryStore {
@@ -62,7 +64,13 @@ impl LocalStore for MemoryStore {
 
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     let key = (message.conversation_id, *message.client_message_id.as_bytes());
-    self.lock().messages.insert(key, message.clone());
+    let mut inner = self.lock();
+    if let Some(server_id) = message.maybe_server_id {
+      inner
+        .by_server_id
+        .insert((message.conversation_id, server_id), key.1);
+    }
+    inner.messages.insert(key, message.clone());
     Ok(())
   }
 
@@ -78,6 +86,18 @@ impl LocalStore for MemoryStore {
         .get(&(conversation, *client_message_id.as_bytes()))
         .cloned(),
     )
+  }
+
+  fn message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    let inner = self.lock();
+    let Some(client_message_id) = inner.by_server_id.get(&(conversation, server_id)) else {
+      return Ok(None);
+    };
+    Ok(inner.messages.get(&(conversation, *client_message_id)).cloned())
   }
 
   fn messages(
@@ -97,9 +117,12 @@ impl LocalStore for MemoryStore {
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    self
-      .lock()
+    let mut inner = self.lock();
+    inner
       .messages
+      .retain(|(entry_conversation, _), _| *entry_conversation != conversation);
+    inner
+      .by_server_id
       .retain(|(entry_conversation, _), _| *entry_conversation != conversation);
     Ok(())
   }

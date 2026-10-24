@@ -230,36 +230,57 @@ pub fn run_message_action(action: MessageAction, message: &Message, maybe_extras
     },
     MessageAction::CopyLink => {
       // The toolbar asked for the link when it appeared, so a backend that loads it has it by now.
-      if let Some(link) = state.read(|backend| backend.permalink(conversation, id)) {
-        copy_to_clipboard(&link);
-        state.show_toast(i18n.t("action-copied"));
+      match state.read(|backend| backend.permalink(conversation, id)) {
+        Some(link) => copy_and_confirm(link),
+        // Still loading, or the message isn't on the server yet (no ID to link to).
+        None => state.show_error(i18n.t("action-copy-link-unready"), String::new()),
       }
     },
-    MessageAction::CopyText => {
-      copy_to_clipboard(&message.body);
-      state.show_toast(i18n.t("action-copied"));
-    },
+    MessageAction::CopyText => copy_and_confirm(message.body.clone()),
     MessageAction::MarkUnread => state.write(|backend| backend.mark_unread(conversation, id)),
     MessageAction::Edit => state.edit_request.set(Some(id)),
     MessageAction::Delete => state.delete_with_undo(conversation, id, i18n.t("message-deleted-toast")),
   }
 }
 
+/// Copies `text` and says whether it worked: "Copied", or an error when the browser refused.
+fn copy_and_confirm(text: String) {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let (copied, failed) = (i18n.t("action-copied"), i18n.t("action-copy-failed"));
+  let Some(promise) = clipboard_write(&text) else {
+    state.show_error(failed, String::new());
+    return;
+  };
+  leptos::task::spawn_local(async move {
+    // `show_error` does nothing once the shell is gone (issue #322); the toast checks first.
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+      Ok(_) => {
+        if state.is_alive() {
+          state.show_toast(copied);
+        }
+      },
+      Err(_) => state.show_error(failed, String::new()),
+    }
+  });
+}
+
 /// Writes to the clipboard through the page's `navigator.clipboard` (web-sys keeps that API unstable).
 pub(crate) fn copy_to_clipboard(text: &str) {
-  let Some(window) = web_sys::window() else { return };
-  let navigator = window.navigator();
-  let Ok(clipboard) = js_sys::Reflect::get(&navigator, &"clipboard".into()) else {
-    return;
-  };
-  let Ok(write_text) = js_sys::Reflect::get(&clipboard, &"writeText".into()) else {
-    return;
-  };
-  let Ok(write_text) = write_text.dyn_into::<js_sys::Function>() else {
-    return;
-  };
   // A refused write (no permission, insecure context) leaves the clipboard as it was.
-  drop(write_text.call1(&clipboard, &text.into()));
+  drop(clipboard_write(text));
+}
+
+/// Starts a clipboard write; `None` where the page has no clipboard API.
+fn clipboard_write(text: &str) -> Option<js_sys::Promise> {
+  let window = web_sys::window()?;
+  let navigator = window.navigator();
+  let clipboard = js_sys::Reflect::get(&navigator, &"clipboard".into()).ok()?;
+  let write_text = js_sys::Reflect::get(&clipboard, &"writeText".into())
+    .ok()?
+    .dyn_into::<js_sys::Function>()
+    .ok()?;
+  write_text.call1(&clipboard, &text.into()).ok()?.dyn_into().ok()
 }
 
 /// All versions of an edited message, newest first, with the changed words marked.

@@ -334,6 +334,8 @@ pub enum LinkedMessage {
   },
   /// The viewer is a member, but the message was deleted.
   Deleted { target: PermalinkTarget },
+  /// The viewer is a member, but this device doesn't have the message (not synced yet, or purged).
+  NotLoaded { target: PermalinkTarget },
   /// Not a member, a message this device doesn't have, or no message link at all. Says nothing
   /// about whether the message exists.
   #[serde(other)]

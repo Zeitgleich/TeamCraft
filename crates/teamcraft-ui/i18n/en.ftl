@@ -2213,6 +2213,8 @@ callback-failed-body = The sign-in could not be finished. Go back to the app for
 action-with-shortcut = { $action } ({ $shortcut })
 action-copy-text = Copy text
 action-copied = Copied
+action-copy-failed = Couldn’t copy to the clipboard
+action-copy-link-unready = The link isn’t ready yet. Try again in a moment.
 message-action-sheet = Actions for this message
 
 ## Previews of linked messages (#319)
@@ -2220,4 +2222,5 @@ linked-message-from = In { $conversation }
 linked-message-from-thread = From a thread in { $conversation }
 linked-message-open = Open message
 linked-message-deleted = This message was deleted
+linked-message-not-loaded = Message not loaded yet
 linked-message-unavailable = Message from a conversation you can’t see

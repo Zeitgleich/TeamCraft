@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use teamcraft_proto::{ClientMessageId, ConversationId, UserId};
+use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, UserId};
 
 use super::{LocalStore, MessageFilter, StoreError, StoredMessage, Table};
 
@@ -151,6 +151,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     client_message_id: ClientMessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
     self.inner.message(conversation, client_message_id)
+  }
+
+  fn message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    self.inner.message_by_server_id(conversation, server_id)
   }
 
   fn messages(
