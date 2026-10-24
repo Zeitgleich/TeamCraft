@@ -103,6 +103,9 @@ in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that t
 | In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
 | Download size                                           | –         | ≤ 10 MB wasm uncompressed   | –                                            |
 
+- The download size counts the uncompressed wasm a first visit loads: the app and the service
+  worker. CI checks it on every change to the web client (`.github/workflows/web-size.yml`); see
+  docs/performance.md, "Web bundle size", for where it stands.
 - Lists that can grow (messages, members, channels, search hits) are virtualised or paged; nothing
   renders or loads "all of them".
 - No work proportional to a conversation's or workspace's size on a hot path (send, switch, scroll,
