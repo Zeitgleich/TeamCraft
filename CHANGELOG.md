@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-24
+
 ### Changed
 
 - **One search for everything**: the search in the top bar (Ctrl/Cmd+K, Ctrl/Cmd+F,
@@ -15,6 +17,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   and lists the conversations visited last before anything is typed; "all messages for …" opens
   the search page with its filters. The sidebar's "find or jump to" button, its "Search" entry and
   the DM filter field are gone; the home chips sit in one compact row.
+- **Sign-in screens**: the server entry has its label above a full-width field, plain-language
+  errors with the technical detail folded away, and a "check similar addresses" button for a host
+  that doesn't resolve (nothing is looked up until it is pressed). Until a server is chosen the app
+  shows the TeamCraft mark; the confirmation shows the server's logo, name and identity provider,
+  buttons side by side. After signing in, the browser page is in the app's language and theme
+  instead of a white page in two languages; a logo that carries the name is no longer followed by
+  the name again.
+
+### Added
+
+- **Space picture and color**: space admins upload a picture (PNG, JPEG or WebP; cropped to a square
+  in the app, re-encoded by the server) and pick a color in the space settings; the rail, the space
+  header and the search show it, the letter tile stays the fallback. Like the space name it is
+  directory data the server can read ([docs/e2ee.md](docs/e2ee.md) §4.4). New settings
+  `max_space_image_bytes`, `limits.max_concurrent_image_decodes`, `limits.image_decode_timeout_secs`.
+  Invitations from the space settings default to member instead of guest.
+- **Image lightbox on desktop and web**: clicking an image opens it at full resolution, decrypted in
+  memory on demand (thumbnail as placeholder, loading and error states with retry). Zoom and pan with
+  the wheel, a trackpad or touch pinch, double-click or double-tap and `+` `-` `0`; previous/next
+  with the arrow keys, buttons or a swipe. A message with several images shows an album grid and
+  pages through its images, with a switch to all images of the conversation. Save, forward, sender
+  and time; `Esc` or a click beside the image closes it. Only the image on screen is held at full
+  size; its `blob:` URL is released when the viewer moves on or closes.
 
 ### Fixed
 
@@ -28,21 +53,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   out of key packages is retried with a growing delay, and one none of whose devices can be
   verified waits for a new device; the banner says which, instead of the person being silently
   left out.
-
-## [1.0.1] - 2026-10-24
-
-### Added
-
-- **Image lightbox on desktop and web**: clicking an image opens it at full resolution, decrypted in
-  memory on demand (thumbnail as placeholder, loading and error states with retry). Zoom and pan with
-  the wheel, a trackpad or touch pinch, double-click or double-tap and `+` `-` `0`; previous/next
-  with the arrow keys, buttons or a swipe. A message with several images shows an album grid and
-  pages through its images, with a switch to all images of the conversation. Save, forward, sender
-  and time; `Esc` or a click beside the image closes it. Only the image on screen is held at full
-  size; its `blob:` URL is released when the viewer moves on or closes.
-
-### Fixed
-
 - **Window controls look like the desktop's own**: on Linux the custom title bar follows the running
   desktop (`XDG_CURRENT_DESKTOP`): GNOME's round, lightly filled buttons, or on KDE Plasma Breeze's
   flat chevrons with a round highlight and a red close circle; other desktops get the GNOME look.
