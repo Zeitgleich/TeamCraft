@@ -181,14 +181,15 @@ jobs:
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
-    env:
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The flatpak-builder state (.flatpak-builder: downloads, built modules, ccache and the cargo
       # target and home the manifest keeps there) under a key of what changes the build. The action
       # appends the arch and falls back to the newest `flatpak-builder-<arch>` cache, so a tag run
-      # restores what `main` saved even when the lockfile changed since.
-      CACHE_KEY: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml') }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # restores what `main` saved even when the lockfile changed since. A step, not job `env`:
+      # `hashFiles` is not available at the job level, and the workflow would not load at all.
+      - id: cache-key
+        run: echo "value=flatpak-builder-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml') }}" >> "$GITHUB_OUTPUT"
       # A warm-up whose key is already saved only restores it (which keeps it from expiring) and
       # skips the build.
       - id: cache-lookup
@@ -196,7 +197,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .flatpak-builder
-          key: ${{ env.CACHE_KEY }}-${{ matrix.arch }}
+          key: ${{ steps.cache-key.outputs.value }}-${{ matrix.arch }}
       # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
       # SDK's Rust lacks) comes from the ui job.
       - if: ${{ steps.cache-lookup.outputs.cache-hit != 'true' }}
@@ -212,7 +213,7 @@ jobs:
           bundle: teamcraft-desktop-${{ matrix.arch }}.flatpak
           manifest-path: apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml
           arch: ${{ matrix.arch }}
-          cache-key: ${{ env.CACHE_KEY }}
+          cache-key: ${{ steps.cache-key.outputs.value }}
           save-cache: false
           build-bundle: ${{ !inputs.warm-cache }}
           upload-artifact: ${{ !inputs.warm-cache }}
@@ -230,7 +231,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .flatpak-builder
-          key: ${{ env.CACHE_KEY }}-${{ matrix.arch }}
+          key: ${{ steps.cache-key.outputs.value }}-${{ matrix.arch }}
 
   macos:
     name: macOS ${{ matrix.title }} (dmg)
