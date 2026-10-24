@@ -254,6 +254,63 @@ What the numbers say:
 - **wasm:** uncompressed sizes at the time (#248); the budget now counts the compressed transfer,
   see "Web bundle size" below for the current numbers.
 
+#### Idle traffic and updates per conversation
+
+Re-measured for #246, #247, #252, #259 and #270 in the same kind of cloud VM (4 vCPUs, 15 GiB,
+headless Chromium 1243, Postgres in a container on the VM), with the **debug** server binary (the
+disk of the VM had no room for two release builds; the client is the release web build either
+way). "Before" is `main` e569848, "after" the change. Same harness as above, with three additions:
+API requests while idle apart from token renewal (`idle_api_requests_per_minute`, the regression
+check asserts 0), when the first channel opened after coming back shows its newest message, and
+when the background catch-up is done (no connection banner and no API request for 10 s). The idle
+period starts only after that.
+
+| What                                                      | Small before | Small after | Large before | Large after |
+|-----------------------------------------------------------|--------------|-------------|--------------|-------------|
+| Coming back: channel list shows                           | 4.4 s        | 1.6 s       | 247 s        | 1.6 s       |
+| Coming back: first channel read                           | -            | 2.8 s       | 247 s        | 30.4 s      |
+| Coming back: every channel of the first space read        | 5.0 s        | 3.4 s       | 250 s        | 32.9 s      |
+| Coming back: whole workspace caught up                    | 5.0 s        | -           | 250 s        | 39.1 s      |
+| Reload of a signed-in tab until the channel list shows    | 0.5 s        | 0.5 s       | 1.0 s        | 0.8 s       |
+| Channel switch, p50 / p95                                 | 40 / 54 ms   | 41 / 52 ms  | 48 / 72 ms   | 66 / 155 ms |
+| Idle: CPU, whole browser (first 5 min, see below)         | 0.8 %        | 0.7 %       | 8.0 %        | 33.2 %      |
+| Idle: CPU, whole browser, the 5 min after that            | -            | -           | -            | 0.2 %       |
+| Idle: main-thread tasks per minute                        | 115 ms       | 113 ms      | 3,731 ms     | 771 ms      |
+| Idle: HTTP requests per minute (API)                      | 2.0          | 0 (0)       | 99           | 0.2 (0)     |
+| Idle: gateway frames per minute                           | 5.0          | 5.0         | 33           | 5.0         |
+
+Small: 3 spaces, 24 channels, 3,000 messages; idle 60 s. Large: 20 spaces, 300 channels, 100k
+messages; idle 300 s. "Before" shows the channel list only once the whole catch-up is done, so its
+first-channel and caught-up times are the same moment.
+
+What the numbers say:
+
+- **No idle traffic** besides the gateway heartbeat (#252): account data, presence, receipts and
+  last seen are read once per connection or when shown. The server closes every connection after
+  an hour (`connection_max_age_secs`, to check a fresh token); the resume then costs the
+  once-per-connection reads: the unread counts and threads, presence in batches of 200, the
+  announcement, the account data.
+- **Change notifications cost what changed** (#246): on the large workspace main-thread work while
+  idle went from 3.7 s to 0.8 s per minute; a new message re-reads one conversation and
+  sends one entry, a presence event one person's entry.
+- **Coming back** (#247): the list shows as soon as the conversation list arrived (1.6 s instead of
+  four minutes), the channel the user opens is caught up first, the rest in the background with up
+  to six conversations' round trips at once. Before any conversation's messages, the sync still
+  reads every member list and joins the 300 groups from their welcomes, one after the other in the
+  server's order; that is where the 30 s until the first channel is readable go.
+- **After a large catch-up the browser is busy for a few minutes.** In the first idle window after
+  the 100k-message catch-up Chrome's browser process used 31 % CPU and the page's renderer 2.4 %
+  (the network and storage services nothing), with no API request, heartbeats only and no
+  animation running; in the five minutes after that the whole browser was at 0.2 %, within the 1 %
+  budget. Most likely this is IndexedDB writing the caught-up history, which Chrome does in the
+  browser process; before this change those writes ran during the four minutes the list took to
+  show. While IndexedDB was busy, the web core waited for it after every turn of its loop, sent no
+  heartbeats meanwhile and lost its gateway connection (the resume showed up as requests while
+  idle); it no longer waits.
+- Channel switches on the large workspace measured 155 ms at p95 (72 ms before), over the 100 ms
+  budget. They now run while the browser is still busy with the catch-up; before, it was done by
+  then. Not re-measured once it has settled.
+
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.

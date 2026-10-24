@@ -22,8 +22,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_channel::{mpsc, oneshot};
-use futures_util::StreamExt;
 use futures_util::future::{Either, pending, poll_immediate, select};
+use futures_util::{FutureExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
@@ -87,6 +87,8 @@ type Api = HttpServerApi<WebTokens>;
 /// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
 type Store = TrackedStore<Rc<IndexedDbStore>>;
 type Listener = Rc<RefCell<dyn FnMut()>>;
+/// A wait for IndexedDB to have written everything ([`IndexedDbStore::flush`]).
+type Flush = Pin<Box<dyn Future<Output = Result<(), StoreError>>>>;
 
 thread_local! {
   static SETUP: RefCell<Option<Setup>> = const { RefCell::new(None) };
@@ -604,6 +606,8 @@ struct Core {
   maybe_attention: Option<bool>,
   /// Whether IndexedDB keeps up with the cache, as of the last flush.
   store_health: StoreHealth,
+  /// The flush [`Self::check_store`] waits for, while IndexedDB is still writing.
+  maybe_flush: Option<Flush>,
   /// When to compare the browser's push subscription with the registration next; `None` when
   /// nothing is due (e2ee.md §7).
   maybe_push_check_at_ms: Option<i64>,
@@ -656,6 +660,7 @@ impl Core {
       approval_misses: 0,
       maybe_attention: None,
       store_health: StoreHealth::Saved,
+      maybe_flush: None,
       maybe_push_check_at_ms: None,
       maybe_last_security: None,
       snapshots: RefCell::new(SnapshotCache::new(now_ms().unsigned_abs())),
@@ -682,7 +687,7 @@ impl Core {
         Wake::Linked(result) => self.on_linked(result).await,
         Wake::Tick => self.on_tick().await,
       }
-      self.check_store().await;
+      self.check_store();
       self.check_push().await;
     }
   }
@@ -711,13 +716,23 @@ impl Core {
     };
   }
 
-  /// Waits until IndexedDB has everything written so far, and tells the UI when that stops (or
-  /// starts again) working: what is not saved is lost on reload (e2ee.md §9.4).
-  async fn check_store(&mut self) {
+  /// Tells the UI when IndexedDB stops (or starts again) keeping up with what was written: what
+  /// is not saved is lost on reload (e2ee.md §9.4). Never waits: after a large catch-up IndexedDB
+  /// can take minutes to write everything, and a loop waiting for that sends no heartbeats, so the
+  /// server drops the connection. The flush runs on and is looked at again on the next turn.
+  fn check_store(&mut self) {
     let Some(store) = self.store.as_ref() else {
       return;
     };
-    let health = match store.inner().flush().await {
+    let flush = self.maybe_flush.get_or_insert_with(|| {
+      let store = store.clone();
+      Box::pin(async move { store.inner().flush().await })
+    });
+    let Some(outcome) = flush.as_mut().now_or_never() else {
+      return;
+    };
+    self.maybe_flush = None;
+    let health = match outcome {
       Ok(()) => StoreHealth::Saved,
       Err(StoreError::QuotaExceeded) => StoreHealth::QuotaExceeded,
       Err(StoreError::Closed) => StoreHealth::Closed,
