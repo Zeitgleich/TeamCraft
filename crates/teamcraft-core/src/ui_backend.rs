@@ -363,6 +363,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     &self,
     response: &ConversationResponse,
     users: &BTreeMap<UserId, UserSummary>,
+    preferences: &MentionPreferences,
   ) -> Conversation {
     let member_ids = self.members(response.id);
     let kind = match (&response.kind, &response.visibility) {
@@ -403,7 +404,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       topic: response.maybe_topic.clone().unwrap_or_default(),
       member_ids,
       unread_count: u32::try_from(unread.len()).unwrap_or(u32::MAX),
-      mention_count: self.mention_count(&unread, users.get(&self.me)),
+      mention_count: self.mention_count(&unread, users.get(&self.me), preferences),
       is_favorite,
       is_muted: self.is_muted(response),
       can_post: true,
@@ -475,14 +476,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// decrypted text, `@username`, `@channel`/`@here`/`@all`, the first name or a keyword
   /// (docs/notifications.md). Derived from the unread set, so a read marker resets it and a replayed
   /// event can't raise it twice. Muted conversations count too.
-  fn mention_count(&self, unread: &[StoredMessage], maybe_me: Option<&UserSummary>) -> u32 {
-    let preferences = match load_mention_preferences(&self.store) {
-      Ok(preferences) => preferences,
-      Err(error) => {
-        tracing::warn!(%error, "mention preferences unreadable, using defaults");
-        MentionPreferences::default()
-      },
-    };
+  fn mention_count(
+    &self,
+    unread: &[StoredMessage],
+    maybe_me: Option<&UserSummary>,
+    preferences: &MentionPreferences,
+  ) -> u32 {
     let rules = MentionRules {
       username: maybe_me
         .and_then(|me| me.maybe_username.as_deref())
@@ -503,6 +502,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
       })
       .count();
     u32::try_from(count).unwrap_or(u32::MAX)
+  }
+
+  /// The saved mention preferences, read once per list of conversations.
+  pub(crate) fn mention_preferences(&self) -> MentionPreferences {
+    load_mention_preferences(&self.store).unwrap_or_else(|error| {
+      tracing::warn!(%error, "mention preferences unreadable, using defaults");
+      MentionPreferences::default()
+    })
   }
 
   /// Top-level messages the user hasn't read: others' messages after the server's read position,
@@ -691,16 +698,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation> {
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     self
       .conversations_raw()
       .iter()
       .filter(|conversation| conversation.maybe_space_id == Some(space))
-      .map(|conversation| self.to_conversation(conversation, &users))
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
       .collect()
   }
 
   fn direct_conversations(&self) -> Vec<Conversation> {
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     self
       .conversations_raw()
       .iter()
@@ -710,17 +719,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
           ConversationKindProto::Dm | ConversationKindProto::Group
         )
       })
-      .map(|conversation| self.to_conversation(conversation, &users))
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
       .collect()
   }
 
   fn conversation(&self, id: ConversationId) -> Option<Conversation> {
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     self
       .conversations_raw()
       .iter()
       .find(|conversation| conversation.id == id)
-      .map(|conversation| self.to_conversation(conversation, &users))
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
   }
 
   fn message_count(&self, conversation: ConversationId) -> usize {
@@ -1455,7 +1465,7 @@ mod tests {
         (2, "no text match", &[1]),
         (1, "@alice my own message", &[1]),
       ]);
-      let counted = backend.to_conversation(&conversation, &users);
+      let counted = backend.to_conversation(&conversation, &users, &backend.mention_preferences());
       assert_eq!(counted.unread_count, 4);
       assert_eq!(counted.mention_count, 3);
     }
@@ -1468,27 +1478,52 @@ mod tests {
         ..MentionPreferences::default()
       };
       crate::notify_rules::save_mention_preferences(&backend.store, &preferences).unwrap();
-      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 1);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        1
+      );
       // The same event arriving again is the same stored message.
       store_message(&backend, &conversation, 0, 2, "deploy failed", &[]);
-      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 1);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        1
+      );
     }
 
     #[test]
     fn messages_at_or_before_the_read_position_do_not_count() {
       let (backend, mut conversation, users) =
         mention_fixture(&[(2, "@alice one", &[]), (2, "@alice two", &[])]);
-      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 2);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        2
+      );
       let mut membership = test_membership();
       membership.maybe_last_read_message_id = Some(id(101));
       conversation.maybe_my_membership = Some(membership);
-      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 1);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        1
+      );
       conversation
         .maybe_my_membership
         .as_mut()
         .unwrap()
         .maybe_last_read_message_id = Some(id(102));
-      assert_eq!(backend.to_conversation(&conversation, &users).mention_count, 0);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        0
+      );
     }
 
     #[test]
@@ -1497,7 +1532,7 @@ mod tests {
       let mut membership = test_membership();
       membership.notification_level = teamcraft_proto::NotificationLevel::None;
       conversation.maybe_my_membership = Some(membership);
-      let counted = backend.to_conversation(&conversation, &users);
+      let counted = backend.to_conversation(&conversation, &users, &backend.mention_preferences());
       assert!(counted.is_muted);
       assert_eq!(counted.mention_count, 1);
     }
