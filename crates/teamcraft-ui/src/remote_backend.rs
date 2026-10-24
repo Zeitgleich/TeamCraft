@@ -602,6 +602,22 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn conversation_images(
+    &self,
+    conversation: ConversationId,
+    around: MessageId,
+    max_messages: usize,
+  ) -> Vec<FileInfo> {
+    match self.ask(ChatQuery::ConversationImages {
+      conversation,
+      around,
+      max_messages,
+    }) {
+      Some(ChatAnswer::Files { files }) => files,
+      _ => Vec::new(),
+    }
+  }
+
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
     self.act(ChatAction::DownloadFile {
       conversation,

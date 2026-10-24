@@ -53,6 +53,9 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
   assert!(files[1].maybe_thumbnail_png.is_none());
   assert_eq!(files[1].transfer, FileTransfer::Remote);
   assert_eq!(bob_ui.conversation_files(channel).len(), 2);
+  // The viewer's window holds this message's files; a window of zero messages holds none.
+  assert_eq!(bob_ui.conversation_images(channel, received.id, 10).len(), 2);
+  assert!(bob_ui.conversation_images(channel, received.id, 0).is_empty());
 
   let directory = std::env::temp_dir().join(format!("teamcraft-downloads-{}", std::process::id()));
   bob.client.set_download_dir(Some(directory.clone()));

@@ -1116,6 +1116,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_conversation_files(conversation)
   }
 
+  fn conversation_images(
+    &self,
+    conversation: ConversationId,
+    around: MessageId,
+    max_messages: usize,
+  ) -> Vec<FileInfo> {
+    self.ui_conversation_images(conversation, around, max_messages)
+  }
+
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
     self.ui_download_file(conversation, message);
   }

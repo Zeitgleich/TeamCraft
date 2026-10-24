@@ -21,7 +21,7 @@ const MAX_ALBUM_TILES: usize = 4;
 /// The files attached to one message: several images form an album, everything else gets a card.
 #[component]
 pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
-  let is_album_image = |file: &FileInfo| ImageKey::of(file).is_some() && file.maybe_thumbnail_png.is_some();
+  let is_album_image = |file: &FileInfo| ImageKey::of(file).is_some();
   let (album, cards): (Vec<FileInfo>, Vec<FileInfo>) =
     match files.iter().filter(|file| is_album_image(file)).count() {
       0 | 1 => (Vec::new(), files),
@@ -48,10 +48,14 @@ fn AlbumGrid(images: Vec<FileInfo>) -> impl IntoView {
     .enumerate()
     .filter_map(|(index, file)| {
       let key = ImageKey::of(&file)?;
-      let url = ObjectUrl::from_bytes(file.maybe_thumbnail_png.as_deref()?, "image/png")?;
-      let src = url.as_str().to_owned();
+      // An image without a thumbnail still gets its tile, with a placeholder, so "+N" stays true.
+      let maybe_url = file
+        .maybe_thumbnail_png
+        .as_deref()
+        .and_then(|bytes| ObjectUrl::from_bytes(bytes, "image/png"));
+      let maybe_src = maybe_url.as_ref().map(|url| url.as_str().to_owned());
       // Revoked when the row leaves the screen.
-      StoredValue::new_local(url);
+      StoredValue::new_local(maybe_url);
       let conversation = file.conversation;
       let (position, total, name) = ((index + 1).to_string(), count.to_string(), file.file_name);
       let maybe_more = (index + 1 == MAX_ALBUM_TILES && hidden > 0).then(|| format!("+{hidden}"));
@@ -61,7 +65,10 @@ fn AlbumGrid(images: Vec<FileInfo>) -> impl IntoView {
           aria-label=move || i18n.t_with("album-open", &[("index", &position), ("count", &total), ("name", &name)])
           on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
         >
-          <img src=src alt="" loading="lazy" />
+          {match maybe_src {
+            Some(src) => view! { <img src=src alt="" loading="lazy" /> }.into_any(),
+            None => view! { <span class="album-placeholder"><Icon name=IconName::Image /></span> }.into_any(),
+          }}
           {maybe_more.map(|more| view! { <span class="album-more" aria-hidden="true">{more}</span> })}
         </button>
       })

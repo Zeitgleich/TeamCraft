@@ -139,6 +139,35 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages.iter().flat_map(|stored| self.files_of(stored)).collect()
   }
 
+  /// The files of a window of at most `max_messages` messages around `around`, newest first: the
+  /// image viewer must not rebuild the thumbnails of a whole conversation. Only messages with
+  /// attachments count towards the window.
+  pub(crate) fn ui_conversation_images(
+    &self,
+    conversation: ConversationId,
+    around: MessageId,
+    max_messages: usize,
+  ) -> Vec<FileInfo> {
+    let mut messages: Vec<StoredMessage> = self
+      .all_messages(conversation)
+      .into_iter()
+      .filter(|stored| !attachments_of(&stored.content).is_empty())
+      .collect();
+    messages.reverse();
+    // An unknown message (deleted meanwhile) gets the newest window.
+    let at = messages
+      .iter()
+      .position(|stored| ui_message_id(stored) == around)
+      .unwrap_or(0);
+    let start = at.saturating_sub(max_messages / 2);
+    messages
+      .iter()
+      .skip(start)
+      .take(max_messages)
+      .flat_map(|stored| self.files_of(stored))
+      .collect()
+  }
+
   pub(crate) fn ui_download_file(&self, conversation: ConversationId, message: MessageId) {
     let Some(stored) = self.find_stored(conversation, message) else {
       return;

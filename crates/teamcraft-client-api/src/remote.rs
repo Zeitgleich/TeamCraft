@@ -790,6 +790,11 @@ pub enum ChatQuery {
   ConversationFiles {
     conversation: ConversationId,
   },
+  ConversationImages {
+    conversation: ConversationId,
+    around: MessageId,
+    max_messages: usize,
+  },
   ShareLinks {
     conversation: ConversationId,
     message: MessageId,
@@ -980,6 +985,13 @@ impl ChatQuery {
       },
       Self::ConversationFiles { conversation } => ChatAnswer::Files {
         files: backend.conversation_files(conversation),
+      },
+      Self::ConversationImages {
+        conversation,
+        around,
+        max_messages,
+      } => ChatAnswer::Files {
+        files: backend.conversation_images(conversation, around, max_messages),
       },
       Self::ShareLinks {
         conversation,

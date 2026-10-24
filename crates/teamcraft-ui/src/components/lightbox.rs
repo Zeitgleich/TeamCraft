@@ -11,7 +11,7 @@ use std::rc::Rc;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::actions::{FileInfo, FileTransfer};
+use teamcraft_client_api::actions::FileInfo;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -30,6 +30,12 @@ use crate::state::{Overlay, use_app_state};
 /// Pixels per line of a wheel event that scrolls by lines (Firefox with a mouse wheel).
 const WHEEL_LINE_PX: f64 = 16.0;
 
+/// Most messages (with attachments) the lightbox loads around the opened one. The list is read once
+/// when the lightbox opens: rebuilding the thumbnails of a whole conversation on every state change
+/// would stall a big channel. Older images beyond the window are not paged through (tracked as a
+/// v1.1 issue).
+const MAX_WINDOW_MESSAGES: usize = 100;
+
 /// The full-size bytes of the image on screen.
 #[derive(Clone)]
 enum FullImage {
@@ -45,7 +51,12 @@ enum FullImage {
 pub fn Lightbox(conversation: ConversationId, start: ImageKey) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let files = Memo::new(move |_| state.read(|backend| backend.conversation_files(conversation)));
+  // Read once; a memo without dependencies never recomputes.
+  let files = Memo::new(move |_| {
+    untrack(|| {
+      state.read(|backend| backend.conversation_images(conversation, start.message, MAX_WINDOW_MESSAGES))
+    })
+  });
   // `None` until the user picks one: then the album decides, once the files are known.
   let chosen_scope = RwSignal::new(None::<LightboxScope>);
   let album_size = Memo::new(move |_| files.with(|files| album_len(files, start)));
@@ -220,7 +231,7 @@ pub fn Lightbox(conversation: ConversationId, start: ImageKey) -> impl IntoView 
                 {move || i18n.t("lightbox-show-all")}
               </button>
             </Show>
-            <SaveButton current=current current_file=current_file full=full />
+            <SaveButton current=current current_file=current_file />
             <button
               class="icon-btn"
               aria-label=move || i18n.t("lightbox-forward")
@@ -459,49 +470,33 @@ fn listen_to_wheel(stage: NodeRef<html::Div>, on_wheel: impl FnMut(web_sys::Whee
   });
 }
 
-/// Save: in the browser the decrypted image already in memory is offered as a download; the desktop
-/// app has the core write it into the download folder and reports where it stands.
+/// Save: the core downloads and decrypts the file again and saves it (the download folder on the
+/// desktop, the browser's download on the web), with the same size cap as everywhere else.
 #[component]
-fn SaveButton(
-  current: RwSignal<ImageKey>,
-  current_file: Memo<Option<FileInfo>>,
-  full: RwSignal<FullImage, LocalStorage>,
-) -> impl IntoView {
+fn SaveButton(current: RwSignal<ImageKey>, current_file: Memo<Option<FileInfo>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let is_desktop = crate::auth::tauri::is_available();
+  // The file list is a snapshot, so progress is not followed here: the file's card shows the result.
+  let is_requested = RwSignal::new(false);
+  Effect::new(move |_| {
+    current.track();
+    is_requested.set(false);
+  });
   let save = move |_| {
     let Some(file) = current_file.get_untracked() else {
       return;
     };
-    if is_desktop {
-      let key = current.get_untracked();
-      state.write(|backend| backend.download_attachment(file.conversation, key.message, &file.file_id));
-      return;
-    }
-    if let FullImage::Ready(url) = full.get_untracked() {
-      offer_download(url.as_str(), &file.file_name);
-    }
-  };
-  let progress = move || {
-    let key = match current_file.get().map(|file| file.transfer) {
-      Some(FileTransfer::Downloading { .. }) => "lightbox-saving",
-      Some(FileTransfer::Local { .. }) => "file-saved",
-      Some(FileTransfer::Failed { .. }) => "file-failed",
-      _ => return None,
-    };
-    is_desktop.then(|| i18n.t(key))
+    let key = current.get_untracked();
+    state.write(|backend| backend.download_attachment(file.conversation, key.message, &file.file_id));
+    is_requested.set(true);
   };
   view! {
-    <button
-      class="icon-btn"
-      aria-label=move || i18n.t("lightbox-save")
-      disabled=move || !is_desktop && !matches!(full.get(), FullImage::Ready(_))
-      on:click=save
-    >
+    <button class="icon-btn" aria-label=move || i18n.t("lightbox-save") on:click=save>
       <Icon name=IconName::Download />
     </button>
-    <span class="lightbox-save-state" role="status">{progress}</span>
+    <span class="lightbox-save-state" role="status">
+      {move || is_requested.get().then(|| i18n.t("lightbox-saving"))}
+    </span>
   }
 }
 
@@ -522,21 +517,4 @@ fn sizes(image: NodeRef<html::Img>, stage: NodeRef<html::Div>) -> (Size, Size) {
     .map(|stage| Size::new(f64::from(stage.client_width()), f64::from(stage.client_height())))
     .unwrap_or_default();
   (image, stage)
-}
-
-/// Saves a `blob:` URL under the file's name through a temporary download link.
-fn offer_download(url: &str, file_name: &str) {
-  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-    return;
-  };
-  let Some(link) = document
-    .create_element("a")
-    .ok()
-    .and_then(|element| element.dyn_into::<web_sys::HtmlAnchorElement>().ok())
-  else {
-    return;
-  };
-  link.set_href(url);
-  link.set_download(file_name);
-  link.click();
 }
