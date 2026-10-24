@@ -126,11 +126,22 @@ impl PendingAction {
   /// Runs `start`, which starts backend actions (`state.write(..)`), and stays pending until the
   /// backend answered all of them. Ignored while the previous run is still pending.
   pub fn run(&self, start: impl FnOnce()) {
+    self.run_or_else(start, |_| {});
+  }
+
+  /// [`Self::run`], calling `on_failure` when an action failed, even after the component is gone
+  /// (to undo what was prepared for its success elsewhere in the app).
+  pub fn run_or_else(&self, start: impl FnOnce(), on_failure: impl FnOnce(&ActionFailure) + 'static) {
     if !self.begin() {
       return;
     }
     let this = *self;
-    let ticket = Rc::new(ActionTicket::new(move |maybe_failure| this.finish(maybe_failure)));
+    let ticket = Rc::new(ActionTicket::new(move |maybe_failure| {
+      if let Some(failure) = &maybe_failure {
+        on_failure(failure);
+      }
+      this.finish(maybe_failure);
+    }));
     let maybe_outer = CURRENT_TICKET.with(|current| current.replace(Some(ticket)));
     start();
     // Dropping our clone finishes the run unless a backend kept the ticket.
@@ -302,6 +313,23 @@ mod tests {
           Some(ActionFailure::other("refused"))
         );
       });
+    }
+
+    #[test]
+    fn on_failure_runs_even_after_the_component_is_gone() {
+      let failed = Rc::new(Cell::new(false));
+      let owner = Owner::new();
+      let kept = owner.with(|| {
+        let pending = PendingAction::new();
+        let mut maybe_kept = None;
+        let seen = failed.clone();
+        pending.run_or_else(|| maybe_kept = ActionTicket::current(), move |_| seen.set(true));
+        maybe_kept.unwrap()
+      });
+      owner.cleanup();
+      kept.fail(ActionFailure::other("refused"));
+      drop(kept);
+      assert!(failed.get());
     }
 
     /// Regression for #322: the core answered after the dialog that started the action was closed.
