@@ -69,6 +69,7 @@ pub mod quick_switcher;
 pub mod rail;
 pub mod rich_text;
 pub mod search_view;
+pub mod section_tabs;
 pub mod security_ui;
 pub mod settings_modal;
 pub mod settings_tabs;

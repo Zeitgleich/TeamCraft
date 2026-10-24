@@ -12,16 +12,19 @@ use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, SpaceResponse};
 use wasm_bindgen::JsCast;
 
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::left_text;
 use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{
   CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
 };
 use crate::components::modal::Modal;
+use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_tile::SpaceTile;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
-use crate::model::{ConversationId, SpaceId, hue_from_hex};
+use crate::model::{ConversationId, SpaceId, User, hue_from_hex};
 use crate::reactive::SetIfAlive;
 use crate::space_images::use_space_images;
 use crate::state::{Overlay, use_app_state};
@@ -319,101 +322,292 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
   }
 }
 
-/// Settings of one channel, plus adding people.
+/// The sections of the channel settings.
+const CHANNEL_GENERAL: Section = Section::new("general", "settings-section-general");
+const CHANNEL_MEMBERS: Section = Section::new("members", "settings-section-members");
+const CHANNEL_PRIVACY: Section = Section::new("privacy", "settings-section-privacy");
+const CHANNEL_ADVANCED: Section = Section::new("advanced", "settings-section-advanced");
+
+/// Settings of one channel in sections: general, members, privacy and retention, advanced. Each
+/// section saves on its own.
 #[component]
-pub fn ChannelSettingsDialog(conversation: ConversationId) -> impl IntoView {
+pub fn ChannelSettingsDialog(
+  conversation: ConversationId,
+  /// The section to open on ("members" from the member list).
+  #[prop(optional)]
+  maybe_section: Option<&'static str>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let info = state.read(|backend| backend.conversation(conversation));
   let Some(info) = info else {
     return view! { <Dialog title_key="channel-settings-title"><p>{move || i18n.t("channel-missing")}</p></Dialog> }.into_any();
   };
-  let space = info.maybe_space;
-  let name = RwSignal::new(info.name.clone());
-  let topic = RwSignal::new(info.topic.clone());
-  let is_private = matches!(info.kind, crate::model::ConversationKind::Private);
-  let is_confirming_privacy = RwSignal::new(false);
-  let categories = Memo::new(move |_| {
-    space
-      .map(|space| state.read(|backend| backend.categories(space)))
-      .unwrap_or_default()
-  });
+  let sections = vec![
+    CHANNEL_GENERAL,
+    CHANNEL_MEMBERS,
+    CHANNEL_PRIVACY,
+    CHANNEL_ADVANCED,
+  ];
+  let first = maybe_section
+    .and_then(|slug| sections.iter().copied().find(|section| section.slug == slug))
+    .unwrap_or(CHANNEL_GENERAL);
+  let selected = RwSignal::new(first);
+  let title = info.name.clone();
+  view! {
+    <Dialog title_key="channel-settings-title" class="modal-settings">
+      <p class="muted-text settings-subject" translate="no">{format!("#{title}")}</p>
+      <SectionTabs id_prefix="cs" label_key="channel-settings-title" sections=sections selected=selected let:section>
+        {
+          let info = info.clone();
+          match section.slug {
+            "members" => view! { <ChannelMembers conversation=conversation /> }.into_any(),
+            "privacy" => view! { <ChannelPrivacy conversation=conversation is_private=matches!(info.kind, crate::model::ConversationKind::Private) /> }.into_any(),
+            "advanced" => view! { <ChannelAdvanced conversation=conversation space=info.maybe_space /> }.into_any(),
+            _ => view! { <ChannelGeneral conversation=conversation name=info.name.clone() topic=info.topic.clone() /> }.into_any(),
+          }
+        }
+      </SectionTabs>
+    </Dialog>
+  }
+  .into_any()
+}
+
+/// Name and topic, saved together.
+#[component]
+fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let name = RwSignal::new(name);
+  let topic = RwSignal::new(topic);
+  let pending = PendingAction::new();
+  let has_saved = RwSignal::new(false);
   let save = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
+    has_saved.set(true);
+    pending.run(|| {
+      state.write(|backend| {
+        backend.update_channel(
+          conversation,
+          ChannelChanges {
+            maybe_name: non_empty(&name.get_untracked()),
+            maybe_topic: Some(topic.get_untracked().trim().to_owned()),
+            ..ChannelChanges::default()
+          },
+        )
+      })
+    });
+  };
+  view! {
+    <form class="settings-form" on:submit=save>
+      <label for="cs-name">{move || i18n.t("channel-name")}</label>
+      <input id="cs-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| { has_saved.set(false); name.set(event_target_value(&ev)) } />
+      <label for="cs-topic">{move || i18n.t("channel-topic")}</label>
+      <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| { has_saved.set(false); topic.set(event_target_value(&ev)) } />
+      <SaveFooter pending=pending has_saved=has_saved />
+    </form>
+  }
+}
+
+/// The section's save button, and "Saved" once the core confirmed (a failure shows as a toast).
+#[component]
+pub(crate) fn SaveFooter(pending: PendingAction, has_saved: RwSignal<bool>) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <div class="modal-foot">
+      <span role="status" class="muted-text">
+        {move || (has_saved.get() && !pending.is_pending() && pending.maybe_failure().is_none()).then(|| i18n.t("settings-saved"))}
+      </span>
+      <span class="grow"></span>
+      <button type="submit" class="btn btn-primary" prop:disabled=move || pending.is_pending() aria-busy=move || pending.is_pending().then_some("true")>
+        <Show when=move || pending.is_pending() fallback=|| ()>
+          <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
+        </Show>
+        {move || i18n.t("save")}
+      </button>
+    </div>
+  }
+}
+
+/// The channel's members with "Add people" on top and a removal (confirmed first) per person.
+#[component]
+fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let members = Memo::new(move |_| {
+    let ids = state
+      .read(|backend| backend.conversation(conversation))
+      .map(|info| info.member_ids)
+      .unwrap_or_default();
+    let mut users: Vec<User> =
+      state.read(|backend| ids.into_iter().filter_map(|id| backend.user(id)).collect());
+    users.sort_by_key(|user| user.display_name.to_lowercase());
+    users
+  });
+  view! {
+    <div class="settings-row">
+      <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
+      <span class="grow"></span>
+      <button type="button" class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))>
+        <Icon name=IconName::UserPlus />
+        {move || i18n.t("channel-add-people")}
+      </button>
+    </div>
+    <ul class="settings-member-list">
+      <For each=move || members.get() key=|user| user.id let:user>
+        <ChannelMemberRow conversation=conversation user=user />
+      </For>
+    </ul>
+  }
+}
+
+#[component]
+fn ChannelMemberRow(conversation: ConversationId, user: User) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let id = user.id;
+  let is_me = id == state.me().id;
+  let is_confirming = RwSignal::new(false);
+  let pending = PendingAction::new();
+  let name = user.display_name.clone();
+  view! {
+    <li class="settings-member">
+      <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
+      <span class="member-name" translate="no">{user.display_name.clone()}</span>
+      {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+      {is_me.then(|| view! { <span class="muted-text">{move || i18n.t("settings-member-you")}</span> })}
+      <span class="grow"></span>
+      {(!is_me).then(|| view! {
+        <Show
+          when=move || is_confirming.get()
+          fallback=move || view! {
+            <button type="button" class="btn btn-small" prop:disabled=move || pending.is_pending() on:click=move |_| is_confirming.set(true)>
+              {move || i18n.t("settings-member-remove")}
+            </button>
+          }
+        >
+          <span role="alert" class="muted-text">{
+            let name = name.clone();
+            move || i18n.t_with("settings-member-remove-confirm", &[("name", &name)])
+          }</span>
+          <button
+            type="button"
+            class="btn btn-small btn-danger"
+            on:click=move |_| {
+              is_confirming.set(false);
+              // The removal goes through the encryption group (e2ee.md §4.6); refusals show as a toast.
+              pending.run(|| state.write(|backend| backend.remove_member(conversation, id)));
+            }
+          >
+            {move || i18n.t("confirm")}
+          </button>
+          <button type="button" class="btn btn-small" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
+        </Show>
+      })}
+    </li>
+  }
+}
+
+/// Public or private (with a confirmation), and how long messages are kept.
+#[component]
+fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_confirming_privacy = RwSignal::new(false);
+  let convert = move |_| {
     state.write(|backend| {
       backend.update_channel(
         conversation,
         ChannelChanges {
-          maybe_name: non_empty(&name.get_untracked()),
-          maybe_topic: Some(topic.get_untracked().trim().to_owned()),
+          maybe_is_private: Some(!is_private),
           ..ChannelChanges::default()
         },
       )
     });
     state.close_overlay();
   };
-  let change = move |changes: ChannelChanges| {
-    state.write(|backend| backend.update_channel(conversation, changes));
+  view! {
+    <h3>{move || i18n.t("channel-privacy")}</h3>
+    <p class="hint">{move || if is_private { i18n.t("channel-privacy-hint-private") } else { i18n.t("channel-privacy-hint-public") }}</p>
+    <Show
+      when=move || is_confirming_privacy.get()
+      fallback=move || view! { <button type="button" class="btn" on:click=move |_| is_confirming_privacy.set(true)>{move || if is_private { i18n.t("channel-make-public") } else { i18n.t("channel-make-private") }}</button> }
+    >
+      <p role="alert">{move || if is_private { i18n.t("channel-make-public-confirm") } else { i18n.t("channel-make-private-confirm") }}</p>
+      <div class="inline-actions">
+        <button type="button" class="btn btn-primary" on:click=convert>{move || i18n.t("confirm")}</button>
+        <button type="button" class="btn" on:click=move |_| is_confirming_privacy.set(false)>{move || i18n.t("cancel")}</button>
+      </div>
+    </Show>
+    <ChannelRetention conversation=conversation />
+  }
+}
+
+/// Category, moving to another space and archiving (confirmed first).
+#[component]
+fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_confirming_archive = RwSignal::new(false);
+  let categories = Memo::new(move |_| {
+    space
+      .map(|space| state.read(|backend| backend.categories(space)))
+      .unwrap_or_default()
+  });
+  let change_category = move |ev: leptos::ev::Event| {
+    let value = event_target_value(&ev);
+    let choice = match value.parse::<CategoryId>() {
+      Ok(category) if !value.is_empty() => CategoryChoice::Category { category },
+      _ => CategoryChoice::Uncategorized,
+    };
+    state.write(|backend| {
+      backend.update_channel(
+        conversation,
+        ChannelChanges {
+          maybe_category: Some(choice),
+          ..ChannelChanges::default()
+        },
+      )
+    });
+  };
+  let archive = move |_| {
+    state.write(|backend| {
+      backend.update_channel(
+        conversation,
+        ChannelChanges {
+          maybe_is_archived: Some(true),
+          ..ChannelChanges::default()
+        },
+      )
+    });
     state.close_overlay();
   };
   view! {
-    <Dialog title_key="channel-settings-title">
-      <form on:submit=save>
-        <label for="cs-name">{move || i18n.t("channel-name")}</label>
-        <input id="cs-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
-        <label for="cs-topic">{move || i18n.t("channel-topic")}</label>
-        <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| topic.set(event_target_value(&ev)) />
-        <div class="modal-foot">
-          <span class="grow"></span>
-          <button type="submit" class="btn btn-primary">{move || i18n.t("save")}</button>
-        </div>
-      </form>
-      {space
-        .is_some()
-        .then(|| {
-          view! {
-            <label for="cs-category">{move || i18n.t("channel-move-category")}</label>
-            <select
-              id="cs-category"
-              class="input"
-              on:change=move |ev| {
-                let value = event_target_value(&ev);
-                let choice = match value.parse::<CategoryId>() {
-                  Ok(category) if !value.is_empty() => CategoryChoice::Category { category },
-                  _ => CategoryChoice::Uncategorized,
-                };
-                change(ChannelChanges { maybe_category: Some(choice), ..ChannelChanges::default() });
-              }
-            >
-              <option value="">{move || i18n.t("channel-uncategorized")}</option>
-              <For each=move || categories.get() key=|category| category.id let:category>
-                <option value=category.id.to_string() translate="no">{category.name.clone()}</option>
-              </For>
-            </select>
-          }
-        })}
-      <MoveChannel conversation=conversation current_space=space />
-      <h3>{move || i18n.t("channel-privacy")}</h3>
-      <p class="hint">{move || if is_private { i18n.t("channel-privacy-hint-private") } else { i18n.t("channel-privacy-hint-public") }}</p>
-      <Show
-        when=move || is_confirming_privacy.get()
-        fallback=move || view! { <button class="btn" on:click=move |_| is_confirming_privacy.set(true)>{move || if is_private { i18n.t("channel-make-public") } else { i18n.t("channel-make-private") }}</button> }
-      >
-        <p role="alert">{move || if is_private { i18n.t("channel-make-public-confirm") } else { i18n.t("channel-make-private-confirm") }}</p>
-        <button class="btn btn-primary" on:click=move |_| change(ChannelChanges { maybe_is_private: Some(!is_private), ..ChannelChanges::default() })>{move || i18n.t("confirm")}</button>
-        <button class="btn" on:click=move |_| is_confirming_privacy.set(false)>{move || i18n.t("cancel")}</button>
-      </Show>
-      <ChannelRetention conversation=conversation />
-      <h3>{move || i18n.t("channel-archive")}</h3>
-      <button class="btn" on:click=move |_| change(ChannelChanges { maybe_is_archived: Some(true), ..ChannelChanges::default() })>{move || i18n.t("channel-archive-action")}</button>
-      <h3>{move || i18n.t("channel-add-people")}</h3>
-      <button class="btn" on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))>
-        <Icon name=IconName::UserPlus />
-        {move || i18n.t("channel-add-people")}
-      </button>
-    </Dialog>
+    {space.is_some().then(|| view! {
+      <div class="field">
+        <label for="cs-category">{move || i18n.t("channel-move-category")}</label>
+        <select id="cs-category" class="input" on:change=change_category>
+          <option value="">{move || i18n.t("channel-uncategorized")}</option>
+          <For each=move || categories.get() key=|category| category.id let:category>
+            <option value=category.id.to_string() translate="no">{category.name.clone()}</option>
+          </For>
+        </select>
+      </div>
+    })}
+    <MoveChannel conversation=conversation current_space=space />
+    <h3>{move || i18n.t("channel-archive")}</h3>
+    <p class="hint">{move || i18n.t("channel-archive-hint")}</p>
+    <Show
+      when=move || is_confirming_archive.get()
+      fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_archive.set(true)>{move || i18n.t("channel-archive-action")}</button> }
+    >
+      <p role="alert">{move || i18n.t("channel-archive-confirm")}</p>
+      <div class="inline-actions">
+        <button type="button" class="btn btn-danger" on:click=archive>{move || i18n.t("confirm")}</button>
+        <button type="button" class="btn" on:click=move |_| is_confirming_archive.set(false)>{move || i18n.t("cancel")}</button>
+      </div>
+    </Show>
   }
-  .into_any()
 }
 
 /// Moves the channel to another space. Members, history and encryption stay as they are.
@@ -471,8 +665,10 @@ fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> 
         }
       >
         <p role="alert">{move || i18n.t("channel-move-space-confirm")}</p>
-        <button class="btn btn-primary" on:click=move_now>{move || i18n.t("confirm")}</button>
-        <button class="btn" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
+        <div class="inline-actions">
+          <button class="btn btn-primary" on:click=move_now>{move || i18n.t("confirm")}</button>
+          <button class="btn" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
+        </div>
       </Show>
     </Show>
   }
