@@ -121,12 +121,12 @@ pub(crate) enum RemovalStep {
   /// membership, then watch whether the change gets too old to be committed.
   ServerThenWatch { signed_epoch: u64 },
   /// An admin outside the group can't see the members' commit: until `removal_watch` after
-  /// `signed_at_ms`, it checks the group's epoch (the epoch-conflict answer tells it) and signs
+  /// `since_ms` (the first signing), it checks the group's epoch (the epoch-conflict answer tells it) and signs
   /// the removal again before members would refuse it as too old (`MAX_CHANGE_AGE_EPOCHS`).
   /// Signing again is harmless when the first one was committed: members find nobody to remove.
   Watch {
     signed_epoch: u64,
-    signed_at_ms: i64,
+    since_ms: i64,
     /// Checks so far, for the backoff between them.
     probes: u32,
   },
@@ -390,6 +390,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     user: UserId,
   ) -> Result<(), CoreError> {
+    self.cancel_removal_on_add(conversation, user)?;
     self
       .api
       .add_member(
@@ -587,8 +588,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if *state == RemovalState::Failed || self.now_ms() < *not_before_ms {
           return Ok(PendingOutcome::Later(change.clone()));
         }
-        let result = self.run_removal(*conversation_id, *user_id, *step).await;
         let key = PendingChange::removal_key(*conversation_id, *user_id);
+        // Dropped earlier in this round (the user was added again).
+        if self.stored_pending(&key)?.is_none() {
+          return Ok(PendingOutcome::Done);
+        }
+        let result = self.run_removal(*conversation_id, *user_id, *step).await;
         return self.removal_outcome(&key, change, result);
       },
       PendingChange::Revocation {

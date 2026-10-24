@@ -75,6 +75,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         "no removal of this user to retry".into(),
       ));
     }
+    // Only admins of the signed roster are asked (the UI), and only they sign it here.
+    let me = self.account.user_id;
+    if !self.workspace()?.is_admin(me) {
+      return Err(CoreError::NotAnAdmin(me));
+    }
     // The server's word is only why the user is asked; ask it again before signing anything.
     let members = self.api.list_members(conversation).await?;
     if members.members.iter().any(|member| member.user.id == user) {
@@ -178,13 +183,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     if let RemovalStep::Watch {
       signed_epoch,
-      signed_at_ms,
+      since_ms,
       probes,
     } = step
     {
       return self
-        .watch_removal(conversation, user, signed_epoch, signed_at_ms, probes)
+        .watch_removal(conversation, user, signed_epoch, since_ms, probes)
         .await;
+    }
+    if self.is_back_in_group(conversation, user)? {
+      // Added again since the removal (its commit removed them, or it was refused as stale): the
+      // server step, maybe days later, must not drop the new membership.
+      tracing::info!(conversation_id = %conversation, "the user is in the group again; dropped the removal");
+      return Ok(RemovalProgress::Done);
     }
     match self.api.remove_member(conversation, user).await {
       Ok(()) => {},
@@ -198,7 +209,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let now = self.now_ms();
         let watch = RemovalStep::Watch {
           signed_epoch,
-          signed_at_ms: now,
+          since_ms: now,
           probes: 0,
         };
         self.set_removal_step(conversation, user, watch, now.saturating_add(self.backoff_ms(1)))?;
@@ -312,24 +323,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     user: UserId,
     signed_epoch: u64,
-    signed_at_ms: i64,
+    since_ms: i64,
     probes: u32,
   ) -> Result<RemovalProgress, CoreError> {
     let now = self.now_ms();
     if self.has_group(conversation)? {
-      // The admin joined meanwhile and sees the group itself.
-      if self.group_users(conversation)?.contains(&user) {
-        let action = MembershipAction::RemoveUser {
-          user_id: convert::user(user),
-        };
-        self
-          .commit_change(conversation, ChangeSource::Own(action))
-          .await?;
-      }
+      // The admin joined meanwhile and sees the group itself: somebody still in it whom the
+      // server doesn't list shows up as left in the group; one in it and listed may have been
+      // added again, which this removal must not undo.
       return Ok(RemovalProgress::Done);
     }
     let watch_ms = millis(self.settings.removal_watch);
-    if now.saturating_sub(signed_at_ms) > watch_ms {
+    // Measured from the first signing: signing again doesn't extend it.
+    if now.saturating_sub(since_ms) > watch_ms {
       return Ok(RemovalProgress::Done);
     }
     let current = self.probe_epoch(conversation, signed_epoch).await?;
@@ -342,7 +348,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let probes = probes.saturating_add(1);
       let watch = RemovalStep::Watch {
         signed_epoch,
-        signed_at_ms,
+        since_ms,
         probes,
       };
       self.set_removal_step(
@@ -358,6 +364,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!(conversation_id = %conversation, "stopped signing a removal again; members' devices show whether it went through");
       return Ok(RemovalProgress::Done);
     }
+    if self.is_listed_again(conversation, user).await? {
+      tracing::info!(conversation_id = %conversation, "the user was added again; not signing the removal again");
+      return Ok(RemovalProgress::Done);
+    }
     tracing::info!(conversation_id = %conversation, signed_epoch, current_epoch = current, "signing an admin removal again before members would refuse it as too old");
     let action = MembershipAction::RemoveUser {
       user_id: convert::user(user),
@@ -368,7 +378,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       user_id: user,
       step: RemovalStep::Watch {
         signed_epoch,
-        signed_at_ms: now,
+        since_ms,
         probes: 0,
       },
       not_before_ms: now.saturating_add(self.backoff_ms(1)),
@@ -431,6 +441,42 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )?;
     }
     Ok(false)
+  }
+
+  /// A signed addition of `user` (this device's own, or one it saw committed) is newer than any
+  /// removal of them this device started: that removal is dropped, so its later steps (signing
+  /// again, the server step) don't undo the addition.
+  pub(crate) fn cancel_removal_on_add(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    let key = PendingChange::removal_key(conversation, user);
+    if user != self.account.user_id && self.stored_pending(&key)?.is_some() {
+      tracing::info!(conversation_id = %conversation, "the user was added again; dropped the pending removal");
+      self.store.delete(Table::PendingChanges, &key)?;
+    }
+    Ok(())
+  }
+
+  /// Whether somebody else this device removed is in its group again (added back since).
+  fn is_back_in_group(&mut self, conversation: ConversationId, user: UserId) -> Result<bool, CoreError> {
+    Ok(
+      user != self.account.user_id
+        && self.has_group(conversation)?
+        && self.group_users(conversation)?.contains(&user),
+    )
+  }
+
+  /// For an admin outside the group whose removal's server step is done: the server listing the
+  /// user again means somebody added them back. Not trusting it can only mean not signing.
+  async fn is_listed_again(&mut self, conversation: ConversationId, user: UserId) -> Result<bool, CoreError> {
+    match self.api.list_members(conversation).await {
+      Ok(members) => Ok(members.members.iter().any(|member| member.user.id == user)),
+      // Not allowed to see the members (not an instance admin): nothing to go by.
+      Err(error) if error.is_forbidden() || error.is_not_found() => Ok(false),
+      Err(error) => Err(error.into()),
+    }
   }
 
   /// Whether the group has a device of a user other than this one.

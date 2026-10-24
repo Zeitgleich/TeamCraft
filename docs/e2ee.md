@@ -460,19 +460,27 @@ have no secret of the new epoch, whose key every member switches to (§4.2), eve
 still lists the user. Two cases rest on a signed change that a member still has to commit after the
 server's membership is gone: an admin outside the group, who can't see the group's queue, and a
 leaving device that isn't in the group. An admin outside the group keeps watching its change for
-`removal_watch` (30 days): at growing intervals it learns the group's current epoch from the
+`removal_watch` (30 days from the first signing; signing again doesn't extend it): at growing intervals it learns the group's current epoch from the
 epoch-conflict answer to a post for an epoch the group has left (nothing is stored), and signs the
 removal again once the group is half as many epochs past it as members accept
 (`MAX_CHANGE_AGE_EPOCHS`, see Freshness), at most `removal_attempts` times. Signing again is
-harmless when the first change was committed: members find nobody to remove. A leaver's other
-devices drop the group when the server's removal reaches them.
+harmless when the first change was committed: members find nobody to remove. It doesn't sign
+again once the server lists the user again (an instance admin may see the member list; trusting
+that can only mean not signing). A leaver's other devices drop the group when the server's removal
+reaches them.
+
+A later addition wins over a pending removal: the remover's own addition of the user, or a signed
+addition its device sees committed (which Freshness makes newer than the removal), drops the
+pending entry, and a server step tried again finds the user back in the remover's group and is
+dropped too, so a retry days later never undoes the new membership.
 
 Members notice anybody who is in the group but not in the server's member list and whose removal
 isn't on its way (no pending removal of their own, no admin's signed change waiting in their
 queue): a removal whose signed change got lost or was refused as stale. They never sign that
 removal on the server's word (security review A8). Admins see "X is still in the encrypted group of
-#channel" with a button that signs the removal themselves, after asking the server again whether it
-still doesn't list the user. Members' clients don't claim key packages for a user the server lists
+#channel" with a button that, after a confirmation naming the person and that it rests on the
+server's word, signs the removal themselves; the client checks the admin's role in the signed roster
+and asks the server again whether it still doesn't list the user. Members' clients don't claim key packages for a user the server lists
 but who has no device in the group.
 
 A device that joins from a welcome made before somebody's removal pins the identities of everybody
@@ -482,7 +490,8 @@ welcome, before the tree can be read, so these identities can't be pinned first.
 fails for a network reason after that, the welcome can't be opened again; the device's leaf is in
 the members' tree, so it asks to be added back like a device that fell out (below; signed for the
 current epoch, which it learns from the conflict answer without a group), and asks again on a later
-sync after `rejoin_retry` if posting the request failed.
+sync, after `rejoin_retry` doubled with every request up to `rejoin_retry_max` (24 hours), also
+when posting the request failed.
 
 The server refusing a member the group's queue (403/404) is quiet only when that is expected: the
 device's own leave waits for the members' commit, or the server says the user is no longer in the

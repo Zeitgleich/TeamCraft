@@ -65,6 +65,10 @@ struct CatchUp {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RejoinRecord {
   requested_at_ms: i64,
+  /// Requests of a device without a group (a welcome it couldn't join) so far: each doubles the
+  /// wait before the next, up to `rejoin_retry_max`.
+  #[serde(default)]
+  attempts: u32,
 }
 
 /// What became of opening a welcome.
@@ -212,6 +216,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     user: UserId,
     maybe_history: Option<HistoryPolicy>,
   ) -> Result<(), CoreError> {
+    self.cancel_removal_on_add(conversation, user)?;
     self
       .api
       .add_member(
@@ -519,6 +524,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
               &rejoin_key(conversation),
               &RejoinRecord {
                 requested_at_ms: self.now_ms(),
+                attempts: 0,
               },
             )?;
           }
@@ -536,6 +542,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           })
         );
         self.note_removed_senders(conversation, &left_members(&update), at_ms)?;
+        // A signed addition committed now is newer than this device's removal of the user: an
+        // earlier one about them would make it stale (Freshness).
+        if let Some(MembershipAction::AddUser { user_id, .. }) =
+          update.maybe_change.as_ref().map(MembershipChange::action)
+        {
+          self.cancel_removal_on_add(conversation, convert::user_from_crypto(*user_id)?)?;
+        }
         // A rejoin too: the device added back takes the new epoch's key.
         if !update.removed.is_empty() || is_from_join_add {
           self.rotate_to_epoch_key(conversation)?;
@@ -869,6 +882,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     at_ms: i64,
   ) -> Result<Option<SharedKeys>, CoreError> {
     self.note_removed_senders(conversation, &left_members(update), at_ms)?;
+    if let Some(MembershipAction::AddUser { user_id, .. }) =
+      update.maybe_change.as_ref().map(MembershipChange::action)
+    {
+      // Also an admin's signed addition this device committed.
+      self.cancel_removal_on_add(conversation, convert::user_from_crypto(*user_id)?)?;
+    }
     match update.maybe_change.as_ref().map(MembershipChange::action) {
       Some(MembershipAction::AddUser {
         history: HistoryShare::Full,
@@ -1152,7 +1171,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           &self.store,
           Table::AppliedChanges,
           &rejoin_key(conversation),
-          &RejoinRecord { requested_at_ms: 0 },
+          &RejoinRecord {
+            requested_at_ms: 0,
+            attempts: 0,
+          },
         )?;
         self.welcome_handled(welcome)?;
         self.request_rejoin(conversation, welcome.epoch).await
@@ -1433,10 +1455,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     current_epoch: u64,
   ) -> Result<(), CoreError> {
     let now = self.now_ms();
-    let retry_ms = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
-    if let Some(record) =
-      records::get_json::<RejoinRecord>(&self.store, Table::AppliedChanges, &rejoin_key(conversation))?
-      && now.saturating_sub(record.requested_at_ms) < retry_ms
+    let maybe_record =
+      records::get_json::<RejoinRecord>(&self.store, Table::AppliedChanges, &rejoin_key(conversation))?;
+    let attempts = maybe_record.as_ref().map_or(0, |record| record.attempts);
+    if let Some(record) = &maybe_record
+      && now.saturating_sub(record.requested_at_ms) < self.rejoin_wait_ms(record.attempts)
     {
       return Ok(());
     }
@@ -1448,6 +1471,43 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Err(error) = self.top_up_key_packages().await {
       tracing::debug!(%error, "key packages not topped up before asking to rejoin");
     }
+    let has_group = self.has_group(conversation)?;
+    let result = self.post_rejoin_request(conversation, current_epoch).await;
+    // A device without a group has no queue that would make it ask again: every try counts, also
+    // a failed one, so it asks at a growing interval instead of on every sync.
+    let attempts = if has_group { 0 } else { attempts.saturating_add(1) };
+    if has_group && !matches!(result, Ok(true)) {
+      return result.map(|_| ());
+    }
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &rejoin_key(conversation),
+      &RejoinRecord {
+        requested_at_ms: now,
+        attempts,
+      },
+    )?;
+    result.map(|_| ())
+  }
+
+  /// How long after a rejoin request this device waits before asking again: `rejoin_retry`, for a
+  /// device without a group doubled with every request up to `rejoin_retry_max`.
+  fn rejoin_wait_ms(&self, attempts: u32) -> i64 {
+    let base = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
+    let ceiling = i64::try_from(self.settings.rejoin_retry_max.as_millis())
+      .unwrap_or(i64::MAX)
+      .max(base);
+    let doublings = attempts.saturating_sub(1).min(32);
+    base.saturating_mul(1_i64 << doublings).min(ceiling)
+  }
+
+  /// Posts the signed rejoin request; `Ok(false)` when the group moved on meanwhile.
+  async fn post_rejoin_request(
+    &mut self,
+    conversation: ConversationId,
+    current_epoch: u64,
+  ) -> Result<bool, CoreError> {
     let mut epoch = current_epoch;
     for round in 0..2 {
       let signed = RejoinRequest::new(
@@ -1468,7 +1528,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       match self.api.post_mls_message(conversation, &request).await {
         Ok(stored) => {
           self.advance_cursor(conversation, &stored)?;
-          break;
+          return Ok(true);
         },
         // Without a group (a welcome that couldn't be joined) there is no queue to catch up
         // with: the conflict names the epoch to ask for.
@@ -1479,16 +1539,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           }
         },
         // The group moved on meanwhile; the next sync asks for the new epoch.
-        Err(error) if error.is_epoch_conflict() => return Ok(()),
+        Err(error) if error.is_epoch_conflict() => return Ok(false),
         Err(error) => return Err(error.into()),
       }
     }
-    records::put_json(
-      &self.store,
-      Table::AppliedChanges,
-      &rejoin_key(conversation),
-      &RejoinRecord { requested_at_ms: now },
-    )
+    Ok(false)
   }
 
   fn own_member(&self) -> GroupMember {

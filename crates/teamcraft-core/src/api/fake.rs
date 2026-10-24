@@ -1200,8 +1200,13 @@ impl ServerApi for FakeServerApi {
     conversation: ConversationId,
   ) -> Result<ListConversationMembersResponse, ApiError> {
     self.with(|state, me| {
-      let members = state
-        .member_conversation(conversation, me)?
+      // Instance admins may list any conversation's members, like the server.
+      let entry = if state.admins.contains(&me) {
+        state.conversation(conversation)?
+      } else {
+        state.member_conversation(conversation, me)?
+      };
+      let members = entry
         .members
         .iter()
         .map(|(user, (role, _))| (*user, role.clone()))

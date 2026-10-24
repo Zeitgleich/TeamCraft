@@ -164,14 +164,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// [`Self::join_channel`], once per channel. Returns how many were requested.
   pub async fn join_missing_groups(&mut self) -> Result<usize, CoreError> {
     let mut requested = 0;
+    let mut maybe_first_error = None;
     for response in self.cached_conversations()?.into_values() {
       if response.maybe_my_membership.is_some()
         && !self.has_group(response.id)?
         && self.has_requested_rejoin(response.id)?
       {
         // A welcome this device opened but couldn't join: it asked to be added back, and asks
-        // again after `rejoin_retry` (also when the first request never went out).
-        self.request_rejoin(response.id, 0).await?;
+        // again at a growing interval (also when the first request never went out). One
+        // conversation failing doesn't keep the others from asking.
+        if let Err(error) = self.request_rejoin(response.id, 0).await {
+          tracing::warn!(conversation_id = %response.id, %error, "could not ask to be added back");
+          maybe_first_error.get_or_insert(error);
+        }
         continue;
       }
       let is_channel = response.maybe_space_id.is_some() && response.kind == ConversationKind::Channel;
@@ -200,7 +205,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.post_self_add(&response).await?;
       requested += 1;
     }
-    Ok(requested)
+    maybe_first_error.map_or(Ok(requested), Err)
   }
 
   async fn post_self_add(&mut self, response: &ConversationResponse) -> Result<(), CoreError> {

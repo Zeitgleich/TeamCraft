@@ -106,6 +106,9 @@ pub struct ClientSettings {
   /// A device that fell out of a group asks again to be added back after this long without a
   /// welcome (e2ee.md §4.6).
   pub rejoin_retry: std::time::Duration,
+  /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
+  /// request, up to this.
+  pub rejoin_retry_max: std::time::Duration,
   /// A removal whose server side the server refused after the MLS side was done (the remover lost
   /// the right meanwhile) is tried again after this long (e2ee.md §4.6, removal order).
   pub removal_retry: std::time::Duration,
@@ -179,6 +182,7 @@ impl Default for ClientSettings {
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
+      rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
       removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       removal_attempts: 6,

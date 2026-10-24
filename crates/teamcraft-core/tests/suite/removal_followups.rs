@@ -25,6 +25,7 @@ use teamcraft_proto::{ConversationId, ListMlsMessagesQuery, MlsMessageKind, User
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
 const MINUTE: Duration = Duration::from_secs(60);
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 mod left_in_group {
   use super::*;
@@ -85,6 +86,32 @@ mod left_in_group {
     assert_eq!(bob.texts(channel).last().map(String::as_str), Some("after"));
   }
 
+  /// Only admins of the signed roster sign a removal of somebody left in the group.
+  #[tokio::test]
+  async fn a_member_who_is_no_admin_cannot_sign_it() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let commits_before = commits(&alice, channel).await;
+    let carol_id = carol.client.user_id();
+    server.remove_member_as_admin(channel, carol_id);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    let error = bob.client.retry_removal(channel, carol_id).await.unwrap_err();
+    assert!(
+      matches!(error, teamcraft_core::CoreError::NotAnAdmin(_)),
+      "{error}"
+    );
+    assert_eq!(commits(&alice, channel).await, commits_before);
+  }
+
   /// Somebody the server lists again isn't removed by the click.
   #[tokio::test]
   async fn the_click_does_nothing_for_somebody_the_server_lists() {
@@ -142,13 +169,144 @@ mod admin_outside_the_group {
     admin.client.apply_pending_changes().await.unwrap();
     assert_eq!(proposals_by(&alice, &admin, channel).await, 2);
 
-    // After `removal_watch` the admin stops watching.
-    clock.advance(millis(Duration::from_secs(31 * 24 * 60 * 60)));
+    // Still within `removal_watch` of the first signing: signed again.
+    clock.advance(millis(29 * DAY));
+    server.bump_epoch(channel, MAX_CHANGE_AGE_EPOCHS / 2);
     admin.client.apply_pending_changes().await.unwrap();
-    server.bump_epoch(channel, MAX_CHANGE_AGE_EPOCHS);
+    assert_eq!(proposals_by(&alice, &admin, channel).await, 3);
+
+    // Signing again doesn't extend the watch: 31 days after the first signing it is over.
+    clock.advance(millis(2 * DAY));
+    server.bump_epoch(channel, MAX_CHANGE_AGE_EPOCHS / 2);
+    admin.client.apply_pending_changes().await.unwrap();
+    assert_eq!(proposals_by(&alice, &admin, channel).await, 3);
+  }
+
+  /// Somebody added Carol back after the admin's removal: the admin, who sees the server list
+  /// her again, doesn't sign her removal again.
+  #[tokio::test]
+  async fn the_admin_does_not_sign_again_after_the_user_was_added_back() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let mut admin = enroll_with_clock(&server, "Admin", &clock, settings()).await;
+    let (alice_id, admin_id) = (alice.client.user_id(), admin.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (admin_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    server.set_admin(admin_id);
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+
+    admin.client.admin_remove_member(channel, carol_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    alice.client.add_member(channel, carol_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(is_listed(&alice, channel, carol_id).await);
+    let before = proposals_by(&alice, &admin, channel).await;
+
+    server.bump_epoch(channel, MAX_CHANGE_AGE_EPOCHS / 2);
     clock.advance(millis(HOUR));
     admin.client.apply_pending_changes().await.unwrap();
-    assert_eq!(proposals_by(&alice, &admin, channel).await, 2);
+    assert_eq!(proposals_by(&alice, &admin, channel).await, before);
+    assert!(is_listed(&alice, channel, carol_id).await);
+  }
+}
+
+mod added_back {
+  use super::*;
+
+  /// Alice's removal of Carol waits for its refused server step; Alice adds Carol back. The
+  /// pending removal is gone: its retry doesn't drop Carol's new membership.
+  #[tokio::test]
+  async fn the_removers_own_addition_drops_the_pending_removal() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut alice = enroll_with_clock(&server, "Alice", &clock, settings()).await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+
+    server.refuse_removal_steps_by(alice.client.user_id(), true);
+    alice.client.remove_member(channel, carol_id).await.unwrap_err();
+    server.refuse_removal_steps_by(alice.client.user_id(), false);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    alice.client.add_member(channel, carol_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let requests = server.removal_requests();
+
+    clock.advance(millis(2 * DAY));
+    alice.client.apply_pending_changes().await.unwrap();
+    assert_eq!(server.removal_requests(), requests);
+    assert!(is_listed(&alice, channel, carol_id).await);
+    assert!(
+      pending_removals(alice.store.as_ref(), channel)
+        .unwrap()
+        .is_empty()
+    );
+  }
+
+  /// Bob's removal of Carol waits for its server step; Alice adds Carol back and Bob's device
+  /// sees the commit: Bob's retry days later leaves Carol's membership alone.
+  #[tokio::test]
+  async fn an_observed_addition_drops_another_members_pending_removal() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = enroll_with_clock(&server, "Bob", &clock, settings()).await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+
+    server.refuse_removal_steps_by(bob.client.user_id(), true);
+    bob.client.remove_member(channel, carol_id).await.unwrap_err();
+    server.refuse_removal_steps_by(bob.client.user_id(), false);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    alice.client.add_member(channel, carol_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let requests = server.removal_requests();
+
+    clock.advance(millis(2 * DAY));
+    bob.client.apply_pending_changes().await.unwrap();
+    assert_eq!(server.removal_requests(), requests);
+    assert!(is_listed(&alice, channel, carol_id).await);
+    assert!(pending_removals(bob.store.as_ref(), channel).unwrap().is_empty());
+  }
+
+  /// Even without seeing the addition (the commit came with a welcome it joined from), a member
+  /// whose group holds the user again doesn't run the server step.
+  #[tokio::test]
+  async fn a_retried_server_step_skips_a_user_back_in_the_group() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = enroll_with_clock(&server, "Bob", &clock, settings()).await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+
+    server.refuse_removal_steps_by(bob.client.user_id(), true);
+    bob.client.remove_member(channel, carol_id).await.unwrap_err();
+    server.refuse_removal_steps_by(bob.client.user_id(), false);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    // Bob's pending removal comes back as an older version of the app left it.
+    let key = format!("removal/{channel}/{carol_id}");
+    let stored = bob.store.get(Table::PendingChanges, &key).unwrap();
+    alice.client.add_member(channel, carol_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    bob
+      .store
+      .put(Table::PendingChanges, &key, &stored.unwrap())
+      .unwrap();
+    let requests = server.removal_requests();
+
+    clock.advance(millis(2 * DAY));
+    bob.client.apply_pending_changes().await.unwrap();
+    assert_eq!(server.removal_requests(), requests);
+    assert!(is_listed(&alice, channel, carol_id).await);
   }
 }
 
@@ -392,6 +550,49 @@ mod welcome {
     alice.client.send_text(channel, None, "welcome").await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut dave]).await;
     assert_eq!(dave.texts(channel).last().map(String::as_str), Some("welcome"));
+  }
+}
+
+mod welcome_retry {
+  use super::*;
+
+  /// The rejoin request after a cut-off welcome doesn't go out either: the next syncs don't ask
+  /// on every round but after `rejoin_retry`, and the request still gets Dave in.
+  #[tokio::test]
+  async fn a_failed_rejoin_request_is_asked_again_after_a_wait() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let quick = ClientSettings {
+      device_add_stagger: Duration::ZERO,
+      ..settings()
+    };
+    let mut alice = Peer::enroll_with_settings(&server, "Alice", quick.clone()).await;
+    let mut bob = Peer::enroll_with_settings(&server, "Bob", quick.clone()).await;
+    let mut carol = Peer::enroll_with_settings(&server, "Carol", quick.clone()).await;
+    let mut dave = enroll_with_clock(&server, "Dave", &clock, quick).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    server.remove_member_as_admin(channel, carol.client.user_id());
+    settle(&mut [&mut alice, &mut bob]).await;
+
+    server.fail_next_identity_lookup(carol.client.user_id());
+    server.cut_next_proposal(dave.client.user_id(), NetworkCut::BeforeRequest);
+    alice
+      .client
+      .add_member(channel, dave.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let error = dave.client.sync_welcomes().await.unwrap_err();
+    assert!(error.is_transient(), "{error}");
+
+    dave.client.full_sync().await.unwrap();
+    assert_eq!(proposals_by(&alice, &dave, channel).await, 0, "not on every sync");
+
+    clock.advance(millis(Duration::from_secs(10 * 60)));
+    dave.client.full_sync().await.unwrap();
+    assert_eq!(proposals_by(&alice, &dave, channel).await, 1);
+    settle(&mut [&mut alice, &mut bob, &mut dave]).await;
+    assert!(dave.client.has_group(channel).unwrap());
   }
 }
 
