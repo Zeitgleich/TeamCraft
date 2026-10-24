@@ -690,6 +690,10 @@ server-entry-locked = Deine Organisation hat diese App nur für einen Server ein
 server-entry-not-checked = Der Server muss erneut geprüft werden. Fahre noch einmal fort.
 server-entry-not-saved = Der Server konnte auf diesem Gerät nicht gespeichert werden.
 server-entry-failed = Etwas ist schiefgegangen. Versuche es erneut.
+server-entry-unknown-host = Unter dieser Adresse gibt es keinen Server. Prüfe die Schreibweise.
+server-entry-did-you-mean = Meintest du { $host }?
+server-entry-provider-label = Anmeldedienst
+login-details = Technische Details
 welcome-title = Willkommen, { $name }
 welcome-subtitle = Das ist das erste Gerät deines Kontos. Zwei kurze Schritte schützen deine Nachrichten.
 welcome-step-keys = Schlüssel werden auf diesem Gerät erzeugt
@@ -2020,3 +2024,15 @@ lightbox-loading = Bild in voller Größe wird geladen …
 lightbox-failed = Das Bild konnte nicht geladen werden.
 lightbox-gone = Dieses Bild ist nicht mehr verfügbar.
 album-open = Bild { $index } von { $count } öffnen: { $name }
+
+## Anmelde-Rückkehrseite: der Browser-Tab, den die Desktop-App nach dem Anmeldedienst zeigt
+## (nur Text, keine Platzhalter; die Desktop-Shell liest diese Zeilen selbst)
+callback-page-title = Anmeldung
+callback-signed-in-title = Angemeldet
+callback-signed-in-body = Du kannst dieses Fenster schließen und zur App zurückkehren.
+callback-refused-title = Anmeldung nicht abgeschlossen
+callback-refused-body = Die Anmeldung wurde abgebrochen oder abgelehnt. Kehre zur App zurück, um es erneut zu versuchen.
+callback-mismatch-title = Diese Anmeldung wurde nicht hier gestartet
+callback-mismatch-body = Die Antwort passte nicht zur Anmeldung, die in der App gestartet wurde, und wurde zu deiner Sicherheit ignoriert. Starte die Anmeldung in der App erneut.
+callback-failed-title = Anmeldung fehlgeschlagen
+callback-failed-body = Die Anmeldung konnte nicht abgeschlossen werden. Details findest du in der App; versuche es dort erneut.

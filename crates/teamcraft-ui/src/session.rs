@@ -11,7 +11,7 @@ use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse};
 use teamcraft_client_api::remote::{CoreStatus, EnrollRequest};
 
 use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
-use crate::auth::{ApiResponse, AuthError, Authenticator, tauri};
+use crate::auth::{ApiResponse, AuthError, Authenticator, SignInLook, tauri};
 use crate::clock;
 use crate::model::UserId;
 use crate::remote_backend;
@@ -165,7 +165,8 @@ impl SessionControl {
   }
 
   /// The user confirmed the checked server: it becomes the account's server and sign-in starts.
-  pub fn confirm_server(&self, check: ServerCheck) {
+  /// `look` styles the browser's page after the sign-in.
+  pub fn confirm_server(&self, check: ServerCheck, look: SignInLook) {
     let control = *self;
     control.is_checking_server.set(true);
     spawn_local(async move {
@@ -175,7 +176,7 @@ impl SessionControl {
         Ok(server) => {
           crate::brand::show_server_brand(check.brand);
           control.server.set(Some(server));
-          control.sign_in();
+          control.sign_in(look);
         },
         Err(problem) => control.state.set(SessionState::NeedsServer {
           maybe_address: Some(check.server.host),
@@ -233,11 +234,13 @@ impl SessionControl {
     false
   }
 
-  pub fn sign_in(&self) {
+  /// Signs in with the identity provider (desktop: in the system browser, whose page after the
+  /// sign-in gets `look`).
+  pub fn sign_in(&self, look: SignInLook) {
     let control = *self;
     control.state.set(SessionState::SigningIn);
     spawn_local(async move {
-      match control.authenticator().login().await {
+      match control.authenticator().login(look).await {
         Ok(()) => control.load_account().await,
         Err(error) => control
           .state

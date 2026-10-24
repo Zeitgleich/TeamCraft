@@ -9,7 +9,9 @@ use teamcraft_client_api::window_chrome::{TitleBar, WindowAction, WindowChrome};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use super::{ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture};
+use super::{
+  ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
+};
 use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget};
 
 use crate::model::ConversationId;
@@ -48,8 +50,12 @@ impl Authenticator for TauriAuth {
     })
   }
 
-  fn login(&self) -> LocalFuture<'_, Result<(), AuthError>> {
-    Box::pin(async { invoke("auth_login", JsValue::UNDEFINED).await.map(|_| ()) })
+  fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
+    Box::pin(async move {
+      let args = js_sys::JSON::parse(&serde_json::json!({ "look": look }).to_string())
+        .map_err(|_| AuthError::InvalidResponse("could not build the request".to_owned()))?;
+      invoke("auth_login", args).await.map(|_| ())
+    })
   }
 
   fn login_local(
@@ -160,11 +166,13 @@ struct ApiPayload {
   body: String,
 }
 
-/// Error object of the desktop commands: `{ kind, message }`.
+/// Error object of the desktop commands: `{ kind, message, suggestion? }`.
 #[derive(Deserialize)]
 struct CommandError {
   kind: String,
   message: String,
+  #[serde(rename = "suggestion", default)]
+  maybe_suggestion: Option<String>,
 }
 
 pub(crate) async fn invoke(command: &str, args: JsValue) -> Result<JsValue, AuthError> {
@@ -241,13 +249,22 @@ pub struct ServerCheck {
   /// The identity provider lies outside the server's domain.
   #[serde(default)]
   pub is_identity_provider_elsewhere: bool,
+  /// The brand image as a `data:` URL (an older shell sends none).
+  #[serde(rename = "logo", default)]
+  pub maybe_logo: Option<String>,
+  /// The brand's separate image for the dark theme.
+  #[serde(rename = "logo_dark", default)]
+  pub maybe_logo_dark: Option<String>,
 }
 
-/// A failed server step: the i18n key of the message (`server-entry-*`) and details for logs.
+/// A failed server step: the i18n key of the message (`server-entry-*`), details for the
+/// collapsed "technical details", and an address the user may have meant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerProblem {
   pub key: String,
   pub detail: String,
+  /// "Did you mean …?" (host and port); only ever offered, never used on its own.
+  pub maybe_suggestion: Option<String>,
 }
 
 /// The server entry's state in the shell.
@@ -279,6 +296,7 @@ async fn server_call<T: for<'de> Deserialize<'de>>(
   let failed = |detail: String| ServerProblem {
     key: SERVER_FAILED_KEY.to_owned(),
     detail,
+    maybe_suggestion: None,
   };
   let function = invoke_function().ok_or_else(|| failed("not running in the desktop app".to_owned()))?;
   let js_args = js_sys::JSON::parse(&args.to_string())
@@ -295,6 +313,7 @@ async fn server_call<T: for<'de> Deserialize<'de>>(
         Ok(error) if error.kind.starts_with(SERVER_KEY_PREFIX) => ServerProblem {
           key: error.kind,
           detail: error.message,
+          maybe_suggestion: error.maybe_suggestion,
         },
         Ok(error) => failed(error.message),
         Err(_) => failed(value.as_string().unwrap_or_default()),

@@ -201,9 +201,18 @@ make someone an owner.
 
 The desktop, Android and iOS apps have no server built in. On first start they ask for the server
 address; users type `team.example.com`, the full URL, or paste any link into the server (an invitation,
-a message link). The app shows the server's name and host for confirmation and then signs in with the
-settings the server announces. "Change server" on the sign-in screen goes back to the entry. The web
-client needs none of this: it signs in to the server that served it.
+a message link). The app shows the server's logo, name, host and identity provider for confirmation
+and then signs in with the settings the server announces. "Change server" on the sign-in screen goes
+back to the entry. When a host name does not resolve but the same name under another common
+top-level domain does (`.com` typed for `.de`), the desktop app offers it as "Did you mean …?"; it
+only fills in the field and never connects on its own. The web client needs none of this: it signs in
+to the server that served it.
+
+After the identity provider, the browser tab of the desktop sign-in shows a page from the app's
+loopback listener in the app's language and theme, with the server's logo and name. It is answered
+only once the tokens are in, so it says whether the sign-in really worked; it is self-contained
+(content security policy `default-src 'none'`, no scripts) and never shows the redirect's
+parameters.
 
 What the server announces, public and cacheable, at `GET /api/v1/server-info`:
 

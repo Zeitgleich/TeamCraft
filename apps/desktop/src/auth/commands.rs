@@ -6,8 +6,10 @@ use secrecy::SecretString;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
+use teamcraft_client_api::brand::BrandView;
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{ServerOrigin, ServerProfile, is_provider_endpoint};
+use teamcraft_client_api::sign_in_look::SignInLook;
 use teamcraft_proto::BrandResponse;
 
 use base64::Engine;
@@ -23,14 +25,24 @@ pub type Service = AuthService<KeyringStore>;
 pub struct CommandError {
   kind: &'static str,
   message: String,
+  /// The server entry's "did you mean …?" address (host and port), when there is one.
+  #[serde(rename = "suggestion", skip_serializing_if = "Option::is_none")]
+  maybe_suggestion: Option<String>,
+}
+
+impl CommandError {
+  fn new(kind: &'static str, message: String) -> Self {
+    Self {
+      kind,
+      message,
+      maybe_suggestion: None,
+    }
+  }
 }
 
 impl From<AuthError> for CommandError {
   fn from(error: AuthError) -> Self {
-    Self {
-      kind: error.kind(),
-      message: error.to_string(),
-    }
+    Self::new(error.kind(), error.to_string())
   }
 }
 
@@ -64,6 +76,12 @@ pub struct ServerCheckView {
   pub identity_provider_host: String,
   /// The provider lies outside the server's domain: the confirmation warns.
   pub is_identity_provider_elsewhere: bool,
+  /// The brand image as a `data:` URL, for the light theme.
+  #[serde(rename = "logo")]
+  pub maybe_logo: Option<String>,
+  /// The brand's separate image for the dark theme.
+  #[serde(rename = "logo_dark")]
+  pub maybe_logo_dark: Option<String>,
 }
 
 #[tauri::command]
@@ -90,23 +108,22 @@ pub async fn server_check(
   servers: State<'_, Arc<ServerState>>,
   service: State<'_, Arc<Service>>,
 ) -> Result<ServerCheckView, CommandError> {
-  let origin = ServerOrigin::parse(&address, HTTP_POLICY).map_err(|error| CommandError {
-    kind: error.i18n_key(),
-    message: error.to_string(),
-  })?;
+  let origin = ServerOrigin::parse(&address, HTTP_POLICY)
+    .map_err(|error| CommandError::new(error.i18n_key(), error.to_string()))?;
   if !servers.managed.allows(&origin) {
-    return Err(CommandError {
-      kind: "server-entry-locked",
-      message: "the managed configuration allows another server only".to_owned(),
-    });
+    return Err(CommandError::new(
+      "server-entry-locked",
+      "the managed configuration allows another server only".to_owned(),
+    ));
   }
   let checked = service
     .probe_server(&origin)
     .await
     .map_err(|error| CommandError {
-      kind: error.i18n_key(),
-      message: error.to_string(),
+      maybe_suggestion: error.suggestion().map(|origin| origin.host().to_owned()),
+      ..CommandError::new(error.i18n_key(), error.to_string())
     })?;
+  let (maybe_logo, maybe_logo_dark) = brand_logos(&service, &checked.profile.origin, &checked.brand).await;
   let server = view(&checked.profile);
   *servers
     .pending
@@ -117,7 +134,44 @@ pub async fn server_check(
     brand: checked.brand,
     identity_provider_host: checked.identity_provider_host,
     is_identity_provider_elsewhere: checked.is_identity_provider_elsewhere,
+    maybe_logo,
+    maybe_logo_dark,
   })
+}
+
+/// The checked server's brand image for its confirmation, light and (when different) dark, as
+/// `data:` URLs: chosen like the UI's brand header (`BrandView::header_image`, which keeps only
+/// asset paths of the brand endpoint). An image that fails is left out; the name still shows.
+async fn brand_logos(
+  service: &Service,
+  origin: &ServerOrigin,
+  brand: &BrandResponse,
+) -> (Option<String>, Option<String>) {
+  let Some(brand) = BrandView::from_response(brand.clone(), "") else {
+    return (None, None);
+  };
+  let maybe_light = brand.header_image(false).map(str::to_owned);
+  let maybe_dark = brand
+    .header_image(true)
+    .filter(|dark| Some(*dark) != maybe_light.as_deref())
+    .map(str::to_owned);
+  let fetch = |maybe_path: Option<String>| async move {
+    let path = maybe_path?;
+    match service.brand_asset(origin.as_str(), &path).await {
+      Ok(image) if image.status == 200 => image
+        .content_type
+        .map(|content_type| format!("data:{content_type};base64,{}", image.body_base64)),
+      Ok(image) => {
+        tracing::debug!(status = image.status, "the server has no brand image");
+        None
+      },
+      Err(error) => {
+        tracing::debug!(%error, "could not load the brand image");
+        None
+      },
+    }
+  };
+  tokio::join!(fetch(maybe_light), fetch(maybe_dark))
 }
 
 /// Makes the checked server with this origin the active account's server.
@@ -134,9 +188,11 @@ pub async fn server_confirm(
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .take()
     .filter(|profile| profile.origin.as_str() == origin)
-    .ok_or_else(|| CommandError {
-      kind: "server-entry-not-checked",
-      message: "this server was not checked".to_owned(),
+    .ok_or_else(|| {
+      CommandError::new(
+        "server-entry-not-checked",
+        "this server was not checked".to_owned(),
+      )
     })?;
   // A stored token of this server with other sign-in settings must not be used any more.
   if let Some(previous) = servers.directory.profile(&profile.origin)
@@ -150,10 +206,7 @@ pub async fn server_confirm(
   servers
     .directory
     .activate(profile.clone())
-    .map_err(|error| CommandError {
-      kind: "server-entry-not-saved",
-      message: error.to_string(),
-    })?;
+    .map_err(|error| CommandError::new("server-entry-not-saved", error.to_string()))?;
   service
     .set_server(Some(DesktopConfig::from_profile(&profile)))
     .await;
@@ -167,10 +220,10 @@ pub async fn server_forget(
   service: State<'_, Arc<Service>>,
 ) -> Result<(), CommandError> {
   if servers.managed.is_locked {
-    return Err(CommandError {
-      kind: "server-entry-locked",
-      message: "the managed configuration does not allow changing the server".to_owned(),
-    });
+    return Err(CommandError::new(
+      "server-entry-locked",
+      "the managed configuration does not allow changing the server".to_owned(),
+    ));
   }
   refuse_while_signed_in(&service).await?;
   if let Some(active) = servers.directory.active() {
@@ -179,10 +232,10 @@ pub async fn server_forget(
       .await
       .map_err(CommandError::from)?;
   }
-  servers.directory.forget_active().map_err(|error| CommandError {
-    kind: "server-entry-not-saved",
-    message: error.to_string(),
-  })?;
+  servers
+    .directory
+    .forget_active()
+    .map_err(|error| CommandError::new("server-entry-not-saved", error.to_string()))?;
   service.set_server(None).await;
   Ok(())
 }
@@ -193,7 +246,14 @@ pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, Comm
 }
 
 #[tauri::command]
-pub async fn auth_login(app: AppHandle, service: State<'_, Arc<Service>>) -> Result<(), CommandError> {
+/// Signs in through the system browser. `look` (language, theme, brand) styles the page the
+/// browser shows afterwards; an older UI sends none.
+pub async fn auth_login(
+  look: Option<SignInLook>,
+  app: AppHandle,
+  service: State<'_, Arc<Service>>,
+) -> Result<(), CommandError> {
+  let look = look.unwrap_or_default();
   let open = move |url: &str| {
     // Only web addresses reach the OS opener (never `file:`, `search-ms:` and the like).
     if !is_provider_endpoint(url, HTTP_POLICY) {
@@ -204,7 +264,7 @@ pub async fn auth_login(app: AppHandle, service: State<'_, Arc<Service>>) -> Res
       .open_url(url, None::<&str>)
       .map_err(|error| error.to_string())
   };
-  Ok(service.login(open).await?)
+  Ok(service.login(&look, open).await?)
 }
 
 /// Signs in a local account. The password goes straight into a secret and is never logged; errors
@@ -281,10 +341,7 @@ pub async fn api_request_bytes(
     (Some(content_type), Some(encoded)) => {
       let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|_| CommandError {
-          kind: "invalid_response",
-          message: "the body is not base64".to_owned(),
-        })?;
+        .map_err(|_| CommandError::new("invalid_response", "the body is not base64".to_owned()))?;
       Some((content_type, bytes))
     },
     _ => None,
@@ -304,10 +361,10 @@ fn view(profile: &ServerProfile) -> ServerView {
 /// The server can only change while nobody is signed in to it (sign out first).
 async fn refuse_while_signed_in(service: &Service) -> Result<(), CommandError> {
   if service.is_signed_in().await {
-    return Err(CommandError {
-      kind: "server-entry-signed-in",
-      message: "sign out before changing the server".to_owned(),
-    });
+    return Err(CommandError::new(
+      "server-entry-signed-in",
+      "sign out before changing the server".to_owned(),
+    ));
   }
   Ok(())
 }

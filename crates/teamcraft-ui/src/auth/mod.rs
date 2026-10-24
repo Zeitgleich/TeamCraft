@@ -16,6 +16,7 @@ use std::rc::Rc;
 
 pub use config::AppConfig;
 pub use teamcraft_client_api::remote::ApiMethod;
+pub use teamcraft_client_api::sign_in_look::SignInLook;
 
 /// A boxed future that does not need to be `Send`; everything here runs on the UI thread.
 pub type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -76,7 +77,7 @@ pub trait Authenticator {
   fn restore(&self) -> LocalFuture<'_, Result<bool, AuthError>>;
   /// Starts a login. In the browser this navigates away and never resolves; on desktop it resolves when
   /// the system browser has returned.
-  fn login(&self) -> LocalFuture<'_, Result<(), AuthError>>;
+  fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>>;
   /// Aborts a login that waits for the system browser. Nothing to do in the browser flow.
   fn cancel_login(&self) {}
   /// Ends the session and forgets stored tokens.
