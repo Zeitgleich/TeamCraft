@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.1" date="2026-10-24" type="stable">
+      <description>
+        <p>Fixes desktop sign-in on a new device, faster web app on large workspaces, image lightbox.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-10-23" type="stable">
       <description>
         <p>First release: end-to-end encrypted chat, threads, calls and meetings.</p>
