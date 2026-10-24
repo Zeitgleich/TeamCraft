@@ -143,5 +143,8 @@ cargo tauri build --config tauri.models.conf.json --bundles deb,rpm,appimage
 ```
 
 `tauri.conf.json` declares GStreamer as a dependency of the `.deb` and `.rpm` and recommends the
-VA-API plugin (`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`). The release workflow
-builds them in a Debian 13 container (see the distribution table for what that implies).
+VA-API plugin (`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`) and the tray library
+(`libayatana-appindicator3-1` / `libayatana-appindicator-gtk3`). The tray library is only
+recommended because the app runs without it, just without a tray icon (as in the Flatpak, whose
+runtime doesn't ship it). The release workflow builds them in a Debian 13 container (see the
+distribution table for what that implies).

@@ -6,6 +6,9 @@
 //! | Linux    | launcher badge (Unity API)       | menu only (no click events)    |
 //! | macOS    | dock badge                       | left click shows the window    |
 //! | Windows  | taskbar overlay dot              | left click shows the window    |
+//!
+//! Without libayatana-appindicator (Linux) there is no tray icon; the badge still works and the
+//! window is never hidden (see `has_tray`).
 
 use std::sync::Mutex;
 
@@ -27,12 +30,16 @@ const MAX_ZOOM: f64 = 2.0;
 #[cfg(windows)]
 const DOT_SIZE: u32 = 16;
 
-/// The menu items, kept to change their text when the UI's language changes.
+/// The menu items, kept to change their text when the UI's language changes. Only managed while
+/// the tray icon exists.
 pub struct TrayMenu {
   show: MenuItem<Wry>,
   quit: MenuItem<Wry>,
-  last_unread: Mutex<Option<u32>>,
 }
+
+/// The unread count last shown on the badge; managed with or without a tray icon.
+#[derive(Default)]
+pub struct LastUnread(Mutex<Option<u32>>);
 
 /// What the UI tells the tray: unread count and the texts in the user's language.
 #[derive(Debug, Deserialize)]
@@ -45,6 +52,13 @@ pub struct TrayUpdate {
 
 /// Creates the tray icon with "Show" and "Quit". The texts are placeholders until the UI sends them.
 pub fn install(app: &tauri::App) -> tauri::Result<()> {
+  app.manage(LastUnread::default());
+  // The tray crate panics (release builds abort) when the library is missing.
+  #[cfg(target_os = "linux")]
+  if !crate::appindicator::is_available() {
+    tracing::warn!("libayatana-appindicator3 not found; running without a tray icon");
+    return Ok(());
+  }
   let name = app.package_info().name.clone();
   let show = MenuItem::with_id(app, MENU_SHOW, &name, true, None::<&str>)?;
   let quit = MenuItem::with_id(app, MENU_QUIT, "×", true, None::<&str>)?;
@@ -72,11 +86,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
     builder = builder.icon(icon.clone());
   }
   builder.build(app)?;
-  app.manage(TrayMenu {
-    show,
-    quit,
-    last_unread: Mutex::new(None),
-  });
+  app.manage(TrayMenu { show, quit });
   Ok(())
 }
 
@@ -111,7 +121,21 @@ pub fn has_tray(app: &AppHandle) -> bool {
 }
 
 #[tauri::command]
-pub fn tray_update(app: AppHandle, menu: State<'_, TrayMenu>, update: TrayUpdate) {
+pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: TrayUpdate) {
+  if let Some(menu) = app.try_state::<TrayMenu>() {
+    update_tray(&app, &menu, &update);
+  }
+  let mut last = last_unread
+    .0
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  if *last != Some(update.unread) {
+    *last = Some(update.unread);
+    set_badge(&app, update.unread);
+  }
+}
+
+fn update_tray(app: &AppHandle, menu: &TrayMenu, update: &TrayUpdate) {
   let results = [
     menu.show.set_text(&update.show_label),
     menu.quit.set_text(&update.quit_label),
@@ -121,14 +145,6 @@ pub fn tray_update(app: AppHandle, menu: State<'_, TrayMenu>, update: TrayUpdate
   ];
   for error in results.into_iter().filter_map(Result::err) {
     tracing::debug!(%error, "could not update the tray");
-  }
-  let mut last = menu
-    .last_unread
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  if *last != Some(update.unread) {
-    *last = Some(update.unread);
-    set_badge(&app, update.unread);
   }
 }
 

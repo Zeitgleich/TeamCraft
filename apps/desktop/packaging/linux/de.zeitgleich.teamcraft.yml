@@ -37,6 +37,8 @@ finish-args:
   - --talk-name=org.freedesktop.secrets
   # Mention and direct-message notifications.
   - --talk-name=org.freedesktop.Notifications
+  # No tray icon: the GNOME runtime has no libayatana-appindicator, and the app runs without one
+  # (closing quits, "start minimized" minimizes to the taskbar).
   # Nothing else: no home directory, no devices besides the GPU. Screen sharing (ScreenCast),
   # the camera (Camera), push-to-talk on Wayland (GlobalShortcuts), opening the login page
   # (OpenURI) and file dialogs (FileChooser) all go through portals, which need no permission
