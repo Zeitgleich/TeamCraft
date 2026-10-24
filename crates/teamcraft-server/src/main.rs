@@ -453,6 +453,11 @@ fn spawn_account_housekeeping(state: AppState) {
         Ok(deleted) => info!(deleted, "deleted expiring key packages"),
         Err(error) => warn!(%error, "deleting expiring key packages failed"),
       }
+      match state.database.delete_expired_create_keys().await {
+        Ok(0) => {},
+        Ok(deleted) => info!(deleted, "deleted expired idempotency keys"),
+        Err(error) => warn!(%error, "deleting expired idempotency keys failed"),
+      }
     }
   });
 }

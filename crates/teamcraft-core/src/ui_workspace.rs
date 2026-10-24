@@ -25,6 +25,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_color: None,
         maybe_description: space.maybe_description,
         join_policy: join_policy(space.is_open),
+        maybe_idempotency_key: space.maybe_idempotency_key,
       }),
     });
   }
@@ -53,6 +54,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_topic: channel.maybe_topic,
         maybe_category: channel.maybe_category,
         maybe_history: channel.maybe_history,
+        maybe_idempotency_key: channel.maybe_idempotency_key,
       }),
     });
   }

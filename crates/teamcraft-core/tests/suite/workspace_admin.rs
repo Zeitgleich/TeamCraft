@@ -12,7 +12,7 @@ use teamcraft_client_api::actions::{ChannelChanges, NewChannel, NewSpace, SpaceI
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, MessageKind, SystemEvent};
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_proto::{ConversationId, HistoryPolicy, SpaceId, SpaceRole};
+use teamcraft_proto::{ConversationId, HistoryPolicy, IdempotencyKey, SpaceId, SpaceRole};
 
 #[tokio::test]
 async fn public_channels_are_browsed_and_joined() {
@@ -106,6 +106,60 @@ async fn channel_changes_are_announced() {
   }));
 }
 
+/// The server made the channel but the answer was lost: the core retries with the same key and
+/// ends up with the one channel.
+#[tokio::test]
+async fn a_lost_create_answer_is_retried_without_a_duplicate() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let space = alice.space().await;
+
+  server.lose_create_answers(1);
+  let channel = alice.client.create_channel(space, "lossy").await.unwrap();
+
+  assert_eq!(server.channel_count("lossy"), 1);
+  assert!(alice.client.has_group(channel).unwrap());
+}
+
+/// A queued create action that is retried (a lost answer, a second click) carries the key it was
+/// made with, so the server creates the space or channel once.
+#[tokio::test]
+async fn a_retried_create_makes_one_space_and_one_channel() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let ui = backend_of(&alice);
+  let space_key = Some(IdempotencyKey::from_bytes([1; 16]));
+  let channel_key = Some(IdempotencyKey::from_bytes([2; 16]));
+  let space = alice.space().await;
+
+  for _ in 0..2 {
+    ui.create_space(NewSpace {
+      maybe_idempotency_key: space_key,
+      name: "Project C".into(),
+      maybe_description: None,
+      is_open: true,
+    });
+    ui.create_channel_with(NewChannel {
+      maybe_idempotency_key: channel_key,
+      space,
+      name: "retried".into(),
+      is_private: false,
+      maybe_topic: None,
+      maybe_category: None,
+      maybe_history: None,
+    });
+    run_commands(&mut alice, &ui).await;
+  }
+
+  let spaces = ui.spaces().into_iter().filter(|s| s.name == "Project C").count();
+  let channels = ui
+    .space_conversations(space)
+    .into_iter()
+    .filter(|c| c.name == "retried")
+    .count();
+  assert_eq!((spaces, channels), (1, 1));
+}
+
 #[tokio::test]
 async fn a_moved_channel_keeps_its_group_and_is_announced() {
   let server = FakeServer::new();
@@ -119,6 +173,7 @@ async fn a_moved_channel_keeps_its_group_and_is_announced() {
   settle_and_flush(&mut [&mut alice, &mut bob]).await;
 
   alice_ui.create_space(NewSpace {
+    maybe_idempotency_key: None,
     name: "Project B".into(),
     maybe_description: None,
     is_open: true,
@@ -242,6 +297,7 @@ async fn the_people_of_my_spaces_are_known_without_a_shared_conversation() {
 async fn create_public_channel(peer: &mut Peer, space: SpaceId, name: &str) -> ConversationId {
   let ui = backend_of(peer);
   ui.create_channel_with(NewChannel {
+    maybe_idempotency_key: None,
     space,
     name: name.into(),
     is_private: false,

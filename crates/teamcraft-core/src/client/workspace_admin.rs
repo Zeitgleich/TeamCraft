@@ -5,12 +5,13 @@ use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
   CategoryId, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility,
   CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest, CreateSpaceRequest, HistoryPolicy,
-  ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole,
-  UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
+  IdempotencyKey, ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, SpaceId,
+  SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
 };
 
 use super::Client;
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
+use crate::client::groups::CREATE_ATTEMPTS;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
@@ -24,11 +25,22 @@ pub struct ChannelOptions {
   pub maybe_topic: Option<String>,
   pub maybe_category: Option<CategoryId>,
   pub maybe_history: Option<HistoryPolicy>,
+  /// Makes a retry of the creation return the same channel.
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn create_space(&mut self, request: &CreateSpaceRequest) -> Result<SpaceResponse, CoreError> {
-    let space = self.api.create_space(request).await?;
+    let mut attempt = 1;
+    // Same retry as for channels: the request keeps its idempotency key.
+    let space = loop {
+      match self.api.create_space(request).await {
+        Err(ApiError::Network(_)) if request.maybe_idempotency_key.is_some() && attempt < CREATE_ATTEMPTS => {
+          attempt += 1;
+        },
+        other => break other?,
+      }
+    };
     self.refresh_spaces().await?;
     Ok(space)
   }
@@ -61,6 +73,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_topic: options.maybe_topic,
       maybe_description: None,
       is_integration: false,
+      maybe_idempotency_key: options.maybe_idempotency_key,
     };
     self.create_channel_from(space, &request).await
   }

@@ -13,13 +13,14 @@ use teamcraft_crypto::mls::{
 };
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, ListMlsMessagesQuery, MlsMessageKind,
-  MlsMessageResponse, MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
+  CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey, ListMlsMessagesQuery,
+  MlsMessageKind, MlsMessageResponse, MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId,
+  UserId,
 };
 
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
@@ -43,6 +44,8 @@ pub(crate) const REJOIN_REQUEST_MAGIC: &[u8] = b"TCRJ";
 /// Rounds of "catch up, send the lost commit again" before [`Client::sync_mls`] leaves a commit
 /// pending for the next sync.
 const PENDING_COMMIT_ROUNDS: u32 = 3;
+/// Tries of a create request whose answer was lost; all carry the same idempotency key.
+pub(crate) const CREATE_ATTEMPTS: u32 = 3;
 
 /// This device's commit, merged: what it did and when the server stored it.
 struct OwnCommit {
@@ -92,6 +95,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_topic: None,
       maybe_description: None,
       is_integration: false,
+      maybe_idempotency_key: Some(IdempotencyKey::random()),
     };
     self.create_channel_from(space, &request).await
   }
@@ -101,14 +105,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     space: SpaceId,
     request: &CreateChannelRequest,
   ) -> Result<ConversationId, CoreError> {
-    let conversation = self.api.create_channel(space, request).await?;
+    let mut attempt = 1;
+    // A lost answer is retried with the same request, hence the same idempotency key: the server
+    // returns the channel it already made instead of a second one.
+    let conversation = loop {
+      match self.api.create_channel(space, request).await {
+        Err(ApiError::Network(_)) if request.maybe_idempotency_key.is_some() && attempt < CREATE_ATTEMPTS => {
+          attempt += 1;
+        },
+        other => break other?,
+      }
+    };
     records::put_json(
       &self.store,
       Table::Conversations,
       &conversation.id.to_string(),
       &conversation,
     )?;
-    self.found_group(conversation.id)?;
+    // A repeated create (idempotency key) returns the channel we already founded.
+    if !self.has_group(conversation.id)? {
+      self.found_group(conversation.id)?;
+    }
     Ok(conversation.id)
   }
 

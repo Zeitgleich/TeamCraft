@@ -18,7 +18,7 @@ mod role;
 mod wire_enum;
 
 pub use api::*;
-pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, UnixMillis};
+pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, IdempotencyKey, UnixMillis};
 pub use call_media::{
   AudioCodec, MAX_SIMULCAST_LAYERS, MediaCapabilities, TransportFeedback, VideoCodec, VideoLayerInfo,
   VideoTrack, VideoTrackKind,

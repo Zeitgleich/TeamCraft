@@ -351,6 +351,7 @@ fn enroll_options(device_name: &str) -> EnrollmentOptions {
 async fn create_open_space(owner_token: &str, member_token: &str) -> SpaceId {
   let http = reqwest::Client::new();
   let request = CreateSpaceRequest {
+    maybe_idempotency_key: None,
     name: format!("Integration {}", SystemClock.now_ms()),
     maybe_icon: None,
     maybe_color: None,

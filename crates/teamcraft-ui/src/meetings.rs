@@ -7,9 +7,10 @@ use std::rc::Rc;
 use leptos::prelude::*;
 use teamcraft_proto::{
   CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody, GuestLinkResponse,
-  JoinMeetingRequest, JoinMeetingResponse, ListLobbyResponse, ListMeetingsResponse, LobbyEntry, LobbyState,
-  LobbyStateResponse, MeetingControlAction, MeetingControlRequest, MeetingId, MeetingInvitee,
-  MeetingRecurrence, MeetingResponse, RecurrenceFrequency, RsvpStatus, SetRsvpRequest, UnixMillis,
+  IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, ListLobbyResponse, ListMeetingsResponse,
+  LobbyEntry, LobbyState, LobbyStateResponse, MeetingControlAction, MeetingControlRequest, MeetingId,
+  MeetingInvitee, MeetingRecurrence, MeetingResponse, RecurrenceFrequency, RsvpStatus, SetRsvpRequest,
+  UnixMillis,
 };
 
 use crate::auth::fetch::fetch;
@@ -83,8 +84,15 @@ impl MeetingsClient {
       .await
   }
 
-  pub async fn start_instant(&self, maybe_title: Option<String>) -> Result<MeetingResponse, MeetingError> {
-    let body = to_json(&CreateInstantMeetingRequest { maybe_title })?;
+  pub async fn start_instant(
+    &self,
+    maybe_title: Option<String>,
+    maybe_idempotency_key: Option<IdempotencyKey>,
+  ) -> Result<MeetingResponse, MeetingError> {
+    let body = to_json(&CreateInstantMeetingRequest {
+      maybe_title,
+      maybe_idempotency_key,
+    })?;
     self
       .call(ApiMethod::Post, "/api/v1/meetings/instant", Some(body))
       .await
@@ -359,6 +367,9 @@ pub struct ScheduleForm {
   /// Total number of occurrences; `None` repeats until cancelled.
   pub maybe_count: Option<u32>,
   pub has_lobby: bool,
+  /// Made when the dialog opens and kept for every submit of it, so a retry after a lost answer
+  /// (or a second click) schedules the meeting only once.
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 impl ScheduleForm {
@@ -374,6 +385,7 @@ impl ScheduleForm {
       interval: 1,
       maybe_count: None,
       has_lobby: true,
+      maybe_idempotency_key: Some(IdempotencyKey::random()),
     }
   }
 
@@ -419,6 +431,7 @@ impl ScheduleForm {
         maybe_count: self.maybe_count.filter(|count| *count > 0),
       }),
       has_lobby: self.has_lobby,
+      maybe_idempotency_key: self.maybe_idempotency_key,
     })
   }
 }

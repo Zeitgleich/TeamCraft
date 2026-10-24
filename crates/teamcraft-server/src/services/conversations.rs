@@ -107,7 +107,7 @@ pub async fn create_channel(
   }
 
   let id: ConversationId = state.next_id()?;
-  state
+  let created = state
     .database
     .create_channel(
       &NewConversation {
@@ -124,16 +124,20 @@ pub async fn create_channel(
         is_integration: request.is_integration,
       },
       caller.user.id,
+      request.maybe_idempotency_key.as_ref(),
     )
     .await?;
-  if request.is_integration {
-    apply_integration_defaults(state, id).await?;
+  // A retry of an earlier request: return that channel, nothing new to set up or announce.
+  if created.is_new {
+    if request.is_integration {
+      apply_integration_defaults(state, id).await?;
+    }
+    state.hub.publish(
+      [caller.user.id],
+      &GatewayEvent::ConversationUpdate { conversation_id: id },
+    );
   }
-  state.hub.publish(
-    [caller.user.id],
-    &GatewayEvent::ConversationUpdate { conversation_id: id },
-  );
-  get_conversation(state, caller, id).await
+  get_conversation(state, caller, created.id).await
 }
 
 pub async fn create_dm(

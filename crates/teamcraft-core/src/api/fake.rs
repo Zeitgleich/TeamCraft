@@ -16,7 +16,7 @@ use teamcraft_proto::{
   ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationId, ConversationKind, ConversationMemberResponse,
   ConversationResponse, ConversationVisibility, CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest,
   DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
-  GetMeResponse, HistoryPolicy, Id, IdentityKeyResponse, JoinPolicy, KeyBagResponse,
+  GetMeResponse, HistoryPolicy, Id, IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse,
   KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
   ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
   ListSpaceMembersResponse, ListSpacesResponse, MessageId, MessageResponse, MlsMessageKind,
@@ -143,6 +143,11 @@ struct State {
   relays: HashMap<String, Relay>,
   /// Relayed binary frames still to be lost on the way (a flaky connection during linking).
   relay_frames_to_lose: u32,
+  /// Like the server: a repeated idempotency key returns the first space / channel.
+  created_spaces: HashMap<(UserId, IdempotencyKey), SpaceId>,
+  created_channels: HashMap<(UserId, IdempotencyKey), ConversationId>,
+  /// Create answers still to be lost after the resource was made (a timeout).
+  create_answers_to_lose: u32,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -455,6 +460,21 @@ impl FakeServer {
     let by_ms = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
     let mut state = self.lock();
     state.clock_offset_ms = state.clock_offset_ms.saturating_add(by_ms);
+  }
+
+  /// The next `count` space / channel creations are made, but the answer never reaches the client.
+  pub fn lose_create_answers(&self, count: u32) {
+    self.lock().create_answers_to_lose = count;
+  }
+
+  /// How many channels have this name.
+  pub fn channel_count(&self, name: &str) -> usize {
+    let state = self.lock();
+    state
+      .conversations
+      .values()
+      .filter(|c| c.response.maybe_name.as_deref() == Some(name))
+      .count()
   }
 
   /// The user's next commit is stored and fanned out, but the answer to the client is lost (a
@@ -1105,6 +1125,11 @@ impl ServerApi for FakeServerApi {
     request: &CreateChannelRequest,
   ) -> Result<ConversationResponse, ApiError> {
     self.with(|state, me| {
+      if let Some(key) = request.maybe_idempotency_key
+        && let Some(existing) = state.created_channels.get(&(me, key))
+      {
+        return Ok(state.conversation(*existing)?.view(me));
+      }
       let history = request
         .maybe_history_policy
         .clone()
@@ -1120,7 +1145,14 @@ impl ServerApi for FakeServerApi {
       entry.response.visibility = request.visibility.clone();
       entry.response.maybe_topic = request.maybe_topic.clone();
       entry.response.maybe_category_id = request.maybe_category_id;
+      if let Some(key) = request.maybe_idempotency_key {
+        state.created_channels.insert((me, key), id);
+      }
       state.publish([me], &GatewayEvent::ConversationUpdate { conversation_id: id });
+      if state.create_answers_to_lose > 0 {
+        state.create_answers_to_lose -= 1;
+        return Err(ApiError::Network("fake answer lost".into()));
+      }
       Ok(state.conversation(id)?.view(me))
     })
   }
@@ -1818,8 +1850,14 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn create_space(&self, request: &CreateSpaceRequest) -> Result<SpaceResponse, ApiError> {
-    self.with(|state, _| {
+    self.with(|state, me| {
       state.default_space_entry();
+      if let Some(key) = request.maybe_idempotency_key
+        && let Some(existing) = state.created_spaces.get(&(me, key))
+        && let Some(space) = state.spaces.get(existing)
+      {
+        return Ok(space.clone());
+      }
       let id: SpaceId = state.next_id();
       let space = SpaceResponse {
         id,
@@ -1834,6 +1872,9 @@ impl ServerApi for FakeServerApi {
         maybe_my_notifications: None,
       };
       state.spaces.insert(id, space.clone());
+      if let Some(key) = request.maybe_idempotency_key {
+        state.created_spaces.insert((me, key), id);
+      }
       Ok(space)
     })
   }

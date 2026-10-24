@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 use crate::wire_enum::wire_enum;
 use crate::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, MessageId, SpaceId, UnixMillis, UserId, UserSummary,
+  HistoryPolicy, IdempotencyKey, MessageId, SpaceId, UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -88,6 +88,10 @@ pub struct CreateChannelRequest {
   /// Marks the channel as integration channel (see `ConversationResponse::is_integration`).
   #[serde(default)]
   pub is_integration: bool,
+  /// Client-generated key that makes a retry of this request return the original result instead
+  /// of creating a second one. Optional so older clients keep working.
+  #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// `PATCH /api/v1/conversations/{id}`: only present fields change; an empty string clears topic and

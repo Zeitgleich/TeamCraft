@@ -60,7 +60,7 @@ pub async fn create_space(
     validate_text(text, "space field", limits.max_text_length)?;
   }
   let id: SpaceId = state.next_id()?;
-  state
+  let created = state
     .database
     .create_space(&NewSpace {
       id,
@@ -70,17 +70,21 @@ pub async fn create_space(
       maybe_description: request.maybe_description.as_deref(),
       join_policy: request.join_policy,
       creator: caller.user.id,
+      maybe_idempotency_key: request.maybe_idempotency_key,
     })
     .await?;
-  audit::record(
-    state,
-    Some(caller.user.id),
-    "space_created",
-    Some(AuditTarget::new("space", id)),
-    &json!({}),
-  )
-  .await?;
-  let access = load_space(state, caller, id).await?;
+  // A retry of an earlier request: return that space, do not audit a second creation.
+  if created.is_new {
+    audit::record(
+      state,
+      Some(caller.user.id),
+      "space_created",
+      Some(AuditTarget::new("space", id)),
+      &json!({}),
+    )
+    .await?;
+  }
+  let access = load_space(state, caller, created.id).await?;
   Ok(space_response(&access.view))
 }
 
