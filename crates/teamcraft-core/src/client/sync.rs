@@ -1,5 +1,7 @@
 //! Full state sync over REST, key package top-up and key bag upload.
 
+use std::collections::BTreeSet;
+
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListThreadsQuery, SpaceId,
@@ -12,6 +14,9 @@ use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
 use crate::store::{LocalStore, Table};
 use crate::{read_state, records};
+
+/// Conversations an earlier sync skipped, retried by the upkeep and the next full sync.
+const NEEDS_RESYNC_KEY: &str = "needs_resync";
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the store up to date after a fresh gateway session (or at start): the last steps of an
@@ -33,6 +38,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter(|id| !conversations.iter().any(|conversation| conversation.id == **id))
     {
       self.store.delete(Table::Conversations, &stale.to_string())?;
+      self.unmark_resync(*stale)?;
     }
     // The whole list first, members after: a UI reading the store meanwhile shows every
     // conversation at once instead of one per member request (issue #247).
@@ -47,19 +53,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Direct and group messages are named after their members: theirs first, so their names
     // follow right after the list.
     for conversation in members_order(&conversations) {
-      self.refresh_members(conversation).await?;
+      let result = self.refresh_members(conversation).await;
+      self.isolate(conversation, result)?;
     }
     self.sync_welcomes().await?;
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
     self.join_missing_groups().await?;
     for conversation in &conversations {
-      if self.has_group(conversation.id)? {
-        self.sync_mls(conversation.id).await?;
+      let result = self.sync_conversation_content(conversation.id).await;
+      if self.isolate(conversation.id, result)? {
+        self.unmark_resync(conversation.id)?;
       }
-      self.catch_up_messages(conversation.id).await?;
-      self.retry_undecrypted(conversation.id)?;
-      // Senders this device has no verified key for yet (it isn't in the group, or just joined).
-      self.learn_sender_keys(conversation.id).await?;
     }
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;
@@ -67,9 +71,77 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.recheck_waiting_additions().await?;
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
+    // Read positions, acknowledgements and pins taken offline (issue #159).
+    self.flush_pending_actions().await?;
+    // Presence changed unseen while the device was away: refreshed a batch per upkeep tick.
+    self.mark_known_presence_stale()?;
     self.top_up_key_packages().await?;
     // Also picks up saved items and drafts other devices changed while this one was away.
     self.sync_account_data().await
+  }
+
+  /// Retries the conversations an earlier sync had to skip (see [`Self::isolate`]); the upkeep
+  /// calls this with the account sync. Returns how many caught up.
+  pub async fn resync_marked_conversations(&mut self) -> Result<usize, CoreError> {
+    let marked = self.conversations_to_resync()?;
+    let mut caught_up = 0;
+    for conversation in marked {
+      let result = async {
+        self.refresh_members(conversation).await?;
+        self.sync_conversation_content(conversation).await
+      }
+      .await;
+      if self.isolate(conversation, result)? {
+        self.unmark_resync(conversation)?;
+        caught_up += 1;
+      }
+    }
+    Ok(caught_up)
+  }
+
+  /// The conversations an earlier sync skipped.
+  pub fn conversations_to_resync(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
+    Ok(records::get_json(&self.store, Table::SyncState, NEEDS_RESYNC_KEY)?.unwrap_or_default())
+  }
+
+  /// One conversation's part of the sync: its MLS backlog, new messages, messages waiting for keys
+  /// and the senders' keys.
+  async fn sync_conversation_content(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.has_group(conversation)? {
+      self.sync_mls(conversation).await?;
+    }
+    self.catch_up_messages(conversation).await?;
+    self.retry_undecrypted(conversation)?;
+    // Senders this device has no verified key for yet (it isn't in the group, or just joined).
+    self.learn_sender_keys(conversation).await
+  }
+
+  /// Keeps one conversation's failure from failing the whole sync (issue #159): a 403 or 404 right
+  /// after a removal, or a group in a bad state, marks the conversation for another try and the
+  /// sync goes on with the others. Being offline, server trouble, an expired token or a broken
+  /// store would fail every other conversation too: that stops the sync. Returns whether the
+  /// conversation went through.
+  fn isolate(&self, conversation: ConversationId, result: Result<(), CoreError>) -> Result<bool, CoreError> {
+    match result {
+      Ok(()) => Ok(true),
+      Err(error) if error.is_retry_later() || matches!(error, CoreError::Store(_)) => Err(error),
+      Err(error) => {
+        tracing::warn!(%error, conversation_id = %conversation, "conversation skipped by the sync; retried later");
+        let mut marked = self.conversations_to_resync()?;
+        if marked.insert(conversation) {
+          records::put_json(&self.store, Table::SyncState, NEEDS_RESYNC_KEY, &marked)?;
+        }
+        Ok(false)
+      },
+    }
+  }
+
+  fn unmark_resync(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    let mut marked = self.conversations_to_resync()?;
+    if marked.remove(&conversation) {
+      records::put_json(&self.store, Table::SyncState, NEEDS_RESYNC_KEY, &marked)?;
+    }
+    Ok(())
   }
 
   /// Followed threads and unread counts (after `thread_update` and on fresh sessions). The threads'

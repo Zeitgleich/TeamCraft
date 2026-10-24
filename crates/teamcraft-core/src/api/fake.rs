@@ -99,6 +99,10 @@ pub struct FakeGateway {
 struct State {
   next_id: i64,
   directory_searches: u64,
+  /// Conversations whose history answers 403 (a removal the list doesn't show yet, a policy).
+  forbidden_histories: HashSet<ConversationId>,
+  /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
+  read_position_writes: u64,
   users: BTreeMap<UserId, UserSummary>,
   devices: BTreeMap<DeviceId, Device>,
   identity_keys: HashMap<UserId, IdentityKeyResponse>,
@@ -360,6 +364,30 @@ impl FakeServer {
   /// How many directory searches (`GET /users?query=`) arrived so far.
   pub fn directory_search_count(&self) -> u64 {
     self.lock().directory_searches
+  }
+
+  /// Makes the conversation's history answer 403 (or work again).
+  pub fn forbid_history(&self, conversation: ConversationId, is_forbidden: bool) {
+    let mut state = self.lock();
+    if is_forbidden {
+      state.forbidden_histories.insert(conversation);
+    } else {
+      state.forbidden_histories.remove(&conversation);
+    }
+  }
+
+  /// How many read positions were written so far (requests, not changes).
+  pub fn read_position_writes(&self) -> u64 {
+    self.lock().read_position_writes
+  }
+
+  /// How far the user has read the conversation, as the server stores it.
+  pub fn read_position(&self, conversation: ConversationId, user: UserId) -> Option<MessageId> {
+    self
+      .lock()
+      .conversations
+      .get(&conversation)
+      .and_then(|entry| entry.read_positions.get(&user).copied())
   }
 
   /// How many gateway connections were opened so far.
@@ -1467,10 +1495,14 @@ impl ServerApi for FakeServerApi {
     request: &SetReadPositionRequest,
   ) -> Result<(), ApiError> {
     self.with(|state, me| {
-      state
+      state.read_position_writes += 1;
+      // Like the server's `GREATEST`: a late or repeated write never moves the position back.
+      let position = state
         .member_conversation_mut(conversation, me)?
         .read_positions
-        .insert(me, request.message_id);
+        .entry(me)
+        .or_insert(request.message_id);
+      *position = (*position).max(request.message_id);
       Ok(())
     })
   }
@@ -1629,6 +1661,9 @@ impl ServerApi for FakeServerApi {
         .maybe_limit
         .map_or(PAGE_SIZE, |limit| limit as usize)
         .clamp(1, PAGE_SIZE);
+      if state.forbidden_histories.contains(&conversation) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "history not allowed"));
+      }
       let messages = &state.member_conversation(conversation, me)?.messages;
       let selected: Vec<MessageResponse> = match (query.maybe_before, query.maybe_after) {
         (_, Some(after)) => messages

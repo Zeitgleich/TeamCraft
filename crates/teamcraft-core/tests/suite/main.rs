@@ -25,6 +25,7 @@ mod member_devices;
 mod member_removal;
 mod messages;
 mod mls_recovery;
+mod offline_actions;
 mod org_backgrounds;
 mod org_recovery;
 mod people_directory;
