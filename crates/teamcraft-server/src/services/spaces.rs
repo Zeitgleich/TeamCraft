@@ -558,7 +558,11 @@ async fn announce_member(state: &AppState, space: SpaceId, user: UserId) -> Resu
   Ok(())
 }
 
-async fn notify_space(state: &AppState, space: SpaceId, event: &GatewayEvent) -> Result<(), ApiError> {
+pub(super) async fn notify_space(
+  state: &AppState,
+  space: SpaceId,
+  event: &GatewayEvent,
+) -> Result<(), ApiError> {
   let members = state.database.list_space_members(space).await?;
   state.hub.publish(members.iter().map(|m| m.user.id), event);
   Ok(())

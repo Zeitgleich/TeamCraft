@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,\n                s.archived_at IS NOT NULL AS \"is_archived!\", m.role AS \"role?\",\n                m.notification_level AS \"notification_level?\", m.muted_until AS \"muted_until?\"\n         FROM spaces s\n         LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1\n              AND (m.expires_at IS NULL OR m.expires_at > now())\n         WHERE ($2::bigint IS NULL OR s.id = $2)\n           AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL\n                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))\n         ORDER BY s.name, s.id",
+  "query": "SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,\n                s.image_key, s.image_version, s.image_size_bytes,\n                s.archived_at IS NOT NULL AS \"is_archived!\", m.role AS \"role?\",\n                m.notification_level AS \"notification_level?\", m.muted_until AS \"muted_until?\"\n         FROM spaces s\n         LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1\n              AND (m.expires_at IS NULL OR m.expires_at > now())\n         WHERE ($2::bigint IS NULL OR s.id = $2)\n           AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL\n                OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))\n         ORDER BY s.name, s.id",
   "describe": {
     "columns": [
       {
@@ -82,12 +82,45 @@
       },
       {
         "ordinal": 7,
+        "name": "image_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "image_key"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "image_version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "image_version"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "image_size_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "image_size_bytes"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "is_archived!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 8,
+        "ordinal": 11,
         "name": "role?",
         "type_info": "Text",
         "origin": {
@@ -98,7 +131,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 12,
         "name": "notification_level?",
         "type_info": "Text",
         "origin": {
@@ -109,7 +142,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 13,
         "name": "muted_until?",
         "type_info": "Timestamptz",
         "origin": {
@@ -136,11 +169,14 @@
       true,
       false,
       true,
+      true,
+      true,
+      true,
       null,
       false,
       true,
       true
     ]
   },
-  "hash": "e24f91e8414d72ba65161eea333480edaff81fbbd4a62ce3a83894c41fc39976"
+  "hash": "038a30bc13a7c1d8874f46019a0fb86a62fc48b7a84b003626fb8e3e2729b517"
 }

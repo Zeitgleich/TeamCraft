@@ -10414,6 +10414,7 @@ dependencies = [
  "figment",
  "futures-util",
  "httpdate",
+ "image",
  "jsonwebtoken",
  "lettre",
  "p256",

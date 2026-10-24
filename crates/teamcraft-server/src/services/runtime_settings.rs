@@ -206,6 +206,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       let limits = &mut settings.limits;
       limits.max_attachment_bytes_per_user = values.max_attachment_bytes_per_user;
       limits.max_avatar_bytes = values.max_avatar_bytes;
+      limits.max_space_image_bytes = values.max_space_image_bytes;
       limits.max_background_bytes = values.max_background_bytes;
       limits.max_backgrounds_per_user = values.max_backgrounds_per_user;
       limits.max_group_dm_participants = to_usize(values.max_group_dm_participants);
@@ -301,6 +302,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_attachment_bytes: settings.max_attachment_bytes,
       max_attachment_bytes_per_user: limits.max_attachment_bytes_per_user,
       max_avatar_bytes: limits.max_avatar_bytes,
+      max_space_image_bytes: limits.max_space_image_bytes,
       max_background_bytes: limits.max_background_bytes,
       max_backgrounds_per_user: limits.max_backgrounds_per_user,
       max_group_dm_participants: to_u32(limits.max_group_dm_participants),
@@ -405,6 +407,12 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         1 << 50,
       )?;
       check_range("max_avatar_bytes", values.max_avatar_bytes, 1024, 64 << 20)?;
+      check_range(
+        "max_space_image_bytes",
+        values.max_space_image_bytes,
+        64 * 1024,
+        16 << 20,
+      )?;
       check_range(
         "max_background_bytes",
         values.max_background_bytes,

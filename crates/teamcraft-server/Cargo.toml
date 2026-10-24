@@ -32,6 +32,9 @@ chrono.workspace = true
 axum.workspace = true
 figment.workspace = true
 httpdate.workspace = true
+# Space pictures are decoded and re-encoded as PNG before they are stored (same version and pure
+# Rust decoders as teamcraft-core's thumbnails, already in the tree).
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "webp"] }
 jsonwebtoken.workspace = true
 lettre.workspace = true
 rand_core.workspace = true

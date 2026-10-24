@@ -334,6 +334,7 @@ mod tests {
       maybe_icon: None,
       maybe_color: None,
       maybe_description: None,
+      maybe_image: None,
       join_policy: teamcraft_proto::JoinPolicy::Open,
       is_archived: false,
       maybe_brand_id: None,

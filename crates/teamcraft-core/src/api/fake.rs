@@ -2020,6 +2020,7 @@ impl ServerApi for FakeServerApi {
         maybe_icon: request.maybe_icon.clone(),
         maybe_color: request.maybe_color.clone(),
         maybe_description: request.maybe_description.clone(),
+        maybe_image: None,
         join_policy: request.join_policy.clone(),
         is_archived: false,
         maybe_brand_id: None,
@@ -2050,6 +2051,9 @@ impl ServerApi for FakeServerApi {
       }
       if let Some(description) = &request.maybe_description {
         entry.maybe_description = (!description.is_empty()).then(|| description.clone());
+      }
+      if let Some(color) = &request.maybe_color {
+        entry.maybe_color = (!color.is_empty()).then(|| color.clone());
       }
       if let Some(policy) = &request.maybe_join_policy {
         entry.join_policy = policy.clone();
@@ -3054,6 +3058,7 @@ impl State {
       maybe_icon: None,
       maybe_color: None,
       maybe_description: None,
+      maybe_image: None,
       join_policy: JoinPolicy::Open,
       is_archived: false,
       maybe_brand_id: None,

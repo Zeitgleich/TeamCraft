@@ -69,6 +69,13 @@ impl ApiError {
     }
   }
 
+  pub fn space_image_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::SpaceImageNotFound,
+      what: "space image",
+    }
+  }
+
   pub fn conversation_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::ChannelNotFound,

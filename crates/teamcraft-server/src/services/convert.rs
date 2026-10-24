@@ -8,8 +8,8 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   Base64Bytes, CategoryResponse, ConversationId, ConversationResponse, DeviceResponse, DirectoryPolicy,
-  DisplayNameFormat, InviteResponse, MessageResponse, MyMembership, PushProvider, SpaceNotificationSettings,
-  SpaceResponse, UnixMillis, UserSummary,
+  DisplayNameFormat, InviteResponse, MessageResponse, MyMembership, PushProvider, SpaceImage,
+  SpaceNotificationSettings, SpaceResponse, UnixMillis, UserSummary,
 };
 use time::OffsetDateTime;
 
@@ -89,6 +89,10 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
     maybe_icon: space.maybe_icon.clone(),
     maybe_color: space.maybe_color.clone(),
     maybe_description: space.maybe_description.clone(),
+    maybe_image: space.maybe_image.as_ref().map(|image| SpaceImage {
+      version: image.version.clone(),
+      size_bytes: image.size_bytes,
+    }),
     join_policy: space.join_policy.clone(),
     is_archived: space.is_archived,
     maybe_brand_id: space.maybe_brand_id.clone(),

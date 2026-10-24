@@ -21,6 +21,15 @@ pub struct Space {
   pub is_archived: bool,
   /// Optional brand tag: a default theming hint (docs/branding.md §7).
   pub maybe_brand_id: Option<String>,
+  pub maybe_image: Option<StoredSpaceImage>,
+}
+
+/// The space's picture: where it is in the blob store, and the version clients cache it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSpaceImage {
+  pub key: String,
+  pub version: String,
+  pub size_bytes: u64,
 }
 
 /// Which spaces to list for a viewer.
@@ -184,6 +193,7 @@ impl Database {
   ) -> Result<Vec<SpaceView>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,
+                s.image_key, s.image_version, s.image_size_bytes,
                 s.archived_at IS NOT NULL AS "is_archived!", m.role AS "role?",
                 m.notification_level AS "notification_level?", m.muted_until AS "muted_until?"
          FROM spaces s
@@ -213,6 +223,7 @@ impl Database {
             join_policy: JoinPolicy::from(row.join_policy),
             is_archived: row.is_archived,
             maybe_brand_id: row.brand_id,
+            maybe_image: stored_image(row.image_key, row.image_version, row.image_size_bytes)?,
           },
           maybe_role: row.role.map(SpaceRole::from),
           notifications: StoredSpaceNotifications {
@@ -248,6 +259,38 @@ impl Database {
     .execute(self.pool())
     .await?;
     Ok(())
+  }
+
+  /// Makes `image` the space's picture (`None` removes it). Returns the blob key of the picture it
+  /// replaced, which nothing refers to any more; `Ok(None)` also when the space doesn't exist.
+  pub async fn set_space_image(
+    &self,
+    space: SpaceId,
+    maybe_image: Option<&StoredSpaceImage>,
+  ) -> Result<Option<String>, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let maybe_previous = sqlx::query_scalar!(
+      "SELECT image_key FROM spaces WHERE id = $1 FOR UPDATE",
+      to_db(space),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    let maybe_size = maybe_image
+      .map(|image| i64::try_from(image.size_bytes))
+      .transpose()
+      .map_err(|_| DbError::InvalidStoredValue("space image size".into()))?;
+    sqlx::query!(
+      "UPDATE spaces SET image_key = $2, image_version = $3, image_size_bytes = $4 WHERE id = $1",
+      to_db(space),
+      maybe_image.map(|image| image.key.as_str()),
+      maybe_image.map(|image| image.version.as_str()),
+      maybe_size,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(maybe_previous.filter(|previous| maybe_image.is_none_or(|image| image.key != *previous)))
   }
 
   /// The user's role in the space, `None` if not a member (or the guest membership expired).
@@ -490,5 +533,21 @@ impl Database {
       .execute(self.pool())
       .await?;
     Ok(())
+  }
+}
+
+/// The three image columns, set together (a table constraint).
+fn stored_image(
+  maybe_key: Option<String>,
+  maybe_version: Option<String>,
+  maybe_size: Option<i64>,
+) -> Result<Option<StoredSpaceImage>, DbError> {
+  match (maybe_key, maybe_version, maybe_size) {
+    (Some(key), Some(version), Some(size)) => Ok(Some(StoredSpaceImage {
+      key,
+      version,
+      size_bytes: u64::try_from(size).map_err(|_| DbError::InvalidStoredValue("space image size".into()))?,
+    })),
+    _ => Ok(None),
   }
 }

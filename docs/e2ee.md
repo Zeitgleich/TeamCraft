@@ -274,6 +274,13 @@ flag. Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
 
+Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
+like the identity provider does. Space names, descriptions, colors and **pictures**; channel names
+and topics; people's profiles and avatars. A space picture is uploaded to the server itself, which
+refuses SVG and re-encodes PNG, JPEG and WebP uploads as PNG before storing them, and serves it only
+to people who may see the space. Anything put into these fields is visible to the server operator;
+content that must stay confidential belongs in messages.
+
 MLS: the commits, welcomes and application messages of each group (opaque), and the newest MLS
 `GroupInfo` per group (§4.6, "A further device joins on its own"): the group's public ratchet tree,
 i.e. its member devices' certificates, which the server knows anyway, and the epoch's external public
