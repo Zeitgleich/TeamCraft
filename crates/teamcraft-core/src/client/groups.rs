@@ -101,8 +101,9 @@ struct DmSetupRecord {
 /// Where the setup of a DM this device created stands, for the UI (#278).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DmSetupStatus {
-  /// Waiting for the welcome into the group the other side founded.
-  WaitingForWelcome,
+  /// Waiting for the welcome into the group the other side founded; shown as failed after
+  /// `remaining` (the UI plans one timer for it).
+  WaitingForWelcome { remaining: std::time::Duration },
   /// No welcome within `dm_welcome_timeout`: the user can retry ([`Client::retry_dm_setup`]).
   Failed,
 }
@@ -118,10 +119,11 @@ pub fn dm_setup_status(
     records::get_json(store, Table::SyncState, &dm_setup_key(conversation))?;
   Ok(maybe_setup.and_then(|setup| {
     let deadline = setup.maybe_welcome_deadline_ms?;
-    Some(if now_ms >= deadline {
-      DmSetupStatus::Failed
-    } else {
-      DmSetupStatus::WaitingForWelcome
+    Some(match u64::try_from(deadline.saturating_sub(now_ms)) {
+      Ok(remaining_ms) if remaining_ms > 0 => DmSetupStatus::WaitingForWelcome {
+        remaining: std::time::Duration::from_millis(remaining_ms),
+      },
+      _ => DmSetupStatus::Failed,
     })
   }))
 }

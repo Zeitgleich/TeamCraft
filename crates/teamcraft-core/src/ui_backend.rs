@@ -1104,7 +1104,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       conversation,
       self.now_ms(),
     )) {
-      Some(crate::client::DmSetupStatus::WaitingForWelcome) => issues.push(MembershipIssue::EncryptionSetup),
+      Some(crate::client::DmSetupStatus::WaitingForWelcome { remaining }) => {
+        issues.push(MembershipIssue::EncryptionSetup {
+          remaining_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+        });
+      },
       Some(crate::client::DmSetupStatus::Failed) => issues.push(MembershipIssue::EncryptionSetupFailed),
       None => {},
     }

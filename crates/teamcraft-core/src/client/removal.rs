@@ -14,8 +14,8 @@ use teamcraft_proto::{Base64Bytes, ConversationId, DeviceId, MlsMessageKind, Pos
 use super::Client;
 use super::groups::{ADMIN_CHANGE_MAGIC, ChangeSource};
 use super::workspace::{
-  PendingAnnouncement, PendingChange, PendingOutcome, RemovalState, RemovalStep, RevocationStep,
-  current_epoch_of,
+  PendingAnnouncement, PendingChange, PendingOutcome, REVOCATION_CHECK_KEY_PREFIX, RemovalState, RemovalStep,
+  RevocationStep, current_epoch_of,
 };
 use crate::api::ServerApi;
 use crate::convert;
@@ -593,16 +593,40 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// nothing: after `revocation_check_delay` this device reads the user's signed device list and,
   /// only if that names the device revoked, finishes what the revoking device may not have, its
   /// removal from every group they share (#232, e2ee.md §3). Nothing to check when this device is
-  /// the one revoking it.
+  /// the one revoking it, for a device it doesn't know (in no shared group and not in the last
+  /// verified list: the server may make IDs up), for one checked already, or beyond
+  /// `max_pending_revocation_checks`.
   pub(crate) fn queue_revocation_check(&mut self, device: DeviceId) -> Result<(), CoreError> {
+    let check_key = PendingChange::revocation_check_key(device);
     let is_own_revocation = self
       .stored_pending(&PendingChange::revocation_key(device))?
       .is_some();
-    if device == self.account.device_id || is_own_revocation {
+    if device == self.account.device_id || is_own_revocation || self.stored_pending(&check_key)?.is_some() {
       return Ok(());
     }
+    let is_in_shared_group = self.shares_group_with(device)?;
+    let me = self.account.user_id;
+    let maybe_list = self.stored_device_list(me, &self.account.identity_public_key())?;
+    let crypto_device = convert::device(device);
+    let is_revoked_in_list = maybe_list
+      .as_ref()
+      .is_some_and(|list| list.is_revoked(crypto_device));
     // Finished already (by this device, or the list it stored names it and no group has it).
-    if self.is_revoked_in_stored_list(device)? && !self.shares_group_with(device)? {
+    if is_revoked_in_list && !is_in_shared_group {
+      return Ok(());
+    }
+    let is_listed = maybe_list.as_ref().is_some_and(|list| {
+      list
+        .devices()
+        .iter()
+        .any(|entry| entry.device_id == crypto_device)
+    });
+    if !is_in_shared_group && !is_listed {
+      tracing::debug!(device_id = %device, "the server reported an unknown device revoked; ignored");
+      return Ok(());
+    }
+    if self.pending_revocation_checks()? >= self.settings.max_pending_revocation_checks {
+      tracing::warn!(device_id = %device, "too many revocation checks waiting; this one is not queued");
       return Ok(());
     }
     let delay_ms = millis(self.settings.revocation_check_delay);
@@ -611,6 +635,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       not_before_ms: self.now_ms().saturating_add(delay_ms),
       attempts: 0,
     })
+  }
+
+  /// How many [`PendingChange::RevocationCheck`]s wait in the queue.
+  fn pending_revocation_checks(&self) -> Result<usize, CoreError> {
+    let pending = self.store.list(Table::PendingChanges)?;
+    Ok(
+      pending
+        .iter()
+        .filter(|(key, _)| key.starts_with(REVOCATION_CHECK_KEY_PREFIX))
+        .count(),
+    )
   }
 
   /// Runs a [`PendingChange::RevocationCheck`] that is due: finishes the revocation if the signed

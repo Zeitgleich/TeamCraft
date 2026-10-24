@@ -25,6 +25,8 @@ use crate::workspace::{
 };
 
 pub(crate) const WORKSPACE_KEY: &str = "state";
+/// Where [`PendingChange::RevocationCheck`]s wait in the pending queue, before the device ID.
+pub(crate) const REVOCATION_CHECK_KEY_PREFIX: &str = "revocation_check/";
 
 /// A membership change waiting to be committed by this device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,7 +236,7 @@ impl PendingChange {
 
   /// Where the check of a revocation the server reported waits ([`PendingChange::RevocationCheck`]).
   pub(crate) fn revocation_check_key(device: DeviceId) -> String {
-    format!("revocation_check/{device}")
+    format!("{REVOCATION_CHECK_KEY_PREFIX}{device}")
   }
 }
 

@@ -8,7 +8,10 @@
 //!
 //! The keyring can't be listed, so the old issuer is guessed: the environment variable the old
 //! builds read, their built-in default, and the issuer of every server the user entered since
-//! (most move on to the same server).
+//! (most move on to the same server). Only old refresh tokens are looked up under all of them: their
+//! entry name can't be one of the new layout. Old database keys share their keyring service with
+//! the new ones (`<server>|<user>`), so they are deleted only under the old builds' own issuer, and
+//! never under a name a known server's current key has (an identity provider at a server's root).
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -55,6 +58,13 @@ pub struct HttpRevoker {
   http: reqwest::Client,
 }
 
+/// Which names of old database keys may be deleted: only those under the old builds' issuer, and
+/// none that a known server's current key has (`<server>|<user>`, commands.rs).
+struct DatabaseKeyNames<'a> {
+  maybe_issuer: Option<&'a str>,
+  profiles: &'a [ServerProfile],
+}
+
 /// What earlier runs covered: the issuers whose old entries are gone, and the users whose old
 /// stores were found (their database keys are named by issuer, which may only become known when
 /// the user enters a server of that provider later).
@@ -75,12 +85,26 @@ pub async fn clean_up_once<S: TokenStore>(
   keys: &impl LegacyDatabaseKeys,
   revoker: &impl LegacyRevoker,
 ) {
+  clean_up_once_for(environment_provider(), base_dir, profiles, tokens, keys, revoker).await;
+}
+
+/// [`clean_up_once`] with the old builds' provider given, so tests don't depend on the process
+/// environment.
+async fn clean_up_once_for<S: TokenStore>(
+  environment: LegacyProvider,
+  base_dir: &Path,
+  profiles: &[ServerProfile],
+  tokens: &S,
+  keys: &impl LegacyDatabaseKeys,
+  revoker: &impl LegacyRevoker,
+) {
+  let maybe_key_issuer = environment.maybe_issuer.clone();
   let record_path = base_dir.join(RECORD_FILE);
   let mut record: CleanupRecord = std::fs::read(&record_path)
     .ok()
     .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     .unwrap_or_default();
-  let providers: Vec<LegacyProvider> = candidate_providers(environment_provider(), profiles)
+  let providers: Vec<LegacyProvider> = candidate_providers(environment, profiles)
     .into_iter()
     .filter(|provider| {
       provider
@@ -99,7 +123,11 @@ pub async fn clean_up_once<S: TokenStore>(
       record.users.push(*user);
     }
   }
-  match clean_up(&providers, &record, &stores, tokens, keys, revoker).await {
+  let key_names = DatabaseKeyNames {
+    maybe_issuer: maybe_key_issuer.as_deref(),
+    profiles,
+  };
+  match clean_up(&providers, &key_names, &record, &stores, tokens, keys, revoker).await {
     Ok(()) => {
       record
         .issuers
@@ -119,6 +147,7 @@ pub async fn clean_up_once<S: TokenStore>(
 /// Revokes and deletes each old refresh token, deletes the old database keys and stores.
 async fn clean_up<S: TokenStore>(
   providers: &[LegacyProvider],
+  key_names: &DatabaseKeyNames<'_>,
   record: &CleanupRecord,
   stores: &[(UserId, Vec<PathBuf>)],
   tokens: &S,
@@ -138,7 +167,9 @@ async fn clean_up<S: TokenStore>(
       tokens.clear(issuer).await?;
     }
     for user in &record.users {
-      keys.delete(format!("{issuer}|{user}")).await?;
+      if let Some(account) = key_names.old_account(issuer, *user) {
+        keys.delete(account).await?;
+      }
     }
   }
   // Every key of a store is gone once each issuer ran; the store is useless without it already.
@@ -156,6 +187,26 @@ async fn clean_up<S: TokenStore>(
     tracing::info!(stores = stores.len(), "removed the stores of the old layout");
   }
   Ok(())
+}
+
+impl DatabaseKeyNames<'_> {
+  /// The old key's account name of `user` under `issuer`, or `None` when it isn't one to delete.
+  fn old_account(&self, issuer: &str, user: UserId) -> Option<String> {
+    if self.maybe_issuer != Some(issuer) {
+      return None;
+    }
+    // Some keyrings (Windows) compare names without case; a trailing slash is the same root.
+    let root = issuer.trim_end_matches('/');
+    let is_current_key = self
+      .profiles
+      .iter()
+      .any(|profile| profile.origin.as_str().eq_ignore_ascii_case(root));
+    if is_current_key {
+      tracing::info!("kept a database key whose name is a known server's");
+      return None;
+    }
+    Some(format!("{issuer}|{user}"))
+  }
 }
 
 /// The old builds' provider as their environment variables (or defaults) name it.
@@ -307,6 +358,7 @@ mod tests {
 
   const OLD_ISSUER: &str = "https://id.example.com/realms/old";
   const USER: &str = "123456789";
+  const SERVER_URL: &str = "https://chat.example.com";
 
   #[tokio::test]
   async fn the_old_token_is_revoked_and_everything_old_deleted() {
@@ -334,8 +386,16 @@ mod tests {
     let keys = FakeKeys::default();
     let revoker = FakeRevoker::default();
 
-    // The user entered a server of the same identity provider since: its issuer is a candidate.
-    clean_up_once(dir.path(), &[profile(OLD_ISSUER)], &tokens, &keys, &revoker).await;
+    // The user entered a server of the same identity provider since.
+    clean_up_once_for(
+      provider(OLD_ISSUER),
+      dir.path(),
+      &[profile(OLD_ISSUER)],
+      &tokens,
+      &keys,
+      &revoker,
+    )
+    .await;
 
     assert_eq!(
       revoker.revoked(),
@@ -374,7 +434,8 @@ mod tests {
       is_offline: true,
       ..FakeRevoker::default()
     };
-    clean_up_once(
+    clean_up_once_for(
+      provider(OLD_ISSUER),
       dir.path(),
       &[profile(OLD_ISSUER)],
       &tokens,
@@ -396,21 +457,60 @@ mod tests {
     let keys = FakeKeys::default();
     let revoker = FakeRevoker::default();
 
-    // First start: no server entered yet; the store goes, its user is remembered.
-    clean_up_once(dir.path(), &[], &tokens, &keys, &revoker).await;
+    let environment = || provider(OLD_DEFAULT_ISSUER);
+
+    // First start: no server entered yet; the store and its key under the old issuer go.
+    clean_up_once_for(environment(), dir.path(), &[], &tokens, &keys, &revoker).await;
     assert!(!core.join("123456789.db").exists());
     assert!(revoker.revoked().is_empty());
+    assert_eq!(keys.deleted(), vec![format!("{OLD_DEFAULT_ISSUER}|{USER}")]);
 
-    // The user enters a server of the old provider: its token and key go now.
-    clean_up_once(dir.path(), &[profile(OLD_ISSUER)], &tokens, &keys, &revoker).await;
+    // The user enters a server of another provider: its old token goes now, but no database key
+    // is deleted under an issuer only an entered server names.
+    let entered = [profile(OLD_ISSUER)];
+    clean_up_once_for(environment(), dir.path(), &entered, &tokens, &keys, &revoker).await;
     assert_eq!(revoker.revoked().len(), 1);
-    assert!(keys.deleted().contains(&format!("{OLD_ISSUER}|{USER}")));
+    assert!(!keys.deleted().contains(&format!("{OLD_ISSUER}|{USER}")));
 
     // Nothing new: no keyring call at all.
     let before = keys.deleted().len();
-    clean_up_once(dir.path(), &[profile(OLD_ISSUER)], &tokens, &keys, &revoker).await;
+    clean_up_once_for(environment(), dir.path(), &entered, &tokens, &keys, &revoker).await;
     assert_eq!(keys.deleted().len(), before);
     assert_eq!(revoker.revoked().len(), 1);
+  }
+
+  #[tokio::test]
+  async fn the_current_database_key_stays_when_the_issuer_is_the_server_url() {
+    // An identity provider at the server's root: the old key `<issuer>|<user>` and the current
+    // `<server_url>|<user>` (commands.rs) have the same name.
+    for issuer in [
+      SERVER_URL.to_owned(),
+      format!("{SERVER_URL}/"),
+      SERVER_URL.to_uppercase(),
+    ] {
+      let dir = TempDir::new("legacy-root-issuer");
+      let core = dir.path().join(CORE_DIR);
+      std::fs::create_dir_all(&core).unwrap();
+      std::fs::write(core.join("123456789.db"), b"x").unwrap();
+      let tokens = MemoryStore::default();
+      tokens.save(&issuer, "old-refresh").await.unwrap();
+      let keys = FakeKeys::default();
+      let revoker = FakeRevoker::default();
+
+      clean_up_once_for(
+        provider(&issuer),
+        dir.path(),
+        &[profile(&issuer)],
+        &tokens,
+        &keys,
+        &revoker,
+      )
+      .await;
+
+      assert!(keys.deleted().is_empty(), "kept for issuer {issuer}");
+      assert_eq!(revoker.revoked().len(), 1, "the old token still goes");
+      assert!(tokens.load(&issuer).await.unwrap().is_none());
+    }
   }
 
   #[test]
@@ -488,7 +588,7 @@ mod tests {
   fn profile(issuer: &str) -> ServerProfile {
     ServerProfile {
       origin: teamcraft_client_api::server_entry::ServerOrigin::parse(
-        "https://chat.example.com",
+        SERVER_URL,
         teamcraft_client_api::server_entry::HttpPolicy::LoopbackOnly,
       )
       .unwrap(),

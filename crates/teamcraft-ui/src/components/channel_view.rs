@@ -12,6 +12,9 @@ use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
 use crate::state::{Overlay, SidePanel, use_app_state};
 
+/// How long after a DM's welcome wait ran out its banner is read again (the backend's clock).
+const DM_SETUP_EXPIRY_MARGIN_MS: u64 = 500;
+
 /// How far back the seen line looks for the user's own latest message.
 const SEEN_LOOKBACK: usize = 50;
 
@@ -114,7 +117,7 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
         && !backend.membership_issues(conversation).iter().any(|issue| {
           matches!(
             issue,
-            MembershipIssue::EncryptionSetup | MembershipIssue::EncryptionSetupFailed
+            MembershipIssue::EncryptionSetup { .. } | MembershipIssue::EncryptionSetupFailed
           )
         })
     })
@@ -142,7 +145,13 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
 fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conversation>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let issues = Memo::new(move |_| state.read(|backend| backend.membership_issues(conversation)));
+  // Bumped when a DM's welcome wait runs out: nothing in the backend changes then (#278).
+  let expired = RwSignal::new(0_u32);
+  let issues = Memo::new(move |_| {
+    expired.track();
+    state.read(|backend| backend.membership_issues(conversation))
+  });
+  plan_dm_setup_expiry(issues, expired);
   // Signing somebody's removal takes a second click that says what it rests on.
   let confirming = RwSignal::new(None::<UserId>);
   move || {
@@ -161,7 +170,7 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
       .filter_map(|issue| {
         let is_dm_setup = matches!(
           issue,
-          MembershipIssue::EncryptionSetup | MembershipIssue::EncryptionSetupFailed
+          MembershipIssue::EncryptionSetup { .. } | MembershipIssue::EncryptionSetupFailed
         );
         let (role, title, maybe_retry) = match issue {
           MembershipIssue::RemovalPending { user } if user == me => ("status", i18n.t("leave-pending"), None),
@@ -208,7 +217,7 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
             i18n.t_with("devices-unverified", &[("name", &name_of(user))]),
             None,
           ),
-          MembershipIssue::EncryptionSetup => ("status", i18n.t("dm-setup-pending"), None),
+          MembershipIssue::EncryptionSetup { .. } => ("status", i18n.t("dm-setup-pending"), None),
           MembershipIssue::EncryptionSetupFailed => ("alert", i18n.t("dm-setup-failed"), None),
           MembershipIssue::Unknown => return None,
         };
@@ -273,6 +282,44 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
       })
       .collect_view()
   }
+}
+
+/// One timer, while the banners are shown, for when a DM's welcome wait runs out: then `expired`
+/// changes and the issues are read again, so "setting up" turns into the failure with its retry.
+fn plan_dm_setup_expiry(issues: Memo<Vec<MembershipIssue>>, expired: RwSignal<u32>) {
+  use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
+
+  let timer = StoredValue::new(None::<TimeoutHandle>);
+  Effect::new(move |_| {
+    if let Some(running) = timer.get_value() {
+      running.clear();
+      timer.set_value(None);
+    }
+    let maybe_remaining_ms = issues.with(|issues| {
+      issues.iter().find_map(|issue| match issue {
+        MembershipIssue::EncryptionSetup { remaining_ms } => Some(*remaining_ms),
+        _ => None,
+      })
+    });
+    let Some(remaining_ms) = maybe_remaining_ms else {
+      return;
+    };
+    // A little later than the deadline, so the backend reads it as passed.
+    let wait = std::time::Duration::from_millis(remaining_ms.saturating_add(DM_SETUP_EXPIRY_MARGIN_MS));
+    let on_expiry = move || {
+      // A closed view ignores it.
+      let _ = expired.try_update(|count| *count += 1);
+    };
+    match set_timeout_with_handle(on_expiry, wait) {
+      Ok(started) => timer.set_value(Some(started)),
+      Err(_) => tracing::debug!("could not plan the end of the DM setup wait"),
+    }
+  });
+  on_cleanup(move || {
+    if let Some(running) = timer.try_get_value().flatten() {
+      running.clear();
+    }
+  });
 }
 
 /// "Remove" signs the removal afresh, "keep" drops it: the admin decides, not the server's list.

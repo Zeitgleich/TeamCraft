@@ -233,14 +233,23 @@ mod status {
     server.bump_epoch(dm, 3);
     clock.advance(retry_ms() * 2);
     alice.client.full_sync().await.unwrap();
-    assert_eq!(status(&alice, &clock, dm), Some(DmSetupStatus::WaitingForWelcome));
+    assert_eq!(
+      status(&alice, &clock, dm),
+      Some(DmSetupStatus::WaitingForWelcome {
+        remaining: std::time::Duration::from_millis(timeout_ms().unsigned_abs()),
+      }),
+      "the UI's timer fires when it fails"
+    );
 
     clock.advance(timeout_ms());
     assert_eq!(status(&alice, &clock, dm), Some(DmSetupStatus::Failed));
 
     // Retry: the wait starts anew and the members are asked for a welcome; the group of one stays.
     alice.client.retry_dm_setup(dm).await.unwrap();
-    assert_eq!(status(&alice, &clock, dm), Some(DmSetupStatus::WaitingForWelcome));
+    assert!(matches!(
+      status(&alice, &clock, dm),
+      Some(DmSetupStatus::WaitingForWelcome { .. })
+    ));
     assert!(is_waiting_for_device(&*alice.store, dm).unwrap());
     assert_eq!(alice.client.mls_epoch(dm).unwrap(), Some(0));
   }

@@ -130,6 +130,9 @@ pub struct ClientSettings {
   /// removal from the groups (the revoking device normally did by then). Later checks back off
   /// like refused removals, `removal_attempts` in all (#232).
   pub revocation_check_delay: std::time::Duration,
+  /// Revocation checks waiting at most; a server reporting more devices revoked can't make this
+  /// device fetch its device list without bound (#232).
+  pub max_pending_revocation_checks: usize,
   /// How long an admin outside the group keeps checking that its posted removal doesn't get too
   /// old to be committed (it can't see the members' commit).
   pub removal_watch: std::time::Duration,
@@ -204,6 +207,7 @@ impl Default for ClientSettings {
       removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       removal_attempts: 6,
       revocation_check_delay: std::time::Duration::from_secs(5 * 60),
+      max_pending_revocation_checks: 16,
       removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       max_group_info_bytes: 256 * 1024,
       max_upload_bytes: 100 * 1024 * 1024,

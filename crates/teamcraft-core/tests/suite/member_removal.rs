@@ -10,6 +10,7 @@ use common::{Peer, settings, settle};
 use teamcraft_core::Client;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, NetworkCut};
+use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_proto::{
   ConversationId, GatewayEvent, GatewayServerMessage, ListMessagesQuery, ListMlsMessagesQuery,
   MlsMessageKind, UserId,
@@ -509,6 +510,50 @@ mod finished_by_another_device {
   }
 
   #[tokio::test]
+  async fn a_flood_of_made_up_devices_queues_no_checks() {
+    let server = FakeServer::new();
+    let mut world = Devices::new(&server).await;
+    let alice = world.phone.client.user_id();
+    // Checks wait, so the queue shows what was queued.
+    let mut desk = Peer::enroll_with(world.phone.api.clone(), "Alice desk", settings()).await;
+    world.settle_all().await;
+    settle(&mut [&mut desk]).await;
+
+    // A hostile server reports hundreds of devices of the user revoked that never existed, and
+    // a real one several times.
+    for index in 0..200_u64 {
+      let made_up: teamcraft_proto::DeviceId = (900_000_000_000 + index).to_string().parse().unwrap();
+      server.revoke_device(alice, made_up);
+    }
+    for _ in 0..3 {
+      server.revoke_device(alice, world.laptop_device);
+    }
+    settle(&mut [&mut desk]).await;
+
+    assert_eq!(revocation_checks(&desk), 1, "only the known device, once");
+  }
+
+  #[tokio::test]
+  async fn pending_revocation_checks_are_capped() {
+    let server = FakeServer::new();
+    let mut world = Devices::new(&server).await;
+    let alice = world.phone.client.user_id();
+    let capped = teamcraft_core::ClientSettings {
+      max_pending_revocation_checks: 1,
+      ..settings()
+    };
+    let mut desk = Peer::enroll_with(world.phone.api.clone(), "Alice desk", capped).await;
+    world.settle_all().await;
+    settle(&mut [&mut desk]).await;
+
+    server.revoke_device(alice, world.laptop_device);
+    server.revoke_device(alice, world.tablet.client.device_id());
+    settle(&mut [&mut desk]).await;
+
+    assert_eq!(revocation_checks(&desk), 1);
+  }
+
+  #[tokio::test]
   async fn a_tampered_device_list_removes_nobody() {
     let server = FakeServer::new();
     let mut world = Devices::new(&server).await;
@@ -630,6 +675,17 @@ async fn is_listed(peer: &Peer, channel: ConversationId, user: UserId) -> bool {
     .members
     .iter()
     .any(|member| member.user.id == user)
+}
+
+/// The revocation checks waiting in `peer`'s pending queue.
+fn revocation_checks(peer: &Peer) -> usize {
+  peer
+    .store
+    .list(Table::PendingChanges)
+    .unwrap()
+    .iter()
+    .filter(|(key, _)| key.starts_with("revocation_check/"))
+    .count()
 }
 
 async fn queue_len(peer: &Peer, channel: ConversationId) -> usize {
