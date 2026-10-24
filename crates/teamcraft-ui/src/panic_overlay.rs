@@ -24,6 +24,20 @@ pub fn install() {
   }));
 }
 
+/// Demo builds only: `?panic` in the address panics a second after start, to look at the overlay.
+#[cfg(feature = "demo")]
+pub fn panic_on_request() {
+  let is_requested = web_sys::window()
+    .and_then(|window| window.location().search().ok())
+    .is_some_and(|search| search.contains("panic"));
+  if is_requested {
+    leptos::prelude::set_timeout(
+      || panic!("panic requested with ?panic (demo build)"),
+      std::time::Duration::from_secs(1),
+    );
+  }
+}
+
 fn show(info: &PanicHookInfo<'_>) {
   if IS_SHOWN.with(|shown| shown.replace(true)) {
     return;

@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use teamcraft_proto::BackgroundId;
+use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
 use teamcraft_client_api::actions::{FileInfo, MessageExtras, ShareLink, ShareLinkOptions};
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
@@ -15,6 +15,7 @@ use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
 
 use crate::backend::ChatBackend;
 use crate::calls::BackgroundImageInfo;
+use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, LogLevel, Message,
   MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
@@ -268,6 +269,40 @@ impl MockBackend {
 }
 
 impl ChatBackend for MockBackend {
+  /// Like the server: channel members must be in the channel's space (here: in one of its
+  /// conversations), or the add is refused with `not_space_member`.
+  fn add_member_with_history(&self, conversation: ConversationId, user: UserId, _history: HistoryPolicy) {
+    let mut state = self.state.borrow_mut();
+    let Some(space) = state
+      .conversations
+      .iter()
+      .find(|conv| conv.id == conversation)
+      .and_then(|conv| conv.maybe_space)
+    else {
+      return;
+    };
+    let is_in_space = state
+      .conversations
+      .iter()
+      .any(|conv| conv.maybe_space == Some(space) && conv.member_ids.contains(&user));
+    if !is_in_space {
+      drop(state);
+      report_failure(ActionFailure::new(
+        FailureKind::Server(ErrorCode::NotSpaceMember),
+        "server: server answered 400: the user is not a member of the space",
+      ));
+      return;
+    }
+    if let Some(conv) = state
+      .conversations
+      .iter_mut()
+      .find(|conv| conv.id == conversation)
+      && !conv.member_ids.contains(&user)
+    {
+      conv.member_ids.push(user);
+    }
+  }
+
   fn activity(&self) -> ActivityFeed {
     let is_read = self.people.borrow().is_activity_read;
     let count = self.message_count(ch_general());

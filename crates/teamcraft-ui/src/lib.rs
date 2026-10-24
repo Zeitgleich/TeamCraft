@@ -77,6 +77,8 @@ pub use components::app::App;
 /// Mounts the application into `<body>`. Called from the wasm entry point.
 pub fn mount() {
   panic_overlay::install();
+  #[cfg(feature = "demo")]
+  panic_overlay::panic_on_request();
   register_service_worker();
   leptos::mount::mount_to_body(App);
 }

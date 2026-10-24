@@ -23,9 +23,14 @@ pub use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 
 use crate::i18n::I18n;
 
+/// Where failures go, see [`set_failure_sink`].
+type FailureSink = Rc<dyn Fn(ActionFailure)>;
+/// What a finished [`ActionTicket`] calls, with the first failure.
+type OnDone = Box<dyn FnOnce(Option<ActionFailure>)>;
+
 thread_local! {
   /// The installed sink and the number it was installed under.
-  static SINK: RefCell<Option<(u64, Rc<dyn Fn(ActionFailure)>)>> = RefCell::new(None);
+  static SINK: RefCell<Option<(u64, FailureSink)>> = RefCell::new(None);
   static NEXT_SINK: Cell<u64> = const { Cell::new(0) };
   static CURRENT_TICKET: RefCell<Option<Rc<ActionTicket>>> = const { RefCell::new(None) };
 }
@@ -96,7 +101,7 @@ pub struct PendingAction {
 /// done when the last clone is dropped.
 pub struct ActionTicket {
   maybe_failure: RefCell<Option<ActionFailure>>,
-  on_done: RefCell<Option<Box<dyn FnOnce(Option<ActionFailure>)>>>,
+  on_done: RefCell<Option<OnDone>>,
 }
 
 impl PendingAction {

@@ -120,3 +120,10 @@ in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that t
 
 - The user can always tell whether they are connected, whether an action is pending or failed, and
   what to do about it. Errors go through i18n.
+- No silent failure (issue #322): a failed user action reaches the user, as an error toast through
+  `feedback::report_failure` (worded by the server's `error_code`) or inline. Buttons that start
+  async work use `PendingAction`/`PendingButton` and are disabled while it runs.
+- No dead app: async tasks, timers and shell-event callbacks can outlive their component. After an
+  `.await` they touch signals only with `set_if_alive`/`update_if_alive`/`try_*` and the app state
+  with `AppState::try_write` (CI: `scripts/check-async-signals.py`). A panic shows the reload
+  overlay (`panic_overlay.rs`), never a frozen page.
