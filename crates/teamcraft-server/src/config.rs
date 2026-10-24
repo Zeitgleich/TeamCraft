@@ -109,6 +109,9 @@ pub struct DatabaseConfig {
   pub max_connections: u32,
   #[serde(default = "default_acquire_timeout_secs")]
   pub acquire_timeout_secs: u64,
+  /// How long the server waits at startup for an unreachable database before it gives up.
+  #[serde(default = "default_startup_wait_secs")]
+  pub startup_wait_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1179,6 +1182,10 @@ impl DatabaseConfig {
   pub fn acquire_timeout(&self) -> Duration {
     Duration::from_secs(self.acquire_timeout_secs)
   }
+
+  pub fn startup_wait(&self) -> Duration {
+    Duration::from_secs(self.startup_wait_secs)
+  }
 }
 
 impl Default for ServerConfig {
@@ -1472,6 +1479,10 @@ fn default_max_connections() -> u32 {
 
 fn default_acquire_timeout_secs() -> u64 {
   5
+}
+
+fn default_startup_wait_secs() -> u64 {
+  300
 }
 
 fn default_client_id() -> String {

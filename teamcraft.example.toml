@@ -19,6 +19,9 @@ partitions_ahead_months = 3
 url = "postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft"
 max_connections = 10
 acquire_timeout_secs = 5
+# At startup the server waits this long for an unreachable database (retrying with backoff) instead
+# of exiting at once, so a restart policy does not turn a database restart into a crash loop.
+startup_wait_secs = 300
 
 [oidc]
 # Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`

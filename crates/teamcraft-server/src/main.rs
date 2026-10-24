@@ -16,7 +16,7 @@ use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
 use teamcraft_server::brand::{BrandInputs, BrandStore};
-use teamcraft_server::config::{CONFIG_PATH_ENV, Config};
+use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig};
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
@@ -55,6 +55,9 @@ const BACKGROUND_SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 /// Message partitions are created months ahead; checking twice a day is plenty.
 const PARTITION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(12 * 3600);
+/// Backoff while the database is unreachable at startup.
+const DATABASE_RETRY_FIRST: Duration = Duration::from_secs(1);
+const DATABASE_RETRY_MAX: Duration = Duration::from_secs(15);
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -122,15 +125,9 @@ async fn run() -> anyhow::Result<()> {
     );
   }
 
-  let database = Database::connect(
-    config.database.url.expose_secret(),
-    &DatabaseOptions {
-      max_connections: config.database.max_connections,
-      acquire_timeout: config.database.acquire_timeout(),
-    },
-  )
-  .await
-  .context("connecting to the database")?;
+  let database = connect_database(&config.database)
+    .await
+    .context("connecting to the database")?;
   database.migrate().await.context("running migrations")?;
   database
     .ensure_partitions(config.server.partitions_ahead_months)
@@ -267,6 +264,29 @@ async fn run() -> anyhow::Result<()> {
   .await?;
   info!("shut down");
   Ok(())
+}
+
+/// Connects to Postgres, waiting up to `startup_wait_secs` while it is unreachable (it may be
+/// restarting, or start after the server): exiting at once would make a restart policy loop.
+/// Configuration errors (wrong password, unknown database) fail at once.
+async fn connect_database(config: &DatabaseConfig) -> Result<Database, teamcraft_db::DbError> {
+  let options = DatabaseOptions {
+    max_connections: config.max_connections,
+    acquire_timeout: config.acquire_timeout(),
+  };
+  let give_up_at = tokio::time::Instant::now() + config.startup_wait();
+  let mut delay = DATABASE_RETRY_FIRST;
+  loop {
+    match Database::connect(config.url.expose_secret(), &options).await {
+      Ok(database) => return Ok(database),
+      Err(error) if error.is_transient() && tokio::time::Instant::now() + delay < give_up_at => {
+        warn!(%error, retry_in_secs = delay.as_secs(), "the database is unreachable, retrying");
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(DATABASE_RETRY_MAX);
+      },
+      Err(error) => return Err(error),
+    }
+  }
 }
 
 /// Removes deleted and abandoned call backgrounds and unfinished attachments once their upload URLs
