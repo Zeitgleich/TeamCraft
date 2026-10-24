@@ -5,9 +5,11 @@
 #
 # rust-cache keeps the compiled dependencies, not the workspace crates, and its key covers the
 # lockfile, the manifests, the toolchain and the compiler flags. Hence the path filter: other changes
-# would not change what is cached. The nightly run catches a new stable Rust and changes pushed with
-# `[skip ci]`; when the key already exists it only restores the cache (which also keeps it from
-# expiring) and skips the compile.
+# would not change what is cached. The Flatpak job saves the flatpak-builder state (with the cargo
+# target of the build inside the GNOME SDK) the same way, keyed on the lockfile and the Flatpak
+# manifest. The nightly run catches a new stable Rust and changes pushed with `[skip ci]`; when the
+# key already exists it only restores the cache (which also keeps it from expiring) and skips the
+# compile.
 name: Desktop cache
 
 on:
@@ -20,6 +22,7 @@ on:
       - "rust-toolchain*"
       - ".github/workflows/desktop-cache.yml"
       - ".github/workflows/desktop-release.yml"
+      - "apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml"
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:

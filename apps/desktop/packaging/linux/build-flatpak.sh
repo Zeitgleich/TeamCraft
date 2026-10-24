@@ -25,7 +25,9 @@ if [ ! -f "${REPO}/crates/teamcraft-ui/dist/index.html" ] || [ "${TEAMCRAFT_REBU
   "${HERE}/build-ui.sh"
 fi
 
-"${BUILDER[@]}" --user --force-clean --state-dir="${STATE}/state" --repo="${STATE}/repo" \
+# --ccache: the manifest keeps the cargo target in the ccache directory then, so a rebuild only
+# compiles what changed (as in the release workflow).
+"${BUILDER[@]}" --user --force-clean --ccache --state-dir="${STATE}/state" --repo="${STATE}/repo" \
   "${STATE}/build" "${MANIFEST}"
 
 case "${1:-}" in
