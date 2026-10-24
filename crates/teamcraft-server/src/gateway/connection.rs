@@ -23,6 +23,10 @@ const MAX_TRACKED_TYPING: usize = 256;
 /// Changes of the activity state a connection may make: one per this long (each one costs queries
 /// and may broadcast to everybody who shares a conversation).
 const ACTIVITY_CHANGE_INTERVAL: Duration = Duration::from_secs(1);
+/// Longest a frame may wait for the peer to take it. A client that stops reading (a frozen tab, a
+/// stalled proxy) would otherwise block its connection task in the write for as long as TCP keeps
+/// the connection, with its queue and socket held and no heartbeat check running meanwhile.
+const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// WebSocket close code "policy violation" (RFC 6455).
 const CLOSE_POLICY: u16 = 1008;
 const CLOSE_NORMAL: u16 = 1000;
@@ -391,20 +395,28 @@ impl FrameBucket {
   }
 }
 
+/// Sends one frame; fails if the peer hasn't taken it within [`SEND_TIMEOUT`].
 async fn send(socket: &mut WebSocket, message: &GatewayServerMessage) -> Result<(), ()> {
   let Ok(text) = serde_json::to_string(message) else {
     return Err(());
   };
-  socket.send(Message::Text(text.into())).await.map_err(|_| ())
+  match timeout(SEND_TIMEOUT, socket.send(Message::Text(text.into()))).await {
+    Ok(Ok(())) => Ok(()),
+    Ok(Err(_)) => Err(()),
+    Err(_) => {
+      debug!("gateway peer stopped reading, dropping the connection");
+      Err(())
+    },
+  }
 }
 
 async fn close(socket: &mut WebSocket, code: u16, reason: &'static str) {
-  let _ = socket
-    .send(Message::Close(Some(CloseFrame {
-      code,
-      reason: reason.into(),
-    })))
-    .await;
+  let frame = Message::Close(Some(CloseFrame {
+    code,
+    reason: reason.into(),
+  }));
+  // Best effort: a peer that stopped reading never takes the close frame either.
+  let _ = timeout(SEND_TIMEOUT, socket.send(frame)).await;
 }
 
 #[cfg(test)]
