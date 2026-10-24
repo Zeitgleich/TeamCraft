@@ -20,6 +20,7 @@ use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
 use super::fetch::fetch;
 use super::{ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture};
 use crate::clock::now_ms;
+use crate::route::Route;
 
 const PENDING_KEY: &str = "teamcraft.oidc.pending";
 const SIGNED_IN_HINT_KEY: &str = "teamcraft.signed_in";
@@ -76,6 +77,10 @@ struct Pending {
   state: String,
   verifier: String,
   redirect_uri: String,
+  /// The app's path when sign-in began (`/c/123`), restored afterwards. Only route paths, which
+  /// hold nothing but public IDs (route.rs).
+  #[serde(default, rename = "return_path")]
+  maybe_return_path: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -105,14 +110,16 @@ impl BrowserAuth {
     let params = location_params();
     if let Some(error) = params.get("error") {
       let description = params.get("error_description").unwrap_or(error);
-      clean_location();
+      clean_location_to(None);
       session_remove(PENDING_KEY);
       return Err(AuthError::Denied(description.clone()));
     }
     if let (Some(code), Some(state)) = (params.get("code"), params.get("state")) {
       let outcome = self.finish_login(code, state).await;
-      clean_location();
-      return outcome.map(|()| true);
+      // Back to where sign-in began; a failed sign-in stays on the start page.
+      let maybe_return_path = outcome.as_ref().ok().and_then(Option::as_deref);
+      clean_location_to(maybe_return_path);
+      return outcome.map(|_| true);
     }
     // Signed in before and the tab was reloaded: go through the provider again, once, without asking.
     if local_get(SIGNED_IN_HINT_KEY).is_some() && session_get(AUTOLOGIN_TRIED_KEY).is_none() {
@@ -138,6 +145,7 @@ impl BrowserAuth {
       state: state.secret().clone(),
       verifier: verifier.secret().clone(),
       redirect_uri,
+      maybe_return_path: current_route_path(),
     };
     let pending =
       serde_json::to_string(&pending).map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
@@ -145,7 +153,8 @@ impl BrowserAuth {
     navigate(url.as_str())
   }
 
-  async fn finish_login(&self, code: &str, state: &str) -> Result<(), AuthError> {
+  /// Trades the code for tokens; the answer is the path to return to.
+  async fn finish_login(&self, code: &str, state: &str) -> Result<Option<String>, AuthError> {
     let pending = session_get(PENDING_KEY).ok_or(AuthError::StateMismatch)?;
     session_remove(PENDING_KEY);
     let pending: Pending = serde_json::from_str(&pending).map_err(|_| AuthError::StateMismatch)?;
@@ -164,7 +173,7 @@ impl BrowserAuth {
     self.store(&response);
     local_set(SIGNED_IN_HINT_KEY, "1");
     session_remove(AUTOLOGIN_TRIED_KEY);
-    Ok(())
+    Ok(pending.maybe_return_path.filter(|path| is_return_path(path)))
   }
 
   async fn refresh(&self) -> Result<(), AuthError> {
@@ -612,12 +621,16 @@ fn location_params() -> std::collections::HashMap<String, String> {
     .unwrap_or_default()
 }
 
-/// Removes the OIDC response parameters from the address bar.
-fn clean_location() {
+/// Removes the OIDC response parameters from the address bar, and goes back to `maybe_path` (a
+/// checked route path) if sign-in began somewhere else.
+fn clean_location_to(maybe_path: Option<&str>) {
   if let Some(window) = web_sys::window()
     && let Ok(history) = window.history()
   {
-    let path = window.location().pathname().unwrap_or_else(|_| "/".to_owned());
+    let path = match maybe_path {
+      Some(path) => path.to_owned(),
+      None => window.location().pathname().unwrap_or_else(|_| "/".to_owned()),
+    };
     if history
       .replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path))
       .is_err()
@@ -625,6 +638,18 @@ fn clean_location() {
       tracing::debug!("could not clean the address bar");
     }
   }
+}
+
+/// The page's path if it is one of the app's routes other than the start page.
+fn current_route_path() -> Option<String> {
+  let path = web_sys::window()?.location().pathname().ok()?;
+  is_return_path(&path).then_some(path)
+}
+
+/// Only paths the app itself would show come back after sign-in: a route, never another origin
+/// (`//host`) or anything with a query or fragment.
+fn is_return_path(path: &str) -> bool {
+  Route::parse(path).is_some_and(|route| route != Route::Start && route.path() == path)
 }
 
 fn session_get(key: &str) -> Option<String> {
@@ -664,5 +689,46 @@ fn local_set(key: &str, value: &str) {
 fn local_remove(key: &str) {
   if let Some(Some(storage)) = web_sys::window().and_then(|window| window.local_storage().ok()) {
     drop(storage.remove_item(key));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn only_route_paths_come_back_after_sign_in() {
+    for path in [
+      "/c/123/m/456",
+      "/s/1/c/2",
+      "/dm/7",
+      "/settings/privacy",
+      "/admin/users",
+      "/home",
+    ] {
+      assert!(is_return_path(path), "{path}");
+    }
+    for path in [
+      "/",
+      "",
+      "//example.com/c/1",
+      "https://example.com/c/1",
+      "/c/1?x=1",
+      "/c/1#token",
+      "/dm/7/",
+      "/meeting/42",
+      "/unknown",
+      "c/1",
+    ] {
+      assert!(!is_return_path(path), "{path:?}");
+    }
+  }
+
+  /// A pending sign-in stored before the return path existed still reads.
+  #[test]
+  fn pending_without_return_path_reads() {
+    let pending: Pending =
+      serde_json::from_str(r#"{"state":"s","verifier":"v","redirect_uri":"https://example.com/"}"#).unwrap();
+    assert_eq!(pending.maybe_return_path, None);
   }
 }
