@@ -525,6 +525,11 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
   },
+  DownloadAttachment {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+  },
   CreateShareLink {
     conversation: ConversationId,
     message: MessageId,
@@ -698,6 +703,11 @@ impl ChatAction {
         conversation,
         message,
       } => backend.download_file(conversation, message),
+      Self::DownloadAttachment {
+        conversation,
+        message,
+        file_id,
+      } => backend.download_attachment(conversation, message, &file_id),
       Self::CreateShareLink {
         conversation,
         message,
@@ -779,6 +789,11 @@ pub enum ChatQuery {
   },
   ConversationFiles {
     conversation: ConversationId,
+  },
+  ConversationImages {
+    conversation: ConversationId,
+    around: MessageId,
+    max_messages: usize,
   },
   ShareLinks {
     conversation: ConversationId,
@@ -970,6 +985,13 @@ impl ChatQuery {
       },
       Self::ConversationFiles { conversation } => ChatAnswer::Files {
         files: backend.conversation_files(conversation),
+      },
+      Self::ConversationImages {
+        conversation,
+        around,
+        max_messages,
+      } => ChatAnswer::Files {
+        files: backend.conversation_images(conversation, around, max_messages),
       },
       Self::ShareLinks {
         conversation,

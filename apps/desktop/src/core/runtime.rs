@@ -35,7 +35,7 @@ use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
   BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity, DeviceId,
-  GatewayClientMessage, GatewayEvent, OrgBackgroundId, UserId, WorkspacePolicy,
+  GatewayClientMessage, GatewayEvent, MessageId, OrgBackgroundId, UserId, WorkspacePolicy,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -171,6 +171,12 @@ enum Request {
     oneshot::Sender<Result<CallJoinTokenResponse, String>>,
   ),
   BackgroundPicture(BackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
+  Attachment {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    reply: oneshot::Sender<Result<SecretBytes, String>>,
+  },
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
   LinkStart {
     device_name: String,
@@ -362,6 +368,24 @@ impl CoreRuntime {
   pub async fn call_join_token(&self, conversation: ConversationId) -> Result<CallJoinTokenResponse, String> {
     self
       .ask(|reply| Request::CallJoinToken(conversation, reply))
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// One file of a message, downloaded and decrypted in memory (the image viewer).
+  pub async fn attachment(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+  ) -> Result<SecretBytes, String> {
+    self
+      .ask(|reply| Request::Attachment {
+        conversation,
+        message,
+        file_id,
+        reply,
+      })
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -662,8 +686,29 @@ impl Core {
         drop(reply.send(self.call_join_token(conversation).await))
       },
       Request::BackgroundPicture(id, reply) => drop(reply.send(self.background_picture(id).await)),
+      Request::Attachment {
+        conversation,
+        message,
+        file_id,
+        reply,
+      } => drop(reply.send(self.attachment(conversation, message, &file_id).await)),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
     }
+  }
+
+  async fn attachment(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Result<SecretBytes, String> {
+    let (Some(client), Some(backend)) = (self.client.as_ref(), self.backend.as_ref()) else {
+      return Err("this device is not set up yet".to_owned());
+    };
+    let reference = backend
+      .attachment_ref(conversation, message, file_id)
+      .ok_or("no such file in this conversation")?;
+    client.open_attachment(&reference).await.map_err(describe)
   }
 
   async fn background_picture(&mut self, id: BackgroundId) -> Result<Vec<u8>, String> {

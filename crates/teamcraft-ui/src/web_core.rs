@@ -18,6 +18,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
@@ -47,7 +49,8 @@ use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, UserId, WorkspacePolicy,
+  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
+  WorkspacePolicy,
 };
 use wasm_bindgen::JsCast;
 
@@ -237,6 +240,16 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       let query: ChatQuery = field(&args, "query")?;
       to_value(ask(|reply| Request::Query(query, reply)).await??)
     },
+    // Only a follower tab asks for a file by command; it gets the bytes as base64 over the tab channel.
+    "core_attachment" => {
+      let (conversation, message, file_id) = (
+        field(&args, "conversation")?,
+        field(&args, "message")?,
+        field(&args, "file_id")?,
+      );
+      let plaintext = ask_attachment(conversation, message, file_id).await?;
+      Ok(Value::String(BASE64.encode(plaintext.expose_secret())))
+    },
     "core_link_start" => {
       let device_name: String = field(&args, "device_name")?;
       ask(|reply| Request::LinkStart { device_name, reply }).await??;
@@ -268,6 +281,39 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     },
     other => Err(format!("{other} is not available in the browser")),
   }
+}
+
+/// One file of a message, downloaded and decrypted in memory, for the image viewer. A follower tab
+/// gets it from the tab that runs the core.
+pub async fn attachment(
+  conversation: ConversationId,
+  message: MessageId,
+  file_id: String,
+) -> Result<SecretBytes, String> {
+  let Some(follower) = current_follower() else {
+    return ask_attachment(conversation, message, file_id).await;
+  };
+  let args = serde_json::json!({ "conversation": conversation, "message": message, "file_id": file_id });
+  let answer = follower.call("core_attachment", args).await?;
+  let encoded = answer.as_str().ok_or("unreadable answer of core_attachment")?;
+  BASE64
+    .decode(encoded)
+    .map(SecretBytes::new)
+    .map_err(|_| "unreadable answer of core_attachment".to_owned())
+}
+
+async fn ask_attachment(
+  conversation: ConversationId,
+  message: MessageId,
+  file_id: String,
+) -> Result<SecretBytes, String> {
+  ask(|reply| Request::Attachment {
+    conversation,
+    message,
+    file_id,
+    reply,
+  })
+  .await?
 }
 
 fn field<T: DeserializeOwned>(args: &Value, name: &str) -> Result<T, String> {
@@ -476,6 +522,12 @@ enum Request {
   },
   Action(Box<ChatAction>, oneshot::Sender<Result<(), String>>),
   Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
+  Attachment {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    reply: oneshot::Sender<Result<SecretBytes, String>>,
+  },
   LinkStart {
     device_name: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -798,6 +850,12 @@ impl Core {
         len,
         reply,
       } => drop(reply.send(self.window(conversation, start, len))),
+      Request::Attachment {
+        conversation,
+        message,
+        file_id,
+        reply,
+      } => drop(reply.send(self.attachment(conversation, message, &file_id).await)),
       Request::Thread {
         conversation,
         thread,
@@ -1020,6 +1078,21 @@ impl Core {
       total: backend.message_count(conversation),
       messages: backend.messages(conversation, start, len),
     })
+  }
+
+  async fn attachment(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Result<SecretBytes, String> {
+    let (Some(client), Some(backend)) = (self.client.as_ref(), self.backend.as_ref()) else {
+      return Err(not_set_up());
+    };
+    let reference = backend
+      .attachment_ref(conversation, message, file_id)
+      .ok_or("no such file in this conversation")?;
+    client.open_attachment(&reference).await.map_err(describe)
   }
 
   async fn action(&mut self, action: ChatAction) -> Result<(), String> {

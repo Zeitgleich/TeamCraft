@@ -418,6 +418,15 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.conversation_files(conversation)
   }
 
+  fn conversation_images(
+    &self,
+    conversation: ConversationId,
+    around: MessageId,
+    max_messages: usize,
+  ) -> Vec<FileInfo> {
+    self.chat.conversation_images(conversation, around, max_messages)
+  }
+
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
     self.chat.download_file(conversation, message);
   }

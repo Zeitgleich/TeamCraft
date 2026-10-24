@@ -60,9 +60,9 @@ pub enum UploadSource {
 /// Largest file the browser saves: it holds the decrypted bytes in memory until the `<a download>`
 /// click, so bigger files wait for streaming downloads. Native builds write to disk and have no cap.
 #[cfg(target_arch = "wasm32")]
-const MAX_DOWNLOAD_BYTES: Option<u64> = Some(256 * 1024 * 1024);
+pub(super) const MAX_DOWNLOAD_BYTES: Option<u64> = Some(256 * 1024 * 1024);
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_DOWNLOAD_BYTES: Option<u64> = None;
+pub(super) const MAX_DOWNLOAD_BYTES: Option<u64> = None;
 
 /// Longest saved file name in bytes; common file systems allow 255 and the copy suffix needs room.
 const MAX_FILE_NAME_BYTES: usize = 200;

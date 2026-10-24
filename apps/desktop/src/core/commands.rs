@@ -12,7 +12,7 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_proto::{ConversationId, MessageId, UserId};
 
 use super::runtime::{CoreConfig, CoreRuntime, KeyChoice, TokenCache};
 use crate::auth::commands::Service;
@@ -242,6 +242,19 @@ pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Resul
 #[tauri::command]
 pub async fn core_query(host: State<'_, CoreHost>, query: ChatQuery) -> Result<ChatAnswer, CommandError> {
   Ok(host.current()?.query(query).await?)
+}
+
+/// One file of a message, decrypted, as raw bytes (no JSON) for the image viewer. The bytes stay in
+/// memory; the webview turns them into a `blob:` URL it revokes when the viewer moves on.
+#[tauri::command]
+pub async fn core_attachment(
+  host: State<'_, CoreHost>,
+  conversation: ConversationId,
+  message: MessageId,
+  file_id: String,
+) -> Result<tauri::ipc::Response, CommandError> {
+  let plaintext = host.current()?.attachment(conversation, message, file_id).await?;
+  Ok(tauri::ipc::Response::new(plaintext.expose_secret().to_vec()))
 }
 
 /// Stops the core, e.g. on sign-out. The encrypted database stays on disk.

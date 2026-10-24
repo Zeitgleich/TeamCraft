@@ -11,7 +11,7 @@ use crate::client::files::{
   pending_upload, save_pending_upload, share_links, transfer_state,
 };
 use crate::records;
-use crate::store::{LocalStore, MessageContent, MessageMeta, StoredMessage, Table};
+use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageMeta, StoredMessage, Table};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, ui_message_id};
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -19,6 +19,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub(crate) fn files_of(&self, stored: &StoredMessage) -> Vec<FileInfo> {
     let message = ui_message_id(stored);
     let conversation = stored.conversation_id;
+    let (maybe_sender, maybe_sent_at) = (Some(stored.sender_user_id), Some(stored.sent_at_ms));
     if let Some(upload) = self.read(pending_upload(
       self.store_ref(),
       conversation,
@@ -37,6 +38,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
           size_bytes: file.size_bytes,
           maybe_thumbnail_png: None,
           transfer: upload_transfer(&upload, file),
+          maybe_sender,
+          maybe_sent_at,
         })
         .collect();
     }
@@ -59,6 +62,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
         transfer: FileTransfer::Failed {
           reason: failure_view(file.maybe_failure.unwrap_or(TransferFailure::Network)),
         },
+        maybe_sender,
+        maybe_sent_at,
       });
     attachments_of(&stored.content)
       .into_iter()
@@ -89,6 +94,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
             reason: failure_view(reason),
           },
         },
+        maybe_sender,
+        maybe_sent_at,
       })
       .chain(failed)
       .collect()
@@ -132,6 +139,35 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages.iter().flat_map(|stored| self.files_of(stored)).collect()
   }
 
+  /// The files of a window of at most `max_messages` messages around `around`, newest first: the
+  /// image viewer must not rebuild the thumbnails of a whole conversation. Only messages with
+  /// attachments count towards the window.
+  pub(crate) fn ui_conversation_images(
+    &self,
+    conversation: ConversationId,
+    around: MessageId,
+    max_messages: usize,
+  ) -> Vec<FileInfo> {
+    let mut messages: Vec<StoredMessage> = self
+      .all_messages(conversation)
+      .into_iter()
+      .filter(|stored| !attachments_of(&stored.content).is_empty())
+      .collect();
+    messages.reverse();
+    // An unknown message (deleted meanwhile) gets the newest window.
+    let at = messages
+      .iter()
+      .position(|stored| ui_message_id(stored) == around)
+      .unwrap_or(0);
+    let start = at.saturating_sub(max_messages / 2);
+    messages
+      .iter()
+      .skip(start)
+      .take(max_messages)
+      .flat_map(|stored| self.files_of(stored))
+      .collect()
+  }
+
   pub(crate) fn ui_download_file(&self, conversation: ConversationId, message: MessageId) {
     let Some(stored) = self.find_stored(conversation, message) else {
       return;
@@ -142,6 +178,36 @@ impl<S: LocalStore> CoreChatBackend<S> {
         attachment: attachment.attachment_id,
       });
     }
+  }
+
+  pub(crate) fn ui_download_attachment(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) {
+    match self.attachment_ref(conversation, message, file_id) {
+      Some(attachment) => self.command(CoreCommand::DownloadFile {
+        conversation,
+        attachment: attachment.attachment_id,
+      }),
+      None => tracing::warn!(conversation_id = %conversation, "downloading a file that isn't loaded"),
+    }
+  }
+
+  /// One file of a message, with the key to decrypt it ([`crate::Client::open_attachment`]).
+  /// `file_id` is the [`FileInfo::file_id`] the UI got.
+  pub fn attachment_ref(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Option<AttachmentRef> {
+    let stored = self.find_stored(conversation, message)?;
+    attachments_of(&stored.content)
+      .into_iter()
+      .find(|attachment| attachment.attachment_id.to_string() == file_id)
+      .cloned()
   }
 
   pub(crate) fn ui_create_share_link(

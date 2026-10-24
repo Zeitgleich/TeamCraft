@@ -16,6 +16,7 @@ pub enum IconName {
   Reply,
   Threads,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Close,
   Plus,
@@ -66,6 +67,11 @@ pub enum IconName {
   Home,
   /// A pencil: write a new message.
   Compose,
+  /// Magnifier with plus and minus: zoom in and out of an image.
+  ZoomIn,
+  ZoomOut,
+  /// An arrow leaving to the right: forward a message.
+  Forward,
 }
 
 impl IconName {
@@ -90,7 +96,11 @@ impl IconName {
       Self::Home => "M3 11 12 3l9 8 M5 9.5V21h5v-6h4v6h5V9.5",
       Self::Compose => "M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z",
       Self::ChevronDown => "M6 9l6 6 6-6",
+      Self::ChevronLeft => "M15 6l-6 6 6 6",
       Self::ChevronRight => "M9 6l6 6-6 6",
+      Self::ZoomIn => "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3 M11 8v6 M8 11h6",
+      Self::ZoomOut => "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3 M8 11h6",
+      Self::Forward => "M15 14l5-5-5-5 M20 9H10a6 6 0 0 0-6 6v3",
       Self::Close => "M18 6 6 18M6 6l12 12",
       Self::Plus => "M12 5v14M5 12h14",
       Self::Bookmark => "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",

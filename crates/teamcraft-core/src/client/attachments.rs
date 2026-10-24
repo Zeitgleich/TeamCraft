@@ -9,6 +9,7 @@ use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, CreateAttachmentRequest, ThreadId};
 
 use super::Client;
+use super::files::MAX_DOWNLOAD_BYTES;
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::store::{AttachmentRef, LocalStore, MessageContent};
@@ -52,6 +53,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::Corrupt("the message has no file".into()));
     };
     self.download_decrypted(&attachment).await
+  }
+
+  /// Downloads and decrypts one file for showing it (the image viewer); nothing is written to disk.
+  /// The reference comes from [`crate::ui_backend::CoreChatBackend::attachment_ref`].
+  pub async fn open_attachment(&self, attachment: &AttachmentRef) -> Result<SecretBytes, CoreError> {
+    // The sender-declared size can't be trusted: the cap applies to the bytes actually received.
+    self
+      .download_decrypted_capped(attachment, MAX_DOWNLOAD_BYTES)
+      .await
   }
 
   /// Encrypts with a fresh key, uploads through a presigned URL and returns what the message needs.

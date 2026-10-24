@@ -34,6 +34,7 @@ const COMMANDS: &[&str] = &[
   "core_thread",
   "core_action",
   "core_query",
+  "core_attachment",
   "core_stop",
   "call_snapshot",
   "call_media_devices",

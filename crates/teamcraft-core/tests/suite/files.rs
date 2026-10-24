@@ -53,6 +53,9 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
   assert!(files[1].maybe_thumbnail_png.is_none());
   assert_eq!(files[1].transfer, FileTransfer::Remote);
   assert_eq!(bob_ui.conversation_files(channel).len(), 2);
+  // The viewer's window holds this message's files; a window of zero messages holds none.
+  assert_eq!(bob_ui.conversation_images(channel, received.id, 10).len(), 2);
+  assert!(bob_ui.conversation_images(channel, received.id, 0).is_empty());
 
   let directory = std::env::temp_dir().join(format!("teamcraft-downloads-{}", std::process::id()));
   bob.client.set_download_dir(Some(directory.clone()));
@@ -63,6 +66,47 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
     panic!("not downloaded: {:?}", files[1].transfer);
   };
   assert_eq!(std::fs::read(path).unwrap(), b"sand");
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// The image viewer opens one file of an album in memory, and saves only that one.
+#[tokio::test]
+async fn one_file_of_an_album_opens_in_memory_and_downloads_alone() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("first.jpg", "image/jpeg", jpeg()),
+      file("second.txt", "text/plain", b"waves".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(files[1].maybe_sender, Some(alice.client.user_id()));
+  assert_eq!(files[1].maybe_sent_at, Some(received.sent_at));
+
+  let reference = bob_ui
+    .attachment_ref(channel, received.id, &files[1].file_id)
+    .expect("the file of the message");
+  let opened = bob.client.open_attachment(&reference).await.unwrap();
+  assert_eq!(opened.expose_secret(), b"waves");
+  assert!(bob_ui.attachment_ref(channel, received.id, "pending-0").is_none());
+
+  let directory = std::env::temp_dir().join(format!("teamcraft-one-download-{}", std::process::id()));
+  bob.client.set_download_dir(Some(directory.clone()));
+  bob_ui.download_attachment(channel, received.id, &files[1].file_id);
+  run_commands(&mut bob, &bob_ui).await;
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Remote,
+    "the other file stays remote"
+  );
+  assert!(matches!(files[1].transfer, FileTransfer::Local { .. }));
   std::fs::remove_dir_all(&directory).unwrap();
 }
 

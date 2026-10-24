@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Added
+
+- **Image lightbox on desktop and web**: clicking an image opens it at full resolution, decrypted in
+  memory on demand (thumbnail as placeholder, loading and error states with retry). Zoom and pan with
+  the wheel, a trackpad or touch pinch, double-click or double-tap and `+` `-` `0`; previous/next
+  with the arrow keys, buttons or a swipe. A message with several images shows an album grid and
+  pages through its images, with a switch to all images of the conversation. Save, forward, sender
+  and time; `Esc` or a click beside the image closes it. Only the image on screen is held at full
+  size; its `blob:` URL is released when the viewer moves on or closes.
+
 ## [1.0.0] - 2026-10-24
 
 First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the

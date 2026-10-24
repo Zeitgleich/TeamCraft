@@ -38,6 +38,7 @@
     "allow-core-thread",
     "allow-core-action",
     "allow-core-query",
+    "allow-core-attachment",
     "allow-core-stop",
     "allow-call-snapshot",
     "allow-call-media-devices",

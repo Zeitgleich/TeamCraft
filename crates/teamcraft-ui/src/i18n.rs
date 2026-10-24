@@ -291,6 +291,29 @@ mod tests {
     }
   }
 
+  /// Every key the lightbox and the file views ask for exists in each language.
+  #[test]
+  fn lightbox_and_file_keys_exist() {
+    let keys: Vec<String> = [
+      include_str!("components/lightbox.rs"),
+      include_str!("components/file_views.rs"),
+    ]
+    .into_iter()
+    .flat_map(keys_in_source)
+    .collect();
+    for expected in ["lightbox-save", "lightbox-saving", "album-open", "file-too-large"] {
+      assert!(
+        keys.iter().any(|key| key == expected),
+        "the scan missed {expected}"
+      );
+    }
+    for locale in [Locale::En, Locale::De] {
+      for key in &keys {
+        assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
+
   #[test]
   fn locale_tags_parse() {
     assert_eq!(Locale::from_tag("de-DE"), Some(Locale::De));
@@ -330,6 +353,20 @@ mod tests {
       }
     }
     found
+  }
+
+  /// The literal keys of `.t("…")`, `.t_with("…", …)` and of match arms that pick a key (`=> "…"`).
+  fn keys_in_source(source: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for marker in [".t(\"", ".t_with(\"", "=> \""] {
+      for (at, _) in source.match_indices(marker) {
+        let rest = &source[at + marker.len()..];
+        if let Some(end) = rest.find('"') {
+          keys.push(rest[..end].to_owned());
+        }
+      }
+    }
+    keys
   }
 
   fn message_ids(source: &str) -> Vec<String> {

@@ -24,12 +24,13 @@ use crate::components::call_screen::CallScreen;
 use crate::components::calls_view::CallsView;
 use crate::components::channel_view::ChannelView;
 use crate::components::directory_view::DirectoryView;
-use crate::components::file_views::{FilesPanel, Gallery};
+use crate::components::file_views::FilesPanel;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
+use crate::components::lightbox::Lightbox;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
@@ -272,7 +273,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
         Overlay::ScheduleMeeting => view! { <ScheduleMeetingDialog /> }.into_any(),
         Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
-        Overlay::Gallery(conversation, message) => view! { <Gallery conversation=conversation start=message /> }.into_any(),
+        Overlay::Lightbox(conversation, start) => view! { <Lightbox conversation=conversation start=start /> }.into_any(),
         Overlay::NewSpace => view! { <NewSpaceDialog /> }.into_any(),
         Overlay::NewMessage => view! { <NewMessageDialog /> }.into_any(),
         Overlay::JoinSpace => view! { <JoinSpaceDialog /> }.into_any(),
