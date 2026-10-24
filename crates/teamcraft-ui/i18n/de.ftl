@@ -1649,6 +1649,7 @@ calls-ongoing = Läuft noch
 calls-call-back = Zurückrufen
 calls-join = Beitreten
 last-seen = Zuletzt online { $when }
+last-seen-just-now = Zuletzt online gerade eben
 privacy-last-seen-off = Deine Administration hat „Zuletzt online“ für alle abgeschaltet.
 policy-last-seen = Anzeigen, wann Personen zuletzt aktiv waren
 policy-last-seen-hint = Jede Person kann ihre Zeit weiterhin in den Datenschutzeinstellungen verbergen.

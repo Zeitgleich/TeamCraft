@@ -1649,6 +1649,7 @@ calls-ongoing = Ongoing
 calls-call-back = Call back
 calls-join = Join
 last-seen = Last seen { $when }
+last-seen-just-now = Last seen just now
 privacy-last-seen-off = Your administrator switched last seen off for everybody.
 policy-last-seen = Show when people were last active
 policy-last-seen-hint = Each person can still hide theirs in the privacy settings.
