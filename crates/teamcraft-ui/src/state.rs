@@ -113,6 +113,8 @@ pub enum MainView {
   GettingStarted,
   /// Home with no conversation open.
   Home,
+  /// A public channel of the space the user hasn't joined: what it is about, and "Join".
+  ChannelPreview(SpaceId, ConversationId),
 }
 
 /// What the right-hand panel shows.
@@ -126,8 +128,6 @@ pub enum SidePanel {
   Members,
   /// The pinned messages of the open conversation.
   Pins,
-  /// Files shared in the open conversation.
-  Files,
 }
 
 /// Modal and popover visibility.
@@ -517,6 +517,7 @@ impl AppState {
       | MainView::Activity
       | MainView::Calls
       | MainView::Directory => true,
+      MainView::ChannelPreview(previewed, _) => is_grouped || previewed == space,
       MainView::Admin(_) | MainView::GettingStarted | MainView::Home => false,
     };
     if !belongs {
@@ -600,7 +601,8 @@ impl AppState {
       | MainView::Calls
       | MainView::Directory
       | MainView::GettingStarted
-      | MainView::Home => None,
+      | MainView::Home
+      | MainView::ChannelPreview(..) => None,
     }
   }
 
@@ -867,6 +869,15 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  /// Shows a public channel the user hasn't joined: its name and topic, and the way to join.
+  pub fn open_channel_preview(&self, space: SpaceId, channel: ConversationId) {
+    self.space.set(space);
+    self.rail.set(RailEntry::Space);
+    self.view.set(MainView::ChannelPreview(space, channel));
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
   pub fn open_directory(&self) {
     self.view.set(MainView::Directory);
     self.panel.set(SidePanel::Closed);
@@ -1030,6 +1041,8 @@ impl AppState {
       MainView::Meetings => Route::Meetings,
       MainView::Directory => Route::People,
       MainView::Home => Route::Home,
+      // Not joined, so not a channel route yet: a reload lands in the space.
+      MainView::ChannelPreview(space, _) => Route::Space(space),
       MainView::GettingStarted => {
         let space = self.space.get();
         let is_known_space = self.rail.get() == RailEntry::Space

@@ -35,6 +35,7 @@ pub fn StatusMenu() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let menu = NodeRef::<html::Div>::new();
+  crate::motion::use_leave_ghost(menu);
   let session = use_session();
   let me = Memo::new(move |_| state.me());
   let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));

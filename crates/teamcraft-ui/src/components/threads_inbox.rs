@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use crate::clock::format_time;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
 use crate::components::thread_panel::ThreadPanel;
@@ -44,7 +45,7 @@ pub fn ThreadsInbox() -> impl IntoView {
             <ThreadCard thread=thread />
           </For>
           <Show when=move || threads.get().is_empty() fallback=|| ()>
-            <li class="empty-state">{move || i18n.t("threads-empty")}</li>
+            <EmptyState icon=IconName::Threads title_key="threads-empty-title" body_key="threads-empty" as_item=true />
           </Show>
         </ul>
       </div>

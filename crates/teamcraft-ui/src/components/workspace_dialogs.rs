@@ -357,7 +357,11 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
         }
         .into_any()
       } else {
+        let space = channel.space;
         view! {
+          <button class="btn btn-small" on:click=move |_| state.open_channel_preview(space, id)>
+            {move || i18n.t("browse-preview")}
+          </button>
           <button class="btn btn-small btn-primary" prop:disabled=channel.is_archived on:click=move |_| state.write(|backend| backend.join_channel(id))>
             {move || i18n.t("browse-join")}
           </button>

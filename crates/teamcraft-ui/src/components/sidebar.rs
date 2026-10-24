@@ -135,53 +135,14 @@ pub fn Sidebar() -> impl IntoView {
   }
 }
 
-/// The entries that are not about one space: threads, activity, calls, meetings, people, saved
-/// items. Home and the space sidebar both start with them; search lives in the top bar.
+/// The entries that are not about one space: calls, meetings, people, saved items. Home and the
+/// space sidebar both start with them; threads and activity are on the rail, search in the top bar.
 #[component]
 pub fn GlobalEntries() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let thread_unread = Memo::new(move |_| {
-    state.read(|backend| {
-      backend
-        .followed_threads()
-        .iter()
-        .filter(|thread| thread.unread_replies > 0)
-        .count() as u32
-    })
-  });
-
-  let activity_unread = Memo::new(move |_| state.read(|backend| backend.activity().unread_count));
 
   view! {
-      <button
-        class="sb-item sb-threads"
-        class:current=move || state.view.get() == MainView::Threads
-        class:unread={move || thread_unread.get() > 0}
-        aria-current=move || (state.view.get() == MainView::Threads).then_some("page")
-        on:click=move |_| state.open_threads()
-      >
-        <Icon name=IconName::Threads />
-        <span class="sb-name">{move || i18n.t("sidebar-threads")}</span>
-        {move || {
-          let unread = thread_unread.get();
-          (unread > 0).then(|| view! { <span class="badge-count">{unread}</span> })
-        }}
-      </button>
-      <button
-        class="sb-item sb-activity"
-        class:current=move || state.view.get() == MainView::Activity
-        class:unread={move || activity_unread.get() > 0}
-        aria-current=move || (state.view.get() == MainView::Activity).then_some("page")
-        on:click=move |_| state.open_activity()
-      >
-        <Icon name=IconName::Bell />
-        <span class="sb-name">{move || i18n.t("sidebar-activity")}</span>
-        {move || {
-          let unread = activity_unread.get();
-          (unread > 0).then(|| view! { <span class="badge-count">{unread}</span> })
-        }}
-      </button>
       <button
         class="sb-item sb-calls"
         class:current=move || state.view.get() == MainView::Calls
@@ -268,6 +229,7 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
   let is_collapsed = move || collapsed.with(|set| set.contains(&space));
   let mentions: u32 = group.conversations.iter().map(|conv| conv.mention_count).sum();
   let list_id = format!("sb-space-{space_id}");
+  let is_opening = RwSignal::new(false);
   let is_muted = {
     let space_id = space_id.clone();
     Memo::new(move |_| {
@@ -301,7 +263,9 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           aria-controls=list_id.clone()
           on:click=move |_| {
             collapsed.update(|set| {
-              if !set.remove(&space) {
+              if set.remove(&space) {
+                is_opening.set(true);
+              } else {
                 set.insert(space);
               }
             });
@@ -337,7 +301,7 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           <Icon name=IconName::Sliders />
         </button>
       </div>
-      <ul id=list_id hidden=is_collapsed>
+      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |_| is_opening.set(false)>
         {group.conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
       </ul>
     </section>
@@ -366,6 +330,8 @@ fn SidebarSection(
   let is_collapsed = move || collapsed.with(|set| set.contains(&kind));
   let unread_hidden: u32 = conversations.iter().map(|conv| conv.mention_count).sum();
   let list_id = format!("sb-{}", kind.slug());
+  // Only a click that opens the section animates its rows, not a re-render with new counts.
+  let is_opening = RwSignal::new(false);
 
   let state = use_app_state();
   view! {
@@ -377,7 +343,9 @@ fn SidebarSection(
           aria-controls=list_id.clone()
           on:click=move |_| {
             collapsed.update(|set| {
-              if !set.remove(&kind) {
+              if set.remove(&kind) {
+                is_opening.set(true);
+              } else {
                 set.insert(kind);
               }
             });
@@ -401,7 +369,7 @@ fn SidebarSection(
             }
           })}
       </div>
-      <ul id=list_id hidden=is_collapsed>
+      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |_| is_opening.set(false)>
         {if kind == SectionKind::Favorites {
           view! { <FavoriteItems conversations=conversations /> }.into_any()
         } else {

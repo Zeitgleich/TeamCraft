@@ -1,4 +1,4 @@
-//! Files and link previews: the cards and image albums under a message and the files panel.
+//! Files and link previews: the cards and image albums under a message and the channel's files tab.
 //! Downloads run in the client core, which reports progress and the local path
 //! (`FileInfo::transfer`); the page holds small thumbnails, and full images only while the lightbox
 //! (`components::lightbox`) shows them.
@@ -7,13 +7,14 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, ShareLinkOptions};
 use teamcraft_client_api::admin::format_bytes;
 
+use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
 use crate::i18n::use_i18n;
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::model::ConversationId;
 use crate::object_url::ObjectUrl;
-use crate::state::{Overlay, SidePanel, use_app_state};
+use crate::state::{Overlay, use_app_state};
 
 /// Most tiles an album shows; the last one counts the images it doesn't show ("+3").
 const MAX_ALBUM_TILES: usize = 4;
@@ -231,29 +232,23 @@ pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
   }
 }
 
-/// Everything shared in the conversation, with an image grid on top.
+/// Everything shared in the conversation: the "Files" tab of the channel header.
 #[component]
-pub fn FilesPanel(conversation: ConversationId) -> impl IntoView {
+pub fn ChannelFiles(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let files = Memo::new(move |_| state.read(|backend| backend.conversation_files(conversation)));
   view! {
-    <aside class="side-panel" aria-label=move || i18n.t("files-title")>
-      <header class="panel-header">
-        <div class="panel-title"><h2>{move || i18n.t("files-title")}</h2></div>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.panel.set(SidePanel::Closed)>
-          <Icon name=IconName::Close />
-        </button>
-      </header>
-      <div class="panel-scroll files-list">
+    <div class="channel-files panel-scroll" role="tabpanel" id="channel-tab-files" aria-label=move || i18n.t("files-title")>
+      <div class="files-list">
         <For each=move || files.get() key=|file| (file.message, file.file_id.clone()) let:file>
           <FileCard file=file />
         </For>
-        <Show when=move || files.get().is_empty() fallback=|| ()>
-          <p class="empty-state">{move || i18n.t("files-empty")}</p>
-        </Show>
       </div>
-    </aside>
+      <Show when=move || files.get().is_empty() fallback=|| ()>
+        <EmptyState icon=IconName::Paperclip title_key="files-empty-title" body_key="files-empty" />
+      </Show>
+    </div>
   }
 }
 

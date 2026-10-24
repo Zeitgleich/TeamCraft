@@ -9,6 +9,7 @@ use wasm_bindgen::JsCast;
 
 use crate::clock::format_date_time;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::rich_text::RichText;
@@ -443,7 +444,7 @@ pub fn SavedView() -> impl IntoView {
           }
         </For>
         <Show when=move || items.get().is_empty() fallback=|| ()>
-          <li class="empty-state">{move || i18n.t("saved-empty")}</li>
+          <EmptyState icon=IconName::Bookmark title_key="saved-empty-title" body_key="saved-empty" as_item=true />
         </Show>
       </ul>
     </section>
@@ -490,7 +491,7 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
           }
         </For>
         <Show when=move || pinned.get().is_empty() fallback=|| ()>
-          <li class="empty-state">{move || i18n.t("pins-empty")}</li>
+          <EmptyState icon=IconName::Star title_key="pins-empty-title" body_key="pins-empty" as_item=true />
         </Show>
       </ul>
     </aside>

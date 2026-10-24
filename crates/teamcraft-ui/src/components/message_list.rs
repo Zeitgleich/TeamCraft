@@ -10,8 +10,11 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::clock::format_date;
+use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
+use crate::components::skeleton::MessageSkeleton;
+use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::state::{Overlay, use_app_state};
@@ -124,6 +127,15 @@ pub fn MessageList(
   };
 
   let count = Memo::new(move |_| state.read(|backend| backend.message_count(conversation)));
+  let motion = StoredValue::new_local(FeedMotion::new(newest_confirmed_of(state, conversation)));
+  // A conversation that opened empty (still loading): its first messages are history, not news.
+  Effect::new(move |_| {
+    if count.get() > 0
+      && let Some(newest) = newest_confirmed_of(state, conversation)
+    {
+      motion.update_value(|motion| motion.set_baseline_if_unset(newest));
+    }
+  });
   let heights = StoredValue::new_local(vec![estimate; count.get_untracked()]);
   let scroll_top = RwSignal::new(0.0_f64);
   let viewport = RwSignal::new(800.0_f64);
@@ -447,20 +459,19 @@ pub fn MessageList(
         on:keydown=on_keydown
       >
         <Show when=move || count.get() == 0 fallback=|| ()>
-          <div class="empty-state">
-            <p>{move || i18n.t("channel-empty")}</p>
-            // Alone in a new channel: the obvious next step is bringing the team in.
-            <Show when=is_alone_in_channel fallback=|| ()>
-              <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))>
-                {move || i18n.t("channel-add-people")}
-              </button>
-            </Show>
-          </div>
+          // Alone in a new channel: the obvious next step is bringing the team in.
+          {move || {
+            let maybe_action = is_alone_in_channel().then_some(EmptyAction {
+              label_key: "channel-add-people",
+              on_click: Callback::new(move |()| state.overlay.set(Overlay::ChannelSettings(conversation))),
+            });
+            view! { <EmptyState icon=IconName::Smile title_key="channel-empty-title" body_key="channel-empty" maybe_action=maybe_action /> }
+          }}
         </Show>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
         <div class="rows" node_ref=rows>
           <For each=indices key=|index| *index let:index>
-            <RowSlot conversation=conversation index=index is_chat=is_chat />
+            <RowSlot conversation=conversation index=index is_chat=is_chat motion=motion />
           </For>
         </div>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
@@ -506,7 +517,12 @@ fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn
 
 /// Wrapper that carries the row index for measuring and re-renders only when its own data changes.
 #[component]
-fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl IntoView {
+fn RowSlot(
+  conversation: ConversationId,
+  index: usize,
+  is_chat: bool,
+  motion: StoredValue<FeedMotion, LocalStorage>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let has_divider = move || {
@@ -531,6 +547,8 @@ fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl In
     let message = messages.remove(1);
     Some((message, messages.into_iter().next()))
   });
+  // What this row showed last, so a re-render knows what changed (feed_motion.rs).
+  let shown = StoredValue::new(None::<Shown>);
   view! {
     <div class="row" data-idx=index.to_string()>
       <Show when=has_divider fallback=|| ()>
@@ -539,18 +557,33 @@ fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl In
         </div>
       </Show>
       {move || match data.get() {
-        Some((message, maybe_prev)) => view! { <MessageRow message=message maybe_prev=maybe_prev /> }.into_any(),
+        Some((message, maybe_prev)) => {
+          let row_motion = motion
+            .try_update_value(|motion| shown.with_value(|shown| motion.row_motion(shown.as_ref(), &message)))
+            .unwrap_or_default();
+          shown.set_value(Some(Shown::of(&message)));
+          view! { <MessageRow message=message maybe_prev=maybe_prev motion=row_motion /> }.into_any()
+        },
         // Still loading (or decrypting): a placeholder instead of a gap.
-        None => view! {
-          <div class="msg-skeleton" aria-hidden="true">
-            <span class="skeleton-avatar"></span>
-            <span class="skeleton-lines"><span></span><span></span></span>
-          </div>
-        }
-          .into_any(),
+        None => view! { <MessageSkeleton /> }.into_any(),
       }}
     </div>
   }
+}
+
+/// The newest message the server confirmed, from the end of the conversation.
+fn newest_confirmed_of(
+  state: crate::state::AppState,
+  conversation: ConversationId,
+) -> Option<crate::model::MessageId> {
+  /// The user's own unsent messages are at the end; a few are enough to look past them.
+  const LOOK_BACK: usize = 8;
+  state.read(|backend| {
+    let count = backend.message_count(conversation);
+    let start = count.saturating_sub(LOOK_BACK);
+    let tail = backend.messages(conversation, start, count - start);
+    newest_confirmed(tail.iter().rev())
+  })
 }
 
 /// Arrow keys move between rendered rows; Home/End jump to the oldest/newest loaded row.
