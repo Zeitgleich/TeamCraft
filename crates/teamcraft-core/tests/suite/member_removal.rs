@@ -288,23 +288,51 @@ mod leaving {
   }
 
   #[tokio::test]
-  async fn a_leave_cut_off_before_the_server_heard_is_finished_on_the_next_round() {
+  async fn a_leave_waits_for_the_commit_and_survives_a_lost_server_removal() {
     let server = FakeServer::new();
     let (mut alice, mut bob, mut carol) = three(&server).await;
     let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
 
     server.cut_next_removal(carol.client.user_id(), NetworkCut::BeforeRequest);
-    carol.client.leave_channel(channel).await.unwrap_err();
+    // Done from the user's side: the signed request is in the queue, the rest waits.
+    carol.client.leave_channel(channel).await.unwrap();
+    carol.client.apply_pending_changes().await.unwrap();
+    // No member committed it yet: the server still lists Carol.
     assert!(is_listed(&alice, channel, carol.client.user_id()).await);
-    // The signed request is in the queue already: the members commit it meanwhile.
+
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     bob.client.apply_pending_changes().await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
-
+    // The commit removed Carol's device; the server removal is cut off once (the entry stays),
+    // then sent again.
+    assert!(!carol.client.has_group(channel).unwrap());
+    carol.client.apply_pending_changes().await.unwrap();
     carol.client.apply_pending_changes().await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
 
     assert!(!is_listed(&alice, channel, carol.client.user_id()).await);
+    assert_removed(channel, &mut alice, &mut bob, &mut carol).await;
+  }
+
+  /// Carol's phone never joined the group, her laptop did: leaving from the phone still gets the
+  /// laptop removed.
+  #[tokio::test]
+  async fn leaving_from_a_device_outside_the_group_removes_the_users_other_devices() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let commits_before = commits(&alice, channel).await;
+    let mut phone = common::link_device(&mut carol).await;
+    assert!(!phone.has_group(channel).unwrap());
+
+    phone.leave_channel(channel).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    bob.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    assert_eq!(commits(&alice, channel).await, commits_before + 1);
+    assert!(!is_listed(&alice, channel, carol.client.user_id()).await);
+    assert!(!carol.client.has_group(channel).unwrap());
     assert_removed(channel, &mut alice, &mut bob, &mut carol).await;
   }
 }
@@ -338,6 +366,40 @@ mod revoking {
     bob.client.send_text(channel, None, "after").await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
     assert_eq!(alice.texts(channel), ["after"]);
+  }
+
+  /// The commit in one group fails: the device is still removed from the other group, and the
+  /// next round finishes the first.
+  #[tokio::test]
+  async fn a_group_that_fails_does_not_keep_the_device_in_the_others() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, _) = three(&server).await;
+    let laptop = common::link_device(&mut alice).await;
+    let laptop_device = laptop.device_id();
+    let first = channel_with(&mut alice, &mut [&mut bob]).await;
+    let second = channel_with(&mut alice, &mut [&mut bob]).await;
+    for channel in [first, second] {
+      alice.client.add_missing_devices(channel).await.unwrap();
+    }
+    settle(&mut [&mut alice, &mut bob]).await;
+    let before = commits(&alice, first).await + commits(&alice, second).await;
+
+    server.drop_next_commit(alice.client.user_id());
+    alice.client.revoke_device(laptop_device).await.unwrap_err();
+    assert_eq!(
+      commits(&alice, first).await + commits(&alice, second).await,
+      before + 1
+    );
+
+    alice.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert_eq!(
+      commits(&alice, first).await + commits(&alice, second).await,
+      before + 2
+    );
+    for channel in [first, second] {
+      assert_eq!(epoch(&mut alice, channel), epoch(&mut bob, channel));
+    }
   }
 }
 

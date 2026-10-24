@@ -104,6 +104,9 @@ pub struct ClientSettings {
   /// A device that fell out of a group asks again to be added back after this long without a
   /// welcome (e2ee.md §4.6).
   pub rejoin_retry: std::time::Duration,
+  /// A removal whose server side the server refused after the MLS side was done (the remover lost
+  /// the right meanwhile) is tried again after this long (e2ee.md §4.6, removal order).
+  pub removal_retry: std::time::Duration,
   /// Larger MLS group information is not sent with a commit (it would push the commit over the
   /// server's payload limit); a further device then waits for a member instead.
   pub max_group_info_bytes: usize,
@@ -158,6 +161,7 @@ impl Default for ClientSettings {
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
+      removal_retry: std::time::Duration::from_secs(60 * 60),
       max_group_info_bytes: 256 * 1024,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,

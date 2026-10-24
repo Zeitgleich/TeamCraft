@@ -425,21 +425,32 @@ lists them:
    the last channel admin leaving).
 2. The MLS side goes first. A member commits the signed removal; an admin outside the group posts it
    for the members to commit (admin.md §2.2); somebody leaving posts a signed removal of themselves,
-   which the remaining members commit (MLS doesn't let a member commit its own removal; the
-   leaver's own devices skip it).
+   also from a device that isn't in the group (for the user's other devices), which the remaining
+   members commit (MLS doesn't let a member commit its own removal; the leaver's own devices skip
+   it). A leaving device that is in the group waits until a member's commit removed it (it watches
+   its own group, no polling) and posts the request again when it got too old to be committed.
 3. Only then is the server's membership dropped (`DELETE …/members/{user}`, idempotent: removing
    somebody who is gone succeeds, so a retry or a second admin finishes instead of failing).
 
 The client records the removal and the step it reached in its pending queue before step 2 and
 finishes it on the next round (after a restart, on the next sync), so a lost answer or a killed app
-is repaired by the device that started it. Every state in between is safe: before step 2 nothing
-changed; after it the removed devices have no secret of the new epoch, whose key every member
-switches to (§4.2), even while the server still lists the user. Members' clients don't claim key
-packages for a user the server lists but who has no device in the group. A device that joins from a
-welcome made before somebody's removal pins the identities of everybody the welcome's tree holds,
-not only of whom the server lists, and verifies every leaf as before; the removal commit follows in
-the queue. A revocation runs in the other order on purpose: the server first, so a lost device loses
-its session at once, then the signed device list and the groups, again from the pending queue.
+is repaired by the device that started it. If the server refuses step 3 after step 2 (the remover
+lost the right meanwhile), the entry stays and is tried again after `removal_retry` (1 hour).
+
+When the remover commits (a member removing somebody, or the leaver's device that waits for the
+commit), every state in between is safe: before step 2 nothing changed; after it the removed devices
+have no secret of the new epoch, whose key every member switches to (§4.2), even while the server
+still lists the user. Two cases rest on a signed change that a member still has to commit after the
+server's membership is gone: an admin outside the group, who can't see the group's queue, and a
+leaving device that isn't in the group. If no member commits it in time (it is refused as stale
+after 32 epochs, see Freshness), the user stays in the group without a server membership; members
+detecting that is #231. Members' clients don't claim key packages for a user the server lists but
+who has no device in the group. A device that joins from a welcome made before somebody's removal
+pins the identities of everybody the welcome's tree holds, not only of whom the server lists, and
+verifies every leaf as before; the removal commit follows in the queue. A revocation runs in the
+other order on purpose: the server first, so a lost device loses its session at once, then the
+signed device list and the groups, again from the pending queue; a group whose commit fails doesn't
+stop the others, and it is tried again.
 
 **Falling out and coming back.** A device can still miss or refuse a commit the others merged (a bug,
 a restored backup of the app's store, an old client). It notices when, with every earlier entry of the
