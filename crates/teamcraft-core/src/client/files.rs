@@ -3,12 +3,13 @@
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use teamcraft_crypto::attachment::AttachmentKey;
+use teamcraft_crypto::attachment::{AttachmentKey, DEFAULT_CHUNK_SIZE, encrypt_attachment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_crypto::share_link::create_fragment;
 use teamcraft_proto::{
-  AttachmentId, Base64Bytes, ClientMessageId, ConversationId, CreateShareLinkRequest, ErrorCode, UnixMillis,
+  AttachmentId, Base64Bytes, ClientMessageId, ConversationId, CreateAttachmentRequest,
+  CreateShareLinkRequest, ErrorCode, UnixMillis,
 };
 
 use super::Client;
@@ -45,6 +46,49 @@ pub struct PendingFile {
   pub maybe_done: Option<AttachmentRef>,
   #[serde(rename = "failure", default, skip_serializing_if = "Option::is_none")]
   pub maybe_failure: Option<TransferFailure>,
+  /// The server's upload slot once announced. A retry uploads into the same slot instead of
+  /// announcing a new attachment: every announcement counts against the user's unfinished uploads
+  /// until it completes or expires, so retrying with new ones ends in 409 Conflict.
+  #[serde(rename = "slot", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_slot: Option<UploadSlot>,
+  /// Failed attempts and when the next one is due.
+  #[serde(default, skip_serializing_if = "UploadRetry::is_fresh")]
+  pub retry: UploadRetry,
+}
+
+/// An announced attachment that the file's ciphertext goes into.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadSlot {
+  pub attachment_id: AttachmentId,
+  pub upload_url: String,
+  /// The announced ciphertext size; the presigned URL accepts exactly this many bytes.
+  pub size_bytes: u64,
+}
+
+/// Failed attempts of one file since it was queued or the user retried it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UploadRetry {
+  /// Not failed yet: due right away.
+  #[default]
+  Fresh,
+  /// Failed `attempts` times; not tried again before `retry_at_ms` (client clock: it only spaces
+  /// out retries).
+  Waiting { attempts: u32, retry_at_ms: i64 },
+  /// Gave up retrying by itself; waits for the user's "Retry" ([`retry_stalled_upload`]).
+  Stalled { attempts: u32 },
+}
+
+/// How uploads that failed on the network are retried. Configurable; the defaults give up after
+/// about eight minutes of failures and leave the file to the user's "Retry".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UploadRetrySettings {
+  /// Wait after the first failed attempt; doubles with each further one.
+  pub retry_after: std::time::Duration,
+  /// The wait between attempts grows up to this.
+  pub retry_max: std::time::Duration,
+  /// Failed attempts after which the file waits for the user (shown as failed, with "Retry").
+  pub max_attempts: u32,
 }
 
 /// Where an upload reads from.
@@ -55,6 +99,60 @@ pub enum UploadSource {
   Bytes { bytes: Base64Bytes },
   /// A file on this device, read when uploading.
   Path { path: String },
+}
+
+impl Default for UploadRetrySettings {
+  fn default() -> Self {
+    Self {
+      retry_after: std::time::Duration::from_secs(2),
+      retry_max: std::time::Duration::from_secs(5 * 60),
+      max_attempts: 8,
+    }
+  }
+}
+
+impl UploadRetry {
+  pub fn is_stalled(&self) -> bool {
+    matches!(self, Self::Stalled { .. })
+  }
+
+  /// Whether an attempt may run at `now_ms`.
+  pub fn is_due(&self, now_ms: i64) -> bool {
+    match self {
+      Self::Fresh => true,
+      Self::Waiting { retry_at_ms, .. } => now_ms >= *retry_at_ms,
+      Self::Stalled { .. } => false,
+    }
+  }
+
+  /// Counts a failed attempt: the next one waits with exponential backoff, and after
+  /// [`UploadRetrySettings::max_attempts`] the file stalls.
+  pub fn record_failure(&mut self, now_ms: i64, settings: &UploadRetrySettings) {
+    let attempts = match self {
+      Self::Fresh => 1,
+      Self::Waiting { attempts, .. } | Self::Stalled { attempts } => attempts.saturating_add(1),
+    };
+    if attempts >= settings.max_attempts {
+      *self = Self::Stalled { attempts };
+      return;
+    }
+    let base = millis(settings.retry_after);
+    let ceiling = millis(settings.retry_max).max(base);
+    let doublings = attempts.saturating_sub(1).min(32);
+    let wait = base.saturating_mul(1_i64 << doublings).min(ceiling);
+    *self = Self::Waiting {
+      attempts,
+      retry_at_ms: now_ms.saturating_add(wait),
+    };
+  }
+
+  fn is_fresh(&self) -> bool {
+    *self == Self::Fresh
+  }
+}
+
+fn millis(duration: std::time::Duration) -> i64 {
+  i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// Largest file the browser saves: it holds the decrypted bytes in memory until the `<a download>`
@@ -136,6 +234,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           },
           maybe_done: None,
           maybe_failure: None,
+          maybe_slot: None,
+          retry: UploadRetry::default(),
         })
         .collect(),
     };
@@ -146,22 +246,43 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Uploads what's pending, file by file; finished messages are completed and become sendable.
-  /// Stops at the first network error (the rest resumes next time). Returns how many files went up.
+  /// Stops at the first network error (the rest resumes next time). A file that failed waits with
+  /// exponential backoff, and after [`UploadRetrySettings::max_attempts`] for the user's retry
+  /// ([`retry_stalled_upload`]). Returns how many files went up.
   pub async fn upload_pending(&mut self) -> Result<usize, CoreError> {
     let mut uploaded = 0;
     let pending: Vec<PendingUpload> = records::list_json(&self.store, Table::PendingUploads)?;
     for mut upload in pending {
       for index in 0..upload.files.len() {
         let file = &upload.files[index];
-        if file.maybe_done.is_some() || file.maybe_failure.is_some() {
+        let is_open = file.maybe_done.is_none() && file.maybe_failure.is_none();
+        if !is_open || !file.retry.is_due(self.now_ms()) {
           continue;
         }
-        match self.upload_one(upload.conversation_id, file).await {
+        match self
+          .upload_one(upload.conversation_id, &mut upload.files[index])
+          .await
+        {
           Ok(attachment) => {
-            upload.files[index].maybe_done = Some(attachment);
+            let file = &mut upload.files[index];
+            file.maybe_done = Some(attachment);
+            file.maybe_slot = None;
+            file.retry = UploadRetry::default();
             uploaded += 1;
           },
+          Err(UploadError::Offline(error)) => {
+            // Like the outbox: nothing counts while the server can't be reached at all.
+            save_pending_upload(&self.store, &upload)?;
+            return Err(error);
+          },
           Err(UploadError::Retry(error)) => {
+            // An expired access token is the app's to renew; it isn't the file's failure.
+            if !error.is_sign_in_required() {
+              let now = self.now_ms();
+              upload.files[index]
+                .retry
+                .record_failure(now, &self.settings.upload_retry);
+            }
             save_pending_upload(&self.store, &upload)?;
             return Err(error);
           },
@@ -265,34 +386,79 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(link)
   }
 
+  /// Encrypts and uploads one file into its slot, announcing one first if it has none. A slot the
+  /// storage refuses (its URL expired) or whose upload went missing is dropped, so the next attempt
+  /// announces a fresh one.
   async fn upload_one(
     &self,
     conversation: ConversationId,
-    file: &PendingFile,
+    file: &mut PendingFile,
   ) -> Result<AttachmentRef, UploadError> {
     if file.size_bytes > self.settings.max_upload_bytes {
       return Err(UploadError::Failed(TransferFailure::TooLarge));
     }
     let content = read_source(&file.source).map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
     let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type);
-    let outgoing = OutgoingFile {
+    let encrypted = encrypt_attachment(&content, DEFAULT_CHUNK_SIZE, &mut OsRng)
+      .map_err(|_| UploadError::Failed(TransferFailure::LocalFile))?;
+    let size_bytes = encrypted.ciphertext.len() as u64;
+    let slot = match file.maybe_slot.take() {
+      Some(slot) if slot.size_bytes == size_bytes => slot,
+      _ => self.announce_upload(conversation, size_bytes).await?,
+    };
+    file.maybe_slot = Some(slot.clone());
+    if let Err(error) = self.api.put_blob(&slot.upload_url, encrypted.ciphertext).await {
+      return Err(self.slot_failure(file, CoreError::Api(error)));
+    }
+    if let Err(error) = self.api.complete_attachment(slot.attachment_id).await {
+      return Err(self.slot_failure(file, CoreError::Api(error)));
+    }
+    Ok(AttachmentRef {
+      attachment_id: slot.attachment_id,
+      key: Base64Bytes::new(encrypted.key.as_key().expose_secret().to_vec()),
+      ciphertext_sha256: Base64Bytes::new(encrypted.ciphertext_sha256.to_vec()),
       file_name: file.file_name.clone(),
       media_type: file.media_type.clone(),
-      content,
+      size_bytes: content.len() as u64,
+      maybe_thumbnail: maybe_thumbnail.map(Base64Bytes::new),
+    })
+  }
+
+  /// Announces an upload. A server out of reach is "offline" (retried on every tick, like the
+  /// outbox); too many unfinished uploads (409) clear up as the server sweeps expired ones, so that
+  /// is retried with backoff rather than failing the file.
+  async fn announce_upload(
+    &self,
+    conversation: ConversationId,
+    size_bytes: u64,
+  ) -> Result<UploadSlot, UploadError> {
+    let request = CreateAttachmentRequest {
+      conversation_id: conversation,
+      size_bytes,
     };
-    match self.upload_encrypted(conversation, outgoing).await {
-      Ok(mut attachment) => {
-        attachment.maybe_thumbnail = maybe_thumbnail.map(Base64Bytes::new);
-        Ok(attachment)
-      },
-      Err(error) if error.is_retry_later() => Err(UploadError::Retry(error)),
-      Err(CoreError::Api(api))
-        if api.error_code() == Some(&ErrorCode::PayloadTooLarge) || is_status(&api, 413) =>
-      {
+    match self.api.create_attachment(&request).await {
+      Ok(created) => Ok(UploadSlot {
+        attachment_id: created.id,
+        upload_url: created.upload_url,
+        size_bytes,
+      }),
+      Err(error) if error.is_retry_later() => Err(UploadError::Offline(CoreError::Api(error))),
+      Err(error) if is_status(&error, 409) => Err(UploadError::Retry(CoreError::Api(error))),
+      Err(error) if error.error_code() == Some(&ErrorCode::PayloadTooLarge) || is_status(&error, 413) => {
         Err(UploadError::Failed(TransferFailure::TooLarge))
       },
       Err(_) => Err(UploadError::Failed(TransferFailure::Network)),
     }
+  }
+
+  /// A failed blob upload or completion: network trouble keeps the slot for the next attempt; a
+  /// refusal (expired URL, a blob the storage lost) drops it, and the next attempt starts over.
+  fn slot_failure(&self, file: &mut PendingFile, error: CoreError) -> UploadError {
+    if !error.is_retry_later() {
+      tracing::debug!(%error, "upload slot refused; the next attempt announces a new one");
+      file.maybe_slot = None;
+    }
+    UploadError::Retry(error)
   }
 
   /// Deletes the app's staged plaintext copies of a finished upload (see
@@ -376,7 +542,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 }
 
 enum UploadError {
-  /// Network trouble: keep the file pending and try again later.
+  /// The server can't be reached: keep the file pending, without counting an attempt.
+  Offline(CoreError),
+  /// The upload itself failed (refused blob, lost slot, 409): try again after a backoff.
   Retry(CoreError),
   Failed(TransferFailure),
 }
@@ -409,6 +577,29 @@ pub fn save_pending_upload(store: &impl LocalStore, upload: &PendingUpload) -> R
     &records::outbox_key(upload.conversation_id, upload.client_message_id),
     upload,
   )
+}
+
+/// The user's "Retry" on a file that stopped retrying by itself: every stalled file of the message is
+/// due again at once, with a fresh count. Returns whether the message had such files.
+pub fn retry_stalled_upload(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  message: ClientMessageId,
+) -> Result<bool, CoreError> {
+  let Some(mut upload) = pending_upload(store, conversation, message)? else {
+    return Ok(false);
+  };
+  let mut has_waiting = false;
+  for file in &mut upload.files {
+    if file.maybe_done.is_none() && file.maybe_failure.is_none() && file.retry.is_stalled() {
+      file.retry = UploadRetry::default();
+      has_waiting = true;
+    }
+  }
+  if has_waiting {
+    save_pending_upload(store, &upload)?;
+  }
+  Ok(has_waiting)
 }
 
 /// Files of a sent message that couldn't be uploaded (shown to the sender only).
@@ -788,6 +979,8 @@ mod tests {
         size_bytes: 1,
         maybe_done: None,
         maybe_failure: None,
+        maybe_slot: None,
+        retry: UploadRetry::default(),
       }],
     };
     save_pending_upload(&store, &upload).unwrap();
@@ -797,5 +990,64 @@ mod tests {
     assert!(!stray.exists());
     assert_eq!(sweep_staged_copies(&store, &staging.join("missing")).unwrap(), 0);
     std::fs::remove_dir_all(&staging).unwrap();
+  }
+
+  mod upload_retry {
+    use super::*;
+
+    #[test]
+    fn waits_double_up_to_the_ceiling_and_stop_at_the_cap() {
+      let settings = UploadRetrySettings {
+        retry_after: std::time::Duration::from_secs(2),
+        retry_max: std::time::Duration::from_secs(10),
+        max_attempts: 5,
+      };
+      let mut retry = UploadRetry::default();
+      assert!(retry.is_due(0));
+      let waits: Vec<i64> = (0..4)
+        .map(|_| {
+          retry.record_failure(1_000, &settings);
+          let UploadRetry::Waiting { retry_at_ms, .. } = retry else {
+            panic!("still retrying: {retry:?}");
+          };
+          retry_at_ms - 1_000
+        })
+        .collect();
+      assert_eq!(
+        waits,
+        vec![2_000, 4_000, 8_000, 10_000],
+        "doubling up to the ceiling"
+      );
+      assert!(!retry.is_due(10_999));
+      assert!(retry.is_due(11_000));
+      retry.record_failure(1_000, &settings);
+      assert_eq!(retry, UploadRetry::Stalled { attempts: 5 });
+      assert!(!retry.is_due(i64::MAX), "a stalled file waits for the user");
+    }
+
+    #[test]
+    fn a_fresh_retry_is_not_stored() {
+      let file = PendingFile {
+        file_name: "a.txt".into(),
+        media_type: "text/plain".into(),
+        source: UploadSource::Bytes {
+          bytes: Base64Bytes::new(b"a".to_vec()),
+        },
+        size_bytes: 1,
+        maybe_done: None,
+        maybe_failure: None,
+        maybe_slot: None,
+        retry: UploadRetry::default(),
+      };
+      let json = serde_json::to_value(&file).unwrap();
+      assert!(json.get("retry").is_none() && json.get("slot").is_none());
+      // Files queued by an older version have neither.
+      let old: PendingFile = serde_json::from_value(serde_json::json!({
+        "file_name": "a.txt", "media_type": "text/plain", "size_bytes": 1,
+        "source": { "kind": "bytes", "bytes": "YQ==" }
+      }))
+      .unwrap();
+      assert_eq!(old, file);
+    }
   }
 }

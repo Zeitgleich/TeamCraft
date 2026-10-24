@@ -11,11 +11,12 @@
 //! Every control has a tooltip naming its key and is reachable by keyboard
 //! ([`crate::lightbox::Command`]).
 //!
-//! Memory stays bounded: only the file on screen is held at full size, and only up to
-//! [`MAX_VIEWER_BYTES`]. Its decrypted bytes live in one `blob:` URL that is revoked when the
-//! lightbox moves to another file or closes; a download that finishes after the user moved on is
-//! dropped (and revoked) unseen. Nothing decrypted ever goes to the server: "open in a new window"
-//! hands the same in-memory URL to a blank window of this page.
+//! It opens at once with the thumbnail scaled up and a small progress indicator, and swaps in the
+//! full file when it is there. Memory stays bounded: files are opened only up to
+//! [`MAX_VIEWER_BYTES`], and their decrypted bytes live in `blob:` URLs in the session's cache
+//! ([`crate::media_cache`], bounded by a byte budget), so reopening a file is instant. Nothing
+//! decrypted ever goes to the server: "open in a new window" hands the same in-memory URL to a
+//! blank window of this page.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -40,8 +41,9 @@ use crate::lightbox::{
   Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, ModifierStyle, Point, Pointers, Release,
   Size, Viewport, album_len, images_in_scope, neighbor, position, wheel_zoom_factor,
 };
+use crate::media_cache::{self, LoadPriority};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
-use crate::object_url::{ObjectUrl, fetch_attachment};
+use crate::object_url::ObjectUrl;
 use crate::state::use_app_state;
 
 /// Pixels per line of a wheel event that scrolls by lines (Firefox with a mouse wheel).
@@ -401,15 +403,21 @@ fn load_current(inputs: LoadInputs) {
       full.set(FullMedia::TooLarge);
       return;
     }
+    // Seen before in this session (inline or in the lightbox): shown at once.
+    if let Some(url) = media_cache::cached(key) {
+      full.set(FullMedia::Ready(url));
+      return;
+    }
     full.set(FullMedia::Loading);
     spawn_local(async move {
-      let result = fetch_attachment(conversation, key.message, key.attachment.to_string(), &media_type).await;
+      let result = media_cache::load(conversation, key, &media_type, LoadPriority::Now, || true).await;
       if ticket.try_get_value() != Some(next_ticket) {
-        // The user moved on or closed the lightbox; dropping the URL revokes it.
+        // The user moved on or closed the lightbox; the cache keeps the file for next time.
         return;
       }
       let shown = match result {
-        Ok(url) => FullMedia::Ready(Rc::new(url)),
+        Ok(Some(url)) => FullMedia::Ready(url),
+        Ok(None) => FullMedia::Failed,
         Err(error) => {
           tracing::warn!(%error, conversation_id = %conversation, "could not open a file");
           FullMedia::Failed
@@ -664,10 +672,10 @@ fn Status(
 ) -> impl IntoView {
   let i18n = use_i18n();
   move || match full.get() {
+    // The thumbnail is already on screen: only a small spinner says the full file is coming.
     FullMedia::Loading => view! {
-      <div class="lightbox-status" role="status">
-        <progress class="lightbox-progress" aria-label=move || i18n.t("lightbox-loading")></progress>
-        <span>{move || i18n.t("lightbox-loading")}</span>
+      <div class="lightbox-loading" role="status" aria-label=move || i18n.t("lightbox-loading")>
+        <span class="spinner" aria-hidden="true"></span>
       </div>
     }
     .into_any(),
@@ -733,7 +741,7 @@ fn listen_to_wheel(stage: NodeRef<html::Div>, on_wheel: impl FnMut(web_sys::Whee
 /// A thumbnail as a placeholder while the full file loads, and for the tinted backdrop.
 fn thumbnail_url(file: &FileInfo) -> Option<Rc<ObjectUrl>> {
   let png = file.maybe_thumbnail_png.as_deref()?;
-  ObjectUrl::from_bytes(png, "image/png").map(Rc::new)
+  ObjectUrl::from_thumbnail(png).map(Rc::new)
 }
 
 /// The image's laid-out size (before zoom and rotation) and the stage's size.
@@ -773,7 +781,7 @@ fn has_text_selection() -> bool {
     .is_some_and(|selection| !selection.is_collapsed())
 }
 
-fn prefers_reduced_motion() -> bool {
+pub(crate) fn prefers_reduced_motion() -> bool {
   web_sys::window()
     .and_then(|window| {
       window

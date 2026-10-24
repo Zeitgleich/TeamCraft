@@ -30,6 +30,8 @@ const UNREAD_SCAN_LIMIT: usize = 500;
 const HIGHLIGHT_DURATION: Duration = Duration::from_millis(2_500);
 /// How long a deleted message can be restored before it is deleted for everyone.
 const UNDO_WINDOW: Duration = Duration::from_secs(6);
+/// How long a confirmation toast ("Link copied") stays.
+const BRIEF_TOAST: Duration = Duration::from_secs(4);
 
 /// A short message over the app, optionally with an Undo button.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -761,6 +763,13 @@ impl AppState {
         });
       }
     });
+  }
+
+  /// Shows a confirmation that goes away by itself ("Link copied").
+  pub fn show_brief_toast(&self, text: String) {
+    let state = *self;
+    let toast = self.push_toast(text, None);
+    set_timeout(move || state.dismiss_toast(toast), BRIEF_TOAST);
   }
 
   pub fn dismiss_toast(&self, id: u64) {

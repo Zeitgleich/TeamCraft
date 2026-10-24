@@ -13,7 +13,11 @@ const OPAQUE_TYPE: &str = "application/octet-stream";
 
 /// A `blob:` URL that is revoked when dropped, so the browser frees the bytes behind it.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ObjectUrl(String);
+pub struct ObjectUrl {
+  url: String,
+  /// Size of the blob behind it, for memory budgets ([`crate::media_cache`]).
+  byte_len: u64,
+}
 
 impl ObjectUrl {
   /// A URL for bytes in memory; `None` where the browser refuses.
@@ -22,13 +26,26 @@ impl ObjectUrl {
     Self::from_parts(&array, media_type)
   }
 
+  /// A URL for a thumbnail sent with a file (PNG or JPEG, told apart by its bytes).
+  pub fn from_thumbnail(bytes: &[u8]) -> Option<Self> {
+    Self::from_bytes(bytes, crate::media_layout::thumbnail_type(bytes))
+  }
+
   /// A URL for a blob the page made itself (a canvas snapshot).
   pub fn from_blob(blob: &web_sys::Blob) -> Option<Self> {
-    web_sys::Url::create_object_url_with_blob(blob).ok().map(Self)
+    let url = web_sys::Url::create_object_url_with_blob(blob).ok()?;
+    Some(Self {
+      url,
+      byte_len: blob.size() as u64,
+    })
   }
 
   pub fn as_str(&self) -> &str {
-    &self.0
+    &self.url
+  }
+
+  pub fn byte_len(&self) -> u64 {
+    self.byte_len
   }
 
   fn from_parts(part: &wasm_bindgen::JsValue, media_type: &str) -> Option<Self> {
@@ -36,14 +53,14 @@ impl ObjectUrl {
     let options = web_sys::BlobPropertyBag::new();
     options.set_type(blob_type(media_type));
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options).ok()?;
-    web_sys::Url::create_object_url_with_blob(&blob).ok().map(Self)
+    Self::from_blob(&blob)
   }
 }
 
 impl Drop for ObjectUrl {
   fn drop(&mut self) {
     // Revoking only fails for a malformed URL, which `create_object_url` never returns.
-    drop(web_sys::Url::revoke_object_url(&self.0));
+    drop(web_sys::Url::revoke_object_url(&self.url));
   }
 }
 

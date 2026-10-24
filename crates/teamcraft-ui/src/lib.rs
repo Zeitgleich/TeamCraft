@@ -38,6 +38,8 @@ pub mod keys;
 pub mod lightbox;
 pub mod live;
 pub mod markdown;
+pub mod media_cache;
+pub mod media_layout;
 pub mod meeting_reminders;
 pub mod meetings;
 pub mod mention;

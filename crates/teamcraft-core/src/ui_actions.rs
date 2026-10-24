@@ -183,6 +183,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let Some(target) = self.find_stored(conversation, message) else {
       return;
     };
+    // A message whose files stopped retrying waits in the outbox; its files are due again.
+    match crate::client::files::retry_stalled_upload(self.store_ref(), conversation, target.client_message_id)
+    {
+      Ok(true) => return self.command(CoreCommand::UploadFiles),
+      Ok(false) => {},
+      Err(error) => tracing::error!(%error, "could not retry the files"),
+    }
     match records::retry_failed(self.store_ref(), conversation, target.client_message_id) {
       Ok(()) => self.command(CoreCommand::FlushOutbox),
       Err(error) => tracing::error!(%error, "could not retry the message"),

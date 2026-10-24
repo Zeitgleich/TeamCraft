@@ -582,18 +582,25 @@ pub fn Composer(
               .starts_with("image/")
               .then(|| web_sys::Url::create_object_url_with_blob(&file).ok())
               .flatten();
-            attachments.update_if_alive(|list| {
-              list.push(PendingFile {
-                name: file.name(),
-                media_type,
-                bytes,
-                maybe_preview_url,
-              })
-            });
+            let read = PendingFile {
+              name: file.name(),
+              media_type,
+              bytes,
+              maybe_preview_url,
+            };
+            if let Some(PendingFile {
+              maybe_preview_url: Some(url),
+              ..
+            }) = add_read_file(attachments, read)
+            {
+              drop(web_sys::Url::revoke_object_url(&url));
+            }
           },
-          Err(_) => upload_error.set_if_alive(Some(
-            i18n.t_with("composer-file-unreadable", &[("name", &file.name())]),
-          )),
+          Err(_) => {
+            let text = i18n.t_with("composer-file-unreadable", &[("name", &file.name())]);
+            // The composer may be gone by now; see `add_read_file`.
+            upload_error.set_if_alive(Some(text));
+          },
         }
       });
     }
@@ -930,5 +937,43 @@ pub fn Composer(
         <p class="markdown-hint">{move || i18n.t("composer-markdown-hint")}</p>
       </Show>
     </div>
+  }
+}
+
+/// Adds a file that was read in the background. The composer may be gone by then (another
+/// conversation was opened while a big file was read): its signals are disposed, and writing them
+/// would panic and abort the whole wasm app (issue #316). Returns the file when nobody took it.
+fn add_read_file(attachments: RwSignal<Vec<PendingFile>>, file: PendingFile) -> Option<PendingFile> {
+  let mut maybe_file = Some(file);
+  attachments.try_update(|list| list.extend(maybe_file.take()));
+  maybe_file
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_file_read_after_the_composer_closed_is_handed_back_without_a_panic() {
+    let owner = Owner::new();
+    let attachments = owner.with(|| RwSignal::new(Vec::<PendingFile>::new()));
+    assert_eq!(add_read_file(attachments, file("open.txt")), None);
+    assert_eq!(attachments.get_untracked().len(), 1);
+
+    owner.cleanup();
+    assert_eq!(
+      add_read_file(attachments, file("late.txt")),
+      Some(file("late.txt")),
+      "a disposed list is not written"
+    );
+  }
+
+  fn file(name: &str) -> PendingFile {
+    PendingFile {
+      name: name.into(),
+      media_type: "text/plain".into(),
+      bytes: b"x".to_vec(),
+      maybe_preview_url: None,
+    }
   }
 }

@@ -18,8 +18,8 @@ use crate::notify_sync::{
   MAX_DND_ALLOWED_USERS, MAX_DND_WINDOWS, format_minutes, is_valid_window, parse_minutes,
 };
 use crate::prefs::{
-  CallPrefs, Density, DndSchedule, EVERY_DAY, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, SidebarSort,
-  ThreadReplies, Zoom, default_dnd_window,
+  CallPrefs, Density, DndSchedule, EVERY_DAY, ImageSize, MuteFor, NotificationPrefs, NotifyLevel, PushWhen,
+  SidebarSort, ThreadReplies, Zoom, default_dnd_window,
 };
 use crate::reactive::SetIfAlive;
 use crate::settings::{SendMode, Theme, load_string, store_string};
@@ -790,6 +790,17 @@ pub fn DisplayTab() -> impl IntoView {
       on_change=Callback::new(move |slug: String| {
         if let Some(density) = Density::from_slug(&slug) {
           prefs.update(|all| all.display.density = density);
+        }
+      })
+    />
+    <SelectField
+      id="setting-image-size"
+      label="settings-image-size"
+      options=options(&["standard", "large"], "settings-image-size-")
+      value=Signal::derive(move || prefs.get().display.image_size.slug().to_owned())
+      on_change=Callback::new(move |slug: String| {
+        if let Some(size) = ImageSize::from_slug(&slug) {
+          prefs.update(|all| all.display.image_size = size);
         }
       })
     />

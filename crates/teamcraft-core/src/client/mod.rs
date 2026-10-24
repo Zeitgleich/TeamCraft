@@ -160,6 +160,8 @@ pub struct ClientSettings {
   pub max_announced_presence: usize,
   /// Limits of the queue of read positions, acknowledgements, pins and presence (issue #159).
   pub pending_actions: PendingActionSettings,
+  /// Backoff and cap of file uploads that failed on the network (issue #316).
+  pub upload_retry: files::UploadRetrySettings,
 }
 
 pub struct Client<A, S> {
@@ -227,6 +229,7 @@ impl Default for ClientSettings {
       accept_unsigned_messages: false,
       max_announced_presence: 500,
       pending_actions: PendingActionSettings::default(),
+      upload_retry: files::UploadRetrySettings::default(),
     }
   }
 }

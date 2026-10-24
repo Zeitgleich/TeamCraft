@@ -858,6 +858,9 @@ notif-enforcement-note = These settings are saved on this device. Notifications 
 settings-density = Message density
 settings-density-comfortable = Comfortable
 settings-density-compact = Compact
+settings-image-size = Image size in conversations
+settings-image-size-standard = Standard
+settings-image-size-large = Large
 settings-status-in-messages = Show custom status next to names in messages
 settings-sidebar-sort = Sort conversations
 settings-sort-default = As the server lists them
@@ -1144,6 +1147,8 @@ file-saved = Saved on this device
 file-failed = Transfer failed
 file-too-large = File is too large
 file-retry = Try again
+file-upload-stalled = Upload failed. The message waits until the file is sent.
+file-upload-failed = Upload failed
 file-preview = Show preview
 file-share = Create share link
 file-copy-share = Copy share link
@@ -2113,7 +2118,7 @@ lightbox-details-sender = Sent by
 lightbox-details-sent = Sent
 lightbox-thumbnails = Files in this view
 lightbox-thumbnail = Show { $name }
-album-open = Open image { $index } of { $count }: { $name }
+media-open = Open { $name }
 
 ## Failed actions (an error toast) and the panic overlay
 

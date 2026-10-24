@@ -205,7 +205,17 @@ pub enum FileTransfer {
   Local {
     path: String,
   },
+  /// A download (or an older failed transfer) that failed; `download_file` tries again.
   Failed {
+    reason: FileFailure,
+  },
+  /// An upload that stopped retrying by itself after repeated failures. The message waits for it;
+  /// [`crate::backend::ChatBackend::retry_send`] on the message tries again.
+  UploadStalled {
+    reason: FileFailure,
+  },
+  /// An upload that failed for good (too large, unreadable); the message went out without it.
+  UploadFailed {
     reason: FileFailure,
   },
 }
