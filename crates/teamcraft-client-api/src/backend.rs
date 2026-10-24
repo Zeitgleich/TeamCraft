@@ -16,8 +16,9 @@ use teamcraft_proto::{
 };
 
 use crate::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
+  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
+  SpaceInvite,
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
@@ -231,6 +232,12 @@ pub trait ChatBackend {
   fn resolve_permalink(&self, _link: &str) -> Option<PermalinkTarget> {
     None
   }
+  /// The message a permalink points to, for its embedded preview, read from this device's store
+  /// and only if the user is a member of its conversation. `None` while a backend that loads in the
+  /// background is still looking, and from backends that can't read messages.
+  fn linked_message(&self, _link: &str) -> Option<LinkedMessage> {
+    None
+  }
   /// Marks the conversation unread from this message on.
   fn mark_unread(&self, _conversation: ConversationId, _from: MessageId) {}
   /// The first message the user hasn't read, to jump to.
@@ -354,6 +361,9 @@ pub trait ChatBackend {
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
   fn invite_to_space(&self, _invite: SpaceInvite) {}
+  /// Adds people from the directory to a space as members or guests; people already in it are
+  /// skipped.
+  fn add_space_members(&self, _space: SpaceId, _users: Vec<UserId>, _is_guest: bool) {}
   /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
   /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
   fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}

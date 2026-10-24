@@ -9,6 +9,7 @@ mod account_data;
 mod activity;
 mod backgrounds;
 mod calls;
+mod catch_up;
 mod chat_actions;
 #[path = "../common/mod.rs"]
 mod common;
@@ -35,6 +36,8 @@ mod queries;
 mod removal_followups;
 mod runner;
 mod search;
+mod snapshot_cache;
 mod sync_engine;
+mod upkeep;
 mod workspace;
 mod workspace_admin;

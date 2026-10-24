@@ -20,6 +20,7 @@ use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
+use crate::viewport::{CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
 use teamcraft_proto::Role;
 
@@ -128,6 +129,9 @@ pub enum MainView {
   GettingStarted,
   /// Home with no conversation open.
   Home,
+  /// The space in [`AppState::space`] with nothing open: its channel list in the compact layout
+  /// (the wider layouts open its first channel instead).
+  Space,
   /// A public channel of the space the user hasn't joined: what it is about, and "Join".
   ChannelPreview(SpaceId, ConversationId),
 }
@@ -169,8 +173,13 @@ pub enum Overlay {
   NewSpace,
   /// Pick one or several people to write to (a DM or a group DM).
   NewMessage,
-  /// Open spaces to join, and the way to create a new one.
-  JoinSpace,
+  /// Open spaces to join and the user's own spaces, and the way to create a new one; a shared
+  /// space link puts its space first.
+  BrowseSpaces(Option<SpaceId>),
+  /// Invite people to a space: from the directory, by e-mail, or with the link of an open space.
+  InvitePeople(SpaceId),
+  /// Add people to a channel (through its encryption group).
+  AddToChannel(ConversationId),
   NewChannel(SpaceId),
   BrowseChannels(SpaceId),
   ChannelSettings(ConversationId),
@@ -185,6 +194,8 @@ pub enum Overlay {
   EditProfile,
   /// Another person's profile card.
   UserProfile(UserId),
+  /// Calls aren't available in this client (the browser, for now): where the apps are.
+  CallsUnavailable,
 }
 
 /// The tabs of the settings dialog (PLAN.md §4 and §5).
@@ -220,6 +231,8 @@ pub struct AppState {
   pub view: RwSignal<MainView>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
+  /// The layout the window's size calls for (`viewport.rs`).
+  pub layout: RwSignal<Layout>,
   /// Text of the search box, kept when leaving and re-entering the search page.
   pub search_query: RwSignal<String>,
   /// What the top bar's search starts with when it opens (Ctrl/Cmd+F: the open conversation).
@@ -292,6 +305,16 @@ fn home_view_without_dms(has_spaces: bool) -> MainView {
   }
 }
 
+/// Which pane a view fills in the compact layout: the lists of Home and of a space, a side panel
+/// over its conversation, and the main column for everything else.
+fn compact_pane_for(view: MainView, panel: SidePanel) -> CompactPane {
+  match view {
+    MainView::Home | MainView::Space => CompactPane::List,
+    MainView::Conversation(_) if panel != SidePanel::Closed => CompactPane::Panel,
+    _ => CompactPane::Main,
+  }
+}
+
 impl AppState {
   /// `start` is the first space and conversation; without one Home opens with the welcome page.
   pub fn new(backend: Rc<dyn Backend>, settings: Settings, start: Option<(SpaceId, ConversationId)>) -> Self {
@@ -304,6 +327,7 @@ impl AppState {
       view: RwSignal::new(view),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
+      layout: RwSignal::new(current_layout()),
       search_query: RwSignal::new(String::new()),
       switcher_query: RwSignal::new(String::new()),
       call: CallState::new(),
@@ -424,7 +448,13 @@ impl AppState {
         .or_else(|| backend.direct_conversations().into_iter().next())
     });
     if let Some(conversation) = first {
-      self.open_conversation(conversation.id);
+      // Phones start on Home's list, like the mobile apps.
+      if self.is_compact() {
+        self.awaits_first_conversation.set(false);
+        self.open_home();
+      } else {
+        self.open_conversation(conversation.id);
+      }
       // It stands in for the start page the URL already shows, so Back doesn't return to a `/`
       // that would just open it again.
       self.follows_url.set_value(true);
@@ -548,9 +578,11 @@ impl AppState {
       | MainView::Calls
       | MainView::Directory => true,
       MainView::ChannelPreview(previewed, _) => is_grouped || previewed == space,
-      MainView::Admin(_) | MainView::GettingStarted | MainView::Home => false,
+      MainView::Admin(_) | MainView::GettingStarted | MainView::Home | MainView::Space => false,
     };
-    if !belongs {
+    if self.is_compact() {
+      self.show_space_list();
+    } else if !belongs {
       self.open_first_conversation_of(space);
     }
   }
@@ -558,6 +590,19 @@ impl AppState {
   /// Shows Home: the most recent DM, or the page's start when there is none.
   pub fn open_home(&self) {
     self.rail.set(RailEntry::Home);
+    // Phones show Home's list (the welcome page while the workspace is empty); a conversation
+    // opens from there.
+    if self.is_compact() {
+      let is_empty =
+        self.read(|backend| backend.spaces().is_empty() && backend.direct_conversations().is_empty());
+      self.view.set(if is_empty {
+        MainView::GettingStarted
+      } else {
+        MainView::Home
+      });
+      self.panel.set(SidePanel::Closed);
+      return;
+    }
     let is_direct_open = self
       .current_conversation_id()
       .and_then(|id| self.read(|backend| backend.conversation(id)))
@@ -645,6 +690,7 @@ impl AppState {
       | MainView::Directory
       | MainView::GettingStarted
       | MainView::Home
+      | MainView::Space
       | MainView::ChannelPreview(..) => None,
     }
   }
@@ -1056,6 +1102,49 @@ impl AppState {
     self.panel.set(SidePanel::Thread { conversation, thread });
   }
 
+  /// Whether one pane shows at a time (phones).
+  pub fn is_compact(&self) -> bool {
+    get_if_observed(self.layout).is_compact()
+  }
+
+  /// The pane that fills the window in the compact layout.
+  pub fn compact_pane(&self) -> CompactPane {
+    compact_pane_for(self.view.get(), self.panel.get())
+  }
+
+  /// One level up in the compact layout, where there is no history entry to go back to: from a
+  /// side panel to its conversation, from a conversation to the list it is in, from anything else
+  /// to Home.
+  pub fn go_up(&self) {
+    if self.panel.get_untracked() != SidePanel::Closed {
+      self.panel.set(SidePanel::Closed);
+      return;
+    }
+    let maybe_space = match self.view.get_untracked() {
+      MainView::Conversation(id) => self
+        .read(|backend| backend.conversation(id))
+        .and_then(|conversation| conversation.maybe_space),
+      MainView::ChannelPreview(space, _) => Some(space),
+      _ => None,
+    };
+    match maybe_space {
+      Some(space) => self.open_space(space),
+      None => self.open_home(),
+    }
+  }
+
+  /// Follows a layout change: a space's list has no page of its own in the wider layouts.
+  pub fn layout_changed(&self, layout: Layout) {
+    if !layout.is_compact() && self.view.get_untracked() == MainView::Space {
+      self.open_first_conversation_of(self.space.get_untracked());
+    }
+  }
+
+  fn show_space_list(&self) {
+    self.view.set(MainView::Space);
+    self.panel.set(SidePanel::Closed);
+  }
+
   /// Opens the settings dialog on its first tab.
   pub fn open_settings(&self) {
     self.settings_tab.set(SettingsTab::DEFAULT);
@@ -1126,6 +1215,7 @@ impl AppState {
       MainView::Meetings => Route::Meetings,
       MainView::Directory => Route::People,
       MainView::Home => Route::Home,
+      MainView::Space => Route::Space(self.space.get()),
       // Not joined, so not a channel route yet: a reload lands in the space.
       MainView::ChannelPreview(space, _) => Route::Space(space),
       MainView::GettingStarted => {
@@ -1246,11 +1336,26 @@ impl AppState {
       Route::Home => self.open_home(),
       Route::Space(space) => {
         if !self.read(|backend| backend.spaces().iter().any(|candidate| candidate.id == space)) {
+          // The link of an open space the user isn't in yet: offer to join it.
+          if self.read(|backend| {
+            backend
+              .joinable_spaces()
+              .iter()
+              .any(|candidate| candidate.id == space)
+          }) {
+            self.open_start();
+            self.overlay.set(Overlay::BrowseSpaces(Some(space)));
+            return RouteOutcome::Shown;
+          }
           return RouteOutcome::Waiting;
         }
         self.space.set(space);
         self.rail.set(RailEntry::Space);
-        self.open_first_conversation_of(space);
+        if self.is_compact() {
+          self.show_space_list();
+        } else {
+          self.open_first_conversation_of(space);
+        }
       },
       Route::Channel { channel: id, .. } | Route::Conversation(id) | Route::Direct(id) => {
         if !self.is_known_conversation(id) {
@@ -1303,6 +1408,10 @@ impl AppState {
   /// Where the app starts: the first channel, else Home with the welcome page (as
   /// [`start_position`] does on startup).
   fn open_start(&self) {
+    if self.is_compact() {
+      self.open_home();
+      return;
+    }
     let first = self.read(|backend| {
       let space = backend.spaces().into_iter().next()?;
       let conversation = backend.space_conversations(space.id).into_iter().next()?;
@@ -1543,6 +1652,18 @@ mod tests {
     }
 
     #[test]
+    fn the_link_of_an_open_space_offers_to_join_it() {
+      let state = test_state();
+      let open = state
+        .read(|backend| backend.joinable_spaces())
+        .first()
+        .map(|space| space.id)
+        .expect("demo data has an open space to join");
+      assert_eq!(state.follow_route(Route::Space(open)), RouteOutcome::Shown);
+      assert_eq!(state.overlay.get_untracked(), Overlay::BrowseSpaces(Some(open)));
+    }
+
+    #[test]
     fn a_space_route_lands_in_its_first_channel() {
       let state = test_state();
       let spaces = state.read(|backend| backend.spaces());
@@ -1728,6 +1849,93 @@ mod tests {
       assert_eq!(toasts.len(), MAX_TOASTS);
       assert!(toasts[0].maybe_undo.is_some(), "the undo toast stays");
       assert_eq!(toasts.last().map(|toast| toast.text.as_str()), Some("error 9"));
+    }
+  }
+
+  mod compact {
+    use super::*;
+
+    #[test]
+    fn home_and_a_space_show_their_list_instead_of_a_conversation() {
+      let state = compact_state();
+      let (space, _) = first_channel(&state);
+      state.open_home();
+      assert_eq!(state.view.get(), MainView::Home);
+      assert_eq!(state.compact_pane(), CompactPane::List);
+      assert_eq!(state.route(), Route::Home);
+      state.open_space(space);
+      assert_eq!(state.view.get(), MainView::Space);
+      assert_eq!(state.compact_pane(), CompactPane::List);
+      assert_eq!(state.route(), Route::Space(space));
+    }
+
+    #[test]
+    fn the_space_route_reads_back_as_the_spaces_list() {
+      let state = compact_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      assert_eq!(state.follow_route(Route::Space(space)), RouteOutcome::Shown);
+      assert_eq!(state.view.get(), MainView::Space);
+      assert_eq!(state.route(), Route::Space(space));
+    }
+
+    #[test]
+    fn the_start_route_opens_homes_list() {
+      let state = compact_state();
+      assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
+      assert_eq!(state.route(), Route::Home);
+    }
+
+    #[test]
+    fn a_thread_fills_the_window_over_its_conversation() {
+      let state = compact_state();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      assert_eq!(state.compact_pane(), CompactPane::Main);
+      state.open_thread(channel, thread_id_of(id_from_raw(42)));
+      assert_eq!(state.compact_pane(), CompactPane::Panel);
+    }
+
+    #[test]
+    fn up_goes_from_the_thread_to_the_conversation_to_its_list() {
+      let state = compact_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_thread(channel, thread_id_of(id_from_raw(42)));
+      state.go_up();
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+      assert_eq!(state.panel.get(), SidePanel::Closed);
+      state.go_up();
+      assert_eq!(state.route(), Route::Space(space));
+      let dm = first_dm(&state);
+      state.open_conversation(dm);
+      state.go_up();
+      assert_eq!(state.route(), Route::Home);
+    }
+
+    #[test]
+    fn a_wider_window_opens_the_first_channel_of_the_listed_space() {
+      let state = compact_state();
+      let (space, channel) = first_channel(&state);
+      state.open_space(space);
+      state.layout.set(Layout::Medium);
+      state.layout_changed(Layout::Medium);
+      assert_eq!(state.route(), Route::Channel { space, channel });
+    }
+
+    #[test]
+    fn startup_data_lands_on_homes_list() {
+      let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(NOW));
+      let state = AppState::new(backend, Settings::for_tests(), None);
+      state.layout.set(Layout::Compact);
+      state.backend_changed();
+      assert_eq!(state.route(), Route::Home);
+    }
+
+    fn compact_state() -> AppState {
+      let state = test_state();
+      state.layout.set(Layout::Compact);
+      state
     }
   }
 

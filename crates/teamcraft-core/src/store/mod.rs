@@ -15,6 +15,7 @@ pub mod sealed;
 mod sealed_sqlite;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
+mod tracked;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
@@ -22,12 +23,15 @@ pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
 pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
 #[cfg(not(target_arch = "wasm32"))]
+pub use key_source::{KeystoreThreadError, run_outside_runtime};
+#[cfg(not(target_arch = "wasm32"))]
 pub use lock::StoreLock;
 pub use memory::MemoryStore;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
+pub use tracked::{StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
@@ -95,6 +99,9 @@ pub enum Table {
   /// Small actions waiting for the server (read positions, acknowledgements, pins, presence), one
   /// record per target.
   PendingActions,
+  /// Presence as `presence_update` events (and the reads after a connection) announced it to the
+  /// UI, one record per user with its revision (issue #259).
+  AnnouncedPresence,
 }
 
 /// A decrypted (or own, not yet sent) message.
@@ -382,6 +389,20 @@ pub trait LocalStore {
     conversation: ConversationId,
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError>;
+  /// The message the server knows by `server_id`, without reading the whole conversation (the
+  /// preview of a message link). The default scans; stores with an index answer directly.
+  fn message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    Ok(
+      self
+        .messages(conversation, MessageFilter::All)?
+        .into_iter()
+        .find(|message| message.maybe_server_id == Some(server_id)),
+    )
+  }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
 }
 
@@ -415,6 +436,14 @@ macro_rules! forward_local_store {
         client_message_id: ClientMessageId,
       ) -> Result<Option<StoredMessage>, StoreError> {
         (**self).message(conversation, client_message_id)
+      }
+
+      fn message_by_server_id(
+        &self,
+        conversation: ConversationId,
+        server_id: MessageId,
+      ) -> Result<Option<StoredMessage>, StoreError> {
+        (**self).message_by_server_id(conversation, server_id)
       }
 
       fn messages(
@@ -507,7 +536,7 @@ impl StoredMessage {
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 31] = [
+  pub const ALL: [Self; 32] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -539,6 +568,7 @@ impl Table {
     Self::DeviceKeys,
     Self::RemovedSenders,
     Self::PendingActions,
+    Self::AnnouncedPresence,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -580,6 +610,7 @@ impl Table {
       Self::DeviceKeys => "device_keys",
       Self::RemovedSenders => "removed_senders",
       Self::PendingActions => "pending_actions",
+      Self::AnnouncedPresence => "announced_presence",
     }
   }
 }
@@ -701,8 +732,19 @@ pub(crate) mod tests {
     store.upsert_message(&sent).unwrap();
     assert_eq!(
       store.message(conversation, pending.client_message_id).unwrap(),
+      Some(sent.clone())
+    );
+    // Found by the server's ID too, only in its own conversation.
+    assert_eq!(
+      store.message_by_server_id(conversation, id(500)).unwrap(),
       Some(sent)
     );
+    assert_eq!(
+      store.message_by_server_id(conversation, id(100)).unwrap(),
+      Some(first.clone())
+    );
+    assert_eq!(store.message_by_server_id(other, id(100)).unwrap(), None);
+    assert_eq!(store.message_by_server_id(conversation, id(999)).unwrap(), None);
     assert_eq!(store.messages(conversation, MessageFilter::All).unwrap().len(), 5);
 
     store.delete_messages(conversation).unwrap();

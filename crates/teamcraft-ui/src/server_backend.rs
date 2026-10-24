@@ -206,6 +206,11 @@ pub fn build_snapshot(
       maybe_image_version: space.maybe_image.as_ref().map(|image| image.version.clone()),
       unread_count: 0,
       mention_count: 0,
+      maybe_description: space.maybe_description.clone(),
+      member_count: space.member_count,
+      join_policy: space.join_policy.clone(),
+      can_add_members: space.can_add_members,
+      can_invite_guests: space.can_invite_guests,
     })
     .collect();
 
@@ -277,6 +282,7 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
       .is_some_and(|membership| membership.notification_level == teamcraft_proto::NotificationLevel::None),
     can_post: !conversation.is_archived,
     bookmarks: Vec::new(),
+    is_catching_up: false,
   }
 }
 

@@ -4,12 +4,13 @@ use std::collections::BTreeSet;
 
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListThreadsQuery, SpaceId,
-  UploadKeyPackagesRequest, UserSummary,
+  Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListConversationMembersResponse,
+  ListThreadsQuery, SpaceId, UploadKeyPackagesRequest, UserSummary,
 };
 
 use super::Client;
-use crate::api::ServerApi;
+use super::catch_up::FirstPages;
+use crate::api::{ApiError, ServerApi};
 use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
 use crate::store::{LocalStore, Table};
@@ -24,15 +25,16 @@ const NEEDS_MEMBER_RESYNC_KEY: &str = "needs_member_resync";
 
 /// The part of a conversation's sync that failed and waits for another try.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResyncPart {
+pub(super) enum ResyncPart {
   Members,
   Content,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the store up to date after a fresh gateway session (or at start): the last steps of an
-  /// interrupted enrollment, spaces, conversations and members, welcomes, MLS backlogs, new
-  /// messages, then the outbox, key packages and the key bag.
+  /// interrupted enrollment, spaces, conversations and members, welcomes, MLS backlogs and new
+  /// messages (the conversation the user looks at first, several at once, issue #247), then the
+  /// outbox, key packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
     // Removal records of the user's devices count before anything is decrypted, and this device's
     // own (also from older versions) reach the others.
@@ -62,23 +64,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
       )?;
     }
-    // Direct and group messages are named after their members: theirs first, so their names
-    // follow right after the list.
-    for conversation in members_order(&conversations) {
-      let result = self.refresh_members(conversation).await;
-      if self.isolate(conversation, ResyncPart::Members, result)? {
-        self.unmark_resync(conversation, ResyncPart::Members)?;
-      }
-    }
-    self.sync_welcomes().await?;
-    // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
-    self.join_missing_groups().await?;
-    for conversation in &conversations {
-      let result = self.sync_conversation_content(conversation.id).await;
-      if self.isolate(conversation.id, ResyncPart::Content, result)? {
-        self.unmark_resync(conversation.id, ResyncPart::Content)?;
-      }
-    }
+    let ids: Vec<ConversationId> = conversations.iter().map(|conversation| conversation.id).collect();
+    self
+      .catch_up_conversations(&ids, &members_order(&conversations))
+      .await?;
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
@@ -95,8 +84,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.flush_outbox().await?;
     // Read positions, acknowledgements and pins taken offline (issue #159).
     self.flush_pending_actions().await?;
-    // Presence changed unseen while the device was away: refreshed a batch per upkeep tick.
-    self.mark_known_presence_stale()?;
     self.top_up_key_packages().await?;
     // Also picks up saved items and drafts other devices changed while this one was away.
     self.sync_account_data().await
@@ -185,13 +172,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// One conversation's part of the sync: its MLS backlog, new messages, messages waiting for keys
   /// and the senders' keys.
   async fn sync_conversation_content(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    if self.has_group(conversation)? {
-      self.sync_mls(conversation).await?;
-    }
-    self.catch_up_messages(conversation).await?;
-    self.retry_undecrypted(conversation)?;
-    // Senders this device has no verified key for yet (it isn't in the group, or just joined).
-    self.learn_sender_keys(conversation).await
+    self
+      .catch_up_content_from(conversation, FirstPages::default())
+      .await
   }
 
   /// Keeps one conversation's failure from failing the whole sync (issue #159): a 403 or 404 right
@@ -199,7 +182,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// sync goes on with the others. Being offline, server trouble, an expired token or a broken
   /// store would fail every other conversation too: that stops the sync. Returns whether the
   /// conversation went through.
-  fn isolate(
+  pub(super) fn isolate(
     &self,
     conversation: ConversationId,
     part: ResyncPart,
@@ -219,7 +202,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  fn unmark_resync(&self, conversation: ConversationId, part: ResyncPart) -> Result<(), CoreError> {
+  pub(super) fn unmark_resync(
+    &self,
+    conversation: ConversationId,
+    part: ResyncPart,
+  ) -> Result<(), CoreError> {
     let mut marked = self.marked_for_resync(part)?;
     if marked.remove(&conversation) {
       records::put_json(&self.store, Table::SyncState, part.key(), &marked)?;
@@ -394,7 +381,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   async fn refresh_members(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let members = match self.api.list_members(conversation).await {
+    let read = self.api.list_members(conversation).await;
+    self.store_members(conversation, read)
+  }
+
+  /// Keeps a member list the server answered, and its people.
+  pub(crate) fn store_members(
+    &mut self,
+    conversation: ConversationId,
+    read: Result<ListConversationMembersResponse, ApiError>,
+  ) -> Result<(), CoreError> {
+    let members = match read {
       Ok(members) => members,
       // No longer a member (an event from before the removal arrived late): nothing to refresh.
       Err(error) if error.is_not_found() || error.is_forbidden() => return Ok(()),

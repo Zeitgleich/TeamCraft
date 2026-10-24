@@ -8,6 +8,7 @@ pub enum IconName {
   Lock,
   Star,
   Users,
+  UserPlus,
   Search,
   Sliders,
   Smile,
@@ -44,10 +45,17 @@ pub enum IconName {
   Maximize,
   Minimize,
   Image,
+  Camera,
   Volume,
   Shield,
   Clock,
   List,
+  ListNumbered,
+  Quote,
+  Code,
+  CodeBlock,
+  AtSign,
+  Slash,
   Key,
   Layers,
   Alert,
@@ -159,10 +167,21 @@ impl IconName {
         "M8 3v3a2 2 0 0 1-2 2H3 M21 8h-3a2 2 0 0 1-2-2V3 M3 16h3a2 2 0 0 1 2 2v3 M16 21v-3a2 2 0 0 1 2-2h3"
       },
       Self::Image => "M3 3h18v18H3z M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z M21 15l-5-5L5 21",
+      Self::Camera => {
+        "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"
+      },
       Self::Volume => "M11 5L6 9H2v6h4l5 4z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14",
       Self::Shield => "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
       Self::Clock => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 7v5l3 3",
       Self::List => "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01",
+      Self::ListNumbered => {
+        "M10 6h11 M10 12h11 M10 18h11 M4 4h1v5 M4 9h2 M6 19H4c0-1.5 2-2.2 2-3.4a1 1 0 0 0-2-.3"
+      },
+      Self::Quote => "M5 18h3l2-4V7H4v7h3z M14 18h3l2-4V7h-6v7h3z",
+      Self::Code => "M16 18l6-6-6-6 M8 6l-6 6 6 6",
+      Self::CodeBlock => "M3 4h18v16H3z M10 9l-3 3 3 3 M14 9l3 3-3 3",
+      Self::AtSign => "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9",
+      Self::Slash => "M4 4h16v16H4z M15 7l-6 10",
       Self::Key => "M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8z M15.5 7.5l3 3L22 7l-3-3",
       Self::Layers => "M12 2l10 5-10 5L2 7z M2 17l10 5 10-5 M2 12l10 5 10-5",
       Self::Alert => {
@@ -173,6 +192,9 @@ impl IconName {
       Self::Download => "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3",
       Self::Trash => "M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6",
       Self::User => "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+      Self::UserPlus => {
+        "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M19 8v6 M22 11h-6"
+      },
       Self::Calendar => "M4 6h16v14H4z M4 10h16 M8 3v4 M16 3v4",
       Self::Eye => "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
       Self::EyeOff => {

@@ -2,6 +2,7 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+pub use teamcraft_proto::JoinPolicy;
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
 
 /// Builds a typed ID from a small integer. Mock data and tests use it; real IDs come from the server.
@@ -172,6 +173,25 @@ pub struct Space {
   pub maybe_image_version: Option<String>,
   pub unread_count: u32,
   pub mention_count: u32,
+  #[serde(default)]
+  pub maybe_description: Option<String>,
+  /// How many people belong to the space (0 when the server doesn't say).
+  #[serde(default)]
+  pub member_count: u32,
+  /// Who may join: an open space can be shared as a link, anyone in the company can join it.
+  #[serde(default = "invite_only")]
+  pub join_policy: JoinPolicy,
+  /// Whether the user may add people to the space (the server checks again).
+  #[serde(default)]
+  pub can_add_members: bool,
+  /// Whether the user may invite guests to the space (the server checks again).
+  #[serde(default)]
+  pub can_invite_guests: bool,
+}
+
+/// What a space from an older peer is taken for: nothing to share as a link.
+fn invite_only() -> JoinPolicy {
+  JoinPolicy::InviteOnly
 }
 
 /// Hue of a `#rrggbb` color, or `None` for anything else (and for greys, which have no hue).
@@ -204,6 +224,33 @@ pub struct JoinableSpace {
   pub name: String,
   #[serde(default)]
   pub maybe_description: Option<String>,
+  /// Hue of the letter tile, as in [`Space::hue`].
+  #[serde(default)]
+  pub hue: u16,
+  #[serde(default)]
+  pub maybe_image_version: Option<String>,
+  #[serde(default)]
+  pub member_count: u32,
+}
+
+impl JoinableSpace {
+  /// The space as its tile shows it (picture or letters); not one the user is in.
+  pub fn tile(&self) -> Space {
+    Space {
+      id: self.id,
+      name: self.name.clone(),
+      hue: self.hue,
+      maybe_color: None,
+      maybe_image_version: self.maybe_image_version.clone(),
+      unread_count: 0,
+      mention_count: 0,
+      maybe_description: self.maybe_description.clone(),
+      member_count: self.member_count,
+      join_policy: JoinPolicy::Open,
+      can_add_members: false,
+      can_invite_guests: false,
+    }
+  }
 }
 
 /// Something about who is in a conversation's encryption group that the user should see or act
@@ -292,6 +339,10 @@ pub struct Conversation {
   /// Whether the signed-in user may post (announcement and integration channels may forbid it).
   pub can_post: bool,
   pub bookmarks: Vec<Bookmark>,
+  /// The client is still catching up this conversation's history after being away (issue #247):
+  /// what it shows may be incomplete.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_catching_up: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

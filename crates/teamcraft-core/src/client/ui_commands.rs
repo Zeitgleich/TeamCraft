@@ -208,11 +208,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         is_guest,
         channels,
         maybe_expires_at,
+        maybe_message,
       } => {
         self
-          .invite_to_space(space, &email, is_guest, channels, maybe_expires_at)
+          .invite_to_space(space, &email, is_guest, channels, maybe_expires_at, maybe_message)
           .await
       },
+      CoreCommand::AddSpaceMembers {
+        space,
+        users,
+        is_guest,
+      } => self.add_space_members(space, &users, is_guest).await,
       CoreCommand::SetCustomStatus { .. } => {
         // The server has no custom status yet (crate README: server gaps).
         tracing::debug!("custom status is not stored on the server yet");

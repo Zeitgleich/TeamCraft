@@ -109,6 +109,9 @@ pub fn Sidebar() -> impl IntoView {
           <Icon name=IconName::Plus />
         </button>
         <Show when=move || !is_grouped.get() fallback=|| ()>
+          <button class="icon-btn" aria-label=move || i18n.t("invite-title") title=move || i18n.t("invite-title") on:click=move |_| state.overlay.set(Overlay::InvitePeople(state.space.get_untracked()))>
+            <Icon name=IconName::UserPlus />
+          </button>
           <button class="icon-btn" aria-label=move || i18n.t("space-settings-title") title=move || i18n.t("space-settings-title") on:click=move |_| state.overlay.set(Overlay::SpaceSettings(state.space.get_untracked()))>
             <Icon name=IconName::Sliders />
           </button>
@@ -187,13 +190,24 @@ pub fn GlobalEntries() -> impl IntoView {
 }
 
 /// What makes a section look different on screen: its kind and the state of its rows.
-type SectionKey = (SectionKind, Vec<(crate::model::ConversationId, u32, u32, bool)>);
+type SectionKey = (
+  SectionKind,
+  Vec<(crate::model::ConversationId, u32, u32, bool, bool)>,
+);
 
 fn section_key(section: &crate::sections::Section) -> SectionKey {
   let rows = section
     .conversations
     .iter()
-    .map(|c| (c.id, c.unread_count, c.mention_count, c.is_favorite))
+    .map(|c| {
+      (
+        c.id,
+        c.unread_count,
+        c.mention_count,
+        c.is_favorite,
+        c.is_catching_up,
+      )
+    })
     .collect();
   (section.kind, rows)
 }
@@ -211,7 +225,7 @@ fn GroupedSections(
     </For>
     <For
       each=move || grouped.get().spaces
-      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count)).collect::<Vec<_>>())
+      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count, c.is_catching_up)).collect::<Vec<_>>())
       let:group
     >
       <SpaceGroupSection group=group collapsed=collapsed_spaces />
@@ -291,6 +305,14 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           }
         >
           <Icon name=IconName::Bell />
+        </button>
+        <button
+          class="icon-btn icon-btn-small"
+          aria-label=move || i18n.t("invite-title")
+          title=move || i18n.t("invite-title")
+          on:click=move |_| state.overlay.set(Overlay::InvitePeople(space))
+        >
+          <Icon name=IconName::UserPlus />
         </button>
         <button
           class="icon-btn icon-btn-small"
@@ -496,8 +518,11 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
     .map(|status| status.emoji);
   let name = conversation.name.clone();
   let aria_name = name.clone();
+  let is_catching_up = conversation.is_catching_up;
   let label = move || {
-    if mentions > 0 {
+    if is_catching_up {
+      i18n.t_with("sidebar-item-catching-up", &[("name", &aria_name)])
+    } else if mentions > 0 {
       i18n.t_with(
         "sidebar-item-mentions",
         &[("name", &aria_name), ("count", &mentions.to_string())],
@@ -515,6 +540,7 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
       class:current=is_current
       class:unread=unread
       class:muted=conversation.is_muted
+      class:catching-up=is_catching_up
       data-conversation=id.to_string()
       aria-current=move || is_current().then_some("page")
       aria-label=label
@@ -533,6 +559,7 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
           .filter(|peer| state.read(|backend| backend.is_in_call(*peer)))
           .map(|_| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
+      {is_catching_up.then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
       {(mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })}
     </button>
   }

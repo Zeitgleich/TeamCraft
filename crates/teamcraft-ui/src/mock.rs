@@ -8,7 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
-use teamcraft_client_api::actions::{FileInfo, MessageExtras, ShareLink, ShareLinkOptions};
+use teamcraft_client_api::actions::{
+  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, ShareLink, ShareLinkOptions,
+};
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
@@ -17,9 +19,10 @@ use crate::backend::ChatBackend;
 use crate::calls::BackgroundImageInfo;
 use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, LogLevel, Message,
-  MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
-  ThreadSummary, TimestampMs, User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinPolicy,
+  JoinableSpace, LogLevel, Message, MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space,
+  SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId, id_from_raw, raw_id,
+  root_message_of, thread_id_of,
 };
 
 /// Number of lines in the large log channel.
@@ -202,6 +205,8 @@ struct State {
   saved: HashSet<MessageId>,
   /// Share links the user created, by file.
   share_links: HashMap<String, ShareLink>,
+  /// Open spaces the user isn't in yet.
+  joinable: Vec<JoinableSpace>,
 }
 
 impl MockBackend {
@@ -218,6 +223,11 @@ impl MockBackend {
           maybe_image_version: None,
           unread_count: 0,
           mention_count: 0,
+          maybe_description: Some("Planning and delivery of Project A".into()),
+          member_count: 6,
+          join_policy: JoinPolicy::Open,
+          can_add_members: true,
+          can_invite_guests: true,
         },
         Space {
           id: space_b(),
@@ -227,6 +237,11 @@ impl MockBackend {
           maybe_image_version: None,
           unread_count: 0,
           mention_count: 0,
+          maybe_description: None,
+          member_count: 4,
+          join_policy: JoinPolicy::InviteOnly,
+          can_add_members: false,
+          can_invite_guests: false,
         },
       ],
       conversations: demo_conversations(),
@@ -237,6 +252,14 @@ impl MockBackend {
       next_background_id: 1,
       saved: HashSet::new(),
       share_links: HashMap::new(),
+      joinable: vec![JoinableSpace {
+        id: id_from_raw(3),
+        name: "Sales team".into(),
+        maybe_description: Some("Offers, customers and the weekly pipeline".into()),
+        hue: 140,
+        maybe_image_version: None,
+        member_count: 12,
+      }],
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -444,6 +467,21 @@ impl ChatBackend for MockBackend {
 
   fn spaces(&self) -> Vec<Space> {
     self.state.borrow().spaces.clone()
+  }
+
+  fn joinable_spaces(&self) -> Vec<JoinableSpace> {
+    self.state.borrow().joinable.clone()
+  }
+
+  fn join_space(&self, space: SpaceId) {
+    let mut state = self.state.borrow_mut();
+    if let Some(index) = state.joinable.iter().position(|candidate| candidate.id == space) {
+      let joined = state.joinable.remove(index);
+      state.spaces.push(Space {
+        member_count: joined.member_count + 1,
+        ..joined.tile()
+      });
+    }
   }
 
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation> {
@@ -705,6 +743,26 @@ impl ChatBackend for MockBackend {
     Some(format!("teamcraft:/c/{conversation}/m/{message}"))
   }
 
+  fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
+    self.state.borrow().find_linked(link).map(|(target, _)| target)
+  }
+
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    let Some((target, message)) = self.state.borrow().find_linked(link) else {
+      return Some(LinkedMessage::Unavailable);
+    };
+    let files = self
+      .conversation_files(target.conversation)
+      .into_iter()
+      .filter(|file| file.message == target.message)
+      .collect();
+    Some(LinkedMessage::Visible {
+      target,
+      message,
+      files,
+    })
+  }
+
   fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
     if conversation != ch_design() {
       return Vec::new();
@@ -773,6 +831,79 @@ impl State {
     for dm in DM_FIRST + 1..DM_FIRST + 6 {
       self.generate_conversation(id_from_raw::<ConversationId>(dm), 12, now);
     }
+    self.seed_message_links();
+  }
+
+  /// A few recent messages in #general link to other messages: one in another channel, a thread
+  /// reply, and one in a conversation the user isn't in (its preview says so).
+  fn seed_message_links(&mut self) {
+    let Some(linked) = self
+      .messages
+      .get(&ch_design())
+      .and_then(|all| {
+        all
+          .iter()
+          .rev()
+          .find(|message| matches!(message.kind, MessageKind::User))
+      })
+      .map(|message| format!("teamcraft:/c/{}/m/{}", message.conversation, message.id))
+    else {
+      return;
+    };
+    let maybe_reply = self
+      .replies
+      .get(&ch_engineering())
+      .and_then(|replies| replies.last())
+      .and_then(|reply| {
+        reply
+          .maybe_thread
+          .map(|thread| format!("teamcraft:/c/{}/m/{}/t/{thread}", reply.conversation, reply.id))
+      });
+    let hidden = "teamcraft:/c/999/m/99900001".to_owned();
+    let bodies = [
+      Some(format!("Here is the mockup we talked about: {linked}")),
+      maybe_reply.map(|link| format!("Answered in the thread: {link}")),
+      Some(format!("Context from the other team: {hidden}")),
+    ];
+    let Some(general) = self.messages.get_mut(&ch_general()) else {
+      return;
+    };
+    let mut users = general
+      .iter_mut()
+      .rev()
+      .skip(1)
+      .filter(|message| matches!(message.kind, MessageKind::User));
+    for body in bodies.into_iter().flatten() {
+      if let Some(message) = users.nth(1) {
+        message.body = body;
+      }
+    }
+  }
+
+  /// The message a demo permalink points to, if the demo user can see it.
+  fn find_linked(&self, link: &str) -> Option<(PermalinkTarget, Message)> {
+    let Some(crate::route::Route::Message {
+      conversation,
+      message,
+      maybe_thread,
+    }) = crate::route::Route::from_permalink(link)
+    else {
+      return None;
+    };
+    let found = self
+      .messages
+      .get(&conversation)
+      .into_iter()
+      .chain(self.replies.get(&conversation))
+      .flatten()
+      .find(|candidate| candidate.id == message)?
+      .clone();
+    let target = PermalinkTarget {
+      conversation,
+      message,
+      maybe_thread: maybe_thread.or(found.maybe_thread),
+    };
+    Some((target, found))
   }
 
   fn generate_conversation(&mut self, conversation: ConversationId, count: usize, now: TimestampMs) {
@@ -1021,6 +1152,7 @@ fn demo_conversations() -> Vec<Conversation> {
     is_muted: false,
     can_post: true,
     bookmarks: Vec::new(),
+    is_catching_up: false,
   };
   use ConversationKind::{Integration, Private, Public};
   use SidebarCategory::{Channels, Integrations};
@@ -1195,6 +1327,7 @@ fn demo_conversations() -> Vec<Conversation> {
       is_muted: false,
       can_post: true,
       bookmarks: Vec::new(),
+      is_catching_up: false,
     });
   }
   list

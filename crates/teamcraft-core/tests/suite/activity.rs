@@ -93,7 +93,7 @@ async fn last_seen_comes_from_the_server_and_follows_the_privacy_choice() {
 }
 
 #[tokio::test]
-async fn people_going_offline_are_read_back_in_one_batch() {
+async fn people_going_offline_are_read_only_when_shown() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
   let bob = Peer::enroll(&server, "Bob").await;
@@ -102,6 +102,10 @@ async fn people_going_offline_are_read_back_in_one_batch() {
   let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
   server.set_last_seen(bob_id, 1_799_999_000_000);
   server.set_last_seen(carol_id, 1_799_999_500_000);
+  // The connection's own reads are done first.
+  let mut upkeep = teamcraft_core::upkeep::Upkeep::new(std::time::Duration::from_secs(60));
+  upkeep.tick(&mut alice.client).await;
+  let before = server.rest_call_count(alice.client.user_id());
 
   for (seq, user) in [(1, bob_id), (2, carol_id), (3, bob_id)] {
     alice
@@ -117,14 +121,15 @@ async fn people_going_offline_are_read_back_in_one_batch() {
       .await
       .unwrap();
   }
-  // Nothing asked yet: the events only mark them; the runner's tick reads them together.
-  assert!(alice.client.refresh_stale_last_seen().await.unwrap());
-  assert!(
-    !alice.client.refresh_stale_last_seen().await.unwrap(),
-    "nothing left"
-  );
+  // Issue #252: nobody looks, so nothing is asked.
+  upkeep.tick(&mut alice.client).await;
+  assert_eq!(server.rest_call_count(alice.client.user_id()), before);
+
+  // Shown: read once, then known.
+  assert_eq!(alice_ui.last_seen(bob_id), None);
+  run_commands(&mut alice, &alice_ui).await;
   assert_eq!(alice_ui.last_seen(bob_id), Some(1_799_999_000_000));
-  assert_eq!(alice_ui.last_seen(carol_id), Some(1_799_999_500_000));
+  assert_eq!(alice_ui.last_seen(carol_id), None, "not shown yet");
 }
 
 #[tokio::test]

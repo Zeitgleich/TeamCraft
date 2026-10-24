@@ -266,6 +266,7 @@ async fn categories_invitations_and_external_badge() {
     is_guest: true,
     channels: vec![channel],
     maybe_expires_at: None,
+    maybe_message: None,
   });
   run_commands(&mut alice, &alice_ui).await;
   let invites = server.invites();
@@ -277,6 +278,57 @@ async fn categories_invitations_and_external_badge() {
   server.set_contains_guests(channel);
   alice.client.full_sync().await.unwrap();
   assert!(alice_ui.has_external_people(channel));
+}
+
+#[tokio::test]
+async fn people_from_the_directory_join_a_space_once() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob = server.add_user("Bob");
+  let carol = server.add_user("Carol");
+  let space = alice.space().await;
+  // Bob is not in the space yet; Carol already is and must keep her role.
+  server.make_space_outsider(bob.user_id());
+
+  let alice_ui = backend_of(&alice);
+  alice_ui.add_space_members(space, vec![bob.user_id(), carol.user_id(), bob.user_id()], false);
+  run_commands(&mut alice, &alice_ui).await;
+
+  let adds = server.space_member_adds();
+  assert_eq!(adds.len(), 1, "{adds:?}");
+  assert_eq!(adds[0].0, space);
+  assert_eq!(adds[0].1.user_id, bob.user_id());
+  assert_eq!(adds[0].1.role, SpaceRole::Member);
+}
+
+#[tokio::test]
+async fn guests_are_added_with_the_guest_role_and_invitations_carry_the_message() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let guest = server.add_user("Guest");
+  let space = alice.space().await;
+  server.make_space_outsider(guest.user_id());
+
+  let alice_ui = backend_of(&alice);
+  alice_ui.add_space_members(space, vec![guest.user_id()], true);
+  alice_ui.invite_to_space(SpaceInvite {
+    space,
+    email: "new@example.com".into(),
+    is_guest: false,
+    channels: Vec::new(),
+    maybe_expires_at: None,
+    maybe_message: Some("Welcome to Project A".into()),
+  });
+  run_commands(&mut alice, &alice_ui).await;
+
+  assert_eq!(server.space_member_adds()[0].1.role, SpaceRole::Guest);
+  let invites = server.invites();
+  assert_eq!(invites.len(), 1);
+  assert_eq!(invites[0].role, SpaceRole::Member);
+  assert_eq!(
+    server.invite_messages(),
+    [Some("Welcome to Project A".to_owned())]
+  );
 }
 
 #[tokio::test]

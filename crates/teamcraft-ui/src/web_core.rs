@@ -12,7 +12,7 @@
 //! Only one tab per account runs the core (`web_tabs`, e2ee.md §9.4); the others pass their calls
 //! to it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -22,8 +22,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_channel::{mpsc, oneshot};
-use futures_util::StreamExt;
 use futures_util::future::{Either, pending, poll_immediate, select};
+use futures_util::{FutureExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
@@ -32,14 +32,16 @@ use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
   LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth,
 };
+use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
-use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::records;
-use teamcraft_core::store::{IndexedDbStore, StoreError, browser_database_key};
+use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
@@ -64,8 +66,10 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
 const SYNC_PROGRESS: Duration = Duration::from_secs(1);
-/// How often account data (saved items, drafts) is pulled from the user's other devices.
-const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
+/// How long a failed account data sync waits before it is retried; also how often the roster's age
+/// is checked locally. Account data itself is read after each connection and on `key_bag_update`
+/// (issue #252), not on a timer.
+const UPKEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// How often the core's copy of the access token is renewed from the page's session.
 const TOKEN_REFRESH: Duration = Duration::from_secs(20);
 /// How long the access token stored for the service worker is used. Tokens are renewed every
@@ -80,14 +84,21 @@ const PUSH_CHECK_RETRY: Duration = Duration::from_secs(60);
 const SUBSCRIPTION_CHANGED: &str = "push_subscription_changed";
 
 type Api = HttpServerApi<WebTokens>;
-type Store = Rc<IndexedDbStore>;
+/// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
+type Store = TrackedStore<Rc<IndexedDbStore>>;
 type Listener = Rc<RefCell<dyn FnMut()>>;
+/// A wait for IndexedDB to have written everything ([`IndexedDbStore::flush`]).
+type Flush = Pin<Box<dyn Future<Output = Result<(), StoreError>>>>;
 
 thread_local! {
   static SETUP: RefCell<Option<Setup>> = const { RefCell::new(None) };
   static RUNNING: RefCell<Option<Running>> = const { RefCell::new(None) };
   static LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
   static IS_WATCHING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+  static IS_WATCHING_LIFECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+  /// The store whose queued writes the page lifecycle listener issues.
+  static LIFECYCLE_STORE: RefCell<std::rc::Weak<IndexedDbStore>> =
+    const { RefCell::new(std::rc::Weak::new()) };
 }
 
 /// What the page tells the core once: who signs the requests and where the server is.
@@ -207,6 +218,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
         .map(|()| Value::Null)
     },
     "core_snapshot" => to_value(ask(Request::Snapshot).await??),
+    "core_snapshot_changes" => {
+      let maybe_since: Option<SnapshotCursor> = field(&args, "since")?;
+      to_value(ask(|reply| Request::SnapshotChanges(maybe_since, reply)).await??)
+    },
     "core_messages" => {
       let (conversation, start, len) = (
         field(&args, "conversation")?,
@@ -513,6 +528,11 @@ enum Request {
   CheckPush,
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
+  /// What changed in the snapshot since the reader's cursor (issue #246).
+  SnapshotChanges(
+    Option<SnapshotCursor>,
+    oneshot::Sender<Result<SnapshotChanges, String>>,
+  ),
   Messages {
     conversation: ConversationId,
     start: usize,
@@ -590,11 +610,18 @@ struct Core {
   maybe_attention: Option<bool>,
   /// Whether IndexedDB keeps up with the cache, as of the last flush.
   store_health: StoreHealth,
+  /// The flush [`Self::check_store`] waits for, while IndexedDB is still writing.
+  maybe_flush: Option<Flush>,
   /// When to compare the browser's push subscription with the registration next; `None` when
   /// nothing is due (e2ee.md §7).
   maybe_push_check_at_ms: Option<i64>,
   /// The security part of the last snapshot, for snapshots taken while a sync holds the client.
   maybe_last_security: Option<SecuritySnapshot>,
+  /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
+  snapshots: RefCell<SnapshotCache>,
+  /// The conversation the UI reads, which a catch-up takes first (issue #247); set also while a
+  /// sync holds the client.
+  catch_up_focus: CatchUpFocus,
   /// Requests that arrived during a connect and need the client; handled once it is done.
   deferred: VecDeque<Request>,
   /// The UI side hung up during a connect: the loop ends after it.
@@ -629,7 +656,7 @@ impl Core {
       connection,
       status: CoreStatus::NotStarted,
       next_tick_ms: i64::MIN,
-      upkeep: Upkeep::new(ACCOUNT_SYNC),
+      upkeep: Upkeep::new(UPKEEP_INTERVAL),
       link: None,
       last_session_token: None,
       link_failure: LinkStatus::Idle,
@@ -637,8 +664,11 @@ impl Core {
       approval_misses: 0,
       maybe_attention: None,
       store_health: StoreHealth::Saved,
+      maybe_flush: None,
       maybe_push_check_at_ms: None,
       maybe_last_security: None,
+      snapshots: RefCell::new(SnapshotCache::new(now_ms().unsigned_abs())),
+      catch_up_focus: CatchUpFocus::default(),
       deferred: VecDeque::new(),
       is_closed: false,
     }
@@ -661,7 +691,7 @@ impl Core {
         Wake::Linked(result) => self.on_linked(result).await,
         Wake::Tick => self.on_tick().await,
       }
-      self.check_store().await;
+      self.check_store();
       self.check_push().await;
     }
   }
@@ -690,13 +720,23 @@ impl Core {
     };
   }
 
-  /// Waits until IndexedDB has everything written so far, and tells the UI when that stops (or
-  /// starts again) working: what is not saved is lost on reload (e2ee.md §9.4).
-  async fn check_store(&mut self) {
+  /// Tells the UI when IndexedDB stops (or starts again) keeping up with what was written: what
+  /// is not saved is lost on reload (e2ee.md §9.4). Never waits: after a large catch-up IndexedDB
+  /// can take minutes to write everything, and a loop waiting for that sends no heartbeats, so the
+  /// server drops the connection. The flush runs on and is looked at again on the next turn.
+  fn check_store(&mut self) {
     let Some(store) = self.store.as_ref() else {
       return;
     };
-    let health = match store.flush().await {
+    let flush = self.maybe_flush.get_or_insert_with(|| {
+      let store = store.clone();
+      Box::pin(async move { store.inner().flush().await })
+    });
+    let Some(outcome) = flush.as_mut().now_or_never() else {
+      return;
+    };
+    self.maybe_flush = None;
+    let health = match outcome {
       Ok(()) => StoreHealth::Saved,
       Err(StoreError::QuotaExceeded) => StoreHealth::QuotaExceeded,
       Err(StoreError::Closed) => StoreHealth::Closed,
@@ -757,12 +797,13 @@ impl Core {
     let key = browser_database_key(&name)
       .await
       .map_err(|error| error.to_string())?;
-    let store = Rc::new(
+    let store = TrackedStore::new(Rc::new(
       IndexedDbStore::open(&name, &key)
         .await
         .map_err(|error| error.to_string())?,
-    );
+    ));
     self.store = Some(store.clone());
+    watch_page_lifecycle(store.inner());
     match Client::open(
       self.api(),
       store,
@@ -810,6 +851,7 @@ impl Core {
       client.user_id(),
       Box::new(SystemClock),
     ));
+    self.catch_up_focus = client.catch_up_focus();
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
     store_string(&self.store_ready_key(), "1");
@@ -820,8 +862,27 @@ impl Core {
     format!("{STORE_READY_PREFIX}{}", self.user)
   }
 
+  /// The server API; with the store open, every request that changes server state waits until
+  /// the store has persisted what was written before it.
   fn api(&self) -> Api {
-    HttpServerApi::new(self.server_url.clone(), self.tokens.clone())
+    let api = HttpServerApi::new(self.server_url.clone(), self.tokens.clone());
+    match &self.store {
+      Some(store) => {
+        let store = Rc::downgrade(store.inner());
+        api.with_write_barrier(Rc::new(move || {
+          let maybe_store = store.upgrade();
+          Box::pin(async move {
+            let Some(store) = maybe_store else { return };
+            // Not saved (quota, a newer version): the store health tells the user; the request
+            // goes out anyway rather than blocking the app.
+            if let Err(error) = store.flush().await {
+              tracing::warn!(%error, "sending before the local store saved everything");
+            }
+          })
+        }))
+      },
+      None => api,
+    }
   }
 
   async fn handle(&mut self, request: Request) {
@@ -862,12 +923,16 @@ impl Core {
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
+      Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
       Request::Messages {
         conversation,
         start,
         len,
         reply,
-      } => drop(reply.send(self.window(conversation, start, len))),
+      } => {
+        self.catch_up_focus.set(conversation);
+        drop(reply.send(self.window(conversation, start, len)));
+      },
       Request::Attachment {
         conversation,
         message,
@@ -1052,8 +1117,36 @@ impl Core {
   fn snapshot(&mut self) -> Result<ChatSnapshot, String> {
     let security = self.security_snapshot()?;
     self.maybe_last_security = Some(security.clone());
-    let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
-    Ok(ChatSnapshot::read(backend, security))
+    let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
+      return Err(not_set_up());
+    };
+    Ok(
+      self
+        .snapshots
+        .borrow_mut()
+        .snapshot(backend, store.take_changes(), || Some(security)),
+    )
+  }
+
+  fn snapshot_changes(&mut self, maybe_since: Option<SnapshotCursor>) -> Result<SnapshotChanges, String> {
+    let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
+      return Err(not_set_up());
+    };
+    let changes = store.take_changes();
+    let mut maybe_security = None;
+    let answer = self.snapshots.borrow_mut().changes_since(
+      backend,
+      changes,
+      || {
+        maybe_security = self.security_snapshot().ok();
+        maybe_security.clone()
+      },
+      maybe_since,
+    );
+    if maybe_security.is_some() {
+      self.maybe_last_security = maybe_security;
+    }
+    Ok(answer)
   }
 
   /// Fingerprints of the keys this device pinned, and of keys the server showed since.
@@ -1275,6 +1368,8 @@ impl Core {
       status,
       store_health,
       maybe_last_security,
+      snapshots,
+      catch_up_focus,
       deferred,
       is_closed,
       ..
@@ -1291,10 +1386,12 @@ impl Core {
           let reads = SyncReads {
             backend,
             store,
-            stored: StoredWorkspace::of(backend),
+            stored: Cell::new(StoredWorkspace::of(backend)),
             status,
             store_health,
             maybe_security: maybe_last_security.as_ref(),
+            snapshots,
+            focus: catch_up_focus,
           };
           reads
             .serve(connecting.as_mut(), requests, deferred, is_closed)
@@ -1379,10 +1476,13 @@ fn millis(duration: Duration) -> i64 {
 struct SyncReads<'a> {
   backend: &'a CoreChatBackend<Store>,
   store: &'a Store,
-  stored: StoredWorkspace,
+  /// Becomes [`StoredWorkspace::Known`] as soon as the sync has stored the conversation list.
+  stored: Cell<StoredWorkspace>,
   status: &'a CoreStatus,
   store_health: &'a StoreHealth,
   maybe_security: Option<&'a SecuritySnapshot>,
+  snapshots: &'a RefCell<SnapshotCache>,
+  focus: &'a CatchUpFocus,
 }
 
 impl SyncReads<'_> {
@@ -1396,7 +1496,7 @@ impl SyncReads<'_> {
     deferred: &mut VecDeque<Request>,
     is_closed: &mut bool,
   ) -> F::Output {
-    let mut seen_revision = self.store.write_revision();
+    let mut seen_revision = self.store.inner().write_revision();
     loop {
       let progress = pin!(platform::sleep(SYNC_PROGRESS));
       let request = if *is_closed {
@@ -1413,7 +1513,10 @@ impl SyncReads<'_> {
         },
         Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
         Either::Right((Either::Right(((), _)), _)) => {
-          let revision = self.store.write_revision();
+          let revision = self.store.inner().write_revision();
+          if revision != seen_revision && self.has_become_known(deferred) {
+            notify_local();
+          }
           if revision != seen_revision && is_page_visible() {
             seen_revision = revision;
             notify_local();
@@ -1423,25 +1526,50 @@ impl SyncReads<'_> {
     }
   }
 
+  /// A first sync stores the conversation list before it catches each one up (issue #247): from
+  /// then on the workspace is shown, each conversation marked while it is caught up, and the
+  /// requests that waited for it are answered. Returns whether that happened now.
+  fn has_become_known(&self, deferred: &mut VecDeque<Request>) -> bool {
+    if self.stored.get() == StoredWorkspace::Known
+      || StoredWorkspace::of(self.backend) == StoredWorkspace::Empty
+    {
+      return false;
+    }
+    self.stored.set(StoredWorkspace::Known);
+    for request in std::mem::take(deferred) {
+      if let Some(request) = self.answer(request) {
+        deferred.push_back(request);
+      }
+    }
+    true
+  }
+
   /// Answers a read; hands back a request that has to wait.
   fn answer(&self, request: Request) -> Option<Request> {
+    let request = match request {
+      Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
+      other => other,
+    };
     let read = match &request {
-      Request::Status(_) if self.stored == StoredWorkspace::Empty => {
+      Request::Status(_) if self.stored.get() == StoredWorkspace::Empty => {
         // Ready with an empty store would show an empty workspace: the first sync is awaited.
         return Some(request);
       },
       Request::Status(_) | Request::StoreHealth(_) => None,
-      Request::Snapshot(_) => Some(SyncRead::Snapshot),
       Request::Messages {
         conversation,
         start,
         len,
         ..
-      } => Some(SyncRead::Messages {
-        conversation: *conversation,
-        start: *start,
-        len: *len,
-      }),
+      } => {
+        // The conversation the user opened is caught up next.
+        self.focus.set(*conversation);
+        Some(SyncRead::Messages {
+          conversation: *conversation,
+          start: *start,
+          len: *len,
+        })
+      },
       Request::Thread {
         conversation, thread, ..
       } => Some(SyncRead::Thread {
@@ -1453,7 +1581,7 @@ impl SyncReads<'_> {
       _ => return Some(request),
     };
     let maybe_answer = match read {
-      Some(read) => match answer_during_sync(read, self.backend, self.stored, self.maybe_security) {
+      Some(read) => match answer_during_sync(read, self.backend, self.stored.get(), self.maybe_security) {
         Some(answer) => Some(answer),
         None => return Some(request),
       },
@@ -1463,7 +1591,6 @@ impl SyncReads<'_> {
     match (request, maybe_answer) {
       (Request::Status(reply), None) => drop(reply.send(self.status.clone())),
       (Request::StoreHealth(reply), None) => drop(reply.send(self.store_health.clone())),
-      (Request::Snapshot(reply), Some(SyncReadAnswer::Snapshot(snapshot))) => drop(reply.send(Ok(*snapshot))),
       (Request::Messages { reply, .. }, Some(SyncReadAnswer::Messages(window))) => {
         drop(reply.send(Ok(window)))
       },
@@ -1474,6 +1601,28 @@ impl SyncReads<'_> {
       // Invariant: `answer_during_sync` answers with the variant of the read. Should it not, the
       // request waits for the sync like any other.
       (request, _) => return Some(request),
+    }
+    None
+  }
+}
+
+impl SyncReads<'_> {
+  /// The snapshot from the cache, as far as the sync has filled the store. Waits while the
+  /// workspace was empty or no security part was taken yet (it needs the client).
+  fn answer_snapshot(&self, request: Request) -> Option<Request> {
+    let (StoredWorkspace::Known, Some(security)) = (self.stored.get(), self.maybe_security) else {
+      return Some(request);
+    };
+    let changes = self.store.take_changes();
+    let mut snapshots = self.snapshots.borrow_mut();
+    let security = || Some(security.clone());
+    match request {
+      Request::Snapshot(reply) => drop(reply.send(Ok(snapshots.snapshot(self.backend, changes, security)))),
+      Request::SnapshotChanges(maybe_since, reply) => {
+        let answer = snapshots.changes_since(self.backend, changes, security, maybe_since);
+        drop(reply.send(Ok(answer)));
+      },
+      other => return Some(other),
     }
     None
   }
@@ -1512,6 +1661,42 @@ async fn link_task(
   };
   notify_changed();
   link.receive_secrets().await.map_err(describe)
+}
+
+/// Issues the store's queued writes at once when the page is hidden, frozen or unloaded: a tab in
+/// the background may be frozen or discarded without another chance to run (robustness.md,
+/// Lifecycle). One listener per page, for the store opened last.
+fn watch_page_lifecycle(store: &Rc<IndexedDbStore>) {
+  LIFECYCLE_STORE.with(|current| *current.borrow_mut() = Rc::downgrade(store));
+  if IS_WATCHING_LIFECYCLE.with(|is_watching| is_watching.replace(true)) {
+    return;
+  }
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+    if event.type_() == "visibilitychange" && is_page_visible() {
+      return;
+    }
+    if let Some(store) = LIFECYCLE_STORE.with(|current| current.borrow().upgrade()) {
+      store.write_now();
+    }
+  });
+  let mut is_listening = false;
+  for kind in ["visibilitychange", "freeze", "pagehide"] {
+    // `pagehide` fires on the window; the others on the document.
+    let added = if kind == "pagehide" {
+      web_sys::window()
+        .map(|window| window.add_event_listener_with_callback(kind, listener.as_ref().unchecked_ref()))
+    } else {
+      Some(document.add_event_listener_with_callback(kind, listener.as_ref().unchecked_ref()))
+    };
+    is_listening |= matches!(added, Some(Ok(())));
+  }
+  if is_listening {
+    // Lives as long as the page.
+    listener.forget();
+  }
 }
 
 /// Passes the service worker's "subscription changed" on to the core (once per page).

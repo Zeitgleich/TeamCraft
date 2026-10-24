@@ -101,6 +101,10 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
       .maybe_role
       .as_ref()
       .map(|_| space_notification_settings(&view.notifications)),
+    member_count: view.member_count,
+    // The caller's abilities need the permission scheme: services::spaces fills them in.
+    can_add_members: false,
+    can_invite_guests: false,
   }
 }
 

@@ -16,6 +16,7 @@ contains demo fixtures.
 |---------------------------------|----------------------------------------------------------------|
 | Channel with thread panel       | ![Channel with thread](docs/screenshots/channel-thread.png)    |
 | Threads inbox                   | ![Threads inbox](docs/screenshots/threads.png)                 |
+| Rich composer and its message   | ![Composer](docs/screenshots/rich-message-rendered-light.png)  |
 | Quick switcher                  | ![Quick switcher](docs/screenshots/quick-switcher.png)         |
 | Status menu                     | ![Status menu](docs/screenshots/status-menu.png)               |
 | Log channel (50,000 lines)      | ![Log channel](docs/screenshots/log-channel.png)               |
@@ -54,6 +55,9 @@ contains demo fixtures.
 | Activity tabs, light / dark     | ![Activity light](docs/screenshots/polish-activity-light.png) ![Activity dark](docs/screenshots/polish-activity-dark.png) |
 | Preview of an unjoined channel  | ![Preview light](docs/screenshots/polish-preview-details-light.png) ![Preview dark](docs/screenshots/polish-preview-details-dark.png) |
 | Files tab, browse with preview  | ![Files tab](docs/screenshots/polish-files-tab-light.png) ![Browse channels](docs/screenshots/polish-browse-dark.png) |
+| Phone (390×844), light: Home, space, channel, thread, Activity, settings | ![Phone light](docs/screenshots/mobile-light.png) |
+| Phone (390×844), dark           | ![Phone dark](docs/screenshots/mobile-dark.png)                |
+| Phone in landscape, light / dark | ![Landscape light](docs/screenshots/mobile-landscape-light.png) ![Landscape dark](docs/screenshots/mobile-landscape-dark.png) |
 
 Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.
@@ -84,7 +88,8 @@ frame rate because only the visible rows are in the DOM.
 - Virtualized message list with measured row heights, author/time grouping, date dividers, reactions,
   thread reply counts, edited marker, system messages, compact log rows with level colours, follow
   mode ("Jump to latest").
-- Composer: Markdown hint, attachments (names only), Enter or Ctrl/Cmd+Enter to send (setting).
+- Composer: rich-text editor stored as the Markdown subset (formatting toolbar, shortcuts, Markdown
+  typed as you go, sanitized paste), attachments, send options, Enter or Ctrl/Cmd+Enter to send.
 - Quick switcher (Ctrl/Cmd+K), status menu (online, away, do not disturb, offline, custom status
   with expiry and presets), settings modal (display, sidebar work; notifications and advanced are
   stubs), shortcuts reference (Ctrl/Cmd+/).
@@ -173,6 +178,7 @@ to the path it started on.
 | `src/settings.rs`       | Per-device preferences (theme, language, send mode) in `localStorage`   |
 | `src/i18n.rs`           | Fluent bundles, `I18n::t`, `t_with`, `t_count`                          |
 | `src/markdown.rs`       | Safe Markdown subset producing a tree (no HTML injection)               |
+| `src/editor_doc.rs`     | Composer document model: DOM tree ↔ Markdown, paste allow-list          |
 | `src/components/`       | One module per screen area                                              |
 | `style/main.css`        | Design tokens, layout, components                                       |
 

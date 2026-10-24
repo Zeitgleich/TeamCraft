@@ -25,6 +25,7 @@ const COMMANDS: &[&str] = &[
   "core_network_changed",
   "core_enroll",
   "core_snapshot",
+  "core_snapshot_changes",
   "core_link_start",
   "core_link_status",
   "core_link_cancel",

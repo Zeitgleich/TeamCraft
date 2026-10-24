@@ -11,15 +11,12 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::sidebar::GlobalEntries;
 
+use crate::components::people_picker::PeoplePicker;
 use crate::i18n::use_i18n;
-use crate::model::{Conversation, ConversationKind, DeviceSetup, User, UserId};
+use crate::model::{Conversation, ConversationKind, User, UserId};
 use crate::prefs::DmSort;
-use crate::reactive::use_debounced;
 use crate::sections::{DirectList, DirectSectionKind, HomeFilter, build_direct};
 use crate::state::{MainView, Overlay, use_app_state};
-
-/// The directory on the server is asked once typing paused this long.
-const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 
 /// Display limits offered for the list ("0" shows all).
 const LIMIT_OPTIONS: [u32; 4] = [0, 5, 10, 20];
@@ -327,18 +324,7 @@ pub fn HomeStart() -> impl IntoView {
 pub fn NewMessageDialog() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let filter = RwSignal::new(String::new());
-  let directory_query = use_debounced(filter, DIRECTORY_DEBOUNCE_MS);
   let chosen = RwSignal::new(Vec::<User>::new());
-  let candidates = Memo::new(move |_| {
-    let me = state.me().id;
-    let picked: Vec<UserId> = chosen.with(|list| list.iter().map(|user| user.id).collect());
-    let query = directory_query.get();
-    let mut users = state.read(|backend| backend.search_people(query.trim()));
-    users.retain(|user| user.id != me && !user.is_bot && !picked.contains(&user.id));
-    people_matching(users, &filter.get())
-  });
-  let input = NodeRef::<leptos::html::Input>::new();
   let start = move || {
     let users: Vec<UserId> = chosen.with_untracked(|list| list.iter().map(|user| user.id).collect());
     if users.is_empty() {
@@ -347,30 +333,12 @@ pub fn NewMessageDialog() -> impl IntoView {
     state.close_overlay();
     state.open_direct_with(users);
   };
-  let pick = move |user: User| {
-    chosen.update(|list| list.push(user));
-    filter.set(String::new());
-    // Back to the search field for the next person.
-    if let Some(element) = input.get_untracked() {
-      drop(element.focus());
-    }
-  };
-  // Enter picks the first match while searching, and opens the conversation otherwise.
-  let submit = move || {
-    let maybe_first = (!filter.get_untracked().trim().is_empty())
-      .then(|| candidates.get_untracked().into_iter().next())
-      .flatten();
-    match maybe_first {
-      Some(user) => pick(user),
-      None => start(),
-    }
-  };
 
   view! {
     <Modal labelled_by="new-message-title" class="modal-small new-message">
       <form on:submit=move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        submit();
+        start();
       }>
         <header class="modal-head">
           <h2 id="new-message-title">{move || i18n.t("dm-new")}</h2>
@@ -379,67 +347,8 @@ pub fn NewMessageDialog() -> impl IntoView {
           </button>
         </header>
         <div class="modal-body">
-          <ul class="chip-list" aria-label=move || i18n.t("dm-new-chosen")>
-            <For each=move || chosen.get() key=|user| user.id let:user>
-              {
-                let id = user.id;
-                let remove_label = {
-                  let name = user.display_name.clone();
-                  move || i18n.t_with("dm-new-remove", &[("name", &name)])
-                };
-                view! {
-                  <li class="chip">
-                    <span translate="no">{user.display_name.clone()}</span>
-                    <button
-                      type="button"
-                      class="icon-btn icon-btn-small"
-                      aria-label=remove_label.clone()
-                      title=remove_label
-                      on:click=move |_| chosen.update(|list| list.retain(|user| user.id != id))
-                    >
-                      <Icon name=IconName::Close />
-                    </button>
-                  </li>
-                }
-              }
-            </For>
-          </ul>
-          <label class="visually-hidden" for="new-message-filter">{move || i18n.t("dm-new-filter")}</label>
-          <input
-            id="new-message-filter"
-            node_ref=input
-            class="input"
-            data-autofocus
-            autocomplete="off"
-            placeholder=move || i18n.t("dm-new-filter")
-            prop:value=move || filter.get()
-            on:input=move |ev| filter.set(event_target_value(&ev))
-            on:keydown=move |ev| {
-              // Backspace in the empty field takes back the last person, as in other pickers.
-              if ev.key() == "Backspace" && filter.get_untracked().is_empty() {
-                chosen.update(|list| {
-                  list.pop();
-                });
-              }
-            }
-          />
-          <ul class="forward-list" role="listbox" aria-label=move || i18n.t("dm-new-people")>
-            <For each=move || candidates.get() key=|user| user.id let:user>
-              {
-                let picked = user.clone();
-                view! {
-                  <li role="option" aria-selected="false">
-                    <button type="button" class="forward-item person-item" on:click=move |_| pick(picked.clone())>
-                      <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
-                      <span translate="no">{user.display_name.clone()}</span>
-                      {(!user.username.is_empty()).then(|| view! { <span class="muted-text" translate="no">{format!("@{}", user.username)}</span> })}
-                      {(user.device_setup == DeviceSetup::NoDevices).then(|| view! { <span class="muted-text">{move || i18n.t("directory-no-devices")}</span> })}
-                    </button>
-                  </li>
-                }
-              }
-            </For>
-          </ul>
+          // Enter picks the first match while searching, and opens the conversation otherwise.
+          <PeoplePicker chosen=chosen chosen_label_key="dm-new-chosen" allows_guest_accounts=true on_submit=Callback::new(move |()| start()) />
           <p class="muted-text small">{move || i18n.t("dm-new-hint")}</p>
         </div>
         <footer class="modal-foot">
@@ -456,22 +365,9 @@ pub fn NewMessageDialog() -> impl IntoView {
   }
 }
 
-/// People whose name or username contains `filter` (any case), by display name.
-fn people_matching(mut users: Vec<User>, filter: &str) -> Vec<User> {
-  let needle = filter.trim().to_lowercase();
-  users.retain(|user| {
-    needle.is_empty()
-      || user.display_name.to_lowercase().contains(&needle)
-      || user.username.to_lowercase().contains(&needle)
-  });
-  users.sort_by_key(|user| user.display_name.to_lowercase());
-  users
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::{PresenceStatus, id_from_raw};
 
   #[test]
   fn keys_built_from_options_exist() {
@@ -492,41 +388,6 @@ mod tests {
         en.contains(&line) && de.contains(&line),
         "missing translation {key}"
       );
-    }
-  }
-
-  #[test]
-  fn people_match_by_name_or_username() {
-    let users = vec![
-      user(1, "Zoe Example", "zoe"),
-      user(2, "amy Example", "a.example"),
-      user(3, "Bob", "bob"),
-    ];
-    let names = |list: Vec<User>| list.into_iter().map(|user| user.display_name).collect::<Vec<_>>();
-    assert_eq!(
-      names(people_matching(users.clone(), "")),
-      ["amy Example", "Bob", "Zoe Example"]
-    );
-    assert_eq!(
-      names(people_matching(users.clone(), " EXAMPLE")),
-      ["amy Example", "Zoe Example"]
-    );
-    assert_eq!(names(people_matching(users.clone(), "a.ex")), ["amy Example"]);
-    assert!(people_matching(users, "nobody").is_empty());
-  }
-
-  fn user(id: u64, name: &str, username: &str) -> User {
-    User {
-      id: id_from_raw(id),
-      username: username.to_owned(),
-      display_name: name.to_owned(),
-      presence: PresenceStatus::Online,
-      maybe_custom_status: None,
-      avatar_hue: 0,
-      is_guest: false,
-      is_bot: false,
-      maybe_organization: None,
-      device_setup: crate::model::DeviceSetup::Unknown,
     }
   }
 }

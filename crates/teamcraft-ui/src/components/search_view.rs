@@ -2,6 +2,7 @@ use leptos::html;
 use leptos::prelude::*;
 
 use crate::clock::format_date_time;
+use crate::components::compact_back::CompactBack;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::ConversationKind;
@@ -147,6 +148,7 @@ pub fn SearchView() -> impl IntoView {
           }
         >
           <div class="search-box">
+            <CompactBack />
             <Icon name=IconName::Search />
             <label class="visually-hidden" for="search-input">{move || i18n.t("search-input-label")}</label>
             <input

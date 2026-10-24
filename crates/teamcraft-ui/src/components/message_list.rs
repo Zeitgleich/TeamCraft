@@ -13,6 +13,7 @@ use crate::clock::format_date;
 use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
+use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
@@ -116,6 +117,7 @@ pub fn MessageList(
   });
   let container = NodeRef::<html::Div>::new();
   let rows = NodeRef::<html::Div>::new();
+  let toolbar = ToolbarHost::provide(container);
 
   let is_log = state
     .read(|backend| backend.conversation(conversation))
@@ -252,6 +254,7 @@ pub fn MessageList(
     if !changed {
       return;
     }
+    toolbar.reposition();
     if stick_to_bottom.get_untracked() {
       layout_rev.update(|rev| *rev += 1);
       defer_while_alive(list_id, scroll_to_bottom);
@@ -406,12 +409,14 @@ pub fn MessageList(
     }
     schedule_measure();
   });
-  let _ = window_event_listener(ev::resize, move |_| {
+  let listener = window_event_listener(ev::resize, move |_| {
     if let Some(element) = container.get_untracked() {
       viewport.set(f64::from(element.client_height()));
       schedule_measure();
     }
   });
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
 
   let on_scroll = move |_| {
     let Some(element) = container.get_untracked() else {
@@ -464,7 +469,7 @@ pub fn MessageList(
           {move || {
             let maybe_action = is_alone_in_channel().then_some(EmptyAction {
               label_key: "channel-add-people",
-              on_click: Callback::new(move |()| state.overlay.set(Overlay::ChannelSettings(conversation))),
+              on_click: Callback::new(move |()| state.overlay.set(Overlay::AddToChannel(conversation))),
             });
             view! { <EmptyState icon=IconName::Smile title_key="channel-empty-title" body_key="channel-empty" maybe_action=maybe_action /> }
           }}
@@ -476,6 +481,7 @@ pub fn MessageList(
           </For>
         </div>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
+        <MessageToolbar host=toolbar />
       </div>
       <Show when=move || !stick_to_bottom.get() fallback=|| ()>
         <button
@@ -588,7 +594,11 @@ fn newest_confirmed_of(
 }
 
 /// Arrow keys move between rendered rows; Home/End jump to the oldest/newest loaded row.
-fn handle_list_keys(ev: &web_sys::KeyboardEvent, container: NodeRef<html::Div>, rows: NodeRef<html::Div>) {
+pub(crate) fn handle_list_keys(
+  ev: &web_sys::KeyboardEvent,
+  container: NodeRef<html::Div>,
+  rows: NodeRef<html::Div>,
+) {
   let key = ev.key();
   if !matches!(key.as_str(), "ArrowUp" | "ArrowDown") {
     return;

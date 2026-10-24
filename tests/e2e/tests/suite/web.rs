@@ -46,7 +46,7 @@ async fn the_web_client_offers_the_v1_chat_features() {
       sign_in_as_alice(&page).await;
       wait_for_text(&page, "browser-channel").await;
       click_text(&page, "browser-channel").await;
-      let composer = wait_for_element(&page, "textarea").await;
+      let composer = wait_for_element(&page, "[data-composer]").await;
 
       // The mention picker completes people (Carol is in the channel).
       composer
@@ -59,7 +59,7 @@ async fn the_web_client_offers_the_v1_chat_features() {
       wait_for_text(&page, "@carol").await;
       shot(&page, "v1-mention-picker").await;
       composer.press_key("Enter").await.unwrap();
-      assert_eq!(textarea_value(&page).await, "hello @carol ");
+      assert_eq!(composer_text(&page).await, "hello @carol ");
 
       // Emoticons become emoji on send.
       composer
@@ -191,7 +191,7 @@ async fn a_message_written_in_the_web_client_reaches_a_second_client() {
       sign_in_as_alice(&page).await;
       wait_for_text(&page, "browser-channel").await;
       click_text(&page, "browser-channel").await;
-      let composer = wait_for_element(&page, "textarea").await;
+      let composer = wait_for_element(&page, "[data-composer]").await;
       composer
         .click()
         .await
@@ -350,9 +350,9 @@ async fn a_full_quota_is_shown_and_recovers() {
 
 /// The stack with the web build, the browser and the data the browser will show: Alice owns a
 /// channel she shares with Carol.
-struct Rig {
+pub(crate) struct Rig {
   stack: Stack,
-  browser: BrowserSession,
+  pub(crate) browser: BrowserSession,
   alice: Peer,
   carol: Peer,
   channel: ConversationId,
@@ -360,7 +360,7 @@ struct Rig {
 }
 
 impl Rig {
-  async fn start() -> Option<Self> {
+  pub(crate) async fn start() -> Option<Self> {
     let Some(web_dir) = web_dir() else {
       let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
       assert!(!is_required, "no web build: run tests/e2e/web/build.sh");
@@ -398,7 +398,7 @@ impl Rig {
     })
   }
 
-  async fn finish(self) {
+  pub(crate) async fn finish(self) {
     self.browser.close().await;
     self.stack.stop().await;
   }
@@ -494,7 +494,7 @@ async fn send_in_channel(page: &Page, text: &str) {
   // Input goes to the tab in front; a background tab never gets it.
   page.bring_to_front().await.unwrap();
   click_text(page, "browser-channel").await;
-  let composer = wait_for_element(page, "textarea").await;
+  let composer = wait_for_element(page, "[data-composer]").await;
   composer
     .click()
     .await
@@ -520,7 +520,7 @@ async fn wait_for_text_gone(page: &Page, needle: &str) {
 }
 
 /// Saves a screenshot as `target/e2e-artifacts/<name>.png` (kept after passing runs too).
-async fn shot(page: &Page, name: &str) {
+pub(crate) async fn shot(page: &Page, name: &str) {
   use chromiumoxide::page::ScreenshotParams;
   let dir = teamcraft_e2e::browser::artifact_dir();
   let _ = std::fs::create_dir_all(&dir);
@@ -532,9 +532,9 @@ async fn shot(page: &Page, name: &str) {
     .await;
 }
 
-async fn textarea_value(page: &Page) -> String {
+async fn composer_text(page: &Page) -> String {
   page
-    .evaluate("document.querySelector('textarea').value")
+    .evaluate("document.querySelector('[data-composer]').textContent")
     .await
     .ok()
     .and_then(|result| result.into_value::<String>().ok())
@@ -579,7 +579,7 @@ pub(crate) async fn wait_for_element(page: &Page, selector: &str) -> chromiumoxi
   }
 }
 
-async fn body_text(page: &Page) -> String {
+pub(crate) async fn body_text(page: &Page) -> String {
   page
     .evaluate("document.body ? document.body.innerText : ''")
     .await

@@ -161,11 +161,16 @@ pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<
     })
     .collect();
   let totals = state.database.thread_unread_totals(caller.user.id).await?;
+  // Taken after the counts: a message with a higher ID was created after they were read (issue
+  // #259). One still being written while they were read can have a lower ID and be missing from
+  // both until the conversation's next `unread_update` or the client's next connection.
+  let counted_through = state.next_id()?;
   Ok(UnreadResponse {
     conversations,
     unread_thread_count: totals.unread_thread_count,
     thread_mention_count: totals.mention_count,
     maybe_max_counted: Some(max_counted),
+    maybe_counted_through: Some(counted_through),
   })
 }
 

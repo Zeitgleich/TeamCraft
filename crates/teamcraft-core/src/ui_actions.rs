@@ -2,19 +2,20 @@
 //! [`CoreChatBackend`] reads directly, and the commands it queues for the engine.
 
 use teamcraft_client_api::actions::{
-  ForwardedFrom, LinkPreview, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage, PermalinkTarget,
-  ReplyPreview, SavedItem, WorkspaceEvent,
+  ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
+  PermalinkTarget, ReplyPreview, SavedItem, WorkspaceEvent,
 };
 use teamcraft_client_api::model::{Bookmark, ConversationId, Message, MessageId, ThreadId, UserId};
 use teamcraft_proto::ClientMessageId;
 
 use crate::client::previews::queue_preview;
 use crate::client::{apply_control, forward_content, reply_ref, stored_account_data};
+use crate::error::CoreError;
 use crate::link_preview::is_allowed;
 use crate::read_state;
 use crate::records;
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, Priority, StoredMessage,
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, Priority, StoredMessage, Table,
 };
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -299,6 +300,47 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .iter()
       .any(|stored| stored.maybe_server_id == Some(target.message))
       .then_some(target)
+  }
+
+  /// Point lookups only (the conversation's record, then the message by its server ID): previews
+  /// are read again on every store change, so they must not read whole conversations.
+  pub(crate) fn ui_linked_message(&self, link: &str) -> LinkedMessage {
+    let Some(target) = parse_permalink(link) else {
+      return LinkedMessage::Unavailable;
+    };
+    // Only conversations this device is a member of: the preview never asks the server.
+    let is_member = self
+      .read(
+        self
+          .store_ref()
+          .get(Table::Conversations, &target.conversation.to_string())
+          .map_err(CoreError::from),
+      )
+      .is_some();
+    if !is_member {
+      return LinkedMessage::Unavailable;
+    }
+    let maybe_stored = self.read(
+      self
+        .store_ref()
+        .message_by_server_id(target.conversation, target.message)
+        .map_err(CoreError::from),
+    );
+    let Some(stored) = maybe_stored else {
+      // A member whose device hasn't synced (or has purged) the message yet.
+      return LinkedMessage::NotLoaded { target };
+    };
+    match stored.content {
+      MessageContent::Deleted => LinkedMessage::Deleted { target },
+      // Without the rest of the conversation: a preview shows no reactions or reply counts.
+      MessageContent::Text { .. } | MessageContent::File { .. } => LinkedMessage::Visible {
+        target,
+        message: self.to_message(&stored, &[]),
+        files: self.files_of(&stored),
+      },
+      // Reactions, edits, events and the like are no message one can link to.
+      _ => LinkedMessage::Unavailable,
+    }
   }
 
   pub(crate) fn ui_first_unread(&self, conversation: ConversationId) -> Option<MessageId> {

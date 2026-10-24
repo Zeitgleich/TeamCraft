@@ -191,7 +191,17 @@ pub fn QuickSwitcher() -> impl IntoView {
         {move || i18n.t("switcher-title")}
       </h2>
       <div class="switcher-input">
-        <Icon name=IconName::Search />
+        // Phones: the search is a full-screen sheet, so it needs a visible way out.
+        <button
+          type="button"
+          class="icon-btn compact-only"
+          aria-label=move || i18n.t("back")
+          title=move || i18n.t("back")
+          on:click=move |_| state.close_overlay()
+        >
+          <Icon name=IconName::ChevronLeft />
+        </button>
+        <Icon name=IconName::Search class="switcher-search-icon" />
         <input
           type="text"
           role="combobox"
@@ -643,7 +653,7 @@ fn first_line(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-  use crate::model::{Message, MessageKind, PresenceStatus, SidebarCategory, id_from_raw};
+  use crate::model::{JoinPolicy, Message, MessageKind, PresenceStatus, SidebarCategory, id_from_raw};
 
   use super::*;
 
@@ -776,6 +786,9 @@ mod tests {
       id: id_from_raw(31),
       name: "Sales team".into(),
       maybe_description: None,
+      hue: 0,
+      maybe_image_version: None,
+      member_count: 3,
     }];
     let found = matching_spaces("sales", &[space(30, "Sales")], &joinable);
     assert!(matches!(&found[0], SwitcherItem::Space(space) if space.name == "Sales"));
@@ -812,6 +825,7 @@ mod tests {
       is_muted: false,
       can_post: true,
       bookmarks: Vec::new(),
+      is_catching_up: false,
     }
   }
 
@@ -824,6 +838,11 @@ mod tests {
       maybe_image_version: None,
       unread_count: 0,
       mention_count: 0,
+      maybe_description: None,
+      member_count: 0,
+      join_policy: JoinPolicy::InviteOnly,
+      can_add_members: false,
+      can_invite_guests: false,
     }
   }
 

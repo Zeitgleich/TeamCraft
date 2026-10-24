@@ -151,6 +151,12 @@ tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
 base64 = "0.23.1"
 
+# The desktop build's zbus features, so the keystore tests see the same Secret Service backend: with
+# `tokio`, zbus' blocking API nests a tokio runtime (store/key_source.rs). Already in the tree
+# through keyring.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5.13", default-features = false, features = ["tokio"] }
+
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # Store and crypto round trips in headless Chromium (tests/web.rs).
 wasm-bindgen-test = "0.3.56"

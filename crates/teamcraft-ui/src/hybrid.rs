@@ -21,8 +21,9 @@ use teamcraft_proto::{
 };
 
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
+  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
+  SpaceInvite,
 };
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy};
 
@@ -74,11 +75,6 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
     let scope_chat = chat.clone();
     let scope = Rc::new(move || LiveScope {
       users: scope_chat.users().into_iter().map(|user| user.id).collect(),
-      direct: scope_chat
-        .direct_conversations()
-        .into_iter()
-        .map(|conversation| conversation.id)
-        .collect(),
     });
     let maybe_admin = (role >= Role::Admin).then(|| AdminLive::new(auth.clone()));
     Self {
@@ -380,6 +376,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.resolve_permalink(link)
   }
 
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    self.chat.linked_message(link)
+  }
+
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {
     self.chat.mark_unread(conversation, from);
   }
@@ -522,6 +522,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn invite_to_space(&self, invite: SpaceInvite) {
     self.chat.invite_to_space(invite);
+  }
+
+  fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
+    self.chat.add_space_members(space, users, is_guest);
   }
 
   fn has_external_people(&self, conversation: ConversationId) -> bool {

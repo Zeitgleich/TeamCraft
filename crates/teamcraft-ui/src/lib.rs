@@ -25,6 +25,7 @@ pub mod clock;
 pub mod components;
 pub mod delivery;
 pub mod diff;
+pub mod editor_doc;
 pub mod feed_motion;
 pub mod feedback;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
@@ -34,6 +35,7 @@ pub mod highlight;
 pub mod history;
 pub mod hybrid;
 pub mod i18n;
+pub mod image_crop;
 pub mod keys;
 pub mod lightbox;
 pub mod live;
@@ -44,6 +46,7 @@ pub mod media_layout;
 pub mod meeting_reminders;
 pub mod meetings;
 pub mod mention;
+pub mod message_links;
 #[cfg(any(test, feature = "demo"))]
 pub mod mock;
 pub mod motion;
@@ -71,6 +74,7 @@ pub mod slash;
 pub mod space_images;
 pub mod state;
 pub mod sync_reads;
+pub mod viewport;
 #[cfg(target_arch = "wasm32")]
 pub mod web_core;
 #[cfg(target_arch = "wasm32")]
@@ -149,10 +153,12 @@ mod tests {
     );
 
     let shell = include_str!("components/app.rs");
+    // The opening tag spans several lines (its data attributes); the children follow its `>`.
     let grid = shell
-      .split("<div class=\"app\">")
+      .split("class=\"app\"")
       .nth(1)
-      .and_then(|rest| rest.split("<div class=\"app-body\">").next())
+      .and_then(|rest| rest.split_once("\n    >\n"))
+      .and_then(|(_, rest)| rest.split("<div class=\"app-body\">").next())
       .expect("the shell has the .app grid with its body");
     // Direct children of the grid sit one indentation level below `<div class="app">`.
     let children: Vec<&str> = grid

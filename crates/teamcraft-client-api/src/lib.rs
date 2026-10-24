@@ -29,5 +29,6 @@ pub mod security;
 pub mod server_entry;
 pub mod sign_in_look;
 pub mod sign_in_page;
+pub mod snapshot_changes;
 pub mod updates;
 pub mod window_chrome;

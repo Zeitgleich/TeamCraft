@@ -195,15 +195,15 @@ What the numbers say:
 - The app adds about 210 MiB to the browser; most of it is the compiled wasm and its linear memory
   (the JS heap is under 5 MiB). Channel switches don't grow it.
 - The message list is virtualised: the DOM holds about 25 rows whatever the channel's length.
-- While idle the page still runs about 0.4 s of tasks per minute: the sync loop's 3 s tick and a
-  30 s REST poll of unread counts, threads, presence and read receipts (#183). A one-second banner
-  timer that ran even while connected is fixed.
+- While idle the page ran about 0.4 s of tasks per minute at the time of this table: the sync
+  loop's 3 s tick and a 30 s REST poll of unread counts, threads, presence and read receipts. The
+  poll is gone since (#183, #252; see "Idle traffic and updates per conversation" below). A
+  one-second banner timer that ran even while connected is fixed.
 - Sending used to read the whole conversation for every message (fixed); it showed when filling a
   20,000-message channel.
-- Against the budgets in robustness.md: switching, scrolling, start and memory are well within them;
-  idle network is not (the 30 s poll, #183, and the once-a-minute account data sync).
-- Since #183 the counters come over the gateway (notifications.md, "Unread and mention counts"); the
-  30 s poll is gone. The numbers above were measured before that change and are not re-run yet.
+- Against the budgets in robustness.md: switching, scrolling, start and memory are well within them.
+  Idle network was not at the time (the 30 s poll and the once-a-minute account data sync); both are
+  gone since (#183, #252), re-measured below.
 
 #### Large workspace
 
@@ -243,15 +243,115 @@ What the numbers say:
   browser on the large workspace (181 MiB on the small one), and neither the JS heap nor the PSS
   grows with channel switches beyond the noise. The message list stays virtualised at 20,000
   messages.
-- **Idle is not** (#246, #183): every change notification re-reads work that grows with the
+- **Idle was not** (#246, #183): every change notification re-read work that grows with the
   workspace (about 0.6 s of main-thread time per round on the large workspace, 70 ms on the small
-  one), and refresh rounds trigger further rounds. Before this change each heartbeat answer (every
-  25 s) counted as a change and started a round too; the 30 s poll and the loop remain.
+  one), and refresh rounds triggered further rounds. Each heartbeat answer (every 25 s) counted as a
+  change too (fixed with this measurement), the 30 s poll and the loop went with #183 and #253, the
+  rest with #246 and #252: see "Idle traffic and updates per conversation" below.
 - **Coming back** to a workspace that grew by 300 channels and 100k messages takes three minutes
   before the channel list shows (#247); the main thread is mostly free meanwhile (14 tasks over
   50 ms, 1 s in total), the time goes to the sequential catch-up (#155).
 - **wasm:** uncompressed sizes at the time (#248); the budget now counts the compressed transfer,
   see "Web bundle size" below for the current numbers.
+
+#### Idle traffic and updates per conversation
+
+Re-measured for #246, #247, #252, #259 and #270 in the same kind of cloud VM (4 vCPUs, 15 GiB,
+headless Chromium 1243, Postgres in a container on the VM), with the **debug** server binary (the
+disk of the VM had no room for two release builds; the client is the release web build either
+way). "Before" is `main` e569848, "after" the change. Same harness as above, with three additions:
+API requests while idle apart from token renewal (`idle_api_requests_per_minute`, the regression
+check asserts 0), when the first channel opened after coming back shows its newest message, and
+when the background catch-up is done (no connection banner and no API request for 10 s). The idle
+period starts only after that.
+
+| What                                                      | Small before | Small after | Large before | Large after |
+|-----------------------------------------------------------|--------------|-------------|--------------|-------------|
+| Coming back: channel list shows                           | 4.4 s        | 1.6 s       | 247 s        | 1.6 s       |
+| Coming back: first channel read                           | -            | 2.8 s       | 247 s        | 30.4 s      |
+| Coming back: every channel of the first space read        | 5.0 s        | 3.4 s       | 250 s        | 32.9 s      |
+| Coming back: whole workspace caught up                    | 5.0 s        | -           | 250 s        | 39.1 s      |
+| Reload of a signed-in tab until the channel list shows    | 0.5 s        | 0.5 s       | 1.0 s        | 0.8 s       |
+| Channel switch, p50 / p95                                 | 40 / 54 ms   | 41 / 52 ms  | 48 / 72 ms   | 66 / 155 ms |
+| Idle: CPU, whole browser (first 5 min, see below)         | 0.8 %        | 0.7 %       | 8.0 %        | 33.2 %      |
+| Idle: CPU, whole browser, the 5 min after that            | -            | -           | -            | 0.2 %       |
+| Idle: main-thread tasks per minute                        | 115 ms       | 113 ms      | 3,731 ms     | 771 ms      |
+| Idle: HTTP requests per minute (API)                      | 2.0          | 0 (0)       | 99           | 0.2 (0)     |
+| Idle: gateway frames per minute                           | 5.0          | 5.0         | 33           | 5.0         |
+
+Small: 3 spaces, 24 channels, 3,000 messages; idle 60 s. Large: 20 spaces, 300 channels, 100k
+messages; idle 300 s. "Before" shows the channel list only once the whole catch-up is done, so its
+first-channel and caught-up times are the same moment.
+
+What the numbers say:
+
+- **No idle traffic** besides the gateway heartbeat (#252): account data, presence, receipts and
+  last seen are read once per connection or when shown. The server closes every connection after
+  an hour (`connection_max_age_secs`, to check a fresh token); the resume then costs the
+  once-per-connection reads: the unread counts and threads, presence in batches of 200, the
+  announcement, the account data.
+- **Change notifications cost what changed** (#246): on the large workspace main-thread work while
+  idle went from 3.7 s to 0.8 s per minute; a new message re-reads one conversation and
+  sends one entry, a presence event one person's entry.
+- **Coming back** (#247): the list shows as soon as the conversation list arrived (1.6 s instead of
+  four minutes), the channel the user opens is caught up first, the rest in the background with up
+  to six conversations' round trips at once. Before any conversation's messages, the sync still
+  reads every member list and joins the 300 groups from their welcomes, one after the other in the
+  server's order; that is where the 30 s until the first channel is readable go.
+- **After a large catch-up the browser was busy for minutes** (first idle window: Chrome's
+  browser process at 31 %, the renderer at 2.4 %; the five minutes after that 0.2 %), and channel
+  switches measured 155 ms at p95 meanwhile. The cause was the IndexedDB store: one read-write
+  transaction per record written, and the whole MLS state (one record for all groups, rewritten
+  after every group the catch-up processed) written again each time. Chrome worked through that
+  backlog for minutes after the catch-up, and every committed transaction woke the page. Writes now
+  go out in batches (one transaction after 50 ms, or at once beyond 8 MiB or on a flush), and of
+  several writes of one record in a batch only the last; re-measured below.
+
+#### Release server, after the catch-up settled
+
+The large workspace again, after the IndexedDB batching and the review fixes of the same change
+(presence log and snapshot indexes, per-conversation lookups in the UI mirror). Local machine
+(24 threads, 62 GiB, headless Google Chrome 156, dev stack in containers on the same machine, other
+work running beside it), **release** server and release test harness, October 2026. Two additions
+to the harness: after the catch-up and again after the reload it waits until the whole browser
+stays under 3 % CPU for 10 s (`seconds_*_until_browser_settled`) before it switches channels and
+idles, and a second idle window of the same length (`PERF_SECOND_IDLE=1`).
+
+```sh
+PERF_SCALE=large PERF_SECOND_IDLE=1 cargo test --release -p teamcraft-e2e --features browser \
+  --test suite -- --nocapture perf::
+```
+
+| What                                                     | Large                | Budget       |
+|----------------------------------------------------------|----------------------|--------------|
+| Coming back: channel list shows                          | 1.7 s                | -            |
+| Coming back: first channel read / whole space read       | 26.1 / 27.2 s        | -            |
+| Coming back: whole workspace caught up                   | 30.8 s               | -            |
+| Caught up until the browser is quiet (after the reload)  | 0.1 s (0.1 s)        | -            |
+| Reload of a signed-in tab until the channel list shows   | 1.0 s                | ≤ 1.5 s      |
+| Channel switch, p50 / p95 / max                          | 40 / 58 / 64 ms      | p95 ≤ 100 ms |
+| Opening the 20,000-message channel                       | 68 ms                | -            |
+| PSS of the browser: empty / app started / after switches | 346 / 274 / 308 MiB  | -            |
+| JS heap after the first / 100 more switches              | 2.7 / 2.8 MiB        | -            |
+| Idle: CPU, whole browser, first 5 min / the 5 min after  | 0.1 % / 0.1 %        | ≤ 1 %        |
+| Idle: main-thread tasks per minute                       | 40 ms                | -            |
+| Idle: HTTP requests per minute (API)                     | 0.2 (0)              | none         |
+| Idle: gateway frames per minute                          | 5.0                  | -            |
+
+Seeding took 24.5 minutes. The empty browser idled at 4.1 % CPU here (the shared machine and a
+newer Chrome; the cloud VM above measured 0.6 %); the app's idle numbers are the difference over
+the same profile, so they don't include it. The empty-browser PSS is higher than the app's because
+the empty page was measured while the machine was busier; read PSS for growth, not as absolute.
+
+What the numbers say:
+
+- **Within budget once settled:** channel switches at 58 ms p95 and the whole browser at 0.1 % CPU
+  idle, in both five-minute windows. With the batched writes the browser is quiet 0.1 s after the
+  catch-up is done; there is no backlog left to settle.
+- The first channel is still readable only after 26 s: member lists and welcomes of all 300
+  conversations come first (#247, "Left open" in the change).
+- 63 tasks over 50 ms (3.9 s in total, the longest 130 ms) while coming back: the catch-up's MLS
+  work and decryption on the page's thread.
 
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts

@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::PresenceDot;
 use crate::components::bookmarks::BookmarksBar;
+use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
 use crate::components::file_views::ChannelFiles;
 use crate::components::huddle_bar::HuddleBar;
@@ -12,7 +13,7 @@ use crate::components::security_ui::KeyChangeBanner;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
-use crate::state::{Overlay, SidePanel, use_app_state};
+use crate::state::{AppState, Overlay, SidePanel, use_app_state};
 
 /// How long after a DM's welcome wait ran out its banner is read again (the backend's clock).
 const DM_SETUP_EXPIRY_MARGIN_MS: u64 = 500;
@@ -127,6 +128,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <ChannelHeader conversation=conversation info=info tab=tab />
         <KeyChangeBanner conversation=conversation />
         <DeviceAccessBanner conversation=conversation />
+        <CatchingUpNote info=info />
         <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
@@ -157,6 +159,27 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
             .into_any(),
         }}
       </section>
+    })
+  }
+}
+
+/// The client is still catching up this conversation after being away (issue #247): older
+/// messages may still arrive above what is shown.
+#[component]
+fn CatchingUpNote(info: Memo<Option<Conversation>>) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_catching_up = Memo::new(move |_| info.get().is_some_and(|conv| conv.is_catching_up));
+  move || {
+    is_catching_up.get().then(|| {
+      view! {
+        <div class="key-banner catching-up-note" role="status">
+          <Icon name=IconName::Clock />
+          <div class="key-banner-text">
+            <strong>{move || i18n.t("catching-up")}</strong>
+            <span>{move || i18n.t("catching-up-detail")}</span>
+          </div>
+        </div>
+      }
     })
   }
 }
@@ -494,11 +517,18 @@ fn ChannelHeader(
   });
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
+  // Channels take people in from the header; direct messages start a new group instead.
+  let is_channel = move || {
+    info
+      .get()
+      .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+  };
   let members_open = move || state.panel.get() == SidePanel::Members;
 
   view! {
     <header class="channel-header">
       <div class="header-main">
+        <CompactBack />
         {title}
         <button
           class="icon-btn"
@@ -563,6 +593,17 @@ fn ChannelHeader(
       </div>
       <div class="header-actions">
         <CallButtons conversation=conversation info=info />
+        <Show when=is_channel fallback=|| ()>
+          <button
+            class="header-btn"
+            aria-label=move || i18n.t("channel-add-people")
+            title=move || i18n.t("channel-add-people")
+            on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))
+          >
+            <Icon name=IconName::UserPlus />
+          </button>
+        </Show>
+        <ConversationMore conversation=conversation tab=tab info=info />
         <button
           class="header-btn"
           aria-label=move || i18n.t("channel-settings-title")
@@ -631,6 +672,71 @@ fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
   }
 }
 
+/// The compact layout's "…" in the conversation header: what the wider header shows as its own
+/// buttons (Files, pins, members, settings, favorite) as a menu.
+#[component]
+fn ConversationMore(
+  conversation: ConversationId,
+  tab: RwSignal<ChannelTab>,
+  info: Memo<Option<Conversation>>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_open = RwSignal::new(false);
+  let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
+  let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
+  let choose = move |action: fn(AppState, ConversationId, RwSignal<ChannelTab>)| {
+    is_open.set(false);
+    action(state, conversation, tab);
+  };
+  view! {
+    <div class="conversation-more compact-only">
+      <button
+        type="button"
+        class="icon-btn"
+        aria-haspopup="menu"
+        aria-expanded=move || is_open.get().to_string()
+        aria-label=move || i18n.t("conversation-more")
+        title=move || i18n.t("conversation-more")
+        on:click=move |_| is_open.update(|open| *open = !*open)
+      >
+        <Icon name=IconName::More />
+      </button>
+      <Show when=move || is_open.get() fallback=|| ()>
+        <div class="popover-backdrop" on:mousedown=move |_| is_open.set(false)></div>
+        <div class="popover conversation-menu" role="menu">
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|_, _, tab| {
+            tab.update(|tab| *tab = if *tab == ChannelTab::Files { ChannelTab::Messages } else { ChannelTab::Files });
+          })>
+            <Icon name=IconName::File />
+            {move || if tab.get() == ChannelTab::Files { i18n.t("channel-tab-messages") } else { i18n.t("channel-tab-files") }}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, _, _| state.panel.set(SidePanel::Members))>
+            <Icon name=IconName::Users />
+            {move || i18n.t_count("members-button-label", member_count())}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, _, _| state.panel.set(SidePanel::Pins))>
+            <Icon name=IconName::Bookmark />
+            {move || i18n.t("pins-title")}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+            let favorite = !is_favorite();
+            is_open.set(false);
+            state.write(|backend| backend.set_favorite(conversation, favorite));
+          }>
+            <Icon name=IconName::Star />
+            {move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::ChannelSettings(conversation)))>
+            <Icon name=IconName::Sliders />
+            {move || i18n.t("channel-settings-title")}
+          </button>
+        </div>
+      </Show>
+    </div>
+  }
+}
+
 /// Start buttons in the header: audio and video call, plus a drop-in huddle in channels.
 #[component]
 fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -> impl IntoView {
@@ -642,11 +748,25 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
     Some(ConversationKind::Direct) => CallKind::Direct,
     _ => CallKind::Group,
   };
-  // Without call support (the browser for now) there are no call buttons.
+  // Without call support (the browser until #330) the buttons still show and say where calls are.
   let has_calls = state.read(|backend| backend.has_calls());
-  let is_callable = move || has_calls && kind().is_some_and(|kind| kind != ConversationKind::Integration);
-  let is_channel = move || matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
+  let is_callable = move || kind().is_some_and(|kind| kind != ConversationKind::Integration);
+  let is_channel =
+    move || has_calls && matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
   let is_busy = move || call.phase.get() != CallPhase::Idle;
+  let start = move |with_video: bool| {
+    if has_calls {
+      call.prepare(
+        CallRequest {
+          conversation,
+          kind: call_kind(),
+        },
+        with_video,
+      );
+    } else {
+      state.overlay.set(Overlay::CallsUnavailable);
+    }
+  };
 
   view! {
     <Show when=is_callable fallback=|| ()>
@@ -655,7 +775,7 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
         disabled=is_busy
         aria-label=move || i18n.t("call-start-audio")
         title=move || i18n.t("call-start-audio")
-        on:click=move |_| call.prepare(CallRequest { conversation, kind: call_kind() }, false)
+        on:click=move |_| start(false)
       >
         <Icon name=IconName::Phone />
       </button>
@@ -664,7 +784,7 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
         disabled=is_busy
         aria-label=move || i18n.t("call-start-video")
         title=move || i18n.t("call-start-video")
-        on:click=move |_| call.prepare(CallRequest { conversation, kind: call_kind() }, true)
+        on:click=move |_| start(true)
       >
         <Icon name=IconName::Video />
       </button>

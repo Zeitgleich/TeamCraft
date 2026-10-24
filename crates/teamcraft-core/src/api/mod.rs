@@ -15,16 +15,16 @@ use std::future::Future;
 
 pub use http::{AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken};
 use teamcraft_proto::{
-  AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
-  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
+  AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
+  ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
   CreateGroupDmRequest, DeviceId, DeviceListResponse, DeviceResponse, ErrorBody, ErrorCode,
   GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse, KeyBagResponse,
   KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
   ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
   ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
   PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, UploadIdentityKeyRequest,
-  UploadKeyPackagesRequest, UserId, UserSummary,
+  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
+  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -148,6 +148,13 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<(), ApiError>>;
   /// Joins an open space (`POST /spaces/{id}/join`).
   fn join_space(&self, space: SpaceId) -> impl Future<Output = Result<SpaceResponse, ApiError>>;
+  /// Adds a person to a space as member or guest (`POST /spaces/{id}/members`). On someone who is
+  /// already a member it changes their role, so callers skip existing members.
+  fn add_space_member(
+    &self,
+    space: SpaceId,
+    request: &AddSpaceMemberRequest,
+  ) -> impl Future<Output = Result<SpaceMemberResponse, ApiError>>;
   /// Joins a public channel (`POST /conversations/{id}/join`).
   fn join_conversation(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
   /// Renames, converts, archives or recategorizes a channel (`PATCH /conversations/{id}`).

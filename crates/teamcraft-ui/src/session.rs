@@ -66,6 +66,9 @@ pub enum LoginProblem {
   ServerUnreachable,
   /// The encrypted local data could not be opened (keystore, database); the text is for details.
   CoreFailed(String),
+  /// The client core stopped on an internal error (not the keystore or the database): restart the
+  /// app and report it.
+  CoreStopped,
   /// The client core has been waiting for an access token for a while; it keeps trying, and the user
   /// can try again or sign out.
   CoreNotSignedIn,
@@ -328,6 +331,9 @@ impl SessionControl {
       Ok(CoreStatus::Failed { message }) => self
         .state
         .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreFailed(message)))),
+      Ok(CoreStatus::Stopped) => self
+        .state
+        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreStopped))),
       // The core is still waiting for an access token and retries on its own.
       Ok(CoreStatus::NotStarted) => self.wait_for_core(me, started_ms, round),
       Err(error) => self

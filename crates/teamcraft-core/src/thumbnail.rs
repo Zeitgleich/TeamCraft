@@ -7,6 +7,7 @@
 use std::io::Cursor;
 
 use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
@@ -16,6 +17,12 @@ pub const THUMBNAIL_SIZE: u32 = 640;
 /// Side of a space picture in pixels (the rail shows it at up to 48 CSS pixels, ×4 for dense screens
 /// and the settings preview).
 pub const SPACE_IMAGE_SIZE: u32 = 256;
+/// Side of an avatar in pixels (shown at up to 64 CSS pixels in profiles, ×4 for dense screens and
+/// the profile card).
+pub const AVATAR_IMAGE_SIZE: u32 = 512;
+/// Longest side of the crop dialog's copy of a picture: plenty for a 512 px result even when zoomed
+/// in, and a 40 MP photo still fits in a few MB of memory.
+pub const EDITOR_IMAGE_MAX_SIDE: u32 = 2048;
 /// A thumbnail travels inside the message, which the server caps (1 MiB of ciphertext by default)
 /// for every file of the message together; larger ones are made smaller or lower in quality.
 pub const MAX_THUMBNAIL_BYTES: usize = 96 * 1024;
@@ -115,24 +122,66 @@ fn encode_png(image: &DynamicImage) -> Option<Vec<u8>> {
   Some(out.into_inner())
 }
 
-/// A space picture from a picked image file: the centered square, scaled to at most
-/// [`SPACE_IMAGE_SIZE`] pixels per side, as PNG. `None` for anything that isn't a decodable image.
-/// The server re-encodes it again (it trusts no client); this keeps uploads small.
-pub fn space_image_png(bytes: &[u8]) -> Option<Vec<u8>> {
-  let image = decode_bounded(bytes)?;
-  let side = image.width().min(image.height());
-  let square = image.crop_imm(
-    (image.width() - side) / 2,
-    (image.height() - side) / 2,
-    side,
-    side,
-  );
-  let small = if side > SPACE_IMAGE_SIZE {
-    square.resize_exact(
-      SPACE_IMAGE_SIZE,
-      SPACE_IMAGE_SIZE,
-      image::imageops::FilterType::Lanczos3,
+/// The editor's copy of a picked picture (crop dialog, issue #323): upright (EXIF orientation
+/// applied), scaled to at most [`EDITOR_IMAGE_MAX_SIDE`] pixels per side, as a quickly encoded PNG.
+/// The dialog shows it and crops from it, so a huge photo is decoded once and never held in full.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorImage {
+  pub png: Vec<u8>,
+  pub width: u32,
+  pub height: u32,
+}
+
+/// The square a user chose in the crop dialog, in pixels of the [`EditorImage`] after turning it
+/// clockwise by `quarter_turns` × 90°.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SquareCrop {
+  pub quarter_turns: u8,
+  pub x: u32,
+  pub y: u32,
+  pub side: u32,
+}
+
+/// The editor's copy of a picked image file; `None` for anything that isn't a decodable image.
+pub fn editor_image(bytes: &[u8]) -> Option<EditorImage> {
+  let image = decode_upright(bytes)?;
+  let image = if image.width().max(image.height()) > EDITOR_IMAGE_MAX_SIDE {
+    image.resize(
+      EDITOR_IMAGE_MAX_SIDE,
+      EDITOR_IMAGE_MAX_SIDE,
+      image::imageops::FilterType::Triangle,
     )
+  } else {
+    image
+  };
+  let mut out = Vec::new();
+  // Fast compression: the PNG only travels to a `blob:` URL and back into `cropped_square_png`.
+  let encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Fast, PngFilter::Adaptive);
+  image.write_with_encoder(encoder).ok()?;
+  Some(EditorImage {
+    png: out,
+    width: image.width(),
+    height: image.height(),
+  })
+}
+
+/// Cuts `crop` out of an editor image (see [`editor_image`]) and scales it to at most `size`
+/// pixels per side, as PNG; a smaller square is not scaled up. The rectangle is clamped to the
+/// picture. The server re-encodes the upload again (it trusts no client); this keeps it small.
+pub fn cropped_square_png(editor_png: &[u8], crop: SquareCrop, size: u32) -> Option<Vec<u8>> {
+  let image = decode_bounded(editor_png)?;
+  let image = match crop.quarter_turns % 4 {
+    1 => image.rotate90(),
+    2 => image.rotate180(),
+    3 => image.rotate270(),
+    _ => image,
+  };
+  let side = crop.side.min(image.width()).min(image.height()).max(1);
+  let x = crop.x.min(image.width() - side);
+  let y = crop.y.min(image.height() - side);
+  let square = image.crop_imm(x, y, side, side);
+  let small = if side > size {
+    square.resize_exact(size, size, image::imageops::FilterType::Lanczos3)
   } else {
     square
   };
@@ -279,33 +328,141 @@ mod tests {
   }
 
   #[test]
-  fn space_images_are_the_centered_square_at_most_256_pixels_wide() {
-    // Left half red, right half blue: the centered square straddles both.
-    let picture = ImageBuffer::from_fn(1000, 500, |x, _| {
-      if x < 500 {
+  fn the_editor_copy_is_bounded_and_unreadable_files_have_none() {
+    let big = encode(ImageBuffer::from_fn(4096, 1024, |x, _| {
+      Rgb([(x % 256) as u8, 1, 2])
+    }));
+    let editor = editor_image(&big).unwrap();
+    assert_eq!((editor.width, editor.height), (EDITOR_IMAGE_MAX_SIDE, 512));
+    let decoded = image::load_from_memory(&editor.png).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (editor.width, editor.height));
+
+    let small = encode(ImageBuffer::from_fn(40, 30, |_, _| Rgb([1u8, 2, 3])));
+    let editor = editor_image(&small).unwrap();
+    assert_eq!((editor.width, editor.height), (40, 30));
+
+    assert_eq!(editor_image(b"<svg></svg>"), None);
+    assert_eq!(editor_image(b""), None);
+  }
+
+  #[test]
+  fn the_chosen_square_is_cut_and_scaled() {
+    // Left half red, right half blue.
+    let picture = encode(halves(1000, 500));
+    let editor = editor_image(&picture).unwrap();
+    let left = crop(
+      &editor.png,
+      SquareCrop {
+        quarter_turns: 0,
+        x: 0,
+        y: 0,
+        side: 500,
+      },
+      256,
+    );
+    assert_eq!(left.dimensions(), (256, 256));
+    assert_eq!(left.get_pixel(250, 128).0, [255, 0, 0]);
+    let right = crop(
+      &editor.png,
+      SquareCrop {
+        quarter_turns: 0,
+        x: 500,
+        y: 0,
+        side: 500,
+      },
+      256,
+    );
+    assert_eq!(right.get_pixel(5, 128).0, [0, 0, 255]);
+
+    // A small square is not scaled up.
+    let small = crop(
+      &editor.png,
+      SquareCrop {
+        quarter_turns: 0,
+        x: 10,
+        y: 10,
+        side: 100,
+      },
+      256,
+    );
+    assert_eq!(small.dimensions(), (100, 100));
+  }
+
+  #[test]
+  fn the_crop_follows_the_rotation_and_stays_inside() {
+    // Turned clockwise, the red left half is on top: 500 wide, 1000 high.
+    let editor = editor_image(&encode(halves(1000, 500))).unwrap();
+    let top = crop(
+      &editor.png,
+      SquareCrop {
+        quarter_turns: 1,
+        x: 0,
+        y: 0,
+        side: 500,
+      },
+      500,
+    );
+    assert_eq!(top.get_pixel(250, 250).0, [255, 0, 0]);
+    let bottom = crop(
+      &editor.png,
+      SquareCrop {
+        quarter_turns: 1,
+        x: 0,
+        y: 500,
+        side: 500,
+      },
+      500,
+    );
+    assert_eq!(bottom.get_pixel(250, 250).0, [0, 0, 255]);
+
+    // Out-of-range rectangles are clamped, not refused.
+    let clamped = crop(
+      &editor.png,
+      SquareCrop {
+        quarter_turns: 0,
+        x: 9000,
+        y: 9000,
+        side: 9000,
+      },
+      600,
+    );
+    assert_eq!(clamped.dimensions(), (500, 500));
+    assert_eq!(clamped.get_pixel(499, 0).0, [0, 0, 255]);
+    assert_eq!(
+      cropped_square_png(
+        b"nope",
+        SquareCrop {
+          quarter_turns: 0,
+          x: 0,
+          y: 0,
+          side: 1
+        },
+        1
+      ),
+      None
+    );
+  }
+
+  fn halves(width: u32, height: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    ImageBuffer::from_fn(width, height, |x, _| {
+      if x < width / 2 {
         Rgb([255u8, 0, 0])
       } else {
         Rgb([0, 0, 255])
       }
-    });
+    })
+  }
+
+  fn encode(picture: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Vec<u8> {
     let mut png = Cursor::new(Vec::new());
     picture.write_to(&mut png, ImageFormat::Png).unwrap();
-    let square = image::load_from_memory(&space_image_png(png.get_ref()).unwrap())
+    png.into_inner()
+  }
+
+  fn crop(editor_png: &[u8], square: SquareCrop, size: u32) -> image::RgbImage {
+    image::load_from_memory(&cropped_square_png(editor_png, square, size).unwrap())
       .unwrap()
-      .to_rgb8();
-    assert_eq!(square.dimensions(), (SPACE_IMAGE_SIZE, SPACE_IMAGE_SIZE));
-    assert_eq!(square.get_pixel(10, 10).0, [255, 0, 0]);
-    assert_eq!(square.get_pixel(SPACE_IMAGE_SIZE - 10, 10).0, [0, 0, 255]);
-
-    // Small pictures are not scaled up.
-    let tiny = ImageBuffer::from_fn(40, 30, |_, _| Rgb([1u8, 2, 3]));
-    let mut png = Cursor::new(Vec::new());
-    tiny.write_to(&mut png, ImageFormat::Png).unwrap();
-    let decoded = image::load_from_memory(&space_image_png(png.get_ref()).unwrap()).unwrap();
-    assert_eq!((decoded.width(), decoded.height()), (30, 30));
-
-    assert_eq!(space_image_png(b"<svg></svg>"), None);
-    assert_eq!(space_image_png(b""), None);
+      .to_rgb8()
   }
 
   fn encoded<P, C>(picture: &ImageBuffer<P, C>, format: ImageFormat) -> Vec<u8>

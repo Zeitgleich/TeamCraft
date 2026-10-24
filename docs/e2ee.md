@@ -1308,6 +1308,16 @@ small PNG. All of it goes into the encrypted message. The fetch comes from the s
 so the linked site sees the sender's IP address, as it would on opening the link. Browsers can't
 read cross-origin pages, so the web client sends links without previews.
 
+**Links to messages of the same server** (permalinks `teamcraft:/c/{c}/m/{m}[/t/{t}]` and the app's
+own `https://<server>/c/{c}/m/{m}` and `/c/{c}/t/{t}` URLs) get an embedded preview of the linked
+message instead. The sender's client embeds nothing but the link. Each **receiving client resolves
+it from its own decrypted store**, and only for conversations it is a member of: author, time,
+source conversation, the text and the attachment names come from the copy that device already
+holds. A viewer who is not a member sees "Message from a conversation you can't see" and learns
+nothing, not even whether the message exists; the server is never asked. Edits and deletes show in
+the preview as soon as the device has them. Links to other servers stay plain links. The OpenGraph
+card of such a URL, if the sender's client made one, is not shown.
+
 ## 13. Bots and integrations
 
 E2EE means a bot can only read a channel if it is a member with its own device keys. Bots therefore

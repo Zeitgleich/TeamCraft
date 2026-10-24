@@ -51,6 +51,7 @@ support_url = "https://support.brand-a.example.com"
 privacy_url = "https://brand-a.example.com/privacy"
 terms_url = "https://brand-a.example.com/terms"
 imprint_url = "https://brand-a.example.com/imprint"
+download_url = "https://brand-a.example.com/apps"   # where the apps are; default: the project's download page
 connect_origins = []                   # extra CSP connect-src origins of this brand only
 # content_security_policy = "..."      # replaces [web].content_security_policy for this brand
 
@@ -149,7 +150,7 @@ of the request host:
   "colors": { "light": { "accent": "#0b7f78" }, "dark": { "accent": "#35c6ba" } },
   "login_title": { "en": "Welcome to Brand A", "de": "Willkommen bei Brand A" },
   "login_text": { "en": "..." },
-  "links": { "support": "...", "privacy": "...", "terms": "...", "imprint": "..." }
+  "links": { "support": "...", "privacy": "...", "terms": "...", "imprint": "...", "download": "..." }
 }
 ```
 
@@ -162,6 +163,11 @@ of the request host:
   `prefers-color-scheme` and `[data-theme]` like `main.css`). It exists because the CSP forbids inline
   styles: the web shell links it before the first paint, so there is no flash of the default colors.
   Only hex colors that passed validation are written; the CSS contains no other configured text.
+- `GET /api/v1/brand/manifest.webmanifest` is the web app manifest, so the web client can be
+  installed (add to home screen): the brand's display name, `display: standalone`, its `chrome` color
+  (light) as theme and splash color, and its `icon` (the PNG's own size, `any` for SVG). A brand
+  without an icon gets the client's own icons (`/icons/`, a maskable one among them). The manifest
+  contains no host name; start URL and scope are `/`.
 - The unauthenticated responses are the same for every caller of one host, `Vary: Host`, cacheable for
   five minutes. They count against the per-address request limit but not against the stricter limit of
   the credential-less endpoints, because one page load makes several of these requests.
@@ -192,7 +198,8 @@ validated like the global one.
 ## 5. Clients
 
 - **Web**: served from the brand host. `index.html` links `/api/v1/brand/theme.css` after the app's own
-  stylesheet, then the app fetches `/api/v1/brand` (same origin) to render logo, title, login text and
+  stylesheet and `/api/v1/brand/manifest.webmanifest` as its manifest; `<meta name="theme-color">`
+  follows the top bar's color of the current theme, then the app fetches `/api/v1/brand` (same origin) to render logo, title, login text and
   links; the answer is cached in `localStorage` keyed by server URL, so the next start paints
   immediately and refreshes in the background.
 - **Desktop, Android, iOS**: the app asks the server URL it is configured with (any host name of a

@@ -263,7 +263,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
   let is_role_problem = problem == Some(LoginProblem::NoTeamcraftRole);
   let is_core_problem = matches!(
     problem,
-    Some(LoginProblem::CoreFailed(_) | LoginProblem::CoreNotSignedIn)
+    Some(LoginProblem::CoreFailed(_) | LoginProblem::CoreStopped | LoginProblem::CoreNotSignedIn)
   );
   let detail = match &problem {
     Some(LoginProblem::Failed(text) | LoginProblem::CoreFailed(text)) => Some(text.clone()),
@@ -277,6 +277,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     Some(LoginProblem::Cancelled) => (Some("login-cancelled-title"), Some("login-cancelled-body")),
     Some(LoginProblem::Failed(_)) => (Some("login-failed-title"), Some("login-failed-body")),
     Some(LoginProblem::CoreFailed(_)) => (Some("login-core-failed-title"), Some("login-core-failed-body")),
+    Some(LoginProblem::CoreStopped) => (Some("login-core-stopped-title"), Some("login-core-stopped-body")),
     Some(LoginProblem::CoreNotSignedIn) => (
       Some("login-core-no-token-title"),
       Some("login-core-no-token-body"),

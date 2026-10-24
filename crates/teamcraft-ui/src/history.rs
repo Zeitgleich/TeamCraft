@@ -115,6 +115,16 @@ pub fn back_or_home(state: AppState) {
   }
 }
 
+/// The compact layout's back button: back to the page before when the app put it there, else one
+/// level up (thread → conversation → its list).
+pub fn back_or_up(state: AppState) {
+  if depth_of_current_entry() > 0 {
+    travel(Travel::Back);
+  } else {
+    state.go_up();
+  }
+}
+
 /// How many entries the app itself pushed before the current one, kept in the entry's state;
 /// `0` for the entry the page was opened on.
 fn depth_of_current_entry() -> u32 {

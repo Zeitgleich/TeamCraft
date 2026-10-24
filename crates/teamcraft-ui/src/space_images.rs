@@ -2,23 +2,21 @@
 //!
 //! The hub downloads a picture once per version from `GET /api/v1/spaces/{id}/image` and shows it
 //! from a `blob:` URL (the page's CSP only lets images come from `blob:` and `data:`). Uploads are
-//! cut to the centered square and scaled to 256×256 here first (teamcraft-core); the server checks
-//! and re-encodes them again.
+//! cropped and scaled to 256×256 in the crop dialog first (`image_crop`); the server checks and
+//! re-encodes them again.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{ErrorBody, SpaceResponse};
+use teamcraft_proto::{ErrorBody, ErrorCode, SpaceResponse};
 
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::components::file_views::blob_url;
+use crate::feedback::{ActionFailure, FailureKind};
 use crate::model::SpaceId;
 
-/// Largest file the picker reads; it is scaled down before the upload (the server has its own
-/// limit for what arrives).
-pub const MAX_SPACE_IMAGE_PICK_BYTES: f64 = 20.0 * 1024.0 * 1024.0;
 /// What the client uploads after scaling.
 const UPLOAD_CONTENT_TYPE: &str = "image/png";
 
@@ -27,15 +25,6 @@ pub struct SpaceImageHub {
   auth: StoredValue<Rc<dyn Authenticator>, LocalStorage>,
   cache: RwSignal<ImageCache>,
   asked: StoredValue<HashSet<(SpaceId, String)>>,
-}
-
-/// Why a picked file is not uploaded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImagePickError {
-  /// Not PNG, JPEG or WebP (SVG included: it may carry script).
-  Type,
-  Size,
-  Unreadable,
 }
 
 /// The loaded pictures: one `blob:` URL per space, for the version it shows.
@@ -178,42 +167,18 @@ pub fn use_space_images() -> Option<SpaceImageHub> {
   use_context::<SpaceImageHub>()
 }
 
-/// Checks a picked file before it is read: PNG, JPEG or WebP, at most
-/// [`MAX_SPACE_IMAGE_PICK_BYTES`].
-pub fn check_pick(media_type: &str, size_bytes: f64) -> Result<(), ImagePickError> {
-  if !matches!(media_type, "image/png" | "image/jpeg" | "image/webp") {
-    return Err(ImagePickError::Type);
-  }
-  if size_bytes > MAX_SPACE_IMAGE_PICK_BYTES {
-    return Err(ImagePickError::Size);
-  }
-  Ok(())
-}
-
-/// The scaled PNG of a picked file's bytes (teamcraft-core, tested there). The UI only runs as wasm
-/// (browser and desktop webview); the native build of this crate is for tests and has no core.
-pub fn prepare_upload(bytes: &[u8]) -> Result<Vec<u8>, ImagePickError> {
-  #[cfg(target_arch = "wasm32")]
-  let maybe_png = teamcraft_core::thumbnail::space_image_png(bytes);
-  #[cfg(not(target_arch = "wasm32"))]
-  let maybe_png: Option<Vec<u8>> = {
-    let _ = bytes;
-    None
-  };
-  maybe_png.ok_or(ImagePickError::Unreadable)
-}
-
-impl ImagePickError {
-  pub fn i18n_key(self) -> &'static str {
+impl SpaceImageFailure {
+  /// The failure to show the user (issue #322).
+  pub fn to_failure(&self) -> ActionFailure {
     match self {
-      Self::Type => "space-image-type",
-      Self::Size => "space-image-size",
-      Self::Unreadable => "space-image-unreadable",
+      Self::Refused(code) => match ErrorCode::from(code.clone()) {
+        ErrorCode::Unknown(_) => ActionFailure::other(format!("space picture refused: {code}")),
+        known => ActionFailure::new(FailureKind::Server(known), "space picture refused"),
+      },
+      Self::Network => ActionFailure::new(FailureKind::Network, "space picture: no connection"),
     }
   }
-}
 
-impl SpaceImageFailure {
   pub fn i18n_key(&self) -> &'static str {
     match self {
       Self::Refused(code) if code == "payload_too_large" => "space-image-size",
@@ -261,26 +226,20 @@ mod tests {
   }
 
   #[test]
-  fn only_raster_images_of_bounded_size_are_picked() {
-    assert_eq!(check_pick("image/png", 1000.0), Ok(()));
-    assert_eq!(check_pick("image/jpeg", 1000.0), Ok(()));
-    assert_eq!(check_pick("image/webp", 1000.0), Ok(()));
-    assert_eq!(check_pick("image/svg+xml", 10.0), Err(ImagePickError::Type));
-    assert_eq!(check_pick("image/gif", 10.0), Err(ImagePickError::Type));
-    assert_eq!(check_pick("", 10.0), Err(ImagePickError::Type));
-    assert_eq!(
-      check_pick("image/png", MAX_SPACE_IMAGE_PICK_BYTES + 1.0),
-      Err(ImagePickError::Size)
-    );
-    assert_eq!(prepare_upload(b"not an image"), Err(ImagePickError::Unreadable));
-  }
-
-  #[test]
   fn server_refusals_have_their_own_messages() {
     let refused = |code: &str| SpaceImageFailure::Refused(code.into()).i18n_key();
     assert_eq!(refused("payload_too_large"), "space-image-size");
     assert_eq!(refused("forbidden"), "space-image-forbidden");
     assert_eq!(refused("internal"), "space-image-failed");
     assert_eq!(SpaceImageFailure::Network.i18n_key(), "space-image-offline");
+  }
+
+  #[test]
+  fn failures_keep_the_servers_code_for_the_toast() {
+    let refused = SpaceImageFailure::Refused("payload_too_large".into()).to_failure();
+    assert_eq!(refused.kind, FailureKind::Server(ErrorCode::PayloadTooLarge));
+    let unknown = SpaceImageFailure::Refused("unreadable".into()).to_failure();
+    assert_eq!(unknown.kind, FailureKind::Other);
+    assert_eq!(SpaceImageFailure::Network.to_failure().kind, FailureKind::Network);
   }
 }

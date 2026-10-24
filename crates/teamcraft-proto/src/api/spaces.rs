@@ -39,6 +39,18 @@ pub struct SpaceResponse {
   /// The caller's notification setting for the whole space; absent for non-members.
   #[serde(rename = "my_notifications", default, skip_serializing_if = "Option::is_none")]
   pub maybe_my_notifications: Option<crate::SpaceNotificationSettings>,
+  /// How many people belong to the space (expired guests not counted). Directory data, shown when
+  /// browsing spaces; 0 from servers that don't send it.
+  #[serde(default)]
+  pub member_count: u32,
+  /// Whether the caller may add members or invite them by e-mail. A hint for the UI only: the
+  /// server checks the permission again on every request.
+  #[serde(default)]
+  pub can_add_members: bool,
+  /// Whether the caller may invite guests (by e-mail or from the directory). A UI hint like
+  /// `can_add_members`.
+  #[serde(default)]
+  pub can_invite_guests: bool,
 }
 
 /// The picture of a space: a square PNG the server re-encoded from the upload
@@ -169,6 +181,9 @@ pub struct CreateInviteRequest {
   pub channel_ids: Vec<crate::ConversationId>,
   #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_expires_at: Option<UnixMillis>,
+  /// A personal note from the inviter, added to the invitation e-mail. Not stored.
+  #[serde(rename = "message", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -223,6 +238,37 @@ mod tests {
     assert_eq!(serde_json::from_value::<SpaceResponse>(value).unwrap(), space);
   }
 
+  #[test]
+  fn browse_fields_have_a_stable_shape() {
+    let space = SpaceResponse {
+      member_count: 12,
+      can_add_members: true,
+      can_invite_guests: false,
+      ..space(None)
+    };
+    let value = serde_json::to_value(&space).unwrap();
+    assert_eq!(value["member_count"], json!(12));
+    assert_eq!(value["can_add_members"], json!(true));
+    assert_eq!(value["can_invite_guests"], json!(false));
+    assert_eq!(serde_json::from_value::<SpaceResponse>(value).unwrap(), space);
+  }
+
+  #[test]
+  fn an_invite_message_is_optional_on_the_wire() {
+    let parsed: CreateInviteRequest = serde_json::from_value(json!({
+      "email": "guest@example.com",
+      "role": "guest",
+    }))
+    .unwrap();
+    assert_eq!(parsed.maybe_message, None);
+    let with_message = CreateInviteRequest {
+      maybe_message: Some("Welcome to Project A".into()),
+      ..parsed
+    };
+    let value = serde_json::to_value(&with_message).unwrap();
+    assert_eq!(value["message"], json!("Welcome to Project A"));
+  }
+
   fn space(maybe_image: Option<SpaceImage>) -> SpaceResponse {
     SpaceResponse {
       id: SpaceId::from_snowflake(Snowflake::new(7).unwrap()),
@@ -236,6 +282,9 @@ mod tests {
       maybe_brand_id: None,
       maybe_my_role: None,
       maybe_my_notifications: None,
+      member_count: 0,
+      can_add_members: false,
+      can_invite_guests: false,
     }
   }
 }

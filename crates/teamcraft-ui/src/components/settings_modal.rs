@@ -3,6 +3,7 @@ use teamcraft_client_api::window_chrome::TitleBar;
 
 use crate::auth::tauri;
 use crate::components::bundle_banner::AboutSection;
+use crate::components::composer_toolbar::{FORMAT_SHORTCUTS, action_label};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::settings_tabs::{
@@ -181,7 +182,7 @@ fn demo_tools() -> impl IntoView {
 pub fn ShortcutsModal() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let rows: [(Vec<Shortcut>, &'static str); 13] = [
+  let rows: [(Vec<Shortcut>, &'static str); 17] = [
     (
       vec![
         QUICK_SWITCHER,
@@ -229,7 +230,17 @@ pub fn ShortcutsModal() -> impl IntoView {
       vec![Shortcut::new(&[], Key::Up), Shortcut::new(&[], Key::Down)],
       "shortcut-messages",
     ),
-    (vec![ENTER], "shortcut-open-thread"),
+    (
+      vec![ENTER, Shortcut::new(&[], Key::Char("T"))],
+      "shortcut-open-thread",
+    ),
+    (vec![Shortcut::new(&[], Key::Char("R"))], "shortcut-quote-message"),
+    (vec![Shortcut::new(&[], Key::Char("E"))], "shortcut-react-message"),
+    (
+      vec![Shortcut::new(&[Modifier::Shift], Key::Char("F10"))],
+      "shortcut-message-menu",
+    ),
+    (vec![Shortcut::new(&[], Key::Up)], "shortcut-edit-last"),
     (
       vec![
         Shortcut::primary("+"),
@@ -256,6 +267,22 @@ pub fn ShortcutsModal() -> impl IntoView {
                 <tr>
                   <th scope="row">{move || i18n.t(key)}</th>
                   <td><ShortcutList shortcuts=keys /></td>
+                </tr>
+              }
+            })
+            .collect_view()}
+        </tbody>
+      </table>
+      <h3 class="shortcut-section">{move || i18n.t("shortcuts-formatting")}</h3>
+      <table class="shortcut-table">
+        <tbody>
+          {FORMAT_SHORTCUTS
+            .into_iter()
+            .map(|(action, shortcut)| {
+              view! {
+                <tr>
+                  <th scope="row">{move || i18n.t(action_label(action))}</th>
+                  <td><ShortcutList shortcuts=vec![shortcut] /></td>
                 </tr>
               }
             })
