@@ -229,6 +229,10 @@ shortcut-back-forward = Back or forward
 shortcut-close = Close dialog or side panel
 shortcut-messages = Move between messages
 shortcut-open-thread = Open the thread of the focused message
+shortcut-quote-message = Quote the focused message in a reply
+shortcut-react-message = React to the focused message
+shortcut-message-menu = More actions for the focused message
+shortcut-edit-last = Edit your last message (in the empty composer)
 
 ## Calls and huddles
 call-start-audio = Start audio call
@@ -1162,6 +1166,7 @@ composer-file-too-large = { $name } is larger than the upload limit of { $limit 
 composer-file-unreadable = { $name } could not be read.
 permalink-label = Message in { $name }
 permalink-unavailable = Link to a conversation you are not in
+permalink-hidden = Message link
 route-unavailable = This page isn't available. It may have been removed, or you may not have access to it.
 
 # Workspace management
@@ -2203,3 +2208,16 @@ callback-mismatch-title = This sign-in was not started here
 callback-mismatch-body = The answer did not match the sign-in started in the app, so it was ignored for your safety. Start the sign-in again in the app.
 callback-failed-title = Sign-in failed
 callback-failed-body = The sign-in could not be finished. Go back to the app for details and try again.
+
+## Message toolbar and action sheet (#320)
+action-with-shortcut = { $action } ({ $shortcut })
+action-copy-text = Copy text
+action-copied = Copied
+message-action-sheet = Actions for this message
+
+## Previews of linked messages (#319)
+linked-message-from = In { $conversation }
+linked-message-from-thread = From a thread in { $conversation }
+linked-message-open = Open message
+linked-message-deleted = This message was deleted
+linked-message-unavailable = Message from a conversation you can’t see

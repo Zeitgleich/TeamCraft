@@ -18,8 +18,9 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
+  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
+  SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
@@ -702,6 +703,15 @@ impl ChatBackend for RemoteChat {
       link: link.to_owned(),
     }) {
       Some(ChatAnswer::PermalinkTarget { maybe_target }) => maybe_target,
+      _ => None,
+    }
+  }
+
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    match self.ask(ChatQuery::LinkedMessage {
+      link: link.to_owned(),
+    }) {
+      Some(ChatAnswer::LinkedMessage { maybe_linked }) => maybe_linked,
       _ => None,
     }
   }

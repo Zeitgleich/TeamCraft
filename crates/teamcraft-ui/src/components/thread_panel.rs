@@ -2,7 +2,9 @@ use leptos::prelude::*;
 
 use crate::components::composer::Composer;
 use crate::components::icons::{Icon, IconName};
+use crate::components::message_list::handle_list_keys;
 use crate::components::message_row::MessageRow;
+use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, Message, ThreadId};
 use crate::state::{SidePanel, use_app_state};
@@ -31,6 +33,8 @@ pub fn ThreadPanel(
   let can_post = state
     .read(|backend| backend.conversation(conversation))
     .is_none_or(|conv| conv.can_post);
+  let scroll = NodeRef::<leptos::html::Div>::new();
+  let toolbar = ToolbarHost::provide(scroll);
   let is_following = RwSignal::new(state.read(|backend| backend.is_thread_followed(conversation, thread)));
   // Opening the thread (and every new reply while it is open) counts as reading it.
   Effect::new(move |_| {
@@ -71,7 +75,10 @@ pub fn ThreadPanel(
           <Icon name=IconName::Close />
         </button>
       </header>
-      <div class="panel-scroll" tabindex="0" role="log" aria-label=move || i18n.t("thread-messages-label")>
+      <div class="panel-scroll" tabindex="0" role="log" node_ref=scroll
+        aria-label=move || i18n.t("thread-messages-label")
+        on:keydown=move |ev| handle_list_keys(&ev, scroll, scroll)
+      >
         {move || {
           let mut prev: Option<Message> = None;
           let mut out = Vec::new();
@@ -93,6 +100,7 @@ pub fn ThreadPanel(
           }
           out
         }}
+        <MessageToolbar host=toolbar />
       </div>
       <Composer
         conversation=conversation

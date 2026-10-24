@@ -13,7 +13,8 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::actions::{
-  FileInfo, MessageExtras, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
+  FileInfo, LinkedMessage, MessageExtras, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{
@@ -1066,6 +1067,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
     self.ui_resolve_permalink(link)
+  }
+
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    Some(self.ui_linked_message(link))
   }
 
   fn activity(&self) -> teamcraft_client_api::activity::ActivityFeed {

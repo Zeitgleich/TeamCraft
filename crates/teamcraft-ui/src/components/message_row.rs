@@ -7,16 +7,18 @@ use teamcraft_proto::HistoryPolicy;
 
 use crate::clock::{format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::emoji_picker::EmojiPicker;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles};
 use crate::components::icons::{Icon, IconName};
-use crate::components::message_actions::MessageMenu;
+use crate::components::message_actions::{MessageAction, run_message_action};
+use crate::components::message_link_card::MessageLinkPreviews;
+use crate::components::message_toolbar::{ActiveMessage, LONG_PRESS, ToolbarHost};
 use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
 use crate::delivery::Delivery;
 use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
+use crate::message_links::{as_permalink, own_hosts};
 use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, is_pending, thread_id_of};
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
@@ -31,10 +33,8 @@ const HOVER_CARD_HEIGHT_PX: f64 = 130.0;
 const HOVER_CARD_GRACE: Duration = Duration::from_millis(250);
 /// How often a message in the outbox re-checks whether it counts as delayed.
 const DELIVERY_TICK_MS: u64 = 2_000;
-/// Quick reactions on hover until the user has used emoji of their own.
-const DEFAULT_QUICK_REACTIONS: [&str; 3] = ["👍", "❤️", "😂"];
-/// How many quick reactions the hover toolbar shows.
-const QUICK_REACTION_COUNT: usize = 3;
+/// A finger that moves further than this is scrolling, not pressing the message.
+const LONG_PRESS_SLOP_PX: i32 = 10;
 
 /// One message in the channel feed or in a thread. The caller recreates it when the message changes.
 #[component]
@@ -413,9 +413,22 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     extras.get().map(|extras| {
       view! {
         {(!extras.files.is_empty()).then(|| view! { <MessageFiles files=extras.files.clone() /> })}
-        {extras.maybe_link_preview.clone().map(|preview| view! { <LinkPreviewCard preview=preview /> })}
+        {extras
+          .maybe_link_preview
+          .clone()
+          // A link to a message of this server gets the message's own preview instead.
+          .filter(|preview| as_permalink(&preview.url, &own_hosts()).is_none())
+          .map(|preview| view! { <LinkPreviewCard preview=preview /> })}
       }
     })
+  };
+  // Links to other messages: each viewer's client resolves its own preview (#319).
+  let link_previews = {
+    let body = message.body.clone();
+    move || {
+      (!extras.get().is_some_and(|extras| extras.is_deleted))
+        .then(|| view! { <MessageLinkPreviews body=body.clone() /> })
+    }
   };
   let acknowledge = move || {
     extras
@@ -470,75 +483,32 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     }
   });
 
-  let message_for_menu = message.clone();
-  let maybe_picker_anchor = RwSignal::new_local(None::<web_sys::Element>);
-  let react = move |emoji: &str| {
-    state.settings.remember_emoji(emoji);
-    state.write(|backend| backend.toggle_reaction(conversation, message_id, emoji));
-  };
-  let quick_reactions = move || {
-    let mut list = state.settings.recent_emoji.get();
-    for emoji in DEFAULT_QUICK_REACTIONS {
-      if !list.iter().any(|recent| recent == emoji) {
-        list.push(emoji.to_owned());
-      }
+  let maybe_host = ToolbarHost::use_nearest();
+  let active = StoredValue::new(ActiveMessage {
+    message: message.clone(),
+    in_thread,
+    is_mine,
+  });
+  // A recreated row (new reaction, edit) hands the toolbar its fresh message.
+  if let Some(host) = maybe_host {
+    host.refresh(active.get_value());
+  }
+  let show_toolbar = move || {
+    if let Some(host) = maybe_host {
+      host.show(active.get_value());
     }
-    list.truncate(QUICK_REACTION_COUNT);
-    list
   };
-  let actions = view! {
-    <div class="msg-actions" role="toolbar" aria-label=move || i18n.t("message-actions")>
-      <For each=quick_reactions key=|emoji| emoji.clone() let:emoji>
-        {
-          let emoji_for_label = emoji.clone();
-          let label = move || i18n.t_with("action-react-with", &[("emoji", &emoji_for_label)]);
-          let chosen = emoji.clone();
-          view! {
-            <button
-              class="icon-btn quick-reaction"
-              aria-label=label.clone()
-              title=label
-              on:click=move |_| react(&chosen)
-            >
-              {emoji}
-            </button>
-          }
-        }
-      </For>
-      <button
-        class="icon-btn"
-        aria-label=move || i18n.t("action-react")
-        title=move || i18n.t("action-react")
-        aria-haspopup="dialog"
-        aria-expanded=move || maybe_picker_anchor.with(Option::is_some).to_string()
-        on:click=move |ev| {
-          let maybe_button = event_target::<web_sys::Element>(&ev);
-          maybe_picker_anchor.set(Some(maybe_button));
-        }
-      >
-        <Icon name=IconName::Smile />
-      </button>
-      {(!in_thread).then(|| {
-        view! {
-          <button
-            class="icon-btn"
-            aria-label=move || i18n.t("action-reply")
-            title=move || i18n.t("action-reply")
-            on:click=move |_| state.open_thread(conversation, thread_root)
-          >
-            <Icon name=IconName::Reply />
-          </button>
-        }
-      })}
-      <MessageMenu
-        message=message_for_menu
-        extras=Signal::derive(move || extras.get())
-        is_mine=is_mine
-        in_thread=in_thread
-        on_edit=Callback::new(move |()| is_editing.set(true))
-      />
-    </div>
+  let hide_toolbar = move || {
+    if let Some(host) = maybe_host {
+      host.hide_soon();
+    }
   };
+  let is_toolbar_on = move || maybe_host.is_some_and(|host| host.is_active(message_id));
+  let long_press = LongPress::new(move || {
+    if let Some(host) = maybe_host {
+      host.open_sheet(active.get_value());
+    }
+  });
 
   let body_text = message.body.clone();
   let edit_draft = RwSignal::new(String::new());
@@ -635,9 +605,38 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     }
   };
 
+  // Shortcuts of a focused message (shown in the toolbar's tooltips).
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
-    if ev.target() == ev.current_target() && ev.key() == "Enter" && !in_thread {
-      state.open_thread(conversation, thread_root);
+    if ev.target() != ev.current_target() || ev.ctrl_key() || ev.meta_key() || ev.alt_key() {
+      return;
+    }
+    let key = ev.key();
+    let maybe_action = match key.as_str() {
+      "Enter" | "t" | "T" if !in_thread => Some(MessageAction::Thread),
+      "r" | "R" => Some(MessageAction::Quote),
+      _ => None,
+    };
+    if let Some(action) = maybe_action {
+      ev.prevent_default();
+      active
+        .with_value(|active| run_message_action(action, &active.message, extras.get_untracked().as_ref()));
+      return;
+    }
+    let Some(host) = maybe_host else { return };
+    match key.as_str() {
+      "e" | "E" => {
+        ev.prevent_default();
+        host.open_picker(active.get_value());
+      },
+      "ContextMenu" => {
+        ev.prevent_default();
+        host.open_more(active.get_value());
+      },
+      "F10" if ev.shift_key() => {
+        ev.prevent_default();
+        host.open_more(active.get_value());
+      },
+      _ => {},
     }
   };
 
@@ -649,12 +648,36 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       class:msg-pending=is_pending(message_id)
       class:msg-arriving=motion.entrance == Entrance::Arriving
       class:msg-settling=motion.entrance == Entrance::Settling
+      class:msg-active=is_toolbar_on
       class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
       tabindex="-1"
       data-nav="row"
+      data-msg-id=message_id.to_string()
       aria-label=aria_label
       on:keydown=on_keydown
+      on:mouseenter=move |_| {
+        if !extras.with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted)) {
+          show_toolbar();
+        }
+      }
+      on:mouseleave=move |_| hide_toolbar()
+      on:focusin=move |_| {
+        if let Some(host) = maybe_host {
+          host.focus(active.get_value());
+        }
+      }
+      on:focusout=move |_| hide_toolbar()
+      on:pointerdown=move |ev| long_press.start(&ev)
+      on:pointermove=move |ev| long_press.track(&ev)
+      on:pointerup=move |_| long_press.cancel()
+      on:pointercancel=move |_| long_press.cancel()
+      on:contextmenu=move |ev| {
+        // The browser's own long-press menu would cover the action sheet.
+        if long_press.has_fired() {
+          ev.prevent_default();
+        }
+      }
     >
       <div class="msg-gutter">{gutter}</div>
       <div class="msg-main">
@@ -663,27 +686,78 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
           {edited}
           {badges}
           {delivery_view}
-        </div> {attachments} {acknowledge} {reaction_chips} {replies}
+        </div> {attachments} {link_previews} {acknowledge} {reaction_chips} {replies}
       </div>
-      {actions}
-      // Outside the toolbar, which is only shown while the message is hovered or focused.
-      {move || {
-        maybe_picker_anchor
-          .get()
-          .map(|anchor| {
-            view! {
-              <EmojiPicker
-                anchor=anchor
-                on_pick=Callback::new(move |emoji: String| {
-                  maybe_picker_anchor.set(None);
-                  state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji));
-                })
-                on_close=Callback::new(move |()| maybe_picker_anchor.set(None))
-              />
-            }
-          })
-      }}
     </div>
+  }
+}
+
+/// A finger resting on a message opens its action sheet; moving it (scrolling) or lifting it
+/// early does not.
+#[derive(Clone, Copy)]
+struct LongPress {
+  /// Bumped by every new press and cancel, so a timer of an earlier press does nothing.
+  generation: StoredValue<u32>,
+  maybe_origin: StoredValue<Option<(i32, i32)>>,
+  has_fired: StoredValue<bool>,
+  on_fire: StoredValue<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl LongPress {
+  fn new(on_fire: impl Fn() + Send + Sync + 'static) -> Self {
+    Self {
+      generation: StoredValue::new(0),
+      maybe_origin: StoredValue::new(None),
+      has_fired: StoredValue::new(false),
+      on_fire: StoredValue::new(Box::new(on_fire)),
+    }
+  }
+
+  fn start(&self, ev: &web_sys::PointerEvent) {
+    self.has_fired.set_value(false);
+    if ev.pointer_type() != "touch" {
+      return;
+    }
+    let generation = self.bump();
+    self.maybe_origin.set_value(Some((ev.client_x(), ev.client_y())));
+    let press = *self;
+    set_timeout(
+      move || {
+        if press.generation.try_get_value() == Some(generation) {
+          press.has_fired.set_value(true);
+          press.maybe_origin.set_value(None);
+          press.on_fire.with_value(|fire| fire());
+        }
+      },
+      LONG_PRESS,
+    );
+  }
+
+  fn track(&self, ev: &web_sys::PointerEvent) {
+    let Some((x, y)) = self.maybe_origin.get_value() else {
+      return;
+    };
+    if (ev.client_x() - x).abs() > LONG_PRESS_SLOP_PX || (ev.client_y() - y).abs() > LONG_PRESS_SLOP_PX {
+      self.cancel();
+    }
+  }
+
+  fn cancel(&self) {
+    self.bump();
+    self.maybe_origin.set_value(None);
+  }
+
+  fn has_fired(&self) -> bool {
+    self.has_fired.try_get_value().unwrap_or(false)
+  }
+
+  fn bump(&self) -> u32 {
+    let mut next = 0;
+    self.generation.update_value(|generation| {
+      *generation = generation.wrapping_add(1);
+      next = *generation;
+    });
+    next
   }
 }
 

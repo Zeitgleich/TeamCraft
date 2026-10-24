@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy, OrgBackgroundId};
 
 use crate::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
+  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
+  SpaceInvite,
 };
 use crate::activity::ActivityFeed;
 use crate::admin::DeviceInfo;
@@ -793,6 +794,9 @@ pub enum ChatQuery {
   ResolvePermalink {
     link: String,
   },
+  LinkedMessage {
+    link: String,
+  },
   FirstUnread {
     conversation: ConversationId,
   },
@@ -894,6 +898,9 @@ pub enum ChatAnswer {
   PermalinkTarget {
     maybe_target: Option<PermalinkTarget>,
   },
+  LinkedMessage {
+    maybe_linked: Option<LinkedMessage>,
+  },
   Message {
     maybe_message: Option<MessageId>,
   },
@@ -993,6 +1000,9 @@ impl ChatQuery {
       },
       Self::ResolvePermalink { link } => ChatAnswer::PermalinkTarget {
         maybe_target: backend.resolve_permalink(&link),
+      },
+      Self::LinkedMessage { link } => ChatAnswer::LinkedMessage {
+        maybe_linked: backend.linked_message(&link),
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),

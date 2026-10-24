@@ -150,6 +150,12 @@ fn PermalinkChip(link: String) -> impl IntoView {
       }
       .into_any()
     },
-    None => view! { <span class="permalink-unavailable">{i18n.t("permalink-unavailable")}</span> }.into_any(),
+    // The preview under the message explains it; the link itself stays short.
+    None => view! {
+      <span class="permalink-unavailable" title=move || i18n.t("permalink-unavailable")>
+        {move || i18n.t("permalink-hidden")}
+      </span>
+    }
+    .into_any(),
   }
 }

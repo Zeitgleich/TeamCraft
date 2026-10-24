@@ -317,6 +317,29 @@ pub struct PermalinkTarget {
   pub maybe_thread: Option<ThreadId>,
 }
 
+/// The message a permalink points to, as the viewer's own client sees it: the embedded preview under
+/// a message that links to another one. Each viewer resolves it from their own decrypted store, so
+/// the sender never embeds the linked text and people outside the source conversation learn nothing
+/// about it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LinkedMessage {
+  /// The viewer can read the message.
+  Visible {
+    target: PermalinkTarget,
+    message: Message,
+    /// Its attachments, for the chips of the preview.
+    #[serde(default)]
+    files: Vec<FileInfo>,
+  },
+  /// The viewer is a member, but the message was deleted.
+  Deleted { target: PermalinkTarget },
+  /// Not a member, a message this device doesn't have, or no message link at all. Says nothing
+  /// about whether the message exists.
+  #[serde(other)]
+  Unavailable,
+}
+
 /// A new space.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewSpace {
@@ -496,6 +519,27 @@ mod tests {
     assert_eq!(
       serde_json::from_str::<WorkspaceEvent>(r#"{"event":"moved_to_space"}"#).expect("parse"),
       WorkspaceEvent::Unknown
+    );
+  }
+
+  #[test]
+  fn linked_messages_are_tagged_and_tolerate_new_states() {
+    let target = PermalinkTarget {
+      conversation: id_from_raw(7),
+      message: id_from_raw(8),
+      maybe_thread: None,
+    };
+    assert_eq!(
+      serde_json::to_string(&LinkedMessage::Deleted { target }).expect("serialize"),
+      r#"{"state":"deleted","target":{"conversation":"7","message":"8","maybe_thread":null}}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<LinkedMessage>(r#"{"state":"unavailable"}"#).expect("parse"),
+      LinkedMessage::Unavailable
+    );
+    assert_eq!(
+      serde_json::from_str::<LinkedMessage>(r#"{"state":"moved"}"#).expect("parse"),
+      LinkedMessage::Unavailable
     );
   }
 }

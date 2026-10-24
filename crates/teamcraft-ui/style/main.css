@@ -1523,6 +1523,8 @@ select.input {
 }
 
 .message-list {
+  /* The shared message toolbar is positioned in its scroll coordinates. */
+  position: relative;
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -1596,7 +1598,8 @@ select.input {
 
 .msg-user:hover,
 .msg-user:focus-within,
-.msg-user:focus {
+.msg-user:focus,
+.msg-user.msg-active {
   background: var(--surface-2);
 }
 
@@ -1621,7 +1624,8 @@ select.input {
 }
 
 .msg-user:hover .hover-time,
-.msg-user:focus .hover-time {
+.msg-user:focus .hover-time,
+.msg-user.msg-active .hover-time {
   visibility: visible;
 }
 
@@ -1766,11 +1770,13 @@ select.input {
   height: 14px;
 }
 
-.msg-actions {
+/* One toolbar per message list, moved onto the hovered or focused message (#320). */
+.msg-toolbar {
   position: absolute;
   right: 16px;
-  top: -14px;
-  display: none;
+  z-index: 5;
+  display: flex;
+  align-items: center;
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border);
@@ -1779,10 +1785,86 @@ select.input {
   box-shadow: 0 2px 8px rgba(16, 24, 40, 0.12);
 }
 
-.msg-user:hover .msg-actions,
-.msg-user:focus-within .msg-actions,
-.msg-user:focus .msg-actions {
+.msg-toolbar .icon-btn.is-on {
+  color: var(--accent);
+}
+
+.msg-toolbar-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--border);
+}
+
+.msg-toolbar .msg-menu {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+.menu-shortcut {
+  margin-inline-start: auto;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font: 11px/16px var(--font-ui);
+}
+
+/* Touch: the actions of a long-pressed message. */
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(16, 24, 40, 0.35);
+}
+
+.action-sheet {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 61;
+  max-height: 75vh;
+  overflow-y: auto;
+  padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.sheet-reactions {
   display: flex;
+  justify-content: space-around;
+  padding: 4px 12px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sheet-reaction {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-2);
+  font-size: 22px;
+}
+
+.action-sheet .menu-item {
+  min-height: 48px;
+}
+
+/* Keyboard shortcuts mean nothing on a touch screen. */
+.action-sheet .menu-shortcut {
+  display: none;
+}
+
+/* Reduced motion shortens the tokens to ~0 (motion system, #273). */
+.action-sheet {
+  animation: sheet-in var(--dur-base) var(--ease-emphasized);
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
 }
 
 .msg-system {
@@ -2330,6 +2412,7 @@ ol.md-list {
 }
 
 .panel-scroll {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -2351,10 +2434,6 @@ ol.md-list {
   flex: 1;
   height: 1px;
   background: var(--border);
-}
-
-.side-panel .msg-actions {
-  top: -12px;
 }
 
 .member {
@@ -5693,7 +5772,6 @@ ol.md-list {
 }
 
 /* Message actions */
-.msg-menu-wrap { position: relative; display: inline-flex; }
 .msg-menu { right: 0; top: 100%; min-width: 14rem; }
 .menu-danger { color: var(--danger, #c0392b); }
 .msg-quote { margin: 0 0 .25rem; padding: .1rem .6rem; border-inline-start: 3px solid var(--border-strong, #888); color: var(--text-muted, #666); display: flex; flex-direction: column; font-size: .9em; }
@@ -6592,7 +6670,7 @@ ol.md-list {
   cursor: default;
 }
 
-.msg-actions .quick-reaction {
+.msg-toolbar .quick-reaction {
   font-size: var(--text-lg);
   line-height: 1;
 }
@@ -7550,4 +7628,102 @@ ol.md-list {
 .segmented button[aria-pressed="true"],
 .view-tabs [role="tab"][aria-selected="true"]::after {
   animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+
+/* Previews of linked messages (#319). */
+.linked-message {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 36rem;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.linked-unavailable .icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.linked-unavailable,
+.linked-deleted {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  border-inline-start-color: var(--border);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.linked-unavailable {
+  flex-wrap: nowrap;
+}
+
+.linked-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.linked-author {
+  font-weight: 700;
+}
+
+.linked-time,
+.linked-source {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.linked-body {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+}
+
+.linked-body .md-p {
+  margin: 0;
+}
+
+.linked-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.linked-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 14rem;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.linked-file img {
+  width: 24px;
+  height: 24px;
+  border-radius: 3px;
+  object-fit: cover;
+}
+
+.linked-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linked-jump {
+  align-self: flex-start;
+  font-size: 12px;
 }

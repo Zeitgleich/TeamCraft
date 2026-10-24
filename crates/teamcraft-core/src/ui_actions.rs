@@ -2,8 +2,8 @@
 //! [`CoreChatBackend`] reads directly, and the commands it queues for the engine.
 
 use teamcraft_client_api::actions::{
-  ForwardedFrom, LinkPreview, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage, PermalinkTarget,
-  ReplyPreview, SavedItem, WorkspaceEvent,
+  ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
+  PermalinkTarget, ReplyPreview, SavedItem, WorkspaceEvent,
 };
 use teamcraft_client_api::model::{Bookmark, ConversationId, Message, MessageId, ThreadId, UserId};
 use teamcraft_proto::ClientMessageId;
@@ -299,6 +299,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .iter()
       .any(|stored| stored.maybe_server_id == Some(target.message))
       .then_some(target)
+  }
+
+  pub(crate) fn ui_linked_message(&self, link: &str) -> LinkedMessage {
+    let Some(target) = parse_permalink(link) else {
+      return LinkedMessage::Unavailable;
+    };
+    // Only conversations this device is a member of: the preview never asks the server.
+    let is_member = self
+      .conversations_raw()
+      .iter()
+      .any(|conversation| conversation.id == target.conversation);
+    if !is_member {
+      return LinkedMessage::Unavailable;
+    }
+    let all = self.all_messages(target.conversation);
+    let Some(stored) = all
+      .iter()
+      .find(|stored| stored.maybe_server_id == Some(target.message))
+    else {
+      return LinkedMessage::Unavailable;
+    };
+    match stored.content {
+      MessageContent::Deleted => LinkedMessage::Deleted { target },
+      MessageContent::Text { .. } | MessageContent::File { .. } => LinkedMessage::Visible {
+        target,
+        message: self.to_message(stored, &all),
+        files: self.files_of(stored),
+      },
+      // Reactions, edits, events and the like are no message one can link to.
+      _ => LinkedMessage::Unavailable,
+    }
   }
 
   pub(crate) fn ui_first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
