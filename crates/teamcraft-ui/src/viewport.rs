@@ -2,6 +2,8 @@
 //! method and the browser's theme color. Phones get one pane at a time, tablets add the sidebar,
 //! wider windows the full desktop layout (issue #307).
 
+use std::cell::Cell;
+
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -51,6 +53,15 @@ impl Layout {
     }
   }
 
+  /// The desktop app never takes the phone layout: a narrow window keeps the rail and sidebar
+  /// (with panels over the conversation), as desktop chat apps do.
+  pub fn for_desktop_app(self) -> Self {
+    match self {
+      Self::Compact => Self::Medium,
+      other => other,
+    }
+  }
+
   pub fn is_compact(self) -> bool {
     self == Self::Compact
   }
@@ -85,10 +96,21 @@ pub fn current_layout() -> Layout {
   };
   let size =
     |value: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| value.ok().and_then(|value| value.as_f64());
-  match (size(window.inner_width()), size(window.inner_height())) {
+  let layout = match (size(window.inner_width()), size(window.inner_height())) {
     (Some(width), Some(height)) => Layout::for_size(width, height),
     _ => Layout::Wide,
+  };
+  if crate::auth::tauri::is_available() {
+    layout.for_desktop_app()
+  } else {
+    layout
   }
+}
+
+thread_local! {
+  /// The layout signal of the shell on screen; the media query listeners (registered once per
+  /// page) update it. A new sign-in mounts a new shell with a new signal.
+  static WATCHED_LAYOUT: Cell<Option<RwSignal<Layout>>> = const { Cell::new(None) };
 }
 
 /// Keeps `layout` equal to the window's layout and mirrors it into `data-layout` on `<html>`.
@@ -104,6 +126,9 @@ pub fn watch_layout(layout: RwSignal<Layout>) {
       tracing::debug!("could not apply the layout attribute");
     }
   });
+  if WATCHED_LAYOUT.replace(Some(layout)).is_some() {
+    return;
+  }
   let Some(window) = web_sys::window() else { return };
   let queries = [
     format!("(max-width: {}px)", f64::from(COMPACT_BELOW_PX) - 0.02),
@@ -114,9 +139,12 @@ pub fn watch_layout(layout: RwSignal<Layout>) {
     let Ok(Some(list)) = window.match_media(&query) else {
       continue;
     };
-    // After sign-out the shell and its signal are gone; the listener then does nothing.
     let handler = Closure::<dyn Fn()>::new(move || {
+      let Some(layout) = WATCHED_LAYOUT.get() else {
+        return;
+      };
       let next = current_layout();
+      // Between sign-out and the next shell the signal is gone; then nothing happens.
       if layout.try_get_untracked().is_some_and(|current| current != next) {
         let _ = layout.try_set(next);
       }
@@ -145,7 +173,7 @@ pub fn is_touch_primary() -> bool {
 /// visual viewport.
 pub fn track_visual_viewport() {
   thread_local! {
-    static IS_TRACKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static IS_TRACKING: Cell<bool> = const { Cell::new(false) };
   }
   // Once per page: the shell mounts again after a new sign-in.
   if IS_TRACKING.replace(true) {
@@ -259,6 +287,13 @@ mod tests {
     assert_eq!(Layout::for_size(1099.0, 800.0), Layout::Medium);
     assert_eq!(Layout::for_size(1100.0, 800.0), Layout::Wide);
     assert_eq!(Layout::for_size(1920.0, 1080.0), Layout::Wide);
+  }
+
+  #[test]
+  fn the_desktop_app_never_gets_the_phone_layout() {
+    assert_eq!(Layout::for_size(720.0, 800.0).for_desktop_app(), Layout::Medium);
+    assert_eq!(Layout::for_size(1000.0, 480.0).for_desktop_app(), Layout::Medium);
+    assert_eq!(Layout::for_size(1400.0, 900.0).for_desktop_app(), Layout::Wide);
   }
 
   #[test]

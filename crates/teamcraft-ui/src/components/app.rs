@@ -139,6 +139,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       untrack(|| state.layout_changed(layout));
     }
   });
+  focus_new_compact_pane(state);
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
@@ -335,6 +336,48 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
     </div>
+  }
+}
+
+/// Phones show one pane at a time: when another one comes up, focus moves to its heading, so
+/// screen readers announce it and the keyboard starts there (the old pane's focus is gone).
+fn focus_new_compact_pane(state: AppState) {
+  Effect::new(move |previous: Option<Option<CompactPane>>| {
+    let maybe_pane = state.is_compact().then(|| state.compact_pane());
+    let has_changed = previous.is_some_and(|before| before.is_some() && before != maybe_pane);
+    if let Some(pane) = maybe_pane
+      && has_changed
+      && untrack(|| state.overlay.get()) == Overlay::None
+    {
+      request_animation_frame(move || focus_pane_heading(pane));
+    }
+    maybe_pane
+  });
+}
+
+fn focus_pane_heading(pane: CompactPane) {
+  let selectors = match pane {
+    CompactPane::List => ".app-body > .sidebar .space-name",
+    CompactPane::Main => "#main-content h1, #main-content .header-title, #main-content",
+    CompactPane::Panel => ".app-body > .side-panel h2, .app-body > .side-panel h1, .app-body > .side-panel",
+  };
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  let Some(target) = document
+    .query_selector(selectors)
+    .ok()
+    .flatten()
+    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+  else {
+    return;
+  };
+  // Headings aren't focusable by themselves; -1 keeps them out of the Tab order.
+  if !target.has_attribute("tabindex") && target.set_attribute("tabindex", "-1").is_err() {
+    return;
+  }
+  if target.focus().is_err() {
+    tracing::debug!("could not focus the new pane");
   }
 }
 

@@ -7304,7 +7304,7 @@ select.input {
 
 :root[data-layout="compact"] .home-chip,
 :root[data-layout="compact"] .btn {
-  min-height: 36px;
+  min-height: var(--touch);
 }
 
 :root[data-layout="compact"] .space-btn {
@@ -7337,7 +7337,7 @@ select.input {
 
 :root[data-layout="compact"] .composer-toolbar > .send-btn {
   width: var(--touch);
-  height: 36px;
+  height: var(--touch);
   margin-left: auto;
 }
 
@@ -7358,8 +7358,8 @@ select.input {
 }
 
 :root[data-layout="compact"] .msg-actions .icon-btn {
-  min-width: 40px;
-  min-height: 40px;
+  min-width: var(--touch);
+  min-height: var(--touch);
 }
 
 @media (hover: none) {
