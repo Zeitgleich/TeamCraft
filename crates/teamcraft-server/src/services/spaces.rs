@@ -246,6 +246,16 @@ pub async fn add_space_member(
     return Err(ApiError::user_not_found());
   };
   check_role_fits_user(&user.kind, &request.role)?;
+  // Adding is idempotent, but never changes the role of someone already in the space: that is
+  // `update_space_member`, which also guards the last space admin.
+  if let Some(current) = state.database.space_role(id, user.id).await? {
+    if current == request.role {
+      return member_response(state, id, &user, current).await;
+    }
+    return Err(ApiError::Conflict(
+      "already a member of the space; change the role instead".into(),
+    ));
+  }
   let expiry = new_member_expiry(state, &request.role, request.maybe_expires_at)?;
 
   state

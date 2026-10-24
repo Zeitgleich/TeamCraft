@@ -241,6 +241,34 @@ async fn members_added_from_join_miss_earlier_messages() {
 }
 
 #[tokio::test]
+async fn adding_to_a_channel_brings_people_into_the_space_first() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let space = alice.space().await;
+  let channel = create_public_channel(&mut alice, space, "Ops").await;
+  server.make_space_outsider(carol.client.user_id());
+  let alice_ui = backend_of(&alice);
+
+  alice_ui.add_people_to_channel(
+    channel,
+    vec![(carol.client.user_id(), false)],
+    HistoryPolicy::FromJoin,
+    true,
+  );
+  run_commands(&mut alice, &alice_ui).await;
+  settle_and_flush(&mut [&mut alice, &mut carol]).await;
+  alice_ui.post_message(channel, None, "welcome");
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut carol]).await;
+
+  let adds = server.space_member_adds();
+  assert_eq!(adds.len(), 1, "{adds:?}");
+  assert_eq!(adds[0].1.user_id, carol.client.user_id());
+  assert_eq!(carol.texts(channel), ["welcome"]);
+}
+
+#[tokio::test]
 async fn categories_invitations_and_external_badge() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;

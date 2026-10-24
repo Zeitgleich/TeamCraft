@@ -248,6 +248,13 @@ pub enum CoreCommand {
     maybe_expires_at: Option<i64>,
     maybe_message: Option<String>,
   },
+  /// People join a channel, first its space when asked (the add-people dialog).
+  AddPeopleToChannel {
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  },
   /// The members and pending invitations of a space, for its settings.
   RefreshSpaceRoster {
     space: SpaceId,
@@ -1455,6 +1462,21 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         role: invite.role,
       })
       .collect()
+  }
+
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self.command(CoreCommand::AddPeopleToChannel {
+      conversation,
+      people,
+      history,
+      joins_space,
+    });
   }
 
   fn refresh_space_roster(&self, space: SpaceId) {

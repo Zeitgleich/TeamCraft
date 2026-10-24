@@ -532,6 +532,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.space_invites(space)
   }
 
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self
+      .chat
+      .add_people_to_channel(conversation, people, history, joins_space);
+  }
+
   fn refresh_space_roster(&self, space: SpaceId) {
     self.chat.refresh_space_roster(space);
   }

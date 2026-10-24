@@ -976,6 +976,21 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self.act(ChatAction::AddPeopleToChannel {
+      conversation,
+      people,
+      history,
+      joins_space,
+    });
+  }
+
   fn refresh_space_roster(&self, space: SpaceId) {
     self.act(ChatAction::RefreshSpaceRoster { space });
   }

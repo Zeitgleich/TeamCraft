@@ -364,6 +364,16 @@ pub trait ChatBackend {
   /// Adds people from the directory to a space as members or guests; people already in it are
   /// skipped.
   fn add_space_members(&self, _space: SpaceId, _users: Vec<UserId>, _is_guest: bool) {}
+  /// Adds people to a channel (`(user, is_guest_account)`), first to its space when `joins_space`;
+  /// someone whose space add failed is not added to the channel.
+  fn add_people_to_channel(
+    &self,
+    _conversation: ConversationId,
+    _people: Vec<(UserId, bool)>,
+    _history: HistoryPolicy,
+    _joins_space: bool,
+  ) {
+  }
   /// The members of a space with their roles; `None` until they are loaded
   /// ([`Self::refresh_space_roster`]).
   fn space_members(&self, _space: SpaceId) -> Option<Vec<crate::model::SpaceMember>> {

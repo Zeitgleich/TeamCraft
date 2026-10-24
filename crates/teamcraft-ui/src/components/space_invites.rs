@@ -14,7 +14,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
 use crate::components::people_picker::PeoplePicker;
 use crate::components::space_tile::SpaceTile;
-use crate::components::workspace_dialogs::Dialog;
+use crate::components::workspace_dialogs::{Dialog, FailureNote};
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, JoinPolicy, JoinableSpace, Space, SpaceId, User, UserId};
@@ -339,26 +339,34 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
     let addresses = parsed.get_untracked().valid;
     let maybe_message = Some(message.get_untracked().trim().to_owned()).filter(|text| !text.is_empty());
     let count = users.len() + addresses.len();
-    pending.run(|| {
-      if !users.is_empty() {
-        state.write(|backend| backend.add_space_members(space, users, is_guest));
-      }
-      for email in addresses {
-        state.write(|backend| {
-          backend.invite_to_space(SpaceInvite {
-            space,
-            email,
-            is_guest,
-            channels: Vec::new(),
-            maybe_expires_at: None,
-            maybe_message: maybe_message.clone(),
-          })
-        });
-      }
-    });
-    chosen.set(Vec::new());
-    emails.set(String::new());
-    status.set(InviteStatus::Sent { count });
+    // The form is cleared only once everything went through; on a failure the choices stay for
+    // another try. The dialog may be gone by then, so the signals are set with `try_set`.
+    let on_success = move || {
+      let _ = chosen.try_set(Vec::new());
+      let _ = emails.try_set(String::new());
+      let _ = status.try_set(InviteStatus::Sent { count });
+    };
+    status.set(InviteStatus::Editing);
+    pending.run_and_then(
+      || {
+        if !users.is_empty() {
+          state.write(|backend| backend.add_space_members(space, users, is_guest));
+        }
+        for email in addresses {
+          state.write(|backend| {
+            backend.invite_to_space(SpaceInvite {
+              space,
+              email,
+              is_guest,
+              channels: Vec::new(),
+              maybe_expires_at: None,
+              maybe_message: maybe_message.clone(),
+            })
+          });
+        }
+      },
+      on_success,
+    );
   };
 
   view! {
@@ -420,12 +428,10 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
             ></textarea>
             <p class="hint">{move || i18n.t("invite-message-hint")}</p>
             <footer class="modal-foot">
-              // Reported once the core answered without a failure (failures show as a toast).
+              // Reported once the core answered without a failure.
               {move || match status.get() {
-                InviteStatus::Sent { count } if !pending.is_pending() && pending.maybe_failure().is_none() => {
-                  view! { <span role="status">{i18n.t_count("invite-done", count)}</span> }.into_any()
-                },
-                InviteStatus::Sent { .. } | InviteStatus::Editing => ().into_any(),
+                InviteStatus::Sent { count } => view! { <span role="status">{i18n.t_count("invite-done", count)}</span> }.into_any(),
+                InviteStatus::Editing => view! { <FailureNote pending=pending /> }.into_any(),
               }}
               <span class="grow"></span>
               <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("close")}</button>
@@ -512,39 +518,33 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
     });
   let space_id = maybe_space.as_ref().map(|space| space.id);
   let adds_to_space = maybe_space.as_ref().is_some_and(|space| space.can_add_members);
-  let adds_guests_to_space = maybe_space.as_ref().is_some_and(|space| space.can_invite_guests);
+  let joins_space = maybe_space
+    .as_ref()
+    .is_some_and(|space| space.can_add_members || space.can_invite_guests);
+  let pending = PendingAction::new();
+  // The dialog stays open until the core answered: it closes on success, and on a failure it
+  // shows it and keeps the picked people for another try (those added meanwhile are greyed out).
   let add = move || {
-    let picked = chosen.get_untracked();
-    if picked.is_empty() {
+    let in_channel = members.get_untracked();
+    let people: Vec<(UserId, bool)> = chosen.with_untracked(|list| {
+      list
+        .iter()
+        .filter(|user| !in_channel.contains(&user.id))
+        .map(|user| (user.id, user.is_guest))
+        .collect()
+    });
+    if people.is_empty() {
       return;
     }
-    // Guest accounts can only be guests of the space.
-    let (guests, members): (Vec<&User>, Vec<&User>) = picked.iter().partition(|user| user.is_guest);
-    let ids = |list: Vec<&User>| list.into_iter().map(|user| user.id).collect::<Vec<UserId>>();
-    let (guests, members) = (ids(guests), ids(members));
-    let users: Vec<UserId> = picked.iter().map(|user| user.id).collect();
     let history = if shares_history.get_untracked() {
       HistoryPolicy::Full
     } else {
       HistoryPolicy::FromJoin
     };
-    // A refusal shows as an error toast (issue #322), also after the dialog closed: the pending
-    // state only lives in the dialog, its end after unmount is ignored.
-    PendingAction::new().run(|| {
-      // The core runs commands in order, so the space membership is there before the channel add.
-      if let Some(space) = space_id {
-        if adds_to_space && !members.is_empty() {
-          state.write(|backend| backend.add_space_members(space, members, false));
-        }
-        if adds_guests_to_space && !guests.is_empty() {
-          state.write(|backend| backend.add_space_members(space, guests, true));
-        }
-      }
-      for user in users {
-        state.write(|backend| backend.add_member_with_history(conversation, user, history.clone()));
-      }
-    });
-    state.close_overlay();
+    pending.run_and_then(
+      || state.write(|backend| backend.add_people_to_channel(conversation, people, history, joins_space)),
+      move || state.close_overlay(),
+    );
   };
   view! {
     <Dialog title_key="channel-add-people">
@@ -573,10 +573,21 @@ pub fn AddToChannelDialog(conversation: ConversationId) -> impl IntoView {
             </button>
           </p>
         })}
+        <FailureNote pending=pending />
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
-          <button type="submit" class="btn btn-primary" prop:disabled=move || chosen.with(Vec::is_empty)>{move || i18n.t("channel-add")}</button>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            prop:disabled=move || pending.is_pending() || chosen.with(Vec::is_empty)
+            aria-busy=move || pending.is_pending().then_some("true")
+          >
+            <Show when=move || pending.is_pending() fallback=|| ()>
+              <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
+            </Show>
+            {move || if pending.maybe_failure().is_some() { i18n.t("data-retry") } else { i18n.t("channel-add") }}
+          </button>
         </footer>
       </form>
     </Dialog>

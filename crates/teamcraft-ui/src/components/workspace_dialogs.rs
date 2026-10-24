@@ -21,7 +21,7 @@ use crate::components::image_crop_dialog::{
 use crate::components::modal::Modal;
 use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_tile::SpaceTile;
-use crate::feedback::PendingAction;
+use crate::feedback::{PendingAction, failure_message};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::model::{ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, User, hue_from_hex};
@@ -514,17 +514,23 @@ fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoVi
   let state = use_app_state();
   let i18n = use_i18n();
   let is_confirming_privacy = RwSignal::new(false);
+  let pending = PendingAction::new();
+  // Closes once the core confirmed the conversion; a refusal stays in the dialog.
   let convert = move |_| {
-    state.write(|backend| {
-      backend.update_channel(
-        conversation,
-        ChannelChanges {
-          maybe_is_private: Some(!is_private),
-          ..ChannelChanges::default()
-        },
-      )
-    });
-    state.close_overlay();
+    pending.run_and_then(
+      || {
+        state.write(|backend| {
+          backend.update_channel(
+            conversation,
+            ChannelChanges {
+              maybe_is_private: Some(!is_private),
+              ..ChannelChanges::default()
+            },
+          )
+        })
+      },
+      move || state.close_overlay(),
+    );
   };
   view! {
     <h3>{move || i18n.t("channel-privacy")}</h3>
@@ -535,9 +541,10 @@ fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoVi
     >
       <p role="alert">{move || if is_private { i18n.t("channel-make-public-confirm") } else { i18n.t("channel-make-private-confirm") }}</p>
       <div class="inline-actions">
-        <button type="button" class="btn btn-primary" on:click=convert>{move || i18n.t("confirm")}</button>
+        <button type="button" class="btn btn-primary" prop:disabled=move || pending.is_pending() on:click=convert>{move || i18n.t("confirm")}</button>
         <button type="button" class="btn" on:click=move |_| is_confirming_privacy.set(false)>{move || i18n.t("cancel")}</button>
       </div>
+      <FailureNote pending=pending />
     </Show>
     <ChannelRetention conversation=conversation />
   }
@@ -549,6 +556,9 @@ fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl
   let state = use_app_state();
   let i18n = use_i18n();
   let is_confirming_archive = RwSignal::new(false);
+  let category_pending = PendingAction::new();
+  let has_saved_category = RwSignal::new(false);
+  let archive_pending = PendingAction::new();
   let categories = Memo::new(move |_| {
     space
       .map(|space| state.read(|backend| backend.categories(space)))
@@ -560,38 +570,46 @@ fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl
       Ok(category) if !value.is_empty() => CategoryChoice::Category { category },
       _ => CategoryChoice::Uncategorized,
     };
-    state.write(|backend| {
-      backend.update_channel(
-        conversation,
-        ChannelChanges {
-          maybe_category: Some(choice),
-          ..ChannelChanges::default()
-        },
-      )
+    has_saved_category.set(true);
+    category_pending.run(|| {
+      state.write(|backend| {
+        backend.update_channel(
+          conversation,
+          ChannelChanges {
+            maybe_category: Some(choice),
+            ..ChannelChanges::default()
+          },
+        )
+      })
     });
   };
   let archive = move |_| {
-    state.write(|backend| {
-      backend.update_channel(
-        conversation,
-        ChannelChanges {
-          maybe_is_archived: Some(true),
-          ..ChannelChanges::default()
-        },
-      )
-    });
-    state.close_overlay();
+    archive_pending.run_and_then(
+      || {
+        state.write(|backend| {
+          backend.update_channel(
+            conversation,
+            ChannelChanges {
+              maybe_is_archived: Some(true),
+              ..ChannelChanges::default()
+            },
+          )
+        })
+      },
+      move || state.close_overlay(),
+    );
   };
   view! {
     {space.is_some().then(|| view! {
       <div class="field">
         <label for="cs-category">{move || i18n.t("channel-move-category")}</label>
-        <select id="cs-category" class="input" on:change=change_category>
+        <select id="cs-category" class="input" prop:disabled=move || category_pending.is_pending() on:change=change_category>
           <option value="">{move || i18n.t("channel-uncategorized")}</option>
           <For each=move || categories.get() key=|category| category.id let:category>
             <option value=category.id.to_string() translate="no">{category.name.clone()}</option>
           </For>
         </select>
+        <SavedNote pending=category_pending has_saved=has_saved_category />
       </div>
     })}
     <MoveChannel conversation=conversation current_space=space />
@@ -603,10 +621,36 @@ fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl
     >
       <p role="alert">{move || i18n.t("channel-archive-confirm")}</p>
       <div class="inline-actions">
-        <button type="button" class="btn btn-danger" on:click=archive>{move || i18n.t("confirm")}</button>
+        <button type="button" class="btn btn-danger" prop:disabled=move || archive_pending.is_pending() on:click=archive>{move || i18n.t("confirm")}</button>
         <button type="button" class="btn" on:click=move |_| is_confirming_archive.set(false)>{move || i18n.t("cancel")}</button>
       </div>
+      <FailureNote pending=archive_pending />
     </Show>
+  }
+}
+
+/// The failure of the last run of `pending`, in the dialog (it was shown as a toast too), so the
+/// user can try again where they are.
+#[component]
+pub(crate) fn FailureNote(pending: PendingAction) -> impl IntoView {
+  let i18n = use_i18n();
+  move || {
+    pending
+      .maybe_failure()
+      .map(|failure| view! { <p class="field-error" role="alert">{failure_message(i18n, &failure)}</p> })
+  }
+}
+
+/// "Saved" once `pending` finished without a failure after the user changed something, the failure
+/// otherwise.
+#[component]
+fn SavedNote(pending: PendingAction, has_saved: RwSignal<bool>) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <span role="status" class="muted-text small">
+      {move || (has_saved.get() && !pending.is_pending() && pending.maybe_failure().is_none()).then(|| i18n.t("settings-saved"))}
+    </span>
+    <FailureNote pending=pending />
   }
 }
 
@@ -624,18 +668,24 @@ fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> 
   });
   let chosen = RwSignal::new(String::new());
   let is_confirming = RwSignal::new(false);
+  let pending = PendingAction::new();
   let move_now = move |_| {
     if let Ok(space) = chosen.get_untracked().parse::<SpaceId>() {
-      state.write(|backend| {
-        backend.update_channel(
-          conversation,
-          ChannelChanges {
-            maybe_space: Some(space),
-            ..ChannelChanges::default()
-          },
-        )
-      });
-      state.close_overlay();
+      // Closes once the server moved it; a refusal (members not in the new space) stays here.
+      pending.run_and_then(
+        || {
+          state.write(|backend| {
+            backend.update_channel(
+              conversation,
+              ChannelChanges {
+                maybe_space: Some(space),
+                ..ChannelChanges::default()
+              },
+            )
+          })
+        },
+        move || state.close_overlay(),
+      );
     }
   };
 
@@ -664,9 +714,10 @@ fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> 
       <Show when=move || is_confirming.get() fallback=|| ()>
         <p role="alert">{move || i18n.t("channel-move-space-confirm")}</p>
         <div class="inline-actions">
-          <button class="btn btn-primary" on:click=move_now>{move || i18n.t("confirm")}</button>
+          <button class="btn btn-primary" prop:disabled=move || pending.is_pending() on:click=move_now>{move || i18n.t("confirm")}</button>
           <button class="btn" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
         </div>
+        <FailureNote pending=pending />
       </Show>
     </Show>
   }
@@ -1187,17 +1238,22 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
   let i18n = use_i18n();
   let id = space.id;
   let is_confirming = RwSignal::new(false);
+  let pending = PendingAction::new();
   let archive = move |_| {
-    state.write(|backend| {
-      backend.update_space(
-        id,
-        SpaceChanges {
-          maybe_is_archived: Some(true),
-          ..SpaceChanges::default()
-        },
-      )
-    });
-    state.close_overlay();
+    pending.run_and_then(
+      || {
+        state.write(|backend| {
+          backend.update_space(
+            id,
+            SpaceChanges {
+              maybe_is_archived: Some(true),
+              ..SpaceChanges::default()
+            },
+          )
+        })
+      },
+      move || state.close_overlay(),
+    );
   };
   view! {
     <h3>{move || i18n.t("channel-archive")}</h3>
@@ -1210,9 +1266,10 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
         >
           <p role="alert">{move || i18n.t("space-archive-confirm")}</p>
           <div class="inline-actions">
-            <button type="button" class="btn btn-danger" on:click=archive>{move || i18n.t("confirm")}</button>
+            <button type="button" class="btn btn-danger" prop:disabled=move || pending.is_pending() on:click=archive>{move || i18n.t("confirm")}</button>
             <button type="button" class="btn" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
           </div>
+          <FailureNote pending=pending />
         </Show>
       }.into_any()
     } else {

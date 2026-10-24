@@ -623,6 +623,12 @@ pub enum ChatAction {
   RefreshSpaceRoster {
     space: SpaceId,
   },
+  AddPeopleToChannel {
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  },
   SetSpaceRole {
     space: SpaceId,
     user: UserId,
@@ -792,6 +798,12 @@ impl ChatAction {
         is_guest,
       } => backend.add_space_members(space, users, is_guest),
       Self::RefreshSpaceRoster { space } => backend.refresh_space_roster(space),
+      Self::AddPeopleToChannel {
+        conversation,
+        people,
+        history,
+        joins_space,
+      } => backend.add_people_to_channel(conversation, people, history, joins_space),
       Self::SetSpaceRole { space, user, role } => backend.set_space_role(space, user, role),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),

@@ -131,6 +131,31 @@ mod inviting {
   }
 
   #[tokio::test]
+  async fn adding_someone_twice_never_changes_their_role() {
+    let app = app!();
+    let (alice, carol) = (owner(), member("carol"));
+    let space = create_space(&app, &alice, "Project A", "invite_only").await;
+    let carol_id = user_id(&app, &carol).await;
+    add_space_member(&app, &alice, &space, &carol_id, "space_admin").await;
+
+    // The same role again is fine (a retried request); another one is a conflict.
+    add_space_member(&app, &alice, &space, &carol_id, "space_admin").await;
+    let reply = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/members"),
+        json!({"user_id": carol_id, "role": "member"}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(
+      space_of(&app, &carol, &space).await["my_role"],
+      json!("space_admin")
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn guest_accounts_join_only_as_guests() {
     let app = app!();
     let (alice, ext) = (owner(), guest("ext"));

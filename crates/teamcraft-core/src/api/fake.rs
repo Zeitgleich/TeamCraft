@@ -2014,6 +2014,23 @@ impl ServerApi for FakeServerApi {
         return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
       }
       let user = state.user(request.user_id)?.clone();
+      // Like the server: never a role change through an add.
+      if !state.space_outsiders.contains(&request.user_id) {
+        let current = state
+          .space_roles
+          .get(&(space, request.user_id))
+          .cloned()
+          .unwrap_or(SpaceRole::Member);
+        if current != request.role {
+          return Err(ApiError::status(409, ErrorCode::Conflict, "already a member"));
+        }
+        return Ok(SpaceMemberResponse {
+          user,
+          role: current,
+          maybe_expires_at: None,
+          maybe_sponsor_user_id: None,
+        });
+      }
       state.space_outsiders.remove(&request.user_id);
       state.space_member_adds.push((space, request.clone()));
       Ok(SpaceMemberResponse {

@@ -159,6 +159,26 @@ impl PendingAction {
     CURRENT_TICKET.with(|current| current.replace(maybe_outer));
   }
 
+  /// [`Self::run`], calling `on_success` once every action succeeded (closing the dialog, clearing
+  /// the form), even after the component is gone: what it touches must tolerate that
+  /// (`try_set`, app-level state).
+  pub fn run_and_then(&self, start: impl FnOnce(), on_success: impl FnOnce() + 'static) {
+    if !self.begin() {
+      return;
+    }
+    let this = *self;
+    let ticket = Rc::new(ActionTicket::new(move |maybe_failure| {
+      let is_success = maybe_failure.is_none();
+      this.finish(maybe_failure);
+      if is_success {
+        on_success();
+      }
+    }));
+    let maybe_outer = CURRENT_TICKET.with(|current| current.replace(Some(ticket)));
+    start();
+    CURRENT_TICKET.with(|current| current.replace(maybe_outer));
+  }
+
   /// Runs awaited work (a REST call, an upload); a failure is reported like a failed backend
   /// action. Ignored while the previous run is still pending.
   pub fn spawn(&self, work: impl Future<Output = Result<(), ActionFailure>> + 'static) {

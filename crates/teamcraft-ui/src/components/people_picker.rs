@@ -20,6 +20,8 @@ const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Candidate {
   Pickable,
+  /// Picked already (checked; a click takes them back).
+  Picked,
   /// Already where the dialog adds people (greyed out, not pickable).
   AlreadyIn,
 }
@@ -56,6 +58,15 @@ pub fn PeoplePicker(
       &filter.get(),
     )
   });
+  let toggle = move |user: User| {
+    chosen.update(|list| {
+      if let Some(index) = list.iter().position(|picked| picked.id == user.id) {
+        list.remove(index);
+      } else {
+        list.push(user);
+      }
+    });
+  };
   let pick = move |user: User| {
     chosen.update(|list| list.push(user));
     filter.set(String::new());
@@ -125,21 +136,29 @@ pub fn PeoplePicker(
       on:input=move |ev| filter.set(event_target_value(&ev))
       on:keydown=on_keydown
     />
-    <ul class="forward-list people-picker" role="listbox" aria-multiselectable="true" aria-label=move || i18n.t("dm-new-people")>
+    // A list of checkboxes: each person is a toggle button (role "checkbox", Space or Enter
+    // toggles, Tab moves on), which assistive technology announces with its state.
+    <ul class="forward-list people-picker" aria-label=move || i18n.t("dm-new-people")>
       <For each=move || candidates.get() key=|(user, kind)| (user.id, *kind) let:candidate>
         {
           let (user, kind) = candidate;
-          let picked = user.clone();
+          let clicked = user.clone();
           let is_already_in = kind == Candidate::AlreadyIn;
+          let is_checked = kind != Candidate::Pickable;
           view! {
-            <li role="option" aria-selected="false" aria-disabled=is_already_in.then_some("true")>
+            <li>
               <button
                 type="button"
+                role="checkbox"
+                aria-checked=is_checked.to_string()
+                aria-disabled=is_already_in.then_some("true")
                 class="forward-item person-item"
                 class:is-member=is_already_in
+                class:is-picked=kind == Candidate::Picked
                 prop:disabled=is_already_in
-                on:click=move |_| pick(picked.clone())
+                on:click=move |_| toggle(clicked.clone())
               >
+                <span class="pick-box" aria-hidden="true">{is_checked.then(|| view! { <Icon name=IconName::Check /> })}</span>
                 <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
                 <span translate="no">{user.display_name.clone()}</span>
                 {(!user.username.is_empty()).then(|| view! { <span class="muted-text" translate="no">{format!("@{}", user.username)}</span> })}
@@ -158,8 +177,8 @@ pub fn PeoplePicker(
   }
 }
 
-/// The matches: not the user, no bots, not picked yet, guest accounts only where allowed, matching
-/// the filter; pickable people by name first, then those already in (greyed out).
+/// The matches: not the user, no bots, guest accounts only where allowed, matching the filter; by
+/// name, those already in (greyed out) last. Picked people stay in the list, checked.
 fn candidates(
   mut users: Vec<User>,
   me: UserId,
@@ -173,7 +192,6 @@ fn candidates(
     user.id != me
       && !user.is_bot
       && (allows_guest_accounts || !user.is_guest)
-      && !picked.contains(&user.id)
       && (needle.is_empty()
         || user.display_name.to_lowercase().contains(&needle)
         || user.username.to_lowercase().contains(&needle))
@@ -183,6 +201,8 @@ fn candidates(
     .map(|user| {
       let kind = if already_in.contains(&user.id) {
         Candidate::AlreadyIn
+      } else if picked.contains(&user.id) {
+        Candidate::Picked
       } else {
         Candidate::Pickable
       };
@@ -201,7 +221,7 @@ mod tests {
   const ME: u64 = 1;
 
   #[test]
-  fn members_are_listed_greyed_out_after_the_others() {
+  fn picked_people_stay_checked_and_members_come_last_greyed_out() {
     let users = vec![
       person(ME, "Me"),
       person(2, "Bea"),
@@ -217,7 +237,11 @@ mod tests {
       .collect();
     assert_eq!(
       listed,
-      [("Cy", Candidate::Pickable), ("Al", Candidate::AlreadyIn)]
+      [
+        ("Bea", Candidate::Picked),
+        ("Cy", Candidate::Pickable),
+        ("Al", Candidate::AlreadyIn)
+      ]
     );
   }
 
