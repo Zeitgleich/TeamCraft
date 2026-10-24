@@ -405,9 +405,19 @@ impl TestApp {
     signing_key_pem: &str,
     dispatcher: PushDispatcher,
   ) -> Option<Self> {
+    Self::start_with_calls_push_and(config, signing_key_pem, dispatcher, |_| {}).await
+  }
+
+  /// Like [`Self::start_with_calls_and_push`] with changed settings (retry timing).
+  pub async fn start_with_calls_push_and(
+    config: &CallsConfig,
+    signing_key_pem: &str,
+    dispatcher: PushDispatcher,
+    customize: impl FnOnce(&mut Settings),
+  ) -> Option<Self> {
     let calls = CallService::new(config, signing_key_pem.as_bytes()).unwrap();
     Self::start_full(
-      |_| {},
+      customize,
       Extras {
         maybe_calls: Some(calls),
         maybe_push: Some(dispatcher),

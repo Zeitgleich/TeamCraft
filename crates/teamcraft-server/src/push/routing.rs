@@ -341,6 +341,12 @@ pub async fn notify_ring(state: AppState, conversation: ConversationId, call: Ca
 
 /// The ring ended (answered, timed out, cancelled): phones that rang stop.
 pub async fn end_ring(state: AppState, call: CallId) {
+  // Queued retries of the ring go first, for every device: also those without a dismissal.
+  match state.database.delete_queued_rings(call).await {
+    Ok(0) => {},
+    Ok(count) => debug!(call_id = %call, count, "queued rings dropped"),
+    Err(error) => warn!(%error, call_id = %call, "dropping queued rings failed"),
+  }
   let Some(ring) = state.push_tracker.take_ring(call) else {
     return;
   };

@@ -146,6 +146,11 @@ async fn attempt_next(state: &AppState, is_user_endpoint: bool) -> Result<bool, 
     claim.complete().await?;
     return Ok(true);
   };
+  if !is_still_ringing(state, &row.wake_up) {
+    debug!(device_id = %row.device, "the call stopped ringing meanwhile; retry dropped");
+    claim.complete().await?;
+    return Ok(true);
+  }
   if is_read_meanwhile(state, row.user, &row.wake_up).await {
     debug!(device_id = %row.device, "the message was read meanwhile; retry dropped");
     claim.complete().await?;
@@ -199,6 +204,18 @@ async fn current_registration(
 ) -> Result<Option<PushDeviceRow>, DbError> {
   let devices = state.database.list_push_devices(user).await?;
   Ok(devices.into_iter().find(|row| row.device == device))
+}
+
+/// For a ring: whether its call still rings. Answered elsewhere, declined, cancelled or timed out,
+/// a late retry would ring the phone for a call that is over (issue #142). Other kinds pass.
+fn is_still_ringing(state: &AppState, wake_up: &PushWakeUp) -> bool {
+  let (PushKind::Call, Some(call)) = (&wake_up.kind, wake_up.maybe_call_id) else {
+    return true;
+  };
+  state
+    .maybe_calls
+    .as_ref()
+    .is_some_and(|calls| calls.is_ringing(wake_up.conversation_id, call))
 }
 
 /// Whether the wake-up names a message the user has read since (on any device): showing it now
