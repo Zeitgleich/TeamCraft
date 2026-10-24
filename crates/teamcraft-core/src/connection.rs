@@ -276,8 +276,10 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     }
   }
 
-  /// Applies what [`Self::receive`] returned; `false` if the connection is gone (it is then
-  /// replaced after the backoff).
+  /// Applies what [`Self::receive`] returned; `true` if it may have changed what the UI shows.
+  /// `false` for a heartbeat answer (it only proves the connection is alive; reporting it as a
+  /// change made the apps re-read everything every 25 s while idle) and when the connection is
+  /// gone (it is then replaced after the backoff).
   pub async fn on_frame<A, S>(
     &mut self,
     client: &mut Client<A, S>,
@@ -292,13 +294,14 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       Some(Ok(frame)) => {
         self.last_heard_ms = now;
         self.maybe_probe_deadline_ms = None;
-        client.handle_frame(frame).await
+        let is_heartbeat_ack = matches!(frame, GatewayServerMessage::HeartbeatAck);
+        client.handle_frame(frame).await.map(|()| !is_heartbeat_ack)
       },
       Some(Err(error)) => Err(CoreError::Api(error)),
       None => Err(CoreError::Gateway("connection closed".into())),
     };
     match outcome {
-      Ok(()) => true,
+      Ok(is_changed) => is_changed,
       Err(error) => {
         self.lose(client.now_ms(), &error);
         false
