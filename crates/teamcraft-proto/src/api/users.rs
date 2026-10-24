@@ -211,6 +211,17 @@ pub struct IdentityKeyResponse {
   pub maybe_key_bag_version: Option<u64>,
 }
 
+/// `GET /api/v1/users/{user_id}/enrollment`: what the user has published so far. Before their first
+/// device is enrolled they have neither, which is an answer, not an error: the single endpoints
+/// (`identity-key`, `device-list`) answer 404 then, which browsers log as failed requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UserEnrollmentResponse {
+  #[serde(rename = "identity_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_identity_key: Option<IdentityKeyResponse>,
+  #[serde(rename = "device_list", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_device_list: Option<DeviceListResponse>,
+}
+
 wire_enum! {
   /// Why a device is woken up (e2ee.md §7).
   pub enum PushKind {
@@ -291,5 +302,38 @@ impl PushWakeUp {
       maybe_badge: None,
       maybe_sent_at: None,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn enrollment_of_a_user_without_keys_is_an_empty_object() {
+    let response = UserEnrollmentResponse::default();
+    assert_eq!(serde_json::to_string(&response).unwrap(), "{}");
+    assert_eq!(
+      serde_json::from_str::<UserEnrollmentResponse>("{}").unwrap(),
+      response
+    );
+  }
+
+  #[test]
+  fn enrollment_wire_format_is_stable() {
+    let json = serde_json::json!({
+      "identity_key": {
+        "user_id": "42",
+        "public_key": "AQID",
+        "signature": "BAUG",
+        "created_at": 1700000000000_i64
+      },
+      "device_list": { "sequence": 3, "signed_list": "BwgJ" }
+    });
+    let response: UserEnrollmentResponse = serde_json::from_value(json.clone()).unwrap();
+    let identity_key = response.maybe_identity_key.as_ref().unwrap();
+    assert_eq!(identity_key.public_key.as_slice(), [1, 2, 3]);
+    assert_eq!(response.maybe_device_list.as_ref().unwrap().sequence, 3);
+    assert_eq!(serde_json::to_value(&response).unwrap(), json);
   }
 }

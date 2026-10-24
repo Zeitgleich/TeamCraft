@@ -42,7 +42,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
-use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
+use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
@@ -94,6 +94,13 @@ pub struct HttpServerApi<T> {
   tokens: T,
 }
 
+/// What `GET /users/{id}/enrollment` answered.
+enum Enrollment {
+  Known(UserEnrollmentResponse),
+  /// A server from before the endpoint: the single endpoints answer instead (404 for nothing).
+  NoEndpoint,
+}
+
 impl<T: AccessTokenSource> HttpServerApi<T> {
   /// `base_url` without trailing slash, e.g. `https://chat.example.com`.
   pub fn new(base_url: impl Into<String>, tokens: T) -> Self {
@@ -121,6 +128,17 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
 
   async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, ApiError> {
     decode(send(self.request(Method::GET, path)?).await?).await
+  }
+
+  /// A user the server doesn't show the caller (404 with an error code) has published nothing, as
+  /// the single endpoints said; a bare 404 is a server that doesn't have the endpoint yet.
+  async fn enrollment(&self, user: UserId) -> Result<Enrollment, ApiError> {
+    match self.get(&format!("/users/{user}/enrollment")).await {
+      Ok(enrollment) => Ok(Enrollment::Known(enrollment)),
+      Err(error) if error.is_not_found() && error.error_code().is_none() => Ok(Enrollment::NoEndpoint),
+      Err(error) if error.is_not_found() => Ok(Enrollment::Known(UserEnrollmentResponse::default())),
+      Err(error) => Err(error),
+    }
   }
 
   async fn send_json<B: Serialize, R: DeserializeOwned>(
@@ -228,12 +246,18 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.send_json(Method::PUT, "/me/identity-key", request).await
   }
 
-  async fn identity_key(&self, user: UserId) -> Result<IdentityKeyResponse, ApiError> {
-    self.get(&format!("/users/{user}/identity-key")).await
+  async fn identity_key(&self, user: UserId) -> Result<Option<IdentityKeyResponse>, ApiError> {
+    match self.enrollment(user).await? {
+      Enrollment::Known(enrollment) => Ok(enrollment.maybe_identity_key),
+      Enrollment::NoEndpoint => found(self.get(&format!("/users/{user}/identity-key")).await),
+    }
   }
 
-  async fn device_list(&self, user: UserId) -> Result<DeviceListResponse, ApiError> {
-    self.get(&format!("/users/{user}/device-list")).await
+  async fn device_list(&self, user: UserId) -> Result<Option<DeviceListResponse>, ApiError> {
+    match self.enrollment(user).await? {
+      Enrollment::Known(enrollment) => Ok(enrollment.maybe_device_list),
+      Enrollment::NoEndpoint => found(self.get(&format!("/users/{user}/device-list")).await),
+    }
   }
 
   async fn put_device_list(&self, request: &PutDeviceListRequest) -> Result<DeviceListResponse, ApiError> {
@@ -1258,6 +1282,15 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   })
 }
 
+/// The single endpoints' 404: nothing published.
+fn found<R>(result: Result<R, ApiError>) -> Result<Option<R>, ApiError> {
+  match result {
+    Ok(response) => Ok(Some(response)),
+    Err(error) if error.is_not_found() => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
 async fn decode<R: DeserializeOwned>(response: Response) -> Result<R, ApiError> {
   response
     .json()
@@ -1468,6 +1501,86 @@ mod tests {
       api.get_blob_capped(&undeclared, 1000).await,
       Err(ApiError::BlobTooLarge { .. })
     ));
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  mod enrollment {
+    use teamcraft_proto::{Id, Snowflake};
+
+    use super::*;
+
+    const USER: i64 = 7;
+
+    #[tokio::test]
+    async fn a_user_without_keys_is_not_enrolled_without_a_404() {
+      let base = route_server(&[("/api/v1/users/7/enrollment", 200, "{}")]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(api.identity_key(user()).await.unwrap(), None);
+      assert_eq!(api.device_list(user()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn the_published_keys_come_from_the_enrollment() {
+      let body = r#"{"device_list":{"sequence":2,"signed_list":"AQID"}}"#;
+      let base = route_server(&[("/api/v1/users/7/enrollment", 200, body)]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(api.identity_key(user()).await.unwrap(), None);
+      assert_eq!(api.device_list(user()).await.unwrap().unwrap().sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_user_is_not_enrolled() {
+      let not_found = r#"{"error_code":"user_not_found","message":"no such user"}"#;
+      let base = route_server(&[("/api/v1/users/7/enrollment", 404, not_found)]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(api.identity_key(user()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_server_without_the_endpoint_is_asked_the_old_way() {
+      let key = r#"{"user_id":"7","public_key":"AQID","signature":"BAUG","created_at":1}"#;
+      let missing = r#"{"error_code":"device_list_not_found","message":"none"}"#;
+      let base = route_server(&[
+        ("/api/v1/users/7/identity-key", 200, key),
+        ("/api/v1/users/7/device-list", 404, missing),
+      ])
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let identity_key = api.identity_key(user()).await.unwrap().unwrap();
+      assert_eq!(identity_key.public_key.as_slice(), [1, 2, 3]);
+      assert_eq!(api.device_list(user()).await.unwrap(), None);
+    }
+
+    fn user() -> UserId {
+      UserId::from_snowflake(Snowflake::new(USER).unwrap())
+    }
+
+    /// Answers `(path, status, body)`; any other path gets a bare 404, like an unknown API route.
+    async fn route_server(routes: &[(&'static str, u16, &'static str)]) -> String {
+      use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+      let routes = routes.to_vec();
+      let listener = loopback_listener().await;
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = [0u8; 4096];
+          let read = socket.read(&mut request).await.unwrap_or(0);
+          let head = String::from_utf8_lossy(&request[..read]);
+          let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
+          let (status, body) = routes
+            .iter()
+            .find(|(route, ..)| *route == path)
+            .map_or((404, ""), |(_, status, body)| (*status, *body));
+          let response = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = socket.write_all(response.as_bytes()).await;
+        }
+      });
+      format!("http://{address}")
+    }
   }
 
   #[cfg(not(target_arch = "wasm32"))]

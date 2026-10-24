@@ -1051,27 +1051,17 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  async fn identity_key(&self, user: UserId) -> Result<IdentityKeyResponse, ApiError> {
+  async fn identity_key(&self, user: UserId) -> Result<Option<IdentityKeyResponse>, ApiError> {
     self.with(|state, _| {
       if state.failing_identity_lookups.remove(&user) {
         return Err(ApiError::Network("fake server: identity lookup cut".into()));
       }
-      state
-        .identity_keys
-        .get(&user)
-        .cloned()
-        .ok_or_else(|| ApiError::status(404, ErrorCode::IdentityKeyNotFound, "no key"))
+      Ok(state.identity_keys.get(&user).cloned())
     })
   }
 
-  async fn device_list(&self, user: UserId) -> Result<DeviceListResponse, ApiError> {
-    self.with(|state, _| {
-      state
-        .device_lists
-        .get(&user)
-        .cloned()
-        .ok_or_else(|| ApiError::status(404, ErrorCode::DeviceNotFound, "no device list"))
-    })
+  async fn device_list(&self, user: UserId) -> Result<Option<DeviceListResponse>, ApiError> {
+    self.with(|state, _| Ok(state.device_lists.get(&user).cloned()))
   }
 
   async fn put_device_list(&self, request: &PutDeviceListRequest) -> Result<DeviceListResponse, ApiError> {

@@ -74,9 +74,11 @@ pub trait ServerApi {
     &self,
     request: &UploadIdentityKeyRequest,
   ) -> impl Future<Output = Result<IdentityKeyResponse, ApiError>>;
-  fn identity_key(&self, user: UserId) -> impl Future<Output = Result<IdentityKeyResponse, ApiError>>;
-  /// The user's signed device list (security review A4); not found if they never published one.
-  fn device_list(&self, user: UserId) -> impl Future<Output = Result<DeviceListResponse, ApiError>>;
+  /// The user's identity key; `None` before they enrolled (or when the server doesn't know them).
+  fn identity_key(&self, user: UserId)
+  -> impl Future<Output = Result<Option<IdentityKeyResponse>, ApiError>>;
+  /// The user's signed device list (security review A4); `None` if they never published one.
+  fn device_list(&self, user: UserId) -> impl Future<Output = Result<Option<DeviceListResponse>, ApiError>>;
   fn put_device_list(
     &self,
     request: &PutDeviceListRequest,

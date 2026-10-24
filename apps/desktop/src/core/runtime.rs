@@ -687,8 +687,7 @@ impl Core {
       },
       None => {
         let has_existing_identity = match self.api().identity_key(self.user).await {
-          Ok(_) => true,
-          Err(error) if error.is_not_found() => false,
+          Ok(maybe_key) => maybe_key.is_some(),
           Err(error @ ApiError::Token(_)) => return Err(OpenError::NoToken(error.to_string())),
           Err(error) => return Err(OpenError::Failed(error.to_string())),
         };
@@ -706,14 +705,10 @@ impl Core {
     if self.client.is_none()
       && self.link.is_none()
       && let CoreStatus::NeedsEnrollment { .. } = self.status
-      && let Ok(has_existing_identity) = match self.api().identity_key(self.user).await {
-        Ok(_) => Ok(true),
-        Err(error) if error.is_not_found() => Ok(false),
-        Err(error) => Err(error),
-      }
+      && let Ok(maybe_key) = self.api().identity_key(self.user).await
     {
       self.status = CoreStatus::NeedsEnrollment {
-        has_existing_identity,
+        has_existing_identity: maybe_key.is_some(),
         was_data_lost: false,
       };
     }
