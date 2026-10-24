@@ -173,6 +173,15 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       .collect()
   }
 
+  fn search_people(&self, query: &str) -> Vec<User> {
+    self
+      .chat
+      .search_people(query)
+      .into_iter()
+      .map(|user| self.with_live_presence(user))
+      .collect()
+  }
+
   fn spaces(&self) -> Vec<Space> {
     self.chat.spaces()
   }

@@ -1,6 +1,7 @@
 //! Home. DMs and group DMs live outside spaces (PLAN.md, ARCHITECTURE.md:
 //! `conversations.space_id` is null for them), so they get their own entry on the space rail and
-//! their own sidebar, as in Element or Discord: newest first, with a filter and "new message".
+//! their own sidebar, as in Element or Discord: newest first, with filter chips and "new message".
+//! Finding a DM by name is the top bar's search.
 
 use leptos::prelude::*;
 
@@ -11,11 +12,14 @@ use crate::components::modal::Modal;
 use crate::components::sidebar::GlobalEntries;
 
 use crate::i18n::use_i18n;
-use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
-use crate::model::{Conversation, ConversationKind, User, UserId};
+use crate::model::{Conversation, ConversationKind, DeviceSetup, User, UserId};
 use crate::prefs::DmSort;
+use crate::reactive::use_debounced;
 use crate::sections::{DirectList, DirectSectionKind, HomeFilter, build_direct};
 use crate::state::{MainView, Overlay, use_app_state};
+
+/// The directory on the server is asked once typing paused this long.
+const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 
 /// Display limits offered for the list ("0" shows all).
 const LIMIT_OPTIONS: [u32; 4] = [0, 5, 10, 20];
@@ -25,7 +29,6 @@ const LIMIT_OPTIONS: [u32; 4] = [0, 5, 10, 20];
 pub fn HomeSidebar() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let filter = RwSignal::new(String::new());
   let show_all = RwSignal::new(false);
   let show_options = RwSignal::new(false);
   let chip = RwSignal::new(HomeFilter::All);
@@ -35,7 +38,7 @@ pub fn HomeSidebar() -> impl IntoView {
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
     let limit = if show_all.get() { 0 } else { limit };
-    build_direct(state.direct_entries(), sort, limit, &filter.get(), chip.get())
+    build_direct(state.direct_entries(), sort, limit, "", chip.get())
   });
   let has_any = Memo::new(move |_| state.read(|backend| !backend.direct_conversations().is_empty()));
 
@@ -65,11 +68,6 @@ pub fn HomeSidebar() -> impl IntoView {
       <Show when=move || show_options.get() fallback=|| ()>
         <DirectOptions />
       </Show>
-      <button class="jump-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
-        <Icon name=IconName::Search />
-        <span class="jump-label">{move || i18n.t("sidebar-jump")}</span>
-        <ShortcutKeys shortcut=QUICK_SWITCHER />
-      </button>
       <GlobalEntries />
       <div class="home-chips" role="group" aria-label=move || i18n.t("home-filters")>
         {HomeFilter::CHIPS
@@ -90,23 +88,6 @@ pub fn HomeSidebar() -> impl IntoView {
             }
           })
           .collect_view()}
-      </div>
-      <div class="dm-filter">
-        <label class="visually-hidden" for="dm-filter">{move || i18n.t("dm-filter")}</label>
-        <input
-          id="dm-filter"
-          class="input"
-          type="search"
-          placeholder=move || i18n.t("dm-filter")
-          prop:value=move || filter.get()
-          on:input=move |ev| filter.set(event_target_value(&ev))
-          on:keydown=move |ev| {
-            if ev.key() == "Escape" && !filter.get_untracked().is_empty() {
-              ev.stop_propagation();
-              filter.set(String::new());
-            }
-          }
-        />
       </div>
       <div class="sidebar-scroll">
         {move || {
@@ -347,11 +328,13 @@ pub fn NewMessageDialog() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let filter = RwSignal::new(String::new());
+  let directory_query = use_debounced(filter, DIRECTORY_DEBOUNCE_MS);
   let chosen = RwSignal::new(Vec::<User>::new());
   let candidates = Memo::new(move |_| {
     let me = state.me().id;
     let picked: Vec<UserId> = chosen.with(|list| list.iter().map(|user| user.id).collect());
-    let mut users = state.read(|backend| backend.users());
+    let query = directory_query.get();
+    let mut users = state.read(|backend| backend.search_people(query.trim()));
     users.retain(|user| user.id != me && !user.is_bot && !picked.contains(&user.id));
     people_matching(users, &filter.get())
   });
@@ -450,6 +433,7 @@ pub fn NewMessageDialog() -> impl IntoView {
                       <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
                       <span translate="no">{user.display_name.clone()}</span>
                       {(!user.username.is_empty()).then(|| view! { <span class="muted-text" translate="no">{format!("@{}", user.username)}</span> })}
+                      {(user.device_setup == DeviceSetup::NoDevices).then(|| view! { <span class="muted-text">{move || i18n.t("directory-no-devices")}</span> })}
                     </button>
                   </li>
                 }
@@ -542,6 +526,7 @@ mod tests {
       is_guest: false,
       is_bot: false,
       maybe_organization: None,
+      device_setup: crate::model::DeviceSetup::Unknown,
     }
   }
 }

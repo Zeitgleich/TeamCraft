@@ -51,6 +51,14 @@ pub trait ChatBackend {
   fn me(&self) -> User;
   fn user(&self, id: UserId) -> Option<User>;
   fn users(&self) -> Vec<User>;
+  /// People whose name or username contains `query` (any case): the people the backend knows and,
+  /// for a backend that reads the server, the server's directory, so colleagues who share nothing
+  /// with the user yet are found too. Such a backend asks the server at most once per query in a
+  /// while and answers with what it knows until the answer arrives (a change notification). The
+  /// UI debounces typing before it asks. An empty query lists the first people alphabetically.
+  fn search_people(&self, query: &str) -> Vec<User> {
+    filter_people(self.users(), query)
+  }
 
   fn spaces(&self) -> Vec<Space>;
   /// Channels of a space the user is a member of.
@@ -587,3 +595,15 @@ pub trait SearchBackend {
 pub trait Backend: ChatBackend + CallBackend + AdminBackend + SecurityBackend + SearchBackend {}
 
 impl<T: ChatBackend + CallBackend + AdminBackend + SecurityBackend + SearchBackend> Backend for T {}
+
+/// The people whose display name or username contains `query` (any case), sorted by name.
+pub fn filter_people(mut people: Vec<User>, query: &str) -> Vec<User> {
+  let needle = query.trim().to_lowercase();
+  people.retain(|user| {
+    needle.is_empty()
+      || user.display_name.to_lowercase().contains(&needle)
+      || user.username.to_lowercase().contains(&needle)
+  });
+  people.sort_by_key(|user| (user.display_name.to_lowercase(), user.id));
+  people
+}

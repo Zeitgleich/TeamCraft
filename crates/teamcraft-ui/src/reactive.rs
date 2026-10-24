@@ -83,3 +83,25 @@ pub fn use_interval_while(
     }
   });
 }
+
+/// A copy of `source` that follows it once it stopped changing for `delay_ms`: a search box asks
+/// the server when the user paused typing, not on every key.
+pub fn use_debounced(source: RwSignal<String>, delay_ms: u64) -> ReadSignal<String> {
+  let (value, set_value) = signal(source.get_untracked());
+  let generation = StoredValue::new(0_u64);
+  Effect::new(move |_| {
+    let next = source.get();
+    generation.update_value(|current| *current += 1);
+    let mine = generation.get_value();
+    set_timeout(
+      move || {
+        // A newer key press restarted the wait; a closed view ignores it (`try_*`).
+        if generation.try_get_value() == Some(mine) {
+          let _ = set_value.try_set(next);
+        }
+      },
+      std::time::Duration::from_millis(delay_ms),
+    );
+  });
+  value
+}

@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
   CallHistoryEntry, LastSeenVisibility, ListCallHistoryQuery, PresenceState, PrivacyResponse,
-  UpdatePrivacyRequest, UserId,
+  UpdatePrivacyRequest, UserId, UserSummary,
 };
 
 use super::Client;
@@ -18,6 +18,12 @@ use crate::store::{LocalStore, Table};
 pub const PRIVACY_KEY: &str = "privacy";
 /// Key of the call history record in [`Table::SyncState`].
 pub const CALL_HISTORY_KEY: &str = "call_history";
+/// Key of the directory cache in [`Table::SyncState`].
+pub const DIRECTORY_CACHE_KEY: &str = "directory_cache";
+/// People the directory cache keeps at most (the most recently found).
+const MAX_DIRECTORY_CACHE: usize = 200;
+/// A directory answer is used this long; older people drop out of the cache.
+const DIRECTORY_CACHE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Calls fetched for the history list.
 const CALL_HISTORY_PAGE: u32 = 100;
 /// Most people `GET /presence` answers for in one request.
@@ -36,6 +42,45 @@ pub struct LastSeenRecord {
 pub struct PrivacyRecord {
   pub privacy: PrivacyResponse,
   pub fetched_at_ms: i64,
+}
+
+/// People the server's directory answered, most recently found first: colleagues who share
+/// nothing with the user yet. Bounded in count and age, and kept apart from [`Table::Users`] (the
+/// people of the user's spaces and conversations), so a search doesn't grow what every list shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryCache {
+  pub entries: Vec<DirectoryEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryEntry {
+  pub user: UserSummary,
+  pub fetched_at_ms: i64,
+}
+
+impl DirectoryCache {
+  /// The cache as stored, without people older than the TTL.
+  pub fn load(store: &impl LocalStore, now_ms: i64) -> Result<Self, CoreError> {
+    let mut cache: Self =
+      records::get_json(store, Table::SyncState, DIRECTORY_CACHE_KEY)?.unwrap_or_default();
+    cache
+      .entries
+      .retain(|entry| now_ms.saturating_sub(entry.fetched_at_ms) <= DIRECTORY_CACHE_TTL_MS);
+    Ok(cache)
+  }
+
+  /// Puts an answer in front, each person once, and drops the oldest beyond the bound.
+  pub fn merge(&mut self, users: &[UserSummary], now_ms: i64) {
+    self
+      .entries
+      .retain(|entry| !users.iter().any(|user| user.id == entry.user.id));
+    let found = users.iter().map(|user| DirectoryEntry {
+      user: user.clone(),
+      fetched_at_ms: now_ms,
+    });
+    self.entries.splice(0..0, found);
+    self.entries.truncate(MAX_DIRECTORY_CACHE);
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +145,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(true)
   }
 
+  /// Asks the directory for people matching `query` and keeps them in the [`DirectoryCache`], so
+  /// the people page and the search find colleagues who share nothing with the user yet. One page
+  /// only: the UI narrows by typing, it never loads everybody. Returns how many were found.
+  pub async fn search_directory(&mut self, query: &str) -> Result<usize, CoreError> {
+    let response = self.api.search_users(query.trim()).await?;
+    let now = self.now_ms();
+    let mut cache = DirectoryCache::load(&self.store, now)?;
+    cache.merge(&response.users, now);
+    records::put_json(&self.store, Table::SyncState, DIRECTORY_CACHE_KEY, &cache)?;
+    Ok(response.users.len())
+  }
+
+  /// The person registered a device (`device_add`): the cache stops saying they have none.
+  pub(crate) fn remember_has_devices(&self, user: UserId) -> Result<(), CoreError> {
+    let mut cache = DirectoryCache::load(&self.store, self.now_ms())?;
+    let Some(entry) = cache.entries.iter_mut().find(|entry| entry.user.id == user) else {
+      return Ok(());
+    };
+    if entry.user.maybe_has_devices == Some(true) {
+      return Ok(());
+    }
+    entry.user.maybe_has_devices = Some(true);
+    records::put_json(&self.store, Table::SyncState, DIRECTORY_CACHE_KEY, &cache)
+  }
+
   /// Reads the user's privacy choices from the server.
   pub async fn refresh_privacy(&mut self) -> Result<PrivacyResponse, CoreError> {
     let privacy = self.api.get_privacy().await?;
@@ -153,5 +223,58 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         fetched_at_ms: self.now_ms(),
       },
     )
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{Id, Snowflake, UserKind};
+
+  use super::*;
+
+  const NOW: i64 = 1_800_000_000_000;
+
+  #[test]
+  fn the_directory_cache_keeps_the_newest_answers_each_person_once() {
+    let mut cache = DirectoryCache::default();
+    cache.merge(&[person(1), person(2)], NOW);
+    cache.merge(&[person(2), person(3)], NOW + 1);
+    assert_eq!(ids(&cache), vec![person(2).id, person(3).id, person(1).id]);
+  }
+
+  #[test]
+  fn the_directory_cache_is_bounded() {
+    let mut cache = DirectoryCache::default();
+    let many: Vec<UserSummary> = (1..=250).map(person).collect();
+    cache.merge(&many, NOW);
+    assert_eq!(cache.entries.len(), MAX_DIRECTORY_CACHE);
+    assert_eq!(cache.entries[0].user.id, person(1).id);
+  }
+
+  #[test]
+  fn old_directory_answers_are_dropped_on_load() {
+    let store = crate::store::MemoryStore::new();
+    let mut cache = DirectoryCache::default();
+    cache.merge(&[person(1)], NOW);
+    cache.merge(&[person(2)], NOW + DIRECTORY_CACHE_TTL_MS);
+    records::put_json(&store, Table::SyncState, DIRECTORY_CACHE_KEY, &cache).unwrap();
+    let loaded = DirectoryCache::load(&store, NOW + DIRECTORY_CACHE_TTL_MS + 1).unwrap();
+    assert_eq!(ids(&loaded), vec![person(2).id]);
+  }
+
+  fn ids(cache: &DirectoryCache) -> Vec<UserId> {
+    cache.entries.iter().map(|entry| entry.user.id).collect()
+  }
+
+  fn person(raw: i64) -> UserSummary {
+    UserSummary {
+      id: UserId::from_snowflake(Snowflake::new(raw).unwrap()),
+      maybe_username: None,
+      display_name: format!("Person {raw}"),
+      kind: UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+    }
   }
 }

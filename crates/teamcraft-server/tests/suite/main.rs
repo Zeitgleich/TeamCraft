@@ -21,6 +21,7 @@ mod call_roster;
 mod calls;
 mod conversations;
 mod device_gaps;
+mod directory;
 mod first_sight;
 mod gateway;
 mod guests;

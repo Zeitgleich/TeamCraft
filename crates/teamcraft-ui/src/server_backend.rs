@@ -159,6 +159,7 @@ pub fn build_snapshot(
     is_guest: summary.kind == UserKind::Guest,
     is_bot: false,
     maybe_organization: summary.maybe_organization.clone(),
+    device_setup: crate::model::DeviceSetup::Unknown,
   };
 
   let me_user = User {
@@ -172,6 +173,7 @@ pub fn build_snapshot(
     is_guest: me.role == Role::Guest,
     is_bot: false,
     maybe_organization: None,
+    device_setup: crate::model::DeviceSetup::Unknown,
   };
 
   let mut users: Vec<User> = vec![me_user.clone()];

@@ -17,8 +17,8 @@ use teamcraft_proto::{
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
   ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
   ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SendMessageRequest,
-  SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SearchUsersResponse,
+  SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -206,6 +206,11 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn user(&self, user: UserId) -> Result<UserSummary, ApiError> {
     self.get(&format!("/users/{user}")).await
+  }
+
+  async fn search_users(&self, query: &str) -> Result<SearchUsersResponse, ApiError> {
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    self.get(&format!("/users?query={encoded}")).await
   }
 
   async fn register_device(&self, request: &RegisterDeviceRequest) -> Result<DeviceResponse, ApiError> {

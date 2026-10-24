@@ -222,6 +222,22 @@ Result:
   if no member is online, the server queues the add and the next member who comes online completes it.
 - If the commit's answer is lost, the content keys the new member needs are sent once the commit is
   merged (§4.6, "Lost commit answers"); if sending fails, they are queued and sent later.
+- **Nobody to add yet.** A person who hasn't set up the app has no device, so there is nothing to
+  put in the group; a person whose devices ran out of key packages can't be added either. The
+  conversation (a DM, or a channel the person is added to) is made anyway and the server lists
+  them; the adding device keeps a pending addition with the history choice it settled. It costs no
+  network while it waits: the person's first device (`device_add`) makes it due; a full sync (at
+  start, and after the gateway's resume window expired, when that event may have gone by) asks for
+  the device lists of up to 50 waiting people again, at most once per `rejoin_retry`. It is then
+  committed like any add (the signed change is made when committed, so it is never stale). Without
+  key packages it is retried after `device_add_stagger`, doubling up to `rejoin_retry_max`; when no
+  device passes the checks (signed device list, credential) it isn't retried until the person's
+  next device. It is dropped once the person is in the group or the server no longer lists them.
+  A DM keeps its setup record (§4.6) so that a founding race with the person's first device is
+  settled as there: the record counts as done while it only waits for a first device (no repair
+  runs), the pending addition then resumes the DM's setup, and a missing key package is the
+  setup's own retry. Only the adding device holds the pending addition (robustness audit, F2).
+  The conversation shows "X hasn't set up the app yet" (or "… can't be added yet") meanwhile.
 
 #### 4.3.1 Key package lifecycle
 

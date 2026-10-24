@@ -813,6 +813,12 @@ fn demo_users() -> Vec<User> {
         5..=8 => Some("Brand B".to_owned()),
         _ => None,
       },
+      // The last colleague hasn't set up the app yet.
+      device_setup: if id == 8 {
+        crate::model::DeviceSetup::NoDevices
+      } else {
+        crate::model::DeviceSetup::HasDevices
+      },
     })
     .collect();
   users[3].maybe_custom_status = Some(CustomStatus {
@@ -835,6 +841,7 @@ fn demo_users() -> Vec<User> {
     is_guest: false,
     is_bot: true,
     maybe_organization: None,
+    device_setup: crate::model::DeviceSetup::HasDevices,
   });
   users
 }

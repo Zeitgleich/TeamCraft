@@ -1023,6 +1023,16 @@ impl ChatBackend for RemoteChat {
     self.mirror.borrow().snapshot.users.clone()
   }
 
+  fn search_people(&self, query: &str) -> Vec<User> {
+    match self.ask(ChatQuery::SearchPeople {
+      query: query.to_owned(),
+    }) {
+      Some(ChatAnswer::People { people }) => people,
+      // Until the core answers: who the mirror knows.
+      _ => teamcraft_client_api::backend::filter_people(self.users(), query),
+    }
+  }
+
   fn live_snapshot(&self) -> Option<teamcraft_client_api::live::LiveSnapshot> {
     self.mirror.borrow().snapshot.maybe_live.clone()
   }

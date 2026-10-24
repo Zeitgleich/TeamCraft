@@ -23,8 +23,8 @@ use teamcraft_proto::{
   ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
   ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
   PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
-  UserId, UserSummary,
+  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, UploadIdentityKeyRequest,
+  UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -61,6 +61,9 @@ pub trait ServerApi {
 
   fn me(&self) -> impl Future<Output = Result<GetMeResponse, ApiError>>;
   fn user(&self, user: UserId) -> impl Future<Output = Result<UserSummary, ApiError>>;
+  /// The directory (`GET /users?query=`): people whose name or username contains `query`, at most
+  /// one page of the server's size. Guests only find people they share a conversation with.
+  fn search_users(&self, query: &str) -> impl Future<Output = Result<SearchUsersResponse, ApiError>>;
 
   fn register_device(
     &self,

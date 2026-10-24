@@ -5,14 +5,16 @@
 use std::collections::HashMap;
 
 use teamcraft_client_api::admin::DeviceInfo;
+use teamcraft_client_api::backend::filter_people;
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
-use teamcraft_client_api::model::{TimestampMs, UserId};
+use teamcraft_client_api::model::{TimestampMs, User, UserId};
 use teamcraft_client_api::privacy::PrivacySettings;
 use teamcraft_proto::CallHistoryEntry;
 
 use crate::client::devices::{OWN_DEVICES_KEY, OwnDevicesRecord};
 use crate::client::people::{
-  CALL_HISTORY_KEY, CallHistoryRecord, LastSeenRecord, PRIVACY_KEY, PrivacyRecord, last_seen_key,
+  CALL_HISTORY_KEY, CallHistoryRecord, DirectoryCache, LastSeenRecord, PRIVACY_KEY, PrivacyRecord,
+  last_seen_key,
 };
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -22,17 +24,56 @@ use crate::ui_backend::{CoreChatBackend, CoreCommand};
 const FRESH_FOR_MS: i64 = 60_000;
 /// A request that got no answer (offline, error) isn't repeated sooner than this.
 const RETRY_AFTER_MS: i64 = 15_000;
+/// Directory searches remembered for [`FRESH_FOR_MS`]; beyond this many the oldest go first.
+const MAX_REMEMBERED_SEARCHES: usize = 64;
 
 /// When each kind of refresh was last requested.
 #[derive(Debug, Default)]
 pub(crate) struct RequestLog {
   last_seen: HashMap<UserId, i64>,
+  /// Directory searches by normalized query.
+  directory: HashMap<String, i64>,
   maybe_privacy: Option<i64>,
   maybe_call_history: Option<i64>,
   maybe_own_devices: Option<i64>,
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
+  /// People by name from the local store (which keeps earlier directory answers) and, unless the
+  /// same query went to the server within [`FRESH_FOR_MS`], a directory search whose answer shows
+  /// on the next read.
+  pub(crate) fn ui_search_people(&self, query: &str) -> Vec<User> {
+    let normalized = query.trim().to_lowercase();
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .directory
+      .get(&normalized)
+      .is_none_or(|requested| now - requested > FRESH_FOR_MS);
+    if is_due {
+      remember_search(&mut log.directory, normalized.clone(), now);
+      drop(log);
+      self.command(CoreCommand::SearchDirectory {
+        query: normalized.clone(),
+      });
+    }
+    filter_people(self.known_people(), &normalized)
+  }
+
+  /// The people of the user's spaces and conversations and, once each, those the directory found
+  /// lately; whether somebody has a device comes from the directory.
+  fn known_people(&self) -> Vec<User> {
+    let cache = self.read(DirectoryCache::load(self.store_ref(), self.now_ms()));
+    let mut summaries = self.summaries();
+    for entry in cache.entries {
+      summaries
+        .entry(entry.user.id)
+        .and_modify(|known| known.maybe_has_devices = entry.user.maybe_has_devices)
+        .or_insert(entry.user);
+    }
+    summaries.values().map(|summary| self.to_user(summary)).collect()
+  }
+
   pub(crate) fn ui_last_seen(&self, user: UserId) -> Option<TimestampMs> {
     let maybe_record: Option<LastSeenRecord> = self.read(records::get_json(
       self.store_ref(),
@@ -180,6 +221,19 @@ fn history_item(me: UserId, call: &CallHistoryEntry) -> CallHistoryItem {
     maybe_started_by: call.maybe_started_by,
     participants: call.participants.clone(),
   }
+}
+
+/// Records a search, dropping the oldest when the log is full (its bound).
+fn remember_search(log: &mut HashMap<String, i64>, query: String, now: i64) {
+  if log.len() >= MAX_REMEMBERED_SEARCHES
+    && let Some(oldest) = log
+      .iter()
+      .min_by_key(|(_, requested)| **requested)
+      .map(|(query, _)| query.clone())
+  {
+    log.remove(&oldest);
+  }
+  log.insert(query, now);
 }
 
 #[cfg(test)]

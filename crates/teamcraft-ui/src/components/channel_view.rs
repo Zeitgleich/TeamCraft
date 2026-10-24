@@ -125,7 +125,8 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
 
 /// Removals and leaves still on their way or failed (with "retry"), people still in the
 /// encryption group whom the server no longer lists (admins can sign their removal), and a server
-/// refusing this device the group (e2ee.md §4.6, removal order).
+/// refusing this device the group (e2ee.md §4.6, removal order), and people who wait to be added
+/// until they have a device with a key package (e2ee.md §4.3).
 #[component]
 fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conversation>>) -> impl IntoView {
   let state = use_app_state();
@@ -177,6 +178,21 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
             Some(user),
           ),
           MembershipIssue::GroupRefused => ("alert", i18n.t("group-refused"), None),
+          MembershipIssue::WaitingForFirstDevice { user } => (
+            "status",
+            i18n.t_with("waiting-first-device", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::NoKeyPackage { user } => (
+            "status",
+            i18n.t_with("waiting-key-package", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::DevicesUnverified { user } => (
+            "alert",
+            i18n.t_with("devices-unverified", &[("name", &name_of(user))]),
+            None,
+          ),
           MembershipIssue::Unknown => return None,
         };
         let is_leftover = matches!(issue, MembershipIssue::LeftInGroup { .. });

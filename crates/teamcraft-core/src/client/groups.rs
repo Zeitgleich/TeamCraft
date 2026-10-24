@@ -87,6 +87,11 @@ struct DmSetupRecord {
   /// founding race; it stops being current if it does.
   #[serde(default)]
   maybe_founding_key_id: Option<[u8; 16]>,
+  /// Everybody else is in the group except people without a device, whose first device makes
+  /// their [`PendingChange::AddUser`] due: nothing to repair until then. The record stays, so a
+  /// founding race with that person's first device is still settled as above.
+  #[serde(default)]
+  is_waiting_for_device: bool,
 }
 
 /// What became of opening a welcome.
@@ -205,6 +210,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .map_or(0, |record| record.attempts)
         .saturating_add(1),
       maybe_founding_key_id: maybe_setup.and_then(|record| record.maybe_founding_key_id),
+      is_waiting_for_device: false,
     };
     records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
     self.finish_dm_setup(id, others).await?;
@@ -236,7 +242,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         continue;
       }
       let now = self.now_ms();
-      if now.saturating_sub(setup.tried_at_ms) < self.rejoin_wait_ms(setup.attempts) {
+      // Waiting for somebody's first device costs nothing; `device_add` wakes it.
+      if setup.is_waiting_for_device
+        || now.saturating_sub(setup.tried_at_ms) < self.rejoin_wait_ms(setup.attempts)
+      {
         continue;
       }
       records::put_json(
@@ -271,7 +280,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// only for a verified welcome of the winner's group ([`Self::join_from_welcome`]), never on
   /// the server's word, so the group never forks and a server can't make devices found again and
   /// again (e2ee.md §4.6). `Ok(true)` once everybody is in.
-  async fn finish_dm_setup(&mut self, id: ConversationId, others: &[UserId]) -> Result<bool, CoreError> {
+  pub(super) async fn finish_dm_setup(
+    &mut self,
+    id: ConversationId,
+    others: &[UserId],
+  ) -> Result<bool, CoreError> {
     if self.has_group(id)? {
       self.resolve_pending_commit(id).await?;
     }
@@ -317,6 +330,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           }),
         )
         .await?;
+      if self.group_users(id)?.contains(user) {
+        continue;
+      }
+      // Somebody who hasn't set up the app yet goes in when their first device appears.
+      if self.wait_for_first_device(id, *user, HistoryShare::Full).await? {
+        continue;
+      }
       if self.is_unfinished_dm_founding(id)? {
         // Nothing went in (another founding won the epoch, or no key packages): try later.
         break;
@@ -346,17 +366,53 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.found_group_with_key(id, maybe_key)
   }
 
-  /// Forgets the setup record once this device is in a group that holds everybody.
+  /// Forgets the setup record once this device is in a group that holds everybody. Done as well
+  /// when the only ones missing wait for their first device: the record stays, marked so that
+  /// nothing retries it ([`DmSetupRecord::is_waiting_for_device`]).
   fn complete_dm_setup(&mut self, id: ConversationId, others: &[UserId]) -> Result<bool, CoreError> {
     if !self.has_group(id)? {
       return Ok(false);
     }
     let users = self.group_users(id)?;
-    if !others.iter().all(|user| users.contains(user)) {
+    let missing: Vec<UserId> = others
+      .iter()
+      .copied()
+      .filter(|user| !users.contains(user))
+      .collect();
+    if missing.is_empty() {
+      self.store.delete(Table::SyncState, &dm_setup_key(id))?;
+      return Ok(true);
+    }
+    let waiting = super::pending_user_additions(&self.store, id)?;
+    let is_waiting_for_device = missing
+      .iter()
+      .all(|user| waiting.contains(&(*user, super::UserAddWait::NoDevice)));
+    if !is_waiting_for_device {
       return Ok(false);
     }
-    self.store.delete(Table::SyncState, &dm_setup_key(id))?;
+    if let Some(setup) = self.dm_setup(id)? {
+      let setup = DmSetupRecord {
+        is_waiting_for_device: true,
+        ..setup
+      };
+      records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
+    }
     Ok(true)
+  }
+
+  /// The people a DM was opened with, while its setup isn't finished; the setup is retried by
+  /// [`Self::repair_dm_setups`] again (no longer waiting for a device).
+  pub(super) fn resume_dm_setup(&mut self, id: ConversationId) -> Result<Option<Vec<UserId>>, CoreError> {
+    let Some(setup) = self.dm_setup(id)? else {
+      return Ok(None);
+    };
+    let others = setup.others.clone();
+    let setup = DmSetupRecord {
+      is_waiting_for_device: false,
+      ..setup
+    };
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
+    Ok(Some(others))
   }
 
   /// Gives up a group of one that lost the founding race, once the winner's welcome checked out.
@@ -438,6 +494,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           history,
         }),
       )
+      .await?;
+    self
+      .queue_user_addition_if_missing(conversation, user, history)
       .await?;
     let shared = match history {
       HistoryShare::FromJoin => HistoryPolicy::FromJoin,

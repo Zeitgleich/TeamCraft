@@ -22,6 +22,7 @@ mod messaging;
 mod notifications;
 mod org_backgrounds;
 mod org_recovery;
+mod pending_add;
 pub mod people;
 pub mod previews;
 mod removal;
@@ -57,6 +58,7 @@ pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
+pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
 use teamcraft_crypto::membership::ChangeId;
@@ -165,6 +167,9 @@ pub struct Client<A, S> {
   /// When this device last tried to join each conversation's group as a further device (backs
   /// off while waiting for a member).
   member_join_attempts: HashMap<ConversationId, i64>,
+  /// When people waiting for a first device were last checked after a full sync
+  /// ([`Client::recheck_waiting_additions`]).
+  maybe_waiting_checked_at_ms: Option<i64>,
   /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
   /// sends into the others only after catching up (e2ee.md §4.6).
   mls_current: std::collections::BTreeSet<ConversationId>,
@@ -241,6 +246,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       mls_current: Default::default(),
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
+      maybe_waiting_checked_at_ms: None,
     };
     // Startup: removal records of the user's devices count from the start, and this device's own
     // (also from older versions) are shared.

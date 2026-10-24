@@ -207,6 +207,8 @@ pub struct AppState {
   pub overlay: RwSignal<Overlay>,
   /// Text of the search box, kept when leaving and re-entering the search page.
   pub search_query: RwSignal<String>,
+  /// What the top bar's search starts with when it opens (Ctrl/Cmd+F: the open conversation).
+  pub switcher_query: RwSignal<String>,
   pub call: CallState,
   /// The login waiting for the user's approval, shown while the overlay is `DeviceApproval`.
   pub device_prompt: RwSignal<Option<DeviceApproval>>,
@@ -288,6 +290,7 @@ impl AppState {
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
       search_query: RwSignal::new(String::new()),
+      switcher_query: RwSignal::new(String::new()),
       call: CallState::new(),
       device_prompt: RwSignal::new(None),
       reply_target: RwSignal::new(None),
@@ -848,6 +851,13 @@ impl AppState {
   }
 
   /// Opens the search page, optionally with a query already filled in.
+  /// Opens the top bar's search, the one search for people, threads, channels, spaces and
+  /// messages, starting with `query`.
+  pub fn open_switcher(&self, query: &str) {
+    self.switcher_query.set(query.to_owned());
+    self.overlay.set(Overlay::QuickSwitcher);
+  }
+
   pub fn open_search(&self, maybe_query: Option<&str>) {
     if let Some(query) = maybe_query {
       self.search_query.set(query.to_owned());
