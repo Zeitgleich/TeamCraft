@@ -5891,6 +5891,20 @@ ol.md-list {
 .browse-text { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .browse-topic { color: var(--text-muted, #666); font-size: .85em; }
 .inline-form { display: flex; gap: .5rem; }
+.inline-form .input { flex: 1; min-width: 0; }
+
+/* Browse spaces and invitations */
+.space-row .space-tile { width: 36px; height: 36px; flex: none; font-size: .9rem; }
+.space-row.highlighted { background: var(--accent-soft, rgba(59,125,221,.12)); border-radius: 6px; padding-inline: .4rem; }
+.browse-meta { font-size: .8em; }
+.radio-group { border: 0; margin: .5rem 0; padding: 0; }
+.radio-group legend { padding: 0; font-weight: 600; }
+.invite-form h3, .modal-body > h3 { margin: 1rem 0 .25rem; font-size: .95rem; }
+.people-picker { max-height: 12rem; }
+@media (max-width: 600px) {
+  .space-row { flex-wrap: wrap; }
+  .space-row .browse-text { flex-basis: calc(100% - 48px); }
+}
 .sidebar-head { display: flex; align-items: center; gap: .25rem; }
 .sidebar-head .space-name { flex: 1; }
 

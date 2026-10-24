@@ -11,15 +11,16 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
-  AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
-  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
+  AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
+  ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
   CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage,
   GetMeResponse, IdentityKeyResponse, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
   ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
   ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest,
   PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, SearchUsersResponse,
-  SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  SendMessageRequest, SpaceId, SpaceMemberResponse, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
+  UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -563,6 +564,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &format!("/spaces/{space}/join"),
         &serde_json::json!({}),
       )
+      .await
+  }
+
+  async fn add_space_member(
+    &self,
+    space: SpaceId,
+    request: &AddSpaceMemberRequest,
+  ) -> Result<SpaceMemberResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/spaces/{space}/members"), request)
       .await
   }
 

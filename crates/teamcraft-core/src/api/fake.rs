@@ -12,19 +12,19 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt;
 use teamcraft_proto::{
-  AddConversationMemberRequest, Base64Bytes, ChannelModeration, ChannelRole, ClaimKeyPackagesRequest,
-  ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationId, ConversationKind, ConversationMemberResponse,
-  ConversationResponse, ConversationVisibility, CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest,
-  DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
-  GetMeResponse, HistoryPolicy, Id, IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse,
-  KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
-  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
-  ListSpaceMembersResponse, ListSpacesResponse, MessageId, MessageResponse, MlsMessageKind,
-  MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, Role,
-  SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake, SpaceId, SpaceMemberResponse,
-  SpaceResponse, SpaceRole, UnixMillis, UpdateConversationMemberRequest, UploadIdentityKeyRequest,
-  UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
+  AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelModeration, ChannelRole,
+  ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationId, ConversationKind,
+  ConversationMemberResponse, ConversationResponse, ConversationVisibility, CreateChannelRequest,
+  CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage,
+  GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id, IdempotencyKey, IdentityKeyResponse,
+  JoinPolicy, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
+  ListConversationsResponse, ListDevicesResponse, ListMessagesQuery, ListMessagesResponse,
+  ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageId,
+  MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, Role, SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake,
+  SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis, UpdateConversationMemberRequest,
+  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -172,6 +172,12 @@ struct State {
   spaces: BTreeMap<SpaceId, SpaceResponse>,
   categories: BTreeMap<CategoryId, CategoryResponse>,
   invites: Vec<InviteResponse>,
+  /// People added to spaces through `add_space_member`, in order.
+  space_member_adds: Vec<(SpaceId, AddSpaceMemberRequest)>,
+  /// Known users who are in no space until `add_space_member` adds them.
+  space_outsiders: HashSet<UserId>,
+  /// The personal message of each invitation, in order (the response doesn't carry it).
+  invite_messages: Vec<Option<String>>,
   /// Calls served by `list_call_history` to everybody who took part (newest first).
   call_history: Vec<teamcraft_proto::CallHistoryEntry>,
   /// When people were last active, and who chose to hide it.
@@ -770,6 +776,21 @@ impl FakeServer {
     state.key_bags.insert(user, bag);
   }
 
+  /// Takes a known user out of every space, so `add_space_member` has someone to add.
+  pub fn make_space_outsider(&self, user: UserId) {
+    self.lock().space_outsiders.insert(user);
+  }
+
+  /// People added to spaces so far (`add_space_member`), in order.
+  pub fn space_member_adds(&self) -> Vec<(SpaceId, AddSpaceMemberRequest)> {
+    self.lock().space_member_adds.clone()
+  }
+
+  /// The personal messages of the invitations sent so far, in order.
+  pub fn invite_messages(&self) -> Vec<Option<String>> {
+    self.lock().invite_messages.clone()
+  }
+
   /// Space invitations sent so far.
   pub fn invites(&self) -> Vec<InviteResponse> {
     self.lock().invites.clone()
@@ -1277,7 +1298,7 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  /// Every known user is in every fake space.
+  /// Every known user is in every fake space, except the outsiders.
   async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
     self.with(|state, _| {
       state.default_space_entry();
@@ -1287,6 +1308,7 @@ impl ServerApi for FakeServerApi {
       let members = state
         .users
         .values()
+        .filter(|user| !state.space_outsiders.contains(&user.id))
         .map(|user| SpaceMemberResponse {
           user: user.clone(),
           role: SpaceRole::Member,
@@ -1967,6 +1989,28 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn add_space_member(
+    &self,
+    space: SpaceId,
+    request: &AddSpaceMemberRequest,
+  ) -> Result<SpaceMemberResponse, ApiError> {
+    self.with(|state, _| {
+      state.default_space_entry();
+      if !state.spaces.contains_key(&space) {
+        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+      }
+      let user = state.user(request.user_id)?.clone();
+      state.space_outsiders.remove(&request.user_id);
+      state.space_member_adds.push((space, request.clone()));
+      Ok(SpaceMemberResponse {
+        user,
+        role: request.role.clone(),
+        maybe_expires_at: request.maybe_expires_at,
+        maybe_sponsor_user_id: None,
+      })
+    })
+  }
+
   async fn join_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
     self.with(|state, me| {
       let floor = state.peek_id();
@@ -2098,6 +2142,9 @@ impl ServerApi for FakeServerApi {
         maybe_brand_id: None,
         maybe_my_role: Some(SpaceRole::SpaceAdmin),
         maybe_my_notifications: None,
+        member_count: 1,
+        can_add_members: true,
+        can_invite_guests: true,
       };
       state.spaces.insert(id, space.clone());
       if let Some(key) = request.maybe_idempotency_key {
@@ -2223,6 +2270,7 @@ impl ServerApi for FakeServerApi {
         maybe_expires_at: request.maybe_expires_at,
       };
       state.invites.push(invite.clone());
+      state.invite_messages.push(request.maybe_message.clone());
       Ok(invite)
     })
   }
@@ -3139,6 +3187,9 @@ impl State {
       maybe_brand_id: None,
       maybe_my_role: Some(SpaceRole::Member),
       maybe_my_notifications: None,
+      member_count: 0,
+      can_add_members: false,
+      can_invite_guests: false,
     });
   }
 

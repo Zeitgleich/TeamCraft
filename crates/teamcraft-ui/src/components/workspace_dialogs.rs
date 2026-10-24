@@ -1,14 +1,12 @@
-//! Managing the workspace: new spaces and channels, the channel browser, channel and space
-//! settings (rename, picture and color, categories, privacy conversion, archive), adding people with
-//! the "share history" choice, and inviting members or guests. The core and server decide what the
-//! user may do; these
+//! Managing the workspace: new spaces and channels, the channel browser, and channel and space
+//! settings (rename, picture and color, categories, privacy conversion, archive). Browsing spaces and
+//! inviting people live in `space_invites`. The core and server decide what the user may do; these
 //! dialogs only collect the choices.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
-  SpaceInvite,
 };
 use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, SpaceResponse};
 use wasm_bindgen::JsCast;
@@ -20,21 +18,16 @@ use crate::components::image_crop_dialog::{
   CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
 };
 use crate::components::modal::Modal;
-use crate::components::pending_button::PendingButton;
 use crate::components::space_tile::SpaceTile;
-use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
-use crate::model::{ConversationId, SpaceId, UserId, hue_from_hex};
+use crate::model::{ConversationId, SpaceId, hue_from_hex};
 use crate::reactive::SetIfAlive;
 use crate::space_images::use_space_images;
 use crate::state::{Overlay, use_app_state};
 
 /// What the color picker shows for a space without a color of its own.
 const DEFAULT_SPACE_COLOR: &str = "#3b5fa0";
-/// Invitations are for members unless the inviter says otherwise: a guest invitation limits what the
-/// person sees, so it has to be a deliberate choice.
-const INVITES_AS_GUEST_BY_DEFAULT: bool = false;
 
 /// The color picker's state: untouched, a picked color, or back to the derived default.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,7 +112,7 @@ impl ShownImage {
 
 /// Dialog frame: title, close button, scrolling body.
 #[component]
-fn Dialog(
+pub(crate) fn Dialog(
   title_key: &'static str,
   #[prop(optional, into)] class: &'static str,
   children: Children,
@@ -184,60 +177,6 @@ pub fn NewSpaceDialog() -> impl IntoView {
         </footer>
       </form>
     </Dialog>
-  }
-}
-
-/// Open spaces the user can join, and the way to create a new one.
-#[component]
-pub fn JoinSpaceDialog() -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  view! {
-    <Dialog title_key="space-join-title" class="modal-small">
-      <JoinableSpaceList />
-      <footer class="modal-foot">
-        <button type="button" class="btn" on:click=move |_| state.overlay.set(Overlay::NewSpace)>
-          {move || i18n.t("space-join-create-instead")}
-        </button>
-      </footer>
-    </Dialog>
-  }
-}
-
-/// The open spaces with a Join button each (also on the getting-started page).
-#[component]
-pub fn JoinableSpaceList() -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let spaces = Memo::new(move |_| state.read(|backend| backend.joinable_spaces()));
-  view! {
-    <ul class="browse-list">
-      <For each=move || spaces.get() key=|space| space.id let:space>
-        {
-          let (id, name) = (space.id, space.name.clone());
-          view! {
-            <li class="browse-row">
-              <div class="browse-text">
-                <span class="browse-name" translate="no">{space.name.clone()}</span>
-                <span class="browse-topic" translate="no">{space.maybe_description.clone().unwrap_or_default()}</span>
-              </div>
-              <button
-                class="btn btn-small btn-primary"
-                on:click=move |_| {
-                  state.close_overlay();
-                  state.join_space(id, name.clone());
-                }
-              >
-                {move || i18n.t("space-join")}
-              </button>
-            </li>
-          }
-        }
-      </For>
-      <Show when=move || spaces.with(Vec::is_empty) fallback=|| ()>
-        <li class="empty-state">{move || i18n.t("space-join-none")}</li>
-      </Show>
-    </ul>
   }
 }
 
@@ -467,7 +406,11 @@ pub fn ChannelSettingsDialog(conversation: ConversationId) -> impl IntoView {
       <ChannelRetention conversation=conversation />
       <h3>{move || i18n.t("channel-archive")}</h3>
       <button class="btn" on:click=move |_| change(ChannelChanges { maybe_is_archived: Some(true), ..ChannelChanges::default() })>{move || i18n.t("channel-archive-action")}</button>
-      <AddPeople conversation=conversation />
+      <h3>{move || i18n.t("channel-add-people")}</h3>
+      <button class="btn" on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))>
+        <Icon name=IconName::UserPlus />
+        {move || i18n.t("channel-add-people")}
+      </button>
     </Dialog>
   }
   .into_any()
@@ -675,58 +618,6 @@ fn SpaceMute(space: SpaceId) -> impl IntoView {
   }
 }
 
-/// Adds a person to the channel. The "share history" toggle decides what they can read (e2ee.md).
-#[component]
-fn AddPeople(conversation: ConversationId) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let chosen = RwSignal::new(String::new());
-  let shares_history = RwSignal::new(false);
-  let pending = PendingAction::new();
-  let candidates = Memo::new(move |_| {
-    let members = state
-      .read(|backend| backend.conversation(conversation))
-      .map(|info| info.member_ids)
-      .unwrap_or_default();
-    state
-      .read(|backend| backend.users())
-      .into_iter()
-      .filter(|user| !members.contains(&user.id))
-      .collect::<Vec<_>>()
-  });
-  let add = move |_| {
-    let Ok(user) = chosen.get_untracked().parse::<UserId>() else {
-      return;
-    };
-    let history = if shares_history.get_untracked() {
-      HistoryPolicy::Full
-    } else {
-      HistoryPolicy::FromJoin
-    };
-    // Pending until the core answered; a refusal shows as an error toast (issue #322).
-    pending.run(|| state.write(|backend| backend.add_member_with_history(conversation, user, history)));
-    chosen.set(String::new());
-  };
-  view! {
-    <h3>{move || i18n.t("channel-add-people")}</h3>
-    <label class="visually-hidden" for="cs-add">{move || i18n.t("channel-add-people")}</label>
-    <select id="cs-add" class="input" prop:value=move || chosen.get() on:change=move |ev| chosen.set(event_target_value(&ev))>
-      <option value="">{move || i18n.t("channel-pick-person")}</option>
-      <For each=move || candidates.get() key=|user| user.id let:user>
-        <option value=user.id.to_string() translate="no">{user.display_name.clone()}</option>
-      </For>
-    </select>
-    <label class="check-row">
-      <input type="checkbox" prop:checked=move || shares_history.get() on:change=move |ev| shares_history.set(event_target_checked(&ev)) />
-      <span>{move || i18n.t("channel-share-history")}</span>
-    </label>
-    <p class="hint">{move || if shares_history.get() { i18n.t("channel-share-history-on") } else { i18n.t("channel-share-history-off") }}</p>
-    <PendingButton pending=pending class="btn btn-primary" is_disabled=Signal::derive(move || chosen.get().is_empty()) on_click=add>
-      {move || i18n.t("channel-add")}
-    </PendingButton>
-  }
-}
-
 /// Settings of a space: name, picture, color, archive, categories and invitations.
 #[component]
 pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
@@ -813,7 +704,11 @@ pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
         <input id="ss-new-category" class="input" placeholder=move || i18n.t("space-category-new") prop:value=move || new_category.get() on:input=move |ev| new_category.set(event_target_value(&ev)) />
         <button type="submit" class="btn" prop:disabled=move || new_category.get().trim().is_empty()>{move || i18n.t("create")}</button>
       </form>
-      <InvitePeople space=space />
+      <h3>{move || i18n.t("invite-title")}</h3>
+      <button class="btn" on:click=move |_| state.overlay.set(Overlay::InvitePeople(space))>
+        <Icon name=IconName::UserPlus />
+        {move || i18n.t("invite-title")}
+      </button>
       <SpaceMute space=space />
       <h3>{move || i18n.t("channel-archive")}</h3>
       <button
@@ -977,48 +872,6 @@ fn CategoryRow(space: SpaceId, category: CategoryInfo) -> impl IntoView {
   }
 }
 
-/// Invites a person by email as member or guest.
-#[component]
-fn InvitePeople(space: SpaceId) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let email = RwSignal::new(String::new());
-  let is_guest = RwSignal::new(INVITES_AS_GUEST_BY_DEFAULT);
-  let is_sent = RwSignal::new(false);
-  let submit = move |ev: leptos::ev::SubmitEvent| {
-    ev.prevent_default();
-    let Some(email_address) = non_empty(&email.get_untracked()) else {
-      return;
-    };
-    state.write(|backend| {
-      backend.invite_to_space(SpaceInvite {
-        space,
-        email: email_address,
-        is_guest: is_guest.get_untracked(),
-        channels: Vec::new(),
-        maybe_expires_at: None,
-      })
-    });
-    email.set(String::new());
-    is_sent.set(true);
-  };
-  view! {
-    <h3>{move || i18n.t("invite-title")}</h3>
-    <form on:submit=submit>
-      <label for="invite-email">{move || i18n.t("invite-email")}</label>
-      <input id="invite-email" class="input" type="email" required prop:value=move || email.get() on:input=move |ev| { is_sent.set(false); email.set(event_target_value(&ev)) } />
-      <label class="check-row">
-        <input type="checkbox" prop:checked=move || is_guest.get() on:change=move |ev| is_guest.set(event_target_checked(&ev)) />
-        <span>{move || i18n.t("invite-as-guest")}</span>
-      </label>
-      <button type="submit" class="btn btn-primary" prop:disabled=move || email.get().trim().is_empty()>{move || i18n.t("invite-send")}</button>
-      <Show when=move || is_sent.get() fallback=|| ()>
-        <span role="status">{move || i18n.t("invite-sent")}</span>
-      </Show>
-    </form>
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1040,11 +893,6 @@ mod tests {
   fn blank_text_is_none() {
     assert_eq!(non_empty("  \n"), None);
     assert_eq!(non_empty(" a "), Some("a".to_owned()));
-  }
-
-  #[test]
-  fn invitations_are_for_members_by_default() {
-    const { assert!(!INVITES_AS_GUEST_BY_DEFAULT) };
   }
 
   #[test]
@@ -1091,6 +939,9 @@ mod tests {
       maybe_brand_id: None,
       maybe_my_role: None,
       maybe_my_notifications: None,
+      member_count: 1,
+      can_add_members: true,
+      can_invite_guests: true,
     }
   }
 }

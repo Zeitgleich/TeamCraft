@@ -60,6 +60,7 @@ mod retention;
 mod security;
 mod session_policy;
 mod shares;
+mod space_discovery;
 mod space_features;
 mod space_images;
 mod status;

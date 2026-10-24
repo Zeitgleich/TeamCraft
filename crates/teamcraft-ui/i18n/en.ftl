@@ -53,7 +53,7 @@ status-preset-vacation = On vacation
 
 ## Space rail
 rail-label = Spaces
-rail-add-space = Add a space
+rail-add-space = Browse or create spaces
 rail-space-mentions = { $name }, { $count } mentions
 rail-space-unread = { $name }, unread messages
 rail-home-unread = Home, { $count } unread
@@ -1238,6 +1238,7 @@ channel-share-history = Share the earlier history with them
 channel-share-history-on = They can read everything posted so far.
 channel-share-history-off = They only see messages from when they join.
 channel-add = Add
+channel-add-not-found = Not in the list?
 browse-title = Browse channels
 browse-filter = Find a channel
 browse-archived = Show archived channels
@@ -1262,10 +1263,31 @@ preview-missing-title = Channel not found
 preview-missing = It may have been made private or deleted.
 browse-preview = Preview
 invite-title = Invite people
-invite-email = Email address
-invite-as-guest = Invite as guest (limited access)
+invite-role = Invite as
+invite-role-member = Member: sees the space's public channels
+invite-role-guest = Guest: sees only what they are added to
+invite-guests-only = You can invite guests to this space. Space admins add members.
+invite-link-only = Only space admins can add people to this space. Share the link below: anyone in your organization can join this open space with it.
+invite-from-directory = People in your organization
+invite-chosen = People to invite
+invite-nobody-found = Nobody found. People who have never signed in can be invited by e-mail.
+invite-by-email = Invite by e-mail
+invite-email-placeholder = name@example.com, …
+invite-email-hint = For people without an account yet. They get an e-mail and join the space when they first sign in.
+invite-email-invalid = Please check these addresses: { $addresses }
+invite-email-too-many = At most { $max } addresses at a time.
+invite-message = Personal message (optional)
+invite-message-hint = Added to the invitation e-mails.
+invite-done = { $count ->
+    [one] { $count } person invited.
+   *[other] { $count } people invited.
+  }
+invite-link = Space link
+invite-link-copy = Copy link
+invite-link-copied = Copied
+invite-link-hint = Anyone in your organization who opens this link can join this open space.
+space-missing = This space is not available.
 invite-send = Send invitation
-invite-sent = Invitation sent.
 
 # Workspace system messages
 ws-member-added = { $by } added { $name }
@@ -1834,8 +1856,10 @@ start-create-channel = Create the first channel
 start-create-channel-hint = Channels are where the team talks, for example #general.
 start-browse-channels = Browse channels
 start-browse-channels-hint = Join the channels that are already there.
+start-browse-spaces = Browse spaces
+start-browse-spaces-hint = Find the open spaces of other teams and join them.
 start-invite = Invite colleagues
-start-invite-hint = Send invitations by e-mail and decide who joins as member or guest.
+start-invite-hint = Add colleagues from the directory or invite them by e-mail, as members or guests.
 start-find-people = Find people
 start-find-people-hint = Everyone who has signed in already; start a direct message.
 device-kind-desktop = Desktop
@@ -1843,10 +1867,14 @@ device-kind-browser = Browser
 passphrase-show = Show
 passphrase-hide = Hide
 start-join-heading = Spaces you can join
-space-join-title = Join a space
 space-join = Join
-space-join-none = There are no open spaces to join.
-space-join-create-instead = Create a new space
+spaces-browse-title = Browse spaces
+spaces-browse-filter = Find a space
+spaces-browse-open = Open spaces you can join
+spaces-browse-open-none = There are no open spaces to join.
+spaces-browse-mine = Your spaces
+spaces-browse-mine-none = You are not in any space yet.
+spaces-browse-invite-only-hint = Invite-only spaces show up here as soon as someone invites you.
 
 # Runtime settings: brands, mail, calendar and instance settings in the admin console
 admin-nav-brands = Brands
