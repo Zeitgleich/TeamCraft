@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire_enum::wire_enum;
-use crate::{BrandAssetSlot, BrandColors, BrandLinks, ConversationId, SpaceId, UnixMillis};
+use crate::{BrandAssetSlot, BrandColors, BrandLinks, ConversationId, SignInMethod, SpaceId, UnixMillis};
 
 wire_enum! {
   /// Where the value in force comes from.
@@ -57,6 +57,7 @@ wire_enum! {
     Limits => "limits",
     Integration => "integration",
     LocalAccounts => "local_accounts",
+    SignInPage => "sign_in_page",
     MailTexts => "mail_texts",
     MeetingMail => "meeting_mail",
   }
@@ -122,6 +123,10 @@ pub struct BrandSettings {
   pub links: BrandLinks,
   #[serde(default)]
   pub mail: BrandMailSettings,
+  /// The provider part of the sign-in button "Sign in with …" (e.g. "Microsoft"); else the
+  /// display name. Its icon is the `sso_icon` image.
+  #[serde(rename = "sso_label", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sso_label: Option<String>,
 }
 
 /// The sender of mail that goes out as this brand.
@@ -302,6 +307,7 @@ pub struct RuntimeSettingsResponse {
   pub limits: LimitSettings,
   pub integration: IntegrationSettings,
   pub local_accounts: LocalAccountSettings,
+  pub sign_in_page: SignInPageSettings,
   pub mail_texts: MailTextSettings,
   pub meeting_mail: MeetingMailSettings,
   /// One entry per group.
@@ -327,6 +333,7 @@ pub enum RuntimeSettingsSection {
   Limits(LimitSettings),
   Integration(IntegrationSettings),
   LocalAccounts(LocalAccountSettings),
+  SignInPage(SignInPageSettings),
   MailTexts(MailTextSettings),
   MeetingMail(MeetingMailSettings),
 }
@@ -401,15 +408,37 @@ pub struct IntegrationSettings {
   pub default_retention_days: u32,
 }
 
-/// Rules for local (password) accounts; whether they exist at all stays in the configuration, the
-/// shortest password is part of the signed workspace policy.
+/// Rules for local (password) accounts. They need `[local_accounts]` with a session secret in the
+/// configuration; `is_enabled` switches them off and on at runtime (sign-in refused, sessions end).
+/// The shortest password is part of the signed workspace policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct LocalAccountSettings {
+  #[serde(default = "enabled")]
+  pub is_enabled: bool,
   pub require_totp: bool,
   pub activation_ttl_hours: u32,
   pub session_ttl_hours: u32,
   pub max_failed_attempts: u32,
   pub lockout_secs: u64,
+}
+
+/// How the sign-in page looks (`GET /api/v1/server-info`). The SSO button's provider name and
+/// icon are brand settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SignInPageSettings {
+  /// The methods offered, in this order; at least one, each once. `local` only shows while local
+  /// accounts are available.
+  pub methods: Vec<SignInMethod>,
+  /// Language code -> help text below the form; `en` is the fallback.
+  #[serde(default)]
+  pub help_text: BTreeMap<String, String>,
+  /// A help page (https).
+  #[serde(rename = "help_link", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_help_link: Option<String>,
+}
+
+fn enabled() -> bool {
+  true
 }
 
 /// Texts of the server's own mail. Placeholders: invitation `{inviter}` `{space}` `{role}` `{url}`,
@@ -463,6 +492,7 @@ impl RuntimeSettingsSection {
       Self::Limits(_) => RuntimeSettingsKey::Limits,
       Self::Integration(_) => RuntimeSettingsKey::Integration,
       Self::LocalAccounts(_) => RuntimeSettingsKey::LocalAccounts,
+      Self::SignInPage(_) => RuntimeSettingsKey::SignInPage,
       Self::MailTexts(_) => RuntimeSettingsKey::MailTexts,
       Self::MeetingMail(_) => RuntimeSettingsKey::MeetingMail,
     }

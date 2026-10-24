@@ -32,6 +32,8 @@ const BUILTIN_BRAND_ID: &str = "teamcraft";
 const BUILTIN_DISPLAY_NAME: &str = "TeamCraft";
 const MAX_BRAND_ID_LEN: usize = 32;
 const MAX_TEXT_CHARS: usize = 200;
+/// Longest provider name on the sign-in button.
+const MAX_SSO_LABEL_CHARS: usize = 64;
 /// Most host names and e-mail domains of one brand.
 const MAX_LIST_ENTRIES: usize = 50;
 const ASSET_EXTENSIONS: &[(&str, &str)] = &[
@@ -442,6 +444,13 @@ impl Brand {
         || name.chars().any(char::is_control))
     {
       return Err(invalid("organization_name must be short single-line text".into()));
+    }
+    if let Some(label) = &config.maybe_sso_label
+      && (label.trim().is_empty()
+        || label.chars().count() > MAX_SSO_LABEL_CHARS
+        || label.chars().any(char::is_control))
+    {
+      return Err(invalid("sso_label must be short single-line text".into()));
     }
     if !config.is_default && config.hostnames.is_empty() {
       return Err(invalid(
@@ -940,6 +949,7 @@ fn load_assets(
     (BrandAssetSlot::IconDark, &config.maybe_icon_dark),
     (BrandAssetSlot::Favicon, &config.maybe_favicon),
     (BrandAssetSlot::FaviconDark, &config.maybe_favicon_dark),
+    (BrandAssetSlot::SsoIcon, &config.maybe_sso_icon),
   ];
   let mut assets = HashMap::new();
   for (slot, maybe_name) in slots {

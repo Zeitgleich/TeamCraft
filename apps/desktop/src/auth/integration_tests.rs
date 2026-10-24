@@ -25,6 +25,18 @@ impl TokenStore for SharedStore {
   async fn clear(&self, server: &str) -> Result<(), AuthError> {
     self.0.clear(server).await
   }
+
+  async fn load_local_session(&self, server: &str) -> Result<Option<secrecy::SecretString>, AuthError> {
+    self.0.load_local_session(server).await
+  }
+
+  async fn save_local_session(&self, server: &str, session: &secrecy::SecretString) -> Result<(), AuthError> {
+    self.0.save_local_session(server, session).await
+  }
+
+  async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
+    self.0.clear_local_session(server).await
+  }
 }
 
 #[tokio::test]

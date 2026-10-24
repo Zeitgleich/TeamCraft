@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use secrecy::SecretString;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
@@ -204,6 +205,27 @@ pub async fn auth_login(app: AppHandle, service: State<'_, Arc<Service>>) -> Res
       .map_err(|error| error.to_string())
   };
   Ok(service.login(open).await?)
+}
+
+/// Signs in a local account. The password goes straight into a secret and is never logged; errors
+/// carry the kinds `refused`, `disabled`, `rate_limited` and `network`.
+#[tauri::command]
+pub async fn auth_login_local(
+  login: String,
+  password: String,
+  totp_code: Option<String>,
+  service: State<'_, Arc<Service>>,
+) -> Result<(), CommandError> {
+  let password = SecretString::from(password);
+  let maybe_totp_code = totp_code
+    .as_deref()
+    .map(str::trim)
+    .filter(|code| !code.is_empty());
+  Ok(
+    service
+      .login_local(login.trim(), &password, maybe_totp_code)
+      .await?,
+  )
 }
 
 #[tauri::command]

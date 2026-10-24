@@ -1,17 +1,12 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.graphics.Bitmap
 import androidx.annotation.StringRes
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -38,10 +33,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -54,12 +47,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.SecretClipboard
-import uniffi.teamcraft_ffi.BrandLinks
-import uniffi.teamcraft_ffi.LoginBrand
 
 private const val MIN_PASSPHRASE_LENGTH = 12
 
@@ -78,79 +68,6 @@ fun MessageScreen(@StringRes message: Int, onRetry: () -> Unit) {
   Centered {
     Text(stringResource(message), style = MaterialTheme.typography.bodyLarge)
     Button(onClick = onRetry) { Text(stringResource(R.string.retry)) }
-  }
-}
-
-/**
- * Sign-in: the server's brand (logo, heading, text, links) when it sent one, and which server
- * the app signs in to, so a user with several organizations knows where they are. "Change server"
- * leads back to the server entry; [maybeOnChangeServer] is null when the organization locked it.
- */
-@Composable
-fun LoginScreen(
-  maybeBrand: LoginBrand?,
-  maybeLogo: Bitmap?,
-  serverHost: String,
-  @StringRes maybeError: Int?,
-  isBusy: Boolean,
-  onLogin: () -> Unit,
-  maybeOnChangeServer: (() -> Unit)?,
-) {
-  val name = maybeBrand?.displayName ?: stringResource(R.string.app_name)
-  Centered {
-    if (maybeLogo != null) {
-      Image(
-        maybeLogo.asImageBitmap(),
-        contentDescription = name,
-        modifier = Modifier.heightIn(max = LOGO_MAX_HEIGHT).fillMaxWidth(LOGO_WIDTH_FRACTION),
-      )
-    }
-    Text(
-      maybeBrand?.maybeTitle ?: name,
-      style = MaterialTheme.typography.headlineMedium,
-      textAlign = TextAlign.Center,
-      modifier = Modifier.semantics { heading() },
-    )
-    Text(
-      maybeBrand?.maybeText ?: stringResource(R.string.sign_in_hint),
-      style = MaterialTheme.typography.bodyMedium,
-      textAlign = TextAlign.Center,
-    )
-    maybeError?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
-    Button(onClick = onLogin, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) {
-      if (isBusy) {
-        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-      } else {
-        Text(stringResource(R.string.sign_in))
-      }
-    }
-    Text(
-      stringResource(R.string.sign_in_server, serverHost),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    maybeOnChangeServer?.let { onChange ->
-      TextButton(onClick = onChange, enabled = !isBusy) { Text(stringResource(R.string.server_change)) }
-    }
-    maybeBrand?.links?.let { BrandLinkRow(it) }
-  }
-}
-
-/** Support, privacy, terms and imprint, as the brand names them; each opens in the browser. */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun BrandLinkRow(links: BrandLinks) {
-  val uriHandler = LocalUriHandler.current
-  val entries = listOfNotNull(
-    links.maybeSupport?.let { R.string.brand_support to it },
-    links.maybePrivacy?.let { R.string.brand_privacy to it },
-    links.maybeTerms?.let { R.string.brand_terms to it },
-    links.maybeImprint?.let { R.string.brand_imprint to it },
-  )
-  FlowRow(horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
-    for ((label, url) in entries) {
-      TextButton(onClick = { runCatching { uriHandler.openUri(url) } }) { Text(stringResource(label)) }
-    }
   }
 }
 

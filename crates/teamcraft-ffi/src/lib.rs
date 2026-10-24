@@ -23,8 +23,8 @@ pub use calls::{
 };
 pub use error::TeamCraftError;
 pub use server_entry::{
-  CheckedServer, ServerAddress, ServerEntryError, StoredServer, check_server_info, normalize_server_address,
-  stored_server,
+  CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
+  check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
 };
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_media::openh264_library::{self, OpenH264Binary};

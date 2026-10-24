@@ -9,8 +9,12 @@ import java.net.URL
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -34,11 +38,13 @@ import uniffi.teamcraft_ffi.StoredServer
 
 /**
  * OIDC login with AppAuth (authorization code + PKCE) against the active server's identity provider,
- * as the server announced it (`StoredServer`: issuer, client, scopes). The session (refresh token
- * included) is kept sealed with a Keystore key, one file per server; the Rust core asks for access
- * tokens through [accessToken].
+ * as the server announced it (`StoredServer`: issuer, client, scopes), or a local account's sign-in
+ * with e-mail and password ([signInLocal]). Either session is kept sealed with a Keystore key, one
+ * file per server; the Rust core asks for access tokens through [accessToken].
  */
 class AuthRepository(private val context: Context, private val servers: ServerStore) {
+  /** For the best-effort logout of a local session, which must not hold up signing out. */
+  private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private val signedIn = MutableStateFlow(false)
   private var isLoaded = false
   private var maybeSession: Session? = null
@@ -54,9 +60,12 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
   val server: StoredServer?
     get() = session()?.server
 
-  /** The account key for local data: the OIDC subject. */
+  /** The account key for local data: the OIDC subject, or the local account's user ID. */
   val account: String?
-    get() = synchronized(this) { session()?.state?.parsedIdToken?.subject }
+    get() = synchronized(this) {
+      val session = session() ?: return null
+      session.maybeLocal?.userId ?: session.state.parsedIdToken?.subject
+    }
 
   /**
    * Switches to [maybeServer]'s session (signed in if one is stored for it), or to none. The
@@ -67,8 +76,29 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
       maybeSession?.service?.dispose()
       maybeSession = maybeServer?.let(::open)
       isLoaded = true
-      signedIn.value = maybeSession?.state?.isAuthorized == true
+      signedIn.value = maybeSession?.isSignedIn() == true
     }
+  }
+
+  /**
+   * Signs in to the active server's local account. On success the session replaces any identity
+   * provider session of this server. Throws [IOException][java.io.IOException] when the server
+   * can't be reached.
+   */
+  suspend fun signInLocal(login: String, password: String, maybeTotpCode: String?): LocalLoginOutcome {
+    val session = session() ?: throw IllegalStateException("no server")
+    val outcome = LocalLoginClient.login(session.server.address.origin, login, password, maybeTotpCode)
+    if (outcome !is LocalLoginOutcome.SignedIn) return outcome
+    synchronized(this) {
+      // The user changed the server while the request ran: this session is for the old one.
+      check(maybeSession === session) { "server changed during login" }
+      session.maybeLocal = outcome.session
+      session.state = AuthState()
+    }
+    session.file.delete()
+    session.localFile.write(outcome.session.encode())
+    signedIn.value = true
+    return outcome
   }
 
   /** The intent that opens the browser for login (PKCE is added by AppAuth). */
@@ -107,17 +137,25 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
       // The user changed the server while the browser was open: this login is for the old one.
       check(maybeSession === session) { "server changed during login" }
       session.state = fresh
+      session.maybeLocal = null
     }
+    session.localFile.delete()
     persist(session)
     signedIn.value = true
   }
 
   /**
-   * A valid access token, refreshed if it is about to expire; `null` when signed out. Blocks for
-   * at most [REFRESH_TIMEOUT_SECONDS]: called on the Rust engine thread, never on the UI thread.
+   * A valid access token, refreshed if it is about to expire; `null` when signed out. A local
+   * session has no refresh: once it expired the user is signed out. Blocks for at most
+   * [REFRESH_TIMEOUT_SECONDS]: called on the Rust engine thread, never on the UI thread.
    */
   fun accessToken(): String? {
     val session = session() ?: return null
+    synchronized(this) { session.maybeLocal }?.let { local ->
+      if (local.isValid(System.currentTimeMillis())) return local.accessToken
+      signOut(session)
+      return null
+    }
     val current = synchronized(this) { session.state }
     if (!current.isAuthorized) return null
     if (!current.needsTokenRefresh) return current.accessToken
@@ -135,10 +173,21 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
     synchronized(this) { maybeSession?.service?.dispose() }
   }
 
+  /** Ends either session; a local one is also ended on the server, in the background. */
   private fun signOut(session: Session) {
-    synchronized(this) { session.state = AuthState() }
+    val maybeLocal = synchronized(this) {
+      val local = session.maybeLocal
+      session.state = AuthState()
+      session.maybeLocal = null
+      local
+    }
     session.file.delete()
+    session.localFile.delete()
     if (maybeSession === session) signedIn.value = false
+    // An expired token is already dead on the server; only a live one is worth a request.
+    maybeLocal?.takeIf { it.isValid(System.currentTimeMillis()) }?.let { local ->
+      background.launch { LocalLoginClient.logout(session.server.address.origin, local) }
+    }
   }
 
   /** The active server's session, opened from the stored server on first use. */
@@ -146,7 +195,7 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
     if (!isLoaded) {
       maybeSession = servers.active()?.let(::open)
       isLoaded = true
-      signedIn.value = maybeSession?.state?.isAuthorized == true
+      signedIn.value = maybeSession?.isSignedIn() == true
     }
     maybeSession
   }
@@ -163,8 +212,10 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
         .setSkipIssuerHttpsCheck(issuer.scheme == "http" && isPlainHttpAllowed(issuer.host, isInsecureHttpAllowed))
         .build(),
     )
-    val file = SealedFile(File(context.filesDir, StoragePaths.sessionFile(server.address.storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
-    return Session(server, file, service, connections, loadState(file))
+    val storageKey = server.address.storageKey
+    val file = SealedFile(File(context.filesDir, StoragePaths.sessionFile(storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
+    val localFile = SealedFile(File(context.filesDir, StoragePaths.localSessionFile(storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
+    return Session(server, file, localFile, service, connections, loadState(file), loadLocal(localFile))
   }
 
   private suspend fun refresh(session: Session, current: AuthState): String? =
@@ -204,19 +255,41 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
       AuthState()
     }
 
+  /** The stored local session while it is valid; an expired or unreadable one is deleted. */
+  private fun loadLocal(file: SealedFile): LocalSession? {
+    val maybeLocal = try {
+      file.read()?.let(LocalSession::decode)
+    } catch (unreadable: Exception) {
+      // Sealed under a lost Keystore key: sign in again.
+      null
+    }
+    if (maybeLocal == null || !maybeLocal.isValid(System.currentTimeMillis())) {
+      file.delete()
+      return null
+    }
+    return maybeLocal
+  }
+
   private fun persist(session: Session) {
     val json = synchronized(this) { session.state.jsonSerializeString() }
     session.file.write(json.encodeToByteArray())
   }
 
-  /** One server's session: its sealed file, AppAuth service and current state. */
+  /**
+   * One server's session: its sealed files, AppAuth service and current state. At most one of
+   * [state] (identity provider) and [maybeLocal] (local account) is signed in.
+   */
   private class Session(
     val server: StoredServer,
     val file: SealedFile,
+    val localFile: SealedFile,
     val service: AuthorizationService,
     val connections: ConnectionBuilder,
     var state: AuthState,
-  )
+    var maybeLocal: LocalSession?,
+  ) {
+    fun isSignedIn(): Boolean = maybeLocal != null || state.isAuthorized
+  }
 
   /**
    * HTTPS everywhere; plain HTTP only to the device itself, or anywhere in development builds

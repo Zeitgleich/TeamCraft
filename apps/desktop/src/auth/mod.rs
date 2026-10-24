@@ -11,6 +11,7 @@
 //! apps"). Tokens are stored per server origin.
 
 pub mod commands;
+mod local;
 mod loopback;
 pub mod servers;
 mod store;
@@ -37,6 +38,7 @@ use teamcraft_client_api::server_entry::{
   check_discovery, is_provider_endpoint,
 };
 
+use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
 pub use store::{KeyringStore, TokenStore};
 
 /// How long the browser may take to come back.
@@ -131,6 +133,9 @@ pub enum AuthError {
   /// No server is chosen yet: the user has to enter one first.
   #[error("no server chosen")]
   NoServer,
+  /// The server refused a local account's sign-in.
+  #[error("the server refused the sign-in: {}", .0.kind())]
+  LocalRefused(LocalRefusal),
 }
 
 /// Why a server's `GET /api/v1/server-info` could not be used.
@@ -166,6 +171,7 @@ impl AuthError {
       Self::NotSignedIn => "not_signed_in",
       Self::Unsupported(_) => "unsupported",
       Self::NoServer => "no_server",
+      Self::LocalRefused(refusal) => refusal.kind(),
     }
   }
 }
@@ -203,6 +209,8 @@ struct Tokens {
 #[derive(Default)]
 struct Session {
   maybe_tokens: Option<Tokens>,
+  /// Set instead of `maybe_tokens` while a local account is signed in.
+  maybe_local: Option<LocalSession>,
   maybe_discovery: Option<Discovery>,
 }
 
@@ -277,12 +285,15 @@ impl<S: TokenStore> AuthService<S> {
     )?)
   }
 
-  /// Signs in with a stored refresh token, if there is one. `Ok(false)` means "sign in again"
-  /// (also when no server is chosen yet).
+  /// Signs in with a stored local session or refresh token, if there is one. `Ok(false)` means
+  /// "sign in again" (also when no server is chosen yet).
   pub async fn restore(&self) -> Result<bool, AuthError> {
     let Some(server) = self.active_server() else {
       return Ok(false);
     };
+    if self.restore_local(&server).await? {
+      return Ok(true);
+    }
     let Some(refresh) = self.store.load(&server.token_key()).await? else {
       return Ok(false);
     };
@@ -334,7 +345,50 @@ impl<S: TokenStore> AuthService<S> {
       .await
       .map_err(map_token_error)?;
     let mut session = self.session.lock().await;
-    self.adopt(&mut session, &server, &response).await
+    session.maybe_local = None;
+    self.adopt(&mut session, &server, &response).await?;
+    drop(session);
+    // A local session of an earlier sign-in must not come back at the next start.
+    if let Err(error) = self.store.clear_local_session(&server.server_url).await {
+      tracing::warn!(%error, "could not forget the earlier local session");
+    }
+    Ok(())
+  }
+
+  /// Signs in a local account with e-mail, password and, when given, the one-time code. The token
+  /// is kept for the API and stored for the next start; there is no refresh, expiry signs out.
+  pub async fn login_local(
+    &self,
+    login: &str,
+    password: &SecretString,
+    maybe_totp_code: Option<&str>,
+  ) -> Result<(), AuthError> {
+    let server = self.server()?;
+    let body = local::login_body(login, password, maybe_totp_code)?;
+    let url = format!("{}{LOCAL_LOGIN_PATH}", server.server_url.trim_end_matches('/'));
+    let response = self
+      .http
+      .post(url)
+      .header(reqwest::header::CONTENT_TYPE, "application/json")
+      .header(reqwest::header::ACCEPT, "application/json")
+      // reqwest takes the body by value; this copy is dropped with the request.
+      .body(body.expose_secret().to_owned())
+      .send()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    let status = response.status().as_u16();
+    let answer = response
+      .bytes()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    if status != 200 {
+      return Err(match LocalRefusal::from_answer(status, &answer) {
+        Some(refusal) => AuthError::LocalRefused(refusal),
+        None => AuthError::InvalidResponse(format!("the local sign-in answered HTTP {status}")),
+      });
+    }
+    let granted = LocalSession::from_response(&answer)?;
+    self.adopt_local(&server, granted).await
   }
 
   /// Aborts a login that waits for the browser.
@@ -342,18 +396,21 @@ impl<S: TokenStore> AuthService<S> {
     self.cancel.notify_waiters();
   }
 
-  /// Ends the session at the provider (best effort) and forgets everything stored locally.
+  /// Ends the session at the server or the provider (best effort) and forgets everything stored
+  /// locally.
   pub async fn logout(&self) -> Result<(), AuthError> {
     let Some(server) = self.active_server() else {
       return Ok(());
     };
-    let (in_memory, discovery) = {
+    let (in_memory, discovery, maybe_local) = {
       let mut session = self.session.lock().await;
       (
         session.maybe_tokens.take().and_then(|tokens| tokens.refresh),
         session.maybe_discovery.clone(),
+        session.maybe_local.take(),
       )
     };
+    self.logout_local(&server, maybe_local).await?;
     let refresh = match in_memory {
       Some(token) => Some(token),
       None => self.store.load(&server.token_key()).await?,
@@ -474,9 +531,9 @@ impl<S: TokenStore> AuthService<S> {
     })
   }
 
-  /// The current access token as text, refreshed when needed (tests against the dev stack; the
-  /// app uses [`Self::server_bearer_token`]).
-  #[cfg(all(test, feature = "integration"))]
+  /// The current access token as text, refreshed when needed (tests; the app uses
+  /// [`Self::server_bearer_token`]).
+  #[cfg(test)]
   pub async fn bearer_token(&self) -> Result<String, AuthError> {
     Ok(self.server_bearer_token().await?.1)
   }
@@ -488,9 +545,10 @@ impl<S: TokenStore> AuthService<S> {
     Ok((server.server_url, token.expose_secret().to_owned()))
   }
 
-  /// Whether a session (tokens in memory) exists.
+  /// Whether a session (identity provider or local account) exists.
   pub async fn is_signed_in(&self) -> bool {
-    self.session.lock().await.maybe_tokens.is_some()
+    let session = self.session.lock().await;
+    session.maybe_tokens.is_some() || session.maybe_local.is_some()
   }
 
   /// Deletes a refresh token stored under the server origin alone (the key before tokens were
@@ -499,9 +557,11 @@ impl<S: TokenStore> AuthService<S> {
     self.store.clear(&server.server_url).await
   }
 
-  /// Deletes the stored refresh token of `server` (leaving it, or its sign-in settings changed).
+  /// Deletes the stored refresh token and local session of `server` (leaving it, or its sign-in
+  /// settings changed).
   pub async fn forget_tokens(&self, server: &DesktopConfig) -> Result<(), AuthError> {
-    self.store.clear(&server.token_key()).await
+    self.store.clear(&server.token_key()).await?;
+    self.store.clear_local_session(&server.server_url).await
   }
 
   /// The access token of `server`, refreshed when needed; refused when the active server is
@@ -509,6 +569,17 @@ impl<S: TokenStore> AuthService<S> {
   async fn access_token(&self, server: &DesktopConfig) -> Result<SecretString, AuthError> {
     let mut session = self.session.lock().await;
     if self.active_server().as_ref() != Some(server) {
+      return Err(AuthError::NotSignedIn);
+    }
+    if let Some(local) = &session.maybe_local {
+      if local.is_live(local::now_ms()) {
+        return Ok(local.token());
+      }
+      session.maybe_local = None;
+      drop(session);
+      if let Err(error) = self.store.clear_local_session(&server.server_url).await {
+        tracing::warn!(%error, "could not forget the expired local session");
+      }
       return Err(AuthError::NotSignedIn);
     }
     let needs_refresh = match &session.maybe_tokens {
@@ -588,6 +659,77 @@ impl<S: TokenStore> AuthService<S> {
       refresh: refresh.map(SecretString::from),
       expires_at: Instant::now() + lifetime,
     });
+    Ok(())
+  }
+
+  /// A stored local session that is still valid becomes the session; an expired or damaged one is
+  /// forgotten.
+  async fn restore_local(&self, server: &DesktopConfig) -> Result<bool, AuthError> {
+    let Some(stored) = self.store.load_local_session(&server.server_url).await? else {
+      return Ok(false);
+    };
+    match LocalSession::decode(&stored).filter(|session| session.is_live(local::now_ms())) {
+      Some(session) => {
+        let mut current = self.session.lock().await;
+        current.maybe_tokens = None;
+        current.maybe_local = Some(session);
+        Ok(true)
+      },
+      None => {
+        self.store.clear_local_session(&server.server_url).await?;
+        Ok(false)
+      },
+    }
+  }
+
+  /// Takes over a granted local session of `server`, unless the user switched servers meanwhile.
+  async fn adopt_local(&self, server: &DesktopConfig, granted: LocalSession) -> Result<(), AuthError> {
+    if self.active_server().as_ref() != Some(server) {
+      return Err(AuthError::Cancelled);
+    }
+    self
+      .store
+      .save_local_session(&server.server_url, &granted.encode()?)
+      .await?;
+    // A refresh token of an earlier identity provider sign-in must not come back at the next start.
+    if let Err(error) = self.store.clear(&server.token_key()).await {
+      tracing::warn!(%error, "could not forget the earlier refresh token");
+    }
+    let mut session = self.session.lock().await;
+    session.maybe_tokens = None;
+    session.maybe_local = Some(granted);
+    Ok(())
+  }
+
+  /// Ends a local session at the server (best effort) and forgets the stored one.
+  async fn logout_local(
+    &self,
+    server: &DesktopConfig,
+    maybe_in_memory: Option<LocalSession>,
+  ) -> Result<(), AuthError> {
+    let maybe_session = match maybe_in_memory {
+      Some(session) => Some(session),
+      None => self
+        .store
+        .load_local_session(&server.server_url)
+        .await?
+        .and_then(|stored| LocalSession::decode(&stored)),
+    };
+    self.store.clear_local_session(&server.server_url).await?;
+    let Some(session) = maybe_session.filter(|session| session.is_live(local::now_ms())) else {
+      return Ok(());
+    };
+    let url = format!("{}{LOCAL_LOGOUT_PATH}", server.server_url.trim_end_matches('/'));
+    if let Err(error) = self
+      .http
+      .post(url)
+      .bearer_auth(session.access.expose_secret())
+      .send()
+      .await
+    {
+      // The local session is gone either way; the server's token expires on its own.
+      tracing::warn!(%error, "could not end the local session on the server");
+    }
     Ok(())
   }
 
@@ -837,5 +979,113 @@ mod tests {
     assert_eq!(AuthError::Cancelled.kind(), "cancelled");
     assert_eq!(AuthError::Network("x".into()).kind(), "network");
     assert_eq!(AuthError::StateMismatch.kind(), "state_mismatch");
+    assert_eq!(AuthError::LocalRefused(LocalRefusal::Refused).kind(), "refused");
+    assert_eq!(AuthError::LocalRefused(LocalRefusal::Disabled).kind(), "disabled");
+    assert_eq!(
+      AuthError::LocalRefused(LocalRefusal::RateLimited).kind(),
+      "rate_limited"
+    );
+  }
+
+  mod local_sessions {
+    use super::*;
+    use crate::auth::store::MemoryStore;
+
+    const SERVER: &str = "https://team.example.com";
+
+    #[tokio::test]
+    async fn a_stored_session_is_restored_and_signs_requests() {
+      let store = MemoryStore::default();
+      store
+        .save_local_session(SERVER, &session("local-token", 3_600_000).encode().unwrap())
+        .await
+        .unwrap();
+      let service = AuthService::new(Some(config()), store).unwrap();
+      assert!(service.restore().await.unwrap());
+      assert_eq!(service.bearer_token().await.unwrap(), "local-token");
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_is_forgotten_at_restore() {
+      let store = MemoryStore::default();
+      store
+        .save_local_session(SERVER, &session("old", -1_000).encode().unwrap())
+        .await
+        .unwrap();
+      let service = AuthService::new(Some(config()), store).unwrap();
+      assert!(!service.restore().await.unwrap());
+      assert!(service.store.load_local_session(SERVER).await.unwrap().is_none());
+      assert!(matches!(
+        service.bearer_token().await,
+        Err(AuthError::NotSignedIn)
+      ));
+    }
+
+    #[tokio::test]
+    async fn expiry_while_running_signs_out() {
+      let service = AuthService::new(Some(config()), MemoryStore::default()).unwrap();
+      service
+        .adopt_local(&config(), session("short", 1_000))
+        .await
+        .unwrap();
+      assert!(service.store.load_local_session(SERVER).await.unwrap().is_some());
+      assert!(matches!(
+        service.bearer_token().await,
+        Err(AuthError::NotSignedIn)
+      ));
+      assert!(service.store.load_local_session(SERVER).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_local_sign_in_replaces_a_stored_refresh_token() {
+      let store = MemoryStore::default();
+      store.save(&config().token_key(), "refresh").await.unwrap();
+      let service = AuthService::new(Some(config()), store).unwrap();
+      service
+        .adopt_local(&config(), session("fresh", 3_600_000))
+        .await
+        .unwrap();
+      assert!(service.store.load(&config().token_key()).await.unwrap().is_none());
+      assert_eq!(service.bearer_token().await.unwrap(), "fresh");
+    }
+
+    #[tokio::test]
+    async fn a_session_for_another_server_is_dropped() {
+      let service = AuthService::new(Some(config()), MemoryStore::default()).unwrap();
+      let mut other = config();
+      other.server_url = "https://other.example.com".into();
+      assert!(matches!(
+        service.adopt_local(&other, session("x", 3_600_000)).await,
+        Err(AuthError::Cancelled)
+      ));
+    }
+
+    #[tokio::test]
+    async fn logout_forgets_an_expired_session_without_calling_the_server() {
+      let store = MemoryStore::default();
+      store
+        .save_local_session(SERVER, &session("old", -1_000).encode().unwrap())
+        .await
+        .unwrap();
+      let service = AuthService::new(Some(config()), store).unwrap();
+      service.logout().await.unwrap();
+      assert!(service.store.load_local_session(SERVER).await.unwrap().is_none());
+    }
+
+    fn session(token: &str, lifetime_ms: i64) -> LocalSession {
+      LocalSession {
+        access: SecretString::from(token.to_owned()),
+        expires_at_ms: local::now_ms() + lifetime_ms,
+      }
+    }
+
+    fn config() -> DesktopConfig {
+      DesktopConfig {
+        server_url: SERVER.into(),
+        issuer: "https://auth.example.com/realms/company".into(),
+        client_id: "teamcraft".into(),
+        scopes: vec!["openid".into()],
+      }
+    }
   }
 }

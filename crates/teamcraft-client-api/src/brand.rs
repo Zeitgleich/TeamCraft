@@ -124,7 +124,7 @@ pub fn cache_key(server_url: &str) -> String {
 }
 
 /// Text for a language: the exact tag, its primary subtag (`de-AT` → `de`), then `en`.
-fn pick<'a>(texts: &'a BTreeMap<String, String>, language: &str) -> Option<&'a str> {
+pub(crate) fn pick<'a>(texts: &'a BTreeMap<String, String>, language: &str) -> Option<&'a str> {
   let primary = language.split('-').next().unwrap_or(language);
   [language, primary, "en"]
     .into_iter()
@@ -133,7 +133,7 @@ fn pick<'a>(texts: &'a BTreeMap<String, String>, language: &str) -> Option<&'a s
 }
 
 /// An organization name is shown only when it is plain, short text.
-fn clean_name(maybe_name: Option<String>) -> Option<String> {
+pub(crate) fn clean_name(maybe_name: Option<String>) -> Option<String> {
   let name = maybe_name?;
   let name = name.trim();
   (!name.is_empty() && name.chars().count() <= MAX_NAME_CHARS && !name.chars().any(char::is_control))
@@ -166,7 +166,7 @@ fn clean_texts(texts: BTreeMap<String, String>) -> BTreeMap<String, String> {
 }
 
 /// A link is shown only when it is an https URL (http for localhost) without credentials.
-fn safe_link(maybe_link: Option<String>) -> Option<String> {
+pub(crate) fn safe_link(maybe_link: Option<String>) -> Option<String> {
   let link = maybe_link?;
   let (scheme, rest) = link.split_once("://")?;
   let authority = rest.split(['/', '?', '#']).next().unwrap_or("");

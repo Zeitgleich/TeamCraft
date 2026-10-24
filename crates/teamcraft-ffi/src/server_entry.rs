@@ -6,6 +6,8 @@
 use teamcraft_client_api::server_entry::{
   self, HttpPolicy, ServerAddressError, ServerAnswer, ServerCheckError, ServerOrigin, ServerProfile,
 };
+use teamcraft_client_api::sign_in_page::SignInPage;
+use teamcraft_proto::{ServerInfoResponse, SignInMethod};
 
 use crate::login_brand;
 use crate::types::LoginBrand;
@@ -66,6 +68,31 @@ pub struct CheckedServer {
   /// The identity provider lies outside the server's domain: warn on the confirmation screen
   /// ("signs in through …"); a server can copy another instance's settings.
   pub is_identity_provider_elsewhere: bool,
+  /// What the sign-in page offers.
+  pub sign_in_page: SignInPageInfo,
+}
+
+/// What the sign-in page shows, checked (teamcraft-client-api `sign_in_page`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SignInPageInfo {
+  /// The methods in display order; never empty.
+  pub methods: Vec<SignInOption>,
+  /// The provider part of "Sign in with …".
+  pub sso_label: String,
+  pub maybe_sso_icon_url: Option<String>,
+  pub maybe_help_text: Option<String>,
+  pub maybe_help_link: Option<String>,
+  /// The local form's one-time code field is required; else optional ("if you set one up").
+  pub local_requires_code: bool,
+}
+
+/// A way to sign in on the sign-in page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SignInOption {
+  /// "Sign in with …" through the identity provider.
+  Sso,
+  /// E-mail and password of a local account (`POST /api/v1/auth/local/login`).
+  Local,
 }
 
 /// The account's server and how to sign in to it. `profile_json` is what the app stores; it is
@@ -118,13 +145,63 @@ pub fn check_server_info(
     server_entry::check_server_info(&origin, answer, &client_version, Some(&redirect_uri), policy)?;
   let maybe_brand = serde_json::to_string(&checked.brand)
     .ok()
-    .and_then(|json| login_brand(json, origin.as_str().to_owned(), language));
+    .and_then(|json| login_brand(json, origin.as_str().to_owned(), language.clone()));
+  let brand_name = maybe_brand.as_ref().map_or_else(
+    || checked.profile.display_name.clone(),
+    |brand| brand.display_name.clone(),
+  );
+  let page = SignInPage::from_info(&checked.sign_in, origin.as_str(), &brand_name, &language);
   Ok(CheckedServer {
     server: stored(&checked.profile)?,
     maybe_brand,
     identity_provider_host: checked.identity_provider_host,
     is_identity_provider_elsewhere: checked.is_identity_provider_elsewhere,
+    sign_in_page: page_info(page),
   })
+}
+
+/// The sign-in page from a fresh `GET /api/v1/server-info` answer of the account's server (it may
+/// change at runtime, so the sign-in screen asks again). `None` for an unusable answer: show
+/// [`sso_only_sign_in_page`] then.
+#[uniffi::export]
+pub fn sign_in_page(
+  response_json: String,
+  origin: String,
+  brand_name: String,
+  language: String,
+) -> Option<SignInPageInfo> {
+  let info: ServerInfoResponse = serde_json::from_str(&response_json).ok()?;
+  Some(page_info(SignInPage::from_info(
+    &info.sign_in,
+    &origin,
+    &brand_name,
+    &language,
+  )))
+}
+
+/// Only "Sign in with <brand>": while the server's page is unknown (offline).
+#[uniffi::export]
+pub fn sso_only_sign_in_page(brand_name: String) -> SignInPageInfo {
+  page_info(SignInPage::sso_only(&brand_name))
+}
+
+fn page_info(page: SignInPage) -> SignInPageInfo {
+  SignInPageInfo {
+    methods: page
+      .methods
+      .iter()
+      .filter_map(|method| match method {
+        SignInMethod::Sso => Some(SignInOption::Sso),
+        SignInMethod::Local => Some(SignInOption::Local),
+        SignInMethod::Unknown(_) => None,
+      })
+      .collect(),
+    sso_label: page.sso_label,
+    maybe_sso_icon_url: page.maybe_sso_icon_url,
+    maybe_help_text: page.maybe_help_text,
+    maybe_help_link: page.maybe_help_link,
+    local_requires_code: page.local_requires_code,
+  }
 }
 
 /// Reads a stored `profile_json` back. `None` when it is missing pieces or was tampered with: the
@@ -205,9 +282,33 @@ mod tests {
     assert_eq!(checked.identity_provider_host, "auth.example.com");
     assert!(!checked.is_identity_provider_elsewhere);
     assert_eq!(checked.server.scopes, ["openid", "profile", "email"]);
+    assert_eq!(checked.sign_in_page.methods, [SignInOption::Sso]);
+    assert_eq!(checked.sign_in_page.sso_label, "Example Chat");
     assert_eq!(checked.maybe_brand.unwrap().display_name, "Example Chat");
     let back = stored_server(checked.server.profile_json.clone()).unwrap();
     assert_eq!(back, checked.server);
+  }
+
+  #[test]
+  fn the_sign_in_page_comes_from_a_fresh_answer() {
+    let mut json: serde_json::Value = serde_json::from_str(&answer_json()).unwrap();
+    json["sign_in"]["methods"] = serde_json::json!(["local", "sso"]);
+    json["sign_in"]["has_local_accounts"] = serde_json::json!(true);
+    json["sign_in"]["sso_label"] = serde_json::json!("Example SSO");
+    let page = sign_in_page(
+      json.to_string(),
+      "https://team.example.com".into(),
+      "Example Chat".into(),
+      "en".into(),
+    )
+    .unwrap();
+    assert_eq!(page.methods, [SignInOption::Local, SignInOption::Sso]);
+    assert_eq!(page.sso_label, "Example SSO");
+    assert!(sign_in_page("<html>".into(), String::new(), String::new(), "en".into()).is_none());
+    assert_eq!(
+      sso_only_sign_in_page("Example Chat".into()).methods,
+      [SignInOption::Sso]
+    );
   }
 
   #[test]

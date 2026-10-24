@@ -6,6 +6,7 @@
 const COMMANDS: &[&str] = &[
   "auth_restore",
   "auth_login",
+  "auth_login_local",
   "auth_cancel",
   "auth_logout",
   "api_get",

@@ -48,6 +48,9 @@ pub enum ApiError {
   /// A share link that is unknown, revoked, expired or used up (one answer for all, so links cannot be probed).
   #[error("this link is not available")]
   ShareUnavailable,
+  /// An admin switched local accounts off: no sign-in with e-mail and password.
+  #[error("sign-in with e-mail and password is turned off on this server")]
+  LocalAccountsDisabled,
   /// The request arrived on a host name no brand is configured for and `unknown_host = "reject"`.
   #[error("this host name is not served here")]
   UnknownHost,
@@ -216,6 +219,7 @@ impl ApiError {
       Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
       Self::Database(error) if error.is_transient() => StatusCode::SERVICE_UNAVAILABLE,
       Self::ShareUnavailable => StatusCode::GONE,
+      Self::LocalAccountsDisabled => StatusCode::FORBIDDEN,
       Self::UnknownHost => StatusCode::MISDIRECTED_REQUEST,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -232,6 +236,7 @@ impl ApiError {
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
       Self::MfaRequired => ErrorCode::MfaRequired,
       Self::ShareUnavailable => ErrorCode::ShareUnavailable,
+      Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,

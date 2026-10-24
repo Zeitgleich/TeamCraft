@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{BrandResponse, SERVER_INFO_PRODUCT, ServerInfoResponse};
+use teamcraft_proto::{BrandResponse, SERVER_INFO_PRODUCT, ServerInfoResponse, SignInInfo};
 use url::{Host, Url};
 
 /// Where a client asks a server about itself.
@@ -62,7 +62,8 @@ pub struct ServerProfile {
   pub has_local_accounts: bool,
 }
 
-/// A checked answer: the profile to store and the brand to show for confirmation.
+/// A checked answer: the profile to store, the brand to show for confirmation and the sign-in
+/// page settings (`sign_in_page::SignInPage::from_info`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedServer {
   pub profile: ServerProfile,
@@ -71,6 +72,7 @@ pub struct CheckedServer {
   pub identity_provider_host: String,
   /// The identity provider lies outside the server's domain: the confirmation warns.
   pub is_identity_provider_elsewhere: bool,
+  pub sign_in: SignInInfo,
 }
 
 /// The server's answer to `GET /api/v1/server-info`, as the caller received it. Callers must not
@@ -319,6 +321,7 @@ pub fn check_server_info(
       has_local_accounts: info.sign_in.has_local_accounts,
     },
     brand: info.brand,
+    sign_in: info.sign_in,
   })
 }
 

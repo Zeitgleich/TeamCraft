@@ -90,9 +90,9 @@ pub trait Authenticator {
     maybe_body: Option<String>,
   ) -> LocalFuture<'_, Result<ApiResponse, AuthError>>;
 
-  /// Signs in with a local account (guests without an identity provider account): e-mail, password
-  /// and, when the account has one, the current code of the authenticator app. A refusal that asks for
-  /// the code comes back as `Denied("mfa_required")`. Only the browser build has local sign-in.
+  /// Signs in with a local account (people without an identity provider account): e-mail, password
+  /// and, when the account has one, the current code of the authenticator app. A refusal comes back
+  /// as `Denied(code)` with the server's error code (browser) or the shell's kind (desktop).
   fn login_local(
     &self,
     _login: String,
@@ -101,7 +101,7 @@ pub trait Authenticator {
   ) -> LocalFuture<'_, Result<(), AuthError>> {
     Box::pin(async {
       Err(AuthError::Unsupported(
-        "local accounts sign in in the browser".to_owned(),
+        "local accounts are not available here".to_owned(),
       ))
     })
   }

@@ -512,6 +512,7 @@ fn apply_settings(
   config.maybe_imprint_url = non_empty(settings.links.maybe_imprint);
   config.mail.maybe_sender_name = non_empty(settings.mail.maybe_sender_name);
   config.mail.maybe_from_address = non_empty(settings.mail.maybe_from_address);
+  config.maybe_sso_label = non_empty(settings.maybe_sso_label);
   clear_file_names(&mut config);
   config
 }
@@ -538,6 +539,7 @@ fn settings_of(config: &BrandConfig) -> BrandSettings {
       maybe_sender_name: config.mail.maybe_sender_name.clone(),
       maybe_from_address: config.mail.maybe_from_address.clone(),
     },
+    maybe_sso_label: config.maybe_sso_label.clone(),
   }
 }
 
@@ -549,6 +551,7 @@ fn clear_file_names(config: &mut BrandConfig) {
   config.maybe_icon_dark = None;
   config.maybe_favicon = None;
   config.maybe_favicon_dark = None;
+  config.maybe_sso_icon = None;
 }
 
 fn non_empty(maybe_text: Option<String>) -> Option<String> {

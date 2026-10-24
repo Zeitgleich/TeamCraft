@@ -226,14 +226,16 @@ enum SessionVaultError: Error, Equatable {
   case noServer
 }
 
-/// Keeps the session of the active server's account in the shared keychain (one item per server,
-/// `oidc-session.<storage key>`) and hands the core access tokens, refreshing when needed. Used by
+/// Keeps the session of the active server's account in the shared keychain (one item per server:
+/// `oidc-session.<storage key>` for SSO, `local-session.<storage key>` for a local account; at most
+/// one of the two exists) and hands the core access tokens, refreshing OIDC ones when needed. Used by
 /// both processes; refreshes run under the cross-process lock's protection by the callers (the
 /// engine only asks while its process holds the lock).
 final class SessionVault {
   /// The single item of builds that had one server baked in.
   private static let legacyAccount = "oidc-session"
   private static let accountPrefix = "oidc-session."
+  private static let localAccountPrefix = "local-session."
 
   private let keychain: KeychainStore
   private let servers: ServerStore
@@ -250,13 +252,34 @@ final class SessionVault {
   }
 
   func save(_ session: OidcSession) throws {
-    guard let account = activeItem else { throw SessionVaultError.noServer }
+    guard let account = activeItem, let localAccount = activeLocalItem else { throw SessionVaultError.noServer }
     try keychain.write(JSONEncoder().encode(session), for: account)
+    // One session per server: a local one from before goes.
+    try? keychain.delete(localAccount)
+  }
+
+  func loadLocal() -> LocalSession? {
+    guard let account = activeLocalItem, let data = try? keychain.read(account) else { return nil }
+    return try? JSONDecoder().decode(LocalSession.self, from: data)
+  }
+
+  func saveLocal(_ session: LocalSession) throws {
+    guard let account = activeItem, let localAccount = activeLocalItem else { throw SessionVaultError.noServer }
+    try keychain.write(JSONEncoder().encode(session), for: localAccount)
+    // One session per server: an OIDC one from before goes.
+    try? keychain.delete(account)
+  }
+
+  /// Whether the active server has a session of either kind (it may have expired).
+  var hasSession: Bool {
+    load() != nil || loadLocal() != nil
   }
 
   func clear() {
-    guard let account = activeItem else { return }
-    try? keychain.delete(account)
+    for account in [activeItem, activeLocalItem].compactMap({ $0 }) {
+      // Nothing to do about a failed delete; the next sign-in overwrites the item.
+      try? keychain.delete(account)
+    }
   }
 
   /// Deletes the session of a build before server entry; `true` if there was one (its account
@@ -271,6 +294,10 @@ final class SessionVault {
   /// refresh failed. Blocks (up to the request timeout): the core asks on its engine thread.
   func currentAccessToken() -> String? {
     queue.sync {
+      if let local = loadLocal() {
+        // No refresh for local sessions: past its expiry the account is signed out.
+        return local.isUsable() ? local.accessToken : nil
+      }
       guard let session = load() else { return nil }
       if session.isFresh() { return session.accessToken }
       guard session.refreshToken != nil else { return nil }
@@ -295,6 +322,10 @@ final class SessionVault {
 
   private var activeItem: String? {
     servers.active.map { Self.accountPrefix + $0.storageKey }
+  }
+
+  private var activeLocalItem: String? {
+    servers.active.map { Self.localAccountPrefix + $0.storageKey }
   }
 }
 

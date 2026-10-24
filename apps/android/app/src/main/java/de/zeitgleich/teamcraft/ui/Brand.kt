@@ -29,6 +29,7 @@ private const val TIMEOUT_MILLIS = 10_000
  * talks to.
  */
 class BrandStore(context: Context, val origin: String, storageKey: String) {
+  private val ssoIconFile = File(context.filesDir, StoragePaths.ssoIconFile(storageKey))
   private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
   private val directory = File(context.filesDir, StoragePaths.brandDir(storageKey))
   private val key = "teamcraft.brand:" + origin.trimEnd('/')
@@ -55,6 +56,28 @@ class BrandStore(context: Context, val origin: String, storageKey: String) {
   fun logo(isDark: Boolean): Bitmap? {
     val file = logoFile(isDark).takeIf(File::exists) ?: return null
     return BitmapFactory.decodeFile(file.path)
+  }
+
+  /** The cached icon of the identity provider ("Sign in with …"), decoded; null without one. */
+  fun ssoIcon(): Bitmap? = ssoIconFile.takeIf(File::exists)?.let { BitmapFactory.decodeFile(it.path) }
+
+  /**
+   * Caches the icon the server's sign-in page names (the core only lets the brand endpoint of
+   * this server through); [maybeUrl] null removes it. The cached icon stays when it can't be
+   * fetched.
+   */
+  suspend fun refreshSsoIcon(maybeUrl: String?) = withContext(Dispatchers.IO) {
+    if (maybeUrl == null || !maybeUrl.startsWith(origin.trimEnd('/') + "/")) {
+      ssoIconFile.delete()
+      return@withContext
+    }
+    try {
+      val bytes = download(maybeUrl, MAX_LOGO_BYTES)
+      directory.mkdirs()
+      ssoIconFile.writeBytes(bytes)
+    } catch (failure: IOException) {
+      Log.i(TAG, "sign-in icon not reachable: ${failure.javaClass.simpleName}")
+    }
   }
 
   private fun check(json: String): LoginBrand? = loginBrand(json, origin, Locale.getDefault().toLanguageTag())

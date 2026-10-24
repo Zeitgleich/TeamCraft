@@ -3626,8 +3626,8 @@ select.input {
 }
 
 .auth-card {
-  width: min(460px, 100%);
-  padding: 32px;
+  width: min(440px, 100%);
+  padding: 36px 36px 28px;
   border: 1px solid var(--border);
   border-radius: 16px;
   background: var(--surface);
@@ -3721,9 +3721,15 @@ select.input {
 }
 
 .auth-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   margin-top: 24px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
+  font-size: 12px;
+  text-align: center;
 }
 
 .auth-alert {
@@ -3745,6 +3751,209 @@ select.input {
   align-items: center;
   gap: 12px;
   margin: 16px 0;
+}
+
+.auth-foot .icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+/* The sign-in card: methods in the server's order, "or" between them, help below. */
+.auth-subtitle {
+  margin: 0;
+}
+
+.auth-methods {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 24px;
+}
+
+.auth-sso,
+.auth-submit {
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.auth-sso {
+  gap: 10px;
+}
+
+.auth-sso-icon {
+  width: 20px;
+  height: 20px;
+  padding: 1px;
+  border-radius: 4px;
+  background: #ffffff;
+  object-fit: contain;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.auth-local {
+  display: flex;
+  flex-direction: column;
+}
+
+.auth-local .field {
+  margin-bottom: 14px;
+}
+
+.auth-local .input {
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  font-size: 15px;
+}
+
+.auth-local .input:focus-visible {
+  outline-offset: 0;
+  border-color: var(--focus);
+}
+
+.auth-password {
+  position: relative;
+}
+
+.auth-password .input {
+  padding-right: 46px;
+}
+
+.auth-reveal {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 34px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+}
+
+.auth-reveal:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.auth-reveal[aria-pressed="true"] {
+  color: var(--accent-strong);
+}
+
+.auth-code {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.15em;
+}
+
+.auth-submit {
+  margin-top: 4px;
+}
+
+.auth-submit:disabled {
+  cursor: progress;
+  opacity: 0.8;
+}
+
+.auth-submit .spinner {
+  width: 16px;
+  height: 16px;
+}
+
+.auth-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.auth-error .icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.auth-error .mono {
+  display: block;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.auth-help {
+  margin-top: 20px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.auth-help-text {
+  margin: 0 0 4px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.auth-help-text:last-child {
+  margin: 0;
+}
+
+.auth-help a {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.auth-server {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+}
+
+.auth-server .link-btn {
+  margin: 0;
+  padding: 0;
+}
+
+@media (max-width: 520px) {
+  .auth-page {
+    place-items: start center;
+    padding: 16px;
+  }
+
+  .auth-card {
+    padding: 24px 20px 20px;
+    border-radius: 12px;
+    box-shadow: none;
+  }
 }
 
 .spinner {

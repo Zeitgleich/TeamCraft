@@ -93,6 +93,8 @@ final class AppModel {
   private(set) var managedServer = ManagedServer(maybeAddress: nil, isLocked: false)
   /// The account's server; `nil` until one is chosen.
   private(set) var maybeServer: StoredServer?
+  /// What the sign-in screen offers; `nil` while it is being asked for.
+  private(set) var maybeSignInPage: SignInPageInfo?
 
   @ObservationIgnored private let servers = ServerStore()
   @ObservationIgnored private lazy var vault = SessionVault(servers: servers)
@@ -100,6 +102,9 @@ final class AppModel {
   @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault, servers: servers)
   @ObservationIgnored private let login = WebLogin()
   @ObservationIgnored private let serverInfo = ServerInfoClient()
+  @ObservationIgnored private let localAuth = LocalAuthClient()
+  /// The sign-in page came with the server check just now: the screen need not ask again.
+  @ObservationIgnored private var isSignInPageFromCheck = false
   @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
@@ -170,6 +175,8 @@ final class AppModel {
     guard case .confirmServer(let checked) = phase else { return }
     servers.activate(checked.server)
     maybeServer = checked.server
+    maybeSignInPage = checked.signInPage
+    isSignInPageFromCheck = true
     phase = .signedOut(nil)
   }
 
@@ -181,8 +188,24 @@ final class AppModel {
       servers.forgetActive()
     }
     maybeServer = nil
+    maybeSignInPage = nil
     brand.select(nil)
     phase = .needsServer(address: "", failure: nil)
+  }
+
+  /// Asks the server what the sign-in screen offers (it may change at any time), each time the
+  /// screen is shown; right after the server check its answer is used. Offline: SSO only.
+  func refreshSignInPage() async {
+    if isSignInPageFromCheck {
+      isSignInPageFromCheck = false
+      return
+    }
+    guard let server = maybeServer else { return }
+    let brandName = brand.brand?.displayName ?? server.displayName
+    let page = await SignInPageLoader(client: serverInfo).load(address: server.address, brandName: brandName)
+    // Another server may have been chosen meanwhile.
+    guard maybeServer?.address.origin == server.address.origin else { return }
+    maybeSignInPage = page
   }
 
   func signIn() async {
@@ -203,6 +226,34 @@ final class AppModel {
         phase = .signedOut(.signInFailed)
       }
     }
+  }
+
+  /// Signs in with a local account's e-mail address, password and optional one-time code. Returns
+  /// why it failed for the form to show; `nil` after a sign-in (the phase moved on).
+  func signInLocal(email: String, password: String, maybeCode: String?) async -> LocalSignInFailure? {
+    guard let server = maybeServer, let origin = URL(string: server.address.origin) else {
+      phase = .needsServer(address: "", failure: nil)
+      return nil
+    }
+    var maybeFailure: LocalSignInFailure?
+    await busy {
+      let result = await localAuth.login(origin: origin, email: email, password: password, maybeCode: maybeCode)
+      switch result {
+      case .signedIn(let session):
+        do {
+          try vault.saveLocal(session)
+        } catch {
+          maybeFailure = .generic
+          return
+        }
+        container.activeAccount = session.userId
+        container.displayName = nil
+        await refreshAccountState()
+      case .failed(let failure):
+        maybeFailure = failure
+      }
+    }
+    return maybeFailure
   }
 
   /// Ends the session; the server stays, so signing in again is one tap ("Change server" leads to
@@ -706,7 +757,7 @@ final class AppModel {
   /// The core of the signed-in account; opened on first use (a notification action may be the first).
   func core() throws -> TeamCraft {
     if let maybeCore { return maybeCore }
-    guard let account = container.activeAccount, vault.load() != nil else { throw CoreFactoryError.noAccount }
+    guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
     let opened = try factory.open(
       account: account, createKey: true,
       listener: ClosureEventListener { [weak self] in
@@ -768,6 +819,14 @@ final class AppModel {
     if let core = try? core() {
       await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
     }
+    // A local session also ends on the server (best effort; offline, the token just expires).
+    if let local = vault.loadLocal(),
+      let origin = (maybeServer ?? servers.activeServer).flatMap({ URL(string: $0.address.origin) })
+    {
+      let client = localAuth
+      let token = local.accessToken
+      await Self.awaitAtMost(seconds: 5) { await client.logout(origin: origin, accessToken: token) }
+    }
     if let account = container.activeAccount {
       factory.deleteDatabaseKey(account: account)
     }
@@ -796,7 +855,7 @@ final class AppModel {
   }
 
   private func refreshAccountState() async {
-    guard maybeServer != nil, vault.load() != nil, container.activeAccount != nil else {
+    guard maybeServer != nil, vault.hasSession, container.activeAccount != nil else {
       phase = .signedOut(nil)
       return
     }

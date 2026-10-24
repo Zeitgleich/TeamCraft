@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.system.Os
 import java.io.File
@@ -20,10 +21,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.auth.LocalLoginOutcome
+import de.zeitgleich.teamcraft.auth.isSsoOnly
+import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
@@ -52,9 +58,12 @@ import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.SearchHitItem
 import uniffi.teamcraft_ffi.ServerEntryException
+import uniffi.teamcraft_ffi.SignInPageInfo
 import uniffi.teamcraft_ffi.StoredServer
 import uniffi.teamcraft_ffi.checkServerInfo
 import uniffi.teamcraft_ffi.normalizeServerAddress
+import uniffi.teamcraft_ffi.signInPage
+import uniffi.teamcraft_ffi.ssoOnlySignInPage
 import uniffi.teamcraft_ffi.TeamCraftException
 import uniffi.teamcraft_ffi.TestPushResult
 
@@ -115,9 +124,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The organization fixed the server (managed configuration): no "Change server". */
   val isServerLocked: StateFlow<Boolean> = serverLocked
 
+  private val page = MutableStateFlow<SignInPageInfo?>(null)
+
+  /**
+   * What the sign-in screen offers, asked from the server every time the screen is shown (admins
+   * change it at runtime); `null` until known, "Sign in with <brand>" only while offline.
+   */
+  val signInPage: StateFlow<SignInPageInfo?> = page
+
+  private val pageIcon = MutableStateFlow<Bitmap?>(null)
+
+  /** The identity provider's icon for "Sign in with …", cached per server. */
+  val ssoIcon: StateFlow<Bitmap?> = pageIcon
+
+  /** Which server [page] belongs to, whether it is the server's own answer, and when it came. */
+  private var maybePageOrigin: String? = null
+  private var isPageFresh = false
+  private var pageFetchedAtMillis = 0L
+
   init {
     refresh()
     retryServerWhenOnline()
+    loadSignInPageWhenShown()
   }
 
   fun brandLogo(isDark: Boolean): Bitmap? = maybeBrandStore?.logo(isDark)
@@ -167,8 +195,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     withContext(Dispatchers.IO) { graph.auth.activate(server) }
     showServer(server)
     if (!graph.auth.isSignedIn.value) {
+      // The page came with the answer just checked; the sign-in screen needn't ask again.
+      showSignInPage(server.address.origin, current.checked.signInPage, isFresh = true)
       state.value = AppState.SignedOut()
-      return true
+      // Only the identity provider: straight to the browser, as before local accounts existed.
+      return isSsoOnly(current.checked.signInPage.methods)
     }
     launchBusy { state.value = loadAccountState() }
     return false
@@ -203,6 +234,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       state.value = AppState.SignedOut(signInError(failure) ?: R.string.sign_in_failed)
       null
     }
+
+  /**
+   * Signs in to a local account of the active server. Every failure keeps the sign-in screen with
+   * one reason; a wrong e-mail, password or code all read the same.
+   */
+  fun signInLocal(email: String, password: String, maybeCode: String?) = launchBusy {
+    if (state.value !is AppState.SignedOut) return@launchBusy
+    state.value = try {
+      when (val outcome = graph.auth.signInLocal(email.trim(), password, maybeCode)) {
+        is LocalLoginOutcome.SignedIn -> loadAccountState()
+        else -> AppState.SignedOut(localSignInErrorText(outcome) ?: R.string.sign_in_failed)
+      }
+    } catch (failure: IOException) {
+      AppState.SignedOut(transportErrorText(failure, graph.network.isOnline.value))
+    } catch (failure: IllegalStateException) {
+      // The server changed while the request ran.
+      AppState.SignedOut(R.string.sign_in_failed)
+    }
+  }
 
   fun completeLogin(result: Intent?) = launchBusy {
     state.value = try {
@@ -507,11 +557,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   private fun retryServerWhenOnline() = viewModelScope.launch {
     graph.network.isOnline.collect { isOnline ->
+      // The sign-in screen showed the offline fallback: ask for the server's own page again.
+      if (isOnline && state.value is AppState.SignedOut && !isPageFresh) launch { refreshSignInPage() }
       val current = state.value as? AppState.NeedsServer ?: return@collect
       val maybeError = current.maybeError
       if (isOnline && !busy.value && maybeError != null && isRetryableWhenOnline(maybeError)) {
         submitServer(current.prefill)
       }
+    }
+  }
+
+  /** Asks the server for its sign-in page whenever the sign-in screen appears. */
+  private fun loadSignInPageWhenShown() = viewModelScope.launch {
+    state.map { it is AppState.SignedOut }.distinctUntilChanged().collect { isShown ->
+      if (isShown) launch { refreshSignInPage() }
+    }
+  }
+
+  /**
+   * Fetches `GET /api/v1/server-info` of the active server and shows its sign-in page. When the
+   * server can't be reached the last page of this server stays, or else "Sign in with <brand>".
+   */
+  private suspend fun refreshSignInPage() {
+    val server = activeServer.value ?: return
+    val origin = server.address.origin
+    val isJustFetched = maybePageOrigin == origin && isPageFresh &&
+      SystemClock.elapsedRealtime() - pageFetchedAtMillis < PAGE_REUSE_MILLIS
+    if (isJustFetched) return
+    val brandName = brand.value?.displayName ?: server.displayName
+    val maybeFresh = try {
+      val answer = ServerInfoClient.fetch(server.address.serverInfoUrl)
+      if (answer.status != 200) {
+        null
+      } else {
+        withContext(Dispatchers.Default) {
+          signInPage(answer.body.decodeToString(), origin, brandName, Locale.getDefault().toLanguageTag())
+        }
+      }
+    } catch (failure: IOException) {
+      null
+    }
+    if (activeServer.value?.address?.origin != origin) return
+    when {
+      maybeFresh != null -> showSignInPage(origin, maybeFresh, isFresh = true)
+      maybePageOrigin != origin -> showSignInPage(origin, ssoOnlySignInPage(brandName), isFresh = false)
+      else -> isPageFresh = false
+    }
+  }
+
+  /** Shows [info] for the server at [origin]; its provider icon is cached by the brand store. */
+  private fun showSignInPage(origin: String, info: SignInPageInfo, isFresh: Boolean) {
+    page.value = info
+    maybePageOrigin = origin
+    isPageFresh = isFresh
+    if (isFresh) pageFetchedAtMillis = SystemClock.elapsedRealtime()
+    // The offline fallback names the brand, not a provider: no provider icon next to it.
+    val maybeStore = maybeBrandStore?.takeIf { it.origin == origin && info.maybeSsoIconUrl != null }
+    if (maybeStore == null) {
+      pageIcon.value = null
+      // The server dropped its icon: forget the cached one.
+      if (isFresh) maybeBrandStore?.takeIf { it.origin == origin }?.let { viewModelScope.launch { it.refreshSsoIcon(null) } }
+      return
+    }
+    val store = maybeStore
+    viewModelScope.launch {
+      val maybeCached = withContext(Dispatchers.IO) { store.ssoIcon() }
+      if (maybePageOrigin == origin) pageIcon.value = maybeCached
+      store.refreshSsoIcon(info.maybeSsoIconUrl)
+      val maybeFresh = withContext(Dispatchers.IO) { store.ssoIcon() }
+      if (maybePageOrigin == origin) pageIcon.value = maybeFresh
     }
   }
 
@@ -549,6 +663,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     activeServer.value = null
     maybeBrandStore = null
     brand.value = null
+    page.value = null
+    pageIcon.value = null
+    maybePageOrigin = null
+    isPageFresh = false
   }
 
   private suspend fun loadAccountState(): AppState =
@@ -588,6 +706,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   companion object {
     const val MESSAGE_PAGE = 200
+
+    /** A sign-in page this young (just fetched with the server check) is not asked for again. */
+    private const val PAGE_REUSE_MILLIS = 10_000L
 
     /** Plain HTTP to other hosts than the device itself only in development builds. */
     private val ALLOW_INSECURE_HTTP = BuildConfig.DEBUG

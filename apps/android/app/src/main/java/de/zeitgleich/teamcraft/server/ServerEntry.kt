@@ -120,6 +120,12 @@ object StoragePaths {
   /** The sealed OIDC session of the account on a server. */
   fun sessionFile(storageKey: String): String = "auth/${segment(storageKey)}/session.bin"
 
+  /** The sealed session of a local account (e-mail and password) on a server. */
+  fun localSessionFile(storageKey: String): String = "auth/${segment(storageKey)}/local-session.bin"
+
+  /** The cached icon of a server's identity provider ("Sign in with …"). */
+  fun ssoIconFile(storageKey: String): String = "${brandDir(storageKey)}/sso_icon"
+
   /** The core's data directory of a server; the core adds a directory per account. */
   fun storeDir(storageKey: String): String = "store/${segment(storageKey)}"
 

@@ -228,6 +228,113 @@ mod sign_in {
   }
 
   #[tokio::test]
+  async fn admins_switch_local_accounts_off_and_on_at_runtime() {
+    let (app, mailer) = app!();
+    let alice = owner();
+    let space = create_space(&app, &alice, "Client", "invite_only").await;
+    let (_, token) = create_guest(&app, &mailer, &alice, &space).await;
+    let (_, activated) = public_post(
+      &app,
+      "/auth/local/activate",
+      json!({"token": token, "password": PASSWORD}),
+    )
+    .await;
+    let secret = activated["totp_secret"].as_str().unwrap().to_owned();
+    let (status, session) = public_post(
+      &app,
+      "/auth/local/login",
+      json!({"login": "gus@partner.test", "password": PASSWORD, "totp_code": code_at(&secret, 0)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let access = session["access_token"].as_str().unwrap().to_owned();
+    let info = app.call(reqwest::Method::GET, None, "/server-info", None).await;
+    assert_eq!(info.body["sign_in"]["methods"], json!(["sso", "local"]));
+    assert_eq!(info.body["sign_in"]["local_requires_code"], true);
+
+    let mut local = app.get(&alice, "/admin/settings").await.body["local_accounts"].clone();
+    local["is_enabled"] = json!(false);
+    let saved = app
+      .put(
+        &alice,
+        "/admin/settings",
+        json!({"section": "local_accounts", "values": local.clone()}),
+      )
+      .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+
+    // The form disappears, sign-in is refused with a clear code, and running sessions end.
+    let info = app.call(reqwest::Method::GET, None, "/server-info", None).await;
+    assert_eq!(info.body["sign_in"]["methods"], json!(["sso"]));
+    assert_eq!(info.body["sign_in"]["has_local_accounts"], false);
+    let (status, refused) = public_post(
+      &app,
+      "/auth/local/login",
+      json!({"login": "gus@partner.test", "password": PASSWORD, "totp_code": code_at(&secret, 1)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(refused["error_code"], "local_accounts_disabled");
+    let (status, _) = bearer(&app, reqwest::Method::GET, &access, "/me", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    local["is_enabled"] = json!(true);
+    let saved = app
+      .put(
+        &alice,
+        "/admin/settings",
+        json!({"section": "local_accounts", "values": local}),
+      )
+      .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let (status, _) = bearer(&app, reqwest::Method::GET, &access, "/me", None).await;
+    assert_eq!(status, StatusCode::OK, "the session is valid again");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_sign_in_page_settings_reach_the_server_info() {
+    let (app, _) = app!();
+    let alice = owner();
+    let page = json!({
+      "methods": ["local", "sso"],
+      "help_text": {"en": "Problems signing in? Call 1234.", "de": "Probleme? Ruf 1234 an."},
+      "help_link": "https://help.example.com/sign-in",
+    });
+    let saved = app
+      .put(
+        &alice,
+        "/admin/settings",
+        json!({"section": "sign_in_page", "values": page}),
+      )
+      .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let info = app.call(reqwest::Method::GET, None, "/server-info", None).await;
+    assert_eq!(info.body["sign_in"]["methods"], json!(["local", "sso"]));
+    assert_eq!(info.body["sign_in"]["help_text"]["de"], "Probleme? Ruf 1234 an.");
+    assert_eq!(
+      info.body["sign_in"]["help_link"],
+      "https://help.example.com/sign-in"
+    );
+
+    for invalid in [
+      json!({"methods": []}),
+      json!({"methods": ["sso", "sso"]}),
+      json!({"methods": ["sso"], "help_link": "http://help.example.com"}),
+    ] {
+      let refused = app
+        .put(
+          &alice,
+          "/admin/settings",
+          json!({"section": "sign_in_page", "values": invalid}),
+        )
+        .await;
+      assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+    }
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn repeated_failures_lock_the_account() {
     let Some((app, mailer)) = start(|settings| settings.local_accounts.max_failed_attempts = 3).await else {
       return;

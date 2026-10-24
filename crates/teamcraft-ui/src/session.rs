@@ -28,6 +28,7 @@ pub enum SessionState {
     maybe_problem: Option<ServerProblem>,
   },
   /// Desktop: the server answered; the user confirms its name and host before signing in.
+  /// Boxed: the brand in it makes it much larger than the other states.
   ConfirmServer(Box<ServerCheck>),
   SignedOut(Option<LoginProblem>),
   /// The identity provider is open in the browser.
@@ -80,11 +81,15 @@ pub struct SessionControl {
 /// What went wrong in the local-account sign-in form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalSignInProblem {
-  /// The account has two-factor authentication: ask for the code.
-  CodeRequired,
-  /// Wrong e-mail, password or code (the server does not say which).
+  /// Wrong e-mail, password or code, or a code is missing (the server does not say which).
   Refused,
-  /// The server or the network failed.
+  /// Sign-in with e-mail and password is turned off or not set up on this server.
+  Disabled,
+  /// Too many attempts; try again later.
+  RateLimited,
+  /// The server could not be reached.
+  Network,
+  /// Anything else; the text is for a details line.
   Failed(String),
 }
 
@@ -224,7 +229,7 @@ impl SessionControl {
     });
   }
 
-  /// Signs in a local account (a guest without an identity provider account).
+  /// Signs in a local account (e-mail and password instead of the identity provider).
   pub fn sign_in_local(&self, login: String, password: String, maybe_totp: Option<String>) {
     let control = *self;
     control.local_error.set(None);
@@ -368,10 +373,21 @@ fn device_ready_key(me: &GetMeResponse) -> String {
   format!("{KEY_DEVICE_READY_PREFIX}{}", me.id)
 }
 
+/// The browser build gets the server's `error_code` (or `http_{status}`), the desktop shell its own
+/// kinds; both end up as one of the form's messages. Wrong e-mail, password and code share one.
 fn local_problem(error: &AuthError) -> LocalSignInProblem {
   match error {
-    AuthError::Denied(code) if code == "mfa_required" => LocalSignInProblem::CodeRequired,
-    AuthError::Denied(_) => LocalSignInProblem::Refused,
+    AuthError::Denied(code) => match code.as_str() {
+      "unauthorized" | "refused" | "mfa_required" | "invalid_request" | "http_400" | "http_401" => {
+        LocalSignInProblem::Refused
+      },
+      "local_accounts_disabled" | "disabled" | "unavailable" | "http_404" | "http_503" => {
+        LocalSignInProblem::Disabled
+      },
+      "rate_limited" | "http_429" => LocalSignInProblem::RateLimited,
+      other => LocalSignInProblem::Failed(other.to_owned()),
+    },
+    AuthError::Network(_) => LocalSignInProblem::Network,
     other => LocalSignInProblem::Failed(other.to_string()),
   }
 }
@@ -438,17 +454,28 @@ mod tests {
   }
 
   #[test]
-  fn local_sign_in_problems_tell_code_from_wrong_password() {
+  fn local_sign_in_problems_map_server_codes_and_shell_kinds() {
+    let cases = [
+      ("unauthorized", LocalSignInProblem::Refused),
+      ("refused", LocalSignInProblem::Refused),
+      ("mfa_required", LocalSignInProblem::Refused),
+      ("invalid_request", LocalSignInProblem::Refused),
+      ("local_accounts_disabled", LocalSignInProblem::Disabled),
+      ("disabled", LocalSignInProblem::Disabled),
+      ("http_503", LocalSignInProblem::Disabled),
+      ("rate_limited", LocalSignInProblem::RateLimited),
+      ("http_429", LocalSignInProblem::RateLimited),
+      ("internal", LocalSignInProblem::Failed("internal".into())),
+    ];
+    for (code, expected) in cases {
+      assert_eq!(local_problem(&AuthError::Denied(code.into())), expected, "{code}");
+    }
     assert_eq!(
-      local_problem(&AuthError::Denied("mfa_required".into())),
-      LocalSignInProblem::CodeRequired
-    );
-    assert_eq!(
-      local_problem(&AuthError::Denied("unauthorized".into())),
-      LocalSignInProblem::Refused
+      local_problem(&AuthError::Network("down".into())),
+      LocalSignInProblem::Network
     );
     assert!(matches!(
-      local_problem(&AuthError::Network("down".into())),
+      local_problem(&AuthError::InvalidResponse("x".into())),
       LocalSignInProblem::Failed(_)
     ));
   }

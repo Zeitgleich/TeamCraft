@@ -563,7 +563,6 @@ key-mark-verified = Mark as verified
 ## Sign-in
 login-title = Sign in
 login-subtitle = Use your company account to continue.
-login-sign-in = Sign in
 login-use-demo = Use demo data instead
 login-use-other-account = Sign out and use another account
 login-brand-links = About this service
@@ -1237,16 +1236,25 @@ history-title = Edit history
 history-current = Current version
 history-replaced = Replaced { $time }
 
-# Local (guest) sign-in
-login-local-open = Sign in with a guest account
-login-local-title = Guest account
+# Sign-in card: methods, local accounts (e-mail, password, one-time code), help
 login-local-email = E-mail address
 login-local-password = Password
-login-local-code = Code from your authenticator app
-login-local-code-hint = This account uses two-factor authentication.
-login-local-refused = E-mail, password or code is wrong.
+login-local-code = One-time code
+login-local-code-hint = The 6-digit code from your authenticator app.
+login-local-refused = E-mail address, password or one-time code is wrong.
 login-local-failed = Sign-in did not work
 login-local-submit = Sign in
+login-sso = Sign in with { $provider }
+login-or = or
+login-subtitle-local = Sign in with your e-mail address and password.
+login-subtitle-choice = Choose how you want to sign in.
+login-local-show-password = Show password
+login-local-code-optional = One-time code (if you set one up)
+login-local-disabled = Sign-in with e-mail and password is not available on this server.
+login-local-rate-limited = Too many attempts. Wait a few minutes, then try again.
+login-local-network = Can't reach the server. Check your connection, then try again.
+login-local-working = Signing in…
+login-help-link = Help with signing in
 
 ## Administration console: permissions, people, announcement, instance
 
@@ -1792,6 +1800,9 @@ admin-brands-slot-icon = App icon
 admin-brands-slot-icon-dark = App icon, dark theme
 admin-brands-slot-favicon = Favicon
 admin-brands-slot-favicon-dark = Favicon, dark theme
+admin-brands-slot-sso-icon = Sign-in provider icon
+admin-brands-sso-label = Sign-in provider
+admin-brands-sso-label-hint = Shown on the sign-in button as "Sign in with …", e.g. Microsoft. Empty: the display name.
 admin-brands-image-set = Image set
 admin-brands-image-none = No image
 admin-brands-image-delete = Remove
@@ -1822,7 +1833,17 @@ settings-group-limits-hint = Sizes and counts people notice. 0 means no limit wh
 settings-group-integration = Integrations
 settings-group-integration-hint = Retention of integration channels. 0 keeps everything.
 settings-group-local_accounts = Local accounts
-settings-group-local_accounts-hint = Rules for password accounts. Whether they exist stays in the configuration file.
+settings-group-local_accounts-hint = Rules for password accounts. They need a session secret in the configuration file; here you switch them off and on.
+settings-group-sign_in_page = Sign-in page
+settings-group-sign_in_page-hint = What the sign-in page of the web and the apps offers. The provider name and icon of the SSO button are brand settings.
+settings-f-methods = Sign-in methods
+settings-methods-sso-local = SSO first, then e-mail and password
+settings-methods-local-sso = E-mail and password first, then SSO
+settings-methods-sso = SSO only
+settings-methods-local = E-mail and password only
+settings-f-help_text-en = Help text (English)
+settings-f-help_text-de = Help text (German)
+settings-f-help_link = Help page
 settings-group-mail_texts = Invitation and activation mail
 settings-group-mail_texts-hint = Texts of the server's own mail. Placeholders: inviter, space, role, url.
 settings-group-meeting_mail = Meeting mail

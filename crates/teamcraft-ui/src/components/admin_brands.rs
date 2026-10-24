@@ -55,14 +55,17 @@ const COLOR_FIELDS: [[&str; 7]; 2] = [
     "color_dark_chrome",
   ],
 ];
-const SLOTS: [(&str, BrandAssetSlot); 6] = [
+const SLOTS: [(&str, BrandAssetSlot); 7] = [
   ("admin-brands-slot-logo", BrandAssetSlot::Logo),
   ("admin-brands-slot-logo-dark", BrandAssetSlot::LogoDark),
   ("admin-brands-slot-icon", BrandAssetSlot::Icon),
   ("admin-brands-slot-icon-dark", BrandAssetSlot::IconDark),
   ("admin-brands-slot-favicon", BrandAssetSlot::Favicon),
   ("admin-brands-slot-favicon-dark", BrandAssetSlot::FaviconDark),
+  ("admin-brands-slot-sso-icon", BrandAssetSlot::SsoIcon),
 ];
+/// Longest provider name on the sign-in button.
+const MAX_SSO_LABEL_CHARS: usize = 64;
 const IMAGE_TYPES: [&str; 6] = [
   "image/png",
   "image/jpeg",
@@ -234,6 +237,13 @@ fn BrandEditor(
     |d| &d.organization_name,
     |d| &mut d.organization_name,
   );
+  let sso_label = bind(
+    draft,
+    show_errors,
+    "sso_label",
+    |d| &d.sso_label,
+    |d| &mut d.sso_label,
+  );
   let email_domains = bind(
     draft,
     show_errors,
@@ -366,6 +376,15 @@ fn BrandEditor(
           value=organization.value
           on_input=organization.on_input
           error=organization.error
+        />
+        <TextField
+          id="brand-sso-label"
+          label="admin-brands-sso-label"
+          hint="admin-brands-sso-label-hint"
+          placeholder="Microsoft"
+          value=sso_label.value
+          on_input=sso_label.on_input
+          error=sso_label.error
         />
         <CheckField
           label="admin-brands-is-default"
@@ -812,6 +831,8 @@ struct BrandDraft {
   is_default: bool,
   display_name: String,
   organization_name: String,
+  /// The provider part of "Sign in with …".
+  sso_label: String,
   hostnames: Vec<String>,
   email_domains: String,
   title_en: String,
@@ -852,6 +873,7 @@ impl BrandDraft {
       is_default,
       display_name: settings.display_name.clone(),
       organization_name: optional(&settings.maybe_organization_name),
+      sso_label: optional(&settings.maybe_sso_label),
       hostnames: settings.hostnames.clone(),
       email_domains: list_text(&settings.email_domains),
       title_en,
@@ -897,6 +919,7 @@ impl BrandDraft {
         maybe_sender_name: optional(&self.sender_name),
         maybe_from_address: optional(&self.from_address),
       },
+      maybe_sso_label: optional(&self.sso_label),
     }
   }
 
@@ -933,6 +956,9 @@ impl Validated for BrandDraft {
     }
     if self.organization_name.trim().chars().count() > MAX_NAME_CHARS {
       errors.push(("organization_name", "admin-error-too-long"));
+    }
+    if self.sso_label.trim().chars().count() > MAX_SSO_LABEL_CHARS {
+      errors.push(("sso_label", "admin-error-too-long"));
     }
     if !parse_list(&self.email_domains.to_ascii_lowercase())
       .iter()
@@ -1172,6 +1198,7 @@ mod tests {
           ..BrandLinks::default()
         },
         mail: BrandMailSettings::default(),
+        maybe_sso_label: None,
       },
       assets: Vec::new(),
       maybe_updated_at: None,
@@ -1361,6 +1388,8 @@ mod tests {
       "admin-brands-display-name",
       "admin-brands-organization",
       "admin-brands-organization-hint",
+      "admin-brands-sso-label",
+      "admin-brands-sso-label-hint",
       "admin-brands-is-default",
       "admin-brands-is-default-hint",
       "admin-brands-hosts",

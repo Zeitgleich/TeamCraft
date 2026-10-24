@@ -52,6 +52,24 @@ impl Authenticator for TauriAuth {
     Box::pin(async { invoke("auth_login", JsValue::UNDEFINED).await.map(|_| ()) })
   }
 
+  fn login_local(
+    &self,
+    login: String,
+    password: String,
+    maybe_totp: Option<String>,
+  ) -> LocalFuture<'_, Result<(), AuthError>> {
+    Box::pin(async move {
+      let invalid = |_| AuthError::InvalidResponse("could not build the request".to_owned());
+      let args = js_sys::Object::new();
+      js_sys::Reflect::set(&args, &"login".into(), &login.into()).map_err(invalid)?;
+      js_sys::Reflect::set(&args, &"password".into(), &password.into()).map_err(invalid)?;
+      if let Some(code) = maybe_totp {
+        js_sys::Reflect::set(&args, &"totpCode".into(), &code.into()).map_err(invalid)?;
+      }
+      invoke("auth_login_local", args.into()).await.map(|_| ())
+    })
+  }
+
   fn cancel_login(&self) {
     wasm_bindgen_futures::spawn_local(async {
       if let Err(error) = invoke("auth_cancel", JsValue::UNDEFINED).await {
@@ -176,6 +194,8 @@ fn map_kind(kind: &str, message: String) -> AuthError {
     "state_mismatch" => AuthError::StateMismatch,
     "not_signed_in" => AuthError::NotSignedIn,
     "unsupported" => AuthError::Unsupported(message),
+    // Refusals of the local sign-in keep their kind for the form's message.
+    "refused" | "disabled" | "rate_limited" | "mfa_required" => AuthError::Denied(kind.to_owned()),
     _ => AuthError::InvalidResponse(message),
   }
 }
@@ -794,6 +814,14 @@ mod tests {
       AuthError::Network("down".into())
     );
     assert_eq!(map_kind("not_signed_in", String::new()), AuthError::NotSignedIn);
+    assert_eq!(
+      map_kind("refused", "the server refused the sign-in: refused".into()),
+      AuthError::Denied("refused".into())
+    );
+    assert_eq!(
+      map_kind("rate_limited", String::new()),
+      AuthError::Denied("rate_limited".into())
+    );
     assert!(matches!(
       map_kind("something_new", "x".into()),
       AuthError::InvalidResponse(_)
