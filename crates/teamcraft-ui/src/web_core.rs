@@ -1001,6 +1001,7 @@ impl Core {
         user,
         fingerprint: fingerprint(pinned.public_key),
         maybe_new_fingerprint: pinned.maybe_changed_to.map(fingerprint),
+        is_attested: pinned.is_attested,
       })
       .collect();
     Ok(SecuritySnapshot {
@@ -1070,9 +1071,15 @@ impl Core {
         owners,
         admins,
       } => return publish_policy(client, base, policy.clone(), owners, admins).await,
-      ChatAction::PublishRoster { members } => {
+      ChatAction::PublishRoster {
+        base_version,
+        members,
+      } => {
         let roles = teamcraft_core::workspace::roster_roles(members);
-        return client.publish_roster(&roles).await.map_err(describe);
+        return client
+          .publish_roster_based_on(*base_version, &roles)
+          .await
+          .map_err(describe);
       },
       ChatAction::AdminJoinChannel { conversation } => {
         let me = client.user_id();

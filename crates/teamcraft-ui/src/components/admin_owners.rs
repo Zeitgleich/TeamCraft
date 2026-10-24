@@ -122,7 +122,10 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let signed = StoredValue::new(signed_roster(&status));
+  let base_version = status.version;
   let draft = RwSignal::new(signed.get_value());
+  // The roster waiting for the owner's confirmation (every change with ID and key, review #263).
+  let confirming = RwSignal::new(None::<Vec<RosterEntry>>);
   let picked = RwSignal::new(String::new());
   let (idp_owners, idp_admins) = state.read(|backend| backend.admin_role_holders());
   let from_roles = roster_from_roles(&idp_owners, &idp_admins);
@@ -145,7 +148,10 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
       .read(|backend| backend.users())
       .into_iter()
       .filter(|user| !current.iter().any(|entry| entry.user == user.id))
-      .map(|user| (user.id.to_string(), user.display_name))
+      .map(|user| {
+        let label = format!("{} ({})", user.display_name, user.id);
+        (user.id.to_string(), label)
+      })
       .collect();
     users.sort_by(|a, b| a.1.cmp(&b.1));
     users
@@ -165,9 +171,19 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
       picked.set(String::new());
     }
   };
-  let sign = move |members: Vec<RosterEntry>| {
+  // Nothing is signed straight away: names come from the server, so the owner checks each change
+  // with its user ID and pinned key first.
+  let review = move |members: Vec<RosterEntry>| {
     if roster_problem(&members).is_none() {
-      state.write(|backend| backend.admin_publish_roster(members));
+      confirming.set(Some(members));
+    }
+  };
+  let confirm = move || {
+    if let Some(members) = confirming.get_untracked()
+      && roster_problem(&members).is_none()
+    {
+      state.write(|backend| backend.admin_publish_roster(base_version, members));
+      confirming.set(None);
     }
   };
 
@@ -182,7 +198,7 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
       <div class="roster-idp">
         <p class="auth-alert" role="status">{i18n.t("roster-idp-title")}</p>
         <ul>{lines}</ul>
-        <button type="button" class="btn" disabled=has_problem on:click=move |_| sign(target.clone())>
+        <button type="button" class="btn" disabled=has_problem on:click=move |_| review(target.clone())>
           {i18n.t("roster-idp-sign")}
         </button>
       </div>
@@ -263,12 +279,88 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
         type="button"
         class="btn btn-primary"
         disabled=move || changes.get().is_empty() || problem.get().is_some()
-        on:click=move |_| sign(draft.get_untracked())
+        on:click=move |_| review(draft.get_untracked())
       >
-        {move || i18n.t("roster-sign")}
+        {move || i18n.t("roster-review")}
       </button>
       {idp_block}
+      {move || {
+        confirming.get().map(|members| {
+          let lines = roster_changes(&signed.get_value(), &members)
+            .into_iter()
+            .map(|change| {
+              let user = change_user(change);
+              let key = key_line(i18n, user);
+              view! {
+                <li class=if key.1 { "roster-confirm-item warning" } else { "roster-confirm-item" }>
+                  <strong>{change_text(i18n, change, &name_of)}</strong>
+                  <br />
+                  <code translate="no">{i18n.t_with("roster-confirm-id", &[("id", &user.to_string())])}</code>
+                  <br />
+                  <span class="small">{key.0}</span>
+                </li>
+              }
+            })
+            .collect_view();
+          view! {
+            <div class="roster-confirm" role="dialog" aria-label=i18n.t("roster-confirm-title")>
+              <h4 class="detail-heading">{i18n.t("roster-confirm-title")}</h4>
+              <p class="auth-alert" role="status">{i18n.t("roster-confirm-hint")}</p>
+              <ul>{lines}</ul>
+              <button type="button" class="btn" on:click=move |_| confirming.set(None)>
+                {i18n.t("roster-confirm-cancel")}
+              </button>
+              <button type="button" class="btn btn-primary" on:click=move |_| confirm()>
+                {i18n.t("roster-confirm-sign")}
+              </button>
+            </div>
+          }
+        })
+      }}
     </div>
+  }
+}
+
+fn change_user(change: RosterChange) -> UserId {
+  match change {
+    RosterChange::Add { user, .. }
+    | RosterChange::ChangeRole { user, .. }
+    | RosterChange::Remove { user } => user,
+  }
+}
+
+/// The pinned key of `user` as the owner should compare it, and whether it deserves a warning
+/// (not attested, not pinned yet, or a changed key the user hasn't decided on).
+fn key_line(i18n: I18n, user: UserId) -> (String, bool) {
+  let state = use_app_state();
+  let (me, keys) = state.read(|backend| (backend.me().id, backend.admin_identity_keys()));
+  if user == me {
+    let text = format!(
+      "{} · {}",
+      i18n.t_with(
+        "roster-confirm-fingerprint",
+        &[("fingerprint", &keys.my_fingerprint)]
+      ),
+      i18n.t("roster-confirm-own")
+    );
+    return (text, false);
+  }
+  match keys.contacts.iter().find(|contact| contact.user == user) {
+    None => (i18n.t("roster-confirm-new-key"), true),
+    Some(contact) => {
+      let fingerprint = i18n.t_with(
+        "roster-confirm-fingerprint",
+        &[("fingerprint", &contact.fingerprint)],
+      );
+      let (note, is_warning) = if contact.maybe_new_fingerprint.is_some() {
+        (i18n.t("roster-confirm-changed-key"), true)
+      } else if contact.is_attested {
+        (i18n.t("roster-confirm-attested"), false)
+      } else {
+        (i18n.t("roster-confirm-unattested"), true)
+      };
+      (format!("{fingerprint} · {note}"), is_warning)
+    },
   }
 }
 

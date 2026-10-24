@@ -206,6 +206,9 @@ pub enum PolicyBlocker {
 /// The owners of the roster this device verified, for the console's owner warnings (admin.md §2.3).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OwnerRosterStatus {
+  /// The verified roster's version, the base of an edit.
+  #[serde(default)]
+  pub version: u64,
   pub owners: Vec<OwnerSigning>,
   /// Admins of the verified roster (not owners).
   #[serde(default)]
@@ -362,6 +365,9 @@ pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
   if detail.contains(&last_owner) {
     return Some("admin-error-last-owner");
   }
+  if detail.contains(&format!("{ROSTER_BASE_CODE}:")) {
+    return Some("admin-error-roster-changed");
+  }
   detail
     .contains(&format!("{NOT_AN_OWNER_CODE}:"))
     .then_some("admin-error-not-an-owner")
@@ -369,6 +375,9 @@ pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
 
 /// Stable code that starts the core's refusal to sign a roster or policy for a non-owner.
 pub const NOT_AN_OWNER_CODE: &str = "not_an_owner";
+
+/// Stable code that starts the core's refusal to sign a roster edited from an older version.
+pub const ROSTER_BASE_CODE: &str = "roster_changed";
 
 impl OwnerRosterStatus {
   /// The warnings at `now`, most urgent first.
@@ -541,6 +550,10 @@ mod tests {
       admin_error_i18n_key("not_an_owner: only owners sign the roster"),
       Some("admin-error-not-an-owner")
     );
+    assert_eq!(
+      admin_error_i18n_key("roster_changed: another owner changed the roster meanwhile"),
+      Some("admin-error-roster-changed")
+    );
   }
 
   mod roster_edits {
@@ -599,6 +612,7 @@ mod tests {
         "an owner who is also admin stays owner"
       );
       let status = OwnerRosterStatus {
+        version: 1,
         owners: vec![OwnerSigning {
           user: user(1),
           maybe_last_signed_at: None,
@@ -696,6 +710,7 @@ mod tests {
 
     fn status(owners: i64, maybe_expires_at: Option<TimestampMs>, minimum: u8) -> OwnerRosterStatus {
       OwnerRosterStatus {
+        version: 1,
         admins: Vec::new(),
         owners: (1..=owners)
           .map(|raw| OwnerSigning {

@@ -209,6 +209,7 @@ impl Engine {
         user,
         fingerprint: fingerprint(pinned.public_key),
         maybe_new_fingerprint: pinned.maybe_changed_to.map(fingerprint),
+        is_attested: pinned.is_attested,
       })
       .collect();
     Ok(SecuritySnapshot {

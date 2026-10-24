@@ -926,7 +926,11 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
-  fn admin_publish_roster(&self, members: Vec<teamcraft_client_api::admin::RosterEntry>) {
+  fn admin_identity_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {
+    self.chat.security_keys()
+  }
+
+  fn admin_publish_roster(&self, base_version: u64, members: Vec<teamcraft_client_api::admin::RosterEntry>) {
     // The form is read-only otherwise; the core refuses a non-owner as well.
     if self.policy_edit_blocker().is_some() {
       return;
@@ -934,7 +938,7 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     let Some(admin) = &self.maybe_admin else {
       return;
     };
-    self.chat.publish_roster(members);
+    self.chat.publish_roster(base_version, members);
     admin.queue_refresh_after_publish();
   }
 

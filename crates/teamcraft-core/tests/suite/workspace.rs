@@ -176,6 +176,59 @@ mod last_owner {
   }
 
   #[tokio::test]
+  async fn an_edit_of_an_older_roster_is_not_signed() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    // Both owners open the editor on version 1; Alice signs first.
+    let base = bob.client.workspace().unwrap().roster.version;
+    alice
+      .client
+      .publish_roster_based_on(
+        base,
+        &[
+          (alice_id, RosterRole::Owner),
+          (bob_id, RosterRole::Owner),
+          (carol_id, RosterRole::Admin),
+        ],
+      )
+      .await
+      .unwrap();
+    let stale = bob
+      .client
+      .publish_roster_based_on(
+        base,
+        &[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Owner)],
+      )
+      .await;
+    assert!(matches!(
+      stale,
+      Err(teamcraft_core::CoreError::RosterBaseMismatch)
+    ));
+    let workspace = bob.client.workspace().unwrap();
+    assert_eq!(workspace.roster.version, 2);
+    assert!(workspace.is_admin(carol_id), "Alice's change was not undone");
+    // From the fresh version it works.
+    bob
+      .client
+      .publish_roster_based_on(2, &[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
   async fn a_zero_owner_roster_from_a_hostile_server_is_refused() {
     let server = FakeServer::new();
     let mut alice = Peer::enroll(&server, "Alice").await;

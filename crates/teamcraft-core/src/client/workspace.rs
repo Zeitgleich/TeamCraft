@@ -252,6 +252,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.append_roster(document).await
   }
 
+  /// [`Self::publish_roster`] only if the verified roster is still `base_version`, the one the
+  /// console's editor started from: an edit of an older roster would silently undo another
+  /// owner's change.
+  pub async fn publish_roster_based_on(
+    &mut self,
+    base_version: u64,
+    roles: &[(UserId, RosterRole)],
+  ) -> Result<(), CoreError> {
+    self.sync_workspace().await?;
+    if self.workspace()?.roster.version != base_version {
+      return Err(CoreError::RosterBaseMismatch);
+    }
+    self.publish_roster(roles).await
+  }
+
   /// Publishes the current roster with a new org recovery key (owners only).
   pub(crate) async fn publish_org_recovery_key(&mut self, key: &[u8; 32]) -> Result<(), CoreError> {
     self.sync_workspace().await?;

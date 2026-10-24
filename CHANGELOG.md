@@ -17,7 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 - **Edit the signed roster**: owners add, promote, demote and remove owners and admins in
   Administration → Security and sign the change on their device; differences to the identity
-  provider's roles are listed and signed in one step. Admins can't sign (#261).
+  provider's roles are listed; every change is confirmed with user ID and key fingerprint before
+  signing, and an edit of an outdated roster is refused. Admins can't sign (#261).
 
 ### Fixed
 

@@ -637,6 +637,7 @@ pub fn owner_roster_status(
     .flatten()?;
   let status = state.owner_status(millis(max_age))?;
   Some(OwnerRosterStatus {
+    version: state.roster.version,
     owners: status
       .owners
       .into_iter()

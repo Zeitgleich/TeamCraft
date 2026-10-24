@@ -102,9 +102,18 @@ signature (freshness above).
   without an owner, and signs the new version on the owner's device (`publish_roster`, then the
   current policy again under it). People need an identity key (they set up TeamCraft once) before
   they can be added.
+- **Confirm before signing.** Names come from the server and can be faked, so nothing is signed
+  from the editor directly: a confirmation lists every change with the user ID and the fingerprint
+  of the identity key this device pinned, marks keys that the identity provider didn't attest, that
+  aren't pinned yet (they are pinned when signing) or that the server now shows changed, and only
+  then signs. The owner compares ID and fingerprint with the person.
+- **Concurrent edits.** The editor signs only if the verified roster is still the version it
+  started from (`publish_roster_based_on`); if another owner signed meanwhile, nothing is signed
+  (`roster_changed`) and the owner edits the new roster.
 - **Identity provider roles.** The `owner` and `admin` roles in the identity provider don't change
   the signed roster by themselves: the server can't sign. When they differ from it, the console
-  lists the difference and an owner signs the identity provider's role holders in one step.
+  lists the difference, and an owner signs the identity provider's role holders through the same
+  confirmation.
 - **Admins can't sign.** For admins the form is read-only; the core refuses to sign a roster or
   policy for anyone who isn't an owner of the verified roster (`not_an_owner`), and every client
   would refuse such an entry anyway.
