@@ -50,6 +50,35 @@ async fn an_identity_key_is_stored_with_its_attestation_and_served_to_others() {
 }
 
 #[tokio::test]
+async fn the_enrollment_of_a_new_user_is_empty_not_missing() {
+  let app = app!();
+  let (carol, dave) = (member("carol"), member("dave"));
+  let carol_id = user_id(&app, &carol).await;
+  let before = app.get(&dave, &format!("/users/{carol_id}/enrollment")).await;
+  assert_eq!(before.status, StatusCode::OK, "{}", before.body);
+  assert_eq!(before.body, json!({}));
+
+  app.put(&carol, "/me/identity-key", key("a2V5MQ==")).await;
+  let list = json!({"expected_sequence": 0, "sequence": 1, "signed_list": "AQID"});
+  assert_eq!(
+    app.put(&carol, "/me/device-list", list).await.status,
+    StatusCode::OK
+  );
+  let after = app.get(&dave, &format!("/users/{carol_id}/enrollment")).await;
+  assert_eq!(after.body["identity_key"]["public_key"], "a2V5MQ==");
+  assert_eq!(after.body["identity_key"]["user_id"], carol_id);
+  assert_eq!(
+    after.body["device_list"],
+    json!({"sequence": 1, "signed_list": "AQID"})
+  );
+  assert_eq!(
+    app.get(&dave, "/users/999999/enrollment").await.error_code(),
+    "user_not_found"
+  );
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn an_identity_key_is_stored_only_with_its_key_bag() {
   let app = app!();
   let carol = member("carol");

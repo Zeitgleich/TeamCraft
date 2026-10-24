@@ -476,11 +476,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       {
         continue;
       }
-      let response = match self.api.identity_key(user).await {
-        Ok(response) => response,
-        // Not enrolled yet: they can't be in any group, so there's nothing to pin.
-        Err(error) if error.is_not_found() => continue,
-        Err(error) => return Err(error.into()),
+      // Not enrolled yet: they can't be in any group, so there's nothing to pin.
+      let Some(response) = self.api.identity_key(user).await? else {
+        continue;
       };
       let public_key = <[u8; 32]>::try_from(response.public_key.as_slice())
         .map_err(|_| CoreError::Corrupt(format!("identity key of {user} has the wrong size")))?;

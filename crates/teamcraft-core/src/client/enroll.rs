@@ -113,11 +113,7 @@ impl PendingEnrollment {
     options: EnrollmentOptions,
   ) -> Result<Client<A, S>, CoreError> {
     let me = api.me().await?;
-    let existing = match api.identity_key(me.id).await {
-      Ok(existing) => Some(existing),
-      Err(error) if error.is_not_found() => None,
-      Err(error) => return Err(error.into()),
-    };
+    let existing = api.identity_key(me.id).await?;
     let is_new_identity = existing.is_none();
     let mut recovered = match existing {
       None => match &options.secret {

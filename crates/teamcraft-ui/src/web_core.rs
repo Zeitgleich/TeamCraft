@@ -781,8 +781,7 @@ impl Core {
 
   async fn has_existing_identity(&self) -> Result<bool, String> {
     match self.api().identity_key(self.user).await {
-      Ok(_) => Ok(true),
-      Err(error) if error.is_not_found() => Ok(false),
+      Ok(maybe_key) => Ok(maybe_key.is_some()),
       Err(error) => Err(error.to_string()),
     }
   }

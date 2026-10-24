@@ -248,11 +248,11 @@ impl Engine {
     }
     let api = self.api();
     let me = api.me().await.map_err(teamcraft_core::CoreError::from)?;
-    let has_existing_identity = match api.identity_key(me.id).await {
-      Ok(_) => true,
-      Err(error) if error.is_not_found() => false,
-      Err(error) => return Err(teamcraft_core::CoreError::from(error).into()),
-    };
+    let has_existing_identity = api
+      .identity_key(me.id)
+      .await
+      .map_err(teamcraft_core::CoreError::from)?
+      .is_some();
     Ok(AccountState::NeedsEnrollment {
       has_existing_identity,
     })

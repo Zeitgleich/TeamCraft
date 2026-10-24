@@ -67,7 +67,10 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
   names it with that key. A device removed from a group by a signed "remove device" never comes back
   into that group, whatever the server serves. Users who never published a list (older clients) are
   accepted as before. The server stores the list without reading it (`GET /users/{id}/device-list`,
-  `PUT /me/device-list`, compare-and-swap on the sequence).
+  `PUT /me/device-list`, compare-and-swap on the sequence). Clients read a user's identity key and
+  device list through `GET /users/{id}/enrollment`, which answers with whichever of the two the user
+  has published (neither before their first device is enrolled) instead of a 404; against a server
+  without it they fall back to the single endpoints.
 - **Removals need a signer.** A removal the server reports (an admin's deactivation, a revoked device)
   is only a hint; clients don't sign a removal on the server's word. The device that revokes signs
   (above); an admin removes people with a signed change any member commits, also in conversations the

@@ -146,10 +146,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     identity: &IdentityPublicKey,
   ) -> Result<Option<VerifiedDeviceList>, CoreError> {
     let maybe_stored = self.stored_device_list(user, identity)?;
-    let response = match self.api.device_list(user).await {
-      Ok(response) => response,
-      Err(error) if error.is_not_found() => return Ok(maybe_stored),
-      Err(error) => return Err(error.into()),
+    let Some(response) = self.api.device_list(user).await? else {
+      return Ok(maybe_stored);
     };
     let signed = SignedDeviceList::from_bytes(response.signed_list.as_slice())?;
     let verified = signed.verify_newer_than(convert::user(user), identity, maybe_stored.as_ref())?;

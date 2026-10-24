@@ -4,12 +4,14 @@
 //! A new identity key comes with its first key bag and both are stored in one transaction
 //! (e2ee.md §3.2): an interrupted enrollment can't leave an identity nobody can recover.
 
-use teamcraft_db::{IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
+use teamcraft_db::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 use teamcraft_proto::{
-  Base64Bytes, GatewayEvent, IdentityKeyResponse, ListDevicesResponse, UploadIdentityKeyRequest, UserId,
+  Base64Bytes, GatewayEvent, IdentityKeyResponse, ListDevicesResponse, UploadIdentityKeyRequest,
+  UserEnrollmentResponse, UserId,
 };
 
 use super::convert::{device_response, unix_millis};
+use super::device_lists::device_list_response;
 use super::directory::visible_user;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -90,14 +92,34 @@ pub async fn get_identity_key(
     .get_identity_key(user.id)
     .await?
     .ok_or(ApiError::identity_key_not_found())?;
-  Ok(IdentityKeyResponse {
+  Ok(identity_key_response(key))
+}
+
+/// The identity key and device list a user has published; neither before their first device is
+/// enrolled. Clients probe this instead of the single endpoints, whose 404 browsers log as errors.
+pub async fn get_user_enrollment(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  user: UserId,
+) -> Result<UserEnrollmentResponse, ApiError> {
+  let user = visible_user(state, caller, user).await?;
+  let maybe_identity_key = state.database.get_identity_key(user.id).await?;
+  let maybe_device_list = state.database.get_device_list(user.id).await?;
+  Ok(UserEnrollmentResponse {
+    maybe_identity_key: maybe_identity_key.map(identity_key_response),
+    maybe_device_list: maybe_device_list.map(device_list_response),
+  })
+}
+
+fn identity_key_response(key: IdentityKey) -> IdentityKeyResponse {
+  IdentityKeyResponse {
     user_id: key.user_id,
     public_key: Base64Bytes::new(key.public_key),
     signature: Base64Bytes::new(key.signature),
     maybe_attestation: key.maybe_attestation,
     created_at: unix_millis(key.created_at),
     maybe_key_bag_version: None,
-  })
+  }
 }
 
 /// The device keys of a user with their cross-signatures, so peers can build MLS groups.

@@ -28,6 +28,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Fixed
 
+- **No failed requests before the first device**: a new `GET /users/{id}/enrollment` answers 200 with
+  the identity key and device list a user has published (`{}` before enrollment), so first sign-in
+  and pinning peers who haven't enrolled yet no longer log red 404s (#234). Newer apps still work
+  against servers without the endpoint.
 - **Share links of messages with several files**: "Create share link" shares the file it belongs to,
   and every file shows its own link, instead of all of them pointing to the message's first file.
 

@@ -1,7 +1,7 @@
 //! Signed device lists (e2ee.md §3, security-review A4): opaque blobs the server stores for the
 //! owner and hands to peers, who verify the signature themselves.
 
-use teamcraft_db::DeviceListOutcome;
+use teamcraft_db::{DeviceList, DeviceListOutcome};
 use teamcraft_proto::{Base64Bytes, DeviceListResponse, PutDeviceListRequest, UserId};
 
 use super::directory::visible_user;
@@ -20,10 +20,7 @@ pub async fn get_device_list(
     .get_device_list(user.id)
     .await?
     .ok_or_else(ApiError::device_list_not_found)?;
-  Ok(DeviceListResponse {
-    sequence: list.sequence,
-    signed_list: Base64Bytes::new(list.signed_list),
-  })
+  Ok(device_list_response(list))
 }
 
 pub async fn put_device_list(
@@ -65,5 +62,12 @@ pub async fn put_device_list(
     DeviceListOutcome::VersionConflict { current_sequence } => Err(ApiError::VersionConflict {
       current_version: current_sequence,
     }),
+  }
+}
+
+pub(super) fn device_list_response(list: DeviceList) -> DeviceListResponse {
+  DeviceListResponse {
+    sequence: list.sequence,
+    signed_list: Base64Bytes::new(list.signed_list),
   }
 }
