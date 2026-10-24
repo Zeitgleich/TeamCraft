@@ -47,6 +47,7 @@ pub mod guest_join;
 pub mod home;
 pub mod huddle_bar;
 pub mod icons;
+pub mod image_crop_dialog;
 pub mod incoming_call;
 pub mod lightbox;
 pub mod lightbox_controls;
