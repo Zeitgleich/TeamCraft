@@ -7,6 +7,7 @@
 use std::io::Cursor;
 
 use image::codecs::jpeg::JpegEncoder;
+use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 /// Longest side of a thumbnail in pixels: sharp at the ~300 dp a phone shows it at on a 2–3×
@@ -111,6 +112,30 @@ pub fn space_image_png(bytes: &[u8]) -> Option<Vec<u8>> {
   Some(out.into_inner())
 }
 
+/// Width and height of an image from its header, without decoding it; `None` for anything else.
+/// Turned upright like the thumbnail: a portrait photo stored sideways reports portrait dimensions.
+pub fn image_dimensions(bytes: &[u8], media_type: &str) -> Option<(u32, u32)> {
+  if !media_type.starts_with("image/") {
+    return None;
+  }
+  let mut decoder = ImageReader::new(Cursor::new(bytes))
+    .with_guessed_format()
+    .ok()?
+    .into_decoder()
+    .ok()?;
+  let (width, height) = decoder.dimensions();
+  let is_sideways = matches!(
+    decoder.orientation().ok()?,
+    Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH
+  );
+  let (width, height) = if is_sideways {
+    (height, width)
+  } else {
+    (width, height)
+  };
+  (width > 0 && height > 0).then_some((width, height))
+}
+
 /// Decodes an image within [`MAX_PIXELS`] and [`MAX_DECODER_BYTES`].
 fn decode_bounded(bytes: &[u8]) -> Option<DynamicImage> {
   bounded_reader(bytes)?.decode().ok()
@@ -199,6 +224,16 @@ mod tests {
     let jpeg = with_exif_orientation(&encoded(&picture, ImageFormat::Jpeg), 6);
     let made = thumbnail(&jpeg, "image/jpeg").unwrap();
     assert_eq!(dimensions(&made), (THUMBNAIL_SIZE / 2, THUMBNAIL_SIZE));
+    assert_eq!(
+      image_dimensions(&jpeg, "image/jpeg"),
+      Some((500, 1000)),
+      "dimensions turn too"
+    );
+    assert_eq!(
+      image_dimensions(&encoded(&picture, ImageFormat::Jpeg), "image/jpeg"),
+      Some((1000, 500))
+    );
+    assert_eq!(image_dimensions(b"%PDF-1.7", "application/pdf"), None);
   }
 
   #[test]

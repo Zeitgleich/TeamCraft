@@ -7,6 +7,8 @@
 use crate::common;
 
 use std::io::Cursor;
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::{Peer, backend_of, run_commands, settle};
 use image::{ImageBuffer, ImageFormat, Rgb};
@@ -15,9 +17,11 @@ use teamcraft_client_api::actions::{
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
-use teamcraft_core::MAX_VIEWER_BYTES;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::client::files::UploadRetrySettings;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::upkeep::Upkeep;
+use teamcraft_core::{ClientSettings, MAX_VIEWER_BYTES};
 use teamcraft_crypto::attachment::decrypt_attachment;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_crypto::share_link::open_fragment;
@@ -158,7 +162,7 @@ async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
   assert_eq!(mine[1].file_name, "big.bin");
   assert_eq!(
     mine[1].transfer,
-    FileTransfer::Failed {
+    FileTransfer::UploadFailed {
       reason: FileFailure::TooLarge
     }
   );
@@ -186,6 +190,111 @@ async fn the_periodic_upkeep_uploads_and_sends_what_waited_for_the_network() {
   let bob_ui = backend_of(&bob);
   let received = last(&bob_ui, channel);
   assert_eq!(received.body, "written on the train");
+  assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
+}
+
+/// A refused blob upload (a browser's CSP, a proxy) goes into the same announced attachment on every
+/// retry, so unfinished uploads don't pile up into 409 Conflict. Retries back off, stop after the cap
+/// with a visible state, and the user's "Retry" sends the message once the network allows.
+#[tokio::test]
+async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
+  let server = FakeServer::new();
+  let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+  let retry = UploadRetrySettings {
+    retry_after: Duration::from_secs(2),
+    retry_max: Duration::from_secs(10),
+    max_attempts: 3,
+  };
+  let client_settings = ClientSettings {
+    upload_retry: retry.clone(),
+    ..common::settings()
+  };
+  let mut alice = Peer::enroll_on_clock(
+    server.add_user("Alice"),
+    "Alice",
+    client_settings,
+    Box::new(clock.clone()),
+  )
+  .await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "files")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let alice_ui = backend_of(&alice);
+  server.refuse_blob_uploads(alice.client.user_id(), true);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("photo.jpg", "image/jpeg", jpeg())],
+  ));
+  for command in alice_ui.drain_commands() {
+    // The blob upload is refused: the command fails and the file waits.
+    let _ = alice.client.run_ui_command(command).await;
+  }
+  assert_eq!(server.attachment_count(), 1);
+
+  // Within the backoff nothing is tried; after it, the same slot is used again.
+  assert!(alice.client.upload_pending().await.is_ok());
+  clock.advance(2_000);
+  assert!(alice.client.upload_pending().await.is_err());
+  assert_eq!(
+    server.attachment_count(),
+    1,
+    "a retry reuses the announced attachment"
+  );
+  let message = last(&alice_ui, channel);
+  let transfer = || {
+    alice_ui.message_extras(channel, &[message.id])[0].files[0]
+      .transfer
+      .clone()
+  };
+  assert!(matches!(transfer(), FileTransfer::Uploading { .. }));
+
+  // Offline in between: nothing reaches the server, so no attempt counts, however long it lasts.
+  server.set_offline(alice.client.user_id(), true);
+  for _ in 0..20 {
+    clock.advance(60_000);
+    assert!(alice.client.upload_pending().await.is_err());
+  }
+  server.set_offline(alice.client.user_id(), false);
+  server.refuse_blob_uploads(alice.client.user_id(), true);
+  assert!(
+    matches!(transfer(), FileTransfer::Uploading { .. }),
+    "offline doesn't stall"
+  );
+
+  clock.advance(4_000);
+  assert!(alice.client.upload_pending().await.is_err());
+  assert_eq!(
+    transfer(),
+    FileTransfer::UploadStalled {
+      reason: FileFailure::Network
+    },
+    "after the cap the file waits for the user"
+  );
+  clock.advance(60 * 60 * 1000);
+  assert_eq!(
+    alice.client.upload_pending().await.unwrap(),
+    0,
+    "no retry on its own"
+  );
+
+  server.refuse_blob_uploads(alice.client.user_id(), false);
+  alice_ui.retry_send(channel, message.id);
+  run_commands(&mut alice, &alice_ui).await;
+  alice.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(server.attachment_count(), 1);
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
   assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
 }
 

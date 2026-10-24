@@ -307,7 +307,8 @@ mod tests {
       "lightbox-saving",
       "lightbox-shortcut",
       "lightbox-details-dimensions-value",
-      "album-open",
+      "media-open",
+      "file-upload-stalled",
       "file-too-large",
     ] {
       assert!(

@@ -315,6 +315,17 @@ pub struct AttachmentRef {
   /// A small PNG preview of an image, made by the sender.
   #[serde(rename = "thumbnail", default, skip_serializing_if = "Option::is_none")]
   pub maybe_thumbnail: Option<teamcraft_proto::Base64Bytes>,
+  /// Width and height of a picture, so receivers lay it out before anything loads. Older clients
+  /// ignore it; files from them have none.
+  #[serde(rename = "dimensions", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_dimensions: Option<ImageDimensions>,
+}
+
+/// The size of a picture in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageDimensions {
+  pub width: u32,
+  pub height: u32,
 }
 
 /// Which messages of a conversation to list.

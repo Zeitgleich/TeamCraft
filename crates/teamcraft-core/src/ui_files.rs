@@ -1,14 +1,14 @@
 //! Files in the UI adapter: attachments of messages, uploads, downloads and share links.
 
 use teamcraft_client_api::actions::{
-  FileFailure, FileInfo, FileSource, FileTransfer, OutgoingFile, ShareLink, ShareLinkOptions,
+  FileFailure, FileInfo, FileSource, FileTransfer, OutgoingFile, PixelSize, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
 
 use crate::client::files::{
-  PendingFile, PendingUpload, TransferFailure, TransferState, UploadSource, attachments_of, failed_uploads,
-  pending_upload, save_pending_upload, share_links, transfer_state,
+  PendingFile, PendingUpload, TransferFailure, TransferState, UploadRetry, UploadSource, attachments_of,
+  failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
 };
 use crate::records;
 use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageMeta, StoredMessage, Table};
@@ -40,6 +40,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           transfer: upload_transfer(&upload, file),
           maybe_sender,
           maybe_sent_at,
+          maybe_dimensions: None,
         })
         .collect();
     }
@@ -59,11 +60,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
         media_type: file.media_type,
         size_bytes: file.size_bytes,
         maybe_thumbnail_png: None,
-        transfer: FileTransfer::Failed {
+        transfer: FileTransfer::UploadFailed {
           reason: failure_view(file.maybe_failure.unwrap_or(TransferFailure::Network)),
         },
         maybe_sender,
         maybe_sent_at,
+        maybe_dimensions: None,
       });
     attachments_of(&stored.content)
       .into_iter()
@@ -96,6 +98,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
         },
         maybe_sender,
         maybe_sent_at,
+        maybe_dimensions: attachment.maybe_dimensions.map(|size| PixelSize {
+          width: size.width,
+          height: size.height,
+        }),
       })
       .chain(failed)
       .collect()
@@ -298,6 +304,8 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
     size_bytes,
     maybe_done: None,
     maybe_failure: None,
+    maybe_slot: None,
+    retry: UploadRetry::default(),
   }
 }
 
@@ -315,8 +323,13 @@ fn file_size(_path: &str) -> u64 {
 /// request per file).
 fn upload_transfer(upload: &PendingUpload, file: &PendingFile) -> FileTransfer {
   if let Some(reason) = file.maybe_failure {
-    return FileTransfer::Failed {
+    return FileTransfer::UploadFailed {
       reason: failure_view(reason),
+    };
+  }
+  if file.maybe_done.is_none() && file.retry.is_stalled() {
+    return FileTransfer::UploadStalled {
+      reason: FileFailure::Network,
     };
   }
   let total_bytes: u64 = upload.files.iter().map(|file| file.size_bytes).sum();

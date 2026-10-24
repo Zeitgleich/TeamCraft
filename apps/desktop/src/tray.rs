@@ -13,7 +13,7 @@
 
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::Deserialize;
 #[cfg(windows)]
@@ -58,10 +58,22 @@ pub struct TrayMenu {
   quit: MenuItem<Wry>,
 }
 
-/// Linux: whether a StatusNotifier host shows the tray icon. Managed while the tray icon exists;
-/// follows the D-Bus watcher, since a panel may start after the app (autostart at login).
+/// Linux: whether a StatusNotifier host shows the tray icon ([`HostState`] as `u8`). Managed while
+/// the tray icon exists; asked in the background at start, then follows the D-Bus watcher, since a
+/// panel may start after the app (autostart at login).
 #[cfg(target_os = "linux")]
-pub struct TrayHost(AtomicBool);
+pub struct TrayHost(AtomicU8);
+
+/// What is known about the StatusNotifier host.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum HostState {
+  /// The D-Bus answer is still on its way (the first milliseconds after start).
+  Unknown = 0,
+  Present = 1,
+  Absent = 2,
+}
 
 /// The unread count last shown on the badge; managed with or without a tray icon.
 #[derive(Default)]
@@ -125,28 +137,66 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
   Ok(())
 }
 
-/// Asks once before the window is created (start minimized hides it only when the icon can be
-/// seen), then follows the watcher in the background.
+/// Asks the session bus in the background, so the start never waits for D-Bus, then follows the
+/// watcher. The window may already exist (hidden, when it starts minimized) by the time the answer
+/// arrives: without a host it is brought back minimized, see [`reveal_without_host`].
 #[cfg(target_os = "linux")]
 fn watch_tray_host(app: &tauri::App) {
   let buses = app.state::<crate::attention::OsProbe>().buses();
-  let is_present = tauri::async_runtime::block_on(buses.has_status_notifier_host());
-  if !is_present {
-    tracing::info!("no StatusNotifier host; the window is not hidden to the tray");
-  }
-  app.manage(TrayHost(AtomicBool::new(is_present)));
+  app.manage(TrayHost(AtomicU8::new(HostState::Unknown as u8)));
   let handle = app.handle().clone();
   tauri::async_runtime::spawn(async move {
+    let is_present = buses.has_status_notifier_host().await;
+    if !is_present {
+      tracing::info!("no StatusNotifier host; the window is not hidden to the tray");
+    }
+    set_host(&handle, is_present);
     buses
       .watch_status_notifier_host(move |is_present| {
-        let host = handle.state::<TrayHost>();
-        if host.0.swap(is_present, Ordering::Relaxed) != is_present {
+        if set_host(&handle, is_present) {
           tracing::info!(is_present, "StatusNotifier host changed");
         }
       })
       .await;
   });
 }
+
+/// Records the host; returns whether that changed what was known.
+#[cfg(target_os = "linux")]
+fn set_host(app: &AppHandle, is_present: bool) -> bool {
+  let state = match is_present {
+    true => HostState::Present,
+    false => HostState::Absent,
+  };
+  let previous = app.state::<TrayHost>().0.swap(state as u8, Ordering::SeqCst);
+  if state == HostState::Absent {
+    reveal_without_host(app);
+  }
+  previous != state as u8
+}
+
+/// A window that started hidden while the host was unknown can't come back through an icon nobody
+/// sees: show it minimized instead. Called after the answer arrives and after the window is
+/// created, so whichever comes second does it.
+#[cfg(target_os = "linux")]
+pub fn reveal_without_host(app: &AppHandle) {
+  let is_absent = app
+    .try_state::<TrayHost>()
+    .is_some_and(|host| host.0.load(Ordering::SeqCst) == HostState::Absent as u8);
+  let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+    return;
+  };
+  if is_absent
+    && !window.is_visible().unwrap_or(true)
+    && let Err(error) = window.show().and_then(|()| window.minimize())
+  {
+    tracing::debug!(%error, "could not bring back the hidden window");
+  }
+}
+
+/// macOS and Windows always show the icon.
+#[cfg(not(target_os = "linux"))]
+pub fn reveal_without_host(_app: &AppHandle) {}
 
 fn build_menu(
   manager: &impl Manager<Wry>,
@@ -215,20 +265,30 @@ pub fn set_zoom(app: AppHandle, factor: f64) {
 
 /// Whether the tray icon exists and can be seen (closing to the tray only makes sense then).
 pub fn has_tray(app: &AppHandle) -> bool {
-  app.tray_by_id(TRAY_ID).is_some() && is_icon_shown(app)
+  app.tray_by_id(TRAY_ID).is_some() && host_state(app) == Some(true)
 }
 
+/// Like [`has_tray`], but counting a host that is still being asked about: the window may start
+/// hidden then, and [`reveal_without_host`] brings it back if there turns out to be none.
+pub fn may_have_tray(app: &AppHandle) -> bool {
+  app.tray_by_id(TRAY_ID).is_some() && host_state(app) != Some(false)
+}
+
+/// `Some(true)` when the icon is shown, `None` while that isn't known yet.
 #[cfg(target_os = "linux")]
-fn is_icon_shown(app: &AppHandle) -> bool {
-  app
-    .try_state::<TrayHost>()
-    .is_some_and(|host| host.0.load(Ordering::Relaxed))
+fn host_state(app: &AppHandle) -> Option<bool> {
+  let state = app.try_state::<TrayHost>()?.0.load(Ordering::SeqCst);
+  match state {
+    state if state == HostState::Present as u8 => Some(true),
+    state if state == HostState::Absent as u8 => Some(false),
+    _ => None,
+  }
 }
 
 /// macOS and Windows always show the icon.
 #[cfg(not(target_os = "linux"))]
-fn is_icon_shown(_app: &AppHandle) -> bool {
-  true
+fn host_state(_app: &AppHandle) -> Option<bool> {
+  Some(true)
 }
 
 #[tauri::command]

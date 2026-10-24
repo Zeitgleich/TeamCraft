@@ -858,6 +858,9 @@ notif-enforcement-note = Diese Einstellungen werden auf diesem Gerät gespeicher
 settings-density = Nachrichtendichte
 settings-density-comfortable = Komfortabel
 settings-density-compact = Kompakt
+settings-image-size = Bildgröße im Verlauf
+settings-image-size-standard = Standard
+settings-image-size-large = Groß
 settings-status-in-messages = Eigenen Status neben Namen in Nachrichten anzeigen
 settings-sidebar-sort = Unterhaltungen sortieren
 settings-sort-default = Wie vom Server geliefert
@@ -1144,6 +1147,8 @@ file-saved = Auf diesem Gerät gespeichert
 file-failed = Übertragung fehlgeschlagen
 file-too-large = Datei ist zu groß
 file-retry = Erneut versuchen
+file-upload-stalled = Hochladen fehlgeschlagen. Die Nachricht wartet, bis die Datei gesendet ist.
+file-upload-failed = Hochladen fehlgeschlagen
 file-preview = Vorschau anzeigen
 file-share = Freigabelink erstellen
 file-copy-share = Freigabelink kopieren
@@ -2113,7 +2118,7 @@ lightbox-details-sender = Gesendet von
 lightbox-details-sent = Gesendet
 lightbox-thumbnails = Dateien in dieser Ansicht
 lightbox-thumbnail = { $name } anzeigen
-album-open = Bild { $index } von { $count } öffnen: { $name }
+media-open = { $name } öffnen
 
 ## Failed actions (an error toast) and the panic overlay
 

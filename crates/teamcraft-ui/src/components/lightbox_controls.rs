@@ -664,7 +664,7 @@ fn StripTile(file: FileInfo, current: RwSignal<MediaKey>) -> impl IntoView {
   let thumbnail = file
     .maybe_thumbnail_png
     .as_deref()
-    .and_then(|bytes| ObjectUrl::from_bytes(bytes, "image/png"));
+    .and_then(ObjectUrl::from_thumbnail);
   let maybe_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
   // Revoked when the tile leaves the strip.
   StoredValue::new_local(thumbnail);

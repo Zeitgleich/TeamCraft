@@ -20,6 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 - **Videos and animated images in the lightbox**: videos play in the viewer with the browser's
   controls; GIFs and APNGs animate and can be paused (`K`), and start paused when the system asks
   for reduced motion.
+- **Inline pictures on desktop and web** (#316): images and GIFs show large in the conversation (up to
+  360 px, in their aspect ratio, sharp on HiDPI), several as a grid; GIFs play inline and stay still
+  under reduced motion. Download, share link, forward, save and "…" float over a picture on hover,
+  focus or long-press instead of permanent buttons; other files are compact cards with a download
+  button and "…". The lightbox opens at once with the thumbnail and a small spinner, and decrypted
+  pictures stay cached for the session (bounded), so reopening is instant.
 - **DM encryption setup status**: a DM whose device waits for the other side's encryption group says
   "Setting up encryption…", and after two minutes without it that the setup failed; "Retry" asks the
   other side's devices again (#278).
@@ -51,6 +57,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 ### Fixed
 
 - The web loading screen offers a reload after 30 seconds when no script runs at all (#136).
+- **Uploads that keep failing** (#316): a retried upload goes into the attachment it already
+  announced instead of announcing new ones until the server answers 409 Conflict; retries back off
+  (2 s doubling to 5 min) and stop after 8 attempts with "Upload failed" and "Try again" on the
+  file. The message waits for it.
+- **No crash when a file is read after leaving the conversation** (#316): the composer no longer
+  writes to its disposed list, which panicked and stopped the web app.
+- **Faster desktop start on Linux**: the tray no longer waits for D-Bus before the window is created.
 - **No failed requests before the first device**: a new `GET /users/{id}/enrollment` answers 200 with
   the identity key and device list a user has published (`{}` before enrollment), so first sign-in
   and pinning peers who haven't enrolled yet no longer log red 404s (#234). Newer apps still work

@@ -99,6 +99,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       media_type: file.media_type,
       size_bytes: file.content.len() as u64,
       maybe_thumbnail: None,
+      maybe_dimensions: None,
     })
   }
 

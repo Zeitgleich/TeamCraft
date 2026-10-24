@@ -118,6 +118,8 @@ struct State {
   device_lists: HashMap<UserId, DeviceListResponse>,
   sessions: HashMap<String, Session>,
   offline_users: HashSet<UserId>,
+  /// Users whose blob uploads the network refuses (a browser's CSP, a proxy) while REST works.
+  blob_refused_users: HashSet<UserId>,
   /// Users whose REST calls fail while their gateway still connects.
   rest_failing_users: HashSet<UserId>,
   /// Users whose access token the server rejects (401), as after an expired session.
@@ -781,6 +783,21 @@ impl FakeServer {
   }
 
   /// Refuses attachments larger than `limit` bytes, like the server's `max_attachment_bytes`.
+  /// While set, this user's blob uploads fail like a refused request; the REST API still answers.
+  pub fn refuse_blob_uploads(&self, user: UserId, is_refused: bool) {
+    let mut state = self.lock();
+    if is_refused {
+      state.blob_refused_users.insert(user);
+    } else {
+      state.blob_refused_users.remove(&user);
+    }
+  }
+
+  /// Attachments announced so far, finished or not.
+  pub fn attachment_count(&self) -> usize {
+    self.lock().attachments.len()
+  }
+
   pub fn set_max_attachment_bytes(&self, limit: u64) {
     self.lock().maybe_max_attachment_bytes = Some(limit);
   }
@@ -2633,7 +2650,10 @@ impl ServerApi for FakeServerApi {
         Ok(())
       });
     }
-    self.with(|state, _| {
+    self.with(|state, me| {
+      if state.blob_refused_users.contains(&me) {
+        return Err(ApiError::Network("fake server: the upload was refused".into()));
+      }
       let entry = blob_entry(state, url)?;
       if bytes.len() as u64 != entry.size_bytes || entry.is_complete {
         return Err(ApiError::Status {

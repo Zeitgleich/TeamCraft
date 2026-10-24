@@ -44,12 +44,22 @@ impl Peer {
 
   /// Enrolls a device of the user behind `api` with other client settings.
   pub async fn enroll_with(api: FakeServerApi, name: &str, client_settings: ClientSettings) -> Self {
+    Self::enroll_on_clock(api, name, client_settings, clock()).await
+  }
+
+  /// Like [`Self::enroll_with`], on a clock the test moves.
+  pub async fn enroll_on_clock(
+    api: FakeServerApi,
+    name: &str,
+    client_settings: ClientSettings,
+    clock: Box<dyn Clock>,
+  ) -> Self {
     let store = Arc::new(MemoryStore::new());
     let mut client = PendingEnrollment::new()
       .complete(
         api.clone(),
         store.clone(),
-        clock(),
+        clock,
         client_settings,
         options(PASSPHRASE),
       )

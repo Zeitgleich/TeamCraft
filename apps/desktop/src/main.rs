@@ -231,7 +231,9 @@ fn main() -> anyhow::Result<()> {
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   let prefs = app.state::<ShellPrefsState>().get();
   // Without a tray icon a hidden window couldn't come back: start minimized to the taskbar instead.
-  let has_tray = tray::has_tray(app.handle());
+  // Linux asks D-Bus for the icon's host in the background; a window hidden before the answer is
+  // brought back by `tray::reveal_without_host` if there is none.
+  let has_tray = tray::may_have_tray(app.handle());
   let is_hidden = prefs.is_start_minimized && has_tray;
   // The title stays set without a title bar: the taskbar, Alt+Tab and the dock show it.
   let window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
@@ -253,6 +255,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     _ => window,
   };
   let window = window.build()?;
+  tray::reveal_without_host(app.handle());
   if prefs.is_start_minimized
     && !has_tray
     && let Err(error) = window.minimize()

@@ -412,10 +412,35 @@ impl Density {
   }
 }
 
+/// How large pictures show in the conversation (issue #316).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSize {
+  Standard,
+  Large,
+}
+
+impl ImageSize {
+  pub const ALL: [ImageSize; 2] = [Self::Standard, Self::Large];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Standard => "standard",
+      Self::Large => "large",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|value| value.slug() == slug)
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayPrefs {
   pub density: Density,
+  /// Size of pictures in the conversation.
+  pub image_size: ImageSize,
   /// The custom status emoji of the author next to the name in messages.
   pub show_status_in_messages: bool,
   /// Size of the whole interface, Ctrl/Cmd + `+` / `-` / `0`.
@@ -426,6 +451,7 @@ impl Default for DisplayPrefs {
   fn default() -> Self {
     Self {
       density: Density::Comfortable,
+      image_size: ImageSize::Large,
       show_status_in_messages: true,
       zoom: Zoom::DEFAULT,
     }

@@ -454,16 +454,25 @@ fn apply_theme(theme: RwSignal<Theme>) {
   });
 }
 
-/// Mirrors the message density into `data-density` on `<html>` for the CSS.
+/// Mirrors the message density and the image size into `data-density` and `data-image-size` on
+/// `<html>` for the CSS.
 fn apply_density(settings: Settings) {
   Effect::new(move |_| {
-    let density = settings.prefs.get().display.density;
-    if let Some(root) = web_sys::window()
+    let display = settings.prefs.get().display;
+    let Some(root) = web_sys::window()
       .and_then(|window| window.document())
       .and_then(|doc| doc.document_element())
-      && root.set_attribute("data-density", density.slug()).is_err()
+    else {
+      return;
+    };
+    if root
+      .set_attribute("data-density", display.density.slug())
+      .is_err()
+      || root
+        .set_attribute("data-image-size", display.image_size.slug())
+        .is_err()
     {
-      tracing::debug!("could not apply density attribute");
+      tracing::debug!("could not apply density attributes");
     }
   });
 }
