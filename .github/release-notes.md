@@ -58,8 +58,9 @@ previous release keep working.
      TeamCraft message and confirm with your password. (On macOS 14 right-click → *Open* in Finder
      works too.)
   3. Only if that button doesn't appear: `xattr -dr com.apple.quarantine /Applications/TeamCraft.app`.
-- **Android**: release APKs are only signed when the project's upload key is configured for the build;
-  otherwise use the `-debug-signed` APKs for testing or sign the release APKs yourself. There is no
+- **Android**: the release APKs are signed with the project's key (certificate SHA-256
+  `68:60:BF:07:4F:47:08:19:82:4F:92:A9:E6:57:30:5A:7A:30:81:49:2C:FD:C2:55:07:81:02:08:5E:50:05:D7`,
+  the same key as the Play Store build, so installs from either update each other). There is no
   Play Store or F-Droid listing yet.
 - **iOS is not distributed**: there is no App Store or TestFlight build. Build it from `apps/ios` with
   your own Apple team and signing; push then goes through your own APNs key (`[push.apns]`), not the
