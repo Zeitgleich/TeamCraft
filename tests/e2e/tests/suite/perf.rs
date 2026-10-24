@@ -67,6 +67,10 @@ const LONG_WAIT: Duration = Duration::from_secs(900);
 /// Connected and without an API request this long, the client counts as done with what it was
 /// doing.
 const QUIET: Duration = Duration::from_secs(10);
+/// The whole browser below this much CPU (percent of one core) over [`SETTLE_WINDOW`] counts as
+/// settled: what a catch-up left behind (IndexedDB writing, decoding) is done.
+const SETTLED_CPU_PERCENT: f64 = 3.0;
+const SETTLE_WINDOW: Duration = Duration::from_secs(10);
 /// Counts tasks that block the page's thread for more than 50 ms (`[count, total ms, longest ms]`).
 const LONG_TASK_RECORDER: &str = "window.__longTasks = [0, 0, 0];
   new PerformanceObserver(list => {
@@ -172,6 +176,8 @@ struct Report {
   seconds_return_first_channel_read: f64,
   /// Until the client stopped asking the server: every conversation caught up.
   seconds_return_until_caught_up: f64,
+  /// From then until the whole browser went quiet (IndexedDB has written the catch-up).
+  seconds_return_until_browser_settled: f64,
   /// 1 when the identity provider's session had expired while Carol was away (she signed in again,
   /// which is part of `seconds_return_to_channel_list`).
   signed_in_again: f64,
@@ -179,6 +185,9 @@ struct Report {
   return_long_task_total_ms: f64,
   return_longest_task_ms: f64,
   seconds_reload_to_channel_list: f64,
+  /// From the channel list after the reload until the browser went quiet; the switches and the
+  /// idle period are measured after that.
+  seconds_reload_until_browser_settled: f64,
   pss_mib_empty_browser: f64,
   empty_browser_idle_cpu_percent: f64,
   empty_browser_idle_wakeups_per_second: f64,
@@ -488,12 +497,15 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   report.return_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
   report.return_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
   report.return_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  report.seconds_return_until_browser_settled = wait_until_browser_settled(profile).await.as_secs_f64();
 
   // Cold start of a signed-in client: reload until the channel list is back.
   let started = Instant::now();
   page.evaluate("location.reload()").await.unwrap();
   wait_long_for_text(page, &seeded.first_space_channels[1].0).await;
   report.seconds_reload_to_channel_list = started.elapsed().as_secs_f64();
+  wait_until_done(page).await;
+  report.seconds_reload_until_browser_settled = wait_until_browser_settled(profile).await.as_secs_f64();
   settle(page).await;
   report.pss_mib_after_start = mib(ProcessUsage::of_matching(profile).pss_bytes);
   report.js_heap_mib_after_start = metric(page, "JSHeapUsedSize").await / MIB;
@@ -686,6 +698,20 @@ async fn wait_until_quiet(page: &Page) {
       Ok(Some(_)) => {},
       Ok(None) => return,
     }
+  }
+}
+
+/// Waits until the browser's processes together stay under [`SETTLED_CPU_PERCENT`] for a
+/// [`SETTLE_WINDOW`] (at most [`LONG_WAIT`]); returns how long that took.
+async fn wait_until_browser_settled(profile: &str) -> Duration {
+  let started = Instant::now();
+  loop {
+    let (cpu, _) = idle_usage(profile, SETTLE_WINDOW).await;
+    if cpu < SETTLED_CPU_PERCENT {
+      return started.elapsed().saturating_sub(SETTLE_WINDOW);
+    }
+    eprintln!("browser still busy: {cpu:.1} % CPU");
+    assert!(started.elapsed() < LONG_WAIT, "the browser never settled");
   }
 }
 
@@ -890,6 +916,14 @@ impl Report {
       (
         "seconds_return_until_all_channels_read",
         self.seconds_return_until_all_channels_read,
+      ),
+      (
+        "seconds_return_until_browser_settled",
+        self.seconds_return_until_browser_settled,
+      ),
+      (
+        "seconds_reload_until_browser_settled",
+        self.seconds_reload_until_browser_settled,
       ),
       (
         "seconds_return_until_caught_up",

@@ -298,18 +298,60 @@ What the numbers say:
   to six conversations' round trips at once. Before any conversation's messages, the sync still
   reads every member list and joins the 300 groups from their welcomes, one after the other in the
   server's order; that is where the 30 s until the first channel is readable go.
-- **After a large catch-up the browser is busy for a few minutes.** In the first idle window after
-  the 100k-message catch-up Chrome's browser process used 31 % CPU and the page's renderer 2.4 %
-  (the network and storage services nothing), with no API request, heartbeats only and no
-  animation running; in the five minutes after that the whole browser was at 0.2 %, within the 1 %
-  budget. Most likely this is IndexedDB writing the caught-up history, which Chrome does in the
-  browser process; before this change those writes ran during the four minutes the list took to
-  show. While IndexedDB was busy, the web core waited for it after every turn of its loop, sent no
-  heartbeats meanwhile and lost its gateway connection (the resume showed up as requests while
-  idle); it no longer waits.
-- Channel switches on the large workspace measured 155 ms at p95 (72 ms before), over the 100 ms
-  budget. They now run while the browser is still busy with the catch-up; before, it was done by
-  then. Not re-measured once it has settled.
+- **After a large catch-up the browser was busy for minutes** (first idle window: Chrome's
+  browser process at 31 %, the renderer at 2.4 %; the five minutes after that 0.2 %), and channel
+  switches measured 155 ms at p95 meanwhile. The cause was the IndexedDB store: one read-write
+  transaction per record written, and the whole MLS state (one record for all groups, rewritten
+  after every group the catch-up processed) written again each time. Chrome worked through that
+  backlog for minutes after the catch-up, and every committed transaction woke the page. Writes now
+  go out in batches (one transaction after 50 ms, or at once beyond 8 MiB or on a flush), and of
+  several writes of one record in a batch only the last; re-measured below.
+
+#### Release server, after the catch-up settled
+
+The large workspace again, after the IndexedDB batching and the review fixes of the same change
+(presence log and snapshot indexes, per-conversation lookups in the UI mirror). Local machine
+(24 threads, 62 GiB, headless Google Chrome 156, dev stack in containers on the same machine, other
+work running beside it), **release** server and release test harness, October 2026. Two additions
+to the harness: after the catch-up and again after the reload it waits until the whole browser
+stays under 3 % CPU for 10 s (`seconds_*_until_browser_settled`) before it switches channels and
+idles, and a second idle window of the same length (`PERF_SECOND_IDLE=1`).
+
+```sh
+PERF_SCALE=large PERF_SECOND_IDLE=1 cargo test --release -p teamcraft-e2e --features browser \
+  --test suite -- --nocapture perf::
+```
+
+| What                                                     | Large                | Budget       |
+|----------------------------------------------------------|----------------------|--------------|
+| Coming back: channel list shows                          | 1.7 s                | -            |
+| Coming back: first channel read / whole space read       | 26.1 / 27.2 s        | -            |
+| Coming back: whole workspace caught up                   | 30.8 s               | -            |
+| Caught up until the browser is quiet (after the reload)  | 0.1 s (0.1 s)        | -            |
+| Reload of a signed-in tab until the channel list shows   | 1.0 s                | ≤ 1.5 s      |
+| Channel switch, p50 / p95 / max                          | 40 / 58 / 64 ms      | p95 ≤ 100 ms |
+| Opening the 20,000-message channel                       | 68 ms                | -            |
+| PSS of the browser: empty / app started / after switches | 346 / 274 / 308 MiB  | -            |
+| JS heap after the first / 100 more switches              | 2.7 / 2.8 MiB        | -            |
+| Idle: CPU, whole browser, first 5 min / the 5 min after  | 0.1 % / 0.1 %        | ≤ 1 %        |
+| Idle: main-thread tasks per minute                       | 40 ms                | -            |
+| Idle: HTTP requests per minute (API)                     | 0.2 (0)              | none         |
+| Idle: gateway frames per minute                          | 5.0                  | -            |
+
+Seeding took 24.5 minutes. The empty browser idled at 4.1 % CPU here (the shared machine and a
+newer Chrome; the cloud VM above measured 0.6 %); the app's idle numbers are the difference over
+the same profile, so they don't include it. The empty-browser PSS is higher than the app's because
+the empty page was measured while the machine was busier; read PSS for growth, not as absolute.
+
+What the numbers say:
+
+- **Within budget once settled:** channel switches at 58 ms p95 and the whole browser at 0.1 % CPU
+  idle, in both five-minute windows. With the batched writes the browser is quiet 0.1 s after the
+  catch-up is done; there is no backlog left to settle.
+- The first channel is still readable only after 26 s: member lists and welcomes of all 300
+  conversations come first (#247, "Left open" in the change).
+- 63 tasks over 50 ms (3.9 s in total, the longest 130 ms) while coming back: the catch-up's MLS
+  work and decryption on the page's thread.
 
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
