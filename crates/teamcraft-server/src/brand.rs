@@ -36,6 +36,15 @@ const MAX_TEXT_CHARS: usize = 200;
 const MAX_SSO_LABEL_CHARS: usize = 64;
 /// Most host names and e-mail domains of one brand.
 const MAX_LIST_ENTRIES: usize = 50;
+/// The top bar's color in `main.css` (`--chrome`): the status bar and splash screen of the installed
+/// web app when the brand doesn't set its own.
+const DEFAULT_CHROME_COLOR: &str = "#111926";
+/// The web client's own install icons (crates/teamcraft-ui/icons), for brands without an icon.
+const DEFAULT_WEB_ICONS: &[(&str, &str, &str)] = &[
+  ("/icons/icon-192.png", "192x192", "any"),
+  ("/icons/icon-512.png", "512x512", "any"),
+  ("/icons/icon-maskable-512.png", "512x512", "maskable"),
+];
 const ASSET_EXTENSIONS: &[(&str, &str)] = &[
   ("svg", "image/svg+xml"),
   ("png", "image/png"),
@@ -113,6 +122,8 @@ pub struct Brand {
   pub response: BrandResponse,
   /// The body of `GET /api/v1/brand/theme.css`.
   pub theme_css: String,
+  /// The body of `GET /api/v1/brand/manifest.webmanifest`: installing the web client as an app.
+  pub web_manifest: String,
   /// `Content-Security-Policy` of the web client on this brand's hosts.
   pub content_security_policy: HeaderValue,
   assets: HashMap<String, BrandAsset>,
@@ -542,6 +553,7 @@ impl Brand {
     Ok(Self {
       content_security_policy: brand_policy(config, web, &id)?,
       theme_css: theme_css(&colors),
+      web_manifest: web_manifest(&config.display_name, &colors, &assets),
       source,
       is_default: config.is_default,
       is_overriding_config,
@@ -935,6 +947,54 @@ fn theme_css(colors: &BrandColors) -> String {
     ));
   }
   css
+}
+
+/// The web app manifest: the brand's name, its top bar color and its icon (the client's own icons
+/// without one). Everything in it was validated or is fixed; the host is never part of it.
+fn web_manifest(display_name: &str, colors: &BrandColors, assets: &HashMap<String, BrandAsset>) -> String {
+  let chrome = colors
+    .light
+    .get("chrome")
+    .map_or(DEFAULT_CHROME_COLOR, String::as_str);
+  let icons = match assets.get(BrandAssetSlot::Icon.as_str()) {
+    Some(icon) => vec![serde_json::json!({
+      "src": format!("/api/v1/brand/assets/{}", BrandAssetSlot::Icon.as_str()),
+      "type": icon.content_type,
+      "sizes": icon_sizes(icon),
+      "purpose": "any",
+    })],
+    None => DEFAULT_WEB_ICONS
+      .iter()
+      .map(|(src, sizes, purpose)| {
+        serde_json::json!({ "src": src, "type": "image/png", "sizes": sizes, "purpose": purpose })
+      })
+      .collect(),
+  };
+  serde_json::json!({
+    "id": "/",
+    "name": display_name,
+    "short_name": display_name,
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "orientation": "any",
+    "theme_color": chrome,
+    "background_color": chrome,
+    "icons": icons,
+  })
+  .to_string()
+}
+
+/// The `sizes` of a manifest icon: a PNG's own size from its header, `any` for scalable or
+/// unknown images.
+fn icon_sizes(icon: &BrandAsset) -> String {
+  const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+  let bytes = &icon.bytes;
+  if icon.content_type != "image/png" || bytes.len() < 24 || !bytes.starts_with(PNG_SIGNATURE) {
+    return "any".to_owned();
+  }
+  let dimension = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+  format!("{}x{}", dimension(16), dimension(20))
 }
 
 fn load_assets(
@@ -1340,6 +1400,54 @@ mod tests {
         "{css}"
       );
       assert!(registry.by_id("b").unwrap().theme_css.is_empty());
+    }
+
+    #[test]
+    fn the_web_manifest_has_the_brands_name_and_chrome_color() {
+      let mut brands = two_brands();
+      brands[0].colors = BrandColorsConfig {
+        light: BTreeMap::from([("chrome".to_owned(), "#202a3c".to_owned())]),
+        dark: BTreeMap::new(),
+      };
+      let registry = registry(&brands, UnknownHostPolicy::Default).unwrap();
+      let manifest: serde_json::Value = serde_json::from_str(&registry.default_brand().web_manifest).unwrap();
+      assert_eq!(manifest["name"], registry.default_brand().display_name);
+      assert_eq!(manifest["display"], "standalone");
+      assert_eq!(manifest["start_url"], "/");
+      assert_eq!(manifest["theme_color"], "#202a3c");
+      let other: serde_json::Value =
+        serde_json::from_str(&registry.by_id("b").unwrap().web_manifest).unwrap();
+      assert_eq!(other["theme_color"], DEFAULT_CHROME_COLOR);
+      let purposes: Vec<&str> = other["icons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|icon| icon["purpose"].as_str().unwrap())
+        .collect();
+      assert_eq!(
+        purposes,
+        ["any", "any", "maskable"],
+        "the client's own icons without a brand icon"
+      );
+    }
+
+    #[test]
+    fn a_png_icon_reports_its_size_and_other_images_any() {
+      let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+      png.extend_from_slice(&192_u32.to_be_bytes());
+      png.extend_from_slice(&96_u32.to_be_bytes());
+      let asset = |bytes: Vec<u8>, content_type| BrandAsset {
+        bytes: Bytes::from(bytes),
+        content_type,
+        etag: HeaderValue::from_static("\"x\""),
+      };
+      assert_eq!(icon_sizes(&asset(png, "image/png")), "192x96");
+      assert_eq!(icon_sizes(&asset(b"<svg/>".to_vec(), "image/svg+xml")), "any");
+      assert_eq!(
+        icon_sizes(&asset(b"\x89PNG".to_vec(), "image/png")),
+        "any",
+        "truncated"
+      );
     }
 
     #[test]

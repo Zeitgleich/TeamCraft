@@ -30,6 +30,8 @@ const PUBLIC: &[(&str, &str)] = &[
   // Public presentation of the host (name, colors, logo): the login screen needs it before sign-in.
   ("get", "/api/v1/brand"),
   ("get", "/api/v1/brand/theme.css"),
+  // Installing the web app: the browser fetches the manifest without credentials.
+  ("get", "/api/v1/brand/manifest.webmanifest"),
   ("get", "/api/v1/brand/assets/{slot}"),
   // The link's token is the credential.
   ("post", "/api/v1/meetings/join"),
