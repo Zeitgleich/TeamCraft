@@ -1,0 +1,95 @@
+# Web client download size (.claude/rules/robustness.md, "Download size"): builds the release web
+# bundle like the release does (`trunk build --release`) and checks its wasm, the app and the service
+# worker, with scripts/check-web-size.py. Every run prints the sizes and the delta to the last `main`
+# run into the job summary; above the budget it warns, above the ratchet below it fails (#248).
+#
+# Only changes that can change the bundle run it: the crates compiled into it, the lockfile and the
+# toolchain. `main` saves its sizes for the next delta (a few hundred bytes in the cache).
+name: Web size
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/teamcraft-ui/**"
+      - "crates/teamcraft-web-sw/**"
+      - "crates/teamcraft-core/**"
+      - "crates/teamcraft-client-api/**"
+      - "crates/teamcraft-crypto/**"
+      - "crates/teamcraft-proto/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "scripts/check-web-size.py"
+      - ".github/workflows/web-size.yml"
+  pull_request:
+    paths:
+      - "crates/teamcraft-ui/**"
+      - "crates/teamcraft-web-sw/**"
+      - "crates/teamcraft-core/**"
+      - "crates/teamcraft-client-api/**"
+      - "crates/teamcraft-crypto/**"
+      - "crates/teamcraft-proto/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "scripts/check-web-size.py"
+      - ".github/workflows/web-size.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  # The job runs in the CI image on GHCR.
+  packages: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The ratchet while the bundle is over the 10 MB budget: 11.06 MB measured when this check was
+  # added, plus 1 %. Lower it with every reduction until it meets the budget; raising it is a
+  # decision, not a fix (docs/performance.md, "Web bundle size").
+  WEB_WASM_MAX_BYTES: "11200000"
+
+jobs:
+  web-size:
+    name: Web wasm size
+    runs-on: ubuntu-latest
+    # Rust, the wasm32 target and trunk are in the CI image (containers/ci.Containerfile).
+    container:
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: web-size
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The sizes of the newest `main` run (pull requests and tags can read main's caches).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .web-size/main.json
+          key: web-size-main-${{ github.sha }}
+          restore-keys: web-size-main-
+      - name: Build the web bundle (release)
+        working-directory: crates/teamcraft-ui
+        run: trunk build --release
+      - name: Check the wasm size
+        run: >
+          scripts/check-web-size.py crates/teamcraft-ui/dist
+          --max-bytes "$WEB_WASM_MAX_BYTES"
+          --baseline .web-size/main.json
+          --write .web-size/current.json
+      - name: Keep the sizes for the next delta
+        if: github.ref == 'refs/heads/main'
+        run: mv .web-size/current.json .web-size/main.json
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .web-size/main.json
+          key: web-size-main-${{ github.sha }}

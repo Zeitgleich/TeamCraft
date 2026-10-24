@@ -250,7 +250,8 @@ What the numbers say:
 - **Coming back** to a workspace that grew by 300 channels and 100k messages takes three minutes
   before the channel list shows (#247); the main thread is mostly free meanwhile (14 tasks over
   50 ms, 1 s in total), the time goes to the sequential catch-up (#155).
-- **wasm:** the app is 0.6 MB under the budget, with the service worker 0.2 MB over (#248).
+- **wasm:** the app is 0.6 MB under the budget, with the service worker 0.2 MB over (#248); see
+  "Web bundle size" below for the current numbers.
 
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
@@ -265,6 +266,62 @@ image does not boot on this AMD host), signed out:
 |-----------------------------------------------|-----------|
 | Cold start to the first frame (`am start -W`) | 1.0–1.2 s |
 | Memory after start (PSS)                      | 95 MiB    |
+
+### Web bundle size
+
+The budget counts the uncompressed wasm a first visit downloads: the app and the service worker,
+which is installed on the first visit too. `.github/workflows/web-size.yml` builds the release
+bundle on every change to the crates in it and runs `scripts/check-web-size.py`. The script prints
+the sizes and the delta to `main`, warns above the 10 MB budget, and fails above a ratchet
+(`WEB_WASM_MAX_BYTES`) set just above the current size. The ratchet comes down with every reduction
+until it meets the budget (#248).
+
+Release `trunk build`, Rust 1.99, wasm-opt 131, measured on `main` e569848:
+
+| Web wasm       | Before (`-Oz`) | After (`-Oz --converge`) | gzip -9 (after) |
+|----------------|----------------|--------------------------|-----------------|
+| App            | 10,282,671 B   | 10,272,725 B             | 3.83 MB         |
+| Service worker | 790,289 B      | 789,496 B                | 0.34 MB         |
+| Total          | 11,072,960 B   | 11,062,221 B             | 4.17 MB         |
+
+The app grew from 9.41 MB (#248) to 10.27 MB in the meantime: the 10 MB budget is 1.06 MB away.
+
+Where the app's code goes (`twiggy top` on an unstripped build, before wasm-opt, by crate):
+
+| Crate(s)                                     | Share | What it is                                        |
+|----------------------------------------------|-------|---------------------------------------------------|
+| teamcraft-ui                                 | 19 %  | the views; the admin console's closures are large |
+| tachys, reactive_graph, leptos               | 21 %  | Leptos (rendering and reactivity)                 |
+| core, alloc                                  | 13 %  | the standard library                              |
+| serde, serde_json and the derived impls      | ~18 % | 2.0 MB of deserializers (overlaps the other rows) |
+| teamcraft-core, -client-api, -proto, -crypto | 18 %  | the client engine and the wire types              |
+| data (`.rodata`)                             | 8.5 % | strings, the two Fluent files (210 kB)            |
+| openmls, hpke-rs, p384, k256, curve25519     | 5 %   | MLS with every ciphersuite of openmls_rust_crypto |
+| image, zune-jpeg, image-webp, png, fdeflate  | 3 %   | attachment thumbnails (`thumbnail.rs`)            |
+
+What was tried, app wasm after wasm-opt:
+
+| Change                                                    | Size         | Taken                          |
+|-----------------------------------------------------------|--------------|--------------------------------|
+| `-Oz` (as shipped)                                        | 10,282,671 B | -                              |
+| wasm-opt `--converge`                                     | −9.9 kB      | yes                            |
+| wasm-opt `--low-memory-unused`                            | −40 kB       | no: Rust's stack is down there |
+| wasm-opt `-Oz -Oz`, `--gufa`, `--merge-similar-functions` | ≤ −10 kB     | no (same as `--converge`)      |
+| `opt-level = "s"` instead of `"z"`                        | +2.15 MB     | no                             |
+| `log` `release_max_level_off` (openmls' logging)          | −0.1 kB      | no (LTO drops it already)      |
+| `tracing` `release_max_level_info` (no debug logs on web) | −33 kB       | no: loses the console's debug  |
+
+Debug sections are already stripped (`strip = true`; the only custom sections left are 85 bytes),
+and the profile is already `opt-level = "z"`, fat LTO, one codegen unit and `panic = "abort"`. So
+there is no cheap megabyte left. What would bring the bundle under the budget:
+
+- **Split the bundle:** load the admin console (and the call UI) on demand. Leptos 0.8 supports
+  this with `#[lazy]` and wasm-split, which trunk 0.22 does not run yet.
+- **Thumbnails through the browser** (`createImageBitmap` and `OffscreenCanvas`) instead of the
+  `image` decoders on wasm: about 0.35 MB.
+- **Leaner deserializers** for the largest wire enums: `ChatAction` alone is 129 kB, decoded from a
+  `serde_json::Value`. Internally tagged enums go through serde's buffering `Content`, which adds
+  0.25 MB.
 
 ## Limits to keep in mind
 

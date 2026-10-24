@@ -14,9 +14,9 @@
     <link data-trunk rel="copy-dir" href="../../assets/backgrounds/thumbs" data-target-path="backgrounds" />
     <!-- wasm-opt only runs in release builds; the features are what rustc enables for wasm32 by default.
          loader.js drives the loading screen below. -->
-    <link data-trunk rel="rust" data-bin="teamcraft-ui" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" data-initializer="loader.js" />
+    <link data-trunk rel="rust" data-bin="teamcraft-ui" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" data-initializer="loader.js" />
     <!-- The service worker's Rust half (push wake-ups); scripts/finish-sw.sh inlines it into sw.js. -->
-    <link data-trunk rel="rust" href="../teamcraft-web-sw/Cargo.toml" data-type="worker" data-bindgen-target="no-modules" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
+    <link data-trunk rel="rust" href="../teamcraft-web-sw/Cargo.toml" data-type="worker" data-bindgen-target="no-modules" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
   </head>
   <body>
     <!-- The loading screen: plain HTML and CSS (style/loader.css), so it shows before any script runs.
