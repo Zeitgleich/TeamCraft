@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release candidates upgrade through `dnf` and `apt`**: candidate packages were built with the final
+  version (`1.0.0-1`), so a package manager never saw an update between candidates or from a candidate
+  to the release. Candidates now carry `1.0.0~rc.N` (deb) and `1.0.0-0.rc.N` (rpm), which sort before
+  the release. Machines that installed a candidate of 1.0.0 need
+  `sudo dnf reinstall team-craft` or `sudo apt install --reinstall team-craft` once; after that
+  updates arrive normally.
+
 ### Added
 
 - **Image lightbox on desktop and web**: clicking an image opens it at full resolution, decrypted in

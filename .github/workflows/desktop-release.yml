@@ -113,6 +113,13 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="$(scripts/check-versions.sh)"; fi
           echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      # Tauri names the deb and rpm after the tree's version, so a candidate would be 1.0.0 like the
+      # release. The rpm gets Release 0.rc.N (via --config below); the deb is repacked as 1.0.0~rc.N.
+      # Both sort before the final version, so dnf/apt upgrade candidate to candidate to release.
+      - name: Package versions (rpm release)
+        shell: bash
+        run: |
+          echo "TEAMCRAFT_RPM_RELEASE=$(scripts/linux-package-version.sh rpm-release "$TEAMCRAFT_RELEASE_VERSION")" >> "$GITHUB_ENV"
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
       # The UI bundle from the ui job; tauri.prebuilt-ui.conf.json drops the trunk build from
@@ -129,10 +136,18 @@ jobs:
         working-directory: apps/desktop
         run: >
           cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json
+          --config "{\"bundle\":{\"linux\":{\"rpm\":{\"release\":\"$TEAMCRAFT_RPM_RELEASE\"}}}}"
           ${{ inputs.warm-cache && '--no-bundle' || '--bundles deb,rpm,appimage' }}
         env:
           # AppImage tooling runs without FUSE on hosted runners.
           APPIMAGE_EXTRACT_AND_RUN: "1"
+      - name: Package versions (deb)
+        if: ${{ !inputs.warm-cache }}
+        run: |
+          for deb in target/release/bundle/deb/*.deb; do
+            scripts/linux-package-version.sh repack-deb "$TEAMCRAFT_RELEASE_VERSION" "$deb"
+          done
+          ls target/release/bundle/deb target/release/bundle/rpm
       # deb and rpm are updated by the package manager from the signed repositories instead.
       - name: Sign the AppImage for the updater (optional)
         if: ${{ !inputs.warm-cache }}
