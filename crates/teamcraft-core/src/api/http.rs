@@ -324,6 +324,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn check_member_removal(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::GET,
+        &format!("/conversations/{conversation}/members/{user}/removal"),
+        None,
+      )
+      .await
+  }
+
   async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(

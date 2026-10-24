@@ -23,6 +23,7 @@ mod org_backgrounds;
 mod org_recovery;
 pub mod people;
 pub mod previews;
+mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
 mod sync;

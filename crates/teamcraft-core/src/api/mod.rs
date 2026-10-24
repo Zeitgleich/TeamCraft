@@ -128,6 +128,14 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &AddConversationMemberRequest,
   ) -> impl Future<Output = Result<ConversationMemberResponse, ApiError>>;
+  /// Asks whether the caller may remove `user` (or leave), changing nothing
+  /// (`GET /conversations/{id}/members/{user}/removal`). Asked before the MLS removal commit.
+  fn check_member_removal(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Removes `user` (or leaves); idempotent. Sent after the MLS removal commit (e2ee.md §4.6).
   fn remove_member(
     &self,
     conversation: ConversationId,

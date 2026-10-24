@@ -37,8 +37,10 @@ actions run in two steps:
 
 1. The admin's client creates a **signed admin action** (e.g. "add Anna to #project-a-dev",
    "remove Max from #project-b-internal"), signed with the admin's device key.
-2. The server enforces it immediately for access control (e.g. stops delivering to removed users) and
-   hands the signed action to the group's member clients. v1 delivers it as a pending change; the
+2. The admin's client posts the signed action into the group's queue first and only then asks the
+   server to drop the membership, so a crash in between can't leave a removal without its signed
+   action (e2ee.md §4.6, removal order). The server enforces it immediately for access control (e.g.
+   stops delivering to removed users) and hands the signed action to the group's member clients. v1 delivers it as a pending change; the
    committing member puts it into the commit's authenticated data (e2ee.md §4.6). Later option: send
    it as an MLS **external proposal** (RFC 9420: the workspace's admin key registered as an
    `external_senders` entry in every group); the signed action stays the same.

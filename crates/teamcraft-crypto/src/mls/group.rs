@@ -59,6 +59,12 @@ pub struct PendingCommit {
   maybe_rejoin: Option<(GroupMember, ChangeId)>,
 }
 
+/// A decrypted welcome whose leaves aren't verified yet ([`ConversationGroup::stage_join`]).
+pub struct StagedJoin {
+  conversation_id: ConversationId,
+  staged: StagedWelcome,
+}
+
 /// What this device saw of the group's signed changes, persisted with the MLS state: a change
 /// signed before this device joined, or before a later change to the same user, is refused
 /// (security review A3).
@@ -147,6 +153,18 @@ impl ConversationGroup {
     conversation_id: ConversationId,
     directory: &impl IdentityDirectory,
   ) -> Result<Self, MlsError> {
+    Self::stage_join(provider, welcome, conversation_id)?.complete(provider, directory)
+  }
+
+  /// Decrypts a welcome without trusting it yet: [`StagedJoin::claimed_users`] says whose
+  /// identities to pin before [`StagedJoin::complete`] verifies every leaf. The welcome's tree may
+  /// hold users the server no longer lists (removed after the welcome was made). This takes the
+  /// device's key package, so a failed join can't be retried with the same welcome.
+  pub fn stage_join(
+    provider: &impl OpenMlsProvider,
+    welcome: &[u8],
+    conversation_id: ConversationId,
+  ) -> Result<StagedJoin, MlsError> {
     let MlsMessageBodyIn::Welcome(welcome) = MlsMessageIn::tls_deserialize_exact(welcome)?.extract() else {
       return Err(MlsError::UnexpectedMessage("expected a welcome"));
     };
@@ -156,7 +174,7 @@ impl ConversationGroup {
     // Leaves that never committed still carry the lifetime of the key package they joined with;
     // checking it would make every group unjoinable once such a member's package expired. A
     // lifetime only bounds when a package may be *added* (RFC 9420 §7.3, openmls #1810), which
-    // the committer and every member checked then; credentials are verified below.
+    // the committer and every member checked then; credentials are verified on completion.
     let staged = StagedWelcome::build_from_welcome(provider, &config, welcome)
       .map_err(|error| MlsError::openmls("welcome processing", error))?
       .skip_lifetime_validation()
@@ -168,17 +186,10 @@ impl ConversationGroup {
     if staged.group_context().ciphersuite() != CIPHERSUITE {
       return Err(MlsError::UnexpectedMessage("welcome with another ciphersuite"));
     }
-    for member in staged.members() {
-      credential::verify(&member.credential, &member.signature_key, directory)?;
-    }
-    let group = staged
-      .into_group(provider)
-      .map_err(|error| MlsError::openmls("joining group", error))?;
-    let history = ChangeHistory {
-      joined_epoch: group.epoch().as_u64(),
-      ..ChangeHistory::default()
-    };
-    Ok(Self::from_group(conversation_id, group, history))
+    Ok(StagedJoin {
+      conversation_id,
+      staged,
+    })
   }
 
   /// Loads a group from the provider's storage, with the change IDs applied so far and the change
@@ -1048,6 +1059,44 @@ impl ConversationGroup {
     } else {
       Err(MlsError::MissingSignedChange)
     }
+  }
+}
+
+impl StagedJoin {
+  /// The users the welcome's tree claims to hold, unverified: whose identities to pin.
+  pub fn claimed_users(&self) -> Result<Vec<UserId>, MlsError> {
+    let mut users = Vec::new();
+    for member in self.staged.members() {
+      let user = credential::member_of(&member.credential)?.user_id;
+      if !users.contains(&user) {
+        users.push(user);
+      }
+    }
+    Ok(users)
+  }
+
+  /// Verifies every leaf against its user's pinned identity and joins the group.
+  pub fn complete(
+    self,
+    provider: &impl OpenMlsProvider,
+    directory: &impl IdentityDirectory,
+  ) -> Result<ConversationGroup, MlsError> {
+    for member in self.staged.members() {
+      credential::verify(&member.credential, &member.signature_key, directory)?;
+    }
+    let group = self
+      .staged
+      .into_group(provider)
+      .map_err(|error| MlsError::openmls("joining group", error))?;
+    let history = ChangeHistory {
+      joined_epoch: group.epoch().as_u64(),
+      ..ChangeHistory::default()
+    };
+    Ok(ConversationGroup::from_group(
+      self.conversation_id,
+      group,
+      history,
+    ))
   }
 }
 

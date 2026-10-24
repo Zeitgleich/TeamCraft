@@ -415,6 +415,32 @@ discards it when another commit took the epoch, and sends the same request again
 never got it. No new commit is made while one is pending. So a lost answer no longer leaves the
 device an epoch behind its own commit.
 
+**Removal order.** Removing a member, leaving and revoking a device are one recoverable operation,
+so a crash or a lost answer can't leave a removed person in the group while the server no longer
+lists them:
+
+1. The client asks the server whether the removal is allowed
+   (`GET /conversations/{id}/members/{user}/removal`, the same checks as the removal, nothing
+   changes), so the group never drops somebody the server then keeps (a moderator removing an admin,
+   the last channel admin leaving).
+2. The MLS side goes first. A member commits the signed removal; an admin outside the group posts it
+   for the members to commit (admin.md §2.2); somebody leaving posts a signed removal of themselves,
+   which the remaining members commit (MLS doesn't let a member commit its own removal; the
+   leaver's own devices skip it).
+3. Only then is the server's membership dropped (`DELETE …/members/{user}`, idempotent: removing
+   somebody who is gone succeeds, so a retry or a second admin finishes instead of failing).
+
+The client records the removal and the step it reached in its pending queue before step 2 and
+finishes it on the next round (after a restart, on the next sync), so a lost answer or a killed app
+is repaired by the device that started it. Every state in between is safe: before step 2 nothing
+changed; after it the removed devices have no secret of the new epoch, whose key every member
+switches to (§4.2), even while the server still lists the user. Members' clients don't claim key
+packages for a user the server lists but who has no device in the group. A device that joins from a
+welcome made before somebody's removal pins the identities of everybody the welcome's tree holds,
+not only of whom the server lists, and verifies every leaf as before; the removal commit follows in
+the queue. A revocation runs in the other order on purpose: the server first, so a lost device loses
+its session at once, then the signed device list and the groups, again from the pending queue.
+
 **Falling out and coming back.** A device can still miss or refuse a commit the others merged (a bug,
 a restored backup of the app's store, an old client). It notices when, with every earlier entry of the
 queue handled, an entry from a later epoch comes. Then it asks to be added back (above) and keeps its

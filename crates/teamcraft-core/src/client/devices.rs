@@ -43,31 +43,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Revokes one of this user's other devices (a lost laptop): the server forgets it, the user's
-  /// device list drops it for good, and this device removes it from every group it shares with it.
-  pub async fn revoke_device(&mut self, device: DeviceId) -> Result<(), CoreError> {
-    if device == self.account.device_id {
-      return Err(CoreError::Corrupt("a device can't revoke itself".into()));
-    }
-    self.api.revoke_device(device).await?;
-    self.publish_device_list(&[device]).await?;
-    let conversations: Vec<_> = self.cached_conversations()?.into_keys().collect();
-    for conversation in conversations {
-      if self.has_group(conversation)? && self.group_device_ids(conversation)?.contains(&device) {
-        self
-          .commit_change(
-            conversation,
-            super::groups::ChangeSource::Own(teamcraft_crypto::membership::MembershipAction::RemoveDevice {
-              user_id: convert::user(self.account.user_id),
-              device_id: convert::device(device),
-            }),
-          )
-          .await?;
-      }
-    }
-    Ok(())
-  }
-
   /// Publishes this user's device list with this device in it and `revoked` dropped. The first
   /// list starts from the devices the server knows whose certificates the identity key signed.
   pub(crate) async fn publish_device_list(&mut self, revoked: &[DeviceId]) -> Result<(), CoreError> {

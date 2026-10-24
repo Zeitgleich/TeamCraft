@@ -691,6 +691,32 @@ mod rejection {
   }
 
   #[test]
+  fn a_staged_join_names_everybody_in_the_tree_before_trusting_them() {
+    let mut world = World::new();
+    let welcome = world.welcome_for_bob();
+    let staged = ConversationGroup::stage_join(&world.bob.provider, &welcome, CONVERSATION).unwrap();
+    let mut claimed = staged.claimed_users().unwrap();
+    claimed.sort();
+    let mut expected: Vec<UserId> = world
+      .alice_group
+      .members()
+      .unwrap()
+      .into_iter()
+      .map(|member| member.user_id)
+      .collect();
+    expected.sort();
+    expected.dedup();
+    assert!(claimed.contains(&UserId::new(ALICE)) && claimed.contains(&UserId::new(BOB)));
+    assert_eq!(claimed, expected);
+    // Completing still verifies every leaf: a directory without one of them is refused.
+    let without_alice = TestDirectory::with(&[&world.bob.user, &world.carol.user]);
+    assert!(matches!(
+      staged.complete(&world.bob.provider, &without_alice),
+      Err(MlsError::UnknownUser(_))
+    ));
+  }
+
+  #[test]
   fn join_rejects_welcome_for_other_conversation() {
     let mut world = World::new();
     let welcome = world.welcome_for_bob();
