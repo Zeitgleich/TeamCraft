@@ -148,9 +148,10 @@ pub async fn list_threads(
 
 /// Unread and mention counts of all conversations and followed threads.
 pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<UnreadResponse, ApiError> {
+  let max_counted = state.settings.get().limits.max_unread_counted;
   let conversations = state
     .database
-    .conversation_unread_counts(caller.user.id, state.settings.get().limits.max_unread_counted)
+    .conversation_unread_counts(caller.user.id, max_counted)
     .await?
     .into_iter()
     .map(|row| ConversationUnread {
@@ -164,6 +165,7 @@ pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<
     conversations,
     unread_thread_count: totals.unread_thread_count,
     thread_mention_count: totals.mention_count,
+    maybe_max_counted: Some(max_counted),
   })
 }
 

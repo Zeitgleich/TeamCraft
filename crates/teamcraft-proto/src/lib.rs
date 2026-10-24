@@ -11,6 +11,7 @@ mod conversation;
 mod error;
 mod gateway;
 mod id;
+pub mod live;
 mod permission;
 mod rendezvous;
 mod role;

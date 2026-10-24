@@ -3,7 +3,8 @@
 //! instead of polling the server for it.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ConversationId, MessageId, ThreadSummary, UnreadResponse, UserId, UserPresence};
+pub use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt, RevisedPresence};
+use teamcraft_proto::{ThreadSummary, UnreadResponse};
 
 /// What the core knows right now. The UI reads it on every change the core reports.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,27 +15,13 @@ pub struct LiveSnapshot {
   /// Followed threads with the server's counters.
   #[serde(default)]
   pub threads: Vec<ThreadSummary>,
-  /// Presence and custom status as last announced by `presence_update` events.
+  /// Presence and custom status as last announced by `presence_update` events, bounded; the UI
+  /// applies only revisions it hasn't seen.
   #[serde(default)]
-  pub presence: Vec<UserPresence>,
+  pub presence: AnnouncedPresence,
   /// How far other members of DMs have read, from `read_receipt` events.
   #[serde(default)]
   pub receipts: Vec<LiveReceipt>,
   #[serde(default)]
   pub marks: LiveMarks,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LiveReceipt {
-  pub conversation: ConversationId,
-  pub user: UserId,
-  pub message: MessageId,
-}
-
-/// Counters that move when the UI should read something from the server once: after each gateway
-/// connection (events in between may be lost) and when the announcement changed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LiveMarks {
-  pub connections: u64,
-  pub announcements: u64,
 }

@@ -113,6 +113,8 @@ struct State {
   signed_out_users: HashSet<UserId>,
   /// Heartbeats received, to check that a busy client keeps sending them.
   heartbeats: u64,
+  /// What `GET /unread` answers per user; without an entry nothing is unread.
+  unread: HashMap<UserId, UnreadResponse>,
   /// A malicious server: the next registered device gets this ID instead of a fresh one.
   maybe_forced_device_id: Option<DeviceId>,
   /// A network cut armed per user: after the given number of calls, the next one fails.
@@ -400,6 +402,11 @@ impl FakeServer {
   /// Forgets a user's identity key, so the server answers "not found" as a lying server would.
   pub fn forget_identity_key(&self, user: UserId) {
     self.lock().identity_keys.remove(&user);
+  }
+
+  /// Sets what `GET /unread` answers the user (the fake keeps no read positions of its own).
+  pub fn set_unread(&self, user: UserId, unread: UnreadResponse) {
+    self.lock().unread.insert(user, unread);
   }
 
   /// Closes all gateway connections of a user, as a network drop would. Sessions stay resumable.
@@ -2015,14 +2022,15 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  /// The fake doesn't track read positions; nothing is ever unread.
+  /// The fake doesn't track read positions: nothing is unread unless a test set it.
   async fn unread(&self) -> Result<UnreadResponse, ApiError> {
-    self.with(|_, _| {
-      Ok(UnreadResponse {
+    self.with(|state, me| {
+      Ok(state.unread.get(&me).cloned().unwrap_or(UnreadResponse {
         conversations: Vec::new(),
         unread_thread_count: 0,
         thread_mention_count: 0,
-      })
+        maybe_max_counted: None,
+      }))
     })
   }
 

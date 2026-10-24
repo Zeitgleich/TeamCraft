@@ -4,8 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
-
+use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt};
 use teamcraft_proto::{
   ConversationId, ConversationUnread, MessageId, MessageResponse, ThreadId, ThreadSummary, UnreadResponse,
   UserId, UserPresence,
@@ -17,24 +16,12 @@ use crate::store::{LocalStore, Table};
 
 const UNREAD_KEY: &str = "state";
 const MARKS_KEY: &str = "marks";
-/// Prefix of the presence records `presence_update` events leave in [`Table::Presence`].
-const ANNOUNCED_PRESENCE_PREFIX: &str = "announced:";
-
-/// Counters that move when a UI should read something from the server once: after each gateway
-/// connection (events in between may be lost) and when the announcement changed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LiveMarks {
-  pub connections: u64,
-  pub announcements: u64,
-}
-
-/// How far another member of a DM has read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StoredReceipt {
-  pub conversation: ConversationId,
-  pub user: UserId,
-  pub message: MessageId,
-}
+/// The one record in [`Table::Presence`] (whose other keys are user IDs) that keeps what
+/// `presence_update` events announced, for the UI.
+const ANNOUNCED_PRESENCE_KEY: &str = "announced";
+/// What servers before 1.0.1 cap counts at (`limits.max_unread_counted` default); newer servers
+/// say it in `GET /unread`.
+const DEFAULT_MAX_UNREAD_COUNTED: u32 = 1000;
 
 /// Followed threads, most recently active first. Last replies are decrypted into the message store
 /// separately; `maybe_last_reply` here keeps only the ciphertext the server sent.
@@ -50,12 +37,12 @@ pub fn unread(store: &impl LocalStore) -> Result<Option<UnreadResponse>, CoreErr
 }
 
 /// How far other members of DMs have read, across all conversations.
-pub fn all_read_receipts(store: &impl LocalStore) -> Result<Vec<StoredReceipt>, CoreError> {
+pub fn all_read_receipts(store: &impl LocalStore) -> Result<Vec<LiveReceipt>, CoreError> {
   let mut receipts = Vec::new();
   for (key, value) in store.list(Table::ReadReceipts)? {
     let corrupt = || CoreError::Corrupt(format!("read receipt key {key}"));
     let (conversation, user) = key.split_once('/').ok_or_else(corrupt)?;
-    receipts.push(StoredReceipt {
+    receipts.push(LiveReceipt {
       conversation: conversation.parse().map_err(|_| corrupt())?,
       user: user.parse().map_err(|_| corrupt())?,
       message: serde_json::from_slice(&value).map_err(|error| CoreError::Corrupt(error.to_string()))?,
@@ -64,15 +51,9 @@ pub fn all_read_receipts(store: &impl LocalStore) -> Result<Vec<StoredReceipt>, 
   Ok(receipts)
 }
 
-/// Presence and custom status as `presence_update` events announced them.
-pub fn announced_presence(store: &impl LocalStore) -> Result<Vec<UserPresence>, CoreError> {
-  let mut presence = Vec::new();
-  for (key, value) in store.list(Table::Presence)? {
-    if key.starts_with(ANNOUNCED_PRESENCE_PREFIX) {
-      presence.push(serde_json::from_slice(&value).map_err(|error| CoreError::Corrupt(error.to_string()))?);
-    }
-  }
-  Ok(presence)
+/// Presence and custom status as `presence_update` events announced them, bounded.
+pub fn announced_presence(store: &impl LocalStore) -> Result<AnnouncedPresence, CoreError> {
+  Ok(records::get_json(store, Table::Presence, ANNOUNCED_PRESENCE_KEY)?.unwrap_or_default())
 }
 
 pub fn marks(store: &impl LocalStore) -> Result<LiveMarks, CoreError> {
@@ -153,8 +134,9 @@ pub(crate) fn note_unread(
   save_unread(store, &unread)
 }
 
-/// Counts a new top-level message of someone else, as the server does (threads.rs counts replies).
-/// Only for messages that arrive live: history that sync loads was counted by the server already.
+/// Counts a new top-level message of someone else, as the server does (threads.rs counts replies),
+/// up to the server's cap. Only for messages that arrive live: history that sync loads was counted
+/// by the server already, and so was a message this device stored before (a duplicate delivery).
 pub(crate) fn note_new_message(
   store: &impl LocalStore,
   message: &MessageResponse,
@@ -166,35 +148,46 @@ pub(crate) fn note_new_message(
   let Some(mut unread) = unread(store)? else {
     return Ok(());
   };
-  let is_mention = message.mentioned_user_ids.contains(&me);
+  let is_known = store
+    .message(message.conversation_id, message.client_message_id)?
+    .is_some_and(|stored| stored.maybe_server_id.is_some());
+  if is_known {
+    return Ok(());
+  }
+  let max_counted = unread.maybe_max_counted.unwrap_or(DEFAULT_MAX_UNREAD_COUNTED);
+  let mention = u32::from(message.mentioned_user_ids.contains(&me));
   match unread
     .conversations
     .iter_mut()
     .find(|entry| entry.conversation_id == message.conversation_id)
   {
     Some(entry) => {
-      entry.unread_count = entry.unread_count.saturating_add(1);
-      entry.mention_count = entry.mention_count.saturating_add(u32::from(is_mention));
+      // Mentions are counted among the counted messages (proto `ConversationUnread`).
+      if entry.unread_count >= max_counted {
+        return Ok(());
+      }
+      entry.unread_count += 1;
+      entry.mention_count = (entry.mention_count + mention).min(entry.unread_count);
     },
+    None if max_counted == 0 => return Ok(()),
     None => unread.conversations.push(ConversationUnread {
       conversation_id: message.conversation_id,
       unread_count: 1,
-      mention_count: u32::from(is_mention),
+      mention_count: mention,
     }),
   }
   save_unread(store, &unread)
 }
 
+/// Keeps a `presence_update` for the UI; at most `max_entries` people, the oldest are dropped.
 pub(crate) fn note_announced_presence(
   store: &impl LocalStore,
-  presence: &UserPresence,
+  presence: UserPresence,
+  max_entries: usize,
 ) -> Result<(), CoreError> {
-  records::put_json(
-    store,
-    Table::Presence,
-    &format!("{ANNOUNCED_PRESENCE_PREFIX}{}", presence.user_id),
-    presence,
-  )
+  let mut announced = announced_presence(store)?;
+  announced.note(presence, max_entries);
+  records::put_json(store, Table::Presence, ANNOUNCED_PRESENCE_KEY, &announced)
 }
 
 pub(crate) fn update_marks(
@@ -275,6 +268,99 @@ mod tests {
       vec![id(3), id(9)]
     );
     assert!(acknowledgements(&store, id(1), id(51)).unwrap().is_empty());
+  }
+
+  mod new_messages {
+    use super::*;
+
+    #[test]
+    fn counting_stops_at_the_servers_cap() {
+      let store = MemoryStore::new();
+      save_unread(&store, &unread_of(&[(1, 2, 2)], Some(3))).unwrap();
+      for seq in 0..3 {
+        note_new_message(&store, &message(1, 9, seq, true), id(5)).unwrap();
+      }
+      assert_eq!(
+        counts(&store, 1),
+        (3, 3),
+        "mentions are among the counted messages"
+      );
+    }
+
+    #[test]
+    fn servers_without_a_cap_get_the_default_one() {
+      let store = MemoryStore::new();
+      save_unread(&store, &unread_of(&[(1, DEFAULT_MAX_UNREAD_COUNTED, 0)], None)).unwrap();
+      note_new_message(&store, &message(1, 9, 0, false), id(5)).unwrap();
+      assert_eq!(counts(&store, 1), (DEFAULT_MAX_UNREAD_COUNTED, 0));
+    }
+
+    #[test]
+    fn own_messages_and_known_messages_are_not_counted() {
+      let store = MemoryStore::new();
+      save_unread(&store, &unread_of(&[], Some(1000))).unwrap();
+      note_new_message(&store, &message(1, 5, 0, false), id(5)).unwrap();
+      assert_eq!(counts(&store, 1), (0, 0), "own message");
+      let delivered = message(1, 9, 1, false);
+      note_new_message(&store, &delivered, id(5)).unwrap();
+      store
+        .upsert_message(&crate::store::StoredMessage {
+          conversation_id: delivered.conversation_id,
+          client_message_id: delivered.client_message_id,
+          maybe_server_id: Some(delivered.id),
+          sender_user_id: delivered.sender_user_id,
+          maybe_thread_id: None,
+          sent_at_ms: 0,
+          content: crate::store::MessageContent::text("hi", Vec::new()),
+          is_edited: false,
+          edits: Vec::new(),
+          is_pinned: false,
+        })
+        .unwrap();
+      note_new_message(&store, &delivered, id(5)).unwrap();
+      assert_eq!(counts(&store, 1), (1, 0), "a duplicate delivery counts once");
+    }
+
+    fn message(conversation: i64, sender: i64, seq: u8, is_mention: bool) -> MessageResponse {
+      MessageResponse {
+        id: id(100 + i64::from(seq)),
+        client_message_id: teamcraft_proto::ClientMessageId::from_bytes([seq; 16]),
+        conversation_id: id(conversation),
+        sender_user_id: id(sender),
+        sender_device_id: id(1),
+        maybe_thread_id: None,
+        mentioned_user_ids: if is_mention { vec![id(5)] } else { Vec::new() },
+        is_urgent: false,
+        content_key_id: teamcraft_proto::Base64Bytes::new(Vec::new()),
+        ciphertext: teamcraft_proto::Base64Bytes::new(Vec::new()),
+      }
+    }
+
+    fn unread_of(counts: &[(i64, u32, u32)], maybe_max_counted: Option<u32>) -> UnreadResponse {
+      UnreadResponse {
+        conversations: counts
+          .iter()
+          .map(|(conversation, unread_count, mention_count)| ConversationUnread {
+            conversation_id: id(*conversation),
+            unread_count: *unread_count,
+            mention_count: *mention_count,
+          })
+          .collect(),
+        unread_thread_count: 0,
+        thread_mention_count: 0,
+        maybe_max_counted,
+      }
+    }
+
+    fn counts(store: &MemoryStore, conversation: i64) -> (u32, u32) {
+      unread(store)
+        .unwrap()
+        .unwrap()
+        .conversations
+        .iter()
+        .find(|entry| entry.conversation_id == id(conversation))
+        .map_or((0, 0), |entry| (entry.unread_count, entry.mention_count))
+    }
   }
 
   fn id<T: Id>(raw: i64) -> T {

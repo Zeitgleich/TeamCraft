@@ -19,7 +19,7 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{
   BackgroundImageInfo, OrgBackgroundInfo, OrgBackgroundRule, OrgBackgrounds,
 };
-use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
+use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinableSpace,
   Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
@@ -990,24 +990,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn live_snapshot(&self) -> Option<LiveSnapshot> {
-    let marks = self.read(crate::read_state::marks(&self.store));
+    // Each part is one record, except the receipts (one per member of each DM).
     Some(LiveSnapshot {
       maybe_unread: self.read(crate::read_state::unread(&self.store)),
       threads: self.read(crate::read_state::threads(&self.store)),
       presence: self.read(crate::read_state::announced_presence(&self.store)),
-      receipts: self
-        .read(crate::read_state::all_read_receipts(&self.store))
-        .into_iter()
-        .map(|receipt| LiveReceipt {
-          conversation: receipt.conversation,
-          user: receipt.user,
-          message: receipt.message,
-        })
-        .collect(),
-      marks: LiveMarks {
-        connections: marks.connections,
-        announcements: marks.announcements,
-      },
+      receipts: self.read(crate::read_state::all_read_receipts(&self.store)),
+      marks: self.read(crate::read_state::marks(&self.store)),
     })
   }
 

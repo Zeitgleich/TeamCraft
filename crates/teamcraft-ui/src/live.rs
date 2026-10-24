@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
-use teamcraft_client_api::live::{LiveMarks, LiveSnapshot};
+use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
 use teamcraft_proto::{
   AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
   ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
@@ -70,8 +70,13 @@ pub struct LiveState {
   presence: HashMap<UserId, UserPresence>,
   receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
   announcement: Option<AnnouncementResponse>,
-  /// The core's last snapshot, so only what changed since is laid over the REST answers.
-  maybe_last_live: Option<LiveSnapshot>,
+  /// The marks of the core's last snapshot; `None` before the first.
+  maybe_last_marks: Option<LiveMarks>,
+  /// The newest presence announcement taken from the core, so only newer ones are laid over the
+  /// REST answers.
+  presence_seen: u64,
+  /// The receipts of the last snapshot: unchanged ones are not applied again.
+  last_receipts: Vec<LiveReceipt>,
 }
 
 /// What the UI still has to read from the server after a core snapshot.
@@ -96,6 +101,11 @@ impl LiveServer {
   /// Called after every refresh that changed something.
   pub fn set_change_notifier(&self, notify: ChangeNotifier) {
     *self.notify.borrow_mut() = Some(notify);
+  }
+
+  /// Whether counts and threads come from a client core's snapshot (then nothing needs polling).
+  pub fn is_core_fed(&self) -> bool {
+    self.state.borrow().is_core_fed
   }
 
   /// Takes the core's snapshot after a change it reported; reads from the server only what the
@@ -369,34 +379,41 @@ impl LiveServer {
 impl LiveState {
   /// Lays the core's snapshot over the state: counts and threads are the core's, presence and
   /// receipts only where they changed since the last snapshot (a REST answer read after an older
-  /// event must not be undone by it).
+  /// event must not be undone by it). Proportional to what changed, not to everything the core
+  /// keeps: presence by revision, receipts skipped when unchanged.
   pub fn apply_snapshot(&mut self, live: LiveSnapshot) -> LiveFollowUp {
-    let maybe_last = self.maybe_last_live.take();
-    let last_marks = maybe_last.as_ref().map(|last| last.marks);
+    let maybe_last_marks = self.maybe_last_marks.replace(live.marks);
     self.is_core_fed = true;
     if let Some(unread) = &live.maybe_unread {
       self.is_loaded = true;
       self.unread = unread_map(unread);
     }
-    self.threads.clone_from(&live.threads);
-    for presence in &live.presence {
-      let is_new = maybe_last
-        .as_ref()
-        .is_none_or(|last| !last.presence.contains(presence));
-      if is_new {
-        self.presence.insert(presence.user_id, presence.clone());
-      }
+    self.threads = live.threads;
+    let has_presence_gap = live.presence.has_gap_since(self.presence_seen);
+    for entry in live.presence.since(self.presence_seen) {
+      self
+        .presence
+        .insert(entry.presence.user_id, entry.presence.clone());
     }
-    for receipt in &live.receipts {
+    self.presence_seen = self.presence_seen.max(live.presence.revision);
+    if live.receipts != self.last_receipts {
+      self.apply_receipts(&live.receipts);
+      self.last_receipts = live.receipts;
+    }
+    let mut follow_up = follow_up(maybe_last_marks, live.marks);
+    // Announcements dropped before this UI saw them: read presence from the server instead.
+    follow_up.needs_resync |= maybe_last_marks.is_some() && has_presence_gap;
+    follow_up
+  }
+
+  fn apply_receipts(&mut self, live: &[LiveReceipt]) {
+    for receipt in live {
       let receipts = self.receipts.entry(receipt.conversation).or_default();
       match receipts.iter_mut().find(|(user, _)| *user == receipt.user) {
         Some((_, read_up_to)) => *read_up_to = (*read_up_to).max(receipt.message),
         None => receipts.push((receipt.user, receipt.message)),
       }
     }
-    let follow_up = follow_up(last_marks, live.marks);
-    self.maybe_last_live = Some(live);
-    follow_up
   }
 }
 
@@ -595,16 +612,37 @@ mod tests {
       let user: UserId = id_from_raw(3);
       let mut state = LiveState::default();
       let mut snapshot = live(Some(&[]), LiveMarks::default());
-      snapshot.presence = vec![presence(user, PresenceState::Away)];
+      snapshot.presence.note(presence(user, PresenceState::Away), 10);
       state.apply_snapshot(snapshot.clone());
       // A REST resync answered later with a newer state; the same old event must not undo it.
       state.presence.insert(user, presence(user, PresenceState::Online));
       state.apply_snapshot(snapshot.clone());
       assert_eq!(state.presence[&user].state, PresenceState::Online);
 
-      snapshot.presence = vec![presence(user, PresenceState::DoNotDisturb)];
+      snapshot
+        .presence
+        .note(presence(user, PresenceState::DoNotDisturb), 10);
       state.apply_snapshot(snapshot);
       assert_eq!(state.presence[&user].state, PresenceState::DoNotDisturb);
+    }
+
+    #[test]
+    fn announcements_dropped_before_the_ui_saw_them_ask_for_a_resync() {
+      let mut state = LiveState::default();
+      let mut snapshot = live(Some(&[]), LiveMarks::default());
+      state.apply_snapshot(snapshot.clone());
+      for user in 1..=4 {
+        snapshot
+          .presence
+          .note(presence(id_from_raw(user), PresenceState::Online), 2);
+      }
+      assert!(state.apply_snapshot(snapshot.clone()).needs_resync);
+      assert_eq!(state.presence.len(), 2, "the entries still kept are applied");
+      assert_eq!(
+        state.apply_snapshot(snapshot),
+        LiveFollowUp::default(),
+        "caught up"
+      );
     }
 
     #[test]
@@ -637,6 +675,7 @@ mod tests {
             .collect(),
           unread_thread_count: 0,
           thread_mention_count: 0,
+          maybe_max_counted: None,
         }),
         marks,
         ..LiveSnapshot::default()

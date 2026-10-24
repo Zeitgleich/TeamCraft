@@ -354,6 +354,10 @@ mod caps {
     // Five unread messages, but only the newest three are looked at; the mention is the newest.
     assert_eq!(counts.body["conversations"][0]["unread_count"], 3);
     assert_eq!(counts.body["conversations"][0]["mention_count"], 1);
+    assert_eq!(
+      counts.body["max_counted"], 3,
+      "clients that count new messages stop there too"
+    );
     app.stop().await;
   }
 }

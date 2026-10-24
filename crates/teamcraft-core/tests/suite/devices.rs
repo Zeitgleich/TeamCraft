@@ -18,7 +18,8 @@ use teamcraft_core::store::{LocalStore, MemoryStore, Table};
 use teamcraft_core::{Client, ClientSettings, CoreError, LinkOffer, PendingEnrollment};
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, GatewayEvent, ListMlsMessagesQuery, RegisterDeviceRequest,
+  Base64Bytes, ConversationId, ConversationUnread, GatewayEvent, ListMlsMessagesQuery, RegisterDeviceRequest,
+  UnreadResponse,
 };
 
 const STAGGER: Duration = Duration::from_secs(10);
@@ -169,6 +170,57 @@ mod read_state_events {
       read_state::marks(bob.store.as_ref()).unwrap().connections,
       connections + 1
     );
+  }
+
+  #[tokio::test]
+  async fn a_resume_counts_the_replayed_messages_once() {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let server = FakeServer::new();
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let mut bob = enroll(&server, "Bob", &clock).await;
+    let channel = channel_of(&mut [&mut alice, &mut bob]).await;
+    let bob_id = bob.client.user_id();
+
+    // Bob's connection drops; two messages arrive meanwhile and wait in his session's replay.
+    server.drop_gateways(bob_id);
+    alice.client.send_text(channel, None, "one").await.unwrap();
+    alice.client.send_text(channel, None, "two").await.unwrap();
+    settle(&mut [&mut alice]).await;
+    // The server's count already includes both missed messages.
+    server.set_unread(
+      bob_id,
+      UnreadResponse {
+        conversations: vec![ConversationUnread {
+          conversation_id: channel,
+          unread_count: 7,
+          mention_count: 1,
+        }],
+        unread_thread_count: 0,
+        thread_mention_count: 0,
+        maybe_max_counted: Some(1000),
+      },
+    );
+
+    let connections = read_state::marks(bob.store.as_ref()).unwrap().connections;
+    let (gateway, outcome) = bob.client.connect_gateway().await.unwrap();
+    assert_eq!(outcome, teamcraft_core::client::GatewayOutcome::Resumed);
+    bob.gateway = gateway;
+    settle(&mut [&mut bob]).await;
+    assert_eq!(
+      counts(&bob, channel),
+      Some((7, 1)),
+      "the replayed message_create events are not counted on top of the server's count"
+    );
+    assert_eq!(
+      read_state::marks(bob.store.as_ref()).unwrap().connections,
+      connections + 1,
+      "one resync, after the replay"
+    );
+    let messages = bob
+      .store
+      .messages(channel, teamcraft_core::store::MessageFilter::All)
+      .unwrap();
+    assert!(messages.len() >= 2, "the replay itself was applied");
   }
 
   #[tokio::test]

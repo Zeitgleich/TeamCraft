@@ -7,6 +7,7 @@
 //! Whatever is missing answers empty: there is no demo data here (it only exists in development
 //! builds with the `demo` feature).
 
+use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
 use teamcraft_client_api::calls::{CallStatusSounds, OrgBackgroundRule};
 use teamcraft_proto::OrgBackgroundId;
@@ -42,7 +43,7 @@ use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId, as_log_line,
 };
-use crate::reactive::use_interval_while_visible;
+use crate::reactive::{use_interval_while, use_page_visible};
 use crate::remote_calls::RemoteCalls;
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::security::KeyChange;
@@ -126,7 +127,12 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       admin.set_change_notifier(notify.clone());
     }
     // The core's snapshot carries the counters it keeps from gateway events; it says when the
-    // rest must be read again (after a reconnect). Applied before the UI re-reads.
+    // rest must be read again (after a reconnect). Applied before the UI re-reads. The first
+    // snapshot is taken before deciding about the poll, so a chat with a core never starts it.
+    live.observe(self.chat.live_snapshot());
+    // No core, so no gateway: polling is the only way to see new counts. Stops for good once a
+    // snapshot shows a core (a shell that reports its live state only later).
+    let is_rest_only = RwSignal::new(!live.is_core_fed());
     let observer = live.clone();
     // Weak: the chat keeps this notifier, which must not keep the chat alive after sign-out.
     let chat = Rc::downgrade(&self.chat);
@@ -134,15 +140,20 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       if let Some(chat) = chat.upgrade() {
         observer.observe(chat.live_snapshot());
       }
+      if is_rest_only.try_get_untracked() == Some(true) && observer.is_core_fed() {
+        is_rest_only.set(false);
+      }
       notify();
     }));
-    live.observe(self.chat.live_snapshot());
     live.queue_refresh();
-    if self.chat.live_snapshot().is_none() {
-      // No core, so no gateway: the only way to see new counts. Paused while the page is hidden.
-      let poller = live.clone();
-      use_interval_while_visible(REST_ONLY_POLL_INTERVAL_MS, move || poller.queue_refresh());
-    }
+    // Paused while the page is hidden.
+    let is_visible = use_page_visible();
+    let poller = live.clone();
+    use_interval_while(
+      REST_ONLY_POLL_INTERVAL_MS,
+      move || is_rest_only.get() && is_visible.get(),
+      move || poller.queue_refresh(),
+    );
   }
 
   fn me(&self) -> User {

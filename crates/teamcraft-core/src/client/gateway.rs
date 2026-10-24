@@ -59,6 +59,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Events may have been missed while disconnected: every group is caught up again before the
     // outbox sends into it.
     self.mls_current.clear();
+    // A replay cut short by the drop is not waited for; this connection brings its own.
+    self.maybe_replay_left = None;
     let (mut connection, mut heartbeat_interval) = self.open_gateway(handshake_timeout).await?;
     // A resumed session skips the full sync; the own name may still be missing from older stores.
     self.refresh_own_summary().await;
@@ -72,8 +74,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         })
         .await?;
       match receive(&mut connection, handshake_timeout).await? {
-        GatewayServerMessage::Resumed { .. } => {
-          self.resync_live_state().await?;
+        GatewayServerMessage::Resumed { replayed } => {
+          if replayed == 0 {
+            self.resync_live_state().await?;
+          } else {
+            self.maybe_replay_left = Some(replayed);
+          }
           return Ok(GatewayStart {
             connection,
             outcome: GatewayOutcome::Resumed,
@@ -128,10 +134,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
-  /// After a resumed connection: the missed events follow, but counters are read once anyway, so a
+  /// After a resumed connection, once the missed events were replayed: counters are read once, so a
   /// count that drifted (an event lost before this device stored it) is repaired on every connect
-  /// instead of by a timer (issue #183). One request each for threads and counts. A failed read
-  /// doesn't fail the connection: the events keep the counts current, the next connect retries.
+  /// instead of by a timer (issue #183). Not before the replay has drained: `GET /unread` already
+  /// counts the replayed messages, which [`read_state::note_new_message`] would count again. One
+  /// request each for threads and counts. A failed read doesn't fail the connection: the events
+  /// keep the counts current, the next connect retries.
   async fn resync_live_state(&mut self) -> Result<(), CoreError> {
     if let Err(error) = self.refresh_read_state().await {
       tracing::warn!(%error, "could not read the unread counts after resuming");
@@ -190,7 +198,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if let Some(session) = &mut self.sync.maybe_gateway_session {
           session.last_seq = session.last_seq.max(seq);
         }
-        self.persist_sync()
+        self.persist_sync()?;
+        self.note_replayed_event().await
       },
       GatewayServerMessage::SessionInvalid => {
         self.sync.maybe_gateway_session = None;
@@ -199,6 +208,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayServerMessage::Error { error } => Err(CoreError::Gateway(error.message)),
       _ => Ok(()),
     }
+  }
+
+  /// Counts down the resume replay (the server sends it right after `resumed`, before any live
+  /// event); the last replayed event triggers the resync.
+  async fn note_replayed_event(&mut self) -> Result<(), CoreError> {
+    let Some(left) = self.maybe_replay_left else {
+      return Ok(());
+    };
+    if left > 1 {
+      self.maybe_replay_left = Some(left - 1);
+      return Ok(());
+    }
+    self.maybe_replay_left = None;
+    self.resync_live_state().await
   }
 
   /// Runs a connection until it closes, sending a heartbeat every `heartbeat`.
@@ -274,12 +297,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         records::put_json(&self.store, Table::Presence, &user_id.to_string(), &state)?;
         read_state::note_announced_presence(
           &self.store,
-          &UserPresence {
+          UserPresence {
             user_id,
             state: state.clone(),
             maybe_status,
             maybe_last_seen: None,
           },
+          self.settings.max_announced_presence,
         )?;
         if state == teamcraft_proto::PresenceState::Offline {
           // The server records "last seen" when the person stops being active; the event doesn't
