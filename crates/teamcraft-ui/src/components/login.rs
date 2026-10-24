@@ -167,6 +167,10 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
   let sign_in = SignInPageState::load(server_url);
   let form = LocalForm::new();
   let is_role_problem = problem == Some(LoginProblem::NoTeamcraftRole);
+  let is_core_problem = matches!(
+    problem,
+    Some(LoginProblem::CoreFailed(_) | LoginProblem::CoreNotSignedIn)
+  );
   let detail = match &problem {
     Some(LoginProblem::Failed(text) | LoginProblem::CoreFailed(text)) => Some(text.clone()),
     _ => None,
@@ -179,6 +183,10 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     Some(LoginProblem::Cancelled) => (Some("login-cancelled-title"), Some("login-cancelled-body")),
     Some(LoginProblem::Failed(_)) => (Some("login-failed-title"), Some("login-failed-body")),
     Some(LoginProblem::CoreFailed(_)) => (Some("login-core-failed-title"), Some("login-core-failed-body")),
+    Some(LoginProblem::CoreNotSignedIn) => (
+      Some("login-core-no-token-title"),
+      Some("login-core-no-token-body"),
+    ),
     None => (None, None),
   };
   let subtitle = move || i18n.t(sign_in.page.with(subtitle_key));
@@ -206,6 +214,19 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
           <div class="auth-actions">
             <button class="btn btn-primary" data-autofocus on:click=move |_| control.sign_out()>
               {move || i18n.t("login-use-other-account")}
+            </button>
+          </div>
+        }
+        .into_any()
+      } else if is_core_problem {
+        // Still signed in: retry the core, or sign out (which also unlocks changing the server).
+        view! {
+          <div class="auth-actions">
+            <button class="btn btn-primary" data-autofocus on:click=move |_| control.retry_core()>
+              {move || i18n.t("login-core-retry")}
+            </button>
+            <button class="btn" on:click=move |_| control.sign_out()>
+              {move || i18n.t("login-core-sign-out")}
             </button>
           </div>
         }

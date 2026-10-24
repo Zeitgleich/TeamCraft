@@ -54,6 +54,8 @@ pub enum LoginProblem {
   ServerUnreachable,
   /// The encrypted local data could not be opened (keystore, database); the text is for details.
   CoreFailed(String),
+  /// The client core got no access token from the sign-in (yet); trying again or signing out helps.
+  CoreNotSignedIn,
   Cancelled,
   /// Anything else; the text is meant for logs and a "details" line, not as the main message.
   Failed(String),
@@ -291,18 +293,22 @@ impl SessionControl {
       },
       Ok(CoreStatus::Failed { message }) => self
         .state
-        .set(SessionState::SignedOut(Some(LoginProblem::CoreFailed(message)))),
-      Ok(CoreStatus::NotStarted) => {
-        self
-          .state
-          .set(SessionState::SignedOut(Some(LoginProblem::CoreFailed(
-            "the client core did not start".to_owned(),
-          ))));
-      },
+        .set(SessionState::SignedOut(Some(core_problem(message)))),
+      // The core is still waiting for an access token (it retries on its own).
+      Ok(CoreStatus::NotStarted) => self
+        .state
+        .set(SessionState::SignedOut(Some(LoginProblem::CoreNotSignedIn))),
       Err(error) => self
         .state
         .set(SessionState::SignedOut(Some(LoginProblem::Failed(error)))),
     }
+  }
+
+  /// The core could not be opened: asks the server and the core again, keeping the sign-in.
+  pub fn retry_core(&self) {
+    let control = *self;
+    control.state.set(SessionState::SigningIn);
+    spawn_local(async move { control.load_account().await });
   }
 
   /// Creates this device's keys (or recovers them) with the passphrase, then enters the app.
@@ -367,6 +373,15 @@ impl SessionControl {
 
 pub fn use_session() -> Option<SessionControl> {
   use_context::<SessionControl>()
+}
+
+/// A core that had no access token is a sign-in problem, not a keystore or database one.
+fn core_problem(message: String) -> LoginProblem {
+  if message.contains("no access token") {
+    LoginProblem::CoreNotSignedIn
+  } else {
+    LoginProblem::CoreFailed(message)
+  }
 }
 
 fn device_ready_key(me: &GetMeResponse) -> String {
@@ -487,5 +502,17 @@ mod tests {
       LoginProblem::ServerUnreachable
     );
     assert_eq!(problem_from_auth(&AuthError::Cancelled), LoginProblem::Cancelled);
+  }
+
+  #[test]
+  fn a_core_without_a_token_is_a_sign_in_problem_not_a_keystore_one() {
+    assert_eq!(
+      core_problem("no access token: not signed in".into()),
+      LoginProblem::CoreNotSignedIn
+    );
+    assert_eq!(
+      core_problem("keyring unavailable".into()),
+      LoginProblem::CoreFailed("keyring unavailable".into())
+    );
   }
 }

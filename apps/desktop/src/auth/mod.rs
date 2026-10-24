@@ -39,6 +39,8 @@ use teamcraft_client_api::server_entry::{
 };
 
 use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
+#[cfg(test)]
+pub(crate) use store::MemoryStore;
 pub use store::{KeyringStore, TokenStore};
 
 /// How long the browser may take to come back.
@@ -202,6 +204,18 @@ struct Discovery {
   token_endpoint: String,
   #[serde(default)]
   end_session_endpoint: Option<String>,
+}
+
+/// The access token as it stands right now, read without waiting or refreshing
+/// ([`AuthService::peek_server_bearer_token`]).
+pub enum TokenPeek {
+  /// The token of the active server, valid for now.
+  Ready { server_url: String, token: SecretString },
+  /// No server, or nobody signed in to it.
+  SignedOut,
+  /// A sign-in or refresh holds the session, or the token is about to run out: the caller uses the
+  /// token it saw last, which the refresh loop replaces.
+  Busy,
 }
 
 struct Tokens {
@@ -598,6 +612,31 @@ impl<S: TokenStore> AuthService<S> {
     let server = self.server()?;
     let token = self.access_token(&server).await?;
     Ok((server.server_url, token.expose_secret().to_owned()))
+  }
+
+  /// The access token of the active server without waiting for the session or refreshing it, for
+  /// the core's synchronous token source: a core started right after sign-in sees the new token
+  /// at once instead of after the next refresh tick.
+  pub fn peek_server_bearer_token(&self) -> TokenPeek {
+    let Some(server) = self.active_server() else {
+      return TokenPeek::SignedOut;
+    };
+    let Ok(session) = self.session.try_lock() else {
+      return TokenPeek::Busy;
+    };
+    let maybe_token = match (&session.maybe_local, &session.maybe_tokens) {
+      (Some(local), _) => local.is_live(local::now_ms()).then(|| local.token()),
+      (None, Some(tokens)) => (tokens.expires_at > Instant::now())
+        .then(|| SecretString::from(tokens.access.expose_secret().to_owned())),
+      (None, None) => return TokenPeek::SignedOut,
+    };
+    match maybe_token {
+      Some(token) => TokenPeek::Ready {
+        server_url: server.server_url,
+        token,
+      },
+      None => TokenPeek::Busy,
+    }
   }
 
   /// Whether a session (identity provider or local account) exists.

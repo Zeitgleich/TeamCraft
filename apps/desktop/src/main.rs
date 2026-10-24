@@ -52,7 +52,9 @@ fn main() -> anyhow::Result<()> {
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
   let service = Arc::new(AuthService::new(None, KeyringStore).context("could not set up sign-in")?);
-  let tokens = TokenCache::default();
+  // The core reads the session's current token on every request; the loop below refreshes it and
+  // keeps the last one as the fallback while a refresh holds the session.
+  let tokens = TokenCache::live(service.clone());
   keep_tokens_fresh(service.clone(), tokens.clone());
 
   // Registered first: the single-instance plugin must see a second launch before anything else.
