@@ -8,7 +8,9 @@ use crate::common;
 use common::{Peer, settings, settle};
 use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
-use teamcraft_core::push_preview::{PreviewContent, push_preview};
+use teamcraft_core::push_preview::{
+  PreviewContent, PreviewGap, device_push_content, push_preview, save_device_push_content,
+};
 use teamcraft_core::store::{LocalStore, MessageFilter};
 use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
@@ -26,6 +28,7 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
     .await
     .unwrap();
   assert_eq!(preview.content, PreviewContent::Text("lunch at noon?".into()));
+  assert_eq!(preview.maybe_gap, None);
   assert_eq!(preview.maybe_conversation_name.as_deref(), Some("planning"));
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
   assert!(!preview.is_direct);
@@ -166,7 +169,77 @@ async fn the_signed_policy_decides_what_a_notification_shows() {
   // Names stay, the text is withheld.
   assert_eq!(preview.content, PreviewContent::Unavailable);
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::WorkspacePolicy));
   settle(&mut [&mut bob]).await;
+}
+
+/// A first direct message from somebody Bob never shared a conversation with, while Bob's app was
+/// closed: neither the conversation, the sender's name nor the keys are on the device. The
+/// preview falls back to what it knows and says why; the app's catch-up then shows it all.
+#[tokio::test]
+async fn a_first_direct_message_shows_after_the_app_caught_the_conversation_up() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let dm = carol.client.open_dm(bob.client.user_id()).await.unwrap();
+  let message = carol_says(&mut carol, dm, "are you around?").await;
+  let sealed = wake_up_for(&server, &bob, &carol, dm, message);
+
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  // Never dropped: a notification still comes, it just can't say more yet.
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::NotDecrypted));
+  assert!(!preview.is_conversation_verified);
+  assert!(preview.needs_catch_up());
+
+  bob.client.catch_up_for_push(dm).await.unwrap();
+  let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.content, PreviewContent::Text("are you around?".into()));
+  assert_eq!(preview.maybe_sender_name.as_deref(), Some("Carol"));
+  assert!(preview.is_direct);
+  assert!(preview.is_conversation_verified);
+  assert_eq!(preview.maybe_gap, None);
+  assert!(!preview.needs_catch_up());
+  settle(&mut [&mut carol, &mut bob]).await;
+}
+
+#[tokio::test]
+async fn without_a_session_the_preview_says_so() {
+  let (server, mut alice, bob, channel) = channel_with_two().await;
+  let message = alice_says(&mut alice, channel, "later").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+  let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::NoSession));
+  assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
+}
+
+#[tokio::test]
+async fn the_device_setting_shows_less_than_the_policy_allows() {
+  let (server, mut alice, bob, channel) = channel_with_two().await;
+  let message = alice_says(&mut alice, channel, "private").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+  assert_eq!(device_push_content(bob.store.as_ref()), PushContentMode::Full);
+
+  save_device_push_content(bob.store.as_ref(), &PushContentMode::Sender).unwrap();
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::DeviceSetting));
+  // Withheld on purpose: nothing to catch up.
+  assert!(!preview.needs_catch_up());
+
+  save_device_push_content(bob.store.as_ref(), &PushContentMode::Generic).unwrap();
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert!(preview.maybe_sender_name.is_none() && preview.maybe_conversation_name.is_none());
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
@@ -193,8 +266,12 @@ async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
 }
 
 async fn alice_says(alice: &mut Peer, channel: ConversationId, text: &str) -> MessageId {
-  alice.client.send_text(channel, None, text).await.unwrap();
-  alice
+  carol_says(alice, channel, text).await
+}
+
+async fn carol_says(sender: &mut Peer, channel: ConversationId, text: &str) -> MessageId {
+  sender.client.send_text(channel, None, text).await.unwrap();
+  sender
     .store
     .messages(channel, MessageFilter::TopLevel)
     .unwrap()

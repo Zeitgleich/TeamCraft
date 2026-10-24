@@ -66,7 +66,7 @@
   <string name="notification_channel_messages">Messages</string>
   <string name="notification_channel_mentions">Mentions and direct messages</string>
   <string name="notification_new_message">New message</string>
-  <string name="notification_file">Sent a file: %1$s</string>
+  <string name="notification_file">📎 %1$s</string>
   <string name="notification_reply">Reply</string>
   <string name="notification_mark_read">Mark as read</string>
   <string name="you">You</string>
@@ -184,5 +184,9 @@
   <plurals name="acknowledged_by">
     <item quantity="one">Confirmed by %d person</item>
     <item quantity="other">Confirmed by %d people</item>
+  </plurals>
+  <plurals name="messages_undecrypted">
+    <item quantity="one">%1$d message can\'t be read on this device yet. It appears once its keys arrive from another member\'s device.</item>
+    <item quantity="other">%1$d messages can\'t be read on this device yet. They appear once their keys arrive from another member\'s device.</item>
   </plurals>
 </resources>

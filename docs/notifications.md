@@ -256,6 +256,36 @@ with UnifiedPush it is the distributor that needs the exemption, and the diagnos
 thread `dismiss` removes that thread's lines up to the message; a conversation `dismiss` removes the
 non-thread lines.
 
+**Android message content (issue #314).** The push stays content-free; the app opens the sealed
+wake-up with the core (`notification_for_push`) without starting the UI and shows the sender (a
+`Person` with the same generated avatar as in the app), the conversation name for channels and group
+DMs, and the text (cut at 240 characters, `@mentions` in bold) or a label for files (photo, video,
+audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; FCM gives about 10 s):
+
+1. From the store if the app already has the message.
+2. Otherwise it fetches and decrypts the one message (at most 4 s), reading nothing else.
+3. If that fails or names no sender (a first DM from somebody new, keys that changed while the app was
+   closed) and the sync loop isn't running, the app's own client catches that one conversation up
+   (`Client::catch_up_for_push`: record and members, welcomes, MLS backlog, new messages) and reads the
+   message from the store. Only the cancel-safe parts are cut at the deadline: following the groups
+   (welcomes, MLS) starts only with 2 s left and then runs to completion, since a welcome spends the
+   key package before the join is stored. The iOS notification extension runs next to the app and
+   must not advance its state, so it stops after step 2.
+
+Whatever is known by then is shown: "New message" under the sender's name when the text could not be
+read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,
+timed out, not showable, workspace policy, device setting); the diagnostics show the last reason and
+the app logs it, never the content. A high-priority FCM wake-up that can't be opened at all shows a
+plain "New message".
+
+**Notification content.** Each device chooses "sender and message" (default), "sender only" or
+"nothing" (Settings → Notifications); the workspace policy `push_content` limits it, and the stricter
+of the two applies (the core applies both when it opens the wake-up; the setting is kept in the store
+so a notification extension reads it too). The app lock caps it at "sender only" and removes reply,
+mark read and the conversation shortcut. Changing either re-posts what is in the shade. "Sender only"
+reads "New message from Alice" or "3 new messages from Alice, Bob". The lock screen's public version
+stays "New message" for devices set to hide sensitive content.
+
 **iOS.** `call` arrives as a mutable alert through the notification service extension; without the
 filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with
 it the extension hands it to CallKit (`NSE_NOTIFICATION_FILTERING` in `Base.xcconfig`, together with

@@ -7,6 +7,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::model::{
@@ -24,7 +25,9 @@ use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_guard;
-use teamcraft_core::push_preview::push_preview;
+use teamcraft_core::push_preview::{
+  PreviewGap, PushPreview, device_push_content, push_content_mode, push_preview, save_device_push_content,
+};
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{SealedSqliteStore, StaticKeySource};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -40,14 +43,23 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem, Presence,
-  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, TestPushResult,
+  AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem,
+  NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo, PushNotification,
+  PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
 /// Decrypted downloads, one folder per account below it.
 const DOWNLOADS_DIR: &str = "downloads";
+/// The longest a wake-up is worked on before its notification is shown with what is known by then.
+/// FCM gives a high-priority message about 10 s; the app hands over to expedited work at 8 s.
+const PUSH_PREVIEW_BUDGET: Duration = Duration::from_secs(7);
+/// The part of [`PUSH_PREVIEW_BUDGET`] for fetching and decrypting the message alone; the rest is
+/// for catching the conversation up if that fails.
+const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
+/// What must be left of [`PUSH_PREVIEW_BUDGET`] to start following the groups, which can't be cut
+/// short once begun.
+const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
 /// Plaintext copies of files waiting to be uploaded, one folder per account below it.
 const UPLOAD_STAGING_DIR: &str = "outgoing";
 
@@ -110,6 +122,29 @@ struct PendingApproval {
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
 pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
+
+/// [`CoreClient::catch_up_for_push`] within `deadline`, cutting only the cancel-safe steps short.
+/// Following the groups (welcomes, MLS) is never dropped halfway: it starts only with
+/// [`PUSH_FOLLOW_MIN_LEFT`] to spare and then runs to completion, bounded by its requests' own
+/// timeouts; a wake-up that outlasts the receiver's budget continues as expedited work.
+async fn catch_up_for_push(
+  client: &mut CoreClient,
+  conversation: ConversationId,
+  deadline: tokio::time::Instant,
+) -> Result<(), TeamCraftError> {
+  let timed_out = || TeamCraftError::Core("push catch-up timed out".into());
+  tokio::time::timeout_at(deadline, client.push_refresh_conversation(conversation))
+    .await
+    .map_err(|_| timed_out())??;
+  if deadline.saturating_duration_since(tokio::time::Instant::now()) < PUSH_FOLLOW_MIN_LEFT {
+    return Err(timed_out());
+  }
+  client.push_follow_groups(conversation).await?;
+  tokio::time::timeout_at(deadline, client.push_catch_up_messages(conversation))
+    .await
+    .map_err(|_| timed_out())??;
+  Ok(())
+}
 
 /// Starts the engine thread and waits until the store is open.
 pub(crate) fn spawn(
@@ -564,10 +599,7 @@ impl Engine {
     payload: Vec<u8>,
     utc_offset_minutes: i16,
   ) -> Result<PushNotification, TeamCraftError> {
-    let api = self.api();
-    // Without a token the preview still names conversation and sender.
-    let maybe_api = self.tokens.0.access_token().map(|_| &api);
-    let preview = push_preview(self.store.as_ref(), maybe_api, &payload).await?;
+    let preview = self.push_preview_within_budget(&payload).await?;
     let now_ms = SystemClock.now_ms();
     let store = self.store.as_ref();
     push_guard::record_received(store, &preview.wake_up, now_ms);
@@ -595,6 +627,59 @@ impl Engine {
     Ok(notification)
   }
 
+  /// The preview of a wake-up within [`PUSH_PREVIEW_BUDGET`], so the push service's time for the
+  /// app (FCM: about 10 s) is never spent on a slow network: a fetch that takes longer, or a catch-up
+  /// that doesn't finish, leaves a notification that names the sender instead of none.
+  async fn push_preview_within_budget(&mut self, payload: &[u8]) -> Result<PushPreview, TeamCraftError> {
+    let deadline = tokio::time::Instant::now() + PUSH_PREVIEW_BUDGET;
+    let api = self.api();
+    // Without a token the preview still names conversation and sender.
+    let maybe_api = self.tokens.0.access_token().map(|_| &api);
+    // Cancel-safe: the preview only reads the store.
+    let fetched = tokio::time::timeout(
+      PUSH_FETCH_BUDGET,
+      push_preview(self.store.as_ref(), maybe_api, payload),
+    )
+    .await;
+    let mut preview = match fetched {
+      Ok(result) => result?,
+      Err(_elapsed) => {
+        let mut preview = push_preview::<Api>(self.store.as_ref(), None, payload).await?;
+        // Only a missing message is the timeout's fault; a policy or setting cut stays as it is.
+        if matches!(
+          preview.maybe_gap,
+          Some(PreviewGap::NoSession | PreviewGap::NotDecrypted)
+        ) {
+          preview.maybe_gap = Some(PreviewGap::TimedOut);
+        }
+        preview
+      },
+    };
+    // The app's own client may catch the conversation up: a conversation this device was just
+    // added to, or keys that changed while the app was closed. Not while the sync loop runs: it
+    // brings the message itself, and taking the client would cut its connection.
+    if preview.needs_catch_up()
+      && let ClientSlot::Idle(client) = &mut self.client
+    {
+      let conversation = preview.wake_up.conversation_id;
+      if let Err(error) = catch_up_for_push(client, conversation, deadline).await {
+        tracing::debug!(%error, conversation_id = %conversation, "push catch-up stopped");
+      }
+      let caught_up = push_preview::<Api>(self.store.as_ref(), None, payload).await?;
+      // The store-only preview names `NoSession` while the message is still missing: then the first
+      // try's reason stays (a failed decryption, a timeout), with any names the catch-up learned.
+      if caught_up.maybe_gap != Some(PreviewGap::NoSession) {
+        preview = caught_up;
+      } else {
+        preview.maybe_sender_name = preview.maybe_sender_name.or(caught_up.maybe_sender_name);
+        preview.maybe_conversation_name = preview
+          .maybe_conversation_name
+          .or(caught_up.maybe_conversation_name);
+      }
+    }
+    Ok(preview)
+  }
+
   pub(crate) fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
     Ok(push_guard::push_diagnostics(self.store.as_ref())?.into())
   }
@@ -618,6 +703,20 @@ impl Engine {
 
   pub(crate) fn mention_settings(&self) -> MentionSettings {
     self.mentions.clone()
+  }
+
+  /// This device's notification privacy setting and the workspace policy's limit; both stored, so
+  /// a notification extension reads them too.
+  pub(crate) fn notification_content(&self) -> NotificationContentSettings {
+    let store = self.store.as_ref();
+    NotificationContentSettings {
+      device: (&device_push_content(store)).into(),
+      workspace: (&push_content_mode(store)).into(),
+    }
+  }
+
+  pub(crate) fn set_notification_content(&self, content: NotificationContent) -> Result<(), TeamCraftError> {
+    Ok(save_device_push_content(self.store.as_ref(), &content.into())?)
   }
 
   pub(crate) fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {

@@ -29,7 +29,9 @@ class UnifiedPushReceiver : MessagingReceiver() {
     val pending = goAsync()
     CoroutineScope(Dispatchers.Default).launch {
       try {
-        WakeUpWork.handle(context, message.content)
+        // A UnifiedPush message doesn't say whether it is a withdrawal (which shows nothing), so
+        // one that can't be opened shows nothing either.
+        WakeUpWork.handle(context, message.content, isVisible = false)
       } finally {
         pending.finish()
       }

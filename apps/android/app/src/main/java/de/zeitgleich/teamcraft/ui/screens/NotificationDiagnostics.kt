@@ -50,6 +50,7 @@ import de.zeitgleich.teamcraft.notifications.QuickDnd
 import de.zeitgleich.teamcraft.push.UnifiedPushStatus
 import de.zeitgleich.teamcraft.ui.AppState
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushNotificationKind
 import uniffi.teamcraft_ffi.PushService
@@ -222,6 +223,13 @@ private fun ReceivedSection(viewModel: MainViewModel, refresh: Int, handled: Lon
   }
   val suppressed = viewModel.pushStats.suppressedCount
   if (suppressed > 0) Text(stringResource(R.string.diagnostics_suppressed, suppressed))
+  // Why a message notification said only "New message": the first thing to check (issue #314).
+  if (info != null && info.receivedCount > 0UL) {
+    val maybeGap = viewModel.pushStats.maybeLastGap
+    StatusLine(gapText(maybeGap), isOk = maybeGap == null || maybeGap.isChosen())
+  }
+  val unreadable = viewModel.pushStats.unreadableCount
+  if (unreadable > 0) StatusLine(R.string.diagnostics_unreadable, isOk = false, unreadable)
 
   Button(
     onClick = {
@@ -288,6 +296,21 @@ private fun kindText(kind: PushNotificationKind): Int = when (kind) {
   PushNotificationKind.TEST -> R.string.push_kind_test
   PushNotificationKind.UNKNOWN -> R.string.push_kind_unknown
 }
+
+@StringRes
+private fun gapText(maybeGap: NotificationGap?): Int = when (maybeGap) {
+  null -> R.string.diagnostics_preview_full
+  NotificationGap.NO_SESSION -> R.string.diagnostics_preview_no_session
+  NotificationGap.NOT_DECRYPTED -> R.string.diagnostics_preview_not_decrypted
+  NotificationGap.TIMED_OUT -> R.string.diagnostics_preview_timed_out
+  NotificationGap.NOT_SHOWABLE -> R.string.diagnostics_preview_not_showable
+  NotificationGap.WORKSPACE_POLICY -> R.string.diagnostics_preview_policy
+  NotificationGap.DEVICE_SETTING -> R.string.diagnostics_preview_setting
+}
+
+/** Shown less on purpose (a setting or policy, or nothing to show): not a fault. */
+private fun NotificationGap.isChosen(): Boolean =
+  this == NotificationGap.WORKSPACE_POLICY || this == NotificationGap.DEVICE_SETTING || this == NotificationGap.NOT_SHOWABLE
 
 @StringRes
 private fun outcomeText(outcome: TestPushOutcome): Int = when (outcome) {

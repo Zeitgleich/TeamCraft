@@ -1338,6 +1338,7 @@ mod tests {
       conversation: id_from_raw(7),
       start: 0,
       total,
+      undecrypted: 0,
       messages: bodies
         .iter()
         .zip(1_u64..)

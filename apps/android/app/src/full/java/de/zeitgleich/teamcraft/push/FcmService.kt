@@ -16,6 +16,8 @@ class FcmService : FirebaseMessagingService() {
     val payload = PushPayload.fromFcmData(message.data) ?: return
     // Called on a background thread; FCM allows about 10 s of work for a high-priority message.
     // Whatever takes longer continues as expedited work.
-    runBlocking { WakeUpWork.handle(this@FcmService, payload) }
+    // Withdrawals are sent with normal priority and show nothing; the others must show something.
+    val isVisible = message.originalPriority == RemoteMessage.PRIORITY_HIGH
+    runBlocking { WakeUpWork.handle(this@FcmService, payload, isVisible) }
   }
 }

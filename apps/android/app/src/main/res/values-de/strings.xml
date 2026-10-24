@@ -65,7 +65,7 @@
   <string name="notification_channel_messages">Nachrichten</string>
   <string name="notification_channel_mentions">Erwähnungen und Direktnachrichten</string>
   <string name="notification_new_message">Neue Nachricht</string>
-  <string name="notification_file">Hat eine Datei gesendet: %1$s</string>
+  <string name="notification_file">📎 %1$s</string>
   <string name="notification_reply">Antworten</string>
   <string name="notification_mark_read">Als gelesen markieren</string>
   <string name="you">Du</string>
@@ -183,5 +183,9 @@
   <plurals name="acknowledged_by">
     <item quantity="one">Von %d Person bestätigt</item>
     <item quantity="other">Von %d Personen bestätigt</item>
+  </plurals>
+  <plurals name="messages_undecrypted">
+    <item quantity="one">%1$d Nachricht kann auf diesem Gerät noch nicht gelesen werden. Sie erscheint, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
+    <item quantity="other">%1$d Nachrichten können auf diesem Gerät noch nicht gelesen werden. Sie erscheinen, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
   </plurals>
 </resources>

@@ -69,6 +69,12 @@ pub trait ChatBackend {
 
   /// Number of top-level messages (thread replies excluded).
   fn message_count(&self, conversation: ConversationId) -> usize;
+
+  /// Messages of the conversation received but not readable on this device yet (their keys have
+  /// not arrived). Backends without end-to-end encryption have none.
+  fn undecrypted_count(&self, _conversation: ConversationId) -> usize {
+    0
+  }
   /// When the newest top-level message was sent, for ordering conversations by recency.
   fn last_activity(&self, _conversation: ConversationId) -> Option<TimestampMs> {
     None

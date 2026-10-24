@@ -97,6 +97,8 @@ class PushDecisionTest {
       maybeSenderName = "Alice",
       maybeText = "hello",
       maybeFileName = null,
+      maybeAttachmentKind = null,
+      maybeGap = null,
       isDirect = false,
       isMention = false,
       isUrgent = isUrgent,

@@ -24,7 +24,10 @@ class PushHandler(
   fun handle(notification: PushNotification) {
     when (val decision = PushDecision.of(notification)) {
       is PushDecision.Ignore -> stats.recordIgnored(decision.reason)
-      is PushDecision.ShowMessage -> notifier.show(decision.notification, decision.isAlerting)
+      is PushDecision.ShowMessage -> {
+        stats.recordPreview(decision.notification.maybeGap)
+        notifier.show(decision.notification, decision.isAlerting)
+      }
       is PushDecision.Ring -> calls.ring(ring(decision.conversationId, decision.maybeCallId, decision.notification))
       is PushDecision.ShowQuietCall -> {
         stats.recordIgnored(IgnoreReason.SUPPRESSED)
@@ -40,6 +43,18 @@ class PushHandler(
       is PushDecision.ShowTest -> notifier.showTest(decision.maybeSentAtMs)
     }
     handled.update { it + 1 }
+  }
+
+  /** A visible wake-up that could not be opened: never nothing (see [MessageNotifier.showUnreadable]). */
+  fun handleUnreadable() {
+    stats.recordUnreadable()
+    notifier.showUnreadable()
+    handled.update { it + 1 }
+  }
+
+  /** A wake-up that could not be opened and must not show anything (it may have been a withdrawal). */
+  fun recordUnreadable() {
+    stats.recordUnreadable()
   }
 
   private fun ring(conversationId: String, maybeCallId: String?, notification: PushNotification): IncomingRing {

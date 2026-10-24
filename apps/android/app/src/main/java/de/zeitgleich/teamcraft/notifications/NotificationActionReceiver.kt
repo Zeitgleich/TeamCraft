@@ -30,7 +30,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
           ACTION_REPLY -> {
             val reply = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)
             if (!reply.isNullOrBlank()) {
-              graph.core.core().sendMessage(conversationId, null, reply.toString())
+              // Through the core's outbox: queued and retried if the phone is offline.
+              graph.core.core().sendMessage(conversationId, intent.getStringExtra(EXTRA_THREAD_ID), reply.toString())
               graph.notifier.showOwnReply(conversationId, reply)
             }
           }
@@ -53,11 +54,13 @@ class NotificationActionReceiver : BroadcastReceiver() {
     const val ACTION_DISMISSED = "de.zeitgleich.teamcraft.DISMISSED"
     const val KEY_REPLY = "reply"
     private const val EXTRA_CONVERSATION_ID = "conversation_id"
+    private const val EXTRA_THREAD_ID = "thread_id"
     private const val TAG = "TeamCraftNotify"
 
-    fun intent(context: Context, action: String, conversationId: String): Intent =
+    fun intent(context: Context, action: String, conversationId: String, maybeThreadId: String? = null): Intent =
       Intent(context, NotificationActionReceiver::class.java)
         .setAction(action)
         .putExtra(EXTRA_CONVERSATION_ID, conversationId)
+        .apply { maybeThreadId?.let { putExtra(EXTRA_THREAD_ID, it) } }
   }
 }

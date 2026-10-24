@@ -11,6 +11,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
+import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
 import de.zeitgleich.teamcraft.notifications.PushHandler
 import uniffi.teamcraft_ffi.PushService
 
@@ -23,6 +24,7 @@ class PushManager(
   private val core: CoreRepository,
   private val handler: PushHandler,
   private val mentionPrefs: MentionPrefs,
+  private val contentPrefs: NotificationContentPrefs,
   private val scope: CoroutineScope,
 ) {
   private val backends: List<PushBackend> = PushBackends.all()
@@ -92,12 +94,12 @@ class PushManager(
    * Starts opening a wake-up in the app's scope (or returns the run already going for the same
    * payload), so it isn't cancelled when a receiver's time is up.
    */
-  fun startWakeUp(payload: ByteArray): Deferred<Unit> {
+  fun startWakeUp(payload: ByteArray, isVisible: Boolean): Deferred<Unit> {
     val key = payload.contentHashCode().toString() + ":" + payload.size
     val run = running.computeIfAbsent(key) {
       scope.async(start = CoroutineStart.LAZY) {
         try {
-          onWakeUp(payload)
+          onWakeUp(payload, isVisible)
         } finally {
           running.remove(key)
         }
@@ -107,18 +109,30 @@ class PushManager(
     return run
   }
 
-  /** Opens a wake-up and shows its notification. Never logs the payload or the text. */
-  suspend fun onWakeUp(payload: ByteArray) {
+  /**
+   * Opens a wake-up and shows its notification. Never logs the payload or the text. `isVisible`:
+   * the push service delivered it as one that must show something (FCM high priority: never a
+   * withdrawal); if it can't be opened at all, a plain "New message" is shown instead of nothing.
+   */
+  suspend fun onWakeUp(payload: ByteArray, isVisible: Boolean) {
     if (isSigningOut) return
+    val core = runCatching { core.core() }.getOrElse {
+      Log.w(TAG, "wake-up while no account is open: ${it.javaClass.simpleName}")
+      if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
+      return
+    }
     runCatching {
-      val core = core.core()
       // Keywords and the first name are matched on the device (the server can't read the text).
       core.setMentionSettings(mentionPrefs.settings.value)
+      core.setNotificationContent(contentPrefs.content.value)
       core.notificationForPush(payload, utcOffsetMinutes())
     }
       // Checked again: sign-out may have started while the wake-up was being opened.
       .onSuccess { if (!isSigningOut) handler.handle(it) }
-      .onFailure { Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}") }
+      .onFailure {
+        Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}")
+        if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
+      }
   }
 
   private companion object {

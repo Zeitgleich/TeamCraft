@@ -6,8 +6,12 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.StyleSpan
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -21,6 +25,7 @@ import androidx.core.graphics.drawable.IconCompat
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.MainActivity
+import uniffi.teamcraft_ffi.NotificationAttachmentKind
 import uniffi.teamcraft_ffi.PushNotification
 
 /**
@@ -31,6 +36,7 @@ import uniffi.teamcraft_ffi.PushNotification
  */
 class MessageNotifier(
   private val context: Context,
+  private val contentPrefs: NotificationContentPrefs,
   private val store: NotificationStore = NotificationStore(context),
 ) {
   private val manager = NotificationManagerCompat.from(context)
@@ -48,10 +54,9 @@ class MessageNotifier(
       maybeSenderName = notification.maybeSenderName,
       maybeText = notification.maybeText,
       maybeFileName = notification.maybeFileName,
+      maybeAttachmentKind = notification.maybeAttachmentKind,
       isDirect = notification.isDirect,
-      fallbackSender = context.getString(R.string.app_name),
-      fallbackText = context.getString(R.string.notification_new_message),
-      fileText = { context.getString(R.string.notification_file, it) },
+      labels = labels(),
     )
     val sentAtMs = notification.maybeMessageId?.let(NotificationLines::sentAtMs)
       ?: notification.maybeSentAtMs
@@ -83,6 +88,25 @@ class MessageNotifier(
       post(entry, isAlerting = isAlerting)
       postSummary()
     }
+  }
+
+  /**
+   * A wake-up that could not be opened at all (no push key, a broken store): FCM lowers the
+   * priority of apps whose high-priority messages show nothing, and a message must never go
+   * unnoticed, so this says "New message" without naming anything.
+   */
+  fun showUnreadable() {
+    if (!canPost()) return
+    val notification = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
+      .setSmallIcon(R.drawable.ic_notification)
+      .setContentTitle(context.getString(R.string.app_name))
+      .setContentText(context.getString(R.string.notification_new_message))
+      .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+      .setAutoCancel(true)
+      .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+      .setContentIntent(launchIntent())
+      .build()
+    postSafely(UNREADABLE_TAG, OTHER_ID, notification)
   }
 
   /** Adds the user's own reply to the conversation's notification (Android Auto expects this). */
@@ -216,7 +240,7 @@ class MessageNotifier(
   private fun post(entry: ConversationNotification, isAlerting: Boolean) {
     if (!canPost()) return
     val newest = entry.lines.lastOrNull { !it.isOwn } ?: return
-    val privacy = MessagePrivacy.of(isAppLockOn(), entry.isVerified)
+    val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
     val channel = if (entry.isMention) NotificationChannels.MENTIONS else NotificationChannels.MESSAGES
     val builder = NotificationCompat.Builder(context, channel)
       .setSmallIcon(R.drawable.ic_notification)
@@ -233,33 +257,74 @@ class MessageNotifier(
       // The lock screen shows only "New message" unless the user unlocks.
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setPublicVersion(publicVersion(channel))
-    if (privacy.showsContent) {
-      val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
-      val style = NotificationCompat.MessagingStyle(me)
-        .setConversationTitle(entry.maybeTitle)
-        .setGroupConversation(entry.maybeTitle != null)
-      entry.lines.forEach { line -> style.addMessage(line.text, line.sentAtMs, person(line)) }
-      builder.setStyle(style)
-    } else {
-      // App lock: the same as the lock screen's public version, also in the unlocked shade.
-      builder
-        .setContentTitle(context.getString(R.string.app_name))
-        .setContentText(context.getString(R.string.notification_new_message))
+    when {
+      privacy.showsContent -> {
+        val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
+        val style = NotificationCompat.MessagingStyle(me)
+          .setConversationTitle(entry.maybeTitle)
+          .setGroupConversation(entry.maybeTitle != null)
+        entry.lines.forEach { line -> style.addMessage(highlighted(line.text), line.sentAtMs, person(line)) }
+        builder.setStyle(style)
+      }
+      privacy.showsNames -> {
+        // Who wrote, not what (the setting, or the app lock): "New message from Alice".
+        val text = NotificationText.senderOnly(entry.lines, labels())
+        builder
+          .setContentTitle(entry.maybeTitle ?: newest.senderName.ifBlank { context.getString(R.string.app_name) })
+          .setContentText(text)
+          .setNumber(entry.lines.count { !it.isOwn })
+        val senderKey = newest.maybeSenderKey
+        if (entry.maybeTitle == null && senderKey != null) builder.setLargeIcon(PersonIcons.bitmap(senderKey, newest.senderName))
+      }
+      else -> {
+        // The same as the lock screen's public version, also in the unlocked shade.
+        builder
+          .setContentTitle(context.getString(R.string.app_name))
+          .setContentText(context.getString(R.string.notification_new_message))
+      }
     }
     if (privacy.pushesShortcut) {
       builder.setShortcutId(entry.conversationId).setLocusId(LocusIdCompat(entry.conversationId))
       pushShortcut(entry, newest)
     }
     if (privacy.offersActions) {
-      builder.addAction(replyAction(entry.conversationId)).addAction(markReadAction(entry.conversationId))
+      builder
+        .addAction(replyAction(entry.conversationId, newest.maybeThreadId))
+        .addAction(markReadAction(entry.conversationId))
     }
     postSafely(entry.conversationId, MESSAGE_ID, builder.build())
   }
 
   private fun person(line: NotificationLine): Person? {
     val key = line.maybeSenderKey ?: return null
-    return Person.Builder().setName(line.senderName).setKey(key).build()
+    return Person.Builder().setName(line.senderName).setKey(key).setIcon(PersonIcons.of(key, line.senderName)).build()
   }
+
+  /** `@mentions` in bold, as in the app. */
+  private fun highlighted(text: String): CharSequence {
+    val ranges = NotificationStyling.mentionRanges(text)
+    if (ranges.isEmpty()) return text
+    return SpannableString(text).apply {
+      ranges.forEach { setSpan(StyleSpan(Typeface.BOLD), it.first, it.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
+    }
+  }
+
+  private fun labels() = NotificationText.Labels(
+    appName = context.getString(R.string.app_name),
+    newMessage = context.getString(R.string.notification_new_message),
+    newMessageFrom = { context.getString(R.string.notification_new_message_from, it) },
+    newMessagesFrom = { count, names ->
+      context.resources.getQuantityString(R.plurals.notification_new_messages_from, count, count, names)
+    },
+    attachment = { kind, fileName ->
+      when (kind) {
+        NotificationAttachmentKind.IMAGE -> context.getString(R.string.notification_photo)
+        NotificationAttachmentKind.VIDEO -> context.getString(R.string.notification_video)
+        NotificationAttachmentKind.AUDIO -> context.getString(R.string.notification_audio)
+        NotificationAttachmentKind.FILE -> context.getString(R.string.notification_file, fileName)
+      }
+    },
+  )
 
   /** The summary that groups the conversations; never alerts, carries the badge count. */
   private fun postSummary() {
@@ -272,8 +337,9 @@ class MessageNotifier(
     val count = shown.conversations.size
     val title = context.resources.getQuantityString(R.plurals.notification_summary, count, count)
     val inbox = NotificationCompat.InboxStyle().setBigContentTitle(title)
-    // Names only (none with the app lock on): the summary may show where the text does not.
-    MessagePrivacy.summaryLines(isAppLockOn(), shown.conversations.values).forEach(inbox::addLine)
+    // Names only (none when names are hidden): the summary may show where the text does not.
+    val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), isVerified = false)
+    MessagePrivacy.summaryLines(privacy, shown.conversations.values).forEach(inbox::addLine)
     val summary = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentTitle(title)
@@ -329,12 +395,13 @@ class MessageNotifier(
     .setCategory(NotificationCompat.CATEGORY_MESSAGE)
     .build()
 
-  private fun replyAction(conversationId: String): NotificationCompat.Action {
+  /** Replies where the newest message is: in its thread if it was a thread reply. */
+  private fun replyAction(conversationId: String, maybeThreadId: String?): NotificationCompat.Action {
     val input = RemoteInput.Builder(NotificationActionReceiver.KEY_REPLY)
       .setLabel(context.getString(R.string.notification_reply))
       .build()
     // Mutable: the system adds the typed or spoken text to this intent.
-    val pending = actionIntent(NotificationActionReceiver.ACTION_REPLY, conversationId, isMutable = true)
+    val pending = actionIntent(NotificationActionReceiver.ACTION_REPLY, conversationId, isMutable = true, maybeThreadId)
     return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(R.string.notification_reply), pending)
       .addRemoteInput(input)
       .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
@@ -355,8 +422,14 @@ class MessageNotifier(
   }
 
   /** Each conversation's intents differ in their data URI, so their PendingIntents never collide. */
-  private fun actionIntent(action: String, conversationId: String, isMutable: Boolean): PendingIntent {
-    val intent = NotificationActionReceiver.intent(context, action, conversationId).setData(conversationUri(conversationId))
+  private fun actionIntent(
+    action: String,
+    conversationId: String,
+    isMutable: Boolean,
+    maybeThreadId: String? = null,
+  ): PendingIntent {
+    val intent = NotificationActionReceiver.intent(context, action, conversationId, maybeThreadId)
+      .setData(conversationUri(conversationId))
     val mutability = if (isMutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE
     return PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or mutability)
   }
@@ -394,6 +467,7 @@ class MessageNotifier(
     private const val OTHER_ID = 3
     private const val TEST_TAG = "test"
     private const val QUIET_CALL_TAG = "quiet_call"
+    private const val UNREADABLE_TAG = "unreadable"
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"
     private const val URI_SCHEME = "teamcraft-conversation"

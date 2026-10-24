@@ -19,6 +19,7 @@ import de.zeitgleich.teamcraft.calls.IncomingCallNotifier
 import de.zeitgleich.teamcraft.calls.IncomingRing
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationChannels
+import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushNotificationKind
 
@@ -38,7 +39,7 @@ class NotificationsOnDeviceTest {
       InstrumentationRegistry.getInstrumentation().uiAutomation
         .grantRuntimePermission(context.packageName, Manifest.permission.POST_NOTIFICATIONS)
     }
-    notifier = MessageNotifier(context)
+    notifier = MessageNotifier(context, NotificationContentPrefs(context))
     notifier.clearAll()
   }
 
@@ -106,6 +107,8 @@ class NotificationsOnDeviceTest {
     maybeSenderName = "Alice",
     maybeText = text,
     maybeFileName = null,
+    maybeAttachmentKind = null,
+    maybeGap = null,
     isDirect = false,
     isMention = false,
     isUrgent = false,

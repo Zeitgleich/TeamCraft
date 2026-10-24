@@ -128,13 +128,16 @@ fun ConversationScreen(
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var pinned by remember { mutableStateOf<List<Message>>(emptyList()) }
   var maybeFirstUnread by remember { mutableStateOf<String?>(null) }
+  var undecrypted by remember { mutableStateOf(0) }
   LaunchedEffect(conversationId) {
     // Where the user stopped reading, before marking the conversation read.
     maybeFirstUnread = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
   }
   LaunchedEffect(changes, conversationId) {
     snapshot = viewModel.readChat { snapshot() }
-    messages = viewModel.readChat { latest(conversationId, PAGE).messages } ?: emptyList()
+    val maybeWindow = viewModel.readChat { latest(conversationId, PAGE) }
+    messages = maybeWindow?.messages ?: emptyList()
+    undecrypted = maybeWindow?.undecrypted ?: 0
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
   }
@@ -151,6 +154,15 @@ fun ConversationScreen(
     },
   ) {
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
+    // Received but not readable here yet: without this the conversation would just look empty.
+    if (undecrypted > 0) {
+      Text(
+        pluralStringResource(R.plurals.messages_undecrypted, undecrypted, undecrypted),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+      )
+    }
     MessageList(
       viewModel = viewModel,
       conversationId = conversationId,
