@@ -16,7 +16,7 @@ use crate::components::rich_text::RichText;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
-use crate::media_formats::{is_svg, media_type_for, needs_app_thumbnail};
+use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, needs_app_thumbnail};
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
@@ -956,7 +956,10 @@ fn chip_preview_url(
   if let Some(thumbnail) = maybe_thumbnail {
     return blob_url(thumbnail, thumbnail_type(thumbnail));
   }
-  let is_shown_as_is = media_type.starts_with("image/") && !is_svg(media_type);
+  // The blob URL of the picked file carries the file's own type: that one must be allowlisted.
+  let is_shown_as_is = essence(media_type).starts_with("image/")
+    && !is_svg(media_type)
+    && displayable_type(&file.type_()).is_some_and(|shown| shown.starts_with("image/"));
   is_shown_as_is
     .then(|| web_sys::Url::create_object_url_with_blob(file).ok())
     .flatten()

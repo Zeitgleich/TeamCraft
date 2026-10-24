@@ -28,7 +28,7 @@ use crate::media_cache::{self, Rendition};
 use crate::media_formats::animation_label;
 use crate::media_layout::{fit_picture, inline_size, loads_inline, thumbnail_size, thumbnail_type};
 use crate::model::{ConversationId, MessageId};
-use crate::object_url::ObjectUrl;
+use crate::object_url::{FetchError, ObjectUrl};
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
@@ -120,18 +120,23 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   if !has_thumbnail && !loads && kind != MediaKind::Video {
     return view! { <FileCard file=file /> }.into_any();
   }
-  let full = RwSignal::new_local(media_cache::cached(key, Rendition::Inline));
-  // The platform couldn't decode it: shown as a file card from then on.
-  let is_broken = RwSignal::new(false);
+  let inline = InlineLoad {
+    conversation,
+    key,
+    media_type: StoredValue::new(file.media_type.clone()),
+    full: RwSignal::new_local(media_cache::cached(key, Rendition::Inline)),
+    is_broken: RwSignal::new(false),
+    is_unavailable: RwSignal::new(false),
+    has_thumbnail,
+  };
+  let InlineLoad {
+    full,
+    is_broken,
+    is_unavailable,
+    ..
+  } = inline;
   if full.get_untracked().is_none() && loads {
-    load_full(
-      conversation,
-      key,
-      file.media_type.clone(),
-      full,
-      is_broken.write_only(),
-      has_thumbnail,
-    );
+    inline.start();
   }
   // A WebP or APNG that turns out to move stays on its thumbnail under reduced motion, like a GIF.
   let shown_full = move || {
@@ -144,13 +149,14 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   };
   let is_full = move || shown_full().is_some();
   let src = move || shown_full().or_else(|| thumbnail_src.clone());
-  // The browser couldn't decode what it was given.
+  // The browser couldn't decode what it was given: the picture, or the thumbnail before the picture
+  // was there. Either way this platform shows it as a file.
   let on_error = move |_| {
     if is_full() {
       // Back to the thumbnail if there is one; the lightbox explains the rest.
       full.set(None);
       is_broken.set(!has_thumbnail);
-    } else if !loads {
+    } else if full.with_untracked(Option::is_none) {
       is_broken.set(true);
     }
   };
@@ -227,11 +233,25 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
             }
             .into_any(),
             None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
+
           }}
           {(kind == MediaKind::Video).then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
           {move || has_badge().then(|| view! { <span class="media-gif-badge" aria-hidden="true">{badge.clone()}</span> })}
           {maybe_hidden.map(|hidden| view! { <span class="media-more" aria-hidden="true">{format!("+{hidden}")}</span> })}
         </button>
+        // Not loaded (offline, server trouble) and nothing else to show: try again on demand.
+        {move || is_unavailable.get().then(|| view! {
+          <button
+            class="btn btn-small media-retry"
+            on:click=move |_| {
+              is_unavailable.set(false);
+              inline.start();
+            }
+          >
+            <Icon name=IconName::Rotate />
+            <span>{move || i18n.t("file-retry")}</span>
+          </button>
+        })}
         <MediaToolbar file=file.get_value() />
       </div>
     }
@@ -244,32 +264,58 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   .into_any()
 }
 
-/// Loads the inline rendition in the background and shows it once it is there; a row that left the
-/// screen in the meantime doesn't download it. A picture without a thumbnail that can't be loaded or
-/// decoded turns into a file card.
-fn load_full(
+/// The inline rendition of one picture and what became of loading it.
+#[derive(Clone, Copy)]
+struct InlineLoad {
   conversation: ConversationId,
   key: MediaKey,
-  media_type: String,
+  media_type: StoredValue<String>,
   full: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
-  is_broken: WriteSignal<bool>,
+  /// This platform can't decode it: shown as a file card from then on.
+  is_broken: RwSignal<bool>,
+  /// Not loaded and no thumbnail to show instead: the tile offers "Try again".
+  is_unavailable: RwSignal<bool>,
   has_thumbnail: bool,
-) {
-  spawn_local(async move {
-    let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
-    match media_cache::load(conversation, key, &media_type, Rendition::Inline, is_wanted).await {
-      // The row may be gone by now: `try_set` drops the URL then.
-      Ok(Some(url)) => drop(full.try_set(Some(url))),
-      Ok(None) => {},
-      // With a thumbnail it stays; the lightbox shows the error and a retry.
-      Err(error) => {
-        tracing::debug!(%error, conversation_id = %conversation, "inline picture not loaded");
-        if !has_thumbnail {
-          is_broken.try_set(true);
-        }
-      },
-    }
-  });
+}
+
+impl InlineLoad {
+  /// Loads the rendition in the background and shows it once it is there; a row that left the
+  /// screen in the meantime doesn't download it. Without a thumbnail, a file this platform can't
+  /// decode becomes a file card, and one that didn't arrive (offline, server trouble) can be tried
+  /// again.
+  fn start(self) {
+    let Self {
+      conversation,
+      key,
+      full,
+      is_broken,
+      is_unavailable,
+      has_thumbnail,
+      ..
+    } = self;
+    let media_type = self.media_type.get_value();
+    spawn_local(async move {
+      let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
+      match media_cache::load(conversation, key, &media_type, Rendition::Inline, is_wanted).await {
+        // The row may be gone by now: `try_set` drops the URL then.
+        Ok(Some(url)) => drop(full.try_set(Some(url))),
+        Ok(None) => {},
+        // With a thumbnail it stays; the lightbox shows the error and a retry.
+        Err(error) => {
+          tracing::debug!(%error, conversation_id = %conversation, "inline picture not loaded");
+          match error {
+            _ if has_thumbnail => {},
+            FetchError::Undecodable(_) => {
+              is_broken.try_set(true);
+            },
+            FetchError::Unavailable(_) => {
+              is_unavailable.try_set(true);
+            },
+          }
+        },
+      }
+    });
+  }
 }
 
 /// The floating actions over a picture: download, share link, forward, save, and "…".

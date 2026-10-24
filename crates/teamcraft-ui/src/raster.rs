@@ -14,7 +14,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use crate::media_formats::is_svg;
+use crate::media_formats::{displayable_type, is_svg};
 
 /// Largest SVG the browser is asked to draw; a bigger one shows as a file.
 pub const MAX_SVG_BYTES: u32 = 4 * 1024 * 1024;
@@ -47,7 +47,12 @@ pub async fn rasterize(
   if is_vector && bytes.length() > MAX_SVG_BYTES {
     return None;
   }
-  let source = source_url(bytes, media_type)?;
+  // An SVG keeps its type only for this off-page decode; any other type goes as the page shows it.
+  let source_type = match is_vector {
+    true => "image/svg+xml",
+    false => displayable_type(media_type)?,
+  };
+  let source = source_url(bytes, source_type)?;
   let image = web_sys::HtmlImageElement::new().ok()?;
   image.set_src(&source);
   let is_decoded = decode_within(&image, DECODE_TIMEOUT).await;

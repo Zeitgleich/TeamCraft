@@ -7,12 +7,23 @@
 
 use wasm_bindgen::JsCast;
 
-use crate::media_formats::{is_animated, is_svg};
+use crate::media_formats::{displayable_type, essence, is_animated, is_svg};
 use crate::model::{ConversationId, MessageId};
 use crate::raster::{Encoding, SVG_DISPLAY_SIDE, rasterize};
 
 /// Media type of a blob whose file doesn't claim to be an image: the browser shows nothing for it.
 const OPAQUE_TYPE: &str = "application/octet-stream";
+
+/// Why a file couldn't be shown.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FetchError {
+  /// Not downloaded or decrypted (offline, server trouble): worth trying again.
+  #[error("not loaded: {0}")]
+  Unavailable(String),
+  /// Here, but this browser can't decode it: shown as a file instead.
+  #[error("not decodable: {0}")]
+  Undecodable(String),
+}
 
 /// A `blob:` URL that is revoked when dropped, so the browser frees the bytes behind it.
 #[derive(Debug, PartialEq, Eq)]
@@ -86,9 +97,13 @@ pub async fn fetch_attachment(
   file_id: String,
   media_type: &str,
   maybe_max_side: Option<u32>,
-) -> Result<ObjectUrl, String> {
-  let bytes = fetch_bytes(conversation, message, file_id).await?;
-  shown(&bytes, media_type, maybe_max_side).await
+) -> Result<ObjectUrl, FetchError> {
+  let bytes = fetch_bytes(conversation, message, file_id)
+    .await
+    .map_err(FetchError::Unavailable)?;
+  shown(&bytes, media_type, maybe_max_side)
+    .await
+    .map_err(FetchError::Undecodable)
 }
 
 /// The decrypted bytes, from the demo data, the desktop shell or the core in the page.
@@ -122,7 +137,7 @@ async fn shown(
       .ok_or_else(|| "the browser could not draw the SVG".to_owned())?;
     return ObjectUrl::from_blob(&blob).ok_or_else(refused);
   }
-  let is_picture = media_type.starts_with("image/");
+  let is_picture = essence(media_type).starts_with("image/");
   let header = bytes
     .subarray(0, bytes.length().min(ANIMATION_SNIFF_BYTES))
     .to_vec();
@@ -131,7 +146,7 @@ async fn shown(
     && is_picture
     && !is_animated
   {
-    let encoding = match media_type.eq_ignore_ascii_case("image/jpeg") {
+    let encoding = match essence(media_type) == "image/jpeg" {
       true => Encoding::Jpeg,
       false => Encoding::Png,
     };
@@ -186,15 +201,11 @@ fn refused() -> String {
   "the browser refused the file".to_owned()
 }
 
-/// Only images and videos get their own type; anything else stays opaque bytes, so a file that lies
-/// about its type is never rendered as a document. SVG is a document too (its scripts would run if
-/// the URL were opened in a tab): it stays opaque and is shown drawn into a PNG instead.
-fn blob_type(media_type: &str) -> &str {
-  let is_media = media_type.starts_with("image/") || media_type.starts_with("video/");
-  match is_media && !is_svg(media_type) {
-    true => media_type,
-    false => OPAQUE_TYPE,
-  }
+/// Only allowlisted pictures and videos get their own type; anything else stays opaque bytes, so a
+/// file that lies about its type is never rendered as a document. SVG is a document too (its scripts
+/// would run if the URL were opened in a tab): it stays opaque and is shown drawn into a PNG instead.
+fn blob_type(media_type: &str) -> &'static str {
+  displayable_type(media_type).unwrap_or(OPAQUE_TYPE)
 }
 
 #[cfg(test)]
@@ -212,6 +223,18 @@ mod tests {
       "SVG is never a blob of its own type"
     );
     assert_eq!(blob_type("IMAGE/SVG+XML"), OPAQUE_TYPE);
+    assert_eq!(
+      blob_type("image/svg+xml; charset=utf-8"),
+      OPAQUE_TYPE,
+      "parameters don't sneak SVG in"
+    );
+    assert_eq!(blob_type("text/html; charset=utf-8"), OPAQUE_TYPE);
+    assert_eq!(
+      blob_type("image/x-made-up"),
+      OPAQUE_TYPE,
+      "unknown image types stay opaque"
+    );
+    assert_eq!(blob_type("Image/JPEG; q=1"), "image/jpeg");
     assert_eq!(blob_type(""), OPAQUE_TYPE);
   }
 }

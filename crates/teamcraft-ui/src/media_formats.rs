@@ -44,14 +44,53 @@ pub fn media_type_for(file_name: &str, browser_type: &str) -> String {
     .to_owned()
 }
 
+/// Media types the page hands the browser as themselves (in `<img>` and `<video>`): pictures and
+/// videos that can't carry scripts. Everything else, SVG and HTML included, stays opaque bytes.
+const DISPLAYABLE_TYPES: [&str; 18] = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/apng",
+  "image/avif",
+  "image/heic",
+  "image/heif",
+  "image/jxl",
+  "image/bmp",
+  "image/tiff",
+  "image/x-icon",
+  "image/vnd.microsoft.icon",
+  "video/mp4",
+  "video/webm",
+  "video/ogg",
+  "video/quicktime",
+  "video/x-matroska",
+];
+
+/// The essence of a media type: without parameters, trimmed, lowercase
+/// (`" Image/SVG+XML; charset=utf-8"` is `"image/svg+xml"`). Senders write whatever they like.
+pub fn essence(media_type: &str) -> String {
+  media_type
+    .split(';')
+    .next()
+    .unwrap_or_default()
+    .trim()
+    .to_ascii_lowercase()
+}
+
+/// The type a blob of this media type may have, if the page may show it as itself.
+pub fn displayable_type(media_type: &str) -> Option<&'static str> {
+  let essence = essence(media_type);
+  DISPLAYABLE_TYPES.into_iter().find(|known| *known == essence)
+}
+
 /// Whether the sender's app draws the thumbnail with the browser's decoder.
 pub fn needs_app_thumbnail(media_type: &str) -> bool {
-  let media_type = media_type.trim().to_ascii_lowercase();
-  APP_THUMBNAIL_TYPES.contains(&media_type.as_str())
+  APP_THUMBNAIL_TYPES.contains(&essence(media_type).as_str())
 }
 
 pub fn is_svg(media_type: &str) -> bool {
-  media_type.trim().eq_ignore_ascii_case("image/svg+xml")
+  essence(media_type) == "image/svg+xml"
 }
 
 /// Whether picture bytes are an animation: a GIF, an animated WebP (`ANIM` flag) or an APNG
@@ -126,6 +165,40 @@ mod tests {
     assert!(!needs_app_thumbnail("image/jpeg"));
     assert!(!needs_app_thumbnail("image/webp"));
     assert!(!needs_app_thumbnail("application/pdf"));
+  }
+
+  #[test]
+  fn media_types_are_compared_by_their_essence() {
+    assert_eq!(essence(" Image/SVG+XML; charset=utf-8"), "image/svg+xml");
+    assert!(is_svg("image/svg+xml;charset=utf-8"));
+    assert!(is_svg("IMAGE/SVG+XML"));
+    assert!(needs_app_thumbnail("image/heic; foo=bar"));
+  }
+
+  #[test]
+  fn only_allowlisted_pictures_and_videos_are_displayable() {
+    assert_eq!(displayable_type("image/jpeg"), Some("image/jpeg"));
+    assert_eq!(
+      displayable_type("Image/PNG; q=1"),
+      Some("image/png"),
+      "normalized"
+    );
+    assert_eq!(displayable_type("video/mp4"), Some("video/mp4"));
+    for hostile in [
+      "image/svg+xml",
+      "image/svg+xml;charset=utf-8",
+      "IMAGE/SVG+XML",
+      "text/html",
+      "text/html; charset=utf-8",
+      "application/xhtml+xml",
+      "text/xml",
+      "application/xml",
+      "image/x-unknown",
+      "video/x-unknown",
+      "",
+    ] {
+      assert_eq!(displayable_type(hostile), None, "{hostile}");
+    }
   }
 
   #[test]
