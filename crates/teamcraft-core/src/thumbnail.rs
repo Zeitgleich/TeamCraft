@@ -38,8 +38,12 @@ const MAX_DECODER_BYTES: u64 = 256 * 1024 * 1024;
 /// A thumbnail of an image file, upright and at most [`THUMBNAIL_SIZE`] pixels on its longer side,
 /// or `None` for anything that isn't a decodable image (or can't be made small enough).
 pub fn thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
+  let media_type = essence(media_type);
   if !media_type.starts_with("image/") {
     return None;
+  }
+  if media_type == "image/svg+xml" {
+    return svg_thumbnail(bytes);
   }
   let image = decode_upright(bytes)?;
   if has_transparency(&image) {
@@ -54,6 +58,31 @@ pub fn thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
       .filter_map(|&(side, quality)| encode_jpeg(&fitted(&image, side), quality))
       .find(|jpeg| jpeg.len() <= MAX_THUMBNAIL_BYTES)
   }
+}
+
+/// A media type without parameters, trimmed and lowercase: senders write whatever they like.
+fn essence(media_type: &str) -> String {
+  media_type
+    .split(';')
+    .next()
+    .unwrap_or_default()
+    .trim()
+    .to_ascii_lowercase()
+}
+
+/// SVG is drawn, not decoded: `resvg` on native platforms; the browser makes its own (`teamcraft-ui`).
+/// A PNG (an SVG may be transparent) at the largest of [`PNG_STEPS`] that fits.
+#[cfg(not(target_arch = "wasm32"))]
+fn svg_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
+  PNG_STEPS
+    .iter()
+    .filter_map(|&side| crate::svg_thumbnail::svg_thumbnail_png(bytes, side))
+    .find(|png| png.len() <= MAX_THUMBNAIL_BYTES)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn svg_thumbnail(_bytes: &[u8]) -> Option<Vec<u8>> {
+  None
 }
 
 /// Decodes within the limits and turns the picture as its EXIF orientation says: phone cameras
@@ -164,7 +193,7 @@ pub fn cropped_square_png(editor_png: &[u8], crop: SquareCrop, size: u32) -> Opt
 /// Width and height of an image from its header, without decoding it; `None` for anything else.
 /// Turned upright like the thumbnail: a portrait photo stored sideways reports portrait dimensions.
 pub fn image_dimensions(bytes: &[u8], media_type: &str) -> Option<(u32, u32)> {
-  if !media_type.starts_with("image/") {
+  if !essence(media_type).starts_with("image/") {
     return None;
   }
   let mut decoder = ImageReader::new(Cursor::new(bytes))
@@ -220,6 +249,19 @@ mod tests {
     assert_eq!(dimensions(&made), (THUMBNAIL_SIZE, THUMBNAIL_SIZE / 2));
 
     assert_eq!(thumbnail(b"%PDF-1.7", "application/pdf"), None);
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"/>"#;
+    let made = thumbnail(svg, "image/svg+xml").unwrap();
+    assert_eq!(
+      thumbnail(svg, "Image/SVG+XML; charset=utf-8"),
+      Some(made.clone()),
+      "parameters and case"
+    );
+    assert_eq!(image::guess_format(&made).unwrap(), ImageFormat::Png);
+    assert_eq!(
+      dimensions(&made),
+      (THUMBNAIL_SIZE, THUMBNAIL_SIZE / 2),
+      "SVG is drawn at the thumbnail size"
+    );
     assert_eq!(thumbnail(b"not really a png", "image/png"), None);
     assert_eq!(thumbnail(b"", "image/png"), None);
   }

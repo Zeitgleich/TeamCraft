@@ -341,14 +341,24 @@ back, if it was (five minutes of slack for clocks). Messages from before signatu
 Client encrypts each file with a fresh random key (XChaCha20-Poly1305, chunked for streaming), uploads
 the blob to S3 via a presigned URL, puts key + hash + file name + thumbnail into the encrypted message.
 
-The message list shows only the encrypted thumbnail. Opening an image or video in the lightbox makes
-the client core download the blob, check its hash and decrypt it in memory (desktop: `core_attachment`,
+The message list shows the encrypted thumbnail at once. On web and desktop it then loads the full
+picture inline (up to 16 MiB, a few at a time), and the lightbox does for any image or video: the
+client core downloads the blob, checks its hash and decrypts it in memory (desktop: `core_attachment`,
 raw bytes to the webview; web: the core in the page), up to `MAX_VIEWER_BYTES` (128 MiB) on every
-platform; bigger files are only saved. The page holds the plaintext only as a `blob:` URL for the file
-on screen and revokes it when the viewer moves on or closes; nothing is written to disk unless the user
-saves the file. "Copy image" draws that image into a canvas in the page; "open in a new window" opens a
-blank window of the page itself (`about:blank`, the only window the desktop app allows) that shows the
-same `blob:` URL. Neither creates a URL the server or anyone else could load.
+platform; bigger files are only saved. The page holds the plaintext only as `blob:` URLs in a session
+cache bounded by bytes (`teamcraft-ui` `media_cache`), revoked once evicted and no longer shown;
+nothing is written to disk unless the user saves the file. "Copy image" draws that image into a canvas
+in the page; "open in a new window" opens a blank window of the page itself (`about:blank`, the only
+window the desktop app allows) that shows the same `blob:` URL. Neither creates a URL the server or
+anyone else could load.
+
+An attachment's file is untrusted content from another member. Only images and videos get a `blob:`
+of their own media type; everything else is opaque bytes. SVG is a document that can carry scripts,
+and a `blob:` URL has the page's origin, so an SVG is never shown as itself: the page decodes it in an
+`<img>` that is never attached to the document (no scripts, no network), draws it into a canvas and
+shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browser the same way, or by
+`resvg` on native platforms, with no DTD, no resources loaded and limits on size, element count and
+`<use>` expansion (`teamcraft-core` `svg_thumbnail`).
 
 #### 4.5.1 Share links for external download
 

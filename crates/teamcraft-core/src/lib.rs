@@ -21,6 +21,8 @@ pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod search;
 pub mod store;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod svg_thumbnail;
 pub mod thumbnail;
 #[cfg(feature = "ui")]
 mod ui_actions;

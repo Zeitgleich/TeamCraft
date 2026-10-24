@@ -101,13 +101,30 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     images.with(|images| images.iter().find(|file| key.matches(file)).cloned())
   });
   let at = Memo::new(move |_| images.with(|images| position(images, current.get())));
-  let kind = Memo::new(move |_| {
-    current_file.with(|file| file.as_ref().and_then(|file| MediaKind::of(&file.media_type)))
-  });
   let full = RwSignal::new_local(FullMedia::Loading);
+  // A WebP or PNG turns out to move once it is loaded (animated WebP, APNG): it can be paused then.
+  let kind = Memo::new(move |_| {
+    let declared = current_file.with(|file| file.as_ref().and_then(|file| MediaKind::of(&file.media_type)));
+    let moves = full.with(|full| matches!(full, FullMedia::Ready(url) if url.is_animated()));
+    match declared {
+      Some(MediaKind::Image) if moves => Some(MediaKind::Animated),
+      other => other,
+    }
+  });
   let thumbnail = RwSignal::new_local(None::<Rc<ObjectUrl>>);
   let viewport = RwSignal::new(Viewport::default());
   let is_paused = RwSignal::new(false);
+  // An animation found only once the file arrived starts paused under reduced motion too.
+  Effect::new(move |previous: Option<Option<MediaKind>>| {
+    let now = kind.get();
+    if previous == Some(Some(MediaKind::Image))
+      && now == Some(MediaKind::Animated)
+      && prefers_reduced_motion()
+    {
+      is_paused.set(true);
+    }
+    now
+  });
   let notice = Notice::default();
   let retries = RwSignal::new(0_u32);
   let ticket = StoredValue::new(0_u64);

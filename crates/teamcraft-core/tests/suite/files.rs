@@ -428,6 +428,7 @@ fn file(name: &str, media_type: &str, bytes: Vec<u8>) -> OutgoingFile {
     file_name: name.into(),
     media_type: media_type.into(),
     source: FileSource::Bytes { bytes },
+    maybe_thumbnail: None,
   }
 }
 

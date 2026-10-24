@@ -25,9 +25,10 @@ use crate::components::message_actions::copy_to_clipboard;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
+use crate::media_formats::animation_label;
 use crate::media_layout::{fit_picture, inline_size, loads_inline, thumbnail_size, thumbnail_type};
 use crate::model::{ConversationId, MessageId};
-use crate::object_url::ObjectUrl;
+use crate::object_url::{FetchError, ObjectUrl};
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
@@ -108,23 +109,62 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   // The sender's size of the picture is exact; older messages only have the thumbnail's.
   let maybe_dimensions = file.maybe_dimensions;
   let thumbnail_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
+  let has_thumbnail = thumbnail_src.is_some();
   // Revoked when the row leaves the screen.
   StoredValue::new_local(thumbnail);
-  let full = RwSignal::new_local(media_cache::cached(key, Rendition::Inline));
   let is_motion_reduced = prefers_reduced_motion();
-  if full.get_untracked().is_none() && loads_inline(kind, file.size_bytes, is_motion_reduced) {
-    load_full(conversation, key, file.media_type.clone(), full);
+  let loads = loads_inline(kind, file.size_bytes, is_motion_reduced);
+  // Nothing to show and nothing to load (a format this platform may not decode, too large to fetch
+  // by itself): a file card instead of a grey box (issue #337). Videos keep their tile and play in
+  // the lightbox.
+  if !has_thumbnail && !loads && kind != MediaKind::Video {
+    return view! { <FileCard file=file /> }.into_any();
   }
-  let is_full = move || full.with(Option::is_some);
-  let src = move || {
-    full
-      .with(|maybe_url| maybe_url.as_ref().map(|url| url.as_str().to_owned()))
-      .or_else(|| thumbnail_src.clone())
+  let inline = InlineLoad {
+    conversation,
+    key,
+    media_type: StoredValue::new(file.media_type.clone()),
+    full: RwSignal::new_local(media_cache::cached(key, Rendition::Inline)),
+    is_broken: RwSignal::new(false),
+    is_unavailable: RwSignal::new(false),
+    has_thumbnail,
+  };
+  let InlineLoad {
+    full,
+    is_broken,
+    is_unavailable,
+    ..
+  } = inline;
+  if full.get_untracked().is_none() && loads {
+    inline.start();
+  }
+  // A WebP or APNG that turns out to move stays on its thumbnail under reduced motion, like a GIF.
+  let shown_full = move || {
+    full.with(|maybe_url| {
+      maybe_url
+        .as_ref()
+        .filter(|url| !(is_motion_reduced && url.is_animated()))
+        .map(|url| url.as_str().to_owned())
+    })
+  };
+  let is_full = move || shown_full().is_some();
+  let src = move || shown_full().or_else(|| thumbnail_src.clone());
+  // The browser couldn't decode what it was given: the picture, or the thumbnail before the picture
+  // was there. Either way this platform shows it as a file.
+  let on_error = move |_| {
+    if is_full() {
+      // Back to the thumbnail if there is one; the lightbox explains the rest.
+      full.set(None);
+      is_broken.set(!has_thumbnail);
+    } else if full.with_untracked(Option::is_none) {
+      is_broken.set(true);
+    }
   };
   // Long-press on touch screens opens the context menu event: it shows the actions instead.
   let is_pinned = RwSignal::new(false);
   let is_touch = StoredValue::new(false);
-  let name = file.file_name.clone();
+  let file = StoredValue::new(file);
+  let name = file.with_value(|file| file.file_name.clone());
   let label = name.clone();
   // Follows the "Image size" setting.
   let style = move || {
@@ -147,70 +187,135 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   };
   let is_single = layout == TileLayout::Single;
   let has_size = maybe_dimensions.is_some() || maybe_thumbnail_size.is_some();
-  let has_badge =
-    matches!(kind, MediaKind::Animated) && (is_motion_reduced || !loads_inline(kind, file.size_bytes, false));
-  view! {
-    <div
-      class="media-tile"
-      class:media-single=is_single
-      class:has-size=has_size
-      class:actions-pinned=move || is_pinned.get()
-      style=style
-      on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
-      on:contextmenu=move |ev: web_sys::MouseEvent| {
-        // A long-press shows the actions; a right click keeps the browser's menu ("Save image as").
-        if is_touch.get_value() {
-          ev.prevent_default();
-          is_pinned.update(|pinned| *pinned = !*pinned);
-        }
-      }
-    >
-      <button
-        class="media-open"
-        aria-label=move || i18n.t_with("media-open", &[("name", &label)])
-        on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
-      >
-        {move || match src() {
-          Some(src) => view! {
-            <img
-              src=src
-              alt=name.clone()
-              class:is-preview=move || !is_full()
-              decoding="async"
-              draggable="false"
-            />
+  let badge = file.with_value(|file| animation_label(&file.media_type));
+  let size_bytes = file.with_value(|file| file.size_bytes);
+  let has_badge = move || {
+    let is_still_gif =
+      kind == MediaKind::Animated && (is_motion_reduced || !loads_inline(kind, size_bytes, false));
+    let is_still_animation =
+      full.with(|maybe_url| maybe_url.as_ref().is_some_and(|url| url.is_animated())) && is_motion_reduced;
+    is_still_gif || is_still_animation
+  };
+  let tile = move || {
+    let (name, label, badge) = (name.clone(), label.clone(), badge.clone());
+    let src = src.clone();
+    view! {
+      <div
+        class="media-tile"
+        class:media-single=is_single
+        class:has-size=has_size
+        class:actions-pinned=move || is_pinned.get()
+        style=style
+        on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
+        on:contextmenu=move |ev: web_sys::MouseEvent| {
+          // A long-press shows the actions; a right click keeps the browser's menu ("Save image as").
+          if is_touch.get_value() {
+            ev.prevent_default();
+            is_pinned.update(|pinned| *pinned = !*pinned);
           }
-          .into_any(),
-          None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
-        }}
-        {(kind == MediaKind::Video).then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
-        {has_badge.then(|| view! { <span class="media-gif-badge" aria-hidden="true">"GIF"</span> })}
-        {maybe_hidden.map(|hidden| view! { <span class="media-more" aria-hidden="true">{format!("+{hidden}")}</span> })}
-      </button>
-      <MediaToolbar file=file />
-    </div>
+        }
+      >
+        <button
+          class="media-open"
+          aria-label=move || i18n.t_with("media-open", &[("name", &label)])
+          on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
+        >
+          {move || match src() {
+            Some(src) => view! {
+              <img
+                src=src
+                alt=name.clone()
+                class:is-preview=move || !is_full()
+                decoding="async"
+                draggable="false"
+                on:error=on_error
+              />
+            }
+            .into_any(),
+            None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
+
+          }}
+          {(kind == MediaKind::Video).then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
+          {move || has_badge().then(|| view! { <span class="media-gif-badge" aria-hidden="true">{badge.clone()}</span> })}
+          {maybe_hidden.map(|hidden| view! { <span class="media-more" aria-hidden="true">{format!("+{hidden}")}</span> })}
+        </button>
+        // Not loaded (offline, server trouble) and nothing else to show: try again on demand.
+        {move || is_unavailable.get().then(|| view! {
+          <button
+            class="btn btn-small media-retry"
+            on:click=move |_| {
+              is_unavailable.set(false);
+              inline.start();
+            }
+          >
+            <Icon name=IconName::Rotate />
+            <span>{move || i18n.t("file-retry")}</span>
+          </button>
+        })}
+        <MediaToolbar file=file.get_value() />
+      </div>
+    }
+  };
+  view! {
+    <Show when=move || !is_broken.get() fallback=move || view! { <FileCard file=file.get_value() /> }>
+      {tile()}
+    </Show>
   }
   .into_any()
 }
 
-/// Loads the full picture in the background and shows it once it is there; a row that left the
-/// screen in the meantime doesn't download it.
-fn load_full(
+/// The inline rendition of one picture and what became of loading it.
+#[derive(Clone, Copy)]
+struct InlineLoad {
   conversation: ConversationId,
   key: MediaKey,
-  media_type: String,
+  media_type: StoredValue<String>,
   full: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
-) {
-  spawn_local(async move {
-    let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
-    match media_cache::load(conversation, key, &media_type, Rendition::Inline, is_wanted).await {
-      // The row may be gone by now: `try_set` drops the URL then.
-      Ok(Some(url)) => drop(full.try_set(Some(url))),
-      Ok(None) => {},
-      // The thumbnail stays; the lightbox shows the error and a retry.
-      Err(error) => tracing::debug!(%error, conversation_id = %conversation, "inline picture not loaded"),
-    }
-  });
+  /// This platform can't decode it: shown as a file card from then on.
+  is_broken: RwSignal<bool>,
+  /// Not loaded and no thumbnail to show instead: the tile offers "Try again".
+  is_unavailable: RwSignal<bool>,
+  has_thumbnail: bool,
+}
+
+impl InlineLoad {
+  /// Loads the rendition in the background and shows it once it is there; a row that left the
+  /// screen in the meantime doesn't download it. Without a thumbnail, a file this platform can't
+  /// decode becomes a file card, and one that didn't arrive (offline, server trouble) can be tried
+  /// again.
+  fn start(self) {
+    let Self {
+      conversation,
+      key,
+      full,
+      is_broken,
+      is_unavailable,
+      has_thumbnail,
+      ..
+    } = self;
+    let media_type = self.media_type.get_value();
+    spawn_local(async move {
+      let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
+      match media_cache::load(conversation, key, &media_type, Rendition::Inline, is_wanted).await {
+        // The row may be gone by now: `try_set` drops the URL then.
+        Ok(Some(url)) => drop(full.try_set(Some(url))),
+        Ok(None) => {},
+        // With a thumbnail it stays; the lightbox shows the error and a retry.
+        Err(error) => {
+          tracing::debug!(%error, conversation_id = %conversation, "inline picture not loaded");
+          match error {
+            _ if has_thumbnail => {},
+            FetchError::Undecodable(_) => {
+              is_broken.try_set(true);
+            },
+            FetchError::Unavailable(_) => {
+              is_unavailable.try_set(true);
+            },
+          }
+        },
+      }
+    });
+  }
 }
 
 /// The floating actions over a picture: download, share link, forward, save, and "…".

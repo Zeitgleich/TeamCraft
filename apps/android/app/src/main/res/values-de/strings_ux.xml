@@ -34,6 +34,7 @@
   <string name="react_quick">Mit %1$s reagieren</string>
   <string name="file_open">Öffnen</string>
   <string name="image_unreadable">Dieses Bild kann nicht angezeigt werden.</string>
+  <string name="image_open_with">Mit anderer App öffnen</string>
   <string name="close">Schließen</string>
   <string name="share">Teilen</string>
   <string name="delete_confirm_title">Nachricht löschen?</string>

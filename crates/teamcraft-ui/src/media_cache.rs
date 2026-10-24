@@ -17,7 +17,7 @@ use futures_channel::oneshot;
 
 use crate::lightbox::MediaKey;
 use crate::model::ConversationId;
-use crate::object_url::{ObjectUrl, fetch_attachment};
+use crate::object_url::{FetchError, ObjectUrl, fetch_attachment};
 
 /// Decrypted bytes the cache keeps at most. A large workspace stays within the memory budget of
 /// docs/performance.md with this on top; one image bigger than this is shown but not kept.
@@ -69,7 +69,7 @@ pub async fn load(
   media_type: &str,
   rendition: Rendition,
   is_wanted: impl Fn() -> bool,
-) -> Result<Option<Rc<ObjectUrl>>, String> {
+) -> Result<Option<Rc<ObjectUrl>>, FetchError> {
   if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
   }

@@ -9,6 +9,9 @@ use crate::prefs::ImageSize;
 /// 320 px in 1.0, larger in newer apps). A thumbnail with a shorter longest side is the whole
 /// picture: it isn't blown up.
 pub const THUMBNAIL_SIDE_PX: u32 = 320;
+/// Longest side of the thumbnails the browser draws for formats the core can't decode (as large as
+/// the core's own, `teamcraft_core::thumbnail::THUMBNAIL_SIZE` in newer apps).
+pub const APP_THUMBNAIL_SIDE: u32 = 640;
 /// Largest file an inline preview downloads by itself; bigger ones keep their thumbnail until opened.
 pub const MAX_INLINE_LOAD_BYTES: u64 = 16 * 1024 * 1024;
 /// Smallest side of an inline picture, so a thin strip stays clickable.

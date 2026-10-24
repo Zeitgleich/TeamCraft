@@ -306,6 +306,7 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
     maybe_failure: None,
     maybe_slot: None,
     retry: UploadRetry::default(),
+    maybe_thumbnail: file.maybe_thumbnail.map(Base64Bytes::new),
   }
 }
 
