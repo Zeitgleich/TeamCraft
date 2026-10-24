@@ -723,6 +723,24 @@ impl Default for WebConfig {
   }
 }
 
+impl StorageConfig {
+  /// The URL presigned requests go to: the endpoint itself with path-style addressing, else the
+  /// bucket as a subdomain of the endpoint's host (virtual-hosted style). The web client's
+  /// `connect-src` must allow exactly this origin.
+  pub fn client_url(&self) -> String {
+    if self.path_style {
+      return self.endpoint.clone();
+    }
+    match url::Url::parse(&self.endpoint) {
+      Ok(mut url) => match url.host_str().map(str::to_owned) {
+        Some(host) if url.set_host(Some(&format!("{}.{host}", self.bucket))).is_ok() => url.to_string(),
+        _ => self.endpoint.clone(),
+      },
+      Err(_) => self.endpoint.clone(),
+    }
+  }
+}
+
 impl WebConfig {
   /// Adds the origins of the identity provider, the SFU and the storage to the ones the web client
   /// may connect to. Unparseable URLs are skipped here and reported by their own sections.
@@ -1582,6 +1600,26 @@ mod tests {
   use secrecy::ExposeSecret;
 
   use super::*;
+
+  #[test]
+  fn storage_client_url_follows_the_addressing_style() {
+    let toml = |path_style: bool| {
+      format!(
+        "endpoint = \"https://objects.example.com\"\nbucket = \"chat-assets\"\n\
+         access_key = \"k\"\nsecret_key = \"s\"\npath_style = {path_style}\n"
+      )
+    };
+    let path: StorageConfig = Figment::new()
+      .merge(Toml::string(&toml(true)))
+      .extract()
+      .expect("storage config");
+    assert_eq!(path.client_url(), "https://objects.example.com");
+    let hosted: StorageConfig = Figment::new()
+      .merge(Toml::string(&toml(false)))
+      .extract()
+      .expect("storage config");
+    assert_eq!(hosted.client_url(), "https://chat-assets.objects.example.com/");
+  }
 
   #[test]
   fn the_web_policy_allows_only_the_origins_the_app_needs() {
