@@ -2,6 +2,7 @@
 //! (tokio-tungstenite on native targets, the browser's `WebSocket` in wasm).
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -92,6 +93,9 @@ pub struct HttpServerApi<T> {
   /// Why `base_url` is refused, checked once in [`HttpServerApi::new`].
   maybe_insecure: Option<String>,
   tokens: T,
+  /// Set once `/enrollment` answered a bare 404 (a server from before the endpoint): later calls
+  /// go to the single endpoints directly instead of probing first.
+  lacks_enrollment_endpoint: AtomicBool,
 }
 
 /// What `GET /users/{id}/enrollment` answered.
@@ -111,6 +115,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
       maybe_insecure: insecure_reason(&base_url),
       base_url,
       tokens,
+      lacks_enrollment_endpoint: AtomicBool::new(false),
     }
   }
 
@@ -133,9 +138,15 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
   /// A user the server doesn't show the caller (404 with an error code) has published nothing, as
   /// the single endpoints said; a bare 404 is a server that doesn't have the endpoint yet.
   async fn enrollment(&self, user: UserId) -> Result<Enrollment, ApiError> {
+    if self.lacks_enrollment_endpoint.load(Ordering::Relaxed) {
+      return Ok(Enrollment::NoEndpoint);
+    }
     match self.get(&format!("/users/{user}/enrollment")).await {
       Ok(enrollment) => Ok(Enrollment::Known(enrollment)),
-      Err(error) if error.is_not_found() && error.error_code().is_none() => Ok(Enrollment::NoEndpoint),
+      Err(error) if error.is_not_found() && error.error_code().is_none() => {
+        self.lacks_enrollment_endpoint.store(true, Ordering::Relaxed);
+        Ok(Enrollment::NoEndpoint)
+      },
       Err(error) if error.is_not_found() => Ok(Enrollment::Known(UserEnrollmentResponse::default())),
       Err(error) => Err(error),
     }
@@ -1549,6 +1560,17 @@ mod tests {
       let identity_key = api.identity_key(user()).await.unwrap().unwrap();
       assert_eq!(identity_key.public_key.as_slice(), [1, 2, 3]);
       assert_eq!(api.device_list(user()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_old_server_is_probed_only_once() {
+      let key = r#"{"user_id":"7","public_key":"AQID","signature":"BAUG","created_at":1}"#;
+      let base = route_server(&[("/api/v1/users/7/identity-key", 200, key)]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert!(!api.lacks_enrollment_endpoint.load(Ordering::Relaxed));
+      api.identity_key(user()).await.unwrap();
+      assert!(api.lacks_enrollment_endpoint.load(Ordering::Relaxed));
+      api.identity_key(user()).await.unwrap();
     }
 
     fn user() -> UserId {
