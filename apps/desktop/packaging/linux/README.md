@@ -61,7 +61,13 @@ apps/desktop/packaging/linux/build-flatpak.sh --bundle   # build a single-file .
 
 `build-flatpak.sh` first builds the web UI with Trunk in the CI's Rust container (`build-ui.sh`;
 the Flatpak SDK's Rust has no wasm32 target), then the app inside the GNOME SDK. Build state goes to
-`~/.cache/teamcraft-flatpak` (about 6 GB), never to `/tmp`.
+`~/.cache/teamcraft-flatpak` (about 6 GB), never to `/tmp`. With `--ccache` (which the script
+passes) the manifest keeps the cargo target and home in flatpak-builder's ccache directory, so a
+rebuild compiles only what changed.
+
+In the release workflow (`desktop-release.yml`) the Flatpak jobs restore the flatpak-builder state
+that the warm-up on `main` (`desktop-cache.yml`) saved, keyed on `Cargo.lock` and this manifest; the
+warm-up drops the workspace crates from the cargo target before saving, like rust-cache.
 
 ### Permissions
 

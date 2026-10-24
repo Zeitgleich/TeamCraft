@@ -88,6 +88,17 @@ modules:
       # The shell, with the prebuilt UI embedded (the custom-protocol feature, as `cargo tauri
       # build` sets it).
       - test -f crates/teamcraft-ui/dist/index.html
+      # With `--ccache` (the release workflow's cached builds) the cargo target and home live in
+      # the ccache directory, which survives the build directory and is cached between runs. One
+      # target per Rust version: a new compiler starts afresh and the old target is dropped.
+      - >-
+        if [ -n "${CCACHE_DIR:-}" ]; then
+        rust="$(rustc -V | cksum | cut -d ' ' -f 1)";
+        find "$CCACHE_DIR" -maxdepth 1 -name 'cargo-target-*' ! -name "cargo-target-$rust" -exec rm -rf {} +;
+        mkdir -p "$CCACHE_DIR/cargo-target-$rust" "$CCACHE_DIR/cargo-home";
+        ln -sfn "$CCACHE_DIR/cargo-target-$rust" "$CARGO_TARGET_DIR";
+        ln -sfn "$CCACHE_DIR/cargo-home" "$CARGO_HOME";
+        fi
       - cargo build --release --locked -p teamcraft-desktop --features custom-protocol
       - install -Dm755 "$CARGO_TARGET_DIR/release/teamcraft-desktop" /app/bin/teamcraft-desktop
       # Tauri's resource directory for an executable in /app/bin is /app/lib/<productName>.

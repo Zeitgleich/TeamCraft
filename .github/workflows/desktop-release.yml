@@ -8,9 +8,9 @@
 # `.sig` files travel with the packages and release.yml turns them into latest.json.
 #
 # With `warm-cache`, desktop-cache.yml runs the same compile on `main` without packaging and saves the
-# Rust build cache. A tag run can only restore caches of its own ref or the default branch, so the
-# release jobs restore what `main` saved and never save themselves (each tag's cache would be
-# unreadable for the next release and only evict the useful ones).
+# Rust build cache and the Flatpak builder state. A tag run can only restore caches of its own ref or
+# the default branch, so the release jobs restore what `main` saved and never save themselves (each
+# tag's cache would be unreadable for the next release and only evict the useful ones).
 name: Desktop release
 
 on:
@@ -169,7 +169,6 @@ jobs:
   flatpak:
     name: Flatpak ${{ matrix.arch }} (build only)
     needs: ui
-    if: ${{ !inputs.warm-cache }}
     strategy:
       fail-fast: false
       matrix:
@@ -182,20 +181,56 @@ jobs:
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
+    env:
+      # The flatpak-builder state (.flatpak-builder: downloads, built modules, ccache and the cargo
+      # target and home the manifest keeps there) under a key of what changes the build. The action
+      # appends the arch and falls back to the newest `flatpak-builder-<arch>` cache, so a tag run
+      # restores what `main` saved even when the lockfile changed since.
+      CACHE_KEY: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A warm-up whose key is already saved only restores it (which keeps it from expiring) and
+      # skips the build.
+      - id: cache-lookup
+        if: ${{ inputs.warm-cache }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .flatpak-builder
+          key: ${{ env.CACHE_KEY }}-${{ matrix.arch }}
       # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
       # SDK's Rust lacks) comes from the ui job.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: ${{ steps.cache-lookup.outputs.cache-hit != 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ui-dist
           path: crates/teamcraft-ui/dist
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+      # Like the Rust caches: a tag run can only restore caches of its own ref or `main`, so only
+      # the warm-up on `main` (desktop-cache.yml) saves, after pruning below.
+      - if: ${{ steps.cache-lookup.outputs.cache-hit != 'true' }}
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
         with:
           bundle: teamcraft-desktop-${{ matrix.arch }}.flatpak
           manifest-path: apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml
           arch: ${{ matrix.arch }}
-          cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
+          cache-key: ${{ env.CACHE_KEY }}
+          save-cache: false
+          build-bundle: ${{ !inputs.warm-cache }}
+          upload-artifact: ${{ !inputs.warm-cache }}
+      # The workspace crates are rebuilt on every run anyway (new sources); keep only the
+      # dependencies, as rust-cache does, to stay within the repository's cache budget.
+      - name: Prune the workspace crates from the cargo target
+        if: ${{ inputs.warm-cache && steps.cache-lookup.outputs.cache-hit != 'true' }}
+        run: |
+          for target in .flatpak-builder/ccache/cargo-target-*/release; do
+            rm -rf "$target"/teamcraft-desktop "$target"/.fingerprint/teamcraft* \
+              "$target"/build/teamcraft* "$target"/deps/teamcraft* "$target"/deps/libteamcraft*
+          done
+          du -sh .flatpak-builder/* || true
+      - if: ${{ inputs.warm-cache && steps.cache-lookup.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .flatpak-builder
+          key: ${{ env.CACHE_KEY }}-${{ matrix.arch }}
 
   macos:
     name: macOS ${{ matrix.title }} (dmg)
