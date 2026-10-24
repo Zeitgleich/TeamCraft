@@ -1,23 +1,21 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use teamcraft_proto::{
-  CustomStatus, DeviceActivity, DeviceId, GatewayEvent, GatewayServerMessage, PresenceState, UserId,
-};
+use teamcraft_proto::{CustomStatus, DeviceActivity, DeviceId, GatewayEvent, PresenceState, UserId};
 use time::OffsetDateTime;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
+use tracing::{debug, warn};
 
 /// Frames queued per connection before it is considered too slow and dropped (it can resume).
 const CHANNEL_CAPACITY: usize = 1024;
+/// The sequence number of events that are neither numbered nor buffered (typing): they only matter
+/// to whoever is connected right now. Clients keep the highest number they saw, so `0` never moves
+/// their resume position (docs/gateway.md, "Resume").
+pub const EPHEMERAL_SEQ: u64 = 0;
 
-/// Registry of gateway sessions and their event buffers.
-///
-/// A session outlives its connection for `resume_window`: events keep being numbered and buffered,
-/// so a client that reconnects with its last seen sequence number receives exactly what it missed.
-/// State is in memory and per server process; running several instances needs a shared bus
-/// (Postgres `LISTEN/NOTIFY`), which is not part of M1.
 /// What was last broadcast about a user's presence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresenceSnapshot {
@@ -34,6 +32,18 @@ impl Default for PresenceSnapshot {
   }
 }
 
+/// Registry of gateway sessions and their event buffers.
+///
+/// A session outlives its connection for `resume_window`: events keep being numbered and buffered,
+/// so a client that reconnects with its last seen sequence number receives exactly what it missed.
+/// State is in memory and per server process; running several instances needs a shared bus
+/// (Postgres `LISTEN/NOTIFY`), which is not part of M1.
+///
+/// Memory: each event is serialized once and shared ([`SharedEvent`]) by every session's buffer
+/// and queue; a buffer holds at most `buffer_events` events and `buffer_bytes` of them, and a
+/// connection that falls behind its buffer is dropped (issue #156). All buffers together reference
+/// at most `max_total_buffer_bytes`; beyond it the slowest sessions go first (see
+/// [`Hub::enforce_total_budget`]).
 pub struct Hub {
   options: HubOptions,
   inner: Mutex<Inner>,
@@ -47,6 +57,12 @@ pub struct Hub {
 pub struct HubOptions {
   pub resume_window: Duration,
   pub buffer_events: usize,
+  /// Bytes of events one session's resume buffer may reference. Events are shared, so this bounds
+  /// what a single stalled or disconnected session keeps alive, not a copy per session.
+  pub buffer_bytes: usize,
+  /// Bytes all resume buffers of the process may reference together (counted per session, so a
+  /// shared event counts once for every session that holds it: the real memory is at most this).
+  pub max_total_buffer_bytes: usize,
   /// Sessions one device may have; opening more drops the oldest (waiting ones first).
   pub max_sessions_per_device: usize,
   pub max_sessions_per_user: usize,
@@ -57,9 +73,44 @@ pub struct HubOptions {
 /// A connection attached to a session.
 pub struct Attached {
   pub session_id: String,
-  /// Buffered events the client missed, to be sent before anything from `receiver`.
-  pub replay: Vec<GatewayServerMessage>,
-  pub receiver: mpsc::Receiver<GatewayServerMessage>,
+  /// Which connection of the session this is: [`Hub::detach`] only detaches the current one, so a
+  /// late detach of a replaced (half-open) connection leaves a resumed session alone.
+  pub connection_id: u64,
+  /// Buffered events the client missed, to be sent before anything from [`Self::next_outgoing`].
+  pub replay: Vec<Outgoing>,
+  receiver: mpsc::Receiver<Outgoing>,
+  link: Arc<ConnectionLink>,
+}
+
+/// An event frame on its way to one connection.
+#[derive(Debug, Clone)]
+pub struct Outgoing {
+  /// [`EPHEMERAL_SEQ`] for events that are not buffered.
+  pub seq: u64,
+  pub event: Arc<SharedEvent>,
+}
+
+/// A gateway event serialized once, shared by every session that gets it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SharedEvent {
+  json: Box<str>,
+}
+
+/// What the hub and a connection task both see of one connection.
+#[derive(Debug)]
+struct ConnectionLink {
+  /// The highest sequence number the peer has taken.
+  delivered_seq: AtomicU64,
+  /// The hub dropped the connection (too slow, replaced, revoked): stop at the next frame.
+  is_dropped: AtomicBool,
+}
+
+/// The hub's side of a live connection. Dropping it (the session was removed, the connection was
+/// replaced or was too slow) tells the connection task to stop, which frees its queue.
+struct Connection {
+  id: u64,
+  sender: mpsc::Sender<Outgoing>,
+  link: Arc<ConnectionLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -111,6 +162,9 @@ struct Inner {
   /// What the user's devices reported at the last presence refresh.
   last_aggregate: HashMap<UserId, DeviceAggregate>,
   next_created_seq: u64,
+  next_connection_id: u64,
+  /// Sum of every session's `buffer_bytes`.
+  total_buffer_bytes: usize,
   /// Busy periods from the users' calendars, as last polled.
   busy: HashMap<UserId, Vec<(OffsetDateTime, OffsetDateTime)>>,
 }
@@ -125,8 +179,10 @@ struct Session {
   last_active_at: Instant,
   attention: Attention,
   next_seq: u64,
-  buffer: VecDeque<(u64, GatewayEvent)>,
-  maybe_sender: Option<mpsc::Sender<GatewayServerMessage>>,
+  buffer: VecDeque<(u64, Arc<SharedEvent>)>,
+  /// Bytes of the events in `buffer`.
+  buffer_bytes: usize,
+  maybe_connection: Option<Connection>,
   maybe_detached_at: Option<Instant>,
   /// The identity provider's session the connection authenticated with.
   maybe_oidc_session: Option<String>,
@@ -143,8 +199,8 @@ impl Hub {
 
   pub fn open_session(&self, user: UserId, device: DeviceId, activity: DeviceActivity) -> Attached {
     let session_id = new_session_id();
-    let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
     let mut inner = self.lock();
+    let (connection, attached) = new_connection(&mut inner.next_connection_id, &session_id, Vec::new(), 0);
     inner.next_created_seq += 1;
     let session = Session {
       created_seq: inner.next_created_seq,
@@ -155,18 +211,15 @@ impl Hub {
       attention: Attention::NeverReported,
       next_seq: 1,
       buffer: VecDeque::new(),
-      maybe_sender: Some(sender),
+      buffer_bytes: 0,
+      maybe_connection: Some(connection),
       maybe_detached_at: None,
       maybe_oidc_session: None,
     };
     inner.by_user.entry(user).or_default().insert(session_id.clone());
-    inner.sessions.insert(session_id.clone(), session);
+    inner.sessions.insert(session_id, session);
     self.evict_excess_sessions(&mut inner, user, device);
-    Attached {
-      session_id,
-      replay: Vec::new(),
-      receiver,
-    }
+    attached
   }
 
   /// Attaches a new connection to an existing session and returns what it missed after `last_seq`.
@@ -178,6 +231,7 @@ impl Hub {
     last_seq: u64,
   ) -> Result<Attached, ResumeError> {
     let mut inner = self.lock();
+    let inner = &mut *inner;
     let session = inner.sessions.get_mut(session_id).ok_or(ResumeError::Unknown)?;
     if session.user != user || session.device != device {
       return Err(ResumeError::NotOwner);
@@ -194,33 +248,47 @@ impl Hub {
       return Err(ResumeError::Gap);
     }
 
-    let replay = session
+    let replay: Vec<Outgoing> = session
       .buffer
       .iter()
       .filter(|(seq, _)| *seq > last_seq)
-      .map(|(seq, event)| GatewayServerMessage::Event {
+      .map(|(seq, event)| Outgoing {
         seq: *seq,
         event: event.clone(),
       })
       .collect();
-    let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
-    session.maybe_sender = Some(sender);
+    let (connection, attached) = new_connection(&mut inner.next_connection_id, session_id, replay, last_seq);
+    // The previous connection (often a half-open one the client gave up on) is replaced: its
+    // task stops at its next frame.
+    session.maybe_connection = Some(connection);
     session.maybe_detached_at = None;
-    Ok(Attached {
-      session_id: session_id.to_owned(),
-      replay,
-      receiver,
-    })
+    Ok(attached)
   }
 
-  /// The connection is gone; the session stays resumable for the resume window.
-  pub fn detach(&self, session_id: &str) {
-    let maybe_user = self.lock().sessions.get_mut(session_id).map(|session| {
-      session.maybe_sender = None;
-      session.maybe_detached_at = Some(Instant::now());
+  /// The connection `connection_id` is gone; the session stays resumable for the resume window.
+  /// Nothing happens if the session has another connection by now (the client resumed on a new
+  /// one before the old task noticed its socket was dead).
+  pub fn detach(&self, session_id: &str, connection_id: u64) {
+    let maybe_user = {
+      let mut inner = self.lock();
+      let Some(session) = inner.sessions.get_mut(session_id) else {
+        return;
+      };
+      if session
+        .maybe_connection
+        .as_ref()
+        .is_some_and(|connection| connection.id != connection_id)
+      {
+        debug!("a replaced gateway connection ended; the session stays attached");
+        return;
+      }
+      session.maybe_connection = None;
+      if session.maybe_detached_at.is_none() {
+        session.maybe_detached_at = Some(Instant::now());
+      }
       session.attention = Attention::Away;
-      session.user
-    });
+      Some(session.user)
+    };
     if let Some(user) = maybe_user {
       self.announce_attention_lost(user);
     }
@@ -241,7 +309,13 @@ impl Hub {
           .flatten()
           .filter_map(|id| inner.sessions.get(id).map(|session| (id, session)))
           .filter(|(_, session)| only_device.is_none_or(|device| session.device == device))
-          .map(|(id, session)| (session.maybe_sender.is_some(), session.created_seq, id.clone()))
+          .map(|(id, session)| {
+            (
+              session.maybe_connection.is_some(),
+              session.created_seq,
+              id.clone(),
+            )
+          })
           .collect();
         if candidates.len() <= limit.max(1) {
           break;
@@ -249,7 +323,7 @@ impl Hub {
         // Waiting (detached) sessions go first, then the oldest.
         candidates.sort();
         let victim = candidates.remove(0).2;
-        inner.sessions.remove(&victim);
+        inner.forget_session(&victim);
         if let Some(set) = inner.by_user.get_mut(&user) {
           set.remove(&victim);
         }
@@ -344,7 +418,7 @@ impl Hub {
   pub fn demote_idle(&self, cutoff: Instant) -> Vec<UserId> {
     let mut users = HashSet::new();
     for session in self.lock().sessions.values_mut() {
-      if session.maybe_sender.is_some()
+      if session.maybe_connection.is_some()
         && session.activity == DeviceActivity::Active
         && session.last_active_at < cutoff
       {
@@ -366,7 +440,7 @@ impl Hub {
           inner
             .sessions
             .get(id)
-            .is_some_and(|session| session.maybe_sender.is_some())
+            .is_some_and(|session| session.maybe_connection.is_some())
         })
       })
       .map(|(user, _)| *user)
@@ -389,7 +463,7 @@ impl Hub {
       let Some(session) = inner.sessions.get(session_id) else {
         continue;
       };
-      if session.maybe_sender.is_none() {
+      if session.maybe_connection.is_none() {
         continue;
       }
       if is_mobile(session.device) {
@@ -429,36 +503,107 @@ impl Hub {
   }
 
   /// Numbers the event per session, buffers it and delivers it to connected sessions of `users`.
+  /// Typing goes out unnumbered and unbuffered ([`EPHEMERAL_SEQ`]).
   pub fn publish(&self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {
-    let mut inner = self.lock();
-    let mut session_ids = Vec::new();
-    for user in users.into_iter().collect::<HashSet<_>>() {
-      if let Some(ids) = inner.by_user.get(&user) {
-        session_ids.extend(ids.iter().cloned());
-      }
+    let Some(shared) = SharedEvent::new(event) else {
+      return;
+    };
+    if is_ephemeral(event) {
+      self.deliver_ephemeral(users, &shared);
+      return;
     }
-    for session_id in session_ids {
-      let buffer_limit = self.options.buffer_events;
-      let Some(session) = inner.sessions.get_mut(&session_id) else {
+    let users: HashSet<UserId> = users.into_iter().collect();
+    let mut inner = self.lock();
+    let inner = &mut *inner;
+    for user in users {
+      let Some(ids) = inner.by_user.get(&user) else {
         continue;
       };
-      let seq = session.next_seq;
-      session.next_seq += 1;
-      session.buffer.push_back((seq, event.clone()));
-      while session.buffer.len() > buffer_limit {
-        session.buffer.pop_front();
+      for session_id in ids {
+        if let Some(session) = inner.sessions.get_mut(session_id) {
+          let before = session.buffer_bytes;
+          session.push(&shared, &self.options);
+          inner.total_buffer_bytes = (inner.total_buffer_bytes + session.buffer_bytes).saturating_sub(before);
+        }
       }
-      if let Some(sender) = &session.maybe_sender
-        && sender
-          .try_send(GatewayServerMessage::Event {
-            seq,
-            event: event.clone(),
-          })
-          .is_err()
-      {
-        // Too slow or already closed: drop the connection; the client resumes from its last seq.
-        session.maybe_sender = None;
-        session.maybe_detached_at = Some(Instant::now());
+    }
+    self.enforce_total_budget(inner);
+  }
+
+  /// Keeps all buffers together within `max_total_buffer_bytes` (issue #156): many sessions that
+  /// each stay within their own budget must not add up to more than the process can hold. The
+  /// slowest go first, so the healthy majority keeps its resume buffers:
+  ///
+  /// 1. sessions waiting to be resumed, the longest-waiting first (they get `session_invalid` and
+  ///    sync afresh);
+  /// 2. connected sessions that are behind, the most bytes behind first (dropped the same way);
+  /// 3. events connected sessions already took, the largest buffers first (they only matter to a
+  ///    resume of a connection that breaks right now, which then syncs afresh).
+  fn enforce_total_budget(&self, inner: &mut Inner) {
+    let limit = self.options.max_total_buffer_bytes;
+    if inner.total_buffer_bytes <= limit {
+      return;
+    }
+    let before = inner.total_buffer_bytes;
+    let mut dropped_sessions = 0_usize;
+    for victim in inner.sessions_slowest_first() {
+      if inner.total_buffer_bytes <= limit {
+        break;
+      }
+      if let Some(session) = inner.forget_session(&victim) {
+        if let Some(ids) = inner.by_user.get_mut(&session.user) {
+          ids.remove(&victim);
+          if ids.is_empty() {
+            inner.by_user.remove(&session.user);
+          }
+        }
+        dropped_sessions += 1;
+      }
+    }
+    let mut largest: Vec<(usize, String)> = inner
+      .sessions
+      .iter()
+      .map(|(id, session)| (session.buffer_bytes, id.clone()))
+      .collect();
+    largest.sort_by(|left, right| right.cmp(left));
+    for (_, id) in largest {
+      if inner.total_buffer_bytes <= limit {
+        break;
+      }
+      if let Some(session) = inner.sessions.get_mut(&id) {
+        let freed = session.trim_delivered();
+        inner.total_buffer_bytes = inner.total_buffer_bytes.saturating_sub(freed);
+      }
+    }
+    warn!(
+      before_bytes = before,
+      after_bytes = inner.total_buffer_bytes,
+      limit_bytes = limit,
+      dropped_sessions,
+      "gateway buffers over their process-wide budget; the slowest sessions were dropped"
+    );
+  }
+
+  /// Delivers the event to the live connections of `users` only: no sequence number, nothing to
+  /// resume. For what is stale a moment later anyway; it never fills a resume buffer.
+  fn deliver_ephemeral(&self, users: impl IntoIterator<Item = UserId>, shared: &Arc<SharedEvent>) {
+    let users: HashSet<UserId> = users.into_iter().collect();
+    let inner = self.lock();
+    for user in users {
+      for session_id in inner.by_user.get(&user).into_iter().flatten() {
+        let Some(connection) = inner
+          .sessions
+          .get(session_id)
+          .and_then(|session| session.maybe_connection.as_ref())
+        else {
+          continue;
+        };
+        // A full queue loses the event: the next one replaces it, and the queue's owner is
+        // dropped by the next numbered event if it stays behind.
+        let _ = connection.sender.try_send(Outgoing {
+          seq: EPHEMERAL_SEQ,
+          event: shared.clone(),
+        });
       }
     }
   }
@@ -475,7 +620,7 @@ impl Hub {
     if let Some(ids) = inner.by_user.remove(&user) {
       for id in ids {
         // Dropping the sender closes the connection's receiver, which ends the connection.
-        inner.sessions.remove(&id);
+        inner.forget_session(&id);
       }
     }
     inner.last_presence.remove(&user);
@@ -489,7 +634,7 @@ impl Hub {
       inner
         .sessions
         .get(id)
-        .is_some_and(|session| session.device == device && session.maybe_sender.is_some())
+        .is_some_and(|session| session.device == device && session.maybe_connection.is_some())
     })
   }
 
@@ -510,7 +655,7 @@ impl Hub {
       .map(|(id, session)| (id.clone(), session.user))
       .collect();
     for (id, user) in ids {
-      inner.sessions.remove(&id);
+      inner.forget_session(&id);
       if let Some(set) = inner.by_user.get_mut(&user) {
         set.remove(&id);
       }
@@ -534,7 +679,7 @@ impl Hub {
       .cloned()
       .collect();
     for id in ids {
-      inner.sessions.remove(&id);
+      inner.forget_session(&id);
       if let Some(set) = inner.by_user.get_mut(&user) {
         set.remove(&id);
       }
@@ -549,7 +694,7 @@ impl Hub {
       let Some(session) = inner.sessions.get(session_id) else {
         continue;
       };
-      if session.maybe_sender.is_none() {
+      if session.maybe_connection.is_none() {
         continue;
       }
       match session.activity {
@@ -587,7 +732,7 @@ impl Hub {
       .map(|(id, session)| (id.clone(), session.user))
       .collect();
     for (id, user) in &expired {
-      inner.sessions.remove(id);
+      inner.forget_session(id);
       if let Some(ids) = inner.by_user.get_mut(user) {
         ids.remove(id);
         if ids.is_empty() {
@@ -603,6 +748,194 @@ impl Hub {
     // matters more than dropping the whole gateway.
     self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
   }
+}
+
+impl Inner {
+  /// Removes a session and its buffer from the byte count. The caller updates `by_user`.
+  fn forget_session(&mut self, id: &str) -> Option<Session> {
+    let session = self.sessions.remove(id)?;
+    self.total_buffer_bytes = self.total_buffer_bytes.saturating_sub(session.buffer_bytes);
+    Some(session)
+  }
+
+  /// Sessions that may be dropped for the process-wide budget, slowest first: waiting ones by how
+  /// long they wait, then connected ones that are behind by how many bytes. Connected sessions
+  /// that took everything but the newest event are not listed.
+  fn sessions_slowest_first(&self) -> Vec<String> {
+    let mut waiting: Vec<(Instant, &String)> = Vec::new();
+    let mut behind: Vec<(usize, &String)> = Vec::new();
+    for (id, session) in &self.sessions {
+      match (&session.maybe_connection, session.maybe_detached_at) {
+        (None, maybe_detached_at) => waiting.push((maybe_detached_at.unwrap_or_else(Instant::now), id)),
+        (Some(connection), _) => {
+          let delivered = connection.link.delivered_seq.load(Ordering::Acquire);
+          let undelivered = session.bytes_behind(delivered);
+          if undelivered > 0 {
+            behind.push((undelivered, id));
+          }
+        },
+      }
+    }
+    waiting.sort();
+    behind.sort_by(|left, right| right.cmp(left));
+    waiting
+      .into_iter()
+      .map(|(_, id)| id.clone())
+      .chain(behind.into_iter().map(|(_, id)| id.clone()))
+      .collect()
+  }
+}
+
+impl Session {
+  /// Numbers, buffers and queues one event. A connection that fell behind its buffer (an event it
+  /// has not taken was evicted) can never catch up from it and only holds memory: it is dropped,
+  /// and its client resumes or, past the gap, syncs afresh.
+  fn push(&mut self, event: &Arc<SharedEvent>, options: &HubOptions) {
+    let seq = self.next_seq;
+    self.next_seq += 1;
+    self.buffer.push_back((seq, event.clone()));
+    self.buffer_bytes += event.byte_len();
+    // The newest event stays even if it alone is over the byte limit.
+    while self.buffer.len() > options.buffer_events.max(1)
+      || (self.buffer_bytes > options.buffer_bytes && self.buffer.len() > 1)
+    {
+      if let Some((_, evicted)) = self.buffer.pop_front() {
+        self.buffer_bytes -= evicted.byte_len();
+      }
+    }
+    let Some(connection) = &self.maybe_connection else {
+      return;
+    };
+    let oldest = self.buffer.front().map_or(seq, |(oldest, _)| *oldest);
+    let delivered = connection.link.delivered_seq.load(Ordering::Acquire);
+    let is_behind = delivered.saturating_add(1) < oldest;
+    let outgoing = Outgoing {
+      seq,
+      event: event.clone(),
+    };
+    if is_behind || connection.sender.try_send(outgoing).is_err() {
+      // Too slow or already closed: drop the connection; the client resumes from its last seq.
+      debug!(seq, delivered, "gateway connection fell behind, dropped");
+      self.maybe_connection = None;
+      self.maybe_detached_at = Some(Instant::now());
+    }
+  }
+}
+
+impl Session {
+  /// Bytes of the buffered events after `delivered` that the connection has not taken, not
+  /// counting the newest (it is on its way right now; a healthy connection is never behind by it).
+  fn bytes_behind(&self, delivered: u64) -> usize {
+    let newest = self.next_seq.saturating_sub(1);
+    self
+      .buffer
+      .iter()
+      .filter(|(seq, _)| *seq > delivered && *seq < newest)
+      .map(|(_, event)| event.byte_len())
+      .sum()
+  }
+
+  /// Drops the buffered events the connection already took; returns the bytes freed. Nothing for a
+  /// session without a connection (all of its buffer is still to be replayed).
+  fn trim_delivered(&mut self) -> usize {
+    let Some(connection) = &self.maybe_connection else {
+      return 0;
+    };
+    let delivered = connection.link.delivered_seq.load(Ordering::Acquire);
+    let mut freed = 0;
+    while self.buffer.front().is_some_and(|(seq, _)| *seq <= delivered) {
+      if let Some((_, event)) = self.buffer.pop_front() {
+        freed += event.byte_len();
+      }
+    }
+    self.buffer_bytes = self.buffer_bytes.saturating_sub(freed);
+    freed
+  }
+}
+
+impl Attached {
+  /// The next event for the connection; `None` once the hub dropped the connection (too slow,
+  /// replaced by a resume, session ended), which ends the connection task and frees its queue.
+  pub async fn next_outgoing(&mut self) -> Option<Outgoing> {
+    let outgoing = self.receiver.recv().await?;
+    (!self.link.is_dropped.load(Ordering::Acquire)).then_some(outgoing)
+  }
+
+  /// The peer took the event numbered `seq`.
+  pub fn delivered(&self, seq: u64) {
+    if seq != EPHEMERAL_SEQ {
+      self.link.delivered_seq.fetch_max(seq, Ordering::AcqRel);
+    }
+  }
+}
+
+impl Outgoing {
+  /// The `event` frame as sent, `{"type":"event","seq":…,"event":…}`, without serializing the event
+  /// again for every recipient.
+  pub fn to_frame(&self) -> String {
+    format!(
+      r#"{{"type":"event","seq":{},"event":{}}}"#,
+      self.seq, self.event.json
+    )
+  }
+}
+
+impl SharedEvent {
+  /// `None` (logged) if the event can't be serialized, which plain data never fails to.
+  fn new(event: &GatewayEvent) -> Option<Arc<Self>> {
+    match serde_json::to_string(event) {
+      Ok(json) => Some(Arc::new(Self {
+        json: json.into_boxed_str(),
+      })),
+      Err(error) => {
+        warn!(%error, "a gateway event could not be serialized");
+        None
+      },
+    }
+  }
+
+  pub fn byte_len(&self) -> usize {
+    self.json.len()
+  }
+}
+
+impl Drop for Connection {
+  fn drop(&mut self) {
+    self.link.is_dropped.store(true, Ordering::Release);
+  }
+}
+
+/// A connection for a session: the hub's end and the connection task's end.
+fn new_connection(
+  next_id: &mut u64,
+  session_id: &str,
+  replay: Vec<Outgoing>,
+  delivered_seq: u64,
+) -> (Connection, Attached) {
+  *next_id += 1;
+  let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+  let link = Arc::new(ConnectionLink {
+    delivered_seq: AtomicU64::new(delivered_seq),
+    is_dropped: AtomicBool::new(false),
+  });
+  let connection = Connection {
+    id: *next_id,
+    sender,
+    link: link.clone(),
+  };
+  let attached = Attached {
+    session_id: session_id.to_owned(),
+    connection_id: *next_id,
+    replay,
+    receiver,
+    link,
+  };
+  (connection, attached)
+}
+
+/// Events that only matter to whoever is connected at this moment.
+fn is_ephemeral(event: &GatewayEvent) -> bool {
+  matches!(event, GatewayEvent::TypingStart { .. })
 }
 
 fn new_session_id() -> String {
@@ -622,6 +955,8 @@ mod tests {
   const OPTIONS: HubOptions = HubOptions {
     resume_window: Duration::from_secs(60),
     buffer_events: 3,
+    buffer_bytes: 1024 * 1024,
+    max_total_buffer_bytes: 1024 * 1024 * 1024,
     max_sessions_per_device: 100,
     max_sessions_per_user: 100,
     attention_lease: Duration::from_secs(75),
@@ -636,8 +971,8 @@ mod tests {
     hub.publish([user(1), user(2)], &event(1));
     hub.publish([user(1)], &event(2));
 
-    assert_eq!(seqs(&mut a.receiver), vec![1, 2]);
-    assert_eq!(seqs(&mut b.receiver), vec![1]);
+    assert_eq!(seqs(&mut a), vec![1, 2]);
+    assert_eq!(seqs(&mut b), vec![1]);
   }
 
   #[tokio::test(start_paused = true)]
@@ -645,7 +980,7 @@ mod tests {
     let hub = Hub::new(OPTIONS);
     let mut other = hub.open_session(user(3), device(3), DeviceActivity::Active);
     hub.publish([user(1)], &event(1));
-    assert!(seqs(&mut other.receiver).is_empty());
+    assert!(seqs(&mut other).is_empty());
   }
 
   #[tokio::test(start_paused = true)]
@@ -654,12 +989,12 @@ mod tests {
     let first = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let session_id = first.session_id.clone();
     hub.publish([user(1)], &event(1));
-    hub.detach(&session_id);
+    hub.detach(&session_id, first.connection_id);
     hub.publish([user(1)], &event(2));
     hub.publish([user(1)], &event(3));
 
     let resumed = hub.resume_session(&session_id, user(1), device(1), 1).unwrap();
-    let replayed: Vec<u64> = resumed.replay.iter().map(seq_of).collect();
+    let replayed: Vec<u64> = resumed.replay.iter().map(|outgoing| outgoing.seq).collect();
     assert_eq!(replayed, vec![2, 3]);
   }
 
@@ -669,11 +1004,11 @@ mod tests {
     let first = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let id = first.session_id.clone();
     hub.publish([user(1)], &event(1));
-    hub.detach(&id);
+    hub.detach(&id, first.connection_id);
 
     let mut resumed = hub.resume_session(&id, user(1), device(1), 1).unwrap();
     hub.publish([user(1)], &event(2));
-    assert_eq!(seqs(&mut resumed.receiver), vec![2]);
+    assert_eq!(seqs(&mut resumed), vec![2]);
   }
 
   #[tokio::test(start_paused = true)]
@@ -681,7 +1016,7 @@ mod tests {
     let hub = Hub::new(OPTIONS);
     let first = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let id = first.session_id.clone();
-    hub.detach(&id);
+    hub.detach(&id, first.connection_id);
     for n in 1..=5 {
       hub.publish([user(1)], &event(n));
     }
@@ -698,7 +1033,7 @@ mod tests {
     let hub = Hub::new(OPTIONS);
     let first = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let id = first.session_id.clone();
-    hub.detach(&id);
+    hub.detach(&id, first.connection_id);
 
     assert_eq!(
       hub.resume_session(&id, user(2), device(1), 0).err(),
@@ -741,7 +1076,7 @@ mod tests {
       let mut first = hub.open_session(user(1), device(1), DeviceActivity::Active);
       let second = hub.open_session(user(1), device(1), DeviceActivity::Active);
       // The older one is live, the newer one waits to be resumed: the waiting one is dropped first.
-      hub.detach(&second.session_id);
+      hub.detach(&second.session_id, second.connection_id);
       let third = hub.open_session(user(1), device(1), DeviceActivity::Active);
       assert!(
         hub
@@ -749,13 +1084,13 @@ mod tests {
           .is_err()
       );
       hub.publish([user(1)], &event(1));
-      assert_eq!(seqs(&mut first.receiver), vec![1]);
+      assert_eq!(seqs(&mut first), vec![1]);
       drop(third);
 
       // With all live, the oldest goes and its connection ends.
       let fourth = hub.open_session(user(1), device(1), DeviceActivity::Active);
       assert!(
-        first.receiver.recv().await.is_none(),
+        first.next_outgoing().await.is_none(),
         "the oldest connection was closed"
       );
       drop(fourth);
@@ -769,9 +1104,9 @@ mod tests {
       let _c = hub.open_session(user(1), device(3), DeviceActivity::Active);
       let mut other = hub.open_session(user(2), device(9), DeviceActivity::Active);
       let _d = hub.open_session(user(1), device(4), DeviceActivity::Active);
-      assert!(oldest.receiver.recv().await.is_none());
+      assert!(oldest.next_outgoing().await.is_none());
       hub.publish([user(2)], &event(1));
-      assert_eq!(seqs(&mut other.receiver), vec![1]);
+      assert_eq!(seqs(&mut other), vec![1]);
     }
   }
 
@@ -780,7 +1115,7 @@ mod tests {
     let hub = Hub::new(OPTIONS);
     let gone = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let _kept = hub.open_session(user(2), device(2), DeviceActivity::Active);
-    hub.detach(&gone.session_id);
+    hub.detach(&gone.session_id, gone.connection_id);
 
     assert!(hub.sweep_expired().is_empty());
     tokio::time::advance(Duration::from_secs(61)).await;
@@ -800,8 +1135,8 @@ mod tests {
 
     hub.set_activity(&phone.session_id, DeviceActivity::Idle);
     assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
-    hub.detach(&phone.session_id);
-    hub.detach(&desktop.session_id);
+    hub.detach(&phone.session_id, phone.connection_id);
+    hub.detach(&desktop.session_id, desktop.connection_id);
     assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::NoDevice);
   }
 
@@ -933,7 +1268,7 @@ mod tests {
       hub.set_attention(&desktop.session_id, false);
       assert!(is_woken(&watcher).await);
       hub.set_attention(&desktop.session_id, true);
-      hub.detach(&desktop.session_id);
+      hub.detach(&desktop.session_id, desktop.connection_id);
       assert!(is_woken(&watcher).await);
       assert!(!is_woken(&other).await, "other users' waiters stay asleep");
       assert!(
@@ -948,6 +1283,245 @@ mod tests {
         .await
         .is_ok()
     }
+  }
+
+  mod memory {
+    use super::*;
+
+    /// Bytes of one [`big_event`] as serialized.
+    fn big_event_bytes() -> usize {
+      SharedEvent::new(&big_event(1)).unwrap().byte_len()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_consumer_keeps_no_more_than_its_byte_budget() {
+      let budget = 10 * big_event_bytes();
+      let hub = Hub::new(HubOptions {
+        buffer_events: 1000,
+        buffer_bytes: budget,
+        ..OPTIONS
+      });
+      let mut stalled = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let mut healthy = hub.open_session(user(2), device(2), DeviceActivity::Active);
+      for n in 1..=100 {
+        hub.publish([user(1), user(2)], &big_event(n));
+        // The healthy connection takes every event as it comes.
+        while let Ok(outgoing) = healthy.receiver.try_recv() {
+          healthy.delivered(outgoing.seq);
+        }
+      }
+
+      // The stalled one was dropped once an event it never took left its buffer, long before its
+      // queue (1024 frames) was full: what it holds is bounded by the budget, not by the traffic.
+      let queued = seqs(&mut stalled);
+      assert!(queued.len() <= 11, "{} frames queued", queued.len());
+      assert!(stalled.next_outgoing().await.is_none(), "its task ends");
+      let inner = hub.lock();
+      for session in inner.sessions.values() {
+        assert!(
+          session.buffer_bytes <= budget,
+          "{} bytes buffered",
+          session.buffer_bytes
+        );
+      }
+      drop(inner);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::NoDevice);
+      assert_eq!(hub.device_aggregate(user(2)), DeviceAggregate::Active);
+      // It can't resume across the gap: its client syncs afresh.
+      assert_eq!(
+        hub
+          .resume_session(&stalled.session_id, user(1), device(1), 0)
+          .err(),
+        Some(ResumeError::Gap)
+      );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_event_is_serialized_once_and_shared_by_every_session() {
+      let hub = Hub::new(OPTIONS);
+      let mut a = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let mut b = hub.open_session(user(2), device(2), DeviceActivity::Active);
+      hub.publish([user(1), user(2)], &big_event(1));
+      let from_a = a.receiver.try_recv().unwrap();
+      let from_b = b.receiver.try_recv().unwrap();
+      assert!(Arc::ptr_eq(&from_a.event, &from_b.event));
+      let inner = hub.lock();
+      let buffered = &inner.sessions[&a.session_id].buffer[0].1;
+      assert!(Arc::ptr_eq(buffered, &from_a.event), "the buffer shares it too");
+    }
+
+    #[test]
+    fn the_shared_frame_is_the_protocol_s_event_frame() {
+      let event = big_event(7);
+      let outgoing = Outgoing {
+        seq: 42,
+        event: SharedEvent::new(&event).unwrap(),
+      };
+      let parsed: teamcraft_proto::GatewayServerMessage = serde_json::from_str(&outgoing.to_frame()).unwrap();
+      assert_eq!(
+        parsed,
+        teamcraft_proto::GatewayServerMessage::Event { seq: 42, event }
+      );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn typing_is_neither_numbered_nor_buffered() {
+      let hub = Hub::new(OPTIONS);
+      let mut live = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let typing = GatewayEvent::TypingStart {
+        conversation_id: ConversationId::from_snowflake(Snowflake::new(1).unwrap()),
+        user_id: user(2),
+      };
+      for _ in 0..10 {
+        hub.publish([user(1)], &typing);
+      }
+      hub.publish([user(1)], &event(1));
+      assert_eq!(seqs(&mut live), [vec![EPHEMERAL_SEQ; 10], vec![1]].concat());
+
+      // A waiting session gets no typing at all, and its buffer holds only the real event.
+      hub.detach(&live.session_id, live.connection_id);
+      hub.publish([user(1)], &typing);
+      let resumed = hub
+        .resume_session(&live.session_id, user(1), device(1), 0)
+        .unwrap();
+      let replayed: Vec<u64> = resumed.replay.iter().map(|outgoing| outgoing.seq).collect();
+      assert_eq!(replayed, vec![1]);
+    }
+
+    /// A 16 KiB event, like a message near a moderate size limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_process_budget_drops_waiting_sessions_first_then_those_most_behind() {
+      let event_bytes = big_event_bytes();
+      let budget = 25 * event_bytes + event_bytes / 2;
+      let hub = Hub::new(HubOptions {
+        buffer_events: 1000,
+        buffer_bytes: 20 * event_bytes,
+        max_total_buffer_bytes: budget,
+        ..OPTIONS
+      });
+      let mut healthy = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let waiting = hub.open_session(user(2), device(2), DeviceActivity::Active);
+      hub.detach(&waiting.session_id, waiting.connection_id);
+      let mut stalled = hub.open_session(user(3), device(3), DeviceActivity::Active);
+      let everyone = [user(1), user(2), user(3)];
+
+      // 3 × 9 events are over the budget: the waiting session goes, the others stay.
+      for n in 11..=19 {
+        hub.publish(everyone, &big_event(n));
+        take_all(&mut healthy);
+        assert_within_budget(&hub, budget);
+      }
+      assert_eq!(
+        hub
+          .resume_session(&waiting.session_id, user(2), device(2), 0)
+          .err(),
+        Some(ResumeError::Unknown),
+        "the waiting session was dropped: its client syncs afresh"
+      );
+      assert_eq!(hub.device_aggregate(user(3)), DeviceAggregate::Active);
+
+      // Two buffers of 9 grow to 13 each: over the budget again, and the stalled one goes.
+      for n in 21..=24 {
+        hub.publish(everyone, &big_event(n));
+        take_all(&mut healthy);
+        assert_within_budget(&hub, budget);
+      }
+      assert_eq!(hub.device_aggregate(user(3)), DeviceAggregate::NoDevice);
+      seqs(&mut stalled);
+      assert!(stalled.next_outgoing().await.is_none(), "its task ends");
+      // The healthy one kept its connection and its buffer for a resume.
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+      hub.publish([user(1)], &big_event(25));
+      assert_eq!(take_all(&mut healthy), vec![14]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_only_healthy_sessions_the_events_they_took_are_trimmed() {
+      let event_bytes = big_event_bytes();
+      let budget = 10 * event_bytes + event_bytes / 2;
+      let hub = Hub::new(HubOptions {
+        buffer_events: 1000,
+        buffer_bytes: 100 * event_bytes,
+        max_total_buffer_bytes: budget,
+        ..OPTIONS
+      });
+      let mut sessions: Vec<Attached> = (1..=3)
+        .map(|n| hub.open_session(user(n), device(n), DeviceActivity::Active))
+        .collect();
+      for n in 11..=30 {
+        hub.publish([user(1), user(2), user(3)], &big_event(n));
+        for attached in &mut sessions {
+          take_all(attached);
+        }
+        assert_within_budget(&hub, budget);
+      }
+      for n in 1..=3 {
+        assert_eq!(hub.device_aggregate(user(n)), DeviceAggregate::Active);
+      }
+    }
+
+    fn take_all(attached: &mut Attached) -> Vec<u64> {
+      let seqs = seqs(attached);
+      if let Some(last) = seqs.last() {
+        attached.delivered(*last);
+      }
+      seqs
+    }
+
+    fn assert_within_budget(hub: &Hub, budget: usize) {
+      let inner = hub.lock();
+      let sum: usize = inner.sessions.values().map(|session| session.buffer_bytes).sum();
+      assert_eq!(
+        inner.total_buffer_bytes, sum,
+        "the running total matches the buffers"
+      );
+      assert!(sum <= budget, "{sum} bytes buffered, budget {budget}");
+    }
+
+    fn big_event(n: i64) -> GatewayEvent {
+      GatewayEvent::MembershipAdd {
+        conversation_id: ConversationId::from_snowflake(Snowflake::new(n).unwrap()),
+        user: teamcraft_proto::UserSummary {
+          id: user(n),
+          maybe_username: None,
+          display_name: "x".repeat(16 * 1024),
+          kind: teamcraft_proto::UserKind::Member,
+          maybe_email: None,
+          maybe_organization: None,
+          maybe_has_devices: None,
+        },
+      }
+    }
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_late_detach_of_a_replaced_connection_keeps_the_resumed_session() {
+    let hub = Hub::new(OPTIONS);
+    let old = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    hub.publish([user(1)], &event(1));
+    // The client gave up on a half-open socket and resumed on a new one before the server noticed.
+    let mut resumed = hub
+      .resume_session(&old.session_id, user(1), device(1), 1)
+      .unwrap();
+    hub.detach(&old.session_id, old.connection_id);
+
+    assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+    hub.publish([user(1)], &event(2));
+    assert_eq!(seqs(&mut resumed), vec![2], "the resumed connection stays open");
+    // The current connection's own detach still works.
+    hub.detach(&resumed.session_id, resumed.connection_id);
+    assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::NoDevice);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_replaced_connection_stops_at_its_next_frame() {
+    let hub = Hub::new(OPTIONS);
+    let mut old = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    hub.publish([user(1)], &event(1));
+    let _resumed = hub
+      .resume_session(&old.session_id, user(1), device(1), 0)
+      .unwrap();
+    assert!(old.next_outgoing().await.is_none());
   }
 
   #[tokio::test(start_paused = true)]
@@ -977,7 +1551,7 @@ mod tests {
     let b = hub.open_session(user(2), device(2), DeviceActivity::Active);
     hub.revoke_user(user(1));
     assert!(
-      a.receiver.recv().await.is_none(),
+      a.next_outgoing().await.is_none(),
       "the connection's channel is closed"
     );
     assert_eq!(
@@ -994,9 +1568,9 @@ mod tests {
     let mut phone = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let mut laptop = hub.open_session(user(1), device(2), DeviceActivity::Active);
     hub.revoke_device(user(1), device(1));
-    assert!(phone.receiver.recv().await.is_none());
+    assert!(phone.next_outgoing().await.is_none());
     hub.publish([user(1)], &event(1));
-    assert_eq!(seqs(&mut laptop.receiver), vec![1]);
+    assert_eq!(seqs(&mut laptop), vec![1]);
   }
 
   #[tokio::test(start_paused = true)]
@@ -1007,9 +1581,9 @@ mod tests {
     hub.set_oidc_session(&a.session_id, "sid-a");
     hub.set_oidc_session(&b.session_id, "sid-b");
     hub.revoke_oidc_session("sid-a");
-    assert!(a.receiver.recv().await.is_none());
+    assert!(a.next_outgoing().await.is_none());
     hub.publish([user(1)], &event(1));
-    assert_eq!(seqs(&mut b.receiver), vec![1]);
+    assert_eq!(seqs(&mut b), vec![1]);
   }
 
   #[tokio::test(start_paused = true)]
@@ -1018,7 +1592,7 @@ mod tests {
     let mut a = hub.open_session(user(1), device(1), DeviceActivity::Active);
     let mut b = hub.open_session(user(2), device(2), DeviceActivity::Active);
     hub.publish_all(&event(1));
-    assert_eq!((seqs(&mut a.receiver), seqs(&mut b.receiver)), (vec![1], vec![1]));
+    assert_eq!((seqs(&mut a), seqs(&mut b)), (vec![1], vec![1]));
   }
 
   #[test]
@@ -1072,17 +1646,10 @@ mod tests {
     }
   }
 
-  fn seq_of(message: &GatewayServerMessage) -> u64 {
-    match message {
-      GatewayServerMessage::Event { seq, .. } => *seq,
-      other => panic!("not an event: {other:?}"),
-    }
-  }
-
-  fn seqs(receiver: &mut mpsc::Receiver<GatewayServerMessage>) -> Vec<u64> {
+  fn seqs(attached: &mut Attached) -> Vec<u64> {
     let mut seqs = Vec::new();
-    while let Ok(message) = receiver.try_recv() {
-      seqs.push(seq_of(&message));
+    while let Ok(outgoing) = attached.receiver.try_recv() {
+      seqs.push(outgoing.seq);
     }
     seqs
   }

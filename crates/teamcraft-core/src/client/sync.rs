@@ -1,5 +1,7 @@
 //! Full state sync over REST, key package top-up and key bag upload.
 
+use std::collections::BTreeSet;
+
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListThreadsQuery, SpaceId,
@@ -12,6 +14,20 @@ use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
 use crate::store::{LocalStore, Table};
 use crate::{read_state, records};
+
+/// Conversations whose content an earlier sync skipped, retried by the upkeep and the next full
+/// sync.
+const NEEDS_RESYNC_KEY: &str = "needs_resync";
+/// Conversations whose member list an earlier sync couldn't refresh; tracked apart from the
+/// content, so a content sync that works doesn't clear a member refresh that failed.
+const NEEDS_MEMBER_RESYNC_KEY: &str = "needs_member_resync";
+
+/// The part of a conversation's sync that failed and waits for another try.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResyncPart {
+  Members,
+  Content,
+}
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the store up to date after a fresh gateway session (or at start): the last steps of an
@@ -33,6 +49,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter(|id| !conversations.iter().any(|conversation| conversation.id == **id))
     {
       self.store.delete(Table::Conversations, &stale.to_string())?;
+      self.unmark_resync(*stale, ResyncPart::Members)?;
+      self.unmark_resync(*stale, ResyncPart::Content)?;
     }
     // The whole list first, members after: a UI reading the store meanwhile shows every
     // conversation at once instead of one per member request (issue #247).
@@ -47,19 +65,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Direct and group messages are named after their members: theirs first, so their names
     // follow right after the list.
     for conversation in members_order(&conversations) {
-      self.refresh_members(conversation).await?;
+      let result = self.refresh_members(conversation).await;
+      if self.isolate(conversation, ResyncPart::Members, result)? {
+        self.unmark_resync(conversation, ResyncPart::Members)?;
+      }
     }
     self.sync_welcomes().await?;
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
     self.join_missing_groups().await?;
     for conversation in &conversations {
-      if self.has_group(conversation.id)? {
-        self.sync_mls(conversation.id).await?;
+      let result = self.sync_conversation_content(conversation.id).await;
+      if self.isolate(conversation.id, ResyncPart::Content, result)? {
+        self.unmark_resync(conversation.id, ResyncPart::Content)?;
       }
-      self.catch_up_messages(conversation.id).await?;
-      self.retry_undecrypted(conversation.id)?;
-      // Senders this device has no verified key for yet (it isn't in the group, or just joined).
-      self.learn_sender_keys(conversation.id).await?;
     }
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;
@@ -75,9 +93,103 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
+    // Read positions, acknowledgements and pins taken offline (issue #159).
+    self.flush_pending_actions().await?;
+    // Presence changed unseen while the device was away: refreshed a batch per upkeep tick.
+    self.mark_known_presence_stale()?;
     self.top_up_key_packages().await?;
     // Also picks up saved items and drafts other devices changed while this one was away.
     self.sync_account_data().await
+  }
+
+  /// Retries the conversations an earlier sync had to skip (see [`Self::isolate`]); the upkeep
+  /// calls this with the account sync. Returns how many caught up.
+  pub async fn resync_marked_conversations(&mut self) -> Result<usize, CoreError> {
+    let members = self.marked_for_resync(ResyncPart::Members)?;
+    let content = self.marked_for_resync(ResyncPart::Content)?;
+    let mut caught_up = 0;
+    for conversation in members.union(&content).copied() {
+      let mut is_caught_up = true;
+      if members.contains(&conversation) {
+        let result = self.refresh_members(conversation).await;
+        let is_done = self.isolate(conversation, ResyncPart::Members, result)?;
+        if is_done {
+          self.unmark_resync(conversation, ResyncPart::Members)?;
+        }
+        is_caught_up &= is_done;
+      }
+      if content.contains(&conversation) {
+        let result = self.sync_conversation_content(conversation).await;
+        let is_done = self.isolate(conversation, ResyncPart::Content, result)?;
+        if is_done {
+          self.unmark_resync(conversation, ResyncPart::Content)?;
+        }
+        is_caught_up &= is_done;
+      }
+      caught_up += usize::from(is_caught_up);
+    }
+    Ok(caught_up)
+  }
+
+  /// The conversations an earlier sync skipped in part (members, content or both).
+  pub fn conversations_to_resync(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
+    let mut marked = self.marked_for_resync(ResyncPart::Members)?;
+    marked.extend(self.marked_for_resync(ResyncPart::Content)?);
+    Ok(marked)
+  }
+
+  /// The conversations whose member list an earlier sync couldn't refresh.
+  pub fn conversations_to_resync_members(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
+    self.marked_for_resync(ResyncPart::Members)
+  }
+
+  /// One conversation's part of the sync: its MLS backlog, new messages, messages waiting for keys
+  /// and the senders' keys.
+  async fn sync_conversation_content(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.has_group(conversation)? {
+      self.sync_mls(conversation).await?;
+    }
+    self.catch_up_messages(conversation).await?;
+    self.retry_undecrypted(conversation)?;
+    // Senders this device has no verified key for yet (it isn't in the group, or just joined).
+    self.learn_sender_keys(conversation).await
+  }
+
+  /// Keeps one conversation's failure from failing the whole sync (issue #159): a 403 or 404 right
+  /// after a removal, or a group in a bad state, marks the conversation for another try and the
+  /// sync goes on with the others. Being offline, server trouble, an expired token or a broken
+  /// store would fail every other conversation too: that stops the sync. Returns whether the
+  /// conversation went through.
+  fn isolate(
+    &self,
+    conversation: ConversationId,
+    part: ResyncPart,
+    result: Result<(), CoreError>,
+  ) -> Result<bool, CoreError> {
+    match result {
+      Ok(()) => Ok(true),
+      Err(error) if error.is_retry_later() || matches!(error, CoreError::Store(_)) => Err(error),
+      Err(error) => {
+        tracing::warn!(%error, conversation_id = %conversation, ?part, "conversation skipped by the sync; retried later");
+        let mut marked = self.marked_for_resync(part)?;
+        if marked.insert(conversation) {
+          records::put_json(&self.store, Table::SyncState, part.key(), &marked)?;
+        }
+        Ok(false)
+      },
+    }
+  }
+
+  fn unmark_resync(&self, conversation: ConversationId, part: ResyncPart) -> Result<(), CoreError> {
+    let mut marked = self.marked_for_resync(part)?;
+    if marked.remove(&conversation) {
+      records::put_json(&self.store, Table::SyncState, part.key(), &marked)?;
+    }
+    Ok(())
+  }
+
+  fn marked_for_resync(&self, part: ResyncPart) -> Result<BTreeSet<ConversationId>, CoreError> {
+    Ok(records::get_json(&self.store, Table::SyncState, part.key())?.unwrap_or_default())
   }
 
   /// Followed threads and unread counts (after `thread_update` and on fresh sessions). The threads'
@@ -257,6 +369,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   fn remember_user(&self, user: &UserSummary) -> Result<(), CoreError> {
     records::put_json(&self.store, Table::Users, &user.id.to_string(), user)
+  }
+}
+
+impl ResyncPart {
+  /// Where the conversations marked for this part are stored.
+  fn key(self) -> &'static str {
+    match self {
+      Self::Members => NEEDS_MEMBER_RESYNC_KEY,
+      Self::Content => NEEDS_RESYNC_KEY,
+    }
   }
 }
 

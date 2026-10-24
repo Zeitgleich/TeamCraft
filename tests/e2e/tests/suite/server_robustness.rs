@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use reqwest::StatusCode;
 use teamcraft_core::GatewayOutcome;
 use teamcraft_e2e::process::{ProcessStats, is_tcp_established};
-use teamcraft_e2e::raw_gateway::RawGateway;
+use teamcraft_e2e::raw_gateway::{Ending, RawGateway};
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack, UserTokens};
 use teamcraft_proto::{
@@ -117,8 +117,9 @@ mod resume {
 mod restart {
   use super::*;
 
-  /// SIGTERM with gateway connections open: the server exits within seconds (it does not wait for
-  /// WebSockets), the connections end, and after the restart everything works without user action.
+  /// SIGTERM with gateway connections open: the server closes them with 1012 ("service restart")
+  /// and exits within its drain timeout, and after the restart everything works without user
+  /// action.
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn sigterm_with_connected_clients_drains_quickly_and_clients_recover() {
     let Some(mut rig) = Rig::start(Stack::builder()).await else {
@@ -136,9 +137,11 @@ mod restart {
     );
     let (_, ending) = raw.drain(Duration::from_secs(5)).await;
     eprintln!("PERF sigterm: raw gateway connection ended with {ending:?}");
-    assert!(
-      ending.is_some(),
-      "the gateway connection stayed open after SIGTERM"
+    // The drain closes the socket with "service restart" before the process exits (#156).
+    assert_eq!(
+      ending,
+      Some(Ending::Closed(1012)),
+      "the gateway connection did not get a 1012 close frame"
     );
 
     // Both clients reconnect and catch up.

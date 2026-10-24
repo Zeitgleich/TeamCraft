@@ -47,6 +47,11 @@ impl Upkeep {
       if let Err(error) = client.check_workspace_head().await {
         tracing::debug!(%error, "workspace head not checked yet");
       }
+      // Conversations a sync had to skip (a 403 right after a removal, a group in a bad state).
+      match client.resync_marked_conversations().await {
+        Ok(caught_up) => is_changed |= caught_up > 0,
+        Err(error) => tracing::debug!(%error, "skipped conversations not synced yet"),
+      }
       // A rotated org recovery key: wrap the backup key to the new one (security review B4).
       if let Err(error) = client.rewrap_for_current_org_key().await {
         tracing::debug!(%error, "backup key not wrapped to the new org key yet");
@@ -70,7 +75,8 @@ impl Upkeep {
 }
 
 /// Sends what is waiting: link previews, then file uploads, then the outbox (a message with files
-/// goes out once they are uploaded). Returns whether the store changed.
+/// goes out once they are uploaded), then queued read positions, acknowledgements, pins and
+/// presence. Returns whether the store changed.
 pub async fn flush<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bool {
   let mut is_changed = false;
   if let Err(error) = client.generate_pending_previews().await {
@@ -93,6 +99,10 @@ pub async fn flush<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bo
       is_changed |= report.sent > 0;
     },
     Err(error) => tracing::debug!(%error, "outbox flush did not finish"),
+  }
+  match client.flush_pending_actions().await {
+    Ok(sent) => is_changed |= sent > 0,
+    Err(error) => tracing::debug!(%error, "queued actions not sent"),
   }
   is_changed
 }

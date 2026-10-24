@@ -42,6 +42,8 @@ pub struct AppState {
   pub ids: Arc<SnowflakeGenerator>,
   pub hub: Arc<Hub>,
   pub rendezvous: Arc<RendezvousHub>,
+  /// Shutdown in progress: readiness fails and WebSockets close with 1012.
+  pub drain: Arc<crate::drain::Drain>,
   pub push: Arc<PushDispatcher>,
   /// What was pushed to which device: withdrawals, rings, delivery counts, test limits.
   pub push_tracker: Arc<PushTracker>,

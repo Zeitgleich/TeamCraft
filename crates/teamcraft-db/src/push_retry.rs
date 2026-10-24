@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use sqlx::{Postgres, Transaction};
-use teamcraft_proto::{DeviceId, PushKind, PushRetryId, PushWakeUp, UnixMillis, UserId};
+use teamcraft_proto::{CallId, DeviceId, PushKind, PushRetryId, PushWakeUp, UnixMillis, UserId};
 
 use crate::database::Database;
 use crate::error::DbError;
@@ -159,6 +159,24 @@ impl Database {
       to_db(dismiss.conversation_id),
       dismiss.maybe_message_id.map(to_db),
       dismiss.maybe_thread_id.map(to_db),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected())
+  }
+
+  /// Removes the queued rings of a call whose ringing ended, for every device: a retry that
+  /// arrived after the call was answered, declined or cancelled would ring a phone for nothing
+  /// (issue #142). Rows a worker is sending right now are left to its own check. Returns how many
+  /// were removed.
+  pub async fn delete_queued_rings(&self, call: CallId) -> Result<u64, DbError> {
+    let result = sqlx::query!(
+      r#"DELETE FROM push_retries
+         WHERE id IN (
+           SELECT id FROM push_retries
+           WHERE kind = 'call' AND call_id = $1
+           FOR UPDATE SKIP LOCKED)"#,
+      to_db(call),
     )
     .execute(self.pool())
     .await?;

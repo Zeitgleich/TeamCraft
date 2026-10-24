@@ -1,11 +1,9 @@
 //! Runs the requests the UI adapter queued ([`CoreCommand`]) against the server.
 
 use teamcraft_client_api::model::PresenceStatus;
-use teamcraft_proto::{
-  ManualPresence, SetPresenceRequest, SetReadPositionRequest, UnixMillis, UpdateConversationMemberRequest,
-};
+use teamcraft_proto::{ManualPresence, SetPresenceRequest, UnixMillis, UpdateConversationMemberRequest};
 
-use super::Client;
+use super::{Client, PendingAction};
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
@@ -39,14 +37,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .into_iter()
           .filter_map(|message| message.maybe_server_id)
           .max();
-        if let Some(message_id) = maybe_latest {
-          self
-            .api
-            .set_read_position(conversation, &SetReadPositionRequest { message_id })
-            .await?;
-          self.refresh_conversation(conversation).await?;
+        match maybe_latest {
+          // Queued: offline, it reaches the server (and the other devices) once back.
+          Some(message) => {
+            self
+              .queue_action(PendingAction::ReadPosition {
+                conversation,
+                message,
+              })
+              .await
+          },
+          None => Ok(()),
         }
-        Ok(())
       },
       CoreCommand::SetFavorite {
         conversation,
@@ -71,18 +73,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           PresenceStatus::DoNotDisturb => ManualPresence::DoNotDisturb,
           PresenceStatus::Offline => ManualPresence::Invisible,
         };
-        Ok(
-          self
-            .api
-            .set_presence(&SetPresenceRequest {
-              // Only do-not-disturb ends by itself.
-              maybe_until: maybe_until
-                .filter(|_| manual == ManualPresence::DoNotDisturb)
-                .map(UnixMillis),
-              manual,
-            })
-            .await?,
-        )
+        let request = SetPresenceRequest {
+          // Only do-not-disturb ends by itself.
+          maybe_until: maybe_until
+            .filter(|_| manual == ManualPresence::DoNotDisturb)
+            .map(UnixMillis),
+          manual,
+        };
+        self.queue_action(PendingAction::Presence { request }).await
       },
       #[cfg(not(target_arch = "wasm32"))]
       CoreCommand::FetchSearchHits { hits } => self.fetch_search_hits(&hits).await.map(|_| ()),

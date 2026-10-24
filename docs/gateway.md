@@ -20,10 +20,25 @@ types are ignored on both sides, so new ones can be added without breaking old c
 ## Events and resume
 
 Every `event` frame has a `seq` that grows by one per session. The server keeps the last
-`resume_buffer_events` events of a session for `resume_window_secs` after the connection dropped. A client that
-reconnects with its last seen `seq` receives exactly the missed events; if they were dropped from the buffer
-(or the window passed) it gets `session_invalid`. A connection that can't keep up is dropped the same way and
-resumes.
+`resume_buffer_events` events of a session, at most `resume_buffer_bytes` of them, for `resume_window_secs`
+after the connection dropped. A client that reconnects with its last seen `seq` receives exactly the missed
+events; if they were dropped from the buffer (or the window passed) it gets `session_invalid`. A connection
+that can't keep up is dropped the same way and resumes: as soon as its queue is full, or an event it has not
+taken yet falls out of its buffer.
+
+Each event is serialized once and shared by every session it goes to, so a big channel costs the event once,
+not once per member; the byte limit bounds what one stalled session keeps alive. `max_buffered_bytes` bounds all
+buffers of the process together (counted per session, so the real memory stays below it). When it is reached
+the slowest sessions go first: those waiting to be resumed (longest waiting first), then connected ones that are
+behind (most bytes behind first); they get `session_invalid` and sync afresh. If only healthy sessions are left,
+the events they already took are dropped from their buffers.
+
+`typing_start` is ephemeral: it comes with `seq` `0`, is not buffered and is never replayed (a late typing
+indicator is wrong anyway). Clients keep the highest `seq` they saw, so `0` leaves their resume position alone.
+
+When the server shuts down (SIGTERM) it closes every gateway and relay socket with close code **1012**
+("service restart"); clients reconnect at once (with jitter) and resume or, after a restart, sync afresh.
+A late `detach` of a connection the client already replaced by a resume never closes the resumed one.
 
 Events go to the *users* that are members at publish time, so a removed member stops receiving a
 conversation's events immediately. Event types: `message_create`, `conversation_update`, `membership_add`,

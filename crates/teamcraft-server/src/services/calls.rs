@@ -386,6 +386,15 @@ impl CallService {
     Some(call.snapshot(conversation_id, started.by, started.at))
   }
 
+  /// Whether `call_id` is the conversation's call and still rings. Calls live in memory, so after
+  /// a restart nothing rings any more.
+  pub fn is_ringing(&self, conversation_id: ConversationId, call_id: CallId) -> bool {
+    self
+      .lock()
+      .get(&conversation_id)
+      .is_some_and(|call| call.call_id == call_id && call.is_ringing)
+  }
+
   /// Whether the device is in the roster of the conversation's call. The SFU reports a device
   /// whose connection was lost as gone only after its reconnect grace period, so this holds while
   /// it rejoins.

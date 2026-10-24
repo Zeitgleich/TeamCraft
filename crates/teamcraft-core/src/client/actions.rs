@@ -3,8 +3,8 @@
 
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
 
-use super::Client;
 use super::messaging::apply_control;
+use super::{Client, PendingAction};
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::read_state;
@@ -65,26 +65,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.set_server_pin(conversation, target, is_pinned).await
   }
 
+  /// The server's pin flag (retention). Queued: it follows once the device is online and the
+  /// message has its server ID.
   pub(crate) async fn set_server_pin(
     &mut self,
     conversation: ConversationId,
     target: ClientMessageId,
     is_pinned: bool,
   ) -> Result<(), CoreError> {
-    let maybe_server_id = self
-      .store
-      .message(conversation, target)?
-      .and_then(|stored| stored.maybe_server_id);
-    match maybe_server_id {
-      Some(message) => Ok(
-        self
-          .api
-          .set_message_pinned(conversation, message, is_pinned)
-          .await?,
-      ),
-      // Not sent yet: the encrypted pin still works; the retention flag follows on the next pin.
-      None => Ok(()),
-    }
+    self
+      .queue_action(PendingAction::ServerPin {
+        conversation,
+        target,
+        is_pinned,
+      })
+      .await
   }
 
   /// Sends a copy of a message to another conversation with an optional comment. The copy is a new
@@ -109,14 +104,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(id)
   }
 
-  /// Confirms having read a message that asked for it; the sender sees it.
+  /// Confirms having read a message that asked for it; the sender sees it once the server has it
+  /// (queued while offline).
   pub async fn acknowledge(
     &mut self,
     conversation: ConversationId,
     message: MessageId,
   ) -> Result<(), CoreError> {
-    self.api.acknowledge_message(conversation, message).await?;
-    read_state::note_acknowledgement(&self.store, conversation, message, self.account.user_id)
+    read_state::note_acknowledgement(&self.store, conversation, message, self.account.user_id)?;
+    self
+      .queue_action(PendingAction::Acknowledge {
+        conversation,
+        message,
+      })
+      .await
   }
 
   /// Marks the conversation unread from `from` on (synced to the user's devices).

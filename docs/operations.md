@@ -72,7 +72,8 @@ exists; clients can still read what they have stored locally.
 
 ## Health and monitoring
 
-- `GET /healthz` is liveness, `GET /readyz` also checks the database. The images ship
+- `GET /healthz` is liveness, `GET /readyz` also checks the database and answers 503 once a shutdown
+  has begun. The images ship
   `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck` and `teamcraft-bridge
   healthcheck` for container health checks (no curl in the images).
 - Logs are structured `tracing` output on stderr (`RUST_LOG` / `[logging]`). They never contain
@@ -188,9 +189,11 @@ make someone an owner.
 - Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges. The SFU
   verifies join tokens the server signs; the token format is versioned with the server. An old
   server binary refuses to start against a database migrated by a newer one.
-- A restarting server drops WebSocket connections and forgets their sessions: every client
-  reconnects (with backoff) and runs a full sync, so expect a burst of API traffic right after the
-  restart. A reverse proxy in front must keep idle WebSockets open for at least 60 s (clients send a
+- On SIGTERM the server drains: `/readyz` answers 503, every gateway and device-linking socket is
+  closed with code 1012 ("service restart"), and the process waits up to `[gateway]
+  drain_timeout_secs` (default 10) for the sockets to close before it exits. Give the container a
+  stop grace period above that. The new server forgets the sessions: every client reconnects (with
+  jitter) and runs a full sync, so expect a burst of API traffic right after the restart. A reverse proxy in front must keep idle WebSockets open for at least 60 s (clients send a
   heartbeat every 25 s). Calls in progress
   live in the SFU and survive a server restart (the server's call roster is in memory and starts empty;
   it is filled by the SFU's participant reports once the SFU sends them).

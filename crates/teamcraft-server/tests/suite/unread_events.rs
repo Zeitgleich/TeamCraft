@@ -55,6 +55,42 @@ async fn moving_the_read_position_sends_the_new_counts_to_the_readers_devices() 
   app.stop().await;
 }
 
+/// A queued read position that arrives late (a device that was offline, a retry after a lost
+/// answer) never moves the position back (issue #159).
+#[tokio::test]
+async fn a_late_older_read_position_never_moves_the_position_back() {
+  let app = app!();
+  let (alice, bob) = (owner(), member("bob"));
+  let alice_device = register_device(&app, &alice).await;
+  let bob_id = user_id(&app, &bob).await;
+  let dm = app.post(&alice, "/dms", json!({"user_id": bob_id})).await.id();
+  let first = send(&app, &alice, &dm, &alice_device, 1).await;
+  let last = send(&app, &alice, &dm, &alice_device, 2).await;
+
+  mark_read(&app, &bob, &dm, &last).await;
+  // The same write again, then an older one: both are accepted and change nothing.
+  mark_read(&app, &bob, &dm, &last).await;
+  mark_read(&app, &bob, &dm, &first).await;
+  let unread = app.get(&bob, "/unread").await;
+  assert_eq!(unread.status, StatusCode::OK, "{}", unread.body);
+  let counts = unread.body["conversations"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|entry| entry["conversation_id"] == dm.as_str())
+    .cloned()
+    .unwrap_or_default();
+  assert_eq!(counts["unread_count"].as_u64().unwrap_or(0), 0, "{}", unread.body);
+  let conversation = app.get(&bob, &format!("/conversations/{dm}")).await;
+  assert_eq!(
+    conversation.body["my_membership"]["last_read_message_id"],
+    last.as_str(),
+    "{}",
+    conversation.body
+  );
+  app.stop().await;
+}
+
 async fn mark_read(app: &TestApp, user: &TestUser, conversation: &str, message: &str) {
   let reply = app
     .put(

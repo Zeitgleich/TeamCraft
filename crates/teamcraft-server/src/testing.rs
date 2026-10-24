@@ -405,9 +405,19 @@ impl TestApp {
     signing_key_pem: &str,
     dispatcher: PushDispatcher,
   ) -> Option<Self> {
+    Self::start_with_calls_push_and(config, signing_key_pem, dispatcher, |_| {}).await
+  }
+
+  /// Like [`Self::start_with_calls_and_push`] with changed settings (retry timing).
+  pub async fn start_with_calls_push_and(
+    config: &CallsConfig,
+    signing_key_pem: &str,
+    dispatcher: PushDispatcher,
+    customize: impl FnOnce(&mut Settings),
+  ) -> Option<Self> {
     let calls = CallService::new(config, signing_key_pem.as_bytes()).unwrap();
     Self::start_full(
-      |_| {},
+      customize,
       Extras {
         maybe_calls: Some(calls),
         maybe_push: Some(dispatcher),
@@ -484,14 +494,9 @@ impl TestApp {
       push: Arc::new(maybe_push.unwrap_or_else(|| PushDispatcher::new(4))),
       push_tracker: Arc::default(),
       revocations: Arc::new(Revocations::default()),
-      hub: Arc::new(Hub::new(HubOptions {
-        resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
-        buffer_events: settings.gateway.resume_buffer_events,
-        max_sessions_per_device: settings.gateway.max_sessions_per_device,
-        max_sessions_per_user: settings.gateway.max_sessions_per_user,
-        attention_lease: Duration::from_secs(settings.notifications.attention_lease_secs),
-      })),
+      hub: Arc::new(new_hub(&settings)),
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
+      drain: Arc::default(),
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
       maybe_calls: maybe_calls.map(Arc::new),
       maybe_meetings: maybe_meetings.map(Arc::new),
@@ -560,6 +565,32 @@ impl TestApp {
     self.state = state;
     self.serve();
     self.retry_workers = spawn_retry_workers(&self.state);
+  }
+
+  /// Ends a shutdown the test began with `state.drain.begin()`: waits (at most `limit`) for the
+  /// WebSockets to close, then serves again on a new address with a fresh drain. Unlike a real
+  /// restart the gateway hub stays in memory, so tests can show that drained sessions resume.
+  /// Returns whether every socket closed in time.
+  pub async fn restart_after_drain(&mut self, limit: Duration) -> bool {
+    let closed = self.state.drain.wait_closed(limit).await;
+    self.server.abort();
+    self.state.drain = Arc::default();
+    self.serve();
+    closed
+  }
+
+  /// Ends a shutdown like [`Self::restart_after_drain`], but like a real restart: the new process
+  /// starts with a fresh gateway hub and relay, so no session can be resumed and clients sync
+  /// afresh. Returns whether every socket closed in time.
+  pub async fn restart_after_drain_with_fresh_memory(&mut self, limit: Duration) -> bool {
+    let closed = self.state.drain.wait_closed(limit).await;
+    self.server.abort();
+    let settings = self.state.settings.base();
+    self.state.hub = Arc::new(new_hub(&settings));
+    self.state.rendezvous = Arc::new(RendezvousHub::new(&settings.rendezvous));
+    self.state.drain = Arc::default();
+    self.serve();
+    closed
   }
 
   /// `true` if the table (e.g. a message partition) exists.
@@ -751,6 +782,19 @@ impl JwkSource for StaticKeys {
       })
     })
   }
+}
+
+/// An empty gateway hub as a process starting with `settings` has it.
+fn new_hub(settings: &Settings) -> Hub {
+  Hub::new(HubOptions {
+    resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
+    buffer_events: settings.gateway.resume_buffer_events,
+    buffer_bytes: settings.gateway.resume_buffer_bytes,
+    max_total_buffer_bytes: settings.gateway.max_buffered_bytes,
+    max_sessions_per_device: settings.gateway.max_sessions_per_device,
+    max_sessions_per_user: settings.gateway.max_sessions_per_user,
+    attention_lease: Duration::from_secs(settings.notifications.attention_lease_secs),
+  })
 }
 
 /// Meeting limits and texts as `[meetings]` sets them.

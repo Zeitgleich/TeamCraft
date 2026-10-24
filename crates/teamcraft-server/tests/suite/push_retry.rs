@@ -341,3 +341,210 @@ where
     tokio::time::sleep(Duration::from_millis(25)).await;
   }
 }
+
+/// Queued rings stop once the call stops ringing (issue #142).
+mod rings {
+  use std::path::PathBuf;
+
+  use teamcraft_db::NewPushRetry;
+  use teamcraft_proto::{CallId, ConversationId, PushWakeUp, UserId};
+  use teamcraft_server::config::CallsConfig;
+
+  use super::*;
+
+  /// Throwaway Ed25519 key used only by these tests. It protects nothing.
+  const SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
+-----END PRIVATE KEY-----
+";
+  const SFU_TOKEN: &str = "sfu-registration-token-for-tests";
+
+  #[tokio::test]
+  async fn a_ring_queued_during_an_outage_is_dropped_when_the_call_is_answered() {
+    let Some(scene) = RingScene::start().await else {
+      return;
+    };
+    scene.fake.set_reply(Some(outage()));
+    let call = scene.ring().await;
+    scene.fake.wait_for_attempts(1).await;
+    wait_until(|| async { scene.queued_rings().await == 1 }).await;
+    assert_eq!(scene.queued_rings().await, 1, "the ring waits for its retry");
+
+    // carol answers on her desktop: the ring ends and its queued retry goes with it.
+    scene
+      .report("joined", &call, &scene.carol_id, &scene.carol_desktop)
+      .await;
+    wait_until(|| async { scene.queued_rings().await == 0 }).await;
+    assert_eq!(scene.queued_rings().await, 0);
+    // What is left is the dismissal for the phone that was shown the ring; it waits for the
+    // provider like any wake-up.
+    assert!(scene.fake.pushes().is_empty(), "the phone never rings late");
+    scene.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_worker_drops_a_ring_whose_call_no_longer_rings() {
+    let Some(scene) = RingScene::start().await else {
+      return;
+    };
+    // A ring left in the queue (written before the ring ended, or before a restart) for a call
+    // that doesn't ring: the worker claims it and drops it without sending.
+    let state = &scene.app.state;
+    let device = state
+      .database
+      .list_push_devices(scene.carol_id.parse::<UserId>().unwrap())
+      .await
+      .unwrap()
+      .into_iter()
+      .next()
+      .unwrap();
+    let retry = NewPushRetry {
+      id: state.next_id().unwrap(),
+      user: scene.carol_id.parse().unwrap(),
+      device: device.device,
+      is_user_endpoint: false,
+      wake_up: PushWakeUp {
+        kind: PushKind::Call,
+        conversation_id: scene.dm.parse::<ConversationId>().unwrap(),
+        maybe_message_id: None,
+        maybe_sender_id: None,
+        is_urgent: false,
+        maybe_thread_id: None,
+        maybe_call_id: Some("77".parse::<CallId>().unwrap()),
+        maybe_badge: None,
+        maybe_sent_at: None,
+      },
+      attempts: 1,
+      delay: Duration::ZERO,
+      ttl: Duration::from_secs(30),
+    };
+    assert!(state.database.enqueue_push_retry(&retry, 10).await.unwrap());
+    wait_until(|| async { scene.queued().await == 0 }).await;
+    assert_eq!(scene.queued().await, 0);
+    assert_eq!(scene.fake.push_attempts(), 0, "nothing was sent");
+    scene.app.stop().await;
+  }
+
+  /// alice calls carol in a DM; carol has a phone behind the fake gateway and a desktop.
+  struct RingScene {
+    app: TestApp,
+    fake: FakeGateway,
+    dm: String,
+    alice_id: String,
+    alice_device: String,
+    carol_id: String,
+    carol_device: String,
+    carol_desktop: String,
+  }
+
+  impl RingScene {
+    async fn start() -> Option<Self> {
+      let (fake, url) = FakeGateway::start().await;
+      let app =
+        TestApp::start_with_calls_push_and(&calls_config(), SIGNING_KEY_PEM, dispatcher(&url), |settings| {
+          // Long enough that the ring is still queued when the test ends the call.
+          settings.push.retry.initial_delay = Duration::from_secs(20);
+          settings.push.retry.max_delay = Duration::from_secs(20);
+          settings.push.retry.poll_interval = Duration::from_millis(20);
+        })
+        .await?;
+      let (alice, carol) = (owner(), member("carol"));
+      let carol_id = user_id(&app, &carol).await;
+      let alice_id = user_id(&app, &alice).await;
+      let dm = app.post(&alice, "/dms", json!({"user_id": carol_id})).await;
+      assert!(dm.status.is_success(), "{}", dm.body);
+      let dm = dm.id();
+      let alice_device = register_device(&app, &alice).await;
+      let carol_device = register_device(&app, &carol).await;
+      let carol_desktop = register_device(&app, &carol).await;
+      let server_id = app.state.push.gateway_binding().unwrap().server_id.clone();
+      let reply = app
+        .put(
+          &carol,
+          &format!("/devices/{carol_device}/push"),
+          json!({
+            "provider": "fcm",
+            "token": sealed_token(&fake, &server_id),
+            "push_key": STANDARD.encode(PUSH_KEY),
+          }),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+      Some(Self {
+        app,
+        fake,
+        dm,
+        alice_id,
+        alice_device,
+        carol_id,
+        carol_device,
+        carol_desktop,
+      })
+    }
+
+    /// alice starts the call, which rings carol. Returns the call ID.
+    async fn ring(&self) -> String {
+      let reply = self
+        .app
+        .post(
+          &owner(),
+          &format!("/conversations/{}/call/join-token", self.dm),
+          json!({ "device_id": self.alice_device }),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+      let call = reply.body["call_id"].as_str().unwrap().to_owned();
+      self
+        .report("joined", &call, &self.alice_id, &self.alice_device)
+        .await;
+      call
+    }
+
+    async fn report(&self, action: &str, call_id: &str, user_id: &str, device_id: &str) {
+      let status = self
+        .app
+        .http
+        .post(format!(
+          "{}/api/internal/v1/calls/participants/{action}",
+          self.app.base_url
+        ))
+        .bearer_auth(SFU_TOKEN)
+        .json(&json!({ "call_id": call_id, "user_id": user_id, "device_id": device_id }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+      assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    async fn queued(&self) -> u64 {
+      self
+        .app
+        .state
+        .database
+        .count_push_retries(self.carol_device.parse::<DeviceId>().unwrap())
+        .await
+        .unwrap()
+    }
+    /// Queued rings only (a dismissal may wait in the queue too).
+    async fn queued_rings(&self) -> i64 {
+      teamcraft_db::testing::sqlx::query_scalar("SELECT COUNT(*) FROM push_retries WHERE kind = 'call'")
+        .fetch_one(self.app.sql_pool())
+        .await
+        .unwrap()
+    }
+  }
+
+  fn calls_config() -> CallsConfig {
+    CallsConfig {
+      sfu_url: "https://sfu.example.com:4433/call".into(),
+      issuer: teamcraft_server::testing::TEST_ISSUER.into(),
+      signing_key_path: PathBuf::from("unused.pem"),
+      join_token_ttl_secs: 60,
+      call_idle_secs: 3600,
+      maybe_sfu_registration_token: Some(SFU_TOKEN.to_owned().into()),
+      ring_timeout_secs: 30,
+      maybe_sfu_control_url: None,
+    }
+  }
+}

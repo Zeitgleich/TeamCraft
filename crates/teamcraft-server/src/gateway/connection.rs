@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 
 use super::hub::Attached;
 use crate::auth::AuthenticatedUser;
+use crate::drain::CLOSE_SERVICE_RESTART;
 use crate::error::ApiError;
 use crate::services::access::{load_conversation, require};
 use crate::services::{accounts, presence};
@@ -33,6 +34,8 @@ const CLOSE_NORMAL: u16 = 1000;
 
 /// Runs one gateway connection from `hello` to close.
 pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
+  // Counted until the task ends, so a shutdown waits for the close frame (bounded).
+  let _socket = state.drain.track();
   let config = state.settings.get().gateway.clone();
   let hello = GatewayServerMessage::Hello {
     heartbeat_interval_ms: config.heartbeat_interval_secs * 1000,
@@ -63,7 +66,7 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
 
   serve(&state, &caller, &mut attached, &mut socket).await;
 
-  state.hub.detach(&attached.session_id);
+  state.hub.detach(&attached.session_id, attached.connection_id);
   debug!(user_id = %user, "gateway disconnected");
   // Reconnects are common (network changes); only report offline if the user stays gone.
   let grace = Duration::from_secs(config.presence_offline_grace_secs);
@@ -121,7 +124,8 @@ async fn handshake(
           .await
           .ok()?;
           for event in &replay {
-            send(socket, event).await.ok()?;
+            send_text(socket, event.to_frame()).await.ok()?;
+            attached.delivered(event.seq);
           }
           Some((caller, attached))
         },
@@ -203,12 +207,19 @@ async fn serve(
           break;
         }
       }
-      outgoing = attached.receiver.recv() => {
-        // `None`: the hub dropped this connection because it was too slow.
-        let Some(message) = outgoing else { break };
-        if send(socket, &message).await.is_err() {
+      outgoing = attached.next_outgoing() => {
+        // `None`: the hub dropped this connection (too slow, replaced by a resume, revoked).
+        let Some(outgoing) = outgoing else { break };
+        if send_text(socket, outgoing.to_frame()).await.is_err() {
           break;
         }
+        attached.delivered(outgoing.seq);
+      }
+      () = state.drain.started() => {
+        // The server shuts down: the client reconnects at once (to the next instance or after the
+        // restart) instead of waiting for a dead connection to time out.
+        close(socket, CLOSE_SERVICE_RESTART, "server restarting").await;
+        break;
       }
       () = sleep_until(deadline) => {
         close(socket, CLOSE_POLICY, "heartbeat timeout").await;
@@ -400,6 +411,11 @@ async fn send(socket: &mut WebSocket, message: &GatewayServerMessage) -> Result<
   let Ok(text) = serde_json::to_string(message) else {
     return Err(());
   };
+  send_text(socket, text).await
+}
+
+/// Sends one serialized frame; fails if the peer hasn't taken it within [`SEND_TIMEOUT`].
+async fn send_text(socket: &mut WebSocket, text: String) -> Result<(), ()> {
   match timeout(SEND_TIMEOUT, socket.send(Message::Text(text.into()))).await {
     Ok(Ok(())) => Ok(()),
     Ok(Err(_)) => Err(()),

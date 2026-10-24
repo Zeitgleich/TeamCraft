@@ -126,6 +126,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// After a fresh session: everyone whose presence this device shows may have changed unseen
+  /// (presence events of the time away are gone). They are read again a batch per upkeep tick,
+  /// like last seen, instead of all at once.
+  pub(crate) fn mark_known_presence_stale(&mut self) -> Result<(), CoreError> {
+    for (key, _) in self.store.list(Table::Presence)? {
+      if let Ok(user) = key.parse::<UserId>() {
+        self.stale_last_seen.insert(user);
+      }
+    }
+    Ok(())
+  }
+
   /// Reads the last seen of the people who went offline since the last call, in one request (the
   /// runner calls it every tick). Returns whether anything was read.
   pub async fn refresh_stale_last_seen(&mut self) -> Result<bool, CoreError> {

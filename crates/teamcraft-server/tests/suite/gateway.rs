@@ -111,8 +111,11 @@ impl Gateway {
     loop {
       match receive(&mut self.socket).await {
         Some(GatewayServerMessage::Event { seq, event }) => {
-          assert_eq!(seq, self.last_seq + 1, "sequence numbers must be consecutive");
-          self.last_seq = seq;
+          // Typing comes unnumbered (`0`) and leaves the resume position alone.
+          if seq != 0 {
+            assert_eq!(seq, self.last_seq + 1, "sequence numbers must be consecutive");
+            self.last_seq = seq;
+          }
           if let Some(found) = matches(&event) {
             return found;
           }
@@ -472,6 +475,117 @@ mod resuming {
     assert_eq!(replayed, vec![second, third]);
     assert!(!replayed.contains(&first));
     app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_shutdown_closes_sockets_with_1012_and_clients_resume() {
+    let mut app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    send(&app, &s.carol, &s.channel, &s.carol_device, 1).await;
+    alice
+      .event_where(|event| matches!(event, GatewayEvent::MessageCreate { .. }).then_some(()))
+      .await;
+    let (session_id, seen) = (alice.session_id.clone(), alice.last_seq);
+    assert_eq!(readiness(&app).await, StatusCode::OK);
+
+    // SIGTERM: not ready any more, and every socket gets "service restart".
+    app.state.drain.begin();
+    assert_eq!(readiness(&app).await, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(close_code(&mut alice.socket).await, Some(1012));
+    assert!(app.restart_after_drain(WAIT).await, "every socket closed in time");
+
+    // The client comes back and picks up where it was, nothing lost and nothing twice.
+    let missed = send(&app, &s.carol, &s.channel, &s.carol_device, 2).await;
+    let (mut alice, answer) = Gateway::resume(&app, &s.alice, &s.alice_device, &session_id, seen).await;
+    assert!(
+      matches!(answer, GatewayServerMessage::Resumed { .. }),
+      "{answer:?}"
+    );
+    // Presence updates of the reconnect may come along; the message is the one that matters.
+    let replayed = alice
+      .event_where(|event| match event {
+        GatewayEvent::MessageCreate { message } => Some(message.id.to_string()),
+        _ => None,
+      })
+      .await;
+    assert_eq!(replayed, missed);
+    assert_eq!(readiness(&app).await, StatusCode::OK);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn after_a_real_restart_a_resume_gets_session_invalid_and_the_client_syncs_afresh() {
+    let mut app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    send(&app, &s.carol, &s.channel, &s.carol_device, 1).await;
+    alice
+      .event_where(|event| matches!(event, GatewayEvent::MessageCreate { .. }).then_some(()))
+      .await;
+    let (session_id, seen) = (alice.session_id.clone(), alice.last_seq);
+
+    // SIGTERM, and a new process: its hub knows no session.
+    app.state.drain.begin();
+    assert_eq!(close_code(&mut alice.socket).await, Some(1012));
+    assert!(
+      app.restart_after_drain_with_fresh_memory(WAIT).await,
+      "every socket closed in time"
+    );
+    let missed = send(&app, &s.carol, &s.channel, &s.carol_device, 2).await;
+    let (_, answer) = Gateway::resume(&app, &s.alice, &s.alice_device, &session_id, seen).await;
+    assert!(
+      matches!(answer, GatewayServerMessage::SessionInvalid),
+      "{answer:?}"
+    );
+
+    // The client identifies again and refetches over REST: the missed message is there.
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    let history = app
+      .get(&s.alice, &format!("/conversations/{}/messages", s.channel))
+      .await;
+    assert_eq!(history.status, StatusCode::OK);
+    let ids: Vec<&str> = history.body["messages"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter_map(|message| message["id"].as_str())
+      .collect();
+    assert!(ids.contains(&missed.as_str()), "{ids:?}");
+    // And the fresh session gets new events.
+    let next = send(&app, &s.carol, &s.channel, &s.carol_device, 3).await;
+    let received = alice
+      .event_where(|event| match event {
+        GatewayEvent::MessageCreate { message } => Some(message.id.to_string()),
+        _ => None,
+      })
+      .await;
+    assert_eq!(received, next);
+    app.stop().await;
+  }
+
+  async fn readiness(app: &TestApp) -> StatusCode {
+    app
+      .http
+      .get(format!("{}/readyz", app.base_url))
+      .send()
+      .await
+      .unwrap()
+      .status()
+  }
+
+  /// The close code the server ends the connection with (`None`: closed without a frame).
+  async fn close_code(socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>) -> Option<u16> {
+    loop {
+      let next = tokio::time::timeout(WAIT, socket.next())
+        .await
+        .expect("the gateway did not close in time");
+      match next? {
+        Ok(Message::Close(frame)) => return frame.map(|frame| u16::from(frame.code)),
+        Ok(_) => {},
+        Err(_) => return None,
+      }
+    }
   }
 
   #[tokio::test]

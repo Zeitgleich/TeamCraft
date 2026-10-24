@@ -22,6 +22,7 @@ mod messaging;
 mod notifications;
 mod org_backgrounds;
 mod org_recovery;
+mod pending_actions;
 mod pending_add;
 pub mod people;
 pub mod previews;
@@ -59,6 +60,7 @@ pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
+pub use pending_actions::{PendingAction, PendingActionSettings};
 pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
@@ -156,6 +158,8 @@ pub struct ClientSettings {
   /// How many people's announced presence the core keeps for the UI (the newest announcements);
   /// a UI that fell further behind reads presence from the server again.
   pub max_announced_presence: usize,
+  /// Limits of the queue of read positions, acknowledgements, pins and presence (issue #159).
+  pub pending_actions: PendingActionSettings,
 }
 
 pub struct Client<A, S> {
@@ -222,6 +226,7 @@ impl Default for ClientSettings {
       maybe_attestation: None,
       accept_unsigned_messages: false,
       max_announced_presence: 500,
+      pending_actions: PendingActionSettings::default(),
     }
   }
 }
