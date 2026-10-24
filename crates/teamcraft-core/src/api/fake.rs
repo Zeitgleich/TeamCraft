@@ -547,6 +547,32 @@ impl FakeServer {
     }
   }
 
+  /// Hands `device` a welcome to `conversation` that no commit made, as a malicious server might.
+  pub fn inject_welcome(&self, conversation: ConversationId, device: DeviceId, epoch: u64, payload: Vec<u8>) {
+    let mut state = self.lock();
+    let id = state.next_id();
+    state.welcomes.push(MlsMessageResponse {
+      id,
+      conversation_id: conversation,
+      epoch,
+      kind: MlsMessageKind::Welcome,
+      sender_device_id: device,
+      maybe_recipient_device_id: Some(device),
+      payload: Base64Bytes::new(payload),
+    });
+  }
+
+  /// The welcomes stored for `device`, oldest first.
+  pub fn welcomes_for(&self, device: DeviceId) -> Vec<MlsMessageResponse> {
+    self
+      .lock()
+      .welcomes
+      .iter()
+      .filter(|welcome| welcome.maybe_recipient_device_id == Some(device))
+      .cloned()
+      .collect()
+  }
+
   /// The user's next commit is lost on the way: never stored, the client sees a network error.
   pub fn drop_next_commit(&self, user: UserId) {
     self.lock().dropping_commits.insert(user);

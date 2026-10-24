@@ -1,18 +1,20 @@
 //! DMs whose MLS setup was cut short (issue #228): the device that created the DM finishes the
-//! setup on a later sync, and two devices that both founded a group never end up in two.
+//! setup on a later sync, and two devices that both founded a group never end up in two. A group
+//! of one is given up only for a verified welcome, never on the server's word (e2ee.md §4.6).
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
 use crate::common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use common::{PASSPHRASE, Peer, options, settings, settle};
+use common::{PASSPHRASE, Peer, linked_options, options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, NetworkCut};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::MemoryStore;
-use teamcraft_core::{Client, PendingEnrollment};
+use teamcraft_core::{Client, LinkOffer, PendingEnrollment};
 use teamcraft_proto::ConversationId;
 
 const NOW_MS: i64 = 1_800_000_000_000;
@@ -122,6 +124,111 @@ mod no_fork {
   }
 }
 
+mod hostile_server {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_welcome_that_doesnt_check_out_leaves_the_founded_group_and_its_key() {
+    let (server, clock, alice, mut bob) = two().await;
+    let (alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;
+    let mut alice = alice;
+    let mut carol = enroll(&server, "Carol", &clock).await;
+    let device = alice.client.device_id();
+
+    // A real welcome for Alice, but of another conversation, and one that is no welcome at all,
+    // both handed out for the DM with a later epoch.
+    let other = carol.client.open_dm(alice.client.user_id()).await.unwrap();
+    let real = server
+      .welcomes_for(device)
+      .into_iter()
+      .find(|welcome| welcome.conversation_id == other)
+      .unwrap();
+    server.inject_welcome(dm, device, 1, real.payload.as_slice().to_vec());
+    server.inject_welcome(dm, device, 1, b"not a welcome".to_vec());
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      alice.client.mls_epoch(dm).unwrap(),
+      Some(0),
+      "kept the founded group"
+    );
+
+    // The founding key is still the one to use: the setup finishes and Bob reads Alice.
+    clock.advance(retry_ms());
+    alice.client.full_sync().await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    assert_talks(&mut alice, &mut bob, dm).await;
+    carol.client.full_sync().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn a_server_claiming_a_later_epoch_doesnt_make_the_device_give_up_or_found_again() {
+    let (server, clock, alice, bob) = two().await;
+    let (alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;
+    let mut alice = alice;
+    let bob_packages = server.stored_key_packages(bob.client.device_id());
+
+    server.bump_epoch(dm, 3);
+    let max_ms = i64::try_from(settings().rejoin_retry_max.as_millis()).unwrap();
+    for _ in 0..4 {
+      clock.advance(max_ms);
+      alice.client.full_sync().await.unwrap();
+      assert_eq!(
+        alice.client.mls_epoch(dm).unwrap(),
+        Some(0),
+        "the group of one stays"
+      );
+    }
+    assert_eq!(
+      server.stored_key_packages(bob.client.device_id()),
+      bob_packages,
+      "no add was tried against the claimed epoch"
+    );
+  }
+}
+
+mod multi_device {
+  use super::*;
+
+  #[tokio::test]
+  async fn giving_up_the_founded_group_keeps_the_key_bag_of_every_device_readable() {
+    let (server, clock, mut alice, mut bob) = two().await;
+    let mut laptop = link(&mut alice, &clock).await;
+    let (alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;
+    let mut alice = alice;
+
+    // Bob founds first and adds both of Alice's devices; Alice's phone gives its group up.
+    assert_eq!(bob.client.open_dm(alice.client.user_id()).await.unwrap(), dm);
+    for _ in 0..2 {
+      laptop.client.full_sync().await.unwrap();
+      alice.client.full_sync().await.unwrap();
+      bob.client.full_sync().await.unwrap();
+    }
+    let epoch = bob.client.mls_epoch(dm).unwrap();
+    assert_eq!(alice.client.mls_epoch(dm).unwrap(), epoch);
+    assert_eq!(laptop.client.mls_epoch(dm).unwrap(), epoch);
+
+    alice.client.send_text(dm, None, "from the phone").await.unwrap();
+    laptop
+      .client
+      .send_text(dm, None, "from the laptop")
+      .await
+      .unwrap();
+    bob.client.send_text(dm, None, "from Bob").await.unwrap();
+    settle(&mut [&mut alice, &mut laptop, &mut bob]).await;
+    let all: BTreeSet<String> = ["from the phone", "from the laptop", "from Bob"]
+      .map(String::from)
+      .into();
+    for peer in [&alice, &laptop, &bob] {
+      assert_eq!(
+        peer.texts(dm).into_iter().collect::<BTreeSet<_>>(),
+        all,
+        "{}",
+        peer.name
+      );
+    }
+  }
+}
+
 /// A server, a shared clock and two peers on it.
 async fn two() -> (FakeServer, Arc<ManualClock>, Peer, Peer) {
   let server = FakeServer::new();
@@ -185,6 +292,41 @@ async fn enroll(server: &FakeServer, name: &str, clock: &Arc<ManualClock>) -> Pe
   let (gateway, _) = client.connect_gateway().await.unwrap();
   Peer {
     name: name.to_string(),
+    api,
+    store,
+    client,
+    gateway,
+  }
+}
+
+/// Links a second device of `owner` over the relay, on the shared clock.
+async fn link(owner: &mut Peer, clock: &Arc<ManualClock>) -> Peer {
+  let api = owner.api.clone();
+  let offer = LinkOffer::generate();
+  let code = offer.to_code();
+  let (new_side, owner_side) = tokio::join!(
+    teamcraft_core::client::NewDeviceLink::connect(&api, &offer),
+    owner.client.start_link_approval(&code)
+  );
+  let (approved, secrets) = tokio::join!(
+    owner.client.complete_link_approval(owner_side.unwrap()),
+    new_side.unwrap().receive_secrets()
+  );
+  approved.unwrap();
+  let store = Arc::new(MemoryStore::new());
+  let mut client = PendingEnrollment::new()
+    .complete(
+      api.clone(),
+      store.clone(),
+      Box::new(clock.clone()),
+      settings(),
+      linked_options(secrets.unwrap()),
+    )
+    .await
+    .unwrap();
+  let (gateway, _) = client.connect_gateway().await.unwrap();
+  Peer {
+    name: format!("{} laptop", owner.name),
     api,
     store,
     client,

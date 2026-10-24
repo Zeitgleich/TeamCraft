@@ -65,6 +65,15 @@ pub struct StagedJoin {
   staged: StagedWelcome,
 }
 
+/// The verified members of a staged welcome's group ([`StagedJoin::verify`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedWelcome {
+  /// Every device in the group, this one included.
+  pub members: Vec<GroupMember>,
+  /// The member whose commit made the welcome.
+  pub sender: GroupMember,
+}
+
 /// What this device saw of the group's signed changes, persisted with the MLS state: a change
 /// signed before this device joined, or before a later change to the same user, is refused
 /// (security review A3).
@@ -165,6 +174,27 @@ impl ConversationGroup {
     welcome: &[u8],
     conversation_id: ConversationId,
   ) -> Result<StagedJoin, MlsError> {
+    Self::stage_join_inner(provider, welcome, conversation_id, false)
+  }
+
+  /// Like [`Self::stage_join`] while this device still holds a group for the conversation (one it
+  /// founded that lost the founding race). That group is left as it is: the caller
+  /// [`StagedJoin::verify`]s the welcome, decides, and [`Self::delete`]s the old group before
+  /// [`StagedJoin::complete`], or keeps it and drops the staged join.
+  pub fn stage_join_replacing(
+    provider: &impl OpenMlsProvider,
+    welcome: &[u8],
+    conversation_id: ConversationId,
+  ) -> Result<StagedJoin, MlsError> {
+    Self::stage_join_inner(provider, welcome, conversation_id, true)
+  }
+
+  fn stage_join_inner(
+    provider: &impl OpenMlsProvider,
+    welcome: &[u8],
+    conversation_id: ConversationId,
+    is_replacing: bool,
+  ) -> Result<StagedJoin, MlsError> {
     let MlsMessageBodyIn::Welcome(welcome) = MlsMessageIn::tls_deserialize_exact(welcome)?.extract() else {
       return Err(MlsError::UnexpectedMessage("expected a welcome"));
     };
@@ -175,9 +205,15 @@ impl ConversationGroup {
     // checking it would make every group unjoinable once such a member's package expired. A
     // lifetime only bounds when a package may be *added* (RFC 9420 §7.3, openmls #1810), which
     // the committer and every member checked then; credentials are verified on completion.
-    let staged = StagedWelcome::build_from_welcome(provider, &config, welcome)
+    let mut builder = StagedWelcome::build_from_welcome(provider, &config, welcome)
       .map_err(|error| MlsError::openmls("welcome processing", error))?
-      .skip_lifetime_validation()
+      .skip_lifetime_validation();
+    if is_replacing {
+      // Only lifts openmls' check that no group with this ID is stored; nothing is written
+      // until the join completes.
+      builder = builder.replace_old_group();
+    }
+    let staged = builder
       .build()
       .map_err(|error| MlsError::openmls("welcome processing", error))?;
     if staged.group_context().group_id() != &group_id(conversation_id) {
@@ -1073,6 +1109,24 @@ impl StagedJoin {
       }
     }
     Ok(users)
+  }
+
+  /// Verifies every leaf against its user's pinned identity without joining yet: who is in the
+  /// welcome's group and which member made the welcome. For a decision that has to be made
+  /// before this device gives up a group it holds for the same conversation (e2ee.md §4.6).
+  pub fn verify(&self, directory: &impl IdentityDirectory) -> Result<VerifiedWelcome, MlsError> {
+    let mut members = Vec::new();
+    for member in self.staged.members() {
+      credential::verify(&member.credential, &member.signature_key, directory)?;
+      members.push(credential::member_of(&member.credential)?);
+    }
+    let sender_leaf = self
+      .staged
+      .welcome_sender()
+      .map_err(|error| MlsError::openmls("reading the welcome's sender", error))?;
+    // Its leaf is one of the members just verified.
+    let sender = credential::member_of(sender_leaf.credential())?;
+    Ok(VerifiedWelcome { members, sender })
   }
 
   /// Verifies every leaf against its user's pinned identity and joins the group.
