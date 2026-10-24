@@ -10,6 +10,13 @@
 //! order they were created, so the database follows the cache in order.
 //! [`IndexedDbStore::flush`] waits until everything written so far is committed.
 //!
+//! Durability: a batch is one transaction, so what survives a page that dies is always a prefix of
+//! the writes in their order (never a cursor or MLS state without the messages written before it).
+//! What must not be lost is made durable before it is confirmed: the web core's API waits for a
+//! flush before every request that changes server state, and the page issues the queue at once when
+//! it is hidden, frozen or unloaded ([`IndexedDbStore::write_now`]). A write lost anyway is one the
+//! server never heard of; the next start catches up from the last persisted cursor.
+//!
 //! A write that fails (quota exceeded, the database closed for a newer version) is kept and written
 //! again on the next flush, so the database catches up with the cache once space is free again
 //! instead of silently rolling back on the next reload (e2ee.md §9.4). The flush reports the
@@ -126,6 +133,12 @@ impl SealedStore<IndexedDbRecords> {
     inner.failure()
   }
 
+  /// Issues what is queued now instead of after the batch delay, without waiting for it (the page
+  /// is being hidden, frozen or unloaded).
+  pub fn write_now(&self) {
+    self.backend().inner.issue_queued();
+  }
+
   /// Changes with every write: a reader can tell whether anything was written since it last
   /// looked without comparing contents.
   pub fn write_revision(&self) -> u32 {
@@ -222,6 +235,11 @@ impl IndexedDbRecords {
 impl Inner {
   /// Issues every queued write in one transaction. A write that can't even start counts as failed.
   fn issue_queued(&self) {
+    // Writes that failed go with every batch: a later write never commits without them, so what
+    // is on disk stays a prefix of what was written.
+    if !self.writes.borrow().queued.is_empty() {
+      self.retry_failed();
+    }
     let keys = {
       let mut writes = self.writes.borrow_mut();
       writes.is_scheduled = false;
@@ -243,7 +261,9 @@ impl Inner {
     };
     let mut writes = self.writes.borrow_mut();
     let mut carried = Vec::with_capacity(keys.len());
-    for key in keys {
+    let mut maybe_refused = None;
+    for key in &keys {
+      let key = key.clone();
       let Some(write) = writes
         .open
         .get(&key)
@@ -264,9 +284,20 @@ impl Inner {
           }
           carried.push((key, sequence));
         },
-        // Refused at once (a full disk can refuse at once): the transaction carries the others.
-        Err(error) => writes.fail_queued(&key, failure_of(&error)),
+        // Refused at once (a full disk can refuse at once): nothing of the batch may commit.
+        Err(error) => {
+          maybe_refused = Some(failure_of(&error));
+          break;
+        },
       }
+    }
+    if let Some(failure) = maybe_refused {
+      // Aborted before it carried a batch number: the abort handler leaves it alone.
+      let _ = transaction.abort();
+      for key in &keys {
+        writes.fail_open(key, failure);
+      }
+      return;
     }
     writes.next_batch = writes.next_batch.wrapping_add(1);
     let batch = writes.next_batch;
@@ -371,6 +402,16 @@ impl Writes {
         write.state = WriteState::Failed;
         self.maybe_last_failure = Some(failure);
       }
+    }
+  }
+
+  /// A write of the batch that was aborted before it was sent (queued or already issued).
+  fn fail_open(&mut self, key: &str, failure: WriteFailure) {
+    if let Some(write) = self.open.get_mut(key)
+      && write.state != WriteState::Failed
+    {
+      write.state = WriteState::Failed;
+      self.maybe_last_failure = Some(failure);
     }
   }
 

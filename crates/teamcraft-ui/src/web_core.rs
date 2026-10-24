@@ -95,6 +95,10 @@ thread_local! {
   static RUNNING: RefCell<Option<Running>> = const { RefCell::new(None) };
   static LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
   static IS_WATCHING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+  static IS_WATCHING_LIFECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+  /// The store whose queued writes the page lifecycle listener issues.
+  static LIFECYCLE_STORE: RefCell<std::rc::Weak<IndexedDbStore>> =
+    const { RefCell::new(std::rc::Weak::new()) };
 }
 
 /// What the page tells the core once: who signs the requests and where the server is.
@@ -799,6 +803,7 @@ impl Core {
         .map_err(|error| error.to_string())?,
     ));
     self.store = Some(store.clone());
+    watch_page_lifecycle(store.inner());
     match Client::open(
       self.api(),
       store,
@@ -857,8 +862,27 @@ impl Core {
     format!("{STORE_READY_PREFIX}{}", self.user)
   }
 
+  /// The server API; with the store open, every request that changes server state waits until
+  /// the store has persisted what was written before it.
   fn api(&self) -> Api {
-    HttpServerApi::new(self.server_url.clone(), self.tokens.clone())
+    let api = HttpServerApi::new(self.server_url.clone(), self.tokens.clone());
+    match &self.store {
+      Some(store) => {
+        let store = Rc::downgrade(store.inner());
+        api.with_write_barrier(Rc::new(move || {
+          let maybe_store = store.upgrade();
+          Box::pin(async move {
+            let Some(store) = maybe_store else { return };
+            // Not saved (quota, a newer version): the store health tells the user; the request
+            // goes out anyway rather than blocking the app.
+            if let Err(error) = store.flush().await {
+              tracing::warn!(%error, "sending before the local store saved everything");
+            }
+          })
+        }))
+      },
+      None => api,
+    }
   }
 
   async fn handle(&mut self, request: Request) {
@@ -1637,6 +1661,42 @@ async fn link_task(
   };
   notify_changed();
   link.receive_secrets().await.map_err(describe)
+}
+
+/// Issues the store's queued writes at once when the page is hidden, frozen or unloaded: a tab in
+/// the background may be frozen or discarded without another chance to run (robustness.md,
+/// Lifecycle). One listener per page, for the store opened last.
+fn watch_page_lifecycle(store: &Rc<IndexedDbStore>) {
+  LIFECYCLE_STORE.with(|current| *current.borrow_mut() = Rc::downgrade(store));
+  if IS_WATCHING_LIFECYCLE.with(|is_watching| is_watching.replace(true)) {
+    return;
+  }
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+    if event.type_() == "visibilitychange" && is_page_visible() {
+      return;
+    }
+    if let Some(store) = LIFECYCLE_STORE.with(|current| current.borrow().upgrade()) {
+      store.write_now();
+    }
+  });
+  let mut is_listening = false;
+  for kind in ["visibilitychange", "freeze", "pagehide"] {
+    // `pagehide` fires on the window; the others on the document.
+    let added = if kind == "pagehide" {
+      web_sys::window()
+        .map(|window| window.add_event_listener_with_callback(kind, listener.as_ref().unchecked_ref()))
+    } else {
+      Some(document.add_event_listener_with_callback(kind, listener.as_ref().unchecked_ref()))
+    };
+    is_listening |= matches!(added, Some(Ok(())));
+  }
+  if is_listening {
+    // Lives as long as the page.
+    listener.forget();
+  }
 }
 
 /// Passes the service worker's "subscription changed" on to the core (once per page).

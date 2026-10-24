@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
-#[cfg(not(target_arch = "wasm32"))]
 use teamcraft_core::clock::Clock;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};

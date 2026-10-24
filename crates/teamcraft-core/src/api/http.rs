@@ -87,8 +87,17 @@ pub trait AccessTokenSource {
 /// A fixed token (tests, command-line tools).
 pub struct StaticToken(pub String);
 
+/// Waits until the local store has persisted what was written so far. Hosts whose store writes
+/// asynchronously (the browser's IndexedDB) set it, so nothing the server is told about can be
+/// lost locally when the page dies right after (an MLS commit, uploaded key packages).
+#[cfg(target_arch = "wasm32")]
+pub type WriteBarrier = std::rc::Rc<dyn Fn() -> futures_util::future::LocalBoxFuture<'static, ()>>;
+
 pub struct HttpServerApi<T> {
   client: reqwest::Client,
+  /// Awaited before every request that changes server state.
+  #[cfg(target_arch = "wasm32")]
+  maybe_write_barrier: Option<WriteBarrier>,
   base_url: String,
   /// Why `base_url` is refused, checked once in [`HttpServerApi::new`].
   maybe_insecure: Option<String>,
@@ -116,7 +125,29 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
       base_url,
       tokens,
       lacks_enrollment_endpoint: AtomicBool::new(false),
+      #[cfg(target_arch = "wasm32")]
+      maybe_write_barrier: None,
     }
+  }
+
+  /// Awaits `barrier` before every request that changes server state.
+  #[cfg(target_arch = "wasm32")]
+  pub fn with_write_barrier(mut self, barrier: WriteBarrier) -> Self {
+    self.maybe_write_barrier = Some(barrier);
+    self
+  }
+
+  /// Local writes are durable before the server hears of anything that follows from them.
+  async fn before_change(&self, method: &Method) {
+    #[cfg(target_arch = "wasm32")]
+    if *method != Method::GET
+      && *method != Method::HEAD
+      && let Some(barrier) = &self.maybe_write_barrier
+    {
+      barrier().await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = method;
   }
 
   fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
@@ -158,6 +189,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     path: &str,
     body: &B,
   ) -> Result<R, ApiError> {
+    self.before_change(&method).await;
     decode(send(self.request(method, path)?.json(body)).await?).await
   }
 
@@ -167,6 +199,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     path: &str,
     maybe_body: Option<&B>,
   ) -> Result<(), ApiError> {
+    self.before_change(&method).await;
     let mut request = self.request(method, path)?;
     if let Some(body) = maybe_body {
       request = request.json(body);
@@ -188,6 +221,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     }
     let method =
       Method::from_bytes(method.as_bytes()).map_err(|error| ApiError::Decode(error.to_string()))?;
+    self.before_change(&method).await;
     let mut request = self.request(method, path)?;
     if let Some(body) = maybe_body {
       request = request
@@ -744,6 +778,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   async fn complete_attachment(&self, attachment: AttachmentId) -> Result<AttachmentResponse, ApiError> {
+    self.before_change(&Method::POST).await;
     decode(send(self.request(Method::POST, &format!("/attachments/{attachment}/complete"))?).await?).await
   }
 
