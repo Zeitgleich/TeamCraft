@@ -5,13 +5,14 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::icons::{Icon, IconName};
 use crate::components::status_menu::StatusMenu;
-use crate::components::window_controls::window_drag_handler;
+use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::state::{Overlay, use_app_state};
 
 /// Global header: search, help and the account/status menu. In the desktop app it is also the
-/// window's title bar: a press on its empty parts or the brand moves the window.
+/// window's title bar: a press on its empty parts moves the window, and so does dragging the brand, which a click
+/// sends Home.
 #[component]
 pub fn TopBar() -> impl IntoView {
   let state = use_app_state();
@@ -20,13 +21,33 @@ pub fn TopBar() -> impl IntoView {
   let menu_open = move || matches!(state.overlay.get(), Overlay::StatusMenu);
   let on_drag = window_drag_handler();
   let brand = Brand::use_current().0;
+  let press = ClickOrDrag::new();
 
   view! {
     <header class="top-bar" data-window-drag="" on:mousedown=on_drag>
-      <div class="brand" translate="no" data-window-drag="">
+      <a
+        class="brand"
+        href="/home"
+        translate="no"
+        aria-label=move || i18n.t("brand-home-label")
+        on:mousedown=move |event| press.press(&event)
+        on:mousemove=move |event| press.moved(&event)
+        on:mouseup=move |_| press.release()
+        on:mouseleave=move |_| press.release()
+        on:click=move |event| {
+          // Modified clicks keep the browser's own link behavior (new tab); a drag is no click.
+          if event.ctrl_key() || event.meta_key() || event.shift_key() || event.button() != 0 {
+            return;
+          }
+          event.prevent_default();
+          if !press.take_was_drag() {
+            state.open_home();
+          }
+        }
+      >
         <BrandLogo class="brand-logo" fallback=|| () />
-        <span class="brand-name" data-window-drag="">{move || brand.with(|view| view.display_name.clone())}</span>
-      </div>
+        <span class="brand-name">{move || brand.with(|view| view.display_name.clone())}</span>
+      </a>
       <button class="search-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
         <Icon name=IconName::Search />
         <span>{move || i18n.t("search-placeholder")}</span>

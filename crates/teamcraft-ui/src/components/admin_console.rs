@@ -17,6 +17,7 @@ use crate::components::admin_settings::SettingsSection;
 use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::icons::{Icon, IconName};
+use crate::history::back_or_home;
 use crate::i18n::use_i18n;
 use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
@@ -54,6 +55,10 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   view! {
     <section class="admin" aria-label=move || i18n.t("admin-title")>
       <nav class="admin-nav" aria-label=move || i18n.t("admin-nav-label")>
+        <button class="admin-back" on:click=move |_| back_or_home(state)>
+          <Icon name=IconName::ChevronRight class="flip" />
+          <span>{move || i18n.t("admin-back")}</span>
+        </button>
         <h1>{move || i18n.t("admin-title")}</h1>
         <ul>
           {nav_item(AdminSection::Channels, IconName::Layers)}
@@ -72,10 +77,6 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
-        <button class="admin-back" on:click=move |_| state.exit_admin()>
-          <Icon name=IconName::ChevronRight class="flip" />
-          <span>{move || i18n.t("admin-back")}</span>
-        </button>
       </nav>
       <div class="admin-content">
         {move || {
