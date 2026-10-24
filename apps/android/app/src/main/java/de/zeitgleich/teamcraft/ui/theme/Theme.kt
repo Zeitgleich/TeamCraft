@@ -15,7 +15,10 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
+import uniffi.teamcraft_ffi.BrandAccent
+import uniffi.teamcraft_ffi.LoginBrand
 
 /** The desktop UI's tokens (crates/teamcraft-ui/style/main.css), so both apps look alike. */
 private val Light = lightColorScheme(
@@ -96,8 +99,12 @@ private val DarkExtra = LightExtra.copy(
 
 val LocalTeamCraftColors = staticCompositionLocalOf { LightExtra }
 
+/**
+ * The app's theme. [maybeBrand]: the server's brand, whose accent colors (branding.md §4) replace
+ * TeamCraft's teal; status, danger and text colors stay the app's own.
+ */
 @Composable
-fun TeamCraftTheme(content: @Composable () -> Unit) {
+fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Unit) {
   val isDark = isSystemInDarkTheme()
   val context = LocalContext.current
   val isDynamic by remember { AppearancePrefs.prefs(context).isDynamicColor }.collectAsState()
@@ -105,10 +112,42 @@ fun TeamCraftTheme(content: @Composable () -> Unit) {
     // The wallpaper's colors (Material You); the dark chrome and badges stay TeamCraft's.
     isDynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
       if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    isDark -> Dark
-    else -> Light
+    isDark -> Dark.withAccent(maybeBrand?.dark)
+    else -> Light.withAccent(maybeBrand?.light)
   }
   CompositionLocalProvider(LocalTeamCraftColors provides if (isDark) DarkExtra else LightExtra) {
-    MaterialTheme(colorScheme = scheme, content = content)
+    MaterialTheme(colorScheme = scheme, typography = TeamCraftTypography, shapes = TeamCraftShapes, content = content)
   }
+}
+
+/** The brand's accent tokens over the scheme; each one only where the brand sets it. */
+private fun ColorScheme.withAccent(maybeAccent: BrandAccent?): ColorScheme {
+  val accent = maybeAccent ?: return this
+  fun pick(maybeHex: String?, fallback: Color) = maybeHex?.let(::brandArgb)?.let { Color(it) } ?: fallback
+  val soft = pick(accent.maybeAccentSoft, primaryContainer)
+  val strong = pick(accent.maybeAccentStrong, onPrimaryContainer)
+  return copy(
+    primary = pick(accent.maybeAccent, primary),
+    onPrimary = pick(accent.maybeOnAccent, onPrimary),
+    primaryContainer = soft,
+    onPrimaryContainer = strong,
+    secondaryContainer = soft,
+    onSecondaryContainer = strong,
+  )
+}
+
+/**
+ * An opaque ARGB value from a brand color (`#rgb` or `#rrggbb`, already checked by the core);
+ * null for anything else.
+ */
+fun brandArgb(hex: String): Long? {
+  if (!hex.startsWith("#")) return null
+  val digits = hex.substring(1)
+  if (digits.any { Character.digit(it, 16) < 0 }) return null
+  val full = when (digits.length) {
+    3 -> digits.map { "$it$it" }.joinToString("")
+    6 -> digits
+    else -> return null
+  }
+  return 0xFF000000L or full.toLong(16)
 }

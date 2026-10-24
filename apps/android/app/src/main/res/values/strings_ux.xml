@@ -104,4 +104,18 @@
     <item quantity="one">%d selected</item>
     <item quantity="other">%d selected</item>
   </plurals>
+  <!-- Main screen (#262): bottom navigation, global entries of Home, empty states. -->
+  <string name="nav_home">Home</string>
+  <string name="nav_activity">Activity</string>
+  <string name="nav_spaces">Spaces</string>
+  <string name="home_entry_threads">Threads</string>
+  <string name="home_entry_saved">Saved</string>
+  <string name="home_entry_meetings">Meetings</string>
+  <string name="home_entry_people">People</string>
+  <string name="account_menu">%1$s: account, status and settings</string>
+  <string name="dm_empty_title">No direct messages yet</string>
+  <string name="activity_empty_title">All caught up</string>
+  <string name="activity_empty">Mentions and unread messages from all your conversations show up here.</string>
+  <string name="spaces_empty_title">No channels yet</string>
+  <string name="spaces_empty">Browse the channels of your spaces to join one.</string>
 </resources>

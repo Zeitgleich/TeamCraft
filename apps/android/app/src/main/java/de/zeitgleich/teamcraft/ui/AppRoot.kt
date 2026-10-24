@@ -180,6 +180,7 @@ private fun ReadyNavigation(
       val list = @Composable {
         ChatListScreen(
           viewModel = viewModel,
+          accountName = account.displayName,
           onOpen = { if (isWide) maybeSelected = it else navigation.navigate("conversation/$it") },
           onSearch = { navigation.navigate("search") },
           onSettings = { navigation.navigate("settings") },

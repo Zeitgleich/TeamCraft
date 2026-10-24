@@ -9,6 +9,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.fragment.app.FragmentActivity
 import de.zeitgleich.teamcraft.R
@@ -43,7 +45,9 @@ class MainActivity : FragmentActivity() {
     openConversation.value = conversationToOpen(intent)
     share.value = sharedContent(intent, packageName)
     setContent {
-      TeamCraftTheme {
+      // The server's brand colors the whole app (branding.md §5), not only the sign-in screen.
+      val maybeBrand by viewModel.loginBrand.collectAsState()
+      TeamCraftTheme(maybeBrand = maybeBrand) {
         if (isLocked.value) {
           LockScreen(onUnlock = ::unlock)
         } else {

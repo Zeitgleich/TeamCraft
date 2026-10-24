@@ -30,10 +30,10 @@ use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppConfig, BrandLinks, ConnectionState, ConversationItem, ConversationKind, EmojiSuggestion,
-  LoginBrand, MentionSettings, MessageItem, NotificationSuppression, OrgRecoveryStart, Presence,
-  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
+  AccountState, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem, ConversationKind,
+  EmojiSuggestion, LoginBrand, MentionSettings, MessageItem, NotificationSuppression, OrgRecoveryStart,
+  Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem,
+  SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -481,7 +481,25 @@ pub fn login_brand(response_json: String, server_url: String, language: String) 
       maybe_terms: brand.links.maybe_terms.clone(),
       maybe_imprint: brand.links.maybe_imprint.clone(),
     },
+    light: brand_accent(brand.properties(false)),
+    dark: brand_accent(brand.properties(true)),
   })
+}
+
+/// The accent tokens out of the checked CSS properties of one theme.
+fn brand_accent(properties: &[(String, String)]) -> BrandAccent {
+  let pick = |name: &str| {
+    properties
+      .iter()
+      .find(|(property, _)| property == name)
+      .map(|(_, value)| value.clone())
+  };
+  BrandAccent {
+    maybe_accent: pick("--accent"),
+    maybe_accent_strong: pick("--accent-strong"),
+    maybe_on_accent: pick("--on-accent"),
+    maybe_accent_soft: pick("--accent-soft"),
+  }
 }
 
 /// Whether a link from content other members control (a bookmark) may be opened: web links only.

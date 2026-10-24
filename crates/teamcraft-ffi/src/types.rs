@@ -114,6 +114,19 @@ pub struct LoginBrand {
   pub maybe_title: Option<String>,
   pub maybe_text: Option<String>,
   pub links: BrandLinks,
+  /// The brand's accent colors (checked `#rgb`/`#rrggbb`) for the light theme.
+  pub light: BrandAccent,
+  /// The same for the dark theme.
+  pub dark: BrandAccent,
+}
+
+/// The brandable accent tokens (branding.md §4); absent keys keep the app's own colors.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct BrandAccent {
+  pub maybe_accent: Option<String>,
+  pub maybe_accent_strong: Option<String>,
+  pub maybe_on_accent: Option<String>,
+  pub maybe_accent_soft: Option<String>,
 }
 
 /// The brand's legal and support links; https only.
