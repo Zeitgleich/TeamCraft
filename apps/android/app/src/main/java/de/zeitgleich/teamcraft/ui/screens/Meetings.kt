@@ -36,7 +36,7 @@ fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
   val context = LocalContext.current
   var meetings by remember { mutableStateOf<List<Meeting>?>(null) }
   LaunchedEffect(changes) { meetings = viewModel.readChat { meetings() } }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.meetings_title), maybeOnBack = onBack) }) { padding ->
+  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.meetings_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     LazyColumn(Modifier.fillMaxSize().padding(padding)) {
       val list = meetings.orEmpty().filter { it.status != "cancelled" && it.status != "ended" }.sortedBy { it.startsAt }
       if (meetings != null && list.isEmpty()) item { EmptyText(R.string.meetings_empty) }

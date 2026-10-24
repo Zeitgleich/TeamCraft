@@ -25,6 +25,7 @@ import de.zeitgleich.teamcraft.search.SegmentPrefetch
 import de.zeitgleich.teamcraft.server.ManagedConfig
 import de.zeitgleich.teamcraft.server.ServerStore
 import de.zeitgleich.teamcraft.ui.NetworkWatcher
+import de.zeitgleich.teamcraft.ui.Pictures
 import uniffi.teamcraft_ffi.AccountState
 
 /** Process-wide objects, shared by the activity, receivers and services. */
@@ -34,7 +35,8 @@ class AppGraph(context: Context) {
   val managedConfig = ManagedConfig(context)
   val auth = AuthRepository(context, servers)
   val legacySignOut = LegacySignOut(servers)
-  val core = CoreRepository(context, auth)
+  // Decrypted pictures leave memory with the account they belong to.
+  val core = CoreRepository(context, auth, onAccountClosed = Pictures::clear)
   val notificationContent = NotificationContentPrefs(context)
   val notifier = MessageNotifier(context, notificationContent)
   val mentionPrefs = MentionPrefs(context)

@@ -25,7 +25,12 @@ import uniffi.teamcraft_ffi.TokenProvider
  * database key is 32 random bytes sealed with a Keystore key (e2ee.md §9.2); tokens come from
  * [AuthRepository]. Store and key are kept per server and account ([StoragePaths]).
  */
-class CoreRepository(private val context: Context, private val auth: AuthRepository) {
+class CoreRepository(
+  private val context: Context,
+  private val auth: AuthRepository,
+  /** Runs when an account's core closes (sign-out, server or account change): drop what it decrypted into memory. */
+  private val onAccountClosed: () -> Unit = {},
+) {
   private val lock = Mutex()
 
   @Volatile private var maybeCore: TeamCraft? = null
@@ -51,7 +56,10 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
     val storageKey = server.address.storageKey
     val account = "${server.address.origin} $subject"
     maybeCore?.takeIf { maybeAccount == account }?.let { return it }
-    maybeCore?.close()
+    maybeCore?.let {
+      it.close()
+      onAccountClosed()
+    }
     val core = withContext(Dispatchers.IO) {
       TeamCraft(
         AppConfig(
@@ -77,6 +85,7 @@ class CoreRepository(private val context: Context, private val auth: AuthReposit
   /** Closes the core; local data stays (it belongs to the account, not the session). */
   suspend fun close() = lock.withLock {
     maybeCore?.close()
+    onAccountClosed()
     maybeCore = null
     maybeAccount = null
     connection.value = null

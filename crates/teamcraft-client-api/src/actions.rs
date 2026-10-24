@@ -176,7 +176,7 @@ pub struct FileInfo {
   pub file_name: String,
   pub media_type: String,
   pub size_bytes: u64,
-  /// A small PNG preview for images, made by the sender's client.
+  /// A small preview for images (JPEG, or PNG for transparent ones), made by the sender's client.
   #[serde(default)]
   pub maybe_thumbnail_png: Option<Vec<u8>>,
   pub transfer: FileTransfer,

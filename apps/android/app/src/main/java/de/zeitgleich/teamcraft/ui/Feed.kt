@@ -12,21 +12,34 @@ const val GROUP_WINDOW_MS = 5 * 60 * 1000L
 sealed interface FeedItem {
   val key: String
 
+  /** Which rows share a layout, for the list's reuse of composed rows. */
+  val contentType: FeedContentType
+
   /** A date chip above the first message of a day. */
   data class Day(val date: LocalDate) : FeedItem {
     override val key: String get() = "day-$date"
+    override val contentType: FeedContentType get() = FeedContentType.Day
   }
 
   /** The "new messages" line above the first unread message. */
   data object Unread : FeedItem {
     override val key: String get() = "unread"
+    override val contentType: FeedContentType get() = FeedContentType.Unread
   }
 
   /** A message; `isContinuation` when it follows the same author's previous one closely. */
   data class Entry(val message: Message, val isContinuation: Boolean) : FeedItem {
     override val key: String get() = message.id
+    override val contentType: FeedContentType
+      get() = when {
+        message.maybeSystemEvent != null -> FeedContentType.Event
+        isContinuation -> FeedContentType.FollowUp
+        else -> FeedContentType.Message
+      }
   }
 }
+
+enum class FeedContentType { Day, Unread, Event, Message, FollowUp }
 
 /**
  * Lays out a conversation (oldest first) the way chat apps do: a date chip per day, the unread line

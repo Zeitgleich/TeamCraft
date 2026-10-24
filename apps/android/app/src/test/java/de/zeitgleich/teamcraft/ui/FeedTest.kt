@@ -58,6 +58,22 @@ class FeedTest {
     assertEquals(listOf("day-2026-10-21", "1"), items.map { it.key })
   }
 
+  @Test
+  fun rowsOfOneLayoutShareAContentType() {
+    val joined = message("3", "a", DAY_ONE + 2 * MINUTE, kind = JsonObject(mapOf("System" to JsonPrimitive("Joined"))))
+    val items = feedItems(
+      listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE), joined),
+      maybeFirstUnread = "2",
+      zone = ZoneOffset.UTC,
+    )
+    assertEquals(
+      listOf(FeedContentType.Day, FeedContentType.Message, FeedContentType.Unread, FeedContentType.Message, FeedContentType.Event),
+      items.map { it.contentType },
+    )
+    val grouped = feedItems(listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE)), null, ZoneOffset.UTC)
+    assertEquals(FeedContentType.FollowUp, grouped.last().contentType)
+  }
+
   private fun entries(vararg messages: Message): List<FeedItem.Entry> =
     feedItems(messages.toList(), maybeFirstUnread = null, zone = ZoneOffset.UTC).filterIsInstance<FeedItem.Entry>()
 

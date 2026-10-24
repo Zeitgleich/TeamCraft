@@ -60,6 +60,10 @@ const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
 /// What must be left of [`PUSH_PREVIEW_BUDGET`] to start following the groups, which can't be cut
 /// short once begun.
 const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
+/// The decrypted downloads an account keeps: the disk cache the apps reopen pictures and files from
+/// without downloading them again. Above it the least recently used go at start (a deleted file is
+/// fetched again when opened: its transfer shows as remote).
+const MAX_DOWNLOADS_BYTES: u64 = 1024 * 1024 * 1024;
 /// Plaintext copies of files waiting to be uploaded, one folder per account below it.
 const UPLOAD_STAGING_DIR: &str = "outgoing";
 
@@ -241,11 +245,13 @@ impl Engine {
     let mentions: MentionSettings = load_mention_preferences(store.as_ref())
       .unwrap_or_default()
       .into();
+    let download_dir = directory.join(DOWNLOADS_DIR).join(&config.account);
+    trim_downloads(&download_dir, MAX_DOWNLOADS_BYTES);
     let mut engine = Self {
       server_url: config.server_url,
       maybe_push_gateway_url: config.push_gateway_url.filter(|url| !url.is_empty()),
       // Per account, so another account signed in on this device never sees these files.
-      download_dir: directory.join(DOWNLOADS_DIR).join(&config.account),
+      download_dir,
       upload_staging_dir,
       tokens,
       listener,
@@ -980,6 +986,35 @@ fn remove_shared_downloads(directory: &std::path::Path) {
   }
 }
 
+/// Deletes the least recently used files of `directory` (by modification time, which the apps bump
+/// when they open a file) until the rest fit into `max_bytes`.
+fn trim_downloads(directory: &std::path::Path, max_bytes: u64) {
+  let Ok(entries) = std::fs::read_dir(directory) else {
+    return;
+  };
+  let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+    .flatten()
+    .filter_map(|entry| {
+      let metadata = entry.metadata().ok()?;
+      let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+      metadata
+        .is_file()
+        .then(|| (modified, metadata.len(), entry.path()))
+    })
+    .collect();
+  let mut total: u64 = files.iter().map(|(_, size, _)| size).sum();
+  files.sort_by_key(|(modified, _, _)| *modified);
+  for (_, size, path) in files {
+    if total <= max_bytes {
+      break;
+    }
+    match std::fs::remove_file(&path) {
+      Ok(()) => total -= size,
+      Err(error) => tracing::debug!(%error, "an old download could not be deleted"),
+    }
+  }
+}
+
 /// The other person's presence in a one-to-one DM; `None` for every other conversation.
 fn peer_presence(
   backend: &impl ChatBackend,
@@ -991,4 +1026,63 @@ fn peer_presence(
   }
   let other = conversation.member_ids.iter().find(|member| **member != me)?;
   backend.user(*other).map(|user| Presence::from(user.presence))
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::{Duration, SystemTime};
+
+  use super::*;
+
+  #[test]
+  fn downloads_above_the_limit_lose_their_least_recently_used_files() {
+    let directory = TestDir::new("lru");
+    let now = SystemTime::now();
+    for (name, age_seconds) in [("old", 300), ("middle", 200), ("new", 100)] {
+      let path = directory.path().join(name);
+      std::fs::write(&path, [0u8; 10]).unwrap();
+      let file = std::fs::File::options().write(true).open(&path).unwrap();
+      file.set_modified(now - Duration::from_secs(age_seconds)).unwrap();
+    }
+
+    trim_downloads(directory.path(), 20);
+
+    let mut left: Vec<String> = std::fs::read_dir(directory.path())
+      .unwrap()
+      .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+      .collect();
+    left.sort();
+    assert_eq!(left, ["middle", "new"]);
+  }
+
+  #[test]
+  fn downloads_within_the_limit_or_missing_stay_as_they_are() {
+    let directory = TestDir::new("within");
+    std::fs::write(directory.path().join("one"), [0u8; 10]).unwrap();
+    trim_downloads(directory.path(), 10);
+    assert!(directory.path().join("one").is_file());
+    trim_downloads(&directory.path().join("missing"), 0);
+  }
+
+  /// A fresh folder in the system's temporary directory, removed when dropped.
+  struct TestDir(PathBuf);
+
+  impl TestDir {
+    fn new(name: &str) -> Self {
+      let path = std::env::temp_dir().join(format!("teamcraft-downloads-{}-{name}", std::process::id()));
+      let _ = std::fs::remove_dir_all(&path);
+      std::fs::create_dir_all(&path).unwrap();
+      Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+      &self.0
+    }
+  }
+
+  impl Drop for TestDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
 }

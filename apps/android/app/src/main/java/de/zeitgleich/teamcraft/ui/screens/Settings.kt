@@ -83,6 +83,7 @@ fun SettingsScreen(
   BackHandler(enabled = maybePage != null) { maybePage = null }
   val page = maybePage
   Scaffold(
+    contentWindowInsets = ScreenInsets,
     topBar = {
       ChromeTopBar(
         title = stringResource(page?.title ?: R.string.settings_title),

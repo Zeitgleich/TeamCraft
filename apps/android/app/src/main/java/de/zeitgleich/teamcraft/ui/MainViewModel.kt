@@ -13,6 +13,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
@@ -370,6 +371,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       chat.act(action)
     } catch (failure: TeamCraftException) {
       failures.value = errorText(failure)
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: IllegalStateException) {
+      // Signed out meanwhile (a draft saved after the delay, say): no account to act for.
     }
   }
 
@@ -389,10 +394,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Runs a read; `null` when the core can't answer (not enrolled, gone). */
   suspend fun <T> readChat(block: suspend ChatClient.() -> T): T? =
     try {
-      chat.block()
+      // Off the main thread: decoding a snapshot or a page of messages takes milliseconds that a
+      // frame doesn't have (#315). Screens call this from their composition's effects.
+      withContext(Dispatchers.Default) { chat.block() }
     } catch (failure: TeamCraftException) {
       null
     } catch (failure: kotlinx.serialization.SerializationException) {
+      null
+    } catch (failure: CancellationException) {
+      // A CancellationException is an IllegalStateException; the caller's cancellation goes on.
+      throw failure
+    } catch (failure: IllegalStateException) {
+      // No server or no account any more (signed out while a screen still reads): nothing to show.
       null
     }
 

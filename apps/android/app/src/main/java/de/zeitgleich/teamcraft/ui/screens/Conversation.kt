@@ -16,9 +16,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -38,13 +39,18 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -64,6 +70,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -72,6 +79,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
@@ -304,10 +312,12 @@ private fun ChatScaffold(
     }
   }
   Scaffold(
+    contentWindowInsets = ScreenInsets,
     topBar = { ChromeTopBar(title = title, maybeSubtitle = maybeSubtitle, maybeOnBack = onBack, actions = actions) },
     snackbarHost = { SnackbarHost(snackbars) },
   ) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
+    // The insets include the keyboard: the composer rides on top of it as it slides in (#309).
+    Column(Modifier.fillMaxSize().padding(padding)) {
       OfflineBanner(onSignInAgain = { viewModel.signOut() })
       content()
     }
@@ -476,13 +486,14 @@ private fun BookmarkRow(bookmark: Bookmark, onClick: () -> Unit) {
 @Composable
 private fun PinnedBanner(message: Message) {
   Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
-    Text(
-      "📌 " + message.body,
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-      style = MaterialTheme.typography.bodySmall,
-    )
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+      Icon(
+        painterResource(R.drawable.ic_push_pin),
+        contentDescription = stringResource(R.string.message_pinned),
+        modifier = Modifier.padding(end = 8.dp).size(16.dp),
+      )
+      Text(message.body, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+    }
   }
 }
 
@@ -708,9 +719,10 @@ object ReplyTarget {
   }
 }
 
+/** The message field with its suggestions, reply line and attachments (internal: screenshots show it with sample data). */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThread: String?, snapshot: ChatSnapshot?) {
+internal fun Composer(viewModel: MainViewModel, conversationId: String, maybeThread: String?, snapshot: ChatSnapshot?) {
   val context = LocalContext.current
   var text by rememberSaveable(conversationId, maybeThread) { mutableStateOf("") }
   var isDraftLoaded by remember(conversationId, maybeThread) { mutableStateOf(false) }
@@ -823,12 +835,17 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
     if (files.isNotEmpty()) {
       FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         for (file in files) {
-          AssistChip(
+          val removeLabel = stringResource(R.string.composer_remove_file, file.fileName)
+          InputChip(
+            selected = false,
             onClick = {
               files = files - file
               viewModel.discardFile(file)
             },
-            label = { Text("📎 ${file.fileName} ✕") },
+            label = { Text(file.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            leadingIcon = { Icon(painterResource(R.drawable.ic_attach_file), contentDescription = null, modifier = Modifier.size(18.dp)) },
+            trailingIcon = { Icon(Icons.Filled.Close, contentDescription = removeLabel, modifier = Modifier.size(18.dp)) },
+            modifier = Modifier.widthIn(max = 240.dp),
           )
         }
       }
@@ -843,41 +860,22 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
     if (flags.isNotEmpty()) {
       Text(flags.joinToString(" · "), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp))
     }
-    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-      IconButton(onClick = { isOptionsOpen = true }) {
-        Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.attach))
-      }
-      OutlinedTextField(
-        value = text,
-        onValueChange = {
-          text = it
-          val now = System.currentTimeMillis()
-          if (isSharingTyping && shouldNotifyTyping(it, now, maybeLastTypingAt)) {
-            maybeLastTypingAt = now
-            viewModel.act(ChatActions.typing(conversationId))
-          }
-        },
-        placeholder = { Text(stringResource(R.string.composer_hint)) },
-        modifier = Modifier
-          .weight(1f)
-          .focusRequester(focus)
-          .onPreviewKeyEvent { event ->
-            // Hardware keyboards: Enter sends when the user chose so; Shift+Enter is a new line.
-            val isSendKey = isSendWithEnter && event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed
-            if (isSendKey && canSend) trySend()
-            isSendKey
-          },
-        maxLines = 6,
-        keyboardOptions = KeyboardOptions(
-          capitalization = KeyboardCapitalization.Sentences,
-          imeAction = if (isSendWithEnter) ImeAction.Send else ImeAction.Default,
-        ),
-        keyboardActions = KeyboardActions(onSend = { if (canSend) trySend() }),
-      )
-      IconButton(onClick = { if (canSend) trySend() }, enabled = canSend) {
-        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
-      }
-    }
+    ComposerField(
+      text = text,
+      onTextChange = {
+        text = it
+        val now = System.currentTimeMillis()
+        if (isSharingTyping && shouldNotifyTyping(it, now, maybeLastTypingAt)) {
+          maybeLastTypingAt = now
+          viewModel.act(ChatActions.typing(conversationId))
+        }
+      },
+      canSend = canSend,
+      isSendWithEnter = isSendWithEnter,
+      focus = focus,
+      onAttach = { isOptionsOpen = true },
+      onSend = ::trySend,
+    )
   }
   if (isOptionsOpen) {
     AttachSheet(pickers, onDismiss = { isOptionsOpen = false }) {
@@ -891,6 +889,72 @@ private fun Composer(viewModel: MainViewModel, conversationId: String, maybeThre
         maybeAlsoToChannel = alsoToChannel.takeIf { maybeThread != null },
         onAlsoToChannel = { alsoToChannel = it },
       )
+    }
+  }
+}
+
+/**
+ * The message field as in the reference chat apps (#315): one rounded pill with attach on the left
+ * and send on the right inside it. Send is a filled button only while there is something to send.
+ */
+@Composable
+private fun ComposerField(
+  text: String,
+  onTextChange: (String) -> Unit,
+  canSend: Boolean,
+  isSendWithEnter: Boolean,
+  focus: FocusRequester,
+  onAttach: () -> Unit,
+  onSend: () -> Unit,
+) {
+  Surface(
+    shape = RoundedCornerShape(COMPOSER_CORNER),
+    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+  ) {
+    Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.Bottom) {
+      IconButton(onClick = onAttach, modifier = Modifier.padding(vertical = 4.dp)) {
+        Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.attach))
+      }
+      TextField(
+        value = text,
+        onValueChange = onTextChange,
+        placeholder = { Text(stringResource(R.string.composer_hint)) },
+        modifier = Modifier
+          .weight(1f)
+          .focusRequester(focus)
+          .onPreviewKeyEvent { event ->
+            // Hardware keyboards: Enter sends when the user chose so; Shift+Enter is a new line.
+            val isSendKey = isSendWithEnter && event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed
+            if (isSendKey && canSend) onSend()
+            isSendKey
+          },
+        maxLines = 6,
+        colors = TextFieldDefaults.colors(
+          focusedContainerColor = Color.Transparent,
+          unfocusedContainerColor = Color.Transparent,
+          disabledContainerColor = Color.Transparent,
+          focusedIndicatorColor = Color.Transparent,
+          unfocusedIndicatorColor = Color.Transparent,
+          disabledIndicatorColor = Color.Transparent,
+        ),
+        keyboardOptions = KeyboardOptions(
+          capitalization = KeyboardCapitalization.Sentences,
+          imeAction = if (isSendWithEnter) ImeAction.Send else ImeAction.Default,
+        ),
+        keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
+      )
+      FilledIconButton(
+        onClick = onSend,
+        enabled = canSend,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          disabledContainerColor = Color.Transparent,
+          disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+        ),
+        modifier = Modifier.padding(4.dp),
+      ) {
+        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
+      }
     }
   }
 }
@@ -988,6 +1052,9 @@ private fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOpti
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
 }
+
+/** The composer pill's corner radius: fully round at one line, a soft box when it grows. */
+private val COMPOSER_CORNER = 28.dp
 
 /** Emoji offered for a typed `:name`. */
 private const val MAX_EMOJI_SUGGESTIONS = 8

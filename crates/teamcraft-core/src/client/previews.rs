@@ -102,7 +102,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(image_url) => fetcher
         .fetch(image_url, settings.max_image_bytes)
         .await
-        .and_then(|image| crate::thumbnail::thumbnail_png(&image.body, &image.content_type))
+        .and_then(|image| crate::thumbnail::thumbnail(&image.body, &image.content_type))
         .map(Base64Bytes::new),
       None => None,
     };

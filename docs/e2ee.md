@@ -381,8 +381,17 @@ hostile link can't make the browser allocate absurd memory. The file name is enc
 file key. The server endpoint for creating links (`POST /attachments/{id}/share-links`) and the
 download page are not built yet.
 
-**Thumbnails:** the sender's client makes a small PNG of image attachments (decoding capped at
-40 megapixels) and puts it next to the file key inside the encrypted message.
+**Thumbnails:** the sender's client makes a preview of image attachments (decoding capped at
+40 megapixels) and puts it next to the file key inside the encrypted message. It is turned upright
+by the photo's EXIF orientation and is at most 640 pixels on its longer side: a JPEG (quality 80),
+or a PNG when the picture has transparency. A preview larger than 96 KiB is made smaller or lower
+in quality, since it counts against the message's size limit. Receivers read the format from the
+bytes; clients before 1.0.2 sent 320-pixel PNGs, which still show.
+
+**Decrypted files on the device:** downloads are decrypted into the app's private storage, one
+folder per account, which doubles as the cache that reopens pictures without downloading them
+again. The least recently used files go when the folder grows beyond 1 GiB (checked at start); all
+of them are deleted at sign-out.
 
 ### 4.6 Who may change a group
 

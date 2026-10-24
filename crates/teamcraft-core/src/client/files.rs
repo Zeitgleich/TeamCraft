@@ -274,7 +274,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(UploadError::Failed(TransferFailure::TooLarge));
     }
     let content = read_source(&file.source).map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
-    let maybe_thumbnail = crate::thumbnail::thumbnail_png(&content, &file.media_type);
+    let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type);
     let outgoing = OutgoingFile {
       file_name: file.file_name.clone(),
       media_type: file.media_type.clone(),

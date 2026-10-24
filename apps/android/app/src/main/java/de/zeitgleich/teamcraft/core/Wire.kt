@@ -1,7 +1,13 @@
 package de.zeitgleich.teamcraft.core
 
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.IntArraySerializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -183,11 +189,11 @@ data class FileInfo(
   @SerialName("file_name") val fileName: String,
   @SerialName("media_type") val mediaType: String,
   @SerialName("size_bytes") val sizeBytes: Long,
-  @SerialName("maybe_thumbnail_png") val maybeThumbnailPng: List<Int>? = null,
+  /** The sender's preview of an image (PNG or JPEG; decoders read the format from the bytes). */
+  @SerialName("maybe_thumbnail_png") val maybeThumbnail: ImageBytes? = null,
   val transfer: FileTransfer,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
-  fun thumbnailBytes(): ByteArray? = maybeThumbnailPng?.let { bytes -> ByteArray(bytes.size) { bytes[it].toByte() } }
 }
 
 @Serializable
@@ -196,9 +202,36 @@ data class LinkPreview(
   @SerialName("maybe_title") val maybeTitle: String? = null,
   @SerialName("maybe_description") val maybeDescription: String? = null,
   @SerialName("maybe_site_name") val maybeSiteName: String? = null,
-  @SerialName("maybe_image") val maybeImage: List<Int>? = null,
-) {
-  fun imageBytes(): ByteArray? = maybeImage?.let { bytes -> ByteArray(bytes.size) { bytes[it].toByte() } }
+  @SerialName("maybe_image") val maybeImage: ImageBytes? = null,
+)
+
+/**
+ * Picture bytes, which the bridge sends as a JSON array of numbers. Decoded straight into a byte
+ * array: a `List<Int>` boxed every byte of every thumbnail on each read of the feed (#315). Equal by
+ * content, so an unchanged message doesn't recompose.
+ */
+@Serializable(with = ImageBytesSerializer::class)
+class ImageBytes(val bytes: ByteArray) {
+  private val hash by lazy { bytes.contentHashCode() }
+
+  override fun equals(other: Any?): Boolean = other is ImageBytes && bytes.contentEquals(other.bytes)
+
+  override fun hashCode(): Int = hash
+}
+
+@OptIn(ExperimentalSerializationApi::class)
+object ImageBytesSerializer : KSerializer<ImageBytes> {
+  private val numbers = IntArraySerializer()
+  override val descriptor: SerialDescriptor = SerialDescriptor("de.zeitgleich.teamcraft.ImageBytes", numbers.descriptor)
+
+  override fun deserialize(decoder: Decoder): ImageBytes {
+    val values = numbers.deserialize(decoder)
+    return ImageBytes(ByteArray(values.size) { values[it].toByte() })
+  }
+
+  override fun serialize(encoder: Encoder, value: ImageBytes) {
+    numbers.serialize(encoder, IntArray(value.bytes.size) { value.bytes[it].toInt() and 0xFF })
+  }
 }
 
 @Serializable

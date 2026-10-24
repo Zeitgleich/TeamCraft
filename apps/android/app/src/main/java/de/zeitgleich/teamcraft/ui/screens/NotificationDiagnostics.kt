@@ -75,7 +75,7 @@ fun NotificationDiagnosticsScreen(
   LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refresh++ }
   val handled by viewModel.pushHandledCount.collectAsState()
   val health = remember(refresh, handled) { NotificationHealth.read(context) }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.diagnostics_title), maybeOnBack = onBack) }) { padding ->
+  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.diagnostics_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(
       Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),

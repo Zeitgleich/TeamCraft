@@ -2,15 +2,20 @@ package de.zeitgleich.teamcraft.ui.screens
 
 import android.text.format.Formatter
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -21,10 +26,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -35,6 +44,9 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
+import de.zeitgleich.teamcraft.ui.rememberThumbnail
+import de.zeitgleich.teamcraft.ui.thumbnailKey
 
 /** Every file of a conversation as a gallery: images as thumbnails, tap to download or open. */
 @Composable
@@ -42,7 +54,8 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
   val changes by viewModel.changeCount.collectAsState()
   val context = LocalContext.current
   var files by remember { mutableStateOf<List<FileInfo>?>(null) }
-  var maybeViewed by remember { mutableStateOf<ViewedImage?>(null) }
+  // Saveable: a rotation keeps the viewer open.
+  var maybeViewedId by rememberSaveable { mutableStateOf<String?>(null) }
   LaunchedEffect(changes, conversationId) {
     files = viewModel.readChat { query(ChatQueries.files(conversationId)).files }
   }
@@ -53,7 +66,7 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
       files = viewModel.readChat { query(ChatQueries.files(conversationId)).files } ?: files
     }
   }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.files_title), maybeOnBack = onBack) }) { padding ->
+  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.files_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     if (files?.isEmpty() == true) {
       EmptyText(R.string.files_empty)
     }
@@ -62,8 +75,9 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
         Column(
           Modifier.padding(4.dp).clickable {
             val path = file.transfer.path
-            if (file.transfer.state == "local" && path != null && file.isImage) {
-              maybeViewed = ViewedImage(path, file.fileName, file.mediaType)
+            if (file.isImage) {
+              // The viewer shows the thumbnail at once and fetches the full image itself.
+              maybeViewedId = file.fileId
             } else if (file.transfer.state == "local" && path != null) {
               openFile(context, File(path), file.mediaType)
             } else {
@@ -71,16 +85,22 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
             }
           },
         ) {
-          val maybeThumbnail = rememberThumbnail(file.maybeThumbnailPng)
-          if (maybeThumbnail != null) {
-            Image(
-              maybeThumbnail,
-              contentDescription = file.fileName,
-              contentScale = ContentScale.Crop,
-              modifier = Modifier.fillMaxWidth().aspectRatio(1f),
-            )
-          } else {
-            Text("📄", style = MaterialTheme.typography.displayMedium, modifier = Modifier.padding(16.dp))
+          val maybeThumbnail by rememberThumbnail(thumbnailKey(file), file.maybeThumbnail?.bytes, THUMBNAIL_DECODE_PX)
+          Box(
+            Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+          ) {
+            val thumbnail = maybeThumbnail
+            if (thumbnail != null) {
+              Image(thumbnail, contentDescription = file.fileName, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else if (file.maybeThumbnail == null) {
+              Icon(
+                painterResource(if (file.isImage) R.drawable.ic_image else R.drawable.ic_description),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(40.dp),
+              )
+            }
           }
           Text(file.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
           Text(Formatter.formatShortFileSize(context, file.sizeBytes), style = MaterialTheme.typography.labelSmall)
@@ -89,5 +109,12 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
       }
     }
   }
-  maybeViewed?.let { image -> ImageViewer(image) { maybeViewed = null } }
+  maybeViewedId?.let { fileId ->
+    ImageViewer(
+      images = files.orEmpty().filter { it.isImage },
+      startFileId = fileId,
+      onDownload = { file -> viewModel.act(ChatActions.download(file.conversation, file.message)) },
+      onDismiss = { maybeViewedId = null },
+    )
+  }
 }

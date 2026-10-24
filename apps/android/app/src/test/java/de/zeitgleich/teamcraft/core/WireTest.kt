@@ -61,4 +61,31 @@ class WireTest {
     val answer = decodeAnswer("""{"answer":"message_extras","extras":[{"message":"10","is_send_failed":true}]}""")
     assertTrue(answer.extras.single().isSendFailed)
   }
+
+  @Test
+  fun thumbnailBytesDecodeFromTheirNumbersAndCompareByContent() {
+    val file = """
+      {"conversation":"7","message":"10","file_id":"3","file_name":"a.jpg","media_type":"image/jpeg","size_bytes":9,
+       "maybe_thumbnail_png":[255,216,0,127,128],"transfer":{"state":"remote"}}
+    """
+    val decoded = WireJson.decodeFromString(FileInfo.serializer(), file)
+    val bytes = decoded.maybeThumbnail!!.bytes
+    assertEquals(listOf(-1, -40, 0, 127, -128), bytes.map { it.toInt() })
+    // A re-read of the same message is equal, so its row doesn't recompose.
+    assertEquals(decoded, WireJson.decodeFromString(FileInfo.serializer(), file))
+    assertEquals(
+      "[255,216,0,127,128]",
+      WireJson.encodeToString(ImageBytesSerializer, decoded.maybeThumbnail),
+    )
+  }
+
+  @Test
+  fun aFileWithoutThumbnailHasNone() {
+    val decoded = WireJson.decodeFromString(
+      FileInfo.serializer(),
+      """{"conversation":"7","message":"10","file_id":"3","file_name":"a.pdf","media_type":"application/pdf",
+          "size_bytes":9,"maybe_thumbnail_png":null,"transfer":{"state":"remote"}}""",
+    )
+    assertEquals(null, decoded.maybeThumbnail)
+  }
 }

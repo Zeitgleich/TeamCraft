@@ -27,6 +27,10 @@ import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.ConnectionState
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -37,6 +41,18 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+
+/**
+ * What content stays clear of (#309): system bars, the display cutout (landscape) and the keyboard.
+ * Every screen's Scaffold takes it as `contentWindowInsets`, so nothing hard-codes a padding and
+ * the keyboard pushes content up with its own animation.
+ */
+val ScreenInsets: WindowInsets
+  @Composable get() = WindowInsets.safeDrawing
+
+/** Top bars reach behind the status bar but keep their content clear of it and of a side cutout. */
+val TopBarInsets: WindowInsets
+  @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
 
 /** The dark top bar of the desktop's chrome. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -71,6 +87,7 @@ fun ChromeTopBar(
       }
     },
     actions = actions,
+    windowInsets = TopBarInsets,
     colors = TopAppBarDefaults.topAppBarColors(
       containerColor = colors.chrome,
       titleContentColor = colors.chromeText,
