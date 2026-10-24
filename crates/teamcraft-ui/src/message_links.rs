@@ -17,7 +17,11 @@ pub const MAX_PREVIEWS: usize = 3;
 pub fn message_links_in(body: &str, own_hosts: &[String]) -> Vec<String> {
   let mut links = Vec::new();
   for block in markdown::parse(body) {
-    let Block::Paragraph(lines) = block else { continue };
+    let lines = match block {
+      Block::Paragraph(lines) | Block::Quote(lines) | Block::List { items: lines, .. } => lines,
+      Block::Heading { content, .. } => vec![content],
+      Block::Code { .. } => continue,
+    };
     for line in lines {
       collect_links(&line, own_hosts, &mut links);
     }
@@ -78,14 +82,14 @@ fn collect_links(inlines: &[Inline], own_hosts: &[String], links: &mut Vec<Strin
       return;
     }
     match inline {
-      Inline::Link(url) => {
+      Inline::Link(url) | Inline::LabeledLink { url, .. } => {
         if let Some(link) = as_permalink(url, own_hosts)
           && !links.contains(&link)
         {
           links.push(link);
         }
       },
-      Inline::Bold(inner) | Inline::Italic(inner) | Inline::Strike(inner) => {
+      Inline::Bold(inner) | Inline::Italic(inner) | Inline::Underline(inner) | Inline::Strike(inner) => {
         collect_links(inner, own_hosts, links);
       },
       Inline::Text(_) | Inline::Code(_) | Inline::Mention(_) => {},
@@ -120,6 +124,11 @@ mod tests {
     assert_eq!(
       links("**https://Chat.Example.com/s/1/c/2**"),
       Vec::<String>::new()
+    );
+    assert_eq!(links("- [the plan](teamcraft:/c/2/m/3)"), ["teamcraft:/c/2/m/3"]);
+    assert_eq!(
+      links("> https://chat.example.com/c/2/m/4"),
+      ["teamcraft:/c/2/m/4"]
     );
   }
 
