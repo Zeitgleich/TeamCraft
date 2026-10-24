@@ -17,6 +17,7 @@ use teamcraft_server::auth::{
 };
 use teamcraft_server::brand::{BrandInputs, BrandStore};
 use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig};
+use teamcraft_server::drain::Drain;
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
@@ -146,11 +147,13 @@ async fn run() -> anyhow::Result<()> {
     hub: Arc::new(Hub::new(HubOptions {
       resume_window: Duration::from_secs(config.gateway.resume_window_secs),
       buffer_events: config.gateway.resume_buffer_events,
+      buffer_bytes: config.gateway.resume_buffer_bytes,
       max_sessions_per_device: config.gateway.max_sessions_per_device,
       max_sessions_per_user: config.gateway.max_sessions_per_user,
       attention_lease: Duration::from_secs(config.notifications.attention_lease_secs),
     })),
     rendezvous: Arc::new(RendezvousHub::new(&config.rendezvous)),
+    drain: Arc::default(),
     maybe_blob_store: config
       .storage
       .as_ref()
@@ -260,14 +263,36 @@ async fn run() -> anyhow::Result<()> {
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
   info!(addr = %config.server.listen_addr, "teamcraft-server listening");
+  let drain = state.drain.clone();
+  let drain_timeout = Duration::from_secs(config.gateway.drain_timeout_secs);
   axum::serve(
     listener,
     router(state).into_make_service_with_connect_info::<SocketAddr>(),
   )
-  .with_graceful_shutdown(shutdown_signal())
+  .with_graceful_shutdown(begin_drain(drain.clone()))
   .await?;
-  info!("shut down");
+  // Upgraded WebSockets outlive the HTTP server: give them a bounded time to send their 1012.
+  let open_sockets = drain.open_sockets();
+  if drain.wait_closed(drain_timeout).await {
+    info!(open_sockets, "shut down");
+  } else {
+    warn!(
+      left_open = drain.open_sockets(),
+      "shut down before every WebSocket was closed"
+    );
+  }
   Ok(())
+}
+
+/// Resolves on SIGTERM or Ctrl-C after starting the drain: readiness fails at once and every
+/// gateway and relay socket is closed with 1012, while the HTTP server finishes what it serves.
+async fn begin_drain(drain: Arc<Drain>) {
+  shutdown_signal().await;
+  info!(
+    open_sockets = drain.open_sockets(),
+    "shutting down, closing WebSockets"
+  );
+  drain.begin();
 }
 
 /// Connects to Postgres, waiting up to `startup_wait_secs` while it is unreachable (it may be

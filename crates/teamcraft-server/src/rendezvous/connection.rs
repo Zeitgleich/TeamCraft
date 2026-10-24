@@ -6,6 +6,7 @@ use tokio::time::{Instant, sleep_until, timeout};
 use tracing::debug;
 
 use super::hub::{JoinError, RelayError, Signal};
+use crate::drain::CLOSE_SERVICE_RESTART;
 use crate::services::accounts;
 use crate::state::AppState;
 
@@ -15,6 +16,8 @@ const ID_HEX_CHARS: usize = 32;
 
 /// Runs one device's side of a rendezvous: join, relay binary frames, end.
 pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
+  // Counted until the task ends, so a shutdown waits for the close frame (bounded).
+  let _socket = state.drain.track();
   let config = state.settings.get().rendezvous.clone();
   let first = timeout(
     Duration::from_secs(config.join_timeout_secs),
@@ -108,6 +111,11 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
         }
         None => break,
       },
+      () = state.drain.started() => {
+        // Linking starts over against the restarted server; the devices see why.
+        close(&mut socket, CLOSE_SERVICE_RESTART, "server restarting").await;
+        break;
+      }
       () = sleep_until(expires) => {
         let _ = send(&mut socket, &RendezvousServerMessage::Expired).await;
         close(&mut socket, CLOSE_NORMAL, "expired").await;

@@ -163,15 +163,19 @@ max_meeting_mails_per_user_per_hour = 200
 heartbeat_interval_secs = 30
 # A connection without any frame for this long is closed.
 heartbeat_timeout_secs = 90
-# How long a disconnected session can still be resumed, and how many events are kept for it.
+# How long a disconnected session can still be resumed, and how many events (and bytes of them) are
+# kept for it. Events are shared between sessions; a connection that falls further behind is dropped.
 resume_window_secs = 120
 resume_buffer_events = 1000
+resume_buffer_bytes = 16777216
 identify_timeout_secs = 10
 # Connections are closed after this long so a fresh token is checked; clients resume.
 connection_max_age_secs = 3600
 # A device that disconnected only counts as offline after this grace period.
 presence_offline_grace_secs = 5
 max_frame_bytes = 65536
+# On SIGTERM: how long to wait for open WebSockets to take their close frame (1012) before exiting.
+drain_timeout_secs = 10
 
 # Relay that connects two devices of one user while linking a new device (/api/v1/rendezvous).
 [rendezvous]

@@ -497,11 +497,13 @@ impl TestApp {
       hub: Arc::new(Hub::new(HubOptions {
         resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
         buffer_events: settings.gateway.resume_buffer_events,
+        buffer_bytes: settings.gateway.resume_buffer_bytes,
         max_sessions_per_device: settings.gateway.max_sessions_per_device,
         max_sessions_per_user: settings.gateway.max_sessions_per_user,
         attention_lease: Duration::from_secs(settings.notifications.attention_lease_secs),
       })),
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
+      drain: Arc::default(),
       maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
       maybe_calls: maybe_calls.map(Arc::new),
       maybe_meetings: maybe_meetings.map(Arc::new),
@@ -570,6 +572,18 @@ impl TestApp {
     self.state = state;
     self.serve();
     self.retry_workers = spawn_retry_workers(&self.state);
+  }
+
+  /// Ends a shutdown the test began with `state.drain.begin()`: waits (at most `limit`) for the
+  /// WebSockets to close, then serves again on a new address with a fresh drain. Unlike a real
+  /// restart the gateway hub stays in memory, so tests can show that drained sessions resume.
+  /// Returns whether every socket closed in time.
+  pub async fn restart_after_drain(&mut self, limit: Duration) -> bool {
+    let closed = self.state.drain.wait_closed(limit).await;
+    self.server.abort();
+    self.state.drain = Arc::default();
+    self.serve();
+    closed
   }
 
   /// `true` if the table (e.g. a message partition) exists.

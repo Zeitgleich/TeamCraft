@@ -300,6 +300,10 @@ pub struct GatewayConfig {
   pub resume_window_secs: u64,
   /// Events kept per session for resuming.
   pub resume_buffer_events: usize,
+  /// Bytes of events one session keeps for resuming. Events are serialized once and shared by
+  /// every session, so this bounds what one stalled or disconnected session keeps alive; a
+  /// connection that falls further behind is dropped (it syncs afresh).
+  pub resume_buffer_bytes: usize,
   /// Time a new connection has to identify.
   pub identify_timeout_secs: u64,
   /// Connections are closed after this long so that a fresh token is checked; clients resume.
@@ -317,6 +321,9 @@ pub struct GatewayConfig {
   pub max_sessions_per_device: usize,
   /// Sessions one user may have in total.
   pub max_sessions_per_user: usize,
+  /// On SIGTERM, how long the server waits for its WebSockets to take their close frame (1012)
+  /// before it exits.
+  pub drain_timeout_secs: u64,
 }
 
 /// S3-compatible blob storage (Garage in development). Everything stored there is encrypted by the
@@ -1322,6 +1329,7 @@ impl Default for GatewayConfig {
       heartbeat_timeout_secs: 90,
       resume_window_secs: 120,
       resume_buffer_events: 1000,
+      resume_buffer_bytes: 16 * 1024 * 1024,
       identify_timeout_secs: 10,
       connection_max_age_secs: 3600,
       presence_offline_grace_secs: 5,
@@ -1330,6 +1338,7 @@ impl Default for GatewayConfig {
       client_frame_burst: 60,
       max_sessions_per_device: 4,
       max_sessions_per_user: 32,
+      drain_timeout_secs: 10,
     }
   }
 }
