@@ -515,6 +515,9 @@ impl TestApp {
         })
         .unwrap(),
       ),
+      image_decodes: Arc::new(tokio::sync::Semaphore::new(
+        settings.limits.max_concurrent_image_decodes.max(1),
+      )),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 

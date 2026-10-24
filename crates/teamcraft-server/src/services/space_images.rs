@@ -7,12 +7,14 @@
 //! may see the space may download it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use image::{ImageFormat, ImageReader, Limits};
 use serde_json::json;
 use teamcraft_db::StoredSpaceImage;
 use teamcraft_proto::{AttachmentId, GatewayEvent, Id, Permission, SpaceId, SpaceResponse};
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 use super::access::{load_space, require};
@@ -28,8 +30,12 @@ use crate::storage::BlobStore;
 pub const MAX_SPACE_IMAGE_SIDE: u32 = 512;
 /// The only type the server stores and serves.
 pub const SPACE_IMAGE_CONTENT_TYPE: &str = "image/png";
-/// Uploads with more pixels than this are not decoded (decompression bombs).
+/// Uploads wider or taller than this are not decoded (decompression bombs).
+const MAX_SOURCE_SIDE: u32 = 4096;
+/// Uploads with more pixels than this are not decoded.
 const MAX_SOURCE_PIXELS: u64 = 4096 * 4096;
+/// What a busy server asks the client to wait before retrying.
+const BUSY_RETRY_AFTER_SECS: u64 = 2;
 /// Memory the decoder may allocate.
 const MAX_DECODER_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -63,17 +69,27 @@ pub async fn put_space_image(
 ) -> Result<SpaceResponse, ApiError> {
   let access = load_space(state, caller, id).await?;
   require(state, caller, Permission::ManageSpaceProperties, &access.target())?;
-  let max_bytes = state.settings.get().limits.max_space_image_bytes;
-  if bytes.is_empty() || bytes.len() as u64 > max_bytes {
+  let (max_bytes, timeout) = {
+    let limits = &state.settings.get().limits;
+    (
+      limits.max_space_image_bytes,
+      Duration::from_secs(limits.image_decode_timeout_secs),
+    )
+  };
+  if bytes.is_empty() {
+    return Err(ApiError::InvalidRequest("the picture is empty".into()));
+  }
+  if bytes.len() as u64 > max_bytes {
     return Err(ApiError::PayloadTooLarge(format!(
-      "space pictures are 1 to {max_bytes} bytes"
+      "space pictures are at most {max_bytes} bytes"
     )));
   }
   let declared_type = declared_type.to_owned();
-  let png = tokio::task::spawn_blocking(move || sanitize(&bytes, &declared_type))
-    .await
-    .map_err(|error| ApiError::Internal(format!("re-encoding the picture failed: {error}")))?
-    .map_err(|error| ApiError::InvalidRequest(error.to_string()))?;
+  let png = run_limited(&state.image_decodes, timeout, move || {
+    sanitize(&bytes, &declared_type)
+  })
+  .await?
+  .map_err(|error| ApiError::InvalidRequest(error.to_string()))?;
   if png.len() as u64 > max_bytes {
     return Err(ApiError::PayloadTooLarge(format!(
       "the re-encoded picture is larger than {max_bytes} bytes"
@@ -161,15 +177,11 @@ pub fn sanitize(bytes: &[u8], declared_type: &str) -> Result<Vec<u8>, SpaceImage
     Some("image/svg+xml") => return Err(SpaceImageError::Svg),
     _ => return Err(SpaceImageError::UnsupportedType),
   };
-  let (width, height) = reader(bytes, format)
-    .into_dimensions()
-    .map_err(|_| SpaceImageError::Undecodable)?;
+  let (width, height) = reader(bytes, format).into_dimensions().map_err(decode_error)?;
   if u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS {
     return Err(SpaceImageError::TooManyPixels);
   }
-  let mut picture = reader(bytes, format)
-    .decode()
-    .map_err(|_| SpaceImageError::Undecodable)?;
+  let mut picture = reader(bytes, format).decode().map_err(decode_error)?;
   if width > MAX_SPACE_IMAGE_SIDE || height > MAX_SPACE_IMAGE_SIDE {
     picture = picture.thumbnail(MAX_SPACE_IMAGE_SIDE, MAX_SPACE_IMAGE_SIDE);
   }
@@ -180,12 +192,57 @@ pub fn sanitize(bytes: &[u8], declared_type: &str) -> Result<Vec<u8>, SpaceImage
   Ok(out.into_inner())
 }
 
+/// Runs `job` on the blocking pool, at most as many at once as `permits` has, for at most
+/// `timeout`. Busy (503 with `Retry-After`) when all permits are taken or the job takes too long.
+/// A job that times out keeps its permit until it really ends, so slow decodes can't pile up.
+pub async fn run_limited<T: Send + 'static>(
+  permits: &Arc<Semaphore>,
+  timeout: Duration,
+  job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+  let busy = ApiError::Busy {
+    what: "picture processing",
+    retry_after_secs: BUSY_RETRY_AFTER_SECS,
+  };
+  let Ok(permit) = Arc::clone(permits).try_acquire_owned() else {
+    return Err(busy);
+  };
+  let task = tokio::task::spawn_blocking(move || {
+    let result = job();
+    drop(permit);
+    result
+  });
+  match tokio::time::timeout(timeout, task).await {
+    Ok(Ok(result)) => Ok(result),
+    Ok(Err(error)) => Err(ApiError::Internal(format!(
+      "re-encoding the picture failed: {error}"
+    ))),
+    Err(_) => {
+      warn!(
+        timeout_secs = timeout.as_secs(),
+        "decoding a picture took too long"
+      );
+      Err(busy)
+    },
+  }
+}
+
 fn reader(bytes: &[u8], format: ImageFormat) -> ImageReader<std::io::Cursor<&[u8]>> {
   let mut reader = ImageReader::with_format(std::io::Cursor::new(bytes), format);
   let mut limits = Limits::default();
+  limits.max_image_width = Some(MAX_SOURCE_SIDE);
+  limits.max_image_height = Some(MAX_SOURCE_SIDE);
   limits.max_alloc = Some(MAX_DECODER_BYTES);
   reader.limits(limits);
   reader
+}
+
+/// A decoder that hit [`Limits`] refused the size; anything else is a broken file.
+fn decode_error(error: image::ImageError) -> SpaceImageError {
+  match error {
+    image::ImageError::Limits(_) => SpaceImageError::TooManyPixels,
+    _ => SpaceImageError::Undecodable,
+  }
 }
 
 async fn announce(
@@ -292,19 +349,88 @@ mod tests {
   }
 
   #[test]
-  fn a_png_claiming_huge_dimensions_is_not_decoded() {
-    // A valid header announcing 20000×20000 pixels; the body is never reached.
-    let mut png = encoded(1, 1, ImageFormat::Png);
-    png[16..20].copy_from_slice(&20_000u32.to_be_bytes());
-    png[20..24].copy_from_slice(&20_000u32.to_be_bytes());
-    let result = sanitize(&png, "image/png");
-    assert!(
-      matches!(
-        result,
-        Err(SpaceImageError::TooManyPixels | SpaceImageError::Undecodable)
-      ),
-      "{result:?}"
-    );
+  fn pngs_claiming_huge_dimensions_are_not_decoded() {
+    // Valid headers (correct CRC) announcing too many pixels; the body is never reached.
+    for (width, height) in [
+      (20_000, 20_000),
+      (MAX_SOURCE_SIDE + 1, 1),
+      (1, MAX_SOURCE_SIDE + 1),
+    ] {
+      let png = with_dimensions(&encoded(1, 1, ImageFormat::Png), width, height);
+      assert_eq!(
+        sanitize(&png, "image/png"),
+        Err(SpaceImageError::TooManyPixels),
+        "{width}×{height}"
+      );
+    }
+  }
+
+  mod limits {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_job_runs_when_a_permit_is_free() {
+      let permits = Arc::new(Semaphore::new(1));
+      let result = run_limited(&permits, Duration::from_secs(5), || 42).await;
+      assert_eq!(result.unwrap(), 42);
+      assert_eq!(permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn without_a_free_permit_the_server_is_busy() {
+      let permits = Arc::new(Semaphore::new(1));
+      let _held = Arc::clone(&permits).try_acquire_owned().unwrap();
+      let result = run_limited(&permits, Duration::from_secs(5), || 42).await;
+      assert!(
+        matches!(
+          result,
+          Err(ApiError::Busy {
+            retry_after_secs: BUSY_RETRY_AFTER_SECS,
+            ..
+          })
+        ),
+        "{result:?}"
+      );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_job_that_takes_too_long_is_busy_and_keeps_its_permit_until_it_ends() {
+      let permits = Arc::new(Semaphore::new(1));
+      let (release, wait) = std::sync::mpsc::channel::<()>();
+      // Blocks until released: it can't finish before the timeout.
+      let result = run_limited(&permits, Duration::from_secs(5), move || wait.recv().is_ok()).await;
+      assert!(matches!(result, Err(ApiError::Busy { .. })), "{result:?}");
+      assert_eq!(permits.available_permits(), 0);
+      release.send(()).unwrap();
+      drop(permits.acquire().await.unwrap());
+    }
+  }
+
+  /// `png` with other dimensions in its IHDR chunk, and the chunk's CRC fixed.
+  fn with_dimensions(png: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut png = png.to_vec();
+    assert_eq!(&png[12..16], b"IHDR");
+    png[16..20].copy_from_slice(&width.to_be_bytes());
+    png[20..24].copy_from_slice(&height.to_be_bytes());
+    let crc = crc32(&png[12..29]);
+    png[29..33].copy_from_slice(&crc.to_be_bytes());
+    png
+  }
+
+  /// CRC-32 (ISO 3309), as PNG chunks use it.
+  fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for byte in bytes {
+      crc ^= u32::from(*byte);
+      for _ in 0..8 {
+        crc = if crc & 1 == 1 {
+          (crc >> 1) ^ 0xedb8_8320
+        } else {
+          crc >> 1
+        };
+      }
+    }
+    !crc
   }
 
   fn encoded(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {

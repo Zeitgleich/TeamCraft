@@ -199,8 +199,9 @@ mod validation {
     let alice = owner();
     let space = create_space(&app, &alice, "Project A", "invite_only").await;
     let path = format!("/spaces/{space}/image");
-    let (status, _) = put_image(&app, &alice, &path, "image/png", &[]).await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // An empty body is a malformed request, not a too large one.
+    let (status, reply) = put_image(&app, &alice, &path, "image/png", &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
     let noisy = noise_png(200);
     assert!(noisy.len() > 2000);
     let (status, reply) = put_image(&app, &alice, &path, "image/png", &noisy).await;

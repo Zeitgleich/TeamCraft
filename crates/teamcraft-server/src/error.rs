@@ -45,6 +45,13 @@ pub enum ApiError {
   /// A needed backend (e.g. attachment storage) is not configured or not reachable.
   #[error("unavailable: {0}")]
   Unavailable(String),
+  /// The server is at its limit for this kind of work (e.g. image decoding); retry after this many
+  /// seconds. 503 with `Retry-After`.
+  #[error("busy: {what}, retry in {retry_after_secs} seconds")]
+  Busy {
+    what: &'static str,
+    retry_after_secs: u64,
+  },
   /// The workspace policy requires a second factor and the sign-in had none.
   #[error("multi-factor authentication is required")]
   MfaRequired,
@@ -226,7 +233,7 @@ impl ApiError {
       | Self::VersionConflict { .. } => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-      Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+      Self::Unavailable(_) | Self::Busy { .. } => StatusCode::SERVICE_UNAVAILABLE,
       Self::Database(error) if error.is_transient() => StatusCode::SERVICE_UNAVAILABLE,
       Self::ShareUnavailable => StatusCode::GONE,
       Self::LocalAccountsDisabled => StatusCode::FORBIDDEN,
@@ -256,7 +263,7 @@ impl ApiError {
       Self::VersionConflict { .. } => ErrorCode::VersionConflict,
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
       Self::RateLimited { .. } => ErrorCode::RateLimited,
-      Self::Unavailable(_) => ErrorCode::Unavailable,
+      Self::Unavailable(_) | Self::Busy { .. } => ErrorCode::Unavailable,
       Self::Database(error) if error.is_transient() => ErrorCode::Unavailable,
       Self::Database(_) | Self::Internal(_) => ErrorCode::Internal,
     }
@@ -269,6 +276,7 @@ impl ApiError {
       Self::Database(error) if error.is_transient() => "the service is busy, try again".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
       Self::Unavailable(_) => "the service is not available".into(),
+      Self::Busy { .. } => "the service is busy, try again".into(),
       other => other.to_string(),
     }
   }
@@ -289,7 +297,7 @@ impl IntoResponse for ApiError {
       _ => {},
     }
     let mut response = (self.status(), Json(body)).into_response();
-    if let Self::RateLimited { retry_after_secs } = &self {
+    if let Self::RateLimited { retry_after_secs } | Self::Busy { retry_after_secs, .. } = &self {
       response
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from(*retry_after_secs));
@@ -348,8 +356,24 @@ mod tests {
   }
 
   #[test]
+  fn a_busy_server_answers_503_with_retry_after() {
+    let response = ApiError::Busy {
+      what: "image decoding",
+      retry_after_secs: 2,
+    }
+    .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+  }
+
+  #[test]
   fn domain_errors_map_to_status_and_code() {
     let cases = [
+      (
+        ApiError::space_image_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::SpaceImageNotFound,
+      ),
       (
         ApiError::InvalidKeyPackage("expired".into()),
         StatusCode::BAD_REQUEST,

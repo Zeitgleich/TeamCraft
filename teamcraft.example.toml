@@ -115,6 +115,10 @@ max_avatar_bytes = 1048576
 # Largest space picture in bytes. Uploads (PNG, JPEG or WebP; no SVG) are re-encoded as PNG of at
 # most 512×512 pixels; the limit applies to the result.
 max_space_image_bytes = 1048576
+# Space pictures decoded at the same time (read at start; more uploads get 503 with Retry-After), and
+# how long one decode may take before the upload is answered 503.
+max_concurrent_image_decodes = 2
+image_decode_timeout_secs = 5
 # A user's own call background pictures: largest picture, and how many one user may keep.
 max_background_bytes = 8388608
 max_backgrounds_per_user = 24

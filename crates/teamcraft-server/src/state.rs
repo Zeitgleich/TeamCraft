@@ -71,6 +71,8 @@ pub struct AppState {
   pub rate_limits: Arc<RateLimits>,
   /// The brands and the host names that select them.
   pub brands: Arc<BrandStore>,
+  /// Permits for decoding uploaded pictures (`limits.max_concurrent_image_decodes`).
+  pub image_decodes: Arc<tokio::sync::Semaphore>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
