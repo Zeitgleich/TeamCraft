@@ -105,14 +105,8 @@ fn open_spaces(state: AppState) {
   });
   match maybe_space {
     Some(space) => state.open_space(space),
-    None => {
-      let has_joinable = state.read(|backend| !backend.joinable_spaces().is_empty());
-      state.overlay.set(if has_joinable {
-        Overlay::JoinSpace
-      } else {
-        Overlay::NewSpace
-      });
-    },
+    // Browsing lists the open spaces to join and has the button to create a new one.
+    None => state.overlay.set(Overlay::BrowseSpaces(None)),
   }
 }
 

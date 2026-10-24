@@ -517,6 +517,12 @@ fn ChannelHeader(
   });
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
+  // Channels take people in from the header; direct messages start a new group instead.
+  let is_channel = move || {
+    info
+      .get()
+      .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+  };
   let members_open = move || state.panel.get() == SidePanel::Members;
 
   view! {
@@ -587,6 +593,16 @@ fn ChannelHeader(
       </div>
       <div class="header-actions">
         <CallButtons conversation=conversation info=info />
+        <Show when=is_channel fallback=|| ()>
+          <button
+            class="header-btn"
+            aria-label=move || i18n.t("channel-add-people")
+            title=move || i18n.t("channel-add-people")
+            on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))
+          >
+            <Icon name=IconName::UserPlus />
+          </button>
+        </Show>
         <ConversationMore conversation=conversation tab=tab info=info />
         <button
           class="header-btn"

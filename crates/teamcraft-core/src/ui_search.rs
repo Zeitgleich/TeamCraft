@@ -340,6 +340,9 @@ mod tests {
       maybe_brand_id: None,
       maybe_my_role: Some(teamcraft_proto::SpaceRole::Member),
       maybe_my_notifications: None,
+      member_count: 1,
+      can_add_members: false,
+      can_invite_guests: false,
     };
     records::put_json(&store, Table::Spaces, &space.to_string(), &project).unwrap();
     let conversation = ConversationResponse {

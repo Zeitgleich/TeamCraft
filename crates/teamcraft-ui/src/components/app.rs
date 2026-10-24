@@ -48,6 +48,7 @@ use crate::components::security_ui::{
 use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::settings_tabs::apply_call_prefs;
 use crate::components::sidebar::Sidebar;
+use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
 use crate::components::status_menu::CustomStatusDialog;
 use crate::components::status_menu::StatusMenu;
 use crate::components::storage_banner::StorageBanner;
@@ -57,8 +58,7 @@ use crate::components::top_bar::TopBar;
 use crate::components::update_notice::UpdateNotice;
 use crate::components::window_controls::{WindowControls, provide_window_chrome};
 use crate::components::workspace_dialogs::{
-  BrowseChannelsDialog, ChannelSettingsDialog, JoinSpaceDialog, NewChannelDialog, NewSpaceDialog,
-  SpaceSettingsDialog,
+  BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
 };
 use crate::history::{Travel, travel};
 use crate::i18n::{provide_i18n, use_i18n};
@@ -325,7 +325,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Lightbox(conversation, start) => view! { <Lightbox conversation=conversation start=start /> }.into_any(),
         Overlay::NewSpace => view! { <NewSpaceDialog /> }.into_any(),
         Overlay::NewMessage => view! { <NewMessageDialog /> }.into_any(),
-        Overlay::JoinSpace => view! { <JoinSpaceDialog /> }.into_any(),
+        Overlay::BrowseSpaces(maybe_highlight) => view! { <BrowseSpacesDialog maybe_highlight=maybe_highlight /> }.into_any(),
+        Overlay::InvitePeople(space) => view! { <InvitePeopleDialog space=space /> }.into_any(),
+        Overlay::AddToChannel(conversation) => view! { <AddToChannelDialog conversation=conversation /> }.into_any(),
         Overlay::NewChannel(space) => view! { <NewChannelDialog space=space /> }.into_any(),
         Overlay::BrowseChannels(space) => view! { <BrowseChannelsDialog space=space /> }.into_any(),
         Overlay::ChannelSettings(id) => view! { <ChannelSettingsDialog conversation=id /> }.into_any(),

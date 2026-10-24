@@ -653,7 +653,7 @@ fn first_line(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-  use crate::model::{Message, MessageKind, PresenceStatus, SidebarCategory, id_from_raw};
+  use crate::model::{JoinPolicy, Message, MessageKind, PresenceStatus, SidebarCategory, id_from_raw};
 
   use super::*;
 
@@ -786,6 +786,9 @@ mod tests {
       id: id_from_raw(31),
       name: "Sales team".into(),
       maybe_description: None,
+      hue: 0,
+      maybe_image_version: None,
+      member_count: 3,
     }];
     let found = matching_spaces("sales", &[space(30, "Sales")], &joinable);
     assert!(matches!(&found[0], SwitcherItem::Space(space) if space.name == "Sales"));
@@ -835,6 +838,11 @@ mod tests {
       maybe_image_version: None,
       unread_count: 0,
       mention_count: 0,
+      maybe_description: None,
+      member_count: 0,
+      join_policy: JoinPolicy::InviteOnly,
+      can_add_members: false,
+      can_invite_guests: false,
     }
   }
 

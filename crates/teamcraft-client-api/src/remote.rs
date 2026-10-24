@@ -614,6 +614,11 @@ pub enum ChatAction {
   InviteToSpace {
     invite: SpaceInvite,
   },
+  AddSpaceMembers {
+    space: SpaceId,
+    users: Vec<UserId>,
+    is_guest: bool,
+  },
   SetThreadFollowed {
     conversation: ConversationId,
     thread: ThreadId,
@@ -764,6 +769,11 @@ impl ChatAction {
         bookmarks,
       } => backend.set_bookmarks(conversation, bookmarks),
       Self::InviteToSpace { invite } => backend.invite_to_space(invite),
+      Self::AddSpaceMembers {
+        space,
+        users,
+        is_guest,
+      } => backend.add_space_members(space, users, is_guest),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
       Self::DeleteSavedSearch { id } => backend.delete_saved_search(id),
       original => return Some(original),

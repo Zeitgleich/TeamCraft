@@ -173,8 +173,13 @@ pub enum Overlay {
   NewSpace,
   /// Pick one or several people to write to (a DM or a group DM).
   NewMessage,
-  /// Open spaces to join, and the way to create a new one.
-  JoinSpace,
+  /// Open spaces to join and the user's own spaces, and the way to create a new one; a shared
+  /// space link puts its space first.
+  BrowseSpaces(Option<SpaceId>),
+  /// Invite people to a space: from the directory, by e-mail, or with the link of an open space.
+  InvitePeople(SpaceId),
+  /// Add people to a channel (through its encryption group).
+  AddToChannel(ConversationId),
   NewChannel(SpaceId),
   BrowseChannels(SpaceId),
   ChannelSettings(ConversationId),
@@ -1331,6 +1336,17 @@ impl AppState {
       Route::Home => self.open_home(),
       Route::Space(space) => {
         if !self.read(|backend| backend.spaces().iter().any(|candidate| candidate.id == space)) {
+          // The link of an open space the user isn't in yet: offer to join it.
+          if self.read(|backend| {
+            backend
+              .joinable_spaces()
+              .iter()
+              .any(|candidate| candidate.id == space)
+          }) {
+            self.open_start();
+            self.overlay.set(Overlay::BrowseSpaces(Some(space)));
+            return RouteOutcome::Shown;
+          }
           return RouteOutcome::Waiting;
         }
         self.space.set(space);
@@ -1633,6 +1649,18 @@ mod tests {
       state.follow_route(Route::Direct(dm));
       assert_eq!(state.overlay.get(), Overlay::None);
       assert_eq!(state.route(), Route::Direct(dm));
+    }
+
+    #[test]
+    fn the_link_of_an_open_space_offers_to_join_it() {
+      let state = test_state();
+      let open = state
+        .read(|backend| backend.joinable_spaces())
+        .first()
+        .map(|space| space.id)
+        .expect("demo data has an open space to join");
+      assert_eq!(state.follow_route(Route::Space(open)), RouteOutcome::Shown);
+      assert_eq!(state.overlay.get_untracked(), Overlay::BrowseSpaces(Some(open)));
     }
 
     #[test]

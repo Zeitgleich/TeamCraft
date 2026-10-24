@@ -13,6 +13,7 @@ mod acceptance_notifications;
 mod acceptance_people;
 mod acceptance_presence;
 mod acceptance_search;
+mod acceptance_space_invites;
 mod acceptance_spaces;
 mod acceptance_threads;
 mod accounts;

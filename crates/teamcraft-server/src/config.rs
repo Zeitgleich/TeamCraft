@@ -524,7 +524,8 @@ pub struct MailConfig {
   pub smtp: Option<SmtpConfig>,
   /// Public base URL of the web client, without trailing slash; the link in invitation e-mail.
   pub public_base_url: String,
-  /// Placeholders of both texts: `{inviter}`, `{space}`, `{role}` and `{url}`.
+  /// Placeholders of both texts: `{inviter}`, `{space}`, `{role}` and `{url}`. The body may also
+  /// place `{message}`, the inviter's personal note; without it the note is quoted below the text.
   pub invite_subject: String,
   pub invite_body: String,
   /// Activation e-mail of local guest accounts. Placeholders: `{inviter}`, `{space}` and `{url}`

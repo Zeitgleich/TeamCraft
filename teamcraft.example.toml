@@ -545,6 +545,7 @@ is_enabled = true
 # public_base_url = "https://chat.example.com"
 # invite_subject = "{inviter} invited you to {space}"
 # invite_body = "{inviter} invited you to \"{space}\" as {role}.\n\nSign in with this e-mail address to join: {url}\n"
+# The body may place {message}, the inviter's optional personal note; otherwise it is quoted below.
 # [mail.smtp]
 # host = "smtp.example.com"
 # port = 587
