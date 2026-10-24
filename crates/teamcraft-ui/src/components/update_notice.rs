@@ -10,7 +10,7 @@ use teamcraft_client_api::updates::{
 use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
-use crate::reactive::use_interval_while_visible;
+use crate::reactive::{SetIfAlive, use_interval_while_visible};
 
 /// The shell's event when the status changed (`updates::UPDATE_CHANGED_EVENT`).
 const UPDATE_CHANGED_EVENT: &str = "update-changed";
@@ -72,7 +72,7 @@ pub fn UpdatesSection() -> impl IntoView {
       }
     });
     leptos::task::spawn_local(async move {
-      error.set(tauri::update_set_preference(preference).await.err());
+      error.set_if_alive(tauri::update_set_preference(preference).await.err());
     });
   };
   let is_managed = move || {
@@ -121,7 +121,7 @@ pub fn UpdatesSection() -> impl IntoView {
         class="btn"
         prop:disabled=move || is_managed() || status.get().is_some_and(|current| current.preference == UpdatePreference::Off)
         on:click=move |_| {
-          leptos::task::spawn_local(async move { error.set(tauri::update_check().await.err()) });
+          leptos::task::spawn_local(async move { error.set_if_alive(tauri::update_check().await.err()) });
         }
       >
         {move || i18n.t("settings-update-check")}
@@ -139,7 +139,7 @@ fn use_update_status() -> RwSignal<Option<UpdateStatus>> {
   }
   let refresh = move || {
     leptos::task::spawn_local(async move {
-      status.set(tauri::update_status().await);
+      status.set_if_alive(tauri::update_status().await);
     });
   };
   refresh();
@@ -277,8 +277,8 @@ fn run(
   command: impl std::future::Future<Output = Result<(), String>> + 'static,
 ) {
   leptos::task::spawn_local(async move {
-    error.set(command.await.err());
-    status.set(tauri::update_status().await);
+    error.set_if_alive(command.await.err());
+    status.set_if_alive(tauri::update_status().await);
   });
 }
 

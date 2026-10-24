@@ -15,7 +15,7 @@ use crate::meetings::{
   ExternalInvitee, FormError, MeetingsHub, Repeat, ScheduleForm, hosts_lobby, is_over, my_rsvp,
 };
 use crate::model::{ConversationId, UserId};
-use crate::reactive::use_interval_while_visible;
+use crate::reactive::{SetIfAlive, use_interval_while_visible};
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// How often the list and the lobbies are reloaded while the screen is open and visible (guests
@@ -48,7 +48,7 @@ pub fn MeetingsView() -> impl IntoView {
       if let Some(meeting) = hub.run(me, now_ms(), client.start_instant(None, key)).await {
         join_meeting(state, i18n, meeting.conversation_id);
       }
-      is_starting.set(false);
+      is_starting.set_if_alive(false);
     });
   };
 
@@ -160,8 +160,8 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let make_guest_link = move |_| {
     spawn_local(async move {
       match hub.client().guest_link(id, None).await {
-        Ok(link) => guest_link.set(Some(link.join_url)),
-        Err(error) => hub.maybe_error.set(Some(error.to_string())),
+        Ok(link) => guest_link.set_if_alive(Some(link.join_url)),
+        Err(error) => hub.maybe_error.set_if_alive(Some(error.to_string())),
       }
     });
   };
@@ -402,7 +402,7 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
           if hub.run(me, now_ms(), client.create(&request)).await.is_some() {
             state.close_overlay();
           }
-          is_saving.set(false);
+          is_saving.set_if_alive(false);
         });
       },
     }

@@ -59,6 +59,7 @@ pub mod message_row;
 pub mod modal;
 pub mod offline_banner;
 pub mod org_badge;
+pub mod pending_button;
 pub mod profile_views;
 pub mod quick_switcher;
 pub mod rail;

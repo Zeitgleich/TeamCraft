@@ -9,8 +9,10 @@ use leptos::prelude::*;
 
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, SpaceId};
+use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::state::use_app_state;
 
 /// After this long without the channel showing up, "Join channel" can be pressed again.
@@ -38,10 +40,23 @@ pub fn ChannelPreview(space: SpaceId, channel: ConversationId) -> impl IntoView 
       state.open_conversation(channel);
     }
   });
+  let pending = PendingAction::new();
   let join = move |_| {
     is_joining.set(true);
     state.pending_open.set(Some(channel));
-    state.write(|backend| backend.join_channel(channel));
+    // A refused join shows its error (issue #322) and forgets the open it prepared: otherwise a
+    // later join from elsewhere (slash command, invite) jumps into the channel (issue #328).
+    pending.run_or_else(
+      || state.write(|backend| backend.join_channel(channel)),
+      move |_| {
+        state.pending_open.update_if_alive(|maybe_open| {
+          if *maybe_open == Some(channel) {
+            *maybe_open = None;
+          }
+        });
+        is_joining.set_if_alive(false);
+      },
+    );
     // A join that never lands (offline, refused) must not leave the button stuck. A preview that
     // closed in the meantime has nothing to reset.
     set_timeout(

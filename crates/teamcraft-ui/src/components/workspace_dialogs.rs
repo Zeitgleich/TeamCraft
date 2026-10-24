@@ -18,9 +18,12 @@ use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::composer_commands::left_text;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::pending_button::PendingButton;
 use crate::components::space_tile::SpaceTile;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, SpaceId, UserId, hue_from_hex};
+use crate::reactive::SetIfAlive;
 use crate::space_images::{ImagePickError, check_pick, prepare_upload, use_space_images};
 use crate::state::{Overlay, use_app_state};
 
@@ -542,21 +545,21 @@ fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
   let is_saved = RwSignal::new(false);
   spawn_local(async move {
     if let Ok(loaded) = hub.retention(conversation).await {
-      days.set(
+      days.set_if_alive(
         loaded
           .own
           .maybe_max_age_days
           .map(|value| value.to_string())
           .unwrap_or_default(),
       );
-      messages.set(
+      messages.set_if_alive(
         loaded
           .own
           .maybe_max_messages
           .map(|value| value.to_string())
           .unwrap_or_default(),
       );
-      status.set(Some(loaded));
+      status.set_if_alive(Some(loaded));
     }
   });
   let save = move |ev: leptos::ev::SubmitEvent| {
@@ -573,12 +576,12 @@ fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
     spawn_local(async move {
       match hub.set_retention(conversation, setting).await {
         Ok(saved) => {
-          status.set(Some(saved));
-          is_saved.set(true);
+          status.set_if_alive(Some(saved));
+          is_saved.set_if_alive(true);
         },
         Err(error) => {
           tracing::warn!(%error, "could not save the channel retention");
-          maybe_error.set(Some("retention-error-refused"));
+          maybe_error.set_if_alive(Some("retention-error-refused"));
         },
       }
     });
@@ -674,6 +677,7 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
   let i18n = use_i18n();
   let chosen = RwSignal::new(String::new());
   let shares_history = RwSignal::new(false);
+  let pending = PendingAction::new();
   let candidates = Memo::new(move |_| {
     let members = state
       .read(|backend| backend.conversation(conversation))
@@ -694,13 +698,14 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
     } else {
       HistoryPolicy::FromJoin
     };
-    state.write(|backend| backend.add_member_with_history(conversation, user, history));
+    // Pending until the core answered; a refusal shows as an error toast (issue #322).
+    pending.run(|| state.write(|backend| backend.add_member_with_history(conversation, user, history)));
     chosen.set(String::new());
   };
   view! {
     <h3>{move || i18n.t("channel-add-people")}</h3>
     <label class="visually-hidden" for="cs-add">{move || i18n.t("channel-add-people")}</label>
-    <select id="cs-add" class="input" on:change=move |ev| chosen.set(event_target_value(&ev))>
+    <select id="cs-add" class="input" prop:value=move || chosen.get() on:change=move |ev| chosen.set(event_target_value(&ev))>
       <option value="">{move || i18n.t("channel-pick-person")}</option>
       <For each=move || candidates.get() key=|user| user.id let:user>
         <option value=user.id.to_string() translate="no">{user.display_name.clone()}</option>
@@ -711,7 +716,9 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
       <span>{move || i18n.t("channel-share-history")}</span>
     </label>
     <p class="hint">{move || if shares_history.get() { i18n.t("channel-share-history-on") } else { i18n.t("channel-share-history-off") }}</p>
-    <button class="btn btn-primary" prop:disabled=move || chosen.get().is_empty() on:click=add>{move || i18n.t("channel-add")}</button>
+    <PendingButton pending=pending class="btn btn-primary" is_disabled=Signal::derive(move || chosen.get().is_empty()) on_click=add>
+      {move || i18n.t("channel-add")}
+    </PendingButton>
   }
 }
 
@@ -864,22 +871,22 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     status.set(ImageStatus::Busy);
     spawn_local(async move {
       let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
-        status.set(ImageStatus::Failed(ImagePickError::Unreadable.i18n_key()));
+        status.set_if_alive(ImageStatus::Failed(ImagePickError::Unreadable.i18n_key()));
         return;
       };
       let png = match prepare_upload(&js_sys::Uint8Array::new(&buffer).to_vec()) {
         Ok(png) => png,
         Err(error) => {
-          status.set(ImageStatus::Failed(error.i18n_key()));
+          status.set_if_alive(ImageStatus::Failed(error.i18n_key()));
           return;
         },
       };
       match hub.upload(space, png).await {
         Ok(updated) => {
-          shown.set(ShownImage::after(&updated));
-          status.set(ImageStatus::Idle);
+          shown.set_if_alive(ShownImage::after(&updated));
+          status.set_if_alive(ImageStatus::Idle);
         },
-        Err(failure) => status.set(ImageStatus::Failed(failure.i18n_key())),
+        Err(failure) => status.set_if_alive(ImageStatus::Failed(failure.i18n_key())),
       }
     });
   };
@@ -888,10 +895,10 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     spawn_local(async move {
       match hub.remove(space).await {
         Ok(updated) => {
-          shown.set(ShownImage::after(&updated));
-          status.set(ImageStatus::Idle);
+          shown.set_if_alive(ShownImage::after(&updated));
+          status.set_if_alive(ImageStatus::Idle);
         },
-        Err(failure) => status.set(ImageStatus::Failed(failure.i18n_key())),
+        Err(failure) => status.set_if_alive(ImageStatus::Failed(failure.i18n_key())),
       }
     });
   };

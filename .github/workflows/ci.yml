@@ -251,6 +251,8 @@ jobs:
         run: scripts/check-versions.sh
       - name: Release script tests (updater manifest, no demo data in release builds)
         run: python3 -m unittest discover -s scripts/tests -v
+      - name: UI tasks touch signals only with try_ after an await (issue #322)
+        run: scripts/check-async-signals.py
       - name: Release notes render
         run: |
           version="$(scripts/check-versions.sh)"

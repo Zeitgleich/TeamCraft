@@ -14,6 +14,7 @@ use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse, SignInInfo, SignI
 use crate::auth::{AppConfig, fetch, tauri};
 use crate::brand::Brand;
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 
 /// The sign-in page of the current server, loading in the background.
 #[derive(Clone, Copy)]
@@ -54,12 +55,12 @@ impl SignInPageState {
     spawn_local(async move {
       match fetch_server_info(&server_url).await {
         Ok((status, body)) => match parse_answer(status, &body) {
-          Some(info) => maybe_info.set(Some(info)),
+          Some(info) => maybe_info.set_if_alive(Some(info)),
           None => tracing::debug!(status, "the server-info answer is unusable; offering SSO only"),
         },
         Err(error) => tracing::debug!(%error, "could not load the sign-in page; offering SSO only"),
       }
-      is_loading.set(false);
+      is_loading.set_if_alive(false);
     });
     Self { page, is_loading }
   }

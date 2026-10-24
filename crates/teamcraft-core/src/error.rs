@@ -9,6 +9,9 @@ use teamcraft_crypto::message::MessageError;
 use teamcraft_crypto::mls::MlsError;
 use teamcraft_proto::{ConversationId, DeviceId, UserId};
 
+#[cfg(feature = "ui")]
+use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+
 use crate::api::ApiError;
 use crate::store::StoreError;
 
@@ -139,6 +142,20 @@ impl CoreError {
   pub fn is_sign_in_required(&self) -> bool {
     matches!(self, Self::Api(error) if error.is_sign_in_required())
   }
+
+  /// The failure as the UI words it (issue #322): the server's error code, an unreachable server,
+  /// or anything else with this error's text as the detail.
+  #[cfg(feature = "ui")]
+  pub fn to_failure(&self) -> ActionFailure {
+    let kind = match self {
+      Self::Api(ApiError::Network(_)) => FailureKind::Network,
+      Self::Api(error) => error
+        .error_code()
+        .map_or(FailureKind::Other, |code| FailureKind::Server(code.clone())),
+      _ => FailureKind::Other,
+    };
+    ActionFailure::new(kind, self.to_string())
+  }
 }
 
 #[cfg(test)]
@@ -155,6 +172,25 @@ mod tests {
         .to_string()
         .starts_with("roster_changed:")
     );
+  }
+
+  #[cfg(feature = "ui")]
+  #[test]
+  fn failures_keep_the_server_code_and_tell_network_errors_apart() {
+    use teamcraft_client_api::failure::FailureKind;
+
+    let refused = CoreError::Api(ApiError::status(
+      400,
+      ErrorCode::NotSpaceMember,
+      "not in the space",
+    ));
+    assert_eq!(
+      refused.to_failure().kind,
+      FailureKind::Server(ErrorCode::NotSpaceMember)
+    );
+    let offline = CoreError::Api(ApiError::Network("offline".into()));
+    assert_eq!(offline.to_failure().kind, FailureKind::Network);
+    assert_eq!(CoreError::NotEnrolled.to_failure().kind, FailureKind::Other);
   }
 
   #[test]

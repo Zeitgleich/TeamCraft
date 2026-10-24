@@ -19,6 +19,7 @@ use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
 use crate::model::{ConversationKind, MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
+use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
 use crate::state::use_app_state;
@@ -224,14 +225,16 @@ pub fn Composer(
     let generation = draft_generation.get_untracked();
     set_timeout(
       move || {
-        if draft_generation.get_untracked() != generation {
+        // The composer may be gone by then (another channel opened); `try_*` then skips the save.
+        if draft_generation.try_get_untracked() != Some(generation) {
           return;
         }
         let text = input
-          .get_untracked()
+          .try_get_untracked()
+          .flatten()
           .map(|element| element.value())
           .unwrap_or_default();
-        state.write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+        state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
       },
       DRAFT_SAVE_DELAY,
     );
@@ -579,7 +582,7 @@ pub fn Composer(
               .starts_with("image/")
               .then(|| web_sys::Url::create_object_url_with_blob(&file).ok())
               .flatten();
-            attachments.update(|list| {
+            attachments.update_if_alive(|list| {
               list.push(PendingFile {
                 name: file.name(),
                 media_type,
@@ -588,7 +591,7 @@ pub fn Composer(
               })
             });
           },
-          Err(_) => upload_error.set(Some(
+          Err(_) => upload_error.set_if_alive(Some(
             i18n.t_with("composer-file-unreadable", &[("name", &file.name())]),
           )),
         }

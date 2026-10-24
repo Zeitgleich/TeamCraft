@@ -40,6 +40,8 @@ wire_enum! {
     VersionConflict => "version_conflict",
     /// A roster change would leave the workspace without an owner (admin.md §2.3).
     LastOwner => "last_owner",
+    /// A channel member must belong to the channel's space first (invite them to the space).
+    NotSpaceMember => "not_space_member",
     KeyPackageExhausted => "key_package_exhausted",
     PayloadTooLarge => "payload_too_large",
     RateLimited => "rate_limited",

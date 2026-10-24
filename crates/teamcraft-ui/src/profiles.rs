@@ -17,6 +17,7 @@ use teamcraft_proto::{
 use crate::auth::ApiMethod;
 use crate::auth::fetch::fetch;
 use crate::components::file_views::blob_url;
+use crate::reactive::UpdateIfAlive;
 use crate::rest::{RestClient, RestError};
 
 /// Largest avatar the picker accepts (the server has its own limit).
@@ -137,7 +138,7 @@ impl ProfileHub {
     spawn_local(async move {
       let path = format!("/api/v1/users/{user}/profile");
       match hub.client.get_value().get::<ProfileResponse>(&path).await {
-        Ok(profile) => hub.profiles.update(|all| {
+        Ok(profile) => hub.profiles.update_if_alive(|all| {
           all.insert(user, profile);
         }),
         Err(error) => tracing::debug!(%error, "profile not loaded"),
@@ -155,7 +156,7 @@ impl ProfileHub {
       match fetch("GET", &location.download_url, &[], None).await {
         Ok(image) if image.status < 300 => {
           if let Some(url) = blob_url(&image.body, location.content_type.as_str()) {
-            hub.avatars.update(|all| {
+            hub.avatars.update_if_alive(|all| {
               all.insert(user, url);
             });
           }

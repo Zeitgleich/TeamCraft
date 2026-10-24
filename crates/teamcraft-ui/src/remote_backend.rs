@@ -36,6 +36,7 @@ use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyRespons
 
 use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen};
+use crate::feedback::{ActionFailure, ActionTicket, report_failure};
 
 /// Messages fetched per request. Feeds are read in 2-row windows by the list, so pages keep the
 /// number of requests small while scrolling.
@@ -183,8 +184,9 @@ struct Slot {
 pub struct RemoteChat {
   mirror: Rc<RefCell<Mirror>>,
   notify: Rc<RefCell<Option<ChangeNotifier>>>,
-  refresh_queued: Rc<Cell<bool>>,
+  /// The newest action failure, for the admin console's inline error (`last_action_error`).
   maybe_error: Rc<RefCell<Option<String>>>,
+  refresh_queued: Rc<Cell<bool>>,
   answers: Rc<RefCell<HashMap<String, Slot>>>,
 }
 
@@ -238,8 +240,8 @@ impl RemoteChat {
         outdated: HashSet::new(),
       })),
       notify: Rc::new(RefCell::new(None)),
-      refresh_queued: Rc::new(Cell::new(false)),
       maybe_error: Rc::new(RefCell::new(None)),
+      refresh_queued: Rc::new(Cell::new(false)),
       answers: Rc::new(RefCell::new(HashMap::new())),
     };
     let listener = backend.clone();
@@ -498,18 +500,25 @@ impl RemoteChat {
     }
   }
 
+  /// Hands an action to the core. A failure is shown to the user (issue #322); a button waiting
+  /// for the action keeps its ticket until the core answered.
   fn act(&self, action: ChatAction) {
     let backend = self.clone();
+    let maybe_ticket = ActionTicket::current();
     spawn_local(async move {
-      match call::<()>("core_action", &json!({ "action": action })).await {
-        Ok(()) => *backend.maybe_error.borrow_mut() = None,
-        Err(error) => {
-          tracing::warn!(%error, "action failed");
-          *backend.maybe_error.borrow_mut() = Some(error);
-        },
+      let outcome = call::<()>("core_action", &json!({ "action": action })).await;
+      *backend.maybe_error.borrow_mut() = outcome.as_ref().err().cloned();
+      if let Err(error) = outcome {
+        let failure = ActionFailure::from_wire(&error);
+        if let Some(ticket) = &maybe_ticket {
+          ticket.fail(failure.clone());
+        }
+        report_failure(failure);
       }
       backend.mark_answers_stale();
       backend.changed();
+      // Dropped only now, so the button stays pending until the change is visible.
+      drop(maybe_ticket);
     });
   }
 

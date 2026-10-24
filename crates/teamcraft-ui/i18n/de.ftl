@@ -2115,6 +2115,25 @@ lightbox-thumbnails = Dateien in dieser Ansicht
 lightbox-thumbnail = { $name } anzeigen
 album-open = Bild { $index } von { $count } öffnen: { $name }
 
+## Failed actions (an error toast) and the panic overlay
+
+error-details = Details
+error-generic = Das hat nicht geklappt. Versuche es erneut; wenn es weiter fehlschlägt, kopiere die Details für deinen Admin.
+error-network = Der Server ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.
+error-not-space-member = Diese Person ist noch nicht im Space. Lade sie zuerst in den Space ein und füge sie dann dem Channel hinzu.
+error-forbidden = Dafür fehlt dir die Berechtigung. Frage einen Admin des Space oder Workspace.
+error-signed-out = Deine Anmeldung ist abgelaufen. Melde dich erneut an und versuche es dann noch einmal.
+error-rate-limited = Zu viele Anfragen auf einmal. Warte einen Moment und versuche es erneut.
+error-too-large = Das ist zu groß für den Server. Versuche es mit etwas Kleinerem.
+error-server-trouble = Der Server hat gerade ein Problem. Versuche es in ein paar Minuten erneut.
+error-conflict = Jemand hat das gleichzeitig geändert. Sieh dir den aktuellen Stand an und versuche es erneut.
+error-not-found = Das gibt es nicht mehr. Es wurde vielleicht gelöscht oder verschoben.
+action-running = Läuft…
+panic-title = Etwas ist schiefgelaufen
+panic-body = Die App ist auf einen Fehler gestoßen und muss neu geladen werden. Deine Nachrichten und Entwürfe bleiben erhalten.
+panic-reload = Neu laden
+panic-details-label = Details für deinen Admin (ohne Nachrichteninhalte)
+
 ## Anmelde-Rückkehrseite: der Browser-Tab, den die Desktop-App nach dem Anmeldedienst zeigt
 ## (nur Text, keine Platzhalter; die Desktop-Shell liest diese Zeilen selbst)
 callback-page-title = Anmeldung

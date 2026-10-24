@@ -8,6 +8,7 @@ use teamcraft_proto::{MeetingAttendeeResponse, MeetingControlAction, MeetingId, 
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{ConversationId, UserId};
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// Buttons for the host of a running meeting. `conversation` names the call whose participants can
@@ -34,8 +35,8 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   let send = move |action: MeetingControlAction| {
     spawn_local(async move {
       match hub.client().control(meeting, action).await {
-        Ok(()) => notice.set(None),
-        Err(error) => notice.set(Some(error.to_string())),
+        Ok(()) => notice.set_if_alive(None),
+        Err(error) => notice.set_if_alive(Some(error.to_string())),
       }
     });
   };

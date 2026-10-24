@@ -301,7 +301,7 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           <Icon name=IconName::Sliders />
         </button>
       </div>
-      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |_| is_opening.set(false)>
+      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |ev| end_opening(&ev, is_opening)>
         {group.conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
       </ul>
     </section>
@@ -369,7 +369,7 @@ fn SidebarSection(
             }
           })}
       </div>
-      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |_| is_opening.set(false)>
+      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |ev| end_opening(&ev, is_opening)>
         {if kind == SectionKind::Favorites {
           view! { <FavoriteItems conversations=conversations /> }.into_any()
         } else {
@@ -535,5 +535,13 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
       }}
       {(mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })}
     </button>
+  }
+}
+
+/// Clears a section's opening flag when its own open animation ended. `animationend` bubbles: a
+/// badge animating inside the list must not end the opening early (issue #328).
+fn end_opening(ev: &leptos::ev::AnimationEvent, is_opening: RwSignal<bool>) {
+  if ev.target() == ev.current_target() {
+    is_opening.set(false);
   }
 }

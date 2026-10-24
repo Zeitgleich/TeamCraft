@@ -14,6 +14,7 @@ use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
 use crate::auth::{ApiResponse, AuthError, Authenticator, SignInLook, tauri};
 use crate::clock;
 use crate::model::UserId;
+use crate::reactive::SetIfAlive;
 use crate::remote_backend;
 use crate::settings::{load_string, store_string};
 
@@ -139,10 +140,10 @@ impl SessionControl {
       let auth = control.authenticator();
       match auth.restore().await {
         Ok(true) => control.load_account().await,
-        Ok(false) => control.state.set(SessionState::SignedOut(None)),
+        Ok(false) => control.state.set_if_alive(SessionState::SignedOut(None)),
         Err(error) => control
           .state
-          .set(SessionState::SignedOut(Some(problem_from_auth(&error)))),
+          .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error)))),
       }
     });
   }
@@ -153,8 +154,8 @@ impl SessionControl {
     control.is_checking_server.set(true);
     spawn_local(async move {
       let outcome = tauri::server_check(&address).await;
-      control.is_checking_server.set(false);
-      control.state.set(match outcome {
+      control.is_checking_server.set_if_alive(false);
+      control.state.set_if_alive(match outcome {
         Ok(check) => SessionState::ConfirmServer(Box::new(check)),
         Err(problem) => SessionState::NeedsServer {
           maybe_address: Some(address),
@@ -171,14 +172,14 @@ impl SessionControl {
     control.is_checking_server.set(true);
     spawn_local(async move {
       let outcome = tauri::server_confirm(&check.server.origin).await;
-      control.is_checking_server.set(false);
+      control.is_checking_server.set_if_alive(false);
       match outcome {
         Ok(server) => {
           crate::brand::show_server_brand(check.brand);
-          control.server.set(Some(server));
+          control.server.set_if_alive(Some(server));
           control.sign_in(look);
         },
-        Err(problem) => control.state.set(SessionState::NeedsServer {
+        Err(problem) => control.state.set_if_alive(SessionState::NeedsServer {
           maybe_address: Some(check.server.host),
           maybe_problem: Some(problem),
         }),
@@ -192,14 +193,14 @@ impl SessionControl {
     spawn_local(async move {
       let had_server = control.server.get_untracked().is_some();
       if had_server && let Err(problem) = tauri::server_forget().await {
-        control.state.set(SessionState::NeedsServer {
+        control.state.set_if_alive(SessionState::NeedsServer {
           maybe_address: None,
           maybe_problem: Some(problem),
         });
         return;
       }
-      control.server.set(None);
-      control.state.set(SessionState::NeedsServer {
+      control.server.set_if_alive(None);
+      control.state.set_if_alive(SessionState::NeedsServer {
         maybe_address: None,
         maybe_problem: None,
       });
@@ -244,7 +245,7 @@ impl SessionControl {
         Ok(()) => control.load_account().await,
         Err(error) => control
           .state
-          .set(SessionState::SignedOut(Some(problem_from_auth(&error)))),
+          .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error)))),
       }
     });
   }
@@ -259,10 +260,10 @@ impl SessionControl {
         .authenticator()
         .login_local(login, password, maybe_totp)
         .await;
-      control.is_local_signing_in.set(false);
+      control.is_local_signing_in.set_if_alive(false);
       match outcome {
         Ok(()) => control.load_account().await,
-        Err(error) => control.local_error.set(Some(local_problem(&error))),
+        Err(error) => control.local_error.set_if_alive(Some(local_problem(&error))),
       }
     });
   }
@@ -284,7 +285,7 @@ impl SessionControl {
       if let Err(error) = control.authenticator().logout().await {
         tracing::warn!(%error, "sign-out did not finish cleanly");
       }
-      control.state.set(SessionState::SignedOut(None));
+      control.state.set_if_alive(SessionState::SignedOut(None));
     });
   }
 
@@ -375,10 +376,10 @@ impl SessionControl {
         device_name,
       };
       match remote_backend::enroll(&request).await {
-        Ok(()) => control.state.set(SessionState::Ready(me)),
-        Err(error) => control.enroll_error.set(Some(error)),
+        Ok(()) => control.state.set_if_alive(SessionState::Ready(me)),
+        Err(error) => control.enroll_error.set_if_alive(Some(error)),
       }
-      control.is_enrolling.set(false);
+      control.is_enrolling.set_if_alive(false);
     });
   }
 

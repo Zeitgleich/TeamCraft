@@ -9,6 +9,7 @@ use teamcraft_client_api::remote::{CORE_CHANGED_EVENT, StoreHealth};
 use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 use crate::remote_backend;
 
 /// Shown above the app while local writes fail. Browser only: the desktop store reports failures
@@ -21,7 +22,7 @@ pub fn StorageBanner() -> impl IntoView {
     let refresh = move || {
       spawn_local(async move {
         if let Ok(next) = remote_backend::store_health().await {
-          health.set(next);
+          health.set_if_alive(next);
         }
       });
     };

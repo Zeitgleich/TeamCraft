@@ -3,6 +3,28 @@
 use leptos::prelude::*;
 use leptos::reactive::graph::Observer;
 
+/// Writes from async tasks and timers (after an `.await`, in a callback of the core), which can run
+/// after the component that owns the signal is gone. Plain `set`/`update` panic then ("reactive
+/// value already disposed"), which kills the wasm app (issue #322); these do nothing instead.
+/// `scripts/check-async-signals.py` makes sure spawned tasks use them.
+pub trait SetIfAlive: Set {
+  fn set_if_alive(&self, value: Self::Value) {
+    // A disposed signal hands the value back; nobody is left to show it.
+    let _ = self.try_set(value);
+  }
+}
+
+impl<S: Set> SetIfAlive for S {}
+
+/// See [`SetIfAlive`].
+pub trait UpdateIfAlive: Update {
+  fn update_if_alive(&self, change: impl FnOnce(&mut Self::Value)) {
+    let _ = self.try_update(change);
+  }
+}
+
+impl<S: Update> UpdateIfAlive for S {}
+
 /// Reads a signal, subscribing the caller only when there is one. Component bodies and event handlers
 /// have no observer; reading there is intentional and must not trigger the debug-build warning.
 pub fn get_if_observed<T: Clone + Send + Sync + 'static>(signal: RwSignal<T>) -> T {
@@ -104,4 +126,31 @@ pub fn use_debounced(source: RwSignal<String>, delay_ms: u64) -> ReadSignal<Stri
     );
   });
   value
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Issue #322: an upload or a core answer finishes after its component was unmounted.
+  #[test]
+  fn writes_after_the_owner_is_gone_do_nothing() {
+    let owner = Owner::new();
+    let (value, list) = owner.with(|| (RwSignal::new(1), RwSignal::new(Vec::<u32>::new())));
+    owner.cleanup();
+    value.set_if_alive(2);
+    list.update_if_alive(|list| list.push(3));
+    assert_eq!(value.try_get_untracked(), None);
+  }
+
+  #[test]
+  fn writes_while_the_owner_lives_go_through() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let list = RwSignal::new(Vec::<u32>::new());
+      list.update_if_alive(|list| list.push(3));
+      list.set_if_alive(vec![4]);
+      assert_eq!(list.get_untracked(), vec![4]);
+    });
+  }
 }

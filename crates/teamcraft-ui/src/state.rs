@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
-use crate::reactive::get_if_observed;
+use crate::reactive::{SetIfAlive, get_if_observed};
 use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
@@ -37,6 +37,17 @@ pub struct Toast {
   pub id: u64,
   pub text: String,
   pub maybe_undo: Option<Undo>,
+  pub tone: ToastTone,
+}
+
+/// How a toast looks and is announced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastTone {
+  Info,
+  /// A failed action (issue #322), with the technical detail behind a "Details" toggle.
+  Error {
+    detail: String,
+  },
 }
 
 /// What the Undo button of a toast reverts.
@@ -320,7 +331,11 @@ impl AppState {
   /// Tells every reader that the backend changed on its own (data arrived over the network or from
   /// the desktop shell), so views re-read.
   pub fn backend_changed(&self) {
-    self.revision.update(|revision| *revision += 1);
+    // Called by the backend from outside the reactive tree, possibly after this shell is gone
+    // (sign-out, a new session): then there is nothing to update (issue #322).
+    if self.revision.try_update(|revision| *revision += 1).is_none() {
+      return;
+    }
     self.open_pending_creation();
     if let Some(route) = self.pending_route.get_untracked() {
       self.follow_route(route);
@@ -585,6 +600,13 @@ impl AppState {
     result
   }
 
+  /// [`Self::write`] for async tasks: nothing happens once the shell is gone (issue #322).
+  pub fn try_write<R>(&self, write: impl FnOnce(&dyn Backend) -> R) -> Option<R> {
+    let result = self.backend.try_with_value(|backend| write(backend.as_ref()))?;
+    let _ = self.revision.try_update(|revision| *revision += 1);
+    Some(result)
+  }
+
   pub fn me(&self) -> User {
     self.read(|backend| backend.me())
   }
@@ -718,8 +740,32 @@ impl AppState {
     self.push_toast(text, None);
   }
 
+  /// Shows a failed action until the user closes it. Called from outside the reactive tree (the
+  /// core answered), so it does nothing once the shell is gone. The same error twice in a row
+  /// shows once.
+  pub fn show_error(&self, text: String, detail: String) {
+    let Some(id) = self.next_toast.try_get_value() else {
+      return;
+    };
+    let _ = self.toasts.try_update(|list| {
+      let is_repeat = list.last().is_some_and(|last| {
+        last.text == text && matches!(&last.tone, ToastTone::Error { detail: shown } if *shown == detail)
+      });
+      if !is_repeat {
+        self.next_toast.set_value(id + 1);
+        list.push(Toast {
+          id,
+          text,
+          maybe_undo: None,
+          tone: ToastTone::Error { detail },
+        });
+      }
+    });
+  }
+
   pub fn dismiss_toast(&self, id: u64) {
-    self.toasts.update(|list| list.retain(|toast| toast.id != id));
+    // Also called by timers, which may fire after the shell is gone.
+    let _ = self.toasts.try_update(|list| list.retain(|toast| toast.id != id));
   }
 
   /// Hides an own message at once and deletes it after the undo window, unless Undo was pressed.
@@ -732,12 +778,12 @@ impl AppState {
     set_timeout(
       move || {
         state.dismiss_toast(toast);
-        let mut is_still_deleted = false;
-        state
+        let is_still_deleted = state
           .hidden_messages
-          .update(|hidden| is_still_deleted = hidden.remove(&message));
+          .try_update(|hidden| hidden.remove(&message))
+          .unwrap_or(false);
         if is_still_deleted {
-          state.write(|backend| backend.delete_message(conversation, message));
+          state.try_write(|backend| backend.delete_message(conversation, message));
         }
       },
       UNDO_WINDOW,
@@ -780,12 +826,12 @@ impl AppState {
     set_timeout(
       move || {
         state.dismiss_toast(toast);
-        let mut is_still_leaving = false;
-        state
+        let is_still_leaving = state
           .hidden_conversations
-          .update(|hidden| is_still_leaving = hidden.remove(&conversation));
+          .try_update(|hidden| hidden.remove(&conversation))
+          .unwrap_or(false);
         if is_still_leaving {
-          state.write(|backend| backend.leave_channel(conversation));
+          state.try_write(|backend| backend.leave_channel(conversation));
         }
       },
       UNDO_WINDOW,
@@ -824,9 +870,14 @@ impl AppState {
   fn push_toast(&self, text: String, maybe_undo: Option<Undo>) -> u64 {
     let id = self.next_toast.get_value();
     self.next_toast.set_value(id + 1);
-    self
-      .toasts
-      .update(|list| list.push(Toast { id, text, maybe_undo }));
+    self.toasts.update(|list| {
+      list.push(Toast {
+        id,
+        text,
+        maybe_undo,
+        tone: ToastTone::Info,
+      })
+    });
     id
   }
 
@@ -941,8 +992,8 @@ impl AppState {
     self.highlighted.set(Some(message));
     set_timeout(
       move || {
-        if state.highlighted.get_untracked() == Some(message) {
-          state.highlighted.set(None);
+        if state.highlighted.try_get_untracked() == Some(Some(message)) {
+          state.highlighted.set_if_alive(None);
         }
       },
       HIGHLIGHT_DURATION,
@@ -1561,6 +1612,53 @@ mod tests {
       state.backend_changed();
       assert_eq!(state.route(), Route::Threads);
       assert!(!state.take_follows_url(), "nothing was redirected");
+    }
+  }
+
+  /// Issue #322: the core answers, a timer fires or the backend reports a change after the shell
+  /// was unmounted (sign-out, a new session). Nothing may panic then.
+  mod after_the_shell_is_gone {
+    use super::*;
+
+    #[test]
+    fn callbacks_from_outside_the_reactive_tree_do_nothing() {
+      let owner = Owner::new();
+      let state = owner.with(test_state);
+      owner.cleanup();
+      state.backend_changed();
+      state.show_error("refused".into(), "detail".into());
+      state.dismiss_toast(0);
+      assert!(state.try_write(|backend| backend.spaces()).is_none());
+    }
+
+    #[test]
+    fn while_the_shell_lives_try_write_writes() {
+      let owner = Owner::new();
+      owner.with(|| {
+        let state = test_state();
+        assert!(state.try_write(|backend| backend.spaces()).is_some());
+      });
+    }
+  }
+
+  mod error_toasts {
+    use super::*;
+
+    #[test]
+    fn an_error_shows_with_its_detail_and_a_repeat_shows_once() {
+      let state = test_state();
+      state.show_error("refused".into(), "detail".into());
+      state.show_error("refused".into(), "detail".into());
+      let toasts = state.toasts.get_untracked();
+      assert_eq!(toasts.len(), 1);
+      assert_eq!(
+        toasts[0].tone,
+        ToastTone::Error {
+          detail: "detail".into()
+        }
+      );
+      state.show_error("refused".into(), "other detail".into());
+      assert_eq!(state.toasts.get_untracked().len(), 2);
     }
   }
 

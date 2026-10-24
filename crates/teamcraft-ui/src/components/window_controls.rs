@@ -12,6 +12,7 @@ use wasm_bindgen::JsCast;
 
 use crate::auth::tauri;
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 
 /// The shell's event when the maximized or fullscreen state or the title bar changed.
 const WINDOW_CHROME_EVENT: &str = "window-chrome-changed";
@@ -34,7 +35,7 @@ pub fn provide_window_chrome() {
   provide_context(state);
   if tauri::is_available() {
     let refresh = move || {
-      leptos::task::spawn_local(async move { state.0.set(tauri::window_chrome().await) });
+      leptos::task::spawn_local(async move { state.0.set_if_alive(tauri::window_chrome().await) });
     };
     refresh();
     tauri::listen(WINDOW_CHROME_EVENT, refresh);

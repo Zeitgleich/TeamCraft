@@ -26,6 +26,7 @@ pub mod components;
 pub mod delivery;
 pub mod diff;
 pub mod feed_motion;
+pub mod feedback;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
 pub use teamcraft_client_api::{emoji, emoji_catalog};
 pub mod groups;
@@ -48,6 +49,7 @@ pub mod notifier;
 pub mod notify_sync;
 pub mod object_url;
 pub mod os_alerts;
+pub mod panic_overlay;
 pub mod prefs;
 pub mod profiles;
 pub mod reactive;
@@ -74,7 +76,9 @@ pub use components::app::App;
 
 /// Mounts the application into `<body>`. Called from the wasm entry point.
 pub fn mount() {
-  console_error_panic_hook::set_once();
+  panic_overlay::install();
+  #[cfg(feature = "demo")]
+  panic_overlay::panic_on_request();
   register_service_worker();
   leptos::mount::mount_to_body(App);
 }

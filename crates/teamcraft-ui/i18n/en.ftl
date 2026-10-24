@@ -2115,6 +2115,25 @@ lightbox-thumbnails = Files in this view
 lightbox-thumbnail = Show { $name }
 album-open = Open image { $index } of { $count }: { $name }
 
+## Failed actions (an error toast) and the panic overlay
+
+error-details = Details
+error-generic = That didn't work. Try again; if it keeps failing, copy the details for your admin.
+error-network = The server can't be reached. Check your connection and try again.
+error-not-space-member = This person isn't in the space yet. Invite them to the space first, then add them to the channel.
+error-forbidden = You don't have permission for this. Ask an admin of the space or workspace.
+error-signed-out = Your sign-in has expired. Sign in again, then try once more.
+error-rate-limited = Too many requests at once. Wait a moment and try again.
+error-too-large = That is too large for the server. Try something smaller.
+error-server-trouble = The server has a problem right now. Try again in a few minutes.
+error-conflict = Someone changed this at the same time. Look at the current state and try again.
+error-not-found = This doesn't exist any more. It may have been deleted or moved.
+action-running = Working…
+panic-title = Something went wrong
+panic-body = The app ran into an error and has to be reloaded. Your messages and drafts are kept.
+panic-reload = Reload
+panic-details-label = Details for your admin (no message content)
+
 ## Sign-in callback page: the browser tab the desktop app shows after the identity provider
 ## (plain text only, no placeables; the desktop shell reads these lines itself)
 callback-page-title = Sign-in

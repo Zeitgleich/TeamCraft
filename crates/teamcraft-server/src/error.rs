@@ -32,6 +32,9 @@ pub enum ApiError {
   /// A roster without an owner: nobody could ever sign a roster or policy again (admin.md §2.3).
   #[error("the roster must keep at least one owner")]
   LastOwner,
+  /// Channel members must belong to the channel's space; the user is not in it (yet).
+  #[error("the user is not a member of the space")]
+  NotSpaceMember,
   #[error("the user has no key package left")]
   KeyPackageExhausted,
   /// An uploaded key package doesn't parse, isn't validly signed, or is (nearly) expired.
@@ -226,7 +229,9 @@ impl ApiError {
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
-      Self::InvalidRequest(_) | Self::InvalidKeyPackage(_) | Self::LastOwner => StatusCode::BAD_REQUEST,
+      Self::InvalidRequest(_) | Self::InvalidKeyPackage(_) | Self::LastOwner | Self::NotSpaceMember => {
+        StatusCode::BAD_REQUEST
+      },
       Self::Conflict(_)
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
@@ -257,6 +262,7 @@ impl ApiError {
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
+      Self::NotSpaceMember => ErrorCode::NotSpaceMember,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
@@ -430,6 +436,11 @@ mod tests {
         ErrorCode::Conflict,
       ),
       (ApiError::LastOwner, StatusCode::BAD_REQUEST, ErrorCode::LastOwner),
+      (
+        ApiError::NotSpaceMember,
+        StatusCode::BAD_REQUEST,
+        ErrorCode::NotSpaceMember,
+      ),
       (
         ApiError::PayloadTooLarge("x".into()),
         StatusCode::PAYLOAD_TOO_LARGE,

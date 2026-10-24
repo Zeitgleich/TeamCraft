@@ -9,10 +9,11 @@ use teamcraft_proto::{
 use crate::auth::ApiMethod;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::skeleton::ListSkeleton;
+use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::model::{DeviceSetup, User, UserId};
 use crate::profiles::use_profiles;
-use crate::reactive::use_debounced;
+use crate::reactive::{SetIfAlive, UpdateIfAlive, use_debounced};
 use crate::rest::RestClient;
 use crate::session::use_session;
 use crate::state::{Overlay, use_app_state};
@@ -24,30 +25,61 @@ const GROUP_SKELETON_ROWS: usize = 3;
 /// The directory on the server is asked once typing paused this long.
 const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 
+/// Element ID of the panel the directory tabs control.
+const DIRECTORY_PANEL_ID: &str = "directory-panel";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DirectoryTab {
   People,
   Groups,
 }
 
+impl DirectoryTab {
+  const ALL: [Self; 2] = [Self::People, Self::Groups];
+
+  fn label_key(self) -> &'static str {
+    match self {
+      Self::People => "directory-people",
+      Self::Groups => "directory-groups",
+    }
+  }
+
+  fn tab_id(self) -> String {
+    format!("{}-tab", self.label_key())
+  }
+}
+
 #[component]
 pub fn DirectoryView() -> impl IntoView {
   let i18n = use_i18n();
   let tab = RwSignal::new(DirectoryTab::People);
+  let on_keydown =
+    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &DirectoryTab::ALL, tab, DirectoryTab::tab_id);
   view! {
     <section class="directory" aria-label=move || i18n.t("directory-title")>
       <header class="panel-header">
         <div class="panel-title"><h1>{move || i18n.t("directory-title")}</h1></div>
-        <div class="tabs" role="tablist">
-          <button role="tab" aria-selected=move || (tab.get() == DirectoryTab::People).to_string() on:click=move |_| tab.set(DirectoryTab::People)>
-            {move || i18n.t("directory-people")}
-          </button>
-          <button role="tab" aria-selected=move || (tab.get() == DirectoryTab::Groups).to_string() on:click=move |_| tab.set(DirectoryTab::Groups)>
-            {move || i18n.t("directory-groups")}
-          </button>
+        <div class="tabs" role="tablist" aria-label=move || i18n.t("directory-title") on:keydown=on_keydown>
+          {DirectoryTab::ALL
+            .into_iter()
+            .map(|value| {
+              view! {
+                <button
+                  id=value.tab_id()
+                  role="tab"
+                  aria-selected=move || (tab.get() == value).to_string()
+                  aria-controls=DIRECTORY_PANEL_ID
+                  tabindex=move || roving_tabindex(tab.get() == value)
+                  on:click=move |_| tab.set(value)
+                >
+                  {move || i18n.t(value.label_key())}
+                </button>
+              }
+            })
+            .collect_view()}
         </div>
       </header>
-      <div class="panel-scroll directory-body">
+      <div class="panel-scroll directory-body" role="tabpanel" id=DIRECTORY_PANEL_ID aria-labelledby=move || tab.get().tab_id()>
         {move || match tab.get() {
           DirectoryTab::People => view! { <PeopleList /> }.into_any(),
           DirectoryTab::Groups => view! { <UserGroups /> }.into_any(),
@@ -194,10 +226,10 @@ fn UserGroups() -> impl IntoView {
         .get::<ListUserGroupsResponse>("/api/v1/user-groups")
         .await
       {
-        Ok(list) => groups.set(list.groups),
-        Err(failure) => error.set(Some(failure.to_string())),
+        Ok(list) => groups.set_if_alive(list.groups),
+        Err(failure) => error.set_if_alive(Some(failure.to_string())),
       }
-      is_loaded.set(true);
+      is_loaded.set_if_alive(true);
     });
   });
 
@@ -221,12 +253,12 @@ fn UserGroups() -> impl IntoView {
         .await
       {
         Ok(_) => {
-          handle.set(String::new());
-          name.set(String::new());
-          error.set(None);
-          reload.update(|value| *value += 1);
+          handle.set_if_alive(String::new());
+          name.set_if_alive(String::new());
+          error.set_if_alive(None);
+          reload.update_if_alive(|value| *value += 1);
         },
-        Err(failure) => error.set(Some(failure.to_string())),
+        Err(failure) => error.set_if_alive(Some(failure.to_string())),
       }
     });
   };
@@ -291,7 +323,7 @@ fn GroupMembers(
     leptos::task::spawn_local(async move {
       let path = format!("/api/v1/user-groups/{group}");
       if let Ok(detail) = client.get_value().get::<UserGroupDetailResponse>(&path).await {
-        members.set(detail.members);
+        members.set_if_alive(detail.members);
       }
     });
   });
@@ -299,8 +331,8 @@ fn GroupMembers(
     leptos::task::spawn_local(async move {
       let path = format!("/api/v1/user-groups/{group}/members/{user}");
       if client.get_value().send(method, &path, None).await.is_ok() {
-        refresh.update(|value| *value += 1);
-        reload.update(|value| *value += 1);
+        refresh.update_if_alive(|value| *value += 1);
+        reload.update_if_alive(|value| *value += 1);
       }
     });
   };
