@@ -142,6 +142,7 @@ impl ToolbarHost {
       move || {
         if host.hide_generation.try_get_value() == Some(generation)
           && host.open.try_get_untracked() == Some(OpenMenu::Nothing)
+          && !host.is_in_use()
         {
           host.active.try_set(None);
         }
@@ -216,8 +217,28 @@ impl ToolbarHost {
     next
   }
 
+  /// A closed menu took the pointer with it without a `mouseleave`: hide the toolbar unless the
+  /// pointer or the focus is still on it or its message.
   fn close_menu(&self) {
     self.open.set(OpenMenu::Nothing);
+    self.hide_soon();
+  }
+
+  /// Whether the pointer or the keyboard focus is on the toolbar or on its message.
+  fn is_in_use(&self) -> bool {
+    let (Some(container), Some(id)) = (
+      self.container.try_get_untracked().flatten(),
+      self
+        .active
+        .try_with_untracked(|active| active.as_ref().map(|active| active.message.id))
+        .flatten(),
+    ) else {
+      return false;
+    };
+    let selector = format!(
+      ".msg-toolbar:hover, .msg-toolbar:focus-within, [data-msg-id=\"{id}\"]:hover, [data-msg-id=\"{id}\"]:focus-within"
+    );
+    container.query_selector(&selector).ok().flatten().is_some()
   }
 }
 
@@ -546,18 +567,19 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let actions = NodeRef::<html::Div>::new();
   let picker_button = NodeRef::<html::Button>::new();
   let is_picking = RwSignal::new(false);
+  let sheet = NodeRef::<html::Div>::new();
+  // The dialog takes the focus (for screen readers), without a ring on the first entry.
   Effect::new(move |_| {
-    if let Some(element) = actions.get()
-      && let Ok(Some(first)) = element.query_selector(".menu-item")
-      && let Some(first) = first.dyn_ref::<web_sys::HtmlElement>()
-    {
-      drop(first.focus());
+    if let Some(element) = sheet.get() {
+      drop(element.focus());
     }
   });
   view! {
     <div class="sheet-backdrop" on:click=move |_| close()></div>
     <div
       class="action-sheet"
+      node_ref=sheet
+      tabindex="-1"
       role="dialog"
       aria-modal="true"
       aria-label=move || i18n.t("message-action-sheet")

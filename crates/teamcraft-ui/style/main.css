@@ -1847,6 +1847,10 @@ select.input {
   font-size: 22px;
 }
 
+.action-sheet:focus {
+  outline: none;
+}
+
 .action-sheet .menu-item {
   min-height: 48px;
 }
@@ -7628,6 +7632,7 @@ ol.md-list {
 .segmented button[aria-pressed="true"],
 .view-tabs [role="tab"][aria-selected="true"]::after {
   animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+}
 
 /* Previews of linked messages (#319). */
 .linked-message {
