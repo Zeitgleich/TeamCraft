@@ -217,18 +217,34 @@ pub struct AppState {
   pub settings: Settings,
 }
 
+/// Where the app starts: the first conversation of a space, or Home with the welcome page when
+/// there is none yet (there is one Home: the rail's Home entry and its sidebar).
+fn start_position(start: Option<(SpaceId, ConversationId)>) -> (SpaceId, RailEntry, MainView) {
+  match start {
+    Some((space, conversation)) => (space, RailEntry::Space, MainView::Conversation(conversation)),
+    None => (id_from_raw(0), RailEntry::Home, MainView::GettingStarted),
+  }
+}
+
+/// Home's page without any DM: the welcome page while the workspace is empty (create a space,
+/// find people), else Home's own start page.
+fn home_view_without_dms(has_spaces: bool) -> MainView {
+  if has_spaces {
+    MainView::Home
+  } else {
+    MainView::GettingStarted
+  }
+}
+
 impl AppState {
-  /// `start` is the first space and conversation; without one the threads inbox opens.
+  /// `start` is the first space and conversation; without one Home opens with the welcome page.
   pub fn new(backend: Rc<dyn Backend>, settings: Settings, start: Option<(SpaceId, ConversationId)>) -> Self {
-    let (space, view) = match start {
-      Some((space, conversation)) => (space, MainView::Conversation(conversation)),
-      None => (id_from_raw(0), MainView::GettingStarted),
-    };
+    let (space, rail, view) = start_position(start);
     Self {
       backend: StoredValue::new_local(backend),
       revision: RwSignal::new(0),
       space: RwSignal::new(space),
-      rail: RwSignal::new(RailEntry::Space),
+      rail: RwSignal::new(rail),
       view: RwSignal::new(view),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
@@ -468,7 +484,8 @@ impl AppState {
     match maybe_recent {
       Some(conversation) => self.open_conversation(conversation.id),
       None => {
-        self.view.set(MainView::Home);
+        let has_spaces = self.read(|backend| !backend.spaces().is_empty());
+        self.view.set(home_view_without_dms(has_spaces));
         self.panel.set(SidePanel::Closed);
       },
     }
@@ -927,4 +944,32 @@ fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
     && members
       .iter()
       .all(|member| *member == me || users.contains(member))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn without_a_channel_the_app_starts_on_home_with_the_welcome_page() {
+    let (_, rail, view) = start_position(None);
+    assert_eq!(rail, RailEntry::Home);
+    assert_eq!(view, MainView::GettingStarted);
+  }
+
+  #[test]
+  fn with_a_channel_the_app_starts_in_its_space() {
+    let space: SpaceId = id_from_raw(7);
+    let conversation: ConversationId = id_from_raw(9);
+    assert_eq!(
+      start_position(Some((space, conversation))),
+      (space, RailEntry::Space, MainView::Conversation(conversation))
+    );
+  }
+
+  #[test]
+  fn home_without_dms_welcomes_an_empty_workspace() {
+    assert_eq!(home_view_without_dms(false), MainView::GettingStarted);
+    assert_eq!(home_view_without_dms(true), MainView::Home);
+  }
 }

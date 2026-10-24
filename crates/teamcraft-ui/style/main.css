@@ -252,12 +252,14 @@ kbd {
   font-weight: 700;
   font-size: 11px;
   color: var(--chrome-strong);
-  text-align: center;
+  /* Start-aligned with an ellipsis: centred text wider than the rail column lost its first letter. */
+  text-align: start;
   white-space: nowrap;
   grid-column: 1;
-  padding: 0 4px;
+  min-width: 0;
+  padding: 0 6px;
   overflow: hidden;
-  text-overflow: clip;
+  text-overflow: ellipsis;
 }
 
 .search-btn {
