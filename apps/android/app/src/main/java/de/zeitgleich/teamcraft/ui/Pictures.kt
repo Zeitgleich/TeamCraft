@@ -29,11 +29,12 @@ const val THUMBNAIL_DECODE_PX = 1024
 private const val MEMORY_SHARE = 8L
 
 /**
- * Full images kept, by count: the one being looked at and its neighbours, so swiping back and
- * forth doesn't decode again. Counted, not sized: one full image may be larger than the
- * thumbnails' whole budget, which would evict it at once.
+ * Share of the heap for full images, apart from the thumbnails' budget so that a large one doesn't
+ * push them all out: the one being looked at and its neighbours, so swiping back and forth doesn't
+ * decode again. Bounded in bytes (a 4096 px picture alone is ~48 MB). One larger than the whole
+ * budget isn't kept here, but the viewer holds it as long as it is shown.
  */
-private const val FULL_IMAGES_KEPT = 4
+private const val FULL_IMAGES_MEMORY_SHARE = 4L
 
 /**
  * Decoded pictures – the senders' thumbnails and full images from the decrypted downloads – kept in
@@ -43,13 +44,13 @@ private const val FULL_IMAGES_KEPT = 4
  * folder in app storage, which it keeps under a size limit).
  */
 object Pictures {
-  private val memory = object : LruCache<String, ImageBitmap>(
-    (Runtime.getRuntime().maxMemory() / MEMORY_SHARE).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
-  ) {
+  private val memory = object : LruCache<String, ImageBitmap>(heapShare(MEMORY_SHARE)) {
     override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * BYTES_PER_PIXEL
   }
 
-  private val fullImages = LruCache<String, ImageBitmap>(FULL_IMAGES_KEPT)
+  private val fullImages = object : LruCache<String, ImageBitmap>(heapShare(FULL_IMAGES_MEMORY_SHARE)) {
+    override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * BYTES_PER_PIXEL
+  }
 
   /** A picture decoded before, without waiting. */
   fun cached(key: String): ImageBitmap? = memory.get(key) ?: fullImages.get(key)
@@ -116,6 +117,9 @@ object Pictures {
       }
     }.getOrNull()
 }
+
+/** `1/share` of the app's heap in bytes. */
+private fun heapShare(share: Long): Int = (Runtime.getRuntime().maxMemory() / share).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
 /** Decoded pictures cost about four bytes a pixel (ARGB_8888, in the heap or on the GPU). */
 private const val BYTES_PER_PIXEL = 4
