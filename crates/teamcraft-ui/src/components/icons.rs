@@ -43,10 +43,6 @@ pub enum IconName {
   Spotlight,
   Maximize,
   Minimize,
-  /// Window controls of the custom title bar: a line, a square and two stacked squares.
-  WindowMinimize,
-  WindowMaximize,
-  WindowRestore,
   Image,
   Volume,
   Shield,
@@ -146,9 +142,6 @@ impl IconName {
       Self::Minimize => {
         "M8 3v3a2 2 0 0 1-2 2H3 M21 8h-3a2 2 0 0 1-2-2V3 M3 16h3a2 2 0 0 1 2 2v3 M16 21v-3a2 2 0 0 1 2-2h3"
       },
-      Self::WindowMinimize => "M5 12h14",
-      Self::WindowMaximize => "M5 5h14v14H5z",
-      Self::WindowRestore => "M5 9h10v10H5z M9 9V5h10v10h-4",
       Self::Image => "M3 3h18v18H3z M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z M21 15l-5-5L5 21",
       Self::Volume => "M11 5L6 9H2v6h4l5 4z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14",
       Self::Shield => "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
