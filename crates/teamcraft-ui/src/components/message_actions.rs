@@ -9,6 +9,7 @@ use wasm_bindgen::JsCast;
 
 use crate::clock::format_date_time;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
@@ -413,6 +414,7 @@ pub fn SavedView() -> impl IntoView {
   view! {
     <section class="saved-view" aria-label=move || i18n.t("saved-title")>
       <header class="panel-header">
+        <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("saved-title")}</h1>
         </div>

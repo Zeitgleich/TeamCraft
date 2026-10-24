@@ -85,6 +85,15 @@ dm-new-hint = Eine Person für eine Direktnachricht, mehrere für eine Gruppe.
 dm-new-start = Unterhaltung öffnen
 dm-new-start-group = Gruppe starten
 
+## Kompaktes Layout (Telefone): untere Navigation, zurück, Menüs
+back = Zurück
+bottom-nav-label = Hauptnavigation
+bottom-nav-spaces = Spaces
+bottom-nav-you = Ich
+conversation-more = Mehr
+composer-camera = Foto oder Video aufnehmen
+composer-photos = Fotos und Videos
+
 ## Seitenleiste
 sidebar-label = Kanäle und Direktnachrichten
 sidebar-threads = Threads

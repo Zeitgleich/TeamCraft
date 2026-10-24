@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use crate::clock::format_time;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
@@ -28,6 +29,7 @@ pub fn ThreadsInbox() -> impl IntoView {
     <section class="threads-view" aria-label=move || i18n.t("threads-title")>
       <div class="threads-list-col">
         <header class="panel-header">
+          <CompactBack />
           <div class="panel-title">
             <h1>{move || i18n.t("threads-title")}</h1>
           </div>

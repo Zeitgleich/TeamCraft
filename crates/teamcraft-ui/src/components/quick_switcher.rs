@@ -191,7 +191,17 @@ pub fn QuickSwitcher() -> impl IntoView {
         {move || i18n.t("switcher-title")}
       </h2>
       <div class="switcher-input">
-        <Icon name=IconName::Search />
+        // Phones: the search is a full-screen sheet, so it needs a visible way out.
+        <button
+          type="button"
+          class="icon-btn compact-only"
+          aria-label=move || i18n.t("back")
+          title=move || i18n.t("back")
+          on:click=move |_| state.close_overlay()
+        >
+          <Icon name=IconName::ChevronLeft />
+        </button>
+        <Icon name=IconName::Search class="switcher-search-icon" />
         <input
           type="text"
           role="combobox"

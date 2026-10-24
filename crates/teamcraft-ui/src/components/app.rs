@@ -18,6 +18,7 @@ use crate::components::activity_view::ActivityView;
 use crate::components::admin_console::AdminConsole;
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bookmarks::BookmarksDialog;
+use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
@@ -47,6 +48,7 @@ use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::settings_tabs::apply_call_prefs;
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
+use crate::components::status_menu::StatusMenu;
 use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::threads_inbox::ThreadsInbox;
@@ -70,6 +72,7 @@ use crate::reactive::use_interval;
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
+use crate::viewport::CompactPane;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -81,6 +84,7 @@ pub fn App() -> impl IntoView {
   apply_density(settings);
   apply_zoom(settings);
   apply_language_attribute();
+  crate::viewport::sync_theme_color(move || settings.theme.track());
   crate::brand::provide_brand(settings);
   provide_window_chrome();
   if tauri::is_available() {
@@ -126,6 +130,14 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let change_source = backend.clone();
   let state = AppState::new(backend, settings, start);
   provide_context(state);
+  crate::viewport::watch_layout(state.layout);
+  crate::viewport::track_visual_viewport();
+  Effect::new(move |previous: Option<()>| {
+    let layout = state.layout.get();
+    if previous.is_some() {
+      untrack(|| state.layout_changed(layout));
+    }
+  });
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
@@ -183,7 +195,12 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     <a class="skip-link" href="#main-content">
       {move || i18n.t("skip-to-content")}
     </a>
-    <div class="app">
+    <div
+      class="app"
+      data-pane=move || state.compact_pane().slug()
+      data-rail=move || if state.rail.get() == RailEntry::Home { "home" } else { "space" }
+      class:has-bottom-nav=move || has_bottom_nav(state)
+    >
       // One grid row for all banners, so the top bar and the body keep their own rows.
       <div class="app-banners" node_ref=banners>
         <BundleBanner />
@@ -215,6 +232,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Directory => view! { <DirectoryView /> }.into_any(),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
             MainView::Home => view! { <HomeStart /> }.into_any(),
+            // Only the compact layout shows a space without a channel; its list is the sidebar.
+            MainView::Space => ().into_any(),
             MainView::ChannelPreview(space, channel) => view! { <ChannelPreview space=space channel=channel /> }.into_any(),
           }}
         </main>
@@ -235,6 +254,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           }}
         </Show>
       </div>
+      <Show when=move || has_bottom_nav(state) fallback=|| ()>
+        <BottomNav />
+      </Show>
+      // On phones the account menu is a sheet over the bottom navigation's "You".
+      <Show when=move || state.is_compact() && state.overlay.get() == Overlay::StatusMenu fallback=|| ()>
+        <StatusMenu />
+      </Show>
       {move || match state.call.phase.get() {
         CallPhase::PreJoin => {
           state.call.maybe_request.get().map(|request| view! { <PreJoinScreen request=request /> }.into_any())
@@ -308,6 +334,14 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       }}
     </div>
   }
+}
+
+/// The compact layout's bottom navigation shows on the top-level pages: the lists, Activity and
+/// the welcome page. Deeper pages have a back button instead.
+fn has_bottom_nav(state: AppState) -> bool {
+  state.is_compact()
+    && (state.compact_pane() == CompactPane::List
+      || matches!(state.view.get(), MainView::Activity | MainView::GettingStarted))
 }
 
 fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
@@ -840,7 +874,7 @@ pub(crate) fn on_document(event: &str, callback: impl Fn() + 'static) {
   listen_on(&document, event, callback);
 }
 
-fn listen_on(target: &web_sys::EventTarget, event: &str, callback: impl Fn() + 'static) {
+pub(crate) fn listen_on(target: &web_sys::EventTarget, event: &str, callback: impl Fn() + 'static) {
   let listener = Closure::<dyn Fn()>::new(callback);
   if target
     .add_event_listener_with_callback(event, listener.as_ref().unchecked_ref())

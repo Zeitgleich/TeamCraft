@@ -85,6 +85,15 @@ dm-new-hint = Pick one person for a direct message, or several for a group.
 dm-new-start = Open conversation
 dm-new-start-group = Start group
 
+## Compact layout (phones): bottom navigation, back, menus
+back = Back
+bottom-nav-label = Main navigation
+bottom-nav-spaces = Spaces
+bottom-nav-you = You
+conversation-more = More
+composer-camera = Take a photo or video
+composer-photos = Photos and videos
+
 ## Sidebar
 sidebar-label = Channels and direct messages
 sidebar-threads = Threads

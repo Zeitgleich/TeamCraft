@@ -23,6 +23,7 @@ use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
 use crate::state::use_app_state;
+use crate::viewport::is_touch_primary;
 
 /// How long typing pauses before the draft is stored.
 const DRAFT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
@@ -160,6 +161,9 @@ pub fn Composer(
   };
   let input = NodeRef::<html::Textarea>::new();
   let file_input = NodeRef::<html::Input>::new();
+  // Phones: the camera and the photo library each have their own picker.
+  let camera_input = NodeRef::<html::Input>::new();
+  let photo_input = NodeRef::<html::Input>::new();
   let is_empty = RwSignal::new(true);
   let attachments = RwSignal::new(Vec::<PendingFile>::new());
   let upload_error = RwSignal::new(None::<String>);
@@ -520,7 +524,9 @@ pub fn Composer(
       return;
     }
     let modifier = ev.ctrl_key() || ev.meta_key();
+    // On touch screens Enter is a newline and the send button sends, as in the phones' messengers.
     let should_send = match state.settings.send_mode.get_untracked() {
+      _ if is_touch_primary() => modifier,
       SendMode::Enter => !ev.shift_key() && !modifier,
       SendMode::CtrlEnter => modifier,
     };
@@ -606,14 +612,15 @@ pub fn Composer(
     }
   };
 
-  let on_files = move |_| {
-    let Some(files) = file_input.get_untracked().and_then(|element| element.files()) else {
+  let take_files = move |picker: NodeRef<html::Input>| {
+    let Some(element) = picker.get_untracked() else {
+      return;
+    };
+    let Some(files) = element.files() else {
       return;
     };
     add_files((0..files.length()).filter_map(|i| files.item(i)).collect());
-    if let Some(element) = file_input.get_untracked() {
-      element.set_value("");
-    }
+    element.set_value("");
   };
   // Drops anywhere on the conversation arrive through the channel view (main composer only).
   if maybe_thread.is_none()
@@ -838,19 +845,34 @@ pub fn Composer(
             data-composer=if maybe_thread.is_some() { "thread" } else { "channel" }
           ></textarea>
           <div class="composer-toolbar">
-            <input type="file" multiple hidden node_ref=file_input on:change=on_files tabindex="-1" />
+            <input type="file" multiple hidden node_ref=file_input on:change=move |_| take_files(file_input) tabindex="-1" />
+            <input type="file" accept="image/*,video/*" capture="environment" hidden node_ref=camera_input on:change=move |_| take_files(camera_input) tabindex="-1" />
+            <input type="file" accept="image/*,video/*" multiple hidden node_ref=photo_input on:change=move |_| take_files(photo_input) tabindex="-1" />
             <button
               class="icon-btn"
               aria-label=move || i18n.t("composer-attach")
               title=move || i18n.t("composer-attach")
-              on:click=move |_| {
-                if let Some(element) = file_input.get_untracked() {
-                  let element: &web_sys::HtmlElement = element.unchecked_ref();
-                  element.click();
-                }
-              }
+              on:click=move |_| open_picker(file_input)
             >
               <Icon name=IconName::Paperclip />
+            </button>
+            <button
+              type="button"
+              class="icon-btn compact-only"
+              aria-label=move || i18n.t("composer-camera")
+              title=move || i18n.t("composer-camera")
+              on:click=move |_| open_picker(camera_input)
+            >
+              <Icon name=IconName::Camera />
+            </button>
+            <button
+              type="button"
+              class="icon-btn compact-only"
+              aria-label=move || i18n.t("composer-photos")
+              title=move || i18n.t("composer-photos")
+              on:click=move |_| open_picker(photo_input)
+            >
+              <Icon name=IconName::Image />
             </button>
             <button
               class="icon-btn"
@@ -937,6 +959,14 @@ pub fn Composer(
         <p class="markdown-hint">{move || i18n.t("composer-markdown-hint")}</p>
       </Show>
     </div>
+  }
+}
+
+/// Opens a file picker (a hidden `<input type="file">`).
+fn open_picker(picker: NodeRef<html::Input>) {
+  if let Some(element) = picker.get_untracked() {
+    let element: &web_sys::HtmlElement = element.unchecked_ref();
+    element.click();
   }
 }
 
