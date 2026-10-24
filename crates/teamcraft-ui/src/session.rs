@@ -213,21 +213,21 @@ impl SessionControl {
     let server_state = match tauri::server_state().await {
       Ok(server_state) => server_state,
       Err(problem) => {
-        self.state.set(SessionState::NeedsServer {
+        self.state.set_if_alive(SessionState::NeedsServer {
           maybe_address: None,
           maybe_problem: Some(problem),
         });
         return false;
       },
     };
-    self.is_server_locked.set(server_state.is_locked);
+    self.is_server_locked.set_if_alive(server_state.is_locked);
     if let Some(server) = server_state.maybe_active {
-      self.server.set(Some(server));
+      self.server.set_if_alive(Some(server));
       return true;
     }
     match server_state.maybe_managed_address {
       Some(address) => self.check_server(address),
-      None => self.state.set(SessionState::NeedsServer {
+      None => self.state.set_if_alive(SessionState::NeedsServer {
         maybe_address: None,
         maybe_problem: None,
       }),
@@ -310,16 +310,16 @@ impl SessionControl {
     }
     let outcome = remote_backend::core_status(me.id).await;
     // Signed out or started again meanwhile: this answer is stale.
-    if self.core_round.get_untracked() != round {
+    if self.core_round.try_get_untracked() != Some(round) {
       return;
     }
     match outcome {
-      Ok(CoreStatus::Ready { .. }) => self.state.set(SessionState::Ready(me)),
+      Ok(CoreStatus::Ready { .. }) => self.state.set_if_alive(SessionState::Ready(me)),
       Ok(CoreStatus::NeedsEnrollment {
         has_existing_identity,
         was_data_lost,
       }) => {
-        self.state.set(SessionState::NeedsEnrollment {
+        self.state.set_if_alive(SessionState::NeedsEnrollment {
           me,
           has_existing_identity,
           was_data_lost,
@@ -327,12 +327,12 @@ impl SessionControl {
       },
       Ok(CoreStatus::Failed { message }) => self
         .state
-        .set(SessionState::SignedOut(Some(LoginProblem::CoreFailed(message)))),
+        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreFailed(message)))),
       // The core is still waiting for an access token and retries on its own.
       Ok(CoreStatus::NotStarted) => self.wait_for_core(me, started_ms, round),
       Err(error) => self
         .state
-        .set(SessionState::SignedOut(Some(LoginProblem::Failed(error)))),
+        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::Failed(error)))),
     }
   }
 
@@ -408,7 +408,7 @@ impl SessionControl {
       Ok(me) if tauri::has_core() => self.start_core(me).await,
       Ok(me) => {
         let is_ready = load_string(&device_ready_key(&me)).is_some();
-        self.state.set(if is_ready {
+        self.state.set_if_alive(if is_ready {
           SessionState::Ready(me)
         } else {
           SessionState::NeedsDeviceSetup(me)
@@ -416,7 +416,7 @@ impl SessionControl {
       },
       Err(problem) => {
         // A role-less account stays signed in at the identity provider; the login screen offers to sign out.
-        self.state.set(SessionState::SignedOut(Some(problem)));
+        self.state.set_if_alive(SessionState::SignedOut(Some(problem)));
       },
     }
   }

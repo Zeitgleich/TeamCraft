@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Fails if UI code touches a signal without `try_` after an `.await` in a `spawn_local` task.
+"""Fails if UI code touches a signal without `try_` in code that runs later than its component.
 
 Issue #322: a task that outlives its component (the core answered after a dialog was closed) and
 then reads or writes the component's signals panics with "Tried to access a reactive value that
-has already been disposed", which kills the wasm app. After the first `.await`, signals are only
-touched with `try_get_untracked`, `try_set`, `try_update`, `try_with`, ... (or through helpers such
+has already been disposed", which kills the wasm app. The same goes for timers, animation frames
+and JS callbacks. After the first `.await` of a task, and anywhere in a deferred callback
+(`set_timeout`, `request_animation_frame`, `Closure::new`/`wrap`/`once`), signals are only touched
+with `try_get_untracked`, `try_set`, `try_update`, `try_with`, ... (or through helpers such
 as `feedback::PendingAction`, which do).
 
     scripts/check-async-signals.py [paths ...]   # default: crates/teamcraft-ui/src
@@ -20,6 +22,11 @@ import sys
 SIGNAL_ACCESS = re.compile(
     r"\.(get|get_untracked|set|update|update_untracked|with|with_untracked|"
     r"get_value|set_value|update_value|with_value|read|write)\((?!\s*&)"
+)
+# Calls whose argument runs later, when the component that started it may be gone.
+CALLBACK_CALL = re.compile(
+    r"\b(spawn_local|set_timeout|set_timeout_with_handle|request_animation_frame|"
+    r"request_animation_frame_with_handle|Closure::(?:<.*?>::)?(?:new|wrap|once|once_into_js))\("
 )
 # `.get()` without arguments only: `.get(&key)` / `.get(index)` are maps and slices.
 ARGUMENT_GETTERS = {"get", "get_untracked"}
@@ -39,7 +46,7 @@ def main(argv=None):
         print(finding)
     if findings:
         print(
-            f"\n{len(findings)} signal access(es) after an .await in spawn_local without try_ (issue #322).\n"
+            f"\n{len(findings)} signal access(es) in deferred code without try_ (issue #322).\n"
             "Use try_get_untracked/try_set/try_update/try_with, or mark a non-signal with `// async-ok: <reason>`.",
             file=sys.stderr,
         )
@@ -53,9 +60,10 @@ def check_source(name, source):
         source = source[: source.index("#[cfg(test)]")]
     lines = source.splitlines()
     findings = []
-    for start, end in spawned_bodies(source):
+    for start, end, is_deferred in callback_bodies(source):
         body = source[start:end]
-        first_await = body.find(".await")
+        # A deferred callback runs later as a whole; a task only after its first await.
+        first_await = 0 if is_deferred else body.find(".await")
         if first_await < 0:
             continue
         for match in SIGNAL_ACCESS.finditer(source, start, end):
@@ -89,10 +97,29 @@ def closing_paren(source, position):
     return position - 1
 
 
-def spawned_bodies(source):
-    """(start, end) of the argument of every `spawn_local(` call, by matching parentheses."""
-    for match in re.finditer(r"\bspawn_local\(", source):
-        yield match.end(), closing_paren(source, match.end())
+def closing_brace(source, position):
+    """Index of the `}` that closes the block whose contents start at `position`."""
+    depth = 1
+    while position < len(source) and depth:
+        if source[position] == "{":
+            depth += 1
+        elif source[position] == "}":
+            depth -= 1
+        elif source[position] == '"':
+            position = skip_string(source, position)
+        position += 1
+    return position - 1
+
+
+def callback_bodies(source):
+    """(start, end, is_deferred) of the arguments of every call that runs code later: tasks
+    (`spawn_local`) and deferred callbacks (timers, animation frames, JS closures)."""
+    for match in CALLBACK_CALL.finditer(source):
+        is_deferred = match.group(1) != "spawn_local"
+        yield match.end(), closing_paren(source, match.end()), is_deferred
+    # `async fn` bodies: they are spawned by name (`spawn_local(load(state))`) as often as inline.
+    for match in re.finditer(r"\basync fn\b[^{;]*\{", source):
+        yield match.end(), closing_brace(source, match.end()), False
 
 
 def skip_string(source, position):

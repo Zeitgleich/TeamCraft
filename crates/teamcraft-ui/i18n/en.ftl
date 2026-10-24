@@ -2130,9 +2130,9 @@ error-conflict = Someone changed this at the same time. Look at the current stat
 error-not-found = This doesn't exist any more. It may have been deleted or moved.
 action-running = Working…
 panic-title = Something went wrong
-panic-body = The app ran into an error and has to be reloaded. Your messages and drafts are kept.
+panic-body = The app ran into an error and has to be reloaded. What you were typing just now may be lost.
 panic-reload = Reload
-panic-details-label = Details for your admin (no message content)
+panic-details-label = Technical details for your admin (version and where the error happened)
 
 ## Sign-in callback page: the browser tab the desktop app shows after the identity provider
 ## (plain text only, no placeables; the desktop shell reads these lines itself)

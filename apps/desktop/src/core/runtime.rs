@@ -194,6 +194,16 @@ impl DatabaseKeySource for KeyChoice {
 /// Receives the gateway's call events (start, update, end, ring) on the core thread.
 pub type CallEventHandler = Arc<dyn Fn(GatewayEvent) + Send + Sync>;
 
+/// Receives a failure no UI request waits for, as `ActionFailure` wire text (issue #322).
+pub type FailureHandler = Arc<dyn Fn(String) + Send + Sync>;
+
+/// How the core tells the shell about changes, failures and call events.
+struct Hooks {
+  on_change: Arc<dyn Fn() + Send + Sync>,
+  on_failure: FailureHandler,
+  on_call_event: CallEventHandler,
+}
+
 /// Everything joining a conversation's call needs from the core (e2ee.md §8).
 pub struct CallPreparation {
   pub join: CallJoinTokenResponse,
@@ -275,13 +285,15 @@ pub struct CoreRuntime {
 
 impl CoreRuntime {
   /// Starts the core for one signed-in user. `on_change` is called after every store change,
-  /// `on_call_event` with every call event from the gateway.
+  /// `on_failure` with every failure the UI did not wait for, `on_call_event` with every call event
+  /// from the gateway.
   pub fn spawn(
     config: CoreConfig,
     user: UserId,
     key: KeyChoice,
     tokens: TokenCache,
     on_change: Arc<dyn Fn() + Send + Sync>,
+    on_failure: FailureHandler,
     on_call_event: CallEventHandler,
   ) -> Self {
     let (requests, receiver) = mpsc::unbounded_channel();
@@ -297,7 +309,12 @@ impl CoreRuntime {
             return;
           },
         };
-        let core = Core::new(config, user, key, tokens, on_change, on_call_event, status);
+        let hooks = Hooks {
+          on_change,
+          on_failure,
+          on_call_event,
+        };
+        let core = Core::new(config, user, key, tokens, hooks, status);
         runtime.block_on(core.run(receiver));
       })
       .ok();
@@ -516,6 +533,7 @@ struct Core {
   key: KeyChoice,
   tokens: TokenCache,
   on_change: Arc<dyn Fn() + Send + Sync>,
+  on_failure: FailureHandler,
   on_call_event: CallEventHandler,
   store: Option<Store>,
   /// Keeps a second process off the store while this one has it open (e2ee.md §9.4).
@@ -576,10 +594,14 @@ impl Core {
     user: UserId,
     key: KeyChoice,
     tokens: TokenCache,
-    on_change: Arc<dyn Fn() + Send + Sync>,
-    on_call_event: CallEventHandler,
+    hooks: Hooks,
     status: ConnectionStatus,
   ) -> Self {
+    let Hooks {
+      on_change,
+      on_failure,
+      on_call_event,
+    } = hooks;
     let mut connection = ConnectionSupervisor::new(ConnectionSettings::default(), status);
     let notify = on_change.clone();
     connection.set_observer(Box::new(move |_| notify()));
@@ -589,6 +611,7 @@ impl Core {
       key,
       tokens,
       on_change,
+      on_failure,
       on_call_event,
       store: None,
       store_lock: None,
@@ -813,9 +836,15 @@ impl Core {
         drop(reply.send(result));
         // A read can ask for data it doesn't have yet (messages found only in shared index
         // segments, last seen, the call history): tell the UI to read again when it arrived.
-        // A failed read command still changed what there is to read (it was answered as failed).
-        if !matches!(self.run_queued_commands().await, Ok(0)) {
-          self.changed();
+        // A failed read command still changed what there is to read (it was answered as failed),
+        // and its failure goes to the UI too, which nobody there waits for (issue #322).
+        match self.run_queued_commands().await {
+          Ok(0) => {},
+          Ok(_) => self.changed(),
+          Err(error) => {
+            self.changed();
+            (self.on_failure)(describe_failure(error));
+          },
         }
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),

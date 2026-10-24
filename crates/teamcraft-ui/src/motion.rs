@@ -86,6 +86,7 @@ fn leave_ghost(element: &web_sys::Element) {
   set_timeout(
     move || {
       ghost.remove();
+      // async-ok: a thread-local Cell, not a signal.
       GHOSTS.set(GHOSTS.get().saturating_sub(1));
     },
     GHOST_LIFETIME,

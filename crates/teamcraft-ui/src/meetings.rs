@@ -18,6 +18,7 @@ use crate::auth::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator};
 use crate::clock::{now_ms, parse_local_datetime};
 use crate::meeting_reminders::ServerClock;
 use crate::model::{ConversationId, TimestampMs, UserId};
+use crate::reactive::SetIfAlive;
 
 /// Meetings that ended less than this long ago are still listed.
 const LIST_LOOKBACK_MS: i64 = 60 * 60_000;
@@ -244,11 +245,11 @@ impl MeetingsHub {
         maybe_clock,
       }) => {
         if let Some(clock) = maybe_clock {
-          self.clock.set(clock);
+          self.clock.set_if_alive(clock);
         }
-        self.maybe_error.set(None);
-        self.meetings.set(meetings.clone());
-        self.is_loaded.set(true);
+        self.maybe_error.set_if_alive(None);
+        self.meetings.set_if_alive(meetings.clone());
+        self.is_loaded.set_if_alive(true);
         let mut lobbies = Vec::new();
         for meeting in meetings.iter().filter(|meeting| hosts_lobby(meeting, me)) {
           if let Ok(entries) = self.client().lobby(meeting.id).await
@@ -257,11 +258,11 @@ impl MeetingsHub {
             lobbies.push((meeting.id, entries));
           }
         }
-        self.lobbies.set(lobbies);
+        self.lobbies.set_if_alive(lobbies);
       },
       Err(error) => {
         tracing::warn!(%error, "could not load the meetings");
-        self.maybe_error.set(Some(error.to_string()));
+        self.maybe_error.set_if_alive(Some(error.to_string()));
       },
     }
   }
@@ -280,7 +281,7 @@ impl MeetingsHub {
       },
       Err(error) => {
         tracing::warn!(%error, "a meeting action failed");
-        self.maybe_error.set(Some(error.to_string()));
+        self.maybe_error.set_if_alive(Some(error.to_string()));
         None
       },
     }

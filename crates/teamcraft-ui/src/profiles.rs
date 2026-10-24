@@ -70,7 +70,7 @@ impl ProfileHub {
   pub async fn save(&self, request: UpdateProfileRequest) -> Result<(), RestError> {
     let client = self.client.get_value();
     let saved: ProfileResponse = client.put("/api/v1/me/profile", &request).await?;
-    self.profiles.update(|all| {
+    self.profiles.update_if_alive(|all| {
       all.insert(saved.user_id, saved);
     });
     Ok(())
@@ -103,7 +103,7 @@ impl ProfileHub {
       .post("/api/v1/me/avatar/complete", &serde_json::json!({}))
       .await?;
     self.forget_avatar(me);
-    self.profiles.update(|all| {
+    self.profiles.update_if_alive(|all| {
       all.insert(profile.user_id, profile);
     });
     Ok(())
@@ -116,7 +116,7 @@ impl ProfileHub {
       .send(ApiMethod::Delete, "/api/v1/me/avatar", None)
       .await?;
     self.forget_avatar(me);
-    self.profiles.update(|all| {
+    self.profiles.update_if_alive(|all| {
       if let Some(profile) = all.get_mut(&me) {
         profile.has_avatar = false;
       }

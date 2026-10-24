@@ -22,6 +22,7 @@ use crate::auth::{ApiMethod, Authenticator};
 use crate::clock::{end_of_local_day, local_time_zone, local_utc_offset_minutes, now_ms};
 use crate::model::TimestampMs;
 use crate::prefs::{ConversationNotify, DndSchedule, EVERY_DAY, MuteFor, NotifyLevel, Preferences, PushWhen};
+use crate::reactive::UpdateIfAlive;
 use crate::settings::Settings;
 
 const MS_PER_HOUR: i64 = 3_600_000;
@@ -74,7 +75,7 @@ impl NotificationSync {
     let spaces = self.get::<ListSpacesResponse>("/api/v1/spaces").await;
     let now = now_ms();
     let mut state = confirmed.borrow_mut();
-    settings.prefs.update(|prefs| {
+    settings.prefs.update_if_alive(|prefs| {
       if let Some(list) = &spaces {
         for space in &list.spaces {
           if let Some(mine) = &space.maybe_my_notifications {

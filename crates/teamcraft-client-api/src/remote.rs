@@ -29,6 +29,10 @@ use crate::search::{SavedSearch, SearchHit, SearchResults};
 /// Event name the host emits whenever the local store changed (new messages, membership, presence).
 pub const CORE_CHANGED_EVENT: &str = "core-changed";
 
+/// Event name the host emits with a failure no UI request waited for (a background command of a
+/// read); the payload is `failure::ActionFailure` wire text.
+pub const CORE_FAILED_EVENT: &str = "core-failed";
+
 /// Event name the host emits whenever call state changed (ringing, roster, media).
 pub const CALL_CHANGED_EVENT: &str = "call-changed";
 

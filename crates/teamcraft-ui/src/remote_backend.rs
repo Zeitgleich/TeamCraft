@@ -28,15 +28,15 @@ use teamcraft_client_api::model::{
   SpaceId, ThreadId, ThreadSummary, User, UserId,
 };
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection, CoreStatus,
-  EnrollRequest, LinkStatus, MessageWindow, StoreHealth,
+  CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
+  CoreStatus, EnrollRequest, LinkStatus, MessageWindow, StoreHealth,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyResponse};
 
 use crate::auth::Authenticator;
-use crate::auth::tauri::{call, listen};
-use crate::feedback::{ActionFailure, ActionTicket, report_failure};
+use crate::auth::tauri::{call, listen, listen_text};
+use crate::feedback::{ActionFailure, ActionTicket, report_background_failure, report_failure};
 
 /// Messages fetched per request. Feeds are read in 2-row windows by the list, so pages keep the
 /// number of requests small while scrolling.
@@ -246,6 +246,10 @@ impl RemoteChat {
     };
     let listener = backend.clone();
     listen(CORE_CHANGED_EVENT, move || listener.queue_refresh());
+    // Desktop: failures of the core's background commands (the browser core reports its own).
+    listen_text(CORE_FAILED_EVENT, |text| {
+      report_background_failure(ActionFailure::from_wire(&text))
+    });
     Ok(backend)
   }
 
@@ -333,6 +337,7 @@ impl RemoteChat {
     let backend = self.clone();
     set_timeout(
       move || {
+        // async-ok: a Cell, not a signal.
         backend.refresh_queued.set(false);
         spawn_local(async move { backend.refresh().await });
       },

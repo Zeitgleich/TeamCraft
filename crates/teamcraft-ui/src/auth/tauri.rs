@@ -710,6 +710,7 @@ async fn show_page_notification(notification: &OsNotification) {
   match js_sys::Reflect::construct(&constructor, &args) {
     Ok(shown) => {
       let tag = notification.tag.as_str().to_owned();
+      // async-ok: a thread-local, not a signal.
       PAGE_NOTIFICATIONS.with(|page| page.borrow_mut().insert(tag, shown));
     },
     Err(_) => tracing::debug!("could not show a notification"),

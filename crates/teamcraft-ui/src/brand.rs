@@ -300,7 +300,7 @@ fn watch_system_scheme(signal: RwSignal<bool>) {
   else {
     return;
   };
-  let handler = Closure::<dyn Fn()>::new(move || signal.set(system_prefers_dark()));
+  let handler = Closure::<dyn Fn()>::new(move || signal.set_if_alive(system_prefers_dark()));
   if query
     .add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())
     .is_ok()

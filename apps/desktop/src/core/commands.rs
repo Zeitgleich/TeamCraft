@@ -7,14 +7,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
-  CORE_CHANGED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection, CoreStatus,
-  EnrollRequest, LinkStatus, MessageWindow,
+  CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
+  CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
 use teamcraft_proto::{ConversationId, MessageId, UserId};
 
-use super::runtime::{CoreConfig, CoreRuntime, KeyChoice, TokenCache};
+use super::runtime::{CoreConfig, CoreRuntime, FailureHandler, KeyChoice, TokenCache};
 use crate::auth::commands::Service;
 use crate::auth::{AuthService, TokenStore};
 use crate::calls::CallHost;
@@ -154,7 +154,21 @@ pub async fn core_start(
           tracing::debug!(%error, "could not notify the webview");
         }
       });
-      CoreRuntime::spawn(config, user, key, tokens, on_change, calls.gateway_handler())
+      let emitter = app.clone();
+      let on_failure: FailureHandler = Arc::new(move |failure| {
+        if let Err(error) = emitter.emit(CORE_FAILED_EVENT, failure) {
+          tracing::debug!(%error, "could not tell the webview about a failure");
+        }
+      });
+      CoreRuntime::spawn(
+        config,
+        user,
+        key,
+        tokens,
+        on_change,
+        on_failure,
+        calls.gateway_handler(),
+      )
     })
     .await?;
   Ok(status)
@@ -473,6 +487,7 @@ mod tests {
       KeyChoice::Fixed(vec![7; 32]),
       tokens,
       Arc::new(|| {}),
+      Arc::new(|_| {}),
       Arc::new(|_| {}),
     )
   }

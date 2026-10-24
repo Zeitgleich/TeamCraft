@@ -166,6 +166,7 @@ async fn a_core_started_right_after_login_reads_the_live_session() {
     TokenCache::live(service.clone()),
     Arc::new(|| {}),
     Arc::new(|_| {}),
+    Arc::new(|_| {}),
   );
 
   let status = runtime.status().await;
@@ -217,6 +218,7 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     tokens.clone(),
     Arc::new(|| {}),
     Arc::new(|_| {}),
+    Arc::new(|_| {}),
   );
   Person {
     name,
@@ -247,6 +249,7 @@ fn second_device(person: &Person, config: &DesktopConfig) -> CoreRuntime {
     KeyChoice::Fixed(vec![8; 32]),
     person.tokens.clone(),
     Arc::new(|| {}),
+    Arc::new(|_| {}),
     Arc::new(|_| {}),
   )
 }
