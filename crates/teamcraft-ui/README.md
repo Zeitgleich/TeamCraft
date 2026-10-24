@@ -50,12 +50,31 @@ contains demo fixtures.
 | Lightbox: file details          | ![Details](docs/screenshots/lightbox-details.png)              |
 | Lightbox: video                 | ![Video](docs/screenshots/lightbox-video.png)                  |
 | Lightbox: GIF, reduced motion   | ![Paused GIF](docs/screenshots/lightbox-gif-paused.png)        |
+| Labelled rail, light / dark     | ![Channel light](docs/screenshots/polish-channel-light.png) ![Channel dark](docs/screenshots/polish-channel-dark.png) |
+| Activity tabs, light / dark     | ![Activity light](docs/screenshots/polish-activity-light.png) ![Activity dark](docs/screenshots/polish-activity-dark.png) |
+| Preview of an unjoined channel  | ![Preview light](docs/screenshots/polish-preview-details-light.png) ![Preview dark](docs/screenshots/polish-preview-details-dark.png) |
+| Files tab, browse with preview  | ![Files tab](docs/screenshots/polish-files-tab-light.png) ![Browse channels](docs/screenshots/polish-browse-dark.png) |
 
 Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.
 
 The 50,000-line `#app-logs` channel (see `docs/screenshots/log-channel-dark.png`) keeps scrolling at
 frame rate because only the visible rows are in the DOM.
+
+## Motion and loading
+
+- Tokens in the first block of `style/main.css`: `--dur-fast` (120 ms), `--dur-base` (180 ms),
+  `--dur-slow` (260 ms), `--dur-exit` (100 ms) and the curves `--ease-standard`,
+  `--ease-emphasized`, `--ease-exit`, `--ease-pop`. With `prefers-reduced-motion` every duration is
+  ~0. The transitions themselves are in the stylesheet's last section ("Motion").
+- Only `transform` and `opacity` animate; entrances run once when an element mounts, nothing loops
+  while it isn't visible (placeholders pulse a few times, then stand still).
+- Exits: `motion::use_leave_ghost` leaves an inert copy of a dialog, menu or toast that plays the
+  exit while the real element is already gone, so focus and the next view never wait.
+- The feed decides how a row enters (`feed_motion.rs`): new since the conversation opened, the
+  user's own message settling once confirmed, reactions whose count changed.
+- Lists that load show `components/skeleton.rs` placeholders, empty ones `components/empty_state.rs`
+  (icon, headline, one sentence, at most one action).
 
 ## What is in the shell
 

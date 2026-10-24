@@ -22,6 +22,8 @@ export default function loader() {
   return {
     onStart: () => {
       if (!root) return;
+      // Script runs, so progress and errors come from here; the script-free reload is not needed.
+      root.querySelector('.tc-loader-reload')?.remove();
       applyTheme();
       applyBrand(root);
       const label = text('loader-loading');

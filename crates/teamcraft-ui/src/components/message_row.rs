@@ -14,9 +14,10 @@ use crate::components::message_actions::MessageMenu;
 use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
 use crate::delivery::Delivery;
+use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
-use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, thread_id_of};
+use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, is_pending, thread_id_of};
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
 
@@ -42,6 +43,9 @@ pub fn MessageRow(
   /// The message right before this one in the same list, used for grouping and date dividers.
   maybe_prev: Option<Message>,
   #[prop(default = false)] in_thread: bool,
+  /// How the row enters and which reactions pop (the feed decides, `feed_motion.rs`).
+  #[prop(optional)]
+  motion: RowMotion,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let state = use_app_state();
@@ -65,7 +69,7 @@ pub fn MessageRow(
     },
     MessageKind::User => {
       let is_grouped = is_grouped(&message, maybe_prev.as_ref());
-      user_message(message, is_grouped, in_thread).into_any()
+      user_message(message, is_grouped, in_thread, motion).into_any()
     },
   };
   view! {
@@ -209,7 +213,7 @@ fn system_line(
   }
 }
 
-fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl IntoView {
+fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: RowMotion) -> impl IntoView {
   let i18n = use_i18n();
   let state = use_app_state();
   let locale = i18n.locale().tag();
@@ -438,9 +442,11 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
         let emoji = reaction.emoji.clone();
         let label_emoji = reaction.emoji.clone();
         let count = reaction.count;
+        let is_popping = motion.popping.contains(&reaction.emoji);
         view! {
           <button
             class="reaction"
+            class:is-popping=is_popping
             class:reaction-mine=reaction.reacted_by_me
             aria-pressed=reaction.reacted_by_me.to_string()
             aria-label=move || i18n.t_with("reaction-label", &[("emoji", &label_emoji), ("count", &count.to_string())])
@@ -640,6 +646,9 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       class="msg msg-user"
       class:msg-grouped=is_grouped
       class:msg-mine=is_mine
+      class:msg-pending=is_pending(message_id)
+      class:msg-arriving=motion.entrance == Entrance::Arriving
+      class:msg-settling=motion.entrance == Entrance::Settling
       class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
       tabindex="-1"

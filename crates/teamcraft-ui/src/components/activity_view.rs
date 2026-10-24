@@ -1,29 +1,54 @@
 //! The activity feed: mentions, reactions to the user's messages and replies in their threads, in
-//! one list with an unread state. An entry jumps to the message.
+//! one list with an unread state, with tabs per kind. An entry jumps to the message.
 
 use leptos::prelude::*;
 use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
 
 use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
+use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
-/// What the user sees of the feed in one go.
+/// The feed's element ID: one panel, which every tab filters.
+const ACTIVITY_PANEL_ID: &str = "activity-panel";
+
+/// The tabs of the feed: everything, or one kind of activity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ActivityFilter {
+enum ActivityTab {
   All,
-  Unread,
+  /// Activity in DMs and group DMs.
+  Direct,
   Mentions,
+  /// Replies in threads the user takes part in.
+  Threads,
 }
 
-impl ActivityFilter {
-  fn includes(self, item: &ActivityItem) -> bool {
+impl ActivityTab {
+  const ALL: [Self; 4] = [Self::All, Self::Direct, Self::Mentions, Self::Threads];
+
+  fn label_key(self) -> &'static str {
+    match self {
+      Self::All => "activity-all",
+      Self::Direct => "activity-direct",
+      Self::Mentions => "activity-mentions",
+      Self::Threads => "activity-threads",
+    }
+  }
+
+  /// The element ID of the tab's button; the feed is labelled by the selected one.
+  fn tab_id(self) -> String {
+    format!("{}-tab", self.label_key())
+  }
+
+  fn includes(self, item: &ActivityItem, is_direct: impl Fn() -> bool) -> bool {
     match self {
       Self::All => true,
-      Self::Unread => item.is_unread,
+      Self::Direct => is_direct(),
       Self::Mentions => item.kind == ActivityKind::Mention,
+      Self::Threads => item.kind == ActivityKind::ThreadReply,
     }
   }
 }
@@ -32,24 +57,29 @@ impl ActivityFilter {
 pub fn ActivityView() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let filter = RwSignal::new(ActivityFilter::All);
+  let tab = RwSignal::new(ActivityTab::All);
+  let is_unread_only = RwSignal::new(false);
   let feed = Memo::new(move |_| state.read(|backend| backend.activity()));
   let items = Memo::new(move |_| {
-    let selected = filter.get();
+    let selected = tab.get();
+    let unread_only = is_unread_only.get();
     feed
       .get()
       .items
       .into_iter()
-      .filter(|item| selected.includes(item))
+      .filter(|item| !unread_only || item.is_unread)
+      .filter(|item| {
+        selected.includes(item, || {
+          state
+            .read(|backend| backend.conversation(item.conversation))
+            .is_some_and(|conversation| conversation.kind.is_direct_like())
+        })
+      })
       .collect::<Vec<_>>()
   });
-  let filter_button = move |value: ActivityFilter, label: &'static str| {
-    view! {
-      <button aria-pressed=move || (filter.get() == value).to_string() on:click=move |_| filter.set(value)>
-        {move || i18n.t(label)}
-      </button>
-    }
-  };
+
+  let on_keydown =
+    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &ActivityTab::ALL, tab, ActivityTab::tab_id);
 
   view! {
     <section class="activity-view" aria-label=move || i18n.t("activity-title")>
@@ -57,11 +87,13 @@ pub fn ActivityView() -> impl IntoView {
         <div class="panel-title">
           <h1>{move || i18n.t("activity-title")}</h1>
         </div>
-        <div class="segmented" role="group" aria-label=move || i18n.t("activity-filter")>
-          {filter_button(ActivityFilter::All, "activity-all")}
-          {filter_button(ActivityFilter::Unread, "activity-unread")}
-          {filter_button(ActivityFilter::Mentions, "activity-mentions")}
-        </div>
+        <button
+          class="btn btn-small"
+          aria-pressed=move || is_unread_only.get().to_string()
+          on:click=move |_| is_unread_only.update(|value| *value = !*value)
+        >
+          {move || i18n.t("activity-unread")}
+        </button>
         <button
           class="btn btn-small"
           prop:disabled=move || feed.get().unread_count == 0
@@ -70,12 +102,36 @@ pub fn ActivityView() -> impl IntoView {
           {move || i18n.t("activity-mark-read")}
         </button>
       </header>
-      <ul class="activity-list panel-scroll">
+      <div class="view-tabs" role="tablist" aria-label=move || i18n.t("activity-filter") on:keydown=on_keydown>
+        {ActivityTab::ALL
+          .into_iter()
+          .map(|value| {
+            view! {
+              <button
+                id=value.tab_id()
+                role="tab"
+                aria-selected=move || (tab.get() == value).to_string()
+                aria-controls=ACTIVITY_PANEL_ID
+                tabindex=move || roving_tabindex(tab.get() == value)
+                on:click=move |_| tab.set(value)
+              >
+                {move || i18n.t(value.label_key())}
+              </button>
+            }
+          })
+          .collect_view()}
+      </div>
+      <ul
+        class="activity-list panel-scroll"
+        role="tabpanel"
+        id=ACTIVITY_PANEL_ID
+        aria-labelledby=move || tab.get().tab_id()
+      >
         <For each=move || items.get() key=|item| (item.id.clone(), item.is_unread) let:item>
           <ActivityRow item=item />
         </For>
         <Show when=move || items.get().is_empty() fallback=|| ()>
-          <li class="empty-state">{move || i18n.t("activity-empty")}</li>
+          <EmptyState icon=IconName::Check title_key="activity-empty-title" body_key="activity-empty" as_item=true />
         </Show>
       </ul>
     </section>

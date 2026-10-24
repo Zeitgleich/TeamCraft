@@ -23,14 +23,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 - **DM encryption setup status**: a DM whose device waits for the other side's encryption group says
   "Setting up encryption…", and after two minutes without it that the setup failed; "Retry" asks the
   other side's devices again (#278).
+- **Channel preview**: "Preview" in "Browse channels" shows a public channel before joining it,
+  with "Details" and "Join channel" at the bottom (its messages are end-to-end encrypted for the
+  members, so they show once joined).
 
 ### Changed
 
 - The in-memory viewer opens files up to 128 MiB on every platform (the desktop app had no limit);
   bigger files offer "Download" instead.
+- **Smoother web and desktop app**: one set of motion tokens (durations, easings; all near-instant
+  with the system's "reduce motion"). Channel switches cross-fade, dialogs, menus and the search
+  scale in and leave faster than they came, toasts and banners slide, sidebar sections unfold, a
+  new message rises in, the user's own message is shown at once and settles when the server has
+  it, reactions and unread badges pop when they change, buttons give a little on press. Only
+  transform and opacity move, nothing loops off screen.
+- **Global destinations on the rail**: Home, Activity and Threads sit at the top of the rail with
+  a label under each icon; the sidebar keeps calls, meetings, people and saved items.
+- **Channel tabs**: Messages and Files in the conversation header; the files side panel is now
+  the Files tab.
+- **Activity**: tabs for all activity, DMs, mentions and threads, an "unread" toggle and an "all
+  caught up" state.
+- **Empty states and loading**: one empty state everywhere (icon, headline, one sentence, at most
+  one action), placeholders instead of "nothing here" while user groups load, fixed sizes for
+  thumbnails and link-preview images so the feed doesn't jump when they decode; one radius and type
+  scale in the stylesheet.
 
 ### Fixed
 
+- The web loading screen offers a reload after 30 seconds when no script runs at all (#136).
 - **No failed requests before the first device**: a new `GET /users/{id}/enrollment` answers 200 with
   the identity key and device list a user has published (`{}` before enrollment), so first sign-in
   and pinning peers who haven't enrolled yet no longer log red 404s (#234). Newer apps still work

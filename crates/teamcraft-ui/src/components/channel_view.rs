@@ -4,10 +4,12 @@ use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::PresenceDot;
 use crate::components::bookmarks::BookmarksBar;
 use crate::components::composer::Composer;
+use crate::components::file_views::ChannelFiles;
 use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
+use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
 use crate::state::{Overlay, SidePanel, use_app_state};
@@ -17,6 +19,35 @@ const DM_SETUP_EXPIRY_MARGIN_MS: u64 = 500;
 
 /// How far back the seen line looks for the user's own latest message.
 const SEEN_LOOKBACK: usize = 50;
+
+/// The tabs of a conversation's header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelTab {
+  Messages,
+  /// Everything shared in the conversation.
+  Files,
+}
+
+impl ChannelTab {
+  const ALL: [Self; 2] = [Self::Messages, Self::Files];
+
+  fn slug(self) -> &'static str {
+    match self {
+      Self::Messages => "messages",
+      Self::Files => "files",
+    }
+  }
+
+  /// The element ID of the tab's button; its panel is labelled by it.
+  fn tab_id(self) -> String {
+    format!("channel-tab-{}", self.slug())
+  }
+
+  /// The element ID of the tab's panel.
+  fn panel_id(self) -> String {
+    format!("channel-panel-{}", self.slug())
+  }
+}
 
 /// Files dropped on a conversation, handed to its composer (provided by [`ChannelView`]).
 #[derive(Clone, Copy)]
@@ -39,6 +70,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
     let dropped = DroppedFiles(RwSignal::new_local(Vec::new()));
     provide_context(dropped);
     let drag_depth = RwSignal::new(0_i32);
+    let tab = RwSignal::new(ChannelTab::Messages);
     let has_files = |ev: &web_sys::DragEvent| {
       ev.data_transfer().is_some_and(|transfer| {
         transfer
@@ -68,6 +100,8 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
       };
       if can_post && files.length() > 0 {
         ev.prevent_default();
+        // The composer is on the messages tab.
+        tab.set(ChannelTab::Messages);
         dropped.0.set(
           (0..files.length())
             .filter_map(|index| files.item(index))
@@ -90,15 +124,38 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
             <span>{move || i18n.t("drop-files-here")}</span>
           </div>
         </Show>
-        <ChannelHeader conversation=conversation info=info />
+        <ChannelHeader conversation=conversation info=info tab=tab />
         <KeyChangeBanner conversation=conversation />
         <DeviceAccessBanner conversation=conversation />
         <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
-        <ChannelFeed conversation=conversation />
-        <SeenLine conversation=conversation />
-        <Composer conversation=conversation can_post=can_post conversation_name=name />
+        {move || match tab.get() {
+          ChannelTab::Messages => {
+            let name = name.clone();
+            view! {
+              <div
+                class="channel-messages"
+                role="tabpanel"
+                id=ChannelTab::Messages.panel_id()
+                aria-labelledby=ChannelTab::Messages.tab_id()
+              >
+                <ChannelFeed conversation=conversation />
+                <SeenLine conversation=conversation />
+                <Composer conversation=conversation can_post=can_post conversation_name=name />
+              </div>
+            }
+              .into_any()
+          },
+          ChannelTab::Files => view! {
+            <ChannelFiles
+              conversation=conversation
+              panel_id=ChannelTab::Files.panel_id()
+              labelled_by=ChannelTab::Files.tab_id()
+            />
+          }
+            .into_any(),
+        }}
       </section>
     })
   }
@@ -338,7 +395,11 @@ pub fn UnconfirmedRemovalActions(conversation: ConversationId, user: UserId) -> 
 }
 
 #[component]
-fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>) -> impl IntoView {
+fn ChannelHeader(
+  conversation: ConversationId,
+  info: Memo<Option<Conversation>>,
+  tab: RwSignal<ChannelTab>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
 
@@ -473,6 +534,7 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
             />
           </Show>
         </div>
+        <ChannelTabs tab=tab />
         {move || {
           info.get().and_then(|conv| {
             (conv.kind == crate::model::ConversationKind::Direct)
@@ -511,19 +573,6 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
         </button>
         <button
           class="header-btn"
-          aria-pressed=move || (state.panel.get() == SidePanel::Files).to_string()
-          aria-label=move || i18n.t("files-title")
-          title=move || i18n.t("files-title")
-          on:click=move |_| {
-            state.panel.update(|panel| {
-              *panel = if *panel == SidePanel::Files { SidePanel::Closed } else { SidePanel::Files };
-            });
-          }
-        >
-          <Icon name=IconName::Paperclip />
-        </button>
-        <button
-          class="header-btn"
           aria-pressed=move || (state.panel.get() == SidePanel::Pins).to_string()
           aria-label=move || i18n.t("pins-title")
           title=move || i18n.t("pins-title")
@@ -550,6 +599,35 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
         </button>
       </div>
     </header>
+  }
+}
+
+/// Messages and Files, right after the conversation's name.
+#[component]
+fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
+  let i18n = use_i18n();
+  let on_keydown =
+    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &ChannelTab::ALL, tab, ChannelTab::tab_id);
+  view! {
+    <div class="view-tabs header-tabs" role="tablist" aria-label=move || i18n.t("channel-tabs") on:keydown=on_keydown>
+      {ChannelTab::ALL
+        .into_iter()
+        .map(|value| {
+          view! {
+            <button
+              id=value.tab_id()
+              role="tab"
+              aria-selected=move || (tab.get() == value).to_string()
+              aria-controls=value.panel_id()
+              tabindex=move || roving_tabindex(tab.get() == value)
+              on:click=move |_| tab.set(value)
+            >
+              {move || i18n.t(&format!("channel-tab-{}", value.slug()))}
+            </button>
+          }
+        })
+        .collect_view()}
+    </div>
   }
 }
 

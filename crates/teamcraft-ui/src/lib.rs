@@ -25,6 +25,7 @@ pub mod clock;
 pub mod components;
 pub mod delivery;
 pub mod diff;
+pub mod feed_motion;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
 pub use teamcraft_client_api::{emoji, emoji_catalog};
 pub mod groups;
@@ -41,6 +42,7 @@ pub mod meetings;
 pub mod mention;
 #[cfg(any(test, feature = "demo"))]
 pub mod mock;
+pub mod motion;
 pub mod navigation;
 pub mod notifier;
 pub mod notify_sync;

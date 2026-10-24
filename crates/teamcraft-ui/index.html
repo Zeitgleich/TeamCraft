@@ -28,6 +28,12 @@
       </div>
       <div class="tc-loader-name"></div>
       <div class="tc-loader-bar" aria-hidden="true"><div class="tc-loader-progress"></div></div>
+      <!-- Shown by CSS alone after a long wait, in case no script runs at all (init.js blocked or
+           missing, no module support); loader.js removes it as soon as it starts. English only:
+           without script there is no language choice. -->
+      <a class="tc-loader-reload" href="" aria-label="Reload" title="Reload">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
       <div class="tc-loader-error" role="alert" hidden>
         <p class="tc-loader-error-title"></p>
         <p class="tc-loader-error-body"></p>

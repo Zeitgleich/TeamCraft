@@ -300,6 +300,37 @@ impl ChatBackend for MockBackend {
     self.people.borrow_mut().is_activity_read = true;
   }
 
+  /// The space's public channels, plus one the demo user hasn't joined (for the preview).
+  fn browse_channels(&self, space: SpaceId) -> Vec<teamcraft_client_api::actions::BrowsableChannel> {
+    let state = self.state.borrow();
+    let mut list: Vec<_> = state
+      .conversations
+      .iter()
+      .filter(|conv| conv.maybe_space == Some(space) && conv.kind == ConversationKind::Public)
+      .map(|conv| teamcraft_client_api::actions::BrowsableChannel {
+        conversation: conv.id,
+        space,
+        name: conv.name.clone(),
+        topic: conv.topic.clone(),
+        is_member: true,
+        is_archived: false,
+        has_external_people: false,
+      })
+      .collect();
+    if space == space_a() {
+      list.push(teamcraft_client_api::actions::BrowsableChannel {
+        conversation: id_from_raw(90),
+        space,
+        name: "support".into(),
+        topic: "Questions from customers, triaged daily".into(),
+        is_member: false,
+        is_archived: false,
+        has_external_people: true,
+      });
+    }
+    list
+  }
+
   fn last_seen(&self, user: UserId) -> Option<TimestampMs> {
     let state = self.state.borrow();
     let person = state.users.iter().find(|candidate| candidate.id == user)?;

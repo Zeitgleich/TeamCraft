@@ -2,6 +2,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::motion::use_leave_ghost;
 use crate::state::use_app_state;
 
 const FOCUSABLE: &str = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
@@ -18,6 +19,8 @@ pub fn Modal(
 ) -> impl IntoView {
   let state = use_app_state();
   let dialog = NodeRef::<html::Div>::new();
+  let backdrop = NodeRef::<html::Div>::new();
+  use_leave_ghost(backdrop);
   let previously_focused = web_sys::window()
     .and_then(|window| window.document())
     .and_then(|document| document.active_element())
@@ -57,7 +60,7 @@ pub fn Modal(
   };
 
   view! {
-    <div class="modal-backdrop" on:mousedown=move |ev| {
+    <div class="modal-backdrop" node_ref=backdrop on:mousedown=move |ev| {
       if ev.target() == ev.current_target() {
         state.close_overlay();
       }

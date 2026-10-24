@@ -8,6 +8,7 @@ use teamcraft_proto::{
 
 use crate::auth::ApiMethod;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::skeleton::ListSkeleton;
 use crate::i18n::use_i18n;
 use crate::model::{DeviceSetup, User, UserId};
 use crate::profiles::use_profiles;
@@ -18,6 +19,8 @@ use crate::state::{Overlay, use_app_state};
 
 /// People shown at once; the filter narrows a larger workspace down.
 const MAX_ROWS: usize = 200;
+/// Placeholder rows while the user groups load.
+const GROUP_SKELETON_ROWS: usize = 3;
 /// The directory on the server is asked once typing paused this long.
 const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 
@@ -179,6 +182,8 @@ fn UserGroups() -> impl IntoView {
   let groups = RwSignal::new(Vec::<UserGroupResponse>::new());
   let open = RwSignal::new(None::<UserGroupId>);
   let error = RwSignal::new(None::<String>);
+  // Until the first answer the list shows placeholders, not "no groups".
+  let is_loaded = RwSignal::new(false);
   let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));
 
   Effect::new(move |_| {
@@ -192,6 +197,7 @@ fn UserGroups() -> impl IntoView {
         Ok(list) => groups.set(list.groups),
         Err(failure) => error.set(Some(failure.to_string())),
       }
+      is_loaded.set(true);
     });
   });
 
@@ -247,7 +253,10 @@ fn UserGroups() -> impl IntoView {
           }
         }
       </For>
-      <Show when=move || groups.get().is_empty() fallback=|| ()>
+      <Show when=move || !is_loaded.get() fallback=|| ()>
+        <ListSkeleton rows=GROUP_SKELETON_ROWS label=Signal::derive(move || i18n.t("groups-loading")) />
+      </Show>
+      <Show when=move || is_loaded.get() && groups.get().is_empty() fallback=|| ()>
         <li class="empty-state">{move || i18n.t("groups-empty")}</li>
       </Show>
     </ul>
