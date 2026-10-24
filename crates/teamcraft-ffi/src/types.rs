@@ -5,8 +5,10 @@ use teamcraft_client_api::model::{self as view, ConversationKind as Conversation
 use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
-use teamcraft_core::push_preview::{PreviewContent, PushPreview};
-use teamcraft_proto::{PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto, TestPushResponse};
+use teamcraft_core::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
+use teamcraft_proto::{
+  PushContentMode, PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto, TestPushResponse,
+};
 
 /// Where the app keeps an account's data.
 #[derive(uniffi::Record)]
@@ -175,6 +177,51 @@ pub enum NotificationSuppression {
   DoNotDisturb,
 }
 
+/// How much a message notification shows: the app's privacy setting, and (as a limit) the
+/// workspace policy. The stricter of the two applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NotificationContent {
+  /// Sender, conversation and the beginning of the text.
+  Content,
+  /// Sender and conversation; "New message" instead of the text.
+  SenderOnly,
+  /// "New message" only.
+  Nothing,
+}
+
+/// The device's own setting and the limit the workspace policy sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NotificationContentSettings {
+  pub device: NotificationContent,
+  pub workspace: NotificationContent,
+}
+
+/// What kind of file a pushed message carries, for a label instead of the file name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NotificationAttachmentKind {
+  Image,
+  Video,
+  Audio,
+  File,
+}
+
+/// Why a message notification shows less than the message (for the diagnostics; never content).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NotificationGap {
+  /// Signed out or no access token: the message could not be fetched.
+  NoSession,
+  /// Fetching, decrypting or verifying failed (offline, keys not arrived yet).
+  NotDecrypted,
+  /// Fetching took longer than the notification's time budget.
+  TimedOut,
+  /// Not a text or a file.
+  NotShowable,
+  /// The workspace policy shows less.
+  WorkspacePolicy,
+  /// This device's setting shows less.
+  DeviceSetting,
+}
+
 /// What the device saw of pushes, for the notification diagnostics screen.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct PushDiagnosticsInfo {
@@ -221,6 +268,10 @@ pub struct PushNotification {
   pub maybe_text: Option<String>,
   /// A file's name, if the message is a file.
   pub maybe_file_name: Option<String>,
+  /// What kind of file, if the message is a file.
+  pub maybe_attachment_kind: Option<NotificationAttachmentKind>,
+  /// Why less than the message is shown, if it is.
+  pub maybe_gap: Option<NotificationGap>,
   pub is_direct: bool,
   pub is_mention: bool,
   pub is_urgent: bool,
@@ -324,10 +375,10 @@ impl MessageItem {
 
 impl From<PushPreview> for PushNotification {
   fn from(preview: PushPreview) -> Self {
-    let (maybe_text, maybe_file_name) = match preview.content {
-      PreviewContent::Text(text) => (Some(text), None),
-      PreviewContent::File { file_name } => (None, Some(file_name)),
-      PreviewContent::Unavailable => (None, None),
+    let (maybe_text, maybe_file_name, maybe_attachment_kind) = match preview.content {
+      PreviewContent::Text(text) => (Some(text), None, None),
+      PreviewContent::File { file_name, kind } => (None, Some(file_name), Some(kind.into())),
+      PreviewContent::Unavailable => (None, None, None),
     };
     let wake_up = &preview.wake_up;
     Self {
@@ -345,12 +396,59 @@ impl From<PushPreview> for PushNotification {
       maybe_sender_name: preview.maybe_sender_name,
       maybe_text,
       maybe_file_name,
+      maybe_attachment_kind,
+      maybe_gap: preview.maybe_gap.map(Into::into),
       is_direct: preview.is_direct,
       is_mention: preview.wake_up.kind == PushKind::Mention,
       is_urgent: preview.wake_up.is_urgent,
       is_call: preview.wake_up.kind == PushKind::Call,
       is_silent: preview.is_silent,
       is_conversation_verified: preview.is_conversation_verified,
+    }
+  }
+}
+
+impl From<AttachmentKind> for NotificationAttachmentKind {
+  fn from(kind: AttachmentKind) -> Self {
+    match kind {
+      AttachmentKind::Image => Self::Image,
+      AttachmentKind::Video => Self::Video,
+      AttachmentKind::Audio => Self::Audio,
+      AttachmentKind::Other => Self::File,
+    }
+  }
+}
+
+impl From<PreviewGap> for NotificationGap {
+  fn from(gap: PreviewGap) -> Self {
+    match gap {
+      PreviewGap::NoSession => Self::NoSession,
+      PreviewGap::NotDecrypted => Self::NotDecrypted,
+      PreviewGap::TimedOut => Self::TimedOut,
+      PreviewGap::NotShowable => Self::NotShowable,
+      PreviewGap::WorkspacePolicy => Self::WorkspacePolicy,
+      PreviewGap::DeviceSetting => Self::DeviceSetting,
+    }
+  }
+}
+
+impl From<NotificationContent> for PushContentMode {
+  fn from(content: NotificationContent) -> Self {
+    match content {
+      NotificationContent::Content => Self::Full,
+      NotificationContent::SenderOnly => Self::Sender,
+      NotificationContent::Nothing => Self::Generic,
+    }
+  }
+}
+
+impl From<&PushContentMode> for NotificationContent {
+  /// A mode from a newer server counts as the strictest one.
+  fn from(mode: &PushContentMode) -> Self {
+    match mode {
+      PushContentMode::Full => Self::Content,
+      PushContentMode::Sender => Self::SenderOnly,
+      PushContentMode::Generic | PushContentMode::Unknown(_) => Self::Nothing,
     }
   }
 }
@@ -524,5 +622,26 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
       Core::Offline { retry_at_ms } => Self::Offline { retry_at_ms },
       Core::SignInRequired => Self::SignInRequired,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn notification_content_maps_both_ways_and_unknown_modes_are_strictest() {
+    for content in [
+      NotificationContent::Content,
+      NotificationContent::SenderOnly,
+      NotificationContent::Nothing,
+    ] {
+      let mode: PushContentMode = content.into();
+      assert_eq!(NotificationContent::from(&mode), content);
+    }
+    assert_eq!(
+      NotificationContent::from(&PushContentMode::Unknown("later".into())),
+      NotificationContent::Nothing
+    );
   }
 }

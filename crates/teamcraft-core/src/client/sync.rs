@@ -102,6 +102,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.sync_account_data().await
   }
 
+  /// Catches one conversation up for a push that arrived while the sync loop wasn't running
+  /// (notifications.md, "Mobile push delivery"): its record and members (for the names), welcomes
+  /// (a conversation this device was just added to), then its MLS backlog and new messages. Only
+  /// for an app that owns this client; a notification extension next to the app must not advance
+  /// its state and uses [`crate::push_preview`] alone.
+  pub async fn catch_up_for_push(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.refresh_conversation(conversation).await?;
+    self.sync_welcomes().await?;
+    self.sync_conversation_content(conversation).await
+  }
+
   /// Retries the conversations an earlier sync had to skip (see [`Self::isolate`]); the upkeep
   /// calls this with the account sync. Returns how many caught up.
   pub async fn resync_marked_conversations(&mut self) -> Result<usize, CoreError> {

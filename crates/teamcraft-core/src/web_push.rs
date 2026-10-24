@@ -244,7 +244,7 @@ mod service_worker {
     .unwrap_or_else(|| FALLBACK_TITLE.to_string());
     let maybe_text = match &preview.content {
       PreviewContent::Text(text) => Some(text.clone()),
-      PreviewContent::File { file_name } => Some(file_name.clone()),
+      PreviewContent::File { file_name, .. } => Some(file_name.clone()),
       PreviewContent::Unavailable => None,
     };
     let body = match (preview.is_direct, sender, maybe_text) {

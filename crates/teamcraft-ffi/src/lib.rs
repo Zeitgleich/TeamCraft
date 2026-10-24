@@ -36,9 +36,10 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem, ConversationKind,
-  EmojiSuggestion, LoginBrand, MentionSettings, MessageItem, NotificationSuppression, OrgRecoveryStart,
-  Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem,
-  SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
+  EmojiSuggestion, LoginBrand, MentionSettings, MessageItem, NotificationAttachmentKind, NotificationContent,
+  NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
+  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
+  SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -308,6 +309,20 @@ impl TeamCraft {
   pub async fn mention_settings(&self) -> Result<MentionSettings, TeamCraftError> {
     self
       .call(|engine| Box::pin(async move { Ok(engine.mention_settings()) }))
+      .await
+  }
+
+  /// How much message notifications show: this device's setting and the workspace policy's limit.
+  pub async fn notification_content(&self) -> Result<NotificationContentSettings, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { Ok(engine.notification_content()) }))
+      .await
+  }
+
+  /// Sets this device's notification privacy setting; the workspace policy can only lower it.
+  pub async fn set_notification_content(&self, content: NotificationContent) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.set_notification_content(content) }))
       .await
   }
 
