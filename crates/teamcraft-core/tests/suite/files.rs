@@ -66,6 +66,47 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// The image viewer opens one file of an album in memory, and saves only that one.
+#[tokio::test]
+async fn one_file_of_an_album_opens_in_memory_and_downloads_alone() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("first.jpg", "image/jpeg", jpeg()),
+      file("second.txt", "text/plain", b"waves".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(files[1].maybe_sender, Some(alice.client.user_id()));
+  assert_eq!(files[1].maybe_sent_at, Some(received.sent_at));
+
+  let reference = bob_ui
+    .attachment_ref(channel, received.id, &files[1].file_id)
+    .expect("the file of the message");
+  let opened = bob.client.open_attachment(&reference).await.unwrap();
+  assert_eq!(opened.expose_secret(), b"waves");
+  assert!(bob_ui.attachment_ref(channel, received.id, "pending-0").is_none());
+
+  let directory = std::env::temp_dir().join(format!("teamcraft-one-download-{}", std::process::id()));
+  bob.client.set_download_dir(Some(directory.clone()));
+  bob_ui.download_attachment(channel, received.id, &files[1].file_id);
+  run_commands(&mut bob, &bob_ui).await;
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Remote,
+    "the other file stays remote"
+  );
+  assert!(matches!(files[1].transfer, FileTransfer::Local { .. }));
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
 #[tokio::test]
 async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;

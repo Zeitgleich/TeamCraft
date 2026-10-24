@@ -268,6 +268,10 @@ pub trait ChatBackend {
   }
   /// Fetches and decrypts a file; its [`FileInfo::transfer`] reports progress and the local path.
   fn download_file(&self, _conversation: ConversationId, _message: MessageId) {}
+  /// Like [`Self::download_file`], for one file of the message (`file_id` of [`FileInfo`]).
+  fn download_attachment(&self, conversation: ConversationId, message: MessageId, _file_id: &str) {
+    self.download_file(conversation, message);
+  }
   /// Creates a public download link for a file (e2ee.md §4.5.1); it appears in [`Self::share_links`].
   fn create_share_link(
     &self,

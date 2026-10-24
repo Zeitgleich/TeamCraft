@@ -525,6 +525,11 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
   },
+  DownloadAttachment {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+  },
   CreateShareLink {
     conversation: ConversationId,
     message: MessageId,
@@ -698,6 +703,11 @@ impl ChatAction {
         conversation,
         message,
       } => backend.download_file(conversation, message),
+      Self::DownloadAttachment {
+        conversation,
+        message,
+        file_id,
+      } => backend.download_attachment(conversation, message, &file_id),
       Self::CreateShareLink {
         conversation,
         message,

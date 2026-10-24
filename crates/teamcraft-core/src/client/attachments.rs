@@ -54,6 +54,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.download_decrypted(&attachment).await
   }
 
+  /// Downloads and decrypts one file for showing it (the image viewer); nothing is written to disk.
+  /// The reference comes from [`crate::ui_backend::CoreChatBackend::attachment_ref`].
+  pub async fn open_attachment(&self, attachment: &AttachmentRef) -> Result<SecretBytes, CoreError> {
+    self.download_decrypted(attachment).await
+  }
+
   /// Encrypts with a fresh key, uploads through a presigned URL and returns what the message needs.
   pub(crate) async fn upload_encrypted(
     &self,

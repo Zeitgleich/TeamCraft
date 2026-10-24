@@ -175,6 +175,12 @@ pub struct FileInfo {
   #[serde(default)]
   pub maybe_thumbnail_png: Option<Vec<u8>>,
   pub transfer: FileTransfer,
+  /// Who sent the message the file belongs to (shown in the image viewer).
+  #[serde(default)]
+  pub maybe_sender: Option<UserId>,
+  /// When that message was sent.
+  #[serde(default)]
+  pub maybe_sent_at: Option<TimestampMs>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
