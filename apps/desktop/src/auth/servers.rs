@@ -111,6 +111,11 @@ impl ServerDirectory {
     }
   }
 
+  /// Every stored server profile.
+  pub fn profiles(&self) -> Vec<ServerProfile> {
+    self.lock().accounts.clone()
+  }
+
   /// The account in use, if any.
   pub fn active(&self) -> Option<ServerProfile> {
     let accounts = self.lock();
@@ -269,6 +274,7 @@ mod tests {
   use teamcraft_client_api::server_entry::HttpPolicy;
 
   use super::*;
+  use crate::auth::test_dir::TempDir;
 
   #[test]
   fn activating_persists_and_replaces_the_same_server() {
@@ -360,25 +366,6 @@ mod tests {
       display_name: name.into(),
       server_version: "1.0.0".into(),
       has_local_accounts: false,
-    }
-  }
-
-  /// A directory below the build's temp dir, removed again.
-  struct TempDir(PathBuf);
-
-  impl TempDir {
-    fn new(name: &str) -> Self {
-      let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-      Self(std::env::temp_dir().join(format!("teamcraft-servers-{name}-{}-{nanos}", std::process::id())))
-    }
-  }
-
-  impl Drop for TempDir {
-    fn drop(&mut self) {
-      let _ = std::fs::remove_dir_all(&self.0);
     }
   }
 }

@@ -14,6 +14,7 @@ pub mod brand;
 pub mod calls;
 pub mod emoji;
 pub mod emoji_catalog;
+pub mod legacy_session;
 pub mod links;
 pub mod live;
 pub mod log;
