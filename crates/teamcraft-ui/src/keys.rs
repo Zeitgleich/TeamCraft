@@ -23,6 +23,8 @@ pub enum Key {
   Char(&'static str),
   Up,
   Down,
+  Left,
+  Right,
   Enter,
   Escape,
 }
@@ -209,6 +211,8 @@ fn key_label(key: Key, platform: Platform, locale: Locale) -> String {
     Key::Char(text) => text.to_owned(),
     Key::Up => "↑".to_owned(),
     Key::Down => "↓".to_owned(),
+    Key::Left => "←".to_owned(),
+    Key::Right => "→".to_owned(),
     Key::Enter if platform == Platform::Mac => "↵".to_owned(),
     Key::Enter => translate(locale, "key-enter", None),
     Key::Escape => translate(locale, "key-escape", None),
@@ -231,6 +235,8 @@ fn spoken_key(key: Key, locale: Locale) -> String {
     Key::Char(text) => text.to_owned(),
     Key::Up => translate(locale, "key-up", None),
     Key::Down => translate(locale, "key-down", None),
+    Key::Left => translate(locale, "key-left", None),
+    Key::Right => translate(locale, "key-right", None),
     Key::Enter => translate(locale, "key-enter", None),
     Key::Escape => translate(locale, "key-escape", None),
   }

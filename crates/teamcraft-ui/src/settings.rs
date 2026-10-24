@@ -196,6 +196,24 @@ impl Settings {
   }
 }
 
+#[cfg(test)]
+impl Settings {
+  /// Defaults without `localStorage`, for tests outside a browser.
+  pub fn for_tests() -> Self {
+    Self {
+      theme: RwSignal::new(Theme::System),
+      locale: RwSignal::new(Locale::En),
+      send_mode: RwSignal::new(SendMode::Enter),
+      show_unreads_group: RwSignal::new(true),
+      show_join_leave: RwSignal::new(true),
+      prefs: RwSignal::new(Preferences::default()),
+      recent_conversations: RwSignal::new(Vec::new()),
+      recent_emoji: RwSignal::new(Vec::new()),
+      favorite_order: RwSignal::new(Vec::new()),
+    }
+  }
+}
+
 fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
   serde_json::from_str(text).ok()
 }

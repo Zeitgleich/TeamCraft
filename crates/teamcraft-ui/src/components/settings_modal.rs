@@ -11,52 +11,15 @@ use crate::components::settings_tabs::{
 use crate::components::update_notice::UpdatesSection;
 use crate::i18n::use_i18n;
 use crate::keys::{ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut, ShortcutList};
-use crate::state::use_app_state;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tab {
-  Notifications,
-  Display,
-  Sidebar,
-  Language,
-  Privacy,
-  Devices,
-  Calls,
-  Advanced,
-}
-
-impl Tab {
-  const ALL: [Tab; 8] = [
-    Self::Notifications,
-    Self::Display,
-    Self::Sidebar,
-    Self::Language,
-    Self::Privacy,
-    Self::Devices,
-    Self::Calls,
-    Self::Advanced,
-  ];
-
-  fn slug(self) -> &'static str {
-    match self {
-      Self::Notifications => "notifications",
-      Self::Display => "display",
-      Self::Sidebar => "sidebar",
-      Self::Language => "language",
-      Self::Privacy => "privacy",
-      Self::Devices => "devices",
-      Self::Calls => "calls",
-      Self::Advanced => "advanced",
-    }
-  }
-}
+use crate::state::{SettingsTab as Tab, use_app_state};
 
 /// User settings, one tab per area (PLAN.md §4 and §5); the tabs live in `settings_tabs`.
 #[component]
 pub fn SettingsModal() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let tab = RwSignal::new(Tab::Notifications);
+  // The tab is part of the URL (`/settings/{tab}`), so it lives in the app state.
+  let tab = state.settings_tab;
 
   let on_tab_keys = move |ev: web_sys::KeyboardEvent| {
     let position = Tab::ALL
@@ -101,7 +64,7 @@ pub fn SettingsModal() -> impl IntoView {
                   aria-selected=move || (tab.get() == candidate).to_string()
                   aria-controls=format!("settings-panel-{}", candidate.slug())
                   tabindex=move || if tab.get() == candidate { "0" } else { "-1" }
-                  data-autofocus=(candidate == Tab::Notifications).then_some("")
+                  data-autofocus=(candidate == tab.get_untracked()).then_some("")
                   on:click=move |_| tab.set(candidate)
                 >
                   {move || i18n.t(&format!("settings-tab-{}", candidate.slug()))}
@@ -233,7 +196,7 @@ fn demo_tools() -> impl IntoView {
 pub fn ShortcutsModal() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let rows: [(Vec<Shortcut>, &'static str); 13] = [
+  let rows: [(Vec<Shortcut>, &'static str); 14] = [
     (vec![QUICK_SWITCHER], "shortcut-switcher"),
     (vec![Shortcut::primary(",")], "shortcut-settings"),
     (vec![Shortcut::primary("/")], "shortcut-shortcuts"),
@@ -262,6 +225,13 @@ pub fn ShortcutsModal() -> impl IntoView {
     (
       vec![Shortcut::new(&[Modifier::Alt], Key::Char("T"))],
       "shortcut-threads",
+    ),
+    (
+      vec![
+        Shortcut::new(&[Modifier::Alt], Key::Left),
+        Shortcut::new(&[Modifier::Alt], Key::Right),
+      ],
+      "shortcut-back-forward",
     ),
     (
       vec![

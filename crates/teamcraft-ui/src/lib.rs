@@ -50,6 +50,7 @@ pub mod reminders;
 pub mod remote_backend;
 pub mod remote_calls;
 pub mod rest;
+pub mod route;
 pub mod sections;
 pub mod server_backend;
 pub mod session;

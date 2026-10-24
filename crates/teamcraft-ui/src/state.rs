@@ -15,10 +15,12 @@ use crate::model::{
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
 use crate::reactive::get_if_observed;
+use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
-use teamcraft_client_api::actions::{NewChannel, NewSpace};
+use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
+use teamcraft_proto::Role;
 
 /// How many of the newest messages are searched for the first unread one.
 const UNREAD_SCAN_LIMIT: usize = 500;
@@ -169,6 +171,29 @@ pub enum Overlay {
   UserProfile(UserId),
 }
 
+/// The tabs of the settings dialog (PLAN.md §4 and §5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTab {
+  Notifications,
+  Display,
+  Sidebar,
+  Language,
+  Privacy,
+  Devices,
+  Calls,
+  Advanced,
+}
+
+/// What became of a route the app was asked to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteOutcome {
+  Shown,
+  /// It names something that hasn't loaded yet; it opens once it does.
+  Waiting,
+  /// It names something that doesn't exist or the user can't open; Home shows instead.
+  Unavailable,
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
   backend: StoredValue<Rc<dyn Backend>, LocalStorage>,
@@ -214,6 +239,18 @@ pub struct AppState {
   pub highlighted: RwSignal<Option<MessageId>>,
   /// A message the composer asked to edit (↑ in the empty composer); its row opens the editor.
   pub edit_request: RwSignal<Option<MessageId>>,
+  /// The tab the settings dialog shows.
+  pub settings_tab: RwSignal<SettingsTab>,
+  /// The message a link or jump opened in the current conversation: the URL names it until the
+  /// user goes somewhere else.
+  linked_message: RwSignal<Option<PermalinkTarget>>,
+  /// A route that names something which hasn't loaded yet.
+  pub pending_route: RwSignal<Option<Route>>,
+  /// Bumped when a route named something that doesn't exist or the user can't open.
+  pub unavailable_routes: RwSignal<u64>,
+  /// Set while the app follows a URL it was given, so the address bar replaces its entry instead
+  /// of adding one (`history.rs` takes it).
+  follows_url: StoredValue<bool>,
   pub settings: Settings,
 }
 
@@ -266,6 +303,11 @@ impl AppState {
       edit_request: RwSignal::new(None),
       highlighted: RwSignal::new(None),
       scroll_anchors: StoredValue::new(HashMap::new()),
+      settings_tab: RwSignal::new(SettingsTab::DEFAULT),
+      linked_message: RwSignal::new(None),
+      pending_route: RwSignal::new(None),
+      unavailable_routes: RwSignal::new(0),
+      follows_url: StoredValue::new(false),
       settings,
     }
   }
@@ -275,6 +317,9 @@ impl AppState {
   pub fn backend_changed(&self) {
     self.revision.update(|revision| *revision += 1);
     self.open_pending_creation();
+    if let Some(route) = self.pending_route.get_untracked() {
+      self.follow_route(route);
+    }
     self.open_first_loaded_conversation();
     if let Some(conversation) = self.pending_open.get_untracked()
       && self.read(|backend| backend.conversation(conversation)).is_some()
@@ -332,6 +377,7 @@ impl AppState {
   fn open_first_loaded_conversation(&self) {
     if !self.awaits_first_conversation.get_untracked()
       || self.view.get_untracked() != MainView::GettingStarted
+      || self.pending_route.get_untracked().is_some()
     {
       return;
     }
@@ -590,6 +636,7 @@ impl AppState {
     if self.view.get_untracked() != MainView::Conversation(id) {
       self.unread_marker.set(self.unread_marker_for(&conversation));
       self.settings.remember_conversation(id);
+      self.linked_message.set(None);
     }
     self.view.set(MainView::Conversation(id));
     self.overlay.set(Overlay::None);
@@ -841,6 +888,13 @@ impl AppState {
     self.highlight(message);
     if let Some(thread) = maybe_thread {
       self.open_thread(conversation, thread);
+    }
+    self.linked_message.set(Some(PermalinkTarget {
+      conversation,
+      message,
+      maybe_thread,
+    }));
+    if maybe_thread.is_some() {
       return;
     }
     let index = self.read(|backend| {
@@ -882,7 +936,19 @@ impl AppState {
   }
 
   pub fn open_thread(&self, conversation: ConversationId, thread: ThreadId) {
+    if self
+      .linked_message
+      .with_untracked(|linked| linked.is_some_and(|linked| linked.maybe_thread != Some(thread)))
+    {
+      self.linked_message.set(None);
+    }
     self.panel.set(SidePanel::Thread { conversation, thread });
+  }
+
+  /// Opens the settings dialog on its first tab.
+  pub fn open_settings(&self) {
+    self.settings_tab.set(SettingsTab::DEFAULT);
+    self.overlay.set(Overlay::Settings);
   }
 
   pub fn close_overlay(&self) {
@@ -932,10 +998,259 @@ impl AppState {
       self.open_conversation(next.id);
     }
   }
+
+  /// The route of what the app shows now; the address bar follows it (`history.rs`).
+  pub fn route(&self) -> Route {
+    if self.overlay.get() == Overlay::Settings {
+      return Route::Settings(self.settings_tab.get());
+    }
+    match self.view.get() {
+      MainView::Conversation(id) => self.conversation_route(id),
+      MainView::Threads => Route::Threads,
+      MainView::Admin(section) => Route::Admin(section),
+      MainView::Search => Route::Search,
+      MainView::Saved => Route::Saved,
+      MainView::Activity => Route::Activity,
+      MainView::Calls => Route::Calls,
+      MainView::Meetings => Route::Meetings,
+      MainView::Directory => Route::People,
+      MainView::Home => Route::Home,
+      MainView::GettingStarted => {
+        let space = self.space.get();
+        let is_known_space = self.rail.get() == RailEntry::Space
+          && self.read(|backend| backend.spaces().iter().any(|candidate| candidate.id == space));
+        if is_known_space {
+          Route::Space(space)
+        } else {
+          Route::Start
+        }
+      },
+    }
+  }
+
+  fn conversation_route(&self, id: ConversationId) -> Route {
+    let panel = self.panel.get();
+    if let Some(linked) = self.linked_message.get()
+      && linked.conversation == id
+      && linked.maybe_thread.is_none_or(|thread| {
+        panel
+          == SidePanel::Thread {
+            conversation: id,
+            thread,
+          }
+      })
+    {
+      return Route::Message {
+        conversation: id,
+        message: linked.message,
+        maybe_thread: linked.maybe_thread,
+      };
+    }
+    if let SidePanel::Thread { conversation, thread } = panel
+      && conversation == id
+    {
+      return Route::Thread { conversation, thread };
+    }
+    match self.read(|backend| backend.conversation(id)) {
+      Some(conversation) => match conversation.maybe_space {
+        Some(space) => Route::Channel { space, channel: id },
+        None if conversation.kind.is_direct_like() => Route::Direct(id),
+        None => Route::Conversation(id),
+      },
+      None => Route::Conversation(id),
+    }
+  }
+
+  /// Shows the place a URL names. Something that hasn't loaded yet is waited for while nothing has
+  /// loaded at all; anything else that can't be opened falls back to Home with a notice.
+  pub fn follow_route(&self, route: Route) -> RouteOutcome {
+    // Called from outside reactive scopes (start, popstate, data arriving), like event handlers.
+    untrack(|| self.follow_route_now(route))
+  }
+
+  fn follow_route_now(&self, route: Route) -> RouteOutcome {
+    let before = self.route_untracked();
+    let outcome = match self.open_route(route) {
+      RouteOutcome::Shown => RouteOutcome::Shown,
+      RouteOutcome::Waiting | RouteOutcome::Unavailable if self.has_loaded_data() => {
+        self.show_unavailable_route();
+        RouteOutcome::Unavailable
+      },
+      RouteOutcome::Waiting | RouteOutcome::Unavailable => RouteOutcome::Waiting,
+    };
+    let maybe_pending = (outcome == RouteOutcome::Waiting).then_some(route);
+    if self.pending_route.get_untracked() != maybe_pending {
+      self.pending_route.set(maybe_pending);
+    }
+    if self.route_untracked() != before {
+      self.follows_url.set_value(true);
+    }
+    outcome
+  }
+
+  /// Stops waiting for `route` if it never loaded: Home with a notice.
+  pub fn give_up_route(&self, route: Route) {
+    if self.pending_route.get_untracked() != Some(route) {
+      return;
+    }
+    self.pending_route.set(None);
+    self.reject_route();
+  }
+
+  /// A URL that is no route at all, or one that can't be shown: Home with a notice.
+  pub fn reject_route(&self) {
+    self.show_unavailable_route();
+    self.follows_url.set_value(true);
+  }
+
+  /// Forgets a route that was still waiting, because the user went somewhere else meanwhile.
+  pub fn cancel_pending_route(&self) {
+    if self.pending_route.get_untracked().is_some() {
+      self.pending_route.set(None);
+    }
+  }
+
+  /// Whether the last changes came from following a URL; reading it resets it.
+  pub fn take_follows_url(&self) -> bool {
+    let follows = self.follows_url.get_value();
+    self.follows_url.set_value(false);
+    follows
+  }
+
+  /// [`AppState::route`] without subscribing the caller.
+  pub fn route_untracked(&self) -> Route {
+    untrack(|| self.route())
+  }
+
+  /// Opens the place of a route. `Waiting` means it names something this device doesn't know (yet).
+  fn open_route(&self, route: Route) -> RouteOutcome {
+    if !matches!(route, Route::Settings(_)) && self.overlay.get_untracked() == Overlay::Settings {
+      self.overlay.set(Overlay::None);
+    }
+    match route {
+      Route::Start => self.open_start(),
+      Route::Home => self.open_home(),
+      Route::Space(space) => {
+        if !self.read(|backend| backend.spaces().iter().any(|candidate| candidate.id == space)) {
+          return RouteOutcome::Waiting;
+        }
+        self.space.set(space);
+        self.rail.set(RailEntry::Space);
+        self.open_first_conversation_of(space);
+      },
+      Route::Channel { channel: id, .. } | Route::Conversation(id) | Route::Direct(id) => {
+        if !self.is_known_conversation(id) {
+          return RouteOutcome::Waiting;
+        }
+        self.open_conversation(id);
+        self.panel.set(SidePanel::Closed);
+      },
+      Route::Thread { conversation, thread } => {
+        if !self.is_known_conversation(conversation) {
+          return RouteOutcome::Waiting;
+        }
+        self.open_conversation(conversation);
+        self.open_thread(conversation, thread);
+      },
+      Route::Message {
+        conversation,
+        message,
+        maybe_thread,
+      } => {
+        if !self.is_known_conversation(conversation) {
+          return RouteOutcome::Waiting;
+        }
+        if maybe_thread.is_none() {
+          self.panel.set(SidePanel::Closed);
+        }
+        self.open_message(conversation, message, maybe_thread);
+      },
+      Route::Threads => self.open_threads(),
+      Route::Activity => self.open_activity(),
+      Route::Calls => self.open_calls(),
+      Route::Meetings => self.open_meetings(),
+      Route::People => self.open_directory(),
+      Route::Saved => self.open_saved(),
+      Route::Search => self.open_search(None),
+      Route::Settings(tab) => {
+        self.settings_tab.set(tab);
+        self.overlay.set(Overlay::Settings);
+      },
+      Route::Admin(section) => {
+        if !self.read(|backend| backend.my_role()).includes(&Role::Admin) {
+          return RouteOutcome::Unavailable;
+        }
+        self.open_admin(section);
+      },
+    }
+    RouteOutcome::Shown
+  }
+
+  /// Where the app starts: the first channel, else the getting-started page.
+  fn open_start(&self) {
+    let first = self.read(|backend| {
+      let space = backend.spaces().into_iter().next()?;
+      let conversation = backend.space_conversations(space.id).into_iter().next()?;
+      Some(conversation.id)
+    });
+    match first {
+      Some(conversation) => self.open_conversation(conversation),
+      None => {
+        self.view.set(MainView::GettingStarted);
+        self.panel.set(SidePanel::Closed);
+      },
+    }
+  }
+
+  fn show_unavailable_route(&self) {
+    self.open_home();
+    self.unavailable_routes.update(|count| *count += 1);
+  }
+
+  fn is_known_conversation(&self, id: ConversationId) -> bool {
+    self.read(|backend| backend.conversation(id)).is_some()
+  }
+
+  /// Whether any spaces or DMs have arrived: from then on, a missing ID is not just late.
+  fn has_loaded_data(&self) -> bool {
+    self.read(|backend| !backend.spaces().is_empty() || !backend.direct_conversations().is_empty())
+  }
 }
 
 pub fn use_app_state() -> AppState {
   expect_context::<AppState>()
+}
+
+impl SettingsTab {
+  pub const ALL: [SettingsTab; 8] = [
+    Self::Notifications,
+    Self::Display,
+    Self::Sidebar,
+    Self::Language,
+    Self::Privacy,
+    Self::Devices,
+    Self::Calls,
+    Self::Advanced,
+  ];
+  /// The tab the dialog opens with.
+  pub const DEFAULT: SettingsTab = Self::Notifications;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Notifications => "notifications",
+      Self::Display => "display",
+      Self::Sidebar => "sidebar",
+      Self::Language => "language",
+      Self::Privacy => "privacy",
+      Self::Devices => "devices",
+      Self::Calls => "calls",
+      Self::Advanced => "advanced",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|tab| tab.slug() == slug)
+  }
 }
 
 /// Whether `members` are exactly `users` plus (optionally) `me`.
@@ -949,6 +1264,10 @@ fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::mock::MockBackend;
+  use crate::model::thread_id_of;
+
+  const NOW: TimestampMs = 1_792_584_000_000;
 
   #[test]
   fn without_a_channel_the_app_starts_on_home_with_the_welcome_page() {
@@ -971,5 +1290,231 @@ mod tests {
   fn home_without_dms_welcomes_an_empty_workspace() {
     assert_eq!(home_view_without_dms(false), MainView::GettingStarted);
     assert_eq!(home_view_without_dms(true), MainView::Home);
+  }
+
+  mod state_to_route {
+    use super::*;
+
+    #[test]
+    fn a_channel_is_named_with_its_space() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      assert_eq!(state.route(), Route::Channel { space, channel });
+    }
+
+    #[test]
+    fn a_dm_has_its_own_path() {
+      let state = test_state();
+      let dm = first_dm(&state);
+      state.open_conversation(dm);
+      assert_eq!(state.route(), Route::Direct(dm));
+    }
+
+    #[test]
+    fn an_open_thread_is_part_of_the_route() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      let thread = thread_id_of(id_from_raw(42));
+      state.open_conversation(channel);
+      state.open_thread(channel, thread);
+      assert_eq!(
+        state.route(),
+        Route::Thread {
+          conversation: channel,
+          thread
+        }
+      );
+      state.panel.set(SidePanel::Closed);
+      assert!(matches!(state.route(), Route::Channel { .. }));
+    }
+
+    #[test]
+    fn pages_and_the_settings_dialog_have_routes() {
+      let state = test_state();
+      state.open_directory();
+      assert_eq!(state.route(), Route::People);
+      state.open_admin(AdminSection::Audit);
+      assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
+      state.open_settings();
+      assert_eq!(state.route(), Route::Settings(SettingsTab::DEFAULT));
+      state.settings_tab.set(SettingsTab::Calls);
+      assert_eq!(state.route(), Route::Settings(SettingsTab::Calls));
+      state.close_overlay();
+      assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
+    }
+
+    #[test]
+    fn the_search_route_never_carries_the_query() {
+      let state = test_state();
+      state.open_search(Some("in:#general secret plans"));
+      assert_eq!(state.route(), Route::Search);
+      assert_eq!(state.route().path(), "/search");
+    }
+  }
+
+  mod route_to_state {
+    use super::*;
+
+    #[test]
+    fn every_page_route_opens_its_page_and_reads_back() {
+      let state = test_state();
+      for route in [
+        Route::Threads,
+        Route::Activity,
+        Route::Calls,
+        Route::Meetings,
+        Route::People,
+        Route::Saved,
+        Route::Search,
+        Route::Settings(SettingsTab::Privacy),
+        Route::Admin(AdminSection::Users),
+      ] {
+        assert_eq!(state.follow_route(route), RouteOutcome::Shown, "{route:?}");
+        assert_eq!(state.route(), route);
+      }
+    }
+
+    #[test]
+    fn a_conversation_route_opens_it_in_its_canonical_spelling() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_threads();
+      assert_eq!(
+        state.follow_route(Route::Conversation(channel)),
+        RouteOutcome::Shown
+      );
+      assert_eq!(state.route(), Route::Channel { space, channel });
+      assert!(state.take_follows_url(), "the URL is replaced, not pushed");
+      assert!(!state.take_follows_url(), "taking it resets it");
+    }
+
+    #[test]
+    fn a_thread_route_opens_the_thread() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      let route = Route::Thread {
+        conversation: channel,
+        thread: thread_id_of(id_from_raw(42)),
+      };
+      assert_eq!(state.follow_route(route), RouteOutcome::Shown);
+      assert_eq!(state.route(), route);
+    }
+
+    #[test]
+    fn leaving_settings_by_route_closes_the_dialog() {
+      let state = test_state();
+      let dm = first_dm(&state);
+      state.follow_route(Route::Settings(SettingsTab::Display));
+      assert_eq!(state.overlay.get(), Overlay::Settings);
+      state.follow_route(Route::Direct(dm));
+      assert_eq!(state.overlay.get(), Overlay::None);
+      assert_eq!(state.route(), Route::Direct(dm));
+    }
+
+    #[test]
+    fn a_space_route_lands_in_its_first_channel() {
+      let state = test_state();
+      let spaces = state.read(|backend| backend.spaces());
+      let second = spaces
+        .get(1)
+        .map(|space| space.id)
+        .expect("demo data has two spaces");
+      let first_channel = state.read(|backend| backend.space_conversations(second))[0].id;
+      state.open_threads();
+      assert_eq!(state.follow_route(Route::Space(second)), RouteOutcome::Shown);
+      assert_eq!(
+        state.route(),
+        Route::Channel {
+          space: second,
+          channel: first_channel
+        }
+      );
+    }
+
+    #[test]
+    fn an_unknown_id_falls_back_to_home_with_a_notice() {
+      let state = test_state();
+      let unknown: ConversationId = id_from_raw(999_999_999);
+      for route in [
+        Route::Conversation(unknown),
+        Route::Direct(unknown),
+        Route::Space(id_from_raw(999_999_999)),
+        Route::Thread {
+          conversation: unknown,
+          thread: thread_id_of(id_from_raw(1)),
+        },
+      ] {
+        let before = state.unavailable_routes.get();
+        state.open_threads();
+        assert_eq!(state.follow_route(route), RouteOutcome::Unavailable, "{route:?}");
+        assert_eq!(state.unavailable_routes.get(), before + 1, "{route:?}");
+        assert_eq!(state.rail.get(), RailEntry::Home, "{route:?}");
+        assert_eq!(
+          state.pending_route.get(),
+          None,
+          "loaded data: nothing to wait for"
+        );
+      }
+    }
+
+    #[test]
+    fn a_rejected_url_shows_home_with_a_notice() {
+      let state = test_state();
+      state.reject_route();
+      assert_eq!(state.unavailable_routes.get(), 1);
+      assert_eq!(state.rail.get(), RailEntry::Home);
+      assert!(state.take_follows_url());
+    }
+
+    #[test]
+    fn giving_up_only_drops_the_route_still_waited_for() {
+      let state = test_state();
+      let waited: Route = Route::Direct(id_from_raw(5));
+      state.give_up_route(waited);
+      assert_eq!(state.unavailable_routes.get(), 0, "nothing was waiting");
+      state.pending_route.set(Some(waited));
+      state.give_up_route(Route::Threads);
+      assert_eq!(state.pending_route.get(), Some(waited));
+      state.give_up_route(waited);
+      assert_eq!(state.pending_route.get(), None);
+      assert_eq!(state.unavailable_routes.get(), 1);
+    }
+
+    #[test]
+    fn the_start_route_opens_the_first_channel() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_threads();
+      assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
+      assert_eq!(state.route(), Route::Channel { space, channel });
+    }
+  }
+
+  fn test_state() -> AppState {
+    let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(NOW));
+    let start = first_of(backend.as_ref());
+    AppState::new(backend, Settings::for_tests(), start)
+  }
+
+  fn first_of(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> {
+    let space = backend.spaces().into_iter().next()?;
+    let conversation = backend.space_conversations(space.id).into_iter().next()?;
+    Some((space.id, conversation.id))
+  }
+
+  fn first_channel(state: &AppState) -> (SpaceId, ConversationId) {
+    state
+      .read(|backend| first_of(backend))
+      .expect("demo data has a channel")
+  }
+
+  fn first_dm(state: &AppState) -> ConversationId {
+    state
+      .read(|backend| backend.direct_conversations())
+      .into_iter()
+      .find(|conversation| conversation.kind == crate::model::ConversationKind::Direct)
+      .map(|conversation| conversation.id)
+      .expect("demo data has a DM")
   }
 }

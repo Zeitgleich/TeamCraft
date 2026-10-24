@@ -233,7 +233,7 @@ pub fn StatusMenu() -> impl IntoView {
           <span class="menu-label">{move || i18n.t("profile-edit-title")}</span>
         </button>
       </Show>
-      <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::Settings)>
+      <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings()>
         <Icon name=IconName::Sliders />
         <span class="menu-label">{move || i18n.t("menu-settings")}</span>
       </button>

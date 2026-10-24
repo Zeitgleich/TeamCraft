@@ -201,6 +201,7 @@ shortcut-settings = Open settings
 shortcut-shortcuts = Show keyboard shortcuts
 shortcut-prev-next = Previous or next conversation
 shortcut-threads = Open threads
+shortcut-back-forward = Back or forward
 shortcut-close = Close dialog or side panel
 shortcut-messages = Move between messages
 shortcut-open-thread = Open the thread of the focused message
@@ -1047,6 +1048,7 @@ composer-file-too-large = { $name } is larger than the upload limit of { $limit 
 composer-file-unreadable = { $name } could not be read.
 permalink-label = Message in { $name }
 permalink-unavailable = Link to a conversation you are not in
+route-unavailable = This page isn't available. It may have been removed, or you may not have access to it.
 
 # Workspace management
 create = Create
@@ -1904,6 +1906,8 @@ key-enter = Enter
 key-escape = Esc
 key-up = Up arrow
 key-down = Down arrow
+key-left = Left arrow
+key-right = Right arrow
 key-plus-word = plus
 calls-unavailable = Calls are only available in the TeamCraft desktop app for now.
 admin-recovery-unavailable = Starting an organization recovery from the console is not available yet.
