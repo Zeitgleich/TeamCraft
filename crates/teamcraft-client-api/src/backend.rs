@@ -242,6 +242,8 @@ pub trait ChatBackend {
   fn retry_removal(&self, _conversation: ConversationId, _user: UserId) {}
   /// "Keep": drops an unconfirmed (or failed) removal without doing anything more.
   fn discard_removal(&self, _conversation: ConversationId, _user: UserId) {}
+  /// "Retry" on a DM whose encryption setup waits for a welcome or failed.
+  fn retry_dm_setup(&self, _conversation: ConversationId) {}
   /// Unconfirmed removals in every conversation, for the admin console: an admin outside the
   /// group doesn't see the conversation.
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

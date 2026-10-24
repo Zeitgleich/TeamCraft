@@ -107,7 +107,18 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
 fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let is_waiting = Memo::new(move |_| state.read(|backend| backend.is_waiting_for_device(conversation)));
+  // A DM waiting for its welcome says so in its own banner, with a retry (#278).
+  let is_waiting = Memo::new(move |_| {
+    state.read(|backend| {
+      backend.is_waiting_for_device(conversation)
+        && !backend.membership_issues(conversation).iter().any(|issue| {
+          matches!(
+            issue,
+            MembershipIssue::EncryptionSetup | MembershipIssue::EncryptionSetupFailed
+          )
+        })
+    })
+  });
   move || {
     is_waiting.get().then(|| {
       view! {
@@ -148,6 +159,10 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
       .get()
       .into_iter()
       .filter_map(|issue| {
+        let is_dm_setup = matches!(
+          issue,
+          MembershipIssue::EncryptionSetup | MembershipIssue::EncryptionSetupFailed
+        );
         let (role, title, maybe_retry) = match issue {
           MembershipIssue::RemovalPending { user } if user == me => ("status", i18n.t("leave-pending"), None),
           MembershipIssue::RemovalPending { user } => (
@@ -193,8 +208,18 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
             i18n.t_with("devices-unverified", &[("name", &name_of(user))]),
             None,
           ),
+          MembershipIssue::EncryptionSetup => ("status", i18n.t("dm-setup-pending"), None),
+          MembershipIssue::EncryptionSetupFailed => ("alert", i18n.t("dm-setup-failed"), None),
           MembershipIssue::Unknown => return None,
         };
+        // The DM's setup has its own retry: asking the other side's devices for a welcome (#278).
+        let dm_setup_retry = is_dm_setup.then(|| {
+          view! {
+            <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_dm_setup(conversation))>
+              {i18n.t("removal-retry")}
+            </button>
+          }
+        });
         let is_leftover = matches!(issue, MembershipIssue::LeftInGroup { .. });
         let is_unconfirmed = matches!(issue, MembershipIssue::RemovalUnconfirmed { .. });
         let actions = maybe_retry.map(|user| {
@@ -242,6 +267,7 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
               <strong translate="no">{title}</strong>
             </div>
             {actions}
+            {dm_setup_retry}
           </div>
         })
       })

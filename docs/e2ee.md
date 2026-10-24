@@ -576,7 +576,12 @@ a revoked device can't hand out the group). The founded group goes only after th
 server's word alone (an epoch conflict, a later epoch in the queue) never makes it drop the group,
 so a server can't make devices drop and found again in a loop; it can only delay the DM. On giving
 up, the founding content key stops being current but stays in the ring (and the account's key bag,
-which merges by union), and the winner's key becomes current when it arrives.
+which merges by union), and the winner's key becomes current when it arrives. While such a device
+waits for the winner's welcome (or for anybody's, when someone else founded), the DM shows "setting
+up encryption", and after `dm_welcome_timeout` (default 2 minutes) that the setup failed; "retry"
+runs the setup again and, if the welcome is still missing, posts a signed rejoin request so a member
+adds this device (§4.6, rejoin), and the wait starts anew. Retrying never founds or gives up a group
+by itself; the rules above still decide.
 
 **Server time for merge decisions.** Whether every member merges a commit must not depend on its own
 clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the

@@ -234,6 +234,10 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
   },
+  /// "Retry" on a DM whose encryption setup waits for a welcome or failed (#278).
+  RetryDmSetup {
+    conversation: ConversationId,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -1095,6 +1099,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     if self.read(crate::client::is_queue_refused(&self.store, conversation)) {
       issues.push(MembershipIssue::GroupRefused);
     }
+    match self.read(crate::client::dm_setup_status(
+      &self.store,
+      conversation,
+      self.now_ms(),
+    )) {
+      Some(crate::client::DmSetupStatus::WaitingForWelcome) => issues.push(MembershipIssue::EncryptionSetup),
+      Some(crate::client::DmSetupStatus::Failed) => issues.push(MembershipIssue::EncryptionSetupFailed),
+      None => {},
+    }
     issues.extend(
       self
         .read(crate::client::pending_user_additions(&self.store, conversation))
@@ -1114,6 +1127,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.command(CoreCommand::DiscardRemoval { conversation, user });
+  }
+
+  fn retry_dm_setup(&self, conversation: ConversationId) {
+    self.command(CoreCommand::RetryDmSetup { conversation });
   }
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

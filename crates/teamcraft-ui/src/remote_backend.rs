@@ -688,6 +688,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RetryRemoval { conversation, user });
   }
 
+  fn retry_dm_setup(&self, conversation: ConversationId) {
+    self.act(ChatAction::RetryDmSetup { conversation });
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::DiscardRemoval { conversation, user });
   }

@@ -403,6 +403,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.retry_removal(conversation, user);
   }
 
+  fn retry_dm_setup(&self, conversation: ConversationId) {
+    self.chat.retry_dm_setup(conversation);
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.chat.discard_removal(conversation, user);
   }

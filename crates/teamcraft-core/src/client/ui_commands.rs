@@ -202,6 +202,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       CoreCommand::RemoveMember { conversation, user } => self.remove_member(conversation, user).await,
       CoreCommand::RetryRemoval { conversation, user } => self.retry_removal(conversation, user).await,
+      CoreCommand::RetryDmSetup { conversation } => self.retry_dm_setup(conversation).await,
       CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,
