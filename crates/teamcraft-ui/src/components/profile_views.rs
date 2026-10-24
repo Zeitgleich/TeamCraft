@@ -33,6 +33,8 @@ fn weekdays() -> [Weekday; 7] {
 }
 const DEFAULT_START: u16 = 9 * 60;
 const DEFAULT_END: u16 = 17 * 60;
+/// Below this, "last seen" reads "just now": seconds are noise, and the label doesn't tick.
+const LAST_SEEN_JUST_NOW_MS: i64 = 2 * 60_000;
 
 /// `HH:MM` (what `<input type=time>` holds) to minutes since midnight.
 pub fn parse_minutes(text: &str) -> Option<u16> {
@@ -295,11 +297,14 @@ pub fn LastSeen(user: UserId) -> impl IntoView {
         .is_some_and(|person| person.presence == PresenceStatus::Offline);
       let maybe_at = is_offline.then(|| state.read(|backend| backend.last_seen(user))).flatten();
       maybe_at.map(|at| {
-        let when = format_relative(at, now_ms(), locale);
+        let now = now_ms();
+        let label = if now - at < LAST_SEEN_JUST_NOW_MS {
+          i18n.t("last-seen-just-now")
+        } else {
+          i18n.t_with("last-seen", &[("when", &format_relative(at, now, locale))])
+        };
         let exact = format_date_time(at, locale);
-        view! {
-          <span class="last-seen" title=exact>{i18n.t_with("last-seen", &[("when", &when)])}</span>
-        }
+        view! { <span class="last-seen" title=exact>{label}</span> }
       })
     }}
   }
