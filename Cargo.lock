@@ -10300,6 +10300,7 @@ dependencies = [
  "teamcraft-media",
  "teamcraft-proto",
  "tokio",
+ "tokio-tungstenite 0.30.0",
 ]
 
 [[package]]

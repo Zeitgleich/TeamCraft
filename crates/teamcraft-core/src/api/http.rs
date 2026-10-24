@@ -1348,7 +1348,7 @@ mod tests {
 
   #[tokio::test(start_paused = true)]
   async fn a_server_that_never_answers_the_websocket_handshake_times_out() {
-    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let listener = loopback_listener().await;
     let address = listener.local_addr().unwrap();
     // Accepts the TCP connection and then stays silent, like a black-holed proxy.
     tokio::spawn(async move {
@@ -1362,7 +1362,7 @@ mod tests {
 
   #[tokio::test(start_paused = true)]
   async fn an_api_call_to_a_server_that_never_answers_times_out() {
-    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let listener = loopback_listener().await;
     let address = listener.local_addr().unwrap();
     // Takes the request and never answers, like a connection that died mid-flight.
     tokio::spawn(async move {
@@ -1410,10 +1410,18 @@ mod tests {
   }
 
   /// Serves one HTTP response per connection: `body`, with or without a content length.
+  /// IPv6 loopback, or IPv4 on hosts whose kernel has no IPv6 (some CI sandboxes).
+  async fn loopback_listener() -> tokio::net::TcpListener {
+    match tokio::net::TcpListener::bind("[::1]:0").await {
+      Ok(listener) => listener,
+      Err(_) => tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    }
+  }
+
   async fn blob_server(body: Vec<u8>, has_length: bool) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let listener = loopback_listener().await;
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
       while let Ok((mut socket, _)) = listener.accept().await {

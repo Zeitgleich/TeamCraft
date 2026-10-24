@@ -18,10 +18,15 @@
 
 use std::time::{Duration, Instant};
 
+use chromiumoxide::cdp::browser_protocol::network::{
+  EnableParams as NetworkEnableParams, EventRequestWillBeSent, EventWebSocketFrameReceived,
+  EventWebSocketFrameSent,
+};
 use chromiumoxide::cdp::browser_protocol::performance::{EnableParams, GetMetricsParams};
 use chromiumoxide::cdp::js_protocol::heap_profiler::CollectGarbageParams;
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::page::Page;
+use futures_util::StreamExt;
 use teamcraft_core::client::OutgoingFile;
 use teamcraft_e2e::browser::{BrowserSession, WebPortLease, artifact_dir, lease_web_port, web_dir};
 use teamcraft_e2e::peer::PASSPHRASE;
@@ -48,8 +53,10 @@ const SENTENCES: [&str; 6] = [
   "Short summary: customers like the new onboarding, but the import is too slow for big files.",
   "ok",
 ];
-/// Channel switches measured for latency, and again for the leak check.
+/// Channel switches measured for latency.
 const SWITCHES: usize = 40;
+/// Channel switches of the leak check (the budget's "memory growth over 100 channel switches").
+const LEAK_CHECK_SWITCHES: usize = 100;
 const MIB: f64 = 1024.0 * 1024.0;
 /// How long the empty browser is watched for its own idle CPU and wakeups.
 const BASELINE_IDLE: Duration = Duration::from_secs(30);
@@ -183,6 +190,10 @@ struct Report {
   idle_cpu_percent: f64,
   idle_wakeups_per_second: f64,
   idle_task_ms_per_minute: f64,
+  /// HTTP requests of the page while idle (the budget: none besides the gateway heartbeat).
+  idle_http_requests_per_minute: f64,
+  /// Gateway frames in both directions while idle (heartbeats and their answers).
+  idle_gateway_frames_per_minute: f64,
   wasm_kib: f64,
 }
 
@@ -490,8 +501,8 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   report.scroll_frames_over_50ms = slow_frames;
   report.long_channel_rows_after_scrolling_back = rows_in_dom(page).await;
 
-  // Leak check: as many switches again, then compare the heap after a full collection.
-  for index in 0..SWITCHES {
+  // Leak check: 100 more switches, then compare the heap after a full collection.
+  for index in 0..LEAK_CHECK_SWITCHES {
     let (name, last) = &short_channels[index % short_channels.len()];
     switch_to(page, name, last).await;
   }
@@ -502,7 +513,7 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   // Idle in the foreground: nothing happens, so the client should not use the CPU.
   let usage_before = ProcessUsage::of_matching(profile);
   let tasks_before = metric(page, "TaskDuration").await;
-  tokio::time::sleep(scale.idle).await;
+  let (http_requests, gateway_frames) = count_traffic(page, scale.idle).await;
   let usage_after = ProcessUsage::of_matching(profile);
   let tasks_after = metric(page, "TaskDuration").await;
   let idle_seconds = scale.idle.as_secs_f64();
@@ -514,6 +525,8 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
     .saturating_sub(usage_before.context_switches)) as f64
     / idle_seconds;
   report.idle_task_ms_per_minute = (tasks_after - tasks_before) * 1000.0 * 60.0 / idle_seconds;
+  report.idle_http_requests_per_minute = http_requests * 60.0 / idle_seconds;
+  report.idle_gateway_frames_per_minute = gateway_frames * 60.0 / idle_seconds;
   report.wasm_kib = wasm_bytes() as f64 / 1024.0;
   report
 }
@@ -528,6 +541,30 @@ fn percentile(sorted: &[f64], percent: usize) -> f64 {
   }
   let index = (sorted.len() * percent / 100).min(sorted.len() - 1);
   sorted[index]
+}
+
+/// Waits `period` while counting the page's HTTP requests and gateway frames (DevTools network
+/// events; the service worker's own requests are not the page's and are not counted).
+async fn count_traffic(page: &Page, period: Duration) -> (f64, f64) {
+  page.execute(NetworkEnableParams::default()).await.unwrap();
+  let mut requests = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
+  let mut sent = page.event_listener::<EventWebSocketFrameSent>().await.unwrap();
+  let mut received = page
+    .event_listener::<EventWebSocketFrameReceived>()
+    .await
+    .unwrap();
+  let (mut http_requests, mut frames) = (0.0, 0.0);
+  let deadline = tokio::time::sleep(period);
+  tokio::pin!(deadline);
+  loop {
+    tokio::select! {
+      () = &mut deadline => break,
+      Some(_) = requests.next() => http_requests += 1.0,
+      Some(_) = sent.next() => frames += 1.0,
+      Some(_) = received.next() => frames += 1.0,
+    }
+  }
+  (http_requests, frames)
 }
 
 /// CPU (percent of one core) and wakeups per second of the browser's processes over `period`.
@@ -772,6 +809,14 @@ impl Report {
       ("idle_cpu_percent", self.idle_cpu_percent),
       ("idle_wakeups_per_second", self.idle_wakeups_per_second),
       ("idle_task_ms_per_minute", self.idle_task_ms_per_minute),
+      (
+        "idle_http_requests_per_minute",
+        self.idle_http_requests_per_minute,
+      ),
+      (
+        "idle_gateway_frames_per_minute",
+        self.idle_gateway_frames_per_minute,
+      ),
       ("wasm_kib", self.wasm_kib),
     ]
   }

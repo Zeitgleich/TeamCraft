@@ -80,6 +80,50 @@ For larger channels the cost grows linearly: 5,000 connected members mean about 
 a send on the request path. If that becomes the limit, move publishing off the request path (the
 event is already stored before it is published) before adding instances.
 
+## Server process: restarts, outages, stalled clients
+
+`tests/e2e` `server_robustness.rs` runs the real `teamcraft-server` binary against the dev stack and
+drives it with `teamcraft-core` clients and raw gateway connections (tests/e2e/README.md has the
+setup). It covers the "Server side" conditions of robustness.md; every scenario except the
+measurement is a regular test of the e2e suite:
+
+```sh
+cargo test -p teamcraft-e2e --features e2e --test suite server_robustness::
+E2E_BIN_DIR=target/release cargo test -p teamcraft-e2e --features e2e --test suite \
+  server_robustness::resources -- --ignored --nocapture        # memory and CPU
+```
+
+Measured in a cloud VM (4 vCPUs, 15 GiB, a kernel without IPv6), release server, Postgres 18 in a
+container on the same VM; October 2026, `main` dd957c6 plus the fixes of the same change.
+
+| Scenario                                                      | Result                                                                                       |
+|---------------------------------------------------------------|----------------------------------------------------------------------------------------------|
+| SIGTERM with gateway connections open                         | Exits in about 10 ms, without waiting for WebSockets; they end without a close frame         |
+| After the restart                                             | Clients get `session_invalid`, identify and sync over REST; a message sent meanwhile arrives |
+| Resume within the window                                      | Exactly the missed events are replayed                                                       |
+| Resume after more events than the buffer holds, or too late   | `session_invalid`, then a full sync                                                          |
+| Ten concurrent retries of one send (same `client_message_id`) | One 201 and nine 200 with the same message ID; one stored row                                |
+| A late or repeated read position                              | Never moves it back                                                                          |
+| Postgres unreachable for a few seconds                        | 503 after `acquire_timeout_secs` (5 s), no restart needed (was 500)                          |
+| Server started while Postgres is down                         | Waits up to `startup_wait_secs` (300 s) and comes up with Postgres (exited before)           |
+| A client stops reading during a flood (3,000 × 16 KiB)        | Dropped after 1024 queued events; the others get every event; RSS 51 → 106 MiB               |
+| A client never reads again                                    | Connection released 23 s after the flood (30 s write deadline; was held indefinitely)        |
+
+During the database outage `/healthz` stays 200 and `/readyz` answers 503; open gateway connections
+stay up and keep answering heartbeats, so clients don't reconnect for a database blip.
+
+| Server process (release)                                | Value                                                       |
+|---------------------------------------------------------|-------------------------------------------------------------|
+| Resident memory after start                             | 31 MiB                                                      |
+| With 200 gateway connections                            | 60 MiB, about 150 KiB per connection                        |
+| Idle with 200 connections (heartbeats every 25 s), CPU  | 0.17 % of one core                                          |
+| 2,000 sends of 1 KiB, each delivered to 200 connections | 6.1 s (326 sends/s, 65,000 deliveries/s), 144 % CPU, 73 MiB |
+
+The memory a slow or stalled connection holds is bounded by count, not by size: 1024 queued events
+per connection plus 1000 per session in the resume buffer, each a copy of the event. With 16 KiB
+messages that is about 32 MiB per stalled session; at the 1 MiB `max_ciphertext_bytes` it would be
+about 2 GiB (#156).
+
 ## Video send path
 
 Per-frame cost of sending a 720p camera at 30 fps (33 ms per frame), from
@@ -161,10 +205,56 @@ What the numbers say:
 - Since #183 the counters come over the gateway (notifications.md, "Unread and mention counts"); the
   30 s poll is gone. The numbers above were measured before that change and are not re-run yet.
 
-The large workspace (20 spaces, 300 channels, 100k messages, 200 photos), the desktop app and the
-Android app are measured against the same harness (`PERF_SCALE=large`, `PERF_MOBILE_USER`); their
-numbers follow in a separate change. Slack, Teams and Element were not measured: that needs their
-apps installed and accounts on their services.
+#### Large workspace
+
+`PERF_SCALE=large`: 20 spaces, 300 channels, 100k messages (20,000 in one channel), 200 photos,
+seeded through the real APIs in 12 minutes. Measured in a cloud VM (4 vCPUs, 15 GiB, headless
+Chromium 1243, release server, Postgres in a container on the same VM), October 2026, `main` dd957c6
+plus the fixes of the same change. A VM is noisy; read the numbers for leaks, outliers and growth
+with the workspace, not to the millisecond. The small workspace on the same VM is given for
+comparison.
+
+```sh
+PERF_SCALE=large E2E_BIN_DIR=target/release cargo test -p teamcraft-e2e --features browser \
+  --test suite -- --nocapture perf::
+```
+
+| What                                                    | Large            | Small (same VM)  | Budget       |
+|---------------------------------------------------------|------------------|------------------|--------------|
+| Reload of a signed-in tab until the channel list shows  | 0.7 s            | 0.4 s            | ≤ 1.5 s      |
+| Coming back after the workspace grew: channel list      | 191 s            | 2.1 s            | -            |
+| Channel switch, p50 / p95 / max                         | 34 / 43 / 43 ms  | 34 / 40 / 42 ms  | p95 ≤ 100 ms |
+| Opening the 20,000-message channel                      | 36 ms            | -                | -            |
+| Message rows in the DOM, after opening / scrolling back | 14 / 23          | 24 / 23          | -            |
+| Frames over 50 ms while scrolling back 120 steps        | 1 of 121         | 0 of 121         | -            |
+| PSS of the browser: empty / app started                 | 426 / 664 MiB    | 428 / 609 MiB    | +350 MiB     |
+| PSS after 100 more channel switches                     | 686 MiB (+3.4 %) | 650 MiB (+6.7 %) | ≤ 10 %       |
+| JS heap after start / after the switches                | 5.0 / 5.1 MiB    | 5.0 / 5.0 MiB    | -            |
+| Idle in the foreground: CPU, whole browser              | 7.3 %            | 1.4 %            | ≤ 1 %        |
+| Idle: main-thread tasks per minute                      | 3,773 ms         | 471 ms           | -            |
+| Idle: HTTP requests / gateway frames per minute         | 63 / 5           | 30 / 5           | none / -     |
+| wasm, app / with the service worker                     | 9.41 / 10.19 MB  | same             | ≤ 10 MB      |
+
+The empty browser idles at 0.6 % CPU and 25 wakeups per second.
+
+What the numbers say:
+
+- **Within budget:** start, channel switches, scrolling and memory. The app adds 238 MiB to the
+  browser on the large workspace (181 MiB on the small one), and neither the JS heap nor the PSS
+  grows with channel switches beyond the noise. The message list stays virtualised at 20,000
+  messages.
+- **Idle is not** (#246, #183): every change notification re-reads work that grows with the
+  workspace (about 0.6 s of main-thread time per round on the large workspace, 70 ms on the small
+  one), and refresh rounds trigger further rounds. Before this change each heartbeat answer (every
+  25 s) counted as a change and started a round too; the 30 s poll and the loop remain.
+- **Coming back** to a workspace that grew by 300 channels and 100k messages takes three minutes
+  before the channel list shows (#247); the main thread is mostly free meanwhile (14 tasks over
+  50 ms, 1 s in total), the time goes to the sequential catch-up (#155).
+- **wasm:** the app is 0.6 MB under the budget, with the service worker 0.2 MB over (#248).
+
+The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
+session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
+on their services.
 
 ### Android (first numbers)
 

@@ -7,6 +7,7 @@ use crate::common;
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::{ClockJump, PASSPHRASE, TokioClock, options, settings};
@@ -174,6 +175,25 @@ async fn a_server_that_drops_every_connection_is_not_hammered() {
     .await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_idle_connection_does_not_report_changes_for_its_heartbeats() {
+  let rig = Rig::start("Ivan").await;
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      tokio::time::sleep(Duration::from_secs(10)).await;
+      let before = rig.changes.load(Ordering::SeqCst);
+      // Twelve heartbeats; each change makes the apps re-read the store and the web client
+      // refetch its counters, so heartbeats must not count.
+      tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+      let changes = rig.changes.load(Ordering::SeqCst) - before;
+      assert_eq!(rig.status.get(), ConnectionState::Connected);
+      // The account data sync (every minute) still reports one.
+      assert!(changes <= 5, "{changes} changes in five idle minutes");
+    })
+    .await;
+}
+
 /// A runner on the fake server, with handles to steer the network and the clock.
 struct Rig {
   server: FakeServer,
@@ -181,6 +201,8 @@ struct Rig {
   network: NetworkChanges,
   status: ConnectionStatus,
   jump: ClockJump,
+  /// How often the runner reported a change.
+  changes: Arc<AtomicUsize>,
   handle: RunnerHandle,
   runner: SyncRunner<teamcraft_core::api::fake::FakeServerApi, Arc<MemoryStore>>,
 }
@@ -193,6 +215,7 @@ struct Steer {
   network: NetworkChanges,
   status: ConnectionStatus,
   jump: ClockJump,
+  changes: Arc<AtomicUsize>,
 }
 
 impl Rig {
@@ -211,7 +234,15 @@ impl Rig {
       )
       .await
       .unwrap();
-    let (mut runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+    let changes = Arc::new(AtomicUsize::new(0));
+    let counter = changes.clone();
+    let (mut runner, handle) = SyncRunner::new(
+      client,
+      RunnerSettings::default(),
+      Box::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+      }),
+    );
     let network = NetworkChanges::new();
     runner.watch_network(&network);
     let status = runner.connection_status();
@@ -221,6 +252,7 @@ impl Rig {
       network,
       status,
       jump,
+      changes,
       handle,
       runner,
     }
@@ -238,6 +270,7 @@ impl Rig {
       network: self.network,
       status: self.status,
       jump: self.jump,
+      changes: self.changes,
     };
     let handle = self.handle;
     let test = async move {
