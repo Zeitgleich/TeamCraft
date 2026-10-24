@@ -20,6 +20,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::legacy_session::{self, LegacyProvider};
 use teamcraft_client_api::server_entry::ServerProfile;
+use teamcraft_core::store::run_outside_runtime;
 use teamcraft_proto::UserId;
 
 use super::{AuthError, HTTP_POLICY, HTTP_TIMEOUT, TokenStore};
@@ -283,16 +284,20 @@ fn store_owner(name: &str) -> Option<UserId> {
 
 impl LegacyDatabaseKeys for KeyringDatabaseKeys {
   async fn delete(&self, account: String) -> Result<(), AuthError> {
-    // Keyring calls block (D-Bus on Linux); keep them off the async executor.
+    // Keyring calls block (D-Bus on Linux); keep them off the async executor, and out of any
+    // runtime context, where zbus' blocking API panics (run_outside_runtime).
     tauri::async_runtime::spawn_blocking(move || {
-      let entry = keyring::Entry::new(DB_KEY_SERVICE, &account)?;
-      match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(error),
-      }
+      run_outside_runtime(move || {
+        let entry = keyring::Entry::new(DB_KEY_SERVICE, &account)?;
+        match entry.delete_credential() {
+          Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+          Err(error) => Err(error),
+        }
+      })
     })
     .await
     .map_err(|error| AuthError::Unsupported(error.to_string()))?
+    .map_err(|error| AuthError::Unsupported(format!("keyring: {error}")))?
     .map_err(|error| AuthError::Unsupported(format!("keyring: {error}")))
   }
 }

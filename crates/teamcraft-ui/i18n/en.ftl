@@ -920,6 +920,8 @@ calls-background-hint = Applied on your device before your video is sent.
 ## First-run key setup
 login-core-failed-title = Your encrypted data could not be opened
 login-core-failed-body = The local database or the system keystore is not available. Check that a keyring service (for example GNOME Keyring) is running, then try again.
+login-core-stopped-title = TeamCraft hit an internal error
+login-core-stopped-body = Your encrypted data is safe, but the app stopped unexpectedly. Try again or restart TeamCraft. If it keeps happening, please report it.
 login-core-no-token-title = Sign-in is not complete yet
 login-core-no-token-body = TeamCraft did not receive your sign-in in time to open your encrypted data. Try again, or sign out and sign in again.
 login-core-retry = Try again

@@ -1,5 +1,6 @@
 use secrecy::{ExposeSecret, SecretString};
 use std::future::Future;
+use teamcraft_core::store::run_outside_runtime;
 
 use super::AuthError;
 
@@ -37,13 +38,17 @@ impl KeyringStore {
     account: String,
     action: impl FnOnce(keyring::Entry) -> keyring::Result<T> + Send + 'static,
   ) -> Result<T, AuthError> {
-    // Keyring calls block (D-Bus on Linux); keep them off the async executor.
+    // Keyring calls block (D-Bus on Linux); keep them off the async executor, and out of any
+    // runtime context, where zbus' blocking API panics (run_outside_runtime).
     tauri::async_runtime::spawn_blocking(move || {
-      let entry = keyring::Entry::new(SERVICE, &account)?;
-      action(entry)
+      run_outside_runtime(move || {
+        let entry = keyring::Entry::new(SERVICE, &account)?;
+        action(entry)
+      })
     })
     .await
     .map_err(|error| AuthError::Unsupported(error.to_string()))?
+    .map_err(|error| AuthError::Unsupported(format!("keyring: {error}")))?
     .map_err(|error| AuthError::Unsupported(format!("keyring: {error}")))
   }
 }

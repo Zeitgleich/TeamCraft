@@ -22,6 +22,8 @@ pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
 pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
 #[cfg(not(target_arch = "wasm32"))]
+pub use key_source::{KeystoreThreadError, run_outside_runtime};
+#[cfg(not(target_arch = "wasm32"))]
 pub use lock::StoreLock;
 pub use memory::MemoryStore;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
