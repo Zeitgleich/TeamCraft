@@ -158,6 +158,8 @@ What the numbers say:
   20,000-message channel.
 - Against the budgets in robustness.md: switching, scrolling, start and memory are well within them;
   idle network is not (the 30 s poll, #183, and the once-a-minute account data sync).
+- Since #183 the counters come over the gateway (notifications.md, "Unread and mention counts"); the
+  30 s poll is gone. The numbers above were measured before that change and are not re-run yet.
 
 The large workspace (20 spaces, 300 channels, 100k messages, 200 photos), the desktop app and the
 Android app are measured against the same harness (`PERF_SCALE=large`, `PERF_MOBILE_USER`); their

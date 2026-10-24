@@ -10,11 +10,12 @@ use teamcraft_client_api::updates::{
 use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
-use crate::reactive::use_interval;
+use crate::reactive::use_interval_while_visible;
 
 /// The shell's event when the status changed (`updates::UPDATE_CHANGED_EVENT`).
 const UPDATE_CHANGED_EVENT: &str = "update-changed";
-/// Status is read again this often anyway (a call starting or ending changes it too).
+/// Status is read again this often anyway (a call starting or ending changes it too), from the
+/// shell over IPC, and only while the window is visible: the notice is all it feeds.
 const REFRESH_MS: u64 = 30_000;
 const PREFERENCES: [UpdatePreference; 3] = [
   UpdatePreference::Automatic,
@@ -143,7 +144,7 @@ fn use_update_status() -> RwSignal<Option<UpdateStatus>> {
   };
   refresh();
   tauri::listen(UPDATE_CHANGED_EVENT, refresh);
-  use_interval(REFRESH_MS, refresh);
+  use_interval_while_visible(REFRESH_MS, refresh);
   status
 }
 

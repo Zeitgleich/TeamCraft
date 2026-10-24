@@ -1,10 +1,13 @@
 //! Server-side state that lives next to the end-to-end encrypted chat: unread and mention counts,
 //! followed threads, presence with custom status, and read receipts.
 //!
-//! None of this is message content, so the server owns it and the UI reads it over REST. The client
-//! core keeps the decrypted messages; [`crate::hybrid::Hybrid`] lays this state over the chat
-//! backend. Refreshes are pulled: once at start, when the chat changes (coalesced) and on a slow
-//! timer, because a missed event must not leave a stale badge.
+//! None of this is message content, so the server owns it. With a client core (desktop, and the
+//! browser with its in-page core) the core keeps it current from gateway events and hands it over
+//! in its snapshot ([`LiveSnapshot`]); the UI reads over REST only what the core doesn't keep
+//! (presence of shown people, the announcement, DM receipts), once at start and once after each
+//! gateway connection, never on a timer (issue #183). Without a core there is no gateway: then
+//! everything is read over REST, with a slow poll while the page is visible.
+//! [`crate::hybrid::Hybrid`] lays this state over the chat backend.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -13,6 +16,7 @@ use std::time::Duration;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
+use teamcraft_client_api::live::{LiveMarks, LiveSnapshot};
 use teamcraft_proto::{
   AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
   ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
@@ -28,8 +32,9 @@ use crate::model::{
 
 /// Wait before a refresh that a change triggered, so a burst of sync steps costs one request round.
 const REFRESH_DELAY: Duration = Duration::from_millis(400);
-/// Safety net for events the UI never heard about.
-pub const POLL_INTERVAL_MS: u64 = 30_000;
+/// Only without a client core, which has no gateway to hear changes on: every 5 minutes, and only
+/// while the page is visible, the counters are read again so a badge doesn't stay stale forever.
+pub const REST_ONLY_POLL_INTERVAL_MS: u64 = 300_000;
 /// The presence endpoint takes a comma separated ID list; keep the URL short.
 const PRESENCE_BATCH: usize = 50;
 const THREAD_PAGE: u32 = 100;
@@ -58,11 +63,23 @@ pub struct LiveServer {
 #[derive(Debug, Default)]
 pub struct LiveState {
   is_loaded: bool,
+  /// Counts and threads come from the core's snapshot, not from REST.
+  is_core_fed: bool,
   unread: HashMap<ConversationId, (u32, u32)>,
   threads: Vec<ThreadWire>,
   presence: HashMap<UserId, UserPresence>,
   receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
   announcement: Option<AnnouncementResponse>,
+  /// The core's last snapshot, so only what changed since is laid over the REST answers.
+  maybe_last_live: Option<LiveSnapshot>,
+}
+
+/// What the UI still has to read from the server after a core snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LiveFollowUp {
+  /// The gateway (re)connected: events in between may be lost, so read once.
+  pub needs_resync: bool,
+  pub needs_announcement: bool,
 }
 
 impl LiveServer {
@@ -81,6 +98,21 @@ impl LiveServer {
     *self.notify.borrow_mut() = Some(notify);
   }
 
+  /// Takes the core's snapshot after a change it reported; reads from the server only what the
+  /// snapshot says is due. `None` (no core) changes nothing.
+  pub fn observe(&self, maybe_live: Option<LiveSnapshot>) {
+    let Some(live) = maybe_live else {
+      return;
+    };
+    let follow_up = self.state.borrow_mut().apply_snapshot(live);
+    if follow_up.needs_resync {
+      self.queue_refresh();
+    } else if follow_up.needs_announcement {
+      let live = self.clone();
+      spawn_local(async move { live.refresh_announcement().await });
+    }
+  }
+
   /// Schedules a refresh soon; calls while one is scheduled collapse into it.
   pub fn queue_refresh(&self) {
     if self.refresh_queued.replace(true) {
@@ -96,13 +128,21 @@ impl LiveServer {
     );
   }
 
-  /// Fetches everything now. Failed parts keep their previous values.
+  /// Fetches what the core doesn't keep (everything without a core). Failed parts keep their
+  /// previous values.
   pub async fn refresh(&self) {
     let scope = (self.scope)();
-    let unread = self.get::<UnreadResponse>("/api/v1/unread").await;
-    let threads = self
-      .get::<ListThreadsResponse>(&format!("/api/v1/threads?limit={THREAD_PAGE}"))
-      .await;
+    let is_core_fed = self.state.borrow().is_core_fed;
+    let (unread, threads) = if is_core_fed {
+      (None, None)
+    } else {
+      (
+        self.get::<UnreadResponse>("/api/v1/unread").await,
+        self
+          .get::<ListThreadsResponse>(&format!("/api/v1/threads?limit={THREAD_PAGE}"))
+          .await,
+      )
+    };
     let presence = self.presence(&scope.users).await;
     let announcement = self.get::<GetAnnouncementResponse>("/api/v1/announcement").await;
     let mut receipts = HashMap::new();
@@ -121,13 +161,11 @@ impl LiveServer {
     }
     {
       let mut state = self.state.borrow_mut();
-      state.is_loaded = true;
+      if !is_core_fed {
+        state.is_loaded = true;
+      }
       if let Some(unread) = unread {
-        state.unread = unread
-          .conversations
-          .into_iter()
-          .map(|entry| (entry.conversation_id, (entry.unread_count, entry.mention_count)))
-          .collect();
+        state.unread = unread_map(&unread);
       }
       if let Some(threads) = threads {
         state.threads = threads.threads;
@@ -141,6 +179,13 @@ impl LiveServer {
       }
     }
     self.changed();
+  }
+
+  async fn refresh_announcement(&self) {
+    if let Some(announcement) = self.get::<GetAnnouncementResponse>("/api/v1/announcement").await {
+      self.state.borrow_mut().announcement = announcement.maybe_announcement;
+      self.changed();
+    }
   }
 
   /// The instance announcement, unless this user dismissed it.
@@ -298,18 +343,80 @@ impl LiveServer {
     }
   }
 
-  /// Fire and forget; the next refresh shows the outcome (or the unchanged truth after a refusal).
+  /// Fire and forget; a refresh shows the outcome (or the unchanged truth after a refusal). With a
+  /// core, a change that went through comes back as a gateway event instead.
   fn send(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
     let live = self.clone();
     spawn_local(async move {
-      match live.auth.api_request(method, &path, maybe_body).await {
-        Ok(response) if response.status < 300 => {},
-        Ok(response) => tracing::warn!(path, status = response.status, "the server refused the change"),
-        Err(error) => tracing::warn!(path, %error, "could not reach the server"),
+      let is_accepted = match live.auth.api_request(method, &path, maybe_body).await {
+        Ok(response) if response.status < 300 => true,
+        Ok(response) => {
+          tracing::warn!(path, status = response.status, "the server refused the change");
+          false
+        },
+        Err(error) => {
+          tracing::warn!(path, %error, "could not reach the server");
+          false
+        },
+      };
+      if !is_accepted || !live.state.borrow().is_core_fed {
+        live.queue_refresh();
       }
-      live.queue_refresh();
     });
   }
+}
+
+impl LiveState {
+  /// Lays the core's snapshot over the state: counts and threads are the core's, presence and
+  /// receipts only where they changed since the last snapshot (a REST answer read after an older
+  /// event must not be undone by it).
+  pub fn apply_snapshot(&mut self, live: LiveSnapshot) -> LiveFollowUp {
+    let maybe_last = self.maybe_last_live.take();
+    let last_marks = maybe_last.as_ref().map(|last| last.marks);
+    self.is_core_fed = true;
+    if let Some(unread) = &live.maybe_unread {
+      self.is_loaded = true;
+      self.unread = unread_map(unread);
+    }
+    self.threads.clone_from(&live.threads);
+    for presence in &live.presence {
+      let is_new = maybe_last
+        .as_ref()
+        .is_none_or(|last| !last.presence.contains(presence));
+      if is_new {
+        self.presence.insert(presence.user_id, presence.clone());
+      }
+    }
+    for receipt in &live.receipts {
+      let receipts = self.receipts.entry(receipt.conversation).or_default();
+      match receipts.iter_mut().find(|(user, _)| *user == receipt.user) {
+        Some((_, read_up_to)) => *read_up_to = (*read_up_to).max(receipt.message),
+        None => receipts.push((receipt.user, receipt.message)),
+      }
+    }
+    let follow_up = follow_up(last_marks, live.marks);
+    self.maybe_last_live = Some(live);
+    follow_up
+  }
+}
+
+/// The first snapshot needs no resync of its own: the start reads everything anyway.
+fn follow_up(maybe_last: Option<LiveMarks>, marks: LiveMarks) -> LiveFollowUp {
+  match maybe_last {
+    None => LiveFollowUp::default(),
+    Some(last) => LiveFollowUp {
+      needs_resync: marks.connections != last.connections,
+      needs_announcement: marks.announcements != last.announcements,
+    },
+  }
+}
+
+fn unread_map(unread: &UnreadResponse) -> HashMap<ConversationId, (u32, u32)> {
+  unread
+    .conversations
+    .iter()
+    .map(|entry| (entry.conversation_id, (entry.unread_count, entry.mention_count)))
+    .collect()
 }
 
 /// Replaces the locally derived counts with the server's, once it has answered. A conversation the
@@ -394,6 +501,7 @@ fn unix_millis(value: TimestampMs) -> teamcraft_proto::UnixMillis {
 mod tests {
   use super::*;
   use crate::model::{ConversationKind, SidebarCategory, id_from_raw};
+  use teamcraft_client_api::live::LiveReceipt;
 
   const NOW: TimestampMs = 1_792_540_800_000;
 
@@ -417,6 +525,132 @@ mod tests {
     let id: ConversationId = id_from_raw(7);
     let result = apply_counts(conversation(id), &HashMap::new(), true);
     assert_eq!((result.unread_count, result.mention_count), (0, 0));
+  }
+
+  mod core_snapshot {
+    use super::*;
+
+    #[test]
+    fn counts_come_from_the_snapshot_without_asking_the_server() {
+      let id: ConversationId = id_from_raw(7);
+      let mut state = LiveState::default();
+      state.apply_snapshot(live(Some(&[(7, 4, 2)]), LiveMarks::default()));
+      assert!(state.is_core_fed);
+      let counted = apply_counts(conversation(id), &state.unread, state.is_loaded);
+      assert_eq!((counted.unread_count, counted.mention_count), (4, 2));
+
+      // An `unread_update` (mark read on another device) reached the core: the badge follows.
+      state.apply_snapshot(live(Some(&[]), LiveMarks::default()));
+      let counted = apply_counts(conversation(id), &state.unread, state.is_loaded);
+      assert_eq!((counted.unread_count, counted.mention_count), (0, 0));
+    }
+
+    #[test]
+    fn counts_stay_local_until_the_core_has_synced() {
+      let mut state = LiveState::default();
+      state.apply_snapshot(live(None, LiveMarks::default()));
+      assert!(!state.is_loaded);
+    }
+
+    #[test]
+    fn a_new_gateway_connection_asks_for_one_resync() {
+      let mut state = LiveState::default();
+      let first = LiveMarks::default();
+      assert_eq!(
+        state.apply_snapshot(live(Some(&[]), first)),
+        LiveFollowUp::default()
+      );
+      assert_eq!(
+        state.apply_snapshot(live(Some(&[]), first)),
+        LiveFollowUp::default()
+      );
+      let reconnected = LiveMarks {
+        connections: 1,
+        ..first
+      };
+      assert_eq!(
+        state.apply_snapshot(live(Some(&[]), reconnected)),
+        LiveFollowUp {
+          needs_resync: true,
+          needs_announcement: false
+        }
+      );
+      assert_eq!(
+        state.apply_snapshot(live(Some(&[]), reconnected)),
+        LiveFollowUp::default()
+      );
+      let announced = LiveMarks {
+        announcements: 1,
+        ..reconnected
+      };
+      assert!(
+        state
+          .apply_snapshot(live(Some(&[]), announced))
+          .needs_announcement
+      );
+    }
+
+    #[test]
+    fn only_presence_that_changed_overrides_the_rest_answer() {
+      let user: UserId = id_from_raw(3);
+      let mut state = LiveState::default();
+      let mut snapshot = live(Some(&[]), LiveMarks::default());
+      snapshot.presence = vec![presence(user, PresenceState::Away)];
+      state.apply_snapshot(snapshot.clone());
+      // A REST resync answered later with a newer state; the same old event must not undo it.
+      state.presence.insert(user, presence(user, PresenceState::Online));
+      state.apply_snapshot(snapshot.clone());
+      assert_eq!(state.presence[&user].state, PresenceState::Online);
+
+      snapshot.presence = vec![presence(user, PresenceState::DoNotDisturb)];
+      state.apply_snapshot(snapshot);
+      assert_eq!(state.presence[&user].state, PresenceState::DoNotDisturb);
+    }
+
+    #[test]
+    fn receipts_from_events_only_move_forward() {
+      let (dm, reader): (ConversationId, UserId) = (id_from_raw(5), id_from_raw(3));
+      let mut state = LiveState::default();
+      state.receipts.insert(dm, vec![(reader, id_from_raw(30))]);
+      let mut snapshot = live(Some(&[]), LiveMarks::default());
+      snapshot.receipts = vec![LiveReceipt {
+        conversation: dm,
+        user: reader,
+        message: id_from_raw(20),
+      }];
+      state.apply_snapshot(snapshot);
+      assert_eq!(state.receipts[&dm], vec![(reader, id_from_raw(30))]);
+    }
+
+    fn live(maybe_counts: Option<&[(u64, u32, u32)]>, marks: LiveMarks) -> LiveSnapshot {
+      LiveSnapshot {
+        maybe_unread: maybe_counts.map(|counts| UnreadResponse {
+          conversations: counts
+            .iter()
+            .map(
+              |(id, unread_count, mention_count)| teamcraft_proto::ConversationUnread {
+                conversation_id: id_from_raw(*id),
+                unread_count: *unread_count,
+                mention_count: *mention_count,
+              },
+            )
+            .collect(),
+          unread_thread_count: 0,
+          thread_mention_count: 0,
+        }),
+        marks,
+        ..LiveSnapshot::default()
+      }
+    }
+
+    fn presence(user: UserId, state: PresenceState) -> UserPresence {
+      UserPresence {
+        user_id: user,
+        state,
+        maybe_status: None,
+        maybe_last_seen: None,
+      }
+    }
   }
 
   #[test]

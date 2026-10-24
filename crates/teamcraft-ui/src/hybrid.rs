@@ -37,12 +37,12 @@ use crate::calls::{
   Participant,
 };
 use crate::clock::now_ms;
-use crate::live::{LiveScope, LiveServer, POLL_INTERVAL_MS, thread_summary};
+use crate::live::{LiveScope, LiveServer, REST_ONLY_POLL_INTERVAL_MS, thread_summary};
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId, as_log_line,
 };
-use crate::reactive::use_interval;
+use crate::reactive::use_interval_while_visible;
 use crate::remote_calls::RemoteCalls;
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::security::KeyChange;
@@ -112,7 +112,7 @@ impl<C: ChatBackend> Hybrid<C> {
   }
 }
 
-impl<C: ChatBackend> ChatBackend for Hybrid<C> {
+impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
   fn set_change_notifier(&self, notify: Rc<dyn Fn()>) {
     if let Some(calls) = &self.maybe_calls {
       calls.set_change_notifier(notify.clone());
@@ -125,15 +125,24 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     if let Some(admin) = &self.maybe_admin {
       admin.set_change_notifier(notify.clone());
     }
-    // Chat changes (sync steps) are the cue to look at the server's counters again.
-    let refresher = live.clone();
+    // The core's snapshot carries the counters it keeps from gateway events; it says when the
+    // rest must be read again (after a reconnect). Applied before the UI re-reads.
+    let observer = live.clone();
+    // Weak: the chat keeps this notifier, which must not keep the chat alive after sign-out.
+    let chat = Rc::downgrade(&self.chat);
     self.chat.set_change_notifier(Rc::new(move || {
+      if let Some(chat) = chat.upgrade() {
+        observer.observe(chat.live_snapshot());
+      }
       notify();
-      refresher.queue_refresh();
     }));
+    live.observe(self.chat.live_snapshot());
     live.queue_refresh();
-    let poller = live.clone();
-    use_interval(POLL_INTERVAL_MS, move || poller.queue_refresh());
+    if self.chat.live_snapshot().is_none() {
+      // No core, so no gateway: the only way to see new counts. Paused while the page is hidden.
+      let poller = live.clone();
+      use_interval_while_visible(REST_ONLY_POLL_INTERVAL_MS, move || poller.queue_refresh());
+    }
   }
 
   fn me(&self) -> User {

@@ -28,6 +28,19 @@ thread mentions. Messages of the user themselves, thread replies (they count in 
 messages from before the user joined are not counted. The read position is
 `PUT /conversations/{id}/read-position`.
 
+Clients keep the counts current from gateway events instead of polling `GET /unread` (issue #183):
+
+- A new top-level `message_create` from someone else raises the conversation's unread count by one, and
+  its mention count when `mentioned_user_ids` contains the user (counted like the server counts).
+- Moving the read position, on any device, sends `unread_update` with the conversation's new counts to
+  the user's devices.
+- `thread_update` makes the client read `GET /threads` and `GET /unread` again.
+- After every gateway connection (resumed or new) the client reads the counts once, so a count that
+  drifted is repaired on reconnect, not by a timer.
+
+The client core keeps all of this in its store and hands it to the UI with its snapshot. Only a UI
+without a core (no gateway) still polls, every 5 minutes while the page is visible.
+
 ### Where the counts show
 
 DMs and group DMs live outside spaces (their `space_id` is null), so no space counts them:

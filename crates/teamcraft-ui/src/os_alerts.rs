@@ -731,7 +731,8 @@ fn share_tab_focus(state: AppState) {
   for event in ["focus", "blur", "pagehide"] {
     on_window_event(event, record);
   }
-  crate::reactive::use_interval(TAB_FOCUS_RENEW_MS, record);
+  // Only a tab in front has a record to renew; blur and pagehide end it when it leaves.
+  crate::reactive::use_interval_while_visible(TAB_FOCUS_RENEW_MS, record);
 }
 
 /// Whether another tab of this browser shows `conversation` in front right now.
