@@ -93,6 +93,12 @@ impl SealedStore<IndexedDbRecords> {
     }
     backend.failure()
   }
+
+  /// Changes with every write: a reader can tell whether anything was written since it last
+  /// looked without comparing contents.
+  pub fn write_revision(&self) -> u32 {
+    self.backend().writes.borrow().next_sequence
+  }
 }
 
 impl RecordBackend for IndexedDbRecords {

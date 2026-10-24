@@ -402,6 +402,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .filter(|user| **user != self.me)
         .filter_map(|user| users.get(user).map(|summary| summary.display_name.clone()))
         .collect();
+      if others.is_empty() {
+        // The member list is not loaded yet (a sync catching up, issue #247): the conversation
+        // list names the other people too.
+        others = response
+          .participants
+          .iter()
+          .filter(|user| user.id != self.me)
+          .map(|user| user.display_name.clone())
+          .collect();
+      }
       others.sort();
       others.join(", ")
     });
@@ -1409,6 +1419,38 @@ mod tests {
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
     );
+  }
+
+  #[test]
+  fn a_direct_message_is_named_after_its_participants_before_its_members_are_loaded() {
+    let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
+    let participant = |raw: i64, name: &str| UserSummary {
+      id: id(raw),
+      maybe_username: None,
+      display_name: name.into(),
+      kind: teamcraft_proto::UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+    };
+    let direct = ConversationResponse {
+      id: id(10),
+      maybe_space_id: None,
+      kind: ConversationKindProto::Dm,
+      maybe_name: None,
+      maybe_topic: None,
+      maybe_description: None,
+      visibility: ConversationVisibility::Private,
+      history_policy: teamcraft_proto::HistoryPolicy::Full,
+      maybe_category_id: None,
+      is_archived: false,
+      moderation: Default::default(),
+      is_integration: false,
+      contains_guests: false,
+      maybe_my_membership: None,
+      participants: vec![participant(1, "Alice Example"), participant(2, "Bob Example")],
+    };
+    let conversation = backend.to_conversation(&direct, &BTreeMap::new(), &MentionPreferences::default());
+    assert_eq!(conversation.name, "Bob Example");
   }
 
   #[test]

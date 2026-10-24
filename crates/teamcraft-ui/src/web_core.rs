@@ -13,8 +13,9 @@
 //! to it.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -22,14 +23,14 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt;
-use futures_util::future::{Either, select};
+use futures_util::future::{Either, pending, poll_immediate, select};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
-  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, last_activity_of,
+  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth,
 };
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
@@ -56,12 +57,15 @@ use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
 use crate::settings::{load_string, store_string};
+use crate::sync_reads::{StoredWorkspace, SyncRead, SyncReadAnswer, answer_during_sync};
 use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// How often the loop wakes up on its own: outbox retries, heartbeats, staggered commits.
 const TICK: Duration = Duration::from_secs(3);
+/// How often the UI is told to read again while a long sync fills the store (issue #247).
+const SYNC_PROGRESS: Duration = Duration::from_secs(1);
 /// How often account data (saved items, drafts) is pulled from the user's other devices.
 const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
 /// How often the core's copy of the access token is renewed from the page's session.
@@ -589,6 +593,12 @@ struct Core {
   /// When to compare the browser's push subscription with the registration next; `None` when
   /// nothing is due (e2ee.md §7).
   maybe_push_check_at_ms: Option<i64>,
+  /// The security part of the last snapshot, for snapshots taken while a sync holds the client.
+  maybe_last_security: Option<SecuritySnapshot>,
+  /// Requests that arrived during a connect and need the client; handled once it is done.
+  deferred: VecDeque<Request>,
+  /// The UI side hung up during a connect: the loop ends after it.
+  is_closed: bool,
 }
 
 /// A link in progress on this (new) device.
@@ -628,13 +638,22 @@ impl Core {
       maybe_attention: None,
       store_health: StoreHealth::Saved,
       maybe_push_check_at_ms: None,
+      maybe_last_security: None,
+      deferred: VecDeque::new(),
+      is_closed: false,
     }
   }
 
   async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
     self.open().await;
     loop {
-      self.connect().await;
+      self.connect(&mut requests).await;
+      while let Some(request) = self.deferred.pop_front() {
+        self.handle(request).await;
+      }
+      if self.is_closed {
+        return;
+      }
       match self.next_wake(&mut requests).await {
         Wake::Request(None) => return,
         Wake::Request(Some(request)) => self.handle(request).await,
@@ -1024,28 +1043,11 @@ impl Core {
     client.complete_link_approval(approval).await.map_err(describe)
   }
 
-  fn snapshot(&self) -> Result<ChatSnapshot, String> {
+  fn snapshot(&mut self) -> Result<ChatSnapshot, String> {
+    let security = self.security_snapshot()?;
+    self.maybe_last_security = Some(security.clone());
     let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
-    let mut conversations = Vec::new();
-    for space in backend.spaces() {
-      conversations.extend(backend.space_conversations(space.id));
-    }
-    conversations.extend(backend.direct_conversations());
-    let message_counts = conversations
-      .iter()
-      .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
-      .collect();
-    let last_activity = last_activity_of(backend, &conversations);
-    Ok(ChatSnapshot {
-      me: backend.me(),
-      users: backend.users(),
-      spaces: backend.spaces(),
-      conversations,
-      message_counts,
-      last_activity,
-      security: self.security_snapshot()?,
-      maybe_live: backend.live_snapshot(),
-    })
+    Ok(ChatSnapshot::read(backend, security))
   }
 
   /// Fingerprints of the keys this device pinned, and of keys the server showed since.
@@ -1072,12 +1074,7 @@ impl Core {
 
   fn window(&self, conversation: ConversationId, start: usize, len: usize) -> Result<MessageWindow, String> {
     let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
-    Ok(MessageWindow {
-      conversation,
-      start,
-      total: backend.message_count(conversation),
-      messages: backend.messages(conversation, start, len),
-    })
+    Ok(MessageWindow::read(backend, conversation, start, len))
   }
 
   async fn attachment(
@@ -1235,11 +1232,50 @@ impl Core {
     }
   }
 
-  async fn connect(&mut self) {
-    let Some(client) = self.client.as_mut() else {
+  /// Connects when due. A fresh session's full sync can take minutes on a workspace that grew
+  /// meanwhile (issue #247): until it is done, the UI's reads are answered from the local store,
+  /// which the sync fills as it goes (`sync_reads`), and requests that need the client wait for
+  /// the end of the connect.
+  async fn connect(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
+    if self.maybe_last_security.is_none() && self.client.is_some() {
+      self.maybe_last_security = self.security_snapshot().ok();
+    }
+    let Self {
+      client: Some(client),
+      store: Some(store),
+      backend: Some(backend),
+      connection,
+      status,
+      store_health,
+      maybe_last_security,
+      deferred,
+      is_closed,
+      ..
+    } = self
+    else {
       return;
     };
-    if self.connection.connect_if_due(client).await.is_some() {
+    let outcome = {
+      let mut connecting = pin!(connection.connect_if_due(client));
+      // No attempt due (the usual case): done without a timer or a look at the store.
+      match poll_immediate(connecting.as_mut()).await {
+        Some(outcome) => outcome,
+        None => {
+          let reads = SyncReads {
+            backend,
+            store,
+            stored: StoredWorkspace::of(backend),
+            status,
+            store_health,
+            maybe_security: maybe_last_security.as_ref(),
+          };
+          reads
+            .serve(connecting.as_mut(), requests, deferred, is_closed)
+            .await
+        },
+      }
+    };
+    if outcome.is_some() {
       self.repeat_attention().await;
       notify_changed();
     }
@@ -1310,6 +1346,116 @@ fn now_ms() -> i64 {
 
 fn millis(duration: Duration) -> i64 {
   i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// What the core can answer while a connect holds the client: reads of the local store.
+struct SyncReads<'a> {
+  backend: &'a CoreChatBackend<Store>,
+  store: &'a Store,
+  stored: StoredWorkspace,
+  status: &'a CoreStatus,
+  store_health: &'a StoreHealth,
+  maybe_security: Option<&'a SecuritySnapshot>,
+}
+
+impl SyncReads<'_> {
+  /// Answers reads until the connect is done; the rest is queued in `deferred`. Every
+  /// [`SYNC_PROGRESS`], this tab's UI is told to read again if the sync wrote anything and the page
+  /// is visible (follower tabs hear about it when the connect is done).
+  async fn serve<F: Future + Unpin>(
+    &self,
+    mut connecting: F,
+    requests: &mut mpsc::UnboundedReceiver<Request>,
+    deferred: &mut VecDeque<Request>,
+    is_closed: &mut bool,
+  ) -> F::Output {
+    let mut seen_revision = self.store.write_revision();
+    loop {
+      let progress = pin!(platform::sleep(SYNC_PROGRESS));
+      let request = if *is_closed {
+        Either::Left(pending())
+      } else {
+        Either::Right(requests.next())
+      };
+      match select(&mut connecting, select(request, progress)).await {
+        Either::Left((outcome, _)) => return outcome,
+        Either::Right((Either::Left((Some(request), _)), _)) => {
+          if let Some(request) = self.answer(request) {
+            deferred.push_back(request);
+          }
+        },
+        Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
+        Either::Right((Either::Right(((), _)), _)) => {
+          let revision = self.store.write_revision();
+          if revision != seen_revision && is_page_visible() {
+            seen_revision = revision;
+            notify_local();
+          }
+        },
+      }
+    }
+  }
+
+  /// Answers a read; hands back a request that has to wait.
+  fn answer(&self, request: Request) -> Option<Request> {
+    let read = match &request {
+      Request::Status(_) if self.stored == StoredWorkspace::Empty => {
+        // Ready with an empty store would show an empty workspace: the first sync is awaited.
+        return Some(request);
+      },
+      Request::Status(_) | Request::StoreHealth(_) => None,
+      Request::Snapshot(_) => Some(SyncRead::Snapshot),
+      Request::Messages {
+        conversation,
+        start,
+        len,
+        ..
+      } => Some(SyncRead::Messages {
+        conversation: *conversation,
+        start: *start,
+        len: *len,
+      }),
+      Request::Thread {
+        conversation, thread, ..
+      } => Some(SyncRead::Thread {
+        conversation: *conversation,
+        thread: *thread,
+      }),
+      // Commands a query queues run with the next query after the connect.
+      Request::Query(query, _) => Some(SyncRead::Query(query.clone())),
+      _ => return Some(request),
+    };
+    let maybe_answer = match read {
+      Some(read) => match answer_during_sync(read, self.backend, self.stored, self.maybe_security) {
+        Some(answer) => Some(answer),
+        None => return Some(request),
+      },
+      None => None,
+    };
+    // A closed reply channel (the caller gave up) needs nothing.
+    match (request, maybe_answer) {
+      (Request::Status(reply), None) => drop(reply.send(self.status.clone())),
+      (Request::StoreHealth(reply), None) => drop(reply.send(self.store_health.clone())),
+      (Request::Snapshot(reply), Some(SyncReadAnswer::Snapshot(snapshot))) => drop(reply.send(Ok(*snapshot))),
+      (Request::Messages { reply, .. }, Some(SyncReadAnswer::Messages(window))) => {
+        drop(reply.send(Ok(window)))
+      },
+      (Request::Thread { reply, .. }, Some(SyncReadAnswer::Thread(messages))) => {
+        drop(reply.send(Ok(messages)))
+      },
+      (Request::Query(_, reply), Some(SyncReadAnswer::Query(answer))) => drop(reply.send(Ok(answer))),
+      // Invariant: `answer_during_sync` answers with the variant of the read. Should it not, the
+      // request waits for the sync like any other.
+      (request, _) => return Some(request),
+    }
+    None
+  }
+}
+
+fn is_page_visible() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .is_none_or(|document| document.visibility_state() == web_sys::VisibilityState::Visible)
 }
 
 fn not_set_up() -> String {

@@ -61,6 +61,7 @@ pub mod settings;
 pub mod sign_in_page;
 pub mod slash;
 pub mod state;
+pub mod sync_reads;
 #[cfg(target_arch = "wasm32")]
 pub mod web_core;
 #[cfg(target_arch = "wasm32")]

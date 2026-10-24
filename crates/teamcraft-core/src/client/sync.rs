@@ -2,7 +2,8 @@
 
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ListThreadsQuery, SpaceId, UploadKeyPackagesRequest, UserSummary,
+  Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListThreadsQuery, SpaceId,
+  UploadKeyPackagesRequest, UserSummary,
 };
 
 use super::Client;
@@ -33,6 +34,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       self.store.delete(Table::Conversations, &stale.to_string())?;
     }
+    // The whole list first, members after: a UI reading the store meanwhile shows every
+    // conversation at once instead of one per member request (issue #247).
     for conversation in &conversations {
       records::put_json(
         &self.store,
@@ -40,7 +43,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &conversation.id.to_string(),
         conversation,
       )?;
-      self.refresh_members(conversation.id).await?;
+    }
+    // Direct and group messages are named after their members: theirs first, so their names
+    // follow right after the list.
+    for conversation in members_order(&conversations) {
+      self.refresh_members(conversation).await?;
     }
     self.sync_welcomes().await?;
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
@@ -240,5 +247,65 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   fn remember_user(&self, user: &UserSummary) -> Result<(), CoreError> {
     records::put_json(&self.store, Table::Users, &user.id.to_string(), user)
+  }
+}
+
+/// The order member lists are read in: direct and group messages first (they are named after
+/// their members), then the rest in the server's order.
+fn members_order(conversations: &[ConversationResponse]) -> Vec<ConversationId> {
+  let is_direct = |conversation: &&ConversationResponse| {
+    matches!(conversation.kind, ConversationKind::Dm | ConversationKind::Group)
+  };
+  conversations
+    .iter()
+    .filter(is_direct)
+    .chain(
+      conversations
+        .iter()
+        .filter(|conversation| !is_direct(conversation)),
+    )
+    .map(|conversation| conversation.id)
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{ConversationVisibility, HistoryPolicy, Id, Snowflake};
+
+  use super::*;
+
+  #[test]
+  fn direct_conversations_get_their_members_first() {
+    let conversations = [
+      conversation(1, ConversationKind::Channel),
+      conversation(2, ConversationKind::Dm),
+      conversation(3, ConversationKind::Channel),
+      conversation(4, ConversationKind::Group),
+    ];
+    let order: Vec<i64> = members_order(&conversations)
+      .into_iter()
+      .map(|id| id.snowflake().get())
+      .collect();
+    assert_eq!(order, vec![2, 4, 1, 3]);
+  }
+
+  fn conversation(raw: i64, kind: ConversationKind) -> ConversationResponse {
+    ConversationResponse {
+      id: ConversationId::from_snowflake(Snowflake::new(raw).unwrap()),
+      maybe_space_id: None,
+      kind,
+      maybe_name: None,
+      maybe_topic: None,
+      maybe_description: None,
+      visibility: ConversationVisibility::Private,
+      history_policy: HistoryPolicy::Full,
+      maybe_category_id: None,
+      is_archived: false,
+      moderation: Default::default(),
+      is_integration: false,
+      contains_guests: false,
+      maybe_my_membership: None,
+      participants: Vec::new(),
+    }
   }
 }
