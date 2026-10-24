@@ -5,6 +5,7 @@
 //! It opens on top of the dialog that picked the file (a portal into `<body>`, so the opener's
 //! focus trap and Escape handling don't see it) and only closes through the caller.
 
+use futures_util::future::LocalBoxFuture;
 use leptos::html;
 use leptos::portal::Portal;
 use leptos::prelude::*;
@@ -14,6 +15,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::trap_tab;
+use crate::feedback::{ActionFailure, PendingAction, failure_message};
 use crate::i18n::use_i18n;
 use crate::image_crop::{CropView, ImagePickError, crop_png, prepare_editor_image};
 use crate::object_url::ObjectUrl;
@@ -32,6 +34,9 @@ const ZOOM_STEP: f64 = 1.2;
 const WHEEL_ZOOM_PER_PX: f64 = 0.002;
 /// Pixels per wheel "line" (`deltaMode` 1, Firefox with a mouse).
 const WHEEL_LINE_PX: f64 = 16.0;
+
+/// The caller's upload of a cropped picture (see [`ImageCropDialog`]).
+pub type CropUpload = LocalBoxFuture<'static, Result<(), ActionFailure>>;
 
 /// What the picture becomes: decides the mask, the previews and the uploaded size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,16 +117,15 @@ impl CropTarget {
   }
 }
 
-/// The crop dialog for `file`. `on_apply` gets the cropped PNG; the caller uploads it, shows
-/// progress through `busy` and a failure through `maybe_error`, and closes the dialog when done.
+/// The crop dialog for `file`. `on_apply` gets the cropped PNG and returns the upload; the dialog
+/// shows it as pending, and a failure as a toast and in the dialog, where "Apply" can be retried.
+/// The upload closes the dialog (through the caller's state) when it succeeds.
 /// `on_cancel` keeps the old picture.
 #[component]
 pub fn ImageCropDialog(
   file: web_sys::File,
   target: CropTarget,
-  #[prop(into)] busy: Signal<bool>,
-  #[prop(into)] maybe_error: Signal<Option<String>>,
-  on_apply: Callback<Vec<u8>>,
+  on_apply: Callback<Vec<u8>, CropUpload>,
   on_cancel: Callback<()>,
 ) -> impl IntoView {
   let i18n = use_i18n();
@@ -135,7 +139,9 @@ pub fn ImageCropDialog(
   let pointers = StoredValue::new(Vec::<ActivePointer>::new());
   let dialog = NodeRef::<html::Div>::new();
   let stage = NodeRef::<html::Div>::new();
-  let is_pending = move || busy.get() || phase.get() == CropPhase::Cropping;
+  let upload = PendingAction::new();
+  let busy = move || upload.is_pending();
+  let is_pending = move || busy() || phase.get() == CropPhase::Cropping;
   let is_ready = move || phase.get() == CropPhase::Ready;
 
   remember_focus();
@@ -174,7 +180,7 @@ pub fn ImageCropDialog(
   });
 
   let change = move |animated: bool, edit: &dyn Fn(&mut CropView, f64)| {
-    if !is_ready() || busy.get_untracked() {
+    if !is_ready() || untrack(|| upload.is_pending()) {
       return;
     }
     is_animated.set(animated);
@@ -190,7 +196,7 @@ pub fn ImageCropDialog(
   let reset = move || change(true, &|current, _| current.reset());
 
   let apply = move || {
-    if !is_ready() || busy.get_untracked() {
+    if !is_ready() || untrack(|| upload.is_pending()) {
       return;
     }
     phase.set(CropPhase::Cropping);
@@ -208,7 +214,9 @@ pub fn ImageCropDialog(
       match result {
         Ok(png) => {
           phase.set_if_alive(CropPhase::Ready);
-          on_apply.try_run(png);
+          if let Some(work) = on_apply.try_run(png) {
+            upload.spawn(work);
+          }
         },
         Err(error) => {
           phase.set_if_alive(CropPhase::Failed(error));
@@ -217,7 +225,7 @@ pub fn ImageCropDialog(
     });
   };
   let cancel = move || {
-    if !busy.get_untracked() {
+    if !untrack(|| upload.is_pending()) {
       on_cancel.run(());
     }
   };
@@ -257,7 +265,7 @@ pub fn ImageCropDialog(
   };
 
   let on_pointer_down = move |ev: web_sys::PointerEvent| {
-    if !is_ready() || busy.get_untracked() || (ev.pointer_type() == "mouse" && ev.button() != 0) {
+    if !is_ready() || untrack(|| upload.is_pending()) || (ev.pointer_type() == "mouse" && ev.button() != 0) {
       return;
     }
     ev.prevent_default();
@@ -320,7 +328,7 @@ pub fn ImageCropDialog(
     }
   };
   let on_wheel = move |ev: web_sys::WheelEvent| {
-    if !is_ready() || busy.get_untracked() {
+    if !is_ready() || untrack(|| upload.is_pending()) {
       return;
     }
     ev.prevent_default();
@@ -397,7 +405,9 @@ pub fn ImageCropDialog(
   let zoom_percent = move || format!("{:.0}", view.get().zoom() * 100.0);
   let message = move || match phase.get() {
     CropPhase::Failed(error) => Some(i18n.t(error.i18n_key())),
-    _ => maybe_error.get(),
+    _ => upload
+      .maybe_failure()
+      .map(|failure| failure_message(i18n, &failure)),
   };
 
   view! {
@@ -517,7 +527,7 @@ pub fn ImageCropDialog(
               <Show when=is_pending fallback=|| ()>
                 <span class="spinner" aria-hidden="true"></span>
               </Show>
-              {move || if busy.get() { i18n.t("crop-uploading") } else { i18n.t("crop-apply") }}
+              {move || if busy() { i18n.t("crop-uploading") } else { i18n.t("crop-apply") }}
             </button>
           </footer>
         </div>

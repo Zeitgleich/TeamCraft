@@ -2,7 +2,7 @@
 //! hours) and the card of another person with their local time.
 
 use leptos::prelude::*;
-use teamcraft_proto::{AvatarContentType, UpdateProfileRequest, UserId, WorkingHours};
+use teamcraft_proto::{AvatarContentType, ErrorCode, UpdateProfileRequest, UserId, WorkingHours};
 use wasm_bindgen::JsCast;
 
 use crate::clock::{
@@ -10,8 +10,11 @@ use crate::clock::{
 };
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
-use crate::components::image_crop_dialog::{CropTarget, ImageCropDialog, allow_image_drop, dropped_file};
+use crate::components::image_crop_dialog::{
+  CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
+};
 use crate::components::modal::Modal;
+use crate::feedback::{ActionFailure, FailureKind};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::model::{PresenceStatus, User};
@@ -144,15 +147,12 @@ pub fn EditProfileDialog() -> impl IntoView {
   };
 
   let picked = RwSignal::new_local(None::<web_sys::File>);
-  let is_uploading = RwSignal::new(false);
-  let crop_error = RwSignal::new(None::<String>);
   let open_crop = move |file: web_sys::File| {
     if let Err(pick_error) = check_pick(&file.type_(), file.size()) {
       error.set(Some(i18n.t(pick_error.i18n_key())));
       return;
     }
     error.set(None);
-    crop_error.set(None);
     picked.set(Some(file));
   };
   let pick_avatar = move |ev: leptos::ev::Event| {
@@ -169,24 +169,21 @@ pub fn EditProfileDialog() -> impl IntoView {
     }
   };
   let me_id = me.id;
-  let apply_avatar = Callback::new(move |png: Vec<u8>| {
-    if png.len() as u64 > MAX_AVATAR_BYTES {
-      crop_error.set(Some(i18n.t("image-pick-size")));
-      return;
-    }
-    is_uploading.set(true);
-    crop_error.set(None);
-    leptos::task::spawn_local(async move {
-      match hub.upload_avatar(me_id, AvatarContentType::Png, png).await {
-        Ok(()) => {
-          picked.set_if_alive(None);
-        },
-        Err(failure) => {
-          crop_error.set_if_alive(Some(failure.to_string()));
-        },
+  let apply_avatar = Callback::new(move |png: Vec<u8>| -> CropUpload {
+    Box::pin(async move {
+      if png.len() as u64 > MAX_AVATAR_BYTES {
+        return Err(ActionFailure::new(
+          FailureKind::Server(ErrorCode::PayloadTooLarge),
+          "cropped avatar above the upload limit",
+        ));
       }
-      is_uploading.set_if_alive(false);
-    });
+      hub
+        .upload_avatar(me_id, AvatarContentType::Png, png)
+        .await
+        .map_err(|failure| failure.to_failure())?;
+      picked.set_if_alive(None);
+      Ok(())
+    })
   });
   let cancel_crop = Callback::new(move |()| picked.set(None));
   let remove_avatar = move |_| {
@@ -285,8 +282,6 @@ pub fn EditProfileDialog() -> impl IntoView {
         <ImageCropDialog
           file=file
           target=CropTarget::Avatar
-          busy=is_uploading
-          maybe_error=crop_error
           on_apply=apply_avatar
           on_cancel=cancel_crop
         />

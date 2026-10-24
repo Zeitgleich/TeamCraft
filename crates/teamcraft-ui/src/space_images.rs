@@ -10,10 +10,11 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{ErrorBody, SpaceResponse};
+use teamcraft_proto::{ErrorBody, ErrorCode, SpaceResponse};
 
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::components::file_views::blob_url;
+use crate::feedback::{ActionFailure, FailureKind};
 use crate::model::SpaceId;
 
 /// What the client uploads after scaling.
@@ -167,6 +168,17 @@ pub fn use_space_images() -> Option<SpaceImageHub> {
 }
 
 impl SpaceImageFailure {
+  /// The failure to show the user (issue #322).
+  pub fn to_failure(&self) -> ActionFailure {
+    match self {
+      Self::Refused(code) => match ErrorCode::from(code.clone()) {
+        ErrorCode::Unknown(_) => ActionFailure::other(format!("space picture refused: {code}")),
+        known => ActionFailure::new(FailureKind::Server(known), "space picture refused"),
+      },
+      Self::Network => ActionFailure::new(FailureKind::Network, "space picture: no connection"),
+    }
+  }
+
   pub fn i18n_key(&self) -> &'static str {
     match self {
       Self::Refused(code) if code == "payload_too_large" => "space-image-size",
@@ -220,5 +232,14 @@ mod tests {
     assert_eq!(refused("forbidden"), "space-image-forbidden");
     assert_eq!(refused("internal"), "space-image-failed");
     assert_eq!(SpaceImageFailure::Network.i18n_key(), "space-image-offline");
+  }
+
+  #[test]
+  fn failures_keep_the_servers_code_for_the_toast() {
+    let refused = SpaceImageFailure::Refused("payload_too_large".into()).to_failure();
+    assert_eq!(refused.kind, FailureKind::Server(ErrorCode::PayloadTooLarge));
+    let unknown = SpaceImageFailure::Refused("unreadable".into()).to_failure();
+    assert_eq!(unknown.kind, FailureKind::Other);
+    assert_eq!(SpaceImageFailure::Network.to_failure().kind, FailureKind::Network);
   }
 }
