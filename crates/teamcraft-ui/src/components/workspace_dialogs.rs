@@ -12,19 +12,20 @@ use teamcraft_client_api::actions::{
 };
 use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, SpaceResponse};
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::JsFuture;
 
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::composer_commands::left_text;
 use crate::components::icons::{Icon, IconName};
+use crate::components::image_crop_dialog::{CropTarget, ImageCropDialog, allow_image_drop, dropped_file};
 use crate::components::modal::Modal;
 use crate::components::pending_button::PendingButton;
 use crate::components::space_tile::SpaceTile;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
+use crate::image_crop::check_pick;
 use crate::model::{ConversationId, SpaceId, UserId, hue_from_hex};
 use crate::reactive::SetIfAlive;
-use crate::space_images::{ImagePickError, check_pick, prepare_upload, use_space_images};
+use crate::space_images::use_space_images;
 use crate::state::{Overlay, use_app_state};
 
 /// What the color picker shows for a space without a color of its own.
@@ -824,15 +825,14 @@ pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
   }
 }
 
-/// The space's picture: preview, upload (scaled to a 256×256 square first) and remove.
+/// The space's picture: preview, upload (cropped to a 256×256 square in the crop dialog first) and
+/// remove.
 #[component]
 fn SpaceImageSection(space: SpaceId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let Some(hub) = use_space_images() else {
-    // The demo backend has no server to keep pictures.
-    return ().into_any();
-  };
+  // The demo backend has no server to keep pictures: the crop dialog still works, nothing is saved.
+  let maybe_hub = use_space_images();
   let shown = RwSignal::new(ShownImage::FromStore);
   let status = RwSignal::new(ImageStatus::Idle);
   let preview = Memo::new(move |_| {
@@ -853,6 +853,18 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     })
   };
 
+  let picked = RwSignal::new_local(None::<web_sys::File>);
+  let is_uploading = RwSignal::new(false);
+  let crop_error = RwSignal::new(None::<String>);
+  let open_crop = move |file: web_sys::File| {
+    if let Err(error) = check_pick(&file.type_(), file.size()) {
+      status.set(ImageStatus::Failed(error.i18n_key()));
+      return;
+    }
+    status.set(ImageStatus::Idle);
+    crop_error.set(None);
+    picked.set(Some(file));
+  };
   let pick = move |ev: leptos::ev::Event| {
     let Some(input) = ev
       .target()
@@ -860,37 +872,36 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     else {
       return;
     };
-    let Some(file) = input.files().and_then(|files| files.item(0)) else {
+    let maybe_file = input.files().and_then(|files| files.item(0));
+    input.set_value("");
+    if let Some(file) = maybe_file {
+      open_crop(file);
+    }
+  };
+  let apply = Callback::new(move |png: Vec<u8>| {
+    let Some(hub) = maybe_hub else {
+      picked.set(None);
+      status.set(ImageStatus::Failed("space-image-demo"));
       return;
     };
-    input.set_value("");
-    if let Err(error) = check_pick(&file.type_(), file.size()) {
-      status.set(ImageStatus::Failed(error.i18n_key()));
-      return;
-    }
-    status.set(ImageStatus::Busy);
+    is_uploading.set(true);
+    crop_error.set(None);
     spawn_local(async move {
-      let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
-        status.set_if_alive(ImageStatus::Failed(ImagePickError::Unreadable.i18n_key()));
-        return;
-      };
-      let png = match prepare_upload(&js_sys::Uint8Array::new(&buffer).to_vec()) {
-        Ok(png) => png,
-        Err(error) => {
-          status.set_if_alive(ImageStatus::Failed(error.i18n_key()));
-          return;
-        },
-      };
       match hub.upload(space, png).await {
         Ok(updated) => {
           shown.set_if_alive(ShownImage::after(&updated));
-          status.set_if_alive(ImageStatus::Idle);
+          picked.set_if_alive(None);
         },
-        Err(failure) => status.set_if_alive(ImageStatus::Failed(failure.i18n_key())),
+        Err(failure) => {
+          crop_error.set_if_alive(Some(i18n.t(failure.i18n_key())));
+        },
       }
+      is_uploading.set_if_alive(false);
     });
-  };
+  });
+  let cancel_crop = Callback::new(move |()| picked.set(None));
   let remove = move |_| {
+    let Some(hub) = maybe_hub else { return };
     status.set(ImageStatus::Busy);
     spawn_local(async move {
       match hub.remove(space).await {
@@ -905,7 +916,11 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
 
   view! {
     <h3>{move || i18n.t("space-image")}</h3>
-    <div class="space-image-row">
+    <div class="space-image-row" on:dragover=allow_image_drop on:drop=move |ev| {
+      if let Some(file) = dropped_file(&ev) {
+        open_crop(file);
+      }
+    }>
       {move || preview.get().map(|space| view! { <span class="space-image-preview"><SpaceTile space=space /></span> })}
       <div class="space-image-actions">
         <label class="btn btn-small" class:disabled=move || status.get() == ImageStatus::Busy>
@@ -931,6 +946,16 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
       ImageStatus::Busy => view! { <p class="hint" role="status">{move || i18n.t("space-image-uploading")}</p> }.into_any(),
       ImageStatus::Failed(key) => view! { <p class="field-error" role="alert">{move || i18n.t(key)}</p> }.into_any(),
     }}
+    {move || picked.get().map(|file| view! {
+      <ImageCropDialog
+        file=file
+        target=CropTarget::SpacePicture
+        busy=is_uploading
+        maybe_error=crop_error
+        on_apply=apply
+        on_cancel=cancel_crop
+      />
+    })}
   }
   .into_any()
 }

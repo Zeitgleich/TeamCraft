@@ -90,7 +90,7 @@ fn focus_selector(selector: &str) {
   }
 }
 
-fn trap_tab(ev: &web_sys::KeyboardEvent, dialog: NodeRef<html::Div>) {
+pub(crate) fn trap_tab(ev: &web_sys::KeyboardEvent, dialog: NodeRef<html::Div>) {
   let Some(root) = dialog.get() else { return };
   let Ok(list) = root.query_selector_all(FOCUSABLE) else {
     return;

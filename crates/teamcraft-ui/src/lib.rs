@@ -34,6 +34,7 @@ pub mod highlight;
 pub mod history;
 pub mod hybrid;
 pub mod i18n;
+pub mod image_crop;
 pub mod keys;
 pub mod lightbox;
 pub mod live;

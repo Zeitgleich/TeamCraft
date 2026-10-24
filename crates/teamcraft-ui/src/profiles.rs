@@ -170,25 +170,3 @@ impl ProfileHub {
 pub fn use_profiles() -> Option<ProfileHub> {
   use_context::<ProfileHub>()
 }
-
-/// The image type of a picked file, if the server accepts it.
-pub fn avatar_type(media_type: &str) -> Option<AvatarContentType> {
-  match media_type {
-    "image/png" => Some(AvatarContentType::Png),
-    "image/jpeg" => Some(AvatarContentType::Jpeg),
-    "image/webp" => Some(AvatarContentType::Webp),
-    _ => None,
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn only_the_servers_image_types_are_avatars() {
-    assert_eq!(avatar_type("image/png"), Some(AvatarContentType::Png));
-    assert_eq!(avatar_type("image/gif"), None);
-    assert_eq!(avatar_type("text/html"), None);
-  }
-}

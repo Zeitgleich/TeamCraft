@@ -10,6 +10,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Added
 
+- **Crop dialog for profile and space pictures** (desktop and web): after picking or dropping a
+  picture, drag it into place, zoom with the slider, the wheel or a pinch, rotate by 90°, and see it
+  live at the sizes it is shown (round for avatars, rounded square for spaces). Arrow keys move,
+  `+`/`−` zoom, `R` rotates. "Apply" uploads the cropped square; "Cancel" keeps the old picture
+  (#323).
 - **Lightbox controls on desktop and web**: the sender, relative time, conversation and file name at
   the top; rotate (`R`) and zoom (−, slider, +, fit) at the bottom left; download, the thread panel
   beside the picture (`T`), open in a new window and a "…" menu (view thread, jump to message `J`,
