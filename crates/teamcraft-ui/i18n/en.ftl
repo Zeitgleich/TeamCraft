@@ -483,6 +483,9 @@ roster-confirm-changed-key = the server now shows a different key; accept or rej
 roster-confirm-sign = Sign these changes
 roster-confirm-cancel = Back
 roster-review = Review and sign
+roster-genesis-title = Check the first admin roster before signing
+roster-genesis-hint = This is the workspace's first signed roster: every member's app will trust these owners and admins. The list comes from the server's identity provider roles and can be faked. Compare each user ID and key fingerprint with the person before you sign, or sign yourself alone and add the others later.
+roster-genesis-sign-alone = Sign only me as owner
 policy-owners-minimum-hint = Fewer owners than this shows a warning here. 1 switches the warning off.
 policy-owners-count = { $count ->
     [one] { $count } owner

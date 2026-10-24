@@ -804,11 +804,17 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
-  fn set_workspace_policy(&self, policy: WorkspacePolicy) {
+  fn set_workspace_policy(
+    &self,
+    policy: WorkspacePolicy,
+    genesis: Vec<teamcraft_client_api::admin::RosterEntry>,
+  ) {
     let Some(admin) = &self.maybe_admin else {
       return;
     };
-    let (owners, admins) = admin.roster_candidates();
+    // Only the roster the owner confirmed with IDs and keys, never the server's role holders as
+    // they come (#265).
+    let (owners, admins) = teamcraft_client_api::admin::roster_by_role(&genesis);
     // The editor started from what the server showed; the core signs only if that is also what it
     // verified itself (a compromised server could show altered fields).
     self.chat.publish_policy(admin.policy(), policy, owners, admins);
@@ -969,6 +975,19 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
       Some(admin) => admin.roster_candidates(),
       None => (Vec::new(), Vec::new()),
     }
+  }
+
+  fn admin_genesis_roster(&self) -> Option<Vec<teamcraft_client_api::admin::RosterEntry>> {
+    let admin = self.maybe_admin.as_ref()?;
+    if self.policy_edit_blocker().is_some() || self.chat.owner_roster().is_some() {
+      return None;
+    }
+    let (owners, admins) = admin.roster_candidates();
+    Some(teamcraft_client_api::admin::genesis_roster(
+      self.chat.me().id,
+      &owners,
+      &admins,
+    ))
   }
 
   fn admin_identity_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {

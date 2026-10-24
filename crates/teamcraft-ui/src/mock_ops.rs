@@ -173,7 +173,7 @@ impl AdminBackend for MockBackend {
     })
   }
 
-  fn set_workspace_policy(&self, policy: WorkspacePolicy) {
+  fn set_workspace_policy(&self, policy: WorkspacePolicy, _genesis: Vec<crate::admin::RosterEntry>) {
     let mut ops = self.ops.borrow_mut();
     ops.policy_version += 1;
     let detail = format!("policy version {}", ops.policy_version);
@@ -1124,7 +1124,7 @@ mod tests {
     assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Joined);
     let (_, mut policy) = backend.workspace_policy();
     policy.admin_self_join = AdminSelfJoinWire::Disabled;
-    backend.set_workspace_policy(policy);
+    backend.set_workspace_policy(policy, Vec::new());
     assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Disabled);
     assert_eq!(backend.workspace_policy().0, 13);
   }

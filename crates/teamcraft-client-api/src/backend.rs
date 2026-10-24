@@ -454,8 +454,10 @@ pub trait AdminBackend {
   fn admin_users(&self) -> Vec<AdminUser>;
   /// The signed workspace policy in force and its version (0: none was signed yet).
   fn workspace_policy(&self) -> (u64, WorkspacePolicy);
-  /// Signs and stores a new policy version. Only owners with signing keys can.
-  fn set_workspace_policy(&self, policy: WorkspacePolicy);
+  /// Signs and stores a new policy version. Only owners with signing keys can. `genesis` is the
+  /// first roster the owner confirmed ([`AdminBackend::admin_genesis_roster`]); it is signed only
+  /// while the workspace has no signed roster and ignored afterwards.
+  fn set_workspace_policy(&self, policy: WorkspacePolicy, genesis: Vec<crate::admin::RosterEntry>);
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention);
   fn remove_device(&self, user: UserId, device: DeviceId);
   fn set_user_active(&self, user: UserId, is_active: bool);
@@ -520,6 +522,12 @@ pub trait AdminBackend {
   /// Signs `members` as the next roster on this device (owners only), unless the verified roster
   /// is no longer version `base_version`.
   fn admin_publish_roster(&self, _base_version: u64, _members: Vec<crate::admin::RosterEntry>) {}
+  /// The first roster to confirm before the first policy is signed, while this device verified
+  /// no roster yet (#265): the signer and the identity provider's role holders. `None` once a
+  /// roster is verified; later changes go through [`Self::admin_publish_roster`].
+  fn admin_genesis_roster(&self) -> Option<Vec<crate::admin::RosterEntry>> {
+    None
+  }
   /// The identity keys this device pinned, to show what an owner is about to vouch for.
   fn admin_identity_keys(&self) -> crate::remote::SecuritySnapshot {
     crate::remote::SecuritySnapshot::default()

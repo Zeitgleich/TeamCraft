@@ -311,6 +311,34 @@ pub fn roster_from_roles(owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntr
   normalized_roster(&entries)
 }
 
+/// The first roster, proposed for the owner's confirmation before the first policy is signed
+/// (#265): the signer as owner (the root of trust), then the identity provider's role holders as
+/// the server reports them. Nothing in it is trusted until the owner confirms each entry.
+pub fn genesis_roster(me: UserId, owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntry> {
+  let signer = RosterEntry {
+    user: me,
+    role: RosterRoleChoice::Owner,
+  };
+  let mut entries = vec![signer];
+  entries.extend(roster_from_roles(owners, admins));
+  normalized_roster(&entries)
+}
+
+/// A roster split by role: (owners, admins).
+pub fn roster_by_role(entries: &[RosterEntry]) -> (Vec<UserId>, Vec<UserId>) {
+  let with_role = |wanted: RosterRoleChoice| {
+    entries
+      .iter()
+      .filter(|entry| entry.role == wanted)
+      .map(|entry| entry.user)
+      .collect()
+  };
+  (
+    with_role(RosterRoleChoice::Owner),
+    with_role(RosterRoleChoice::Admin),
+  )
+}
+
 /// What signing `proposed` would change compared with `signed`, in a stable order.
 pub fn roster_changes(signed: &[RosterEntry], proposed: &[RosterEntry]) -> Vec<RosterChange> {
   let role_in = |roster: &[RosterEntry], user: UserId| {
@@ -601,6 +629,29 @@ mod tests {
     fn a_roster_without_an_owner_is_a_problem() {
       assert_eq!(roster_problem(&[admin(1)]), Some(RosterProblem::NoOwner));
       assert_eq!(roster_problem(&[]), Some(RosterProblem::NoOwner));
+    }
+
+    #[test]
+    fn the_genesis_roster_starts_with_the_signer_and_lists_every_role_holder() {
+      // A hostile server reports a look-alike (5) as owner and demotes the signer to admin: the
+      // signer stays owner, and the look-alike is listed for confirmation, not signed silently.
+      let proposed = genesis_roster(user(1), &[user(5), user(2)], &[user(1), user(3)]);
+      assert_eq!(proposed, vec![owner(1), owner(5), owner(2), admin(3)]);
+      let to_confirm = roster_changes(&[], &proposed);
+      assert_eq!(to_confirm.len(), 4, "every entry is shown for confirmation");
+      assert!(to_confirm.contains(&RosterChange::Add {
+        user: user(5),
+        role: RosterRoleChoice::Owner
+      }));
+      assert_eq!(
+        roster_by_role(&proposed),
+        (vec![user(1), user(5), user(2)], vec![user(3)])
+      );
+      assert_eq!(
+        genesis_roster(user(1), &[], &[]),
+        vec![owner(1)],
+        "the signer alone"
+      );
     }
 
     #[test]

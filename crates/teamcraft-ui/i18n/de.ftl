@@ -483,6 +483,9 @@ roster-confirm-changed-key = der Server zeigt inzwischen einen anderen Schlüsse
 roster-confirm-sign = Diese Änderungen signieren
 roster-confirm-cancel = Zurück
 roster-review = Prüfen und signieren
+roster-genesis-title = Prüfe die erste Admin-Liste vor dem Signieren
+roster-genesis-hint = Das ist die erste signierte Admin-Liste des Workspace: Die App jedes Mitglieds vertraut diesen Eigentümern und Admins. Die Liste stammt aus den Rollen im Identity Provider des Servers und kann gefälscht sein. Vergleiche jede Benutzer-ID und jeden Schlüssel-Fingerprint mit der Person, bevor du signierst, oder signiere nur dich selbst und füge die anderen später hinzu.
+roster-genesis-sign-alone = Nur mich als Eigentümer signieren
 policy-owners-minimum-hint = Bei weniger Eigentümern erscheint hier eine Warnung. 1 schaltet die Warnung ab.
 policy-owners-count = { $count ->
     [one] { $count } Eigentümer

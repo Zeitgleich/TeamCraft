@@ -154,7 +154,10 @@ passphrase again instead.
 **The first owner.** The first roster entry makes its signer the workspace root of trust (admin.md
 §2.3); an owner who can't recover their identity could never sign the roster or policy again. The
 server therefore accepts the genesis roster only from a user who has both an identity key and a key
-bag, in addition to the ordering above.
+bag, in addition to the ordering above. The other owners and admins of the genesis come from the
+identity provider's roles, which the server reports; the signer's client signs only the people the
+signer confirmed one by one with user ID and pinned-key fingerprint (admin.md §2.3, "The first
+roster"), so a hostile server can't slip a look-alike owner into the root roster.
 
 **Never without an owner.** Every roster entry, the genesis included, must name at least one owner
 with a valid 32-byte identity key. Clients check this before the chain and the signature and refuse

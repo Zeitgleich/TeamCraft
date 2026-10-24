@@ -314,6 +314,77 @@ async fn a_policy_edited_from_something_unverified_is_not_signed() {
   assert_eq!(alice.client.workspace().unwrap().policy_version, 2);
 }
 
+mod genesis {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_first_policy_signs_only_the_confirmed_roster() {
+    // #265: the server reports Mallory as an identity provider owner; the owner confirmed only Bob
+    // as admin, so the genesis roster holds Alice and Bob and nobody else.
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut mallory = Peer::enroll(&server, "Mallory").await;
+    let (alice_id, bob_id, mallory_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      mallory.client.user_id(),
+    );
+    let base = alice.client.workspace_policy().unwrap();
+    alice
+      .client
+      .publish_policy_with_genesis(&base, policy(AdminSelfJoin::Disabled), &[], &[bob_id])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut mallory]).await;
+
+    let workspace = mallory.client.workspace().unwrap();
+    assert_eq!(workspace.roster.version, 1);
+    let roles: Vec<_> = workspace
+      .roster
+      .members
+      .iter()
+      .map(|member| (member.user_id, member.role.clone()))
+      .collect();
+    assert_eq!(
+      roles,
+      vec![(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)]
+    );
+    assert!(!workspace.is_admin(mallory_id));
+    assert_eq!(workspace.policy.admin_self_join, AdminSelfJoin::Disabled);
+  }
+
+  #[tokio::test]
+  async fn a_genesis_list_is_ignored_once_a_roster_is_verified() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mallory = Peer::enroll(&server, "Mallory").await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    let base = alice.client.workspace_policy().unwrap();
+
+    // A later save carrying an owner list (a forged one, say) changes the policy, not the roster.
+    alice
+      .client
+      .publish_policy_with_genesis(
+        &base,
+        policy(AdminSelfJoin::Disabled),
+        &[mallory.client.user_id()],
+        &[],
+      )
+      .await
+      .unwrap();
+    let workspace = alice.client.workspace().unwrap();
+    assert_eq!(workspace.roster.version, 1, "no roster was signed");
+    assert_eq!(workspace.roster.members.len(), 1);
+    assert_eq!(workspace.policy_version, 1);
+  }
+}
+
 #[tokio::test]
 async fn admins_cannot_sign_policy() {
   let server = FakeServer::new();

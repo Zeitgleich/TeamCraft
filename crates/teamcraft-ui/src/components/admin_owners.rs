@@ -286,37 +286,83 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
       {idp_block}
       {move || {
         confirming.get().map(|members| {
-          let lines = roster_changes(&signed.get_value(), &members)
-            .into_iter()
-            .map(|change| {
-              let user = change_user(change);
-              let key = key_line(i18n, user);
-              view! {
-                <li class=if key.1 { "roster-confirm-item warning" } else { "roster-confirm-item" }>
-                  <strong>{change_text(i18n, change, &name_of)}</strong>
-                  <br />
-                  <code translate="no">{i18n.t_with("roster-confirm-id", &[("id", &user.to_string())])}</code>
-                  <br />
-                  <span class="small">{key.0}</span>
-                </li>
-              }
-            })
-            .collect_view();
           view! {
-            <div class="roster-confirm" role="dialog" aria-label=i18n.t("roster-confirm-title")>
-              <h4 class="detail-heading">{i18n.t("roster-confirm-title")}</h4>
-              <p class="auth-alert" role="status">{i18n.t("roster-confirm-hint")}</p>
-              <ul>{lines}</ul>
-              <button type="button" class="btn" on:click=move |_| confirming.set(None)>
-                {i18n.t("roster-confirm-cancel")}
-              </button>
-              <button type="button" class="btn btn-primary" on:click=move |_| confirm()>
-                {i18n.t("roster-confirm-sign")}
-              </button>
-            </div>
+            <RosterConfirm
+              signed=signed.get_value()
+              members=members
+              on_cancel=Callback::new(move |()| confirming.set(None))
+              on_confirm=Callback::new(move |()| confirm())
+              maybe_on_sign_alone=None
+            />
           }
         })
       }}
+    </div>
+  }
+}
+
+/// The confirmation before an owner signs a roster: every change with the user ID and the pinned
+/// key's fingerprint, attested, trusted on first use or the owner's own (review #263). The first
+/// roster goes through it too, with `signed` empty (#265); `maybe_on_sign_alone` then offers to
+/// sign the signer alone and add the others later.
+#[component]
+pub(crate) fn RosterConfirm(
+  signed: Vec<RosterEntry>,
+  members: Vec<RosterEntry>,
+  on_cancel: Callback<()>,
+  on_confirm: Callback<()>,
+  maybe_on_sign_alone: Option<Callback<()>>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let name_of = move |user: UserId| {
+    state
+      .read(|backend| backend.user(user))
+      .map(|user| user.display_name)
+      .unwrap_or_else(|| user.to_string())
+  };
+  let lines = roster_changes(&signed, &members)
+    .into_iter()
+    .map(|change| {
+      let user = change_user(change);
+      let key = key_line(i18n, user);
+      view! {
+        <li class=if key.1 { "roster-confirm-item warning" } else { "roster-confirm-item" }>
+          <strong>{change_text(i18n, change, &name_of)}</strong>
+          <br />
+          <code translate="no">{i18n.t_with("roster-confirm-id", &[("id", &user.to_string())])}</code>
+          <br />
+          <span class="small">{key.0}</span>
+        </li>
+      }
+    })
+    .collect_view();
+  let is_genesis = signed.is_empty();
+  let (title_key, hint_key) = if is_genesis {
+    ("roster-genesis-title", "roster-genesis-hint")
+  } else {
+    ("roster-confirm-title", "roster-confirm-hint")
+  };
+  let sign_alone = maybe_on_sign_alone.map(|on_sign_alone| {
+    view! {
+      <button type="button" class="btn" on:click=move |_| on_sign_alone.run(())>
+        {i18n.t("roster-genesis-sign-alone")}
+      </button>
+    }
+  });
+
+  view! {
+    <div class="roster-confirm" role="dialog" aria-label=i18n.t(title_key)>
+      <h4 class="detail-heading">{i18n.t(title_key)}</h4>
+      <p class="auth-alert" role="status">{i18n.t(hint_key)}</p>
+      <ul>{lines}</ul>
+      <button type="button" class="btn" on:click=move |_| on_cancel.run(())>
+        {i18n.t("roster-confirm-cancel")}
+      </button>
+      {sign_alone}
+      <button type="button" class="btn btn-primary" on:click=move |_| on_confirm.run(())>
+        {i18n.t("roster-confirm-sign")}
+      </button>
     </div>
   }
 }

@@ -82,11 +82,12 @@ pub enum CoreError {
     "last_owner: the roster must keep at least one owner; add the new owner before removing the last one"
   )]
   LastOwner,
-  /// Only an owner of the verified roster signs the next roster or policy; nothing is signed. The
+  /// The roster changed since the editor loaded it (another owner signed); nothing is signed. The
   /// message starts with a stable code the UI localizes.
-  /// The roster changed since the editor loaded it (another owner signed); nothing is signed.
   #[error("roster_changed: another owner changed the roster meanwhile; review the new one and edit it again")]
   RosterBaseMismatch,
+  /// Only an owner of the verified roster signs the next roster or policy; nothing is signed. The
+  /// message starts with a stable code the UI localizes.
   #[error("not_an_owner: only owners of the signed roster can sign it; this user is not one")]
   NotAnOwner,
   #[error("user {0} isn't an admin in the signed roster")]

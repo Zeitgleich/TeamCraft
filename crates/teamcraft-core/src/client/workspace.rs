@@ -362,6 +362,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.publish_policy(policy).await
   }
 
+  /// [`Self::publish_policy_based_on`], first signing the genesis roster if this device verified
+  /// none yet: the signer as owner and root of trust, plus the `owners` and `admins` the user
+  /// confirmed with their IDs and keys (admin.md §2.3, #265). The server's role holders never go
+  /// in unconfirmed; once a roster is verified, `owners` and `admins` are ignored.
+  pub async fn publish_policy_with_genesis(
+    &mut self,
+    base: &WorkspacePolicy,
+    policy: WorkspacePolicy,
+    owners: &[UserId],
+    admins: &[UserId],
+  ) -> Result<(), CoreError> {
+    self.sync_workspace().await?;
+    if self.workspace()?.roster.version == 0 {
+      let roles = crate::workspace::genesis_roles(self.account.user_id, owners, admins);
+      self.publish_roster(&roles).await?;
+    }
+    self.publish_policy_based_on(base, policy).await
+  }
+
   /// Signs and publishes a new workspace policy (owners only).
   pub async fn publish_policy(&mut self, policy: WorkspacePolicy) -> Result<(), CoreError> {
     self.sync_workspace().await?;

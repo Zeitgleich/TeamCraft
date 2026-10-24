@@ -41,7 +41,6 @@ use teamcraft_core::records;
 use teamcraft_core::store::{IndexedDbStore, StoreError, browser_database_key};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::upkeep::{self, Upkeep};
-use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
   platform,
@@ -51,7 +50,6 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
   ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
-  WorkspacePolicy,
 };
 use wasm_bindgen::JsCast;
 
@@ -1140,7 +1138,12 @@ impl Core {
         policy,
         owners,
         admins,
-      } => return publish_policy(client, base, policy.clone(), owners, admins).await,
+      } => {
+        return client
+          .publish_policy_with_genesis(base, policy.clone(), owners, admins)
+          .await
+          .map_err(describe);
+      },
       ChatAction::PublishRoster {
         base_version,
         members,
@@ -1465,39 +1468,6 @@ fn not_set_up() -> String {
 /// Error text for the UI: the cause, without internal type names.
 fn describe(error: CoreError) -> String {
   error.to_string()
-}
-
-/// Signs and publishes a policy version. A workspace without a signed roster gets one first, with
-/// the signer as owner (the root of trust, e2ee.md §11); later policy changes only append.
-async fn publish_policy(
-  client: &mut Client<Api, Store>,
-  base: &WorkspacePolicy,
-  policy: WorkspacePolicy,
-  owners: &[UserId],
-  admins: &[UserId],
-) -> Result<(), String> {
-  client.sync_workspace().await.map_err(describe)?;
-  if client.workspace().map_err(describe)?.roster.version == 0 {
-    let me = client.user_id();
-    let mut roles: Vec<(UserId, RosterRole)> = vec![(me, RosterRole::Owner)];
-    roles.extend(
-      owners
-        .iter()
-        .filter(|user| **user != me)
-        .map(|user| (*user, RosterRole::Owner)),
-    );
-    roles.extend(
-      admins
-        .iter()
-        .filter(|user| **user != me && !owners.contains(user))
-        .map(|user| (*user, RosterRole::Admin)),
-    );
-    client.publish_roster(&roles).await.map_err(describe)?;
-  }
-  client
-    .publish_policy_based_on(base, policy)
-    .await
-    .map_err(describe)
 }
 
 /// Waits for the existing device to answer, shows the short code, then waits for the keys.
