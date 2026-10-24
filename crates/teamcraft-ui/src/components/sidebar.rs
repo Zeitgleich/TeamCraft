@@ -109,6 +109,9 @@ pub fn Sidebar() -> impl IntoView {
           <Icon name=IconName::Plus />
         </button>
         <Show when=move || !is_grouped.get() fallback=|| ()>
+          <button class="icon-btn" aria-label=move || i18n.t("invite-title") title=move || i18n.t("invite-title") on:click=move |_| state.overlay.set(Overlay::InvitePeople(state.space.get_untracked()))>
+            <Icon name=IconName::UserPlus />
+          </button>
           <button class="icon-btn" aria-label=move || i18n.t("space-settings-title") title=move || i18n.t("space-settings-title") on:click=move |_| state.overlay.set(Overlay::SpaceSettings(state.space.get_untracked()))>
             <Icon name=IconName::Sliders />
           </button>
@@ -302,6 +305,14 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           }
         >
           <Icon name=IconName::Bell />
+        </button>
+        <button
+          class="icon-btn icon-btn-small"
+          aria-label=move || i18n.t("invite-title")
+          title=move || i18n.t("invite-title")
+          on:click=move |_| state.overlay.set(Overlay::InvitePeople(space))
+        >
+          <Icon name=IconName::UserPlus />
         </button>
         <button
           class="icon-btn icon-btn-small"

@@ -464,7 +464,7 @@ pub fn MessageList(
           {move || {
             let maybe_action = is_alone_in_channel().then_some(EmptyAction {
               label_key: "channel-add-people",
-              on_click: Callback::new(move |()| state.overlay.set(Overlay::ChannelSettings(conversation))),
+              on_click: Callback::new(move |()| state.overlay.set(Overlay::AddToChannel(conversation))),
             });
             view! { <EmptyState icon=IconName::Smile title_key="channel-empty-title" body_key="channel-empty" maybe_action=maybe_action /> }
           }}

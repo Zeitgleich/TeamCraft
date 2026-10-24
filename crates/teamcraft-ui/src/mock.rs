@@ -17,9 +17,10 @@ use crate::backend::ChatBackend;
 use crate::calls::BackgroundImageInfo;
 use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, LogLevel, Message,
-  MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
-  ThreadSummary, TimestampMs, User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinPolicy,
+  JoinableSpace, LogLevel, Message, MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space,
+  SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId, id_from_raw, raw_id,
+  root_message_of, thread_id_of,
 };
 
 /// Number of lines in the large log channel.
@@ -202,6 +203,8 @@ struct State {
   saved: HashSet<MessageId>,
   /// Share links the user created, by file.
   share_links: HashMap<String, ShareLink>,
+  /// Open spaces the user isn't in yet.
+  joinable: Vec<JoinableSpace>,
 }
 
 impl MockBackend {
@@ -218,6 +221,11 @@ impl MockBackend {
           maybe_image_version: None,
           unread_count: 0,
           mention_count: 0,
+          maybe_description: Some("Planning and delivery of Project A".into()),
+          member_count: 6,
+          join_policy: JoinPolicy::Open,
+          can_add_members: true,
+          can_invite_guests: true,
         },
         Space {
           id: space_b(),
@@ -227,6 +235,11 @@ impl MockBackend {
           maybe_image_version: None,
           unread_count: 0,
           mention_count: 0,
+          maybe_description: None,
+          member_count: 4,
+          join_policy: JoinPolicy::InviteOnly,
+          can_add_members: false,
+          can_invite_guests: false,
         },
       ],
       conversations: demo_conversations(),
@@ -237,6 +250,14 @@ impl MockBackend {
       next_background_id: 1,
       saved: HashSet::new(),
       share_links: HashMap::new(),
+      joinable: vec![JoinableSpace {
+        id: id_from_raw(3),
+        name: "Sales team".into(),
+        maybe_description: Some("Offers, customers and the weekly pipeline".into()),
+        hue: 140,
+        maybe_image_version: None,
+        member_count: 12,
+      }],
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -444,6 +465,21 @@ impl ChatBackend for MockBackend {
 
   fn spaces(&self) -> Vec<Space> {
     self.state.borrow().spaces.clone()
+  }
+
+  fn joinable_spaces(&self) -> Vec<JoinableSpace> {
+    self.state.borrow().joinable.clone()
+  }
+
+  fn join_space(&self, space: SpaceId) {
+    let mut state = self.state.borrow_mut();
+    if let Some(index) = state.joinable.iter().position(|candidate| candidate.id == space) {
+      let joined = state.joinable.remove(index);
+      state.spaces.push(Space {
+        member_count: joined.member_count + 1,
+        ..joined.tile()
+      });
+    }
   }
 
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation> {

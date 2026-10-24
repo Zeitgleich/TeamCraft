@@ -3,10 +3,11 @@
 
 use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
-  CategoryId, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility,
-  CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest, CreateSpaceRequest, HistoryPolicy,
-  IdempotencyKey, ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, SpaceId,
-  SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
+  AddSpaceMemberRequest, CategoryId, ConversationId, ConversationKind, ConversationResponse,
+  ConversationVisibility, CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest,
+  CreateSpaceRequest, HistoryPolicy, IdempotencyKey, ListCategoriesResponse, ListConversationsResponse,
+  MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest,
+  UpdateConversationRequest, UpdateSpaceRequest, UserId,
 };
 
 use super::Client;
@@ -284,19 +285,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     is_guest: bool,
     channels: Vec<ConversationId>,
     maybe_expires_at: Option<i64>,
+    maybe_message: Option<String>,
   ) -> Result<(), CoreError> {
     let request = CreateInviteRequest {
       email: email.to_string(),
-      role: if is_guest {
-        SpaceRole::Guest
-      } else {
-        SpaceRole::Member
-      },
+      role: space_role(is_guest),
       channel_ids: channels,
       maybe_expires_at: maybe_expires_at.map(UnixMillis),
+      maybe_message,
     };
     self.api.create_invite(space, &request).await?;
     Ok(())
+  }
+
+  /// Adds people from the directory to a space, as members or guests. People already in the space
+  /// are skipped: adding them again would change their role. Space membership is directory data;
+  /// the space's channels are joined one by one through their encryption groups (e2ee.md §4.6).
+  pub async fn add_space_members(
+    &mut self,
+    space: SpaceId,
+    users: &[UserId],
+    is_guest: bool,
+  ) -> Result<(), CoreError> {
+    let members = self.api.list_space_members(space).await?;
+    let mut maybe_first_error = None;
+    for user in users_to_add(users, members.members.iter().map(|member| member.user.id)) {
+      let request = AddSpaceMemberRequest {
+        user_id: user,
+        role: space_role(is_guest),
+        maybe_expires_at: None,
+      };
+      // One refusal (a deactivated account, a guest as member) doesn't stop the others.
+      if let Err(error) = self.api.add_space_member(space, &request).await {
+        tracing::warn!(%error, space_id = %space, "adding a person to the space failed");
+        maybe_first_error.get_or_insert(error);
+      }
+    }
+    // The member count and the people the user can find changed.
+    self.refresh_spaces().await?;
+    maybe_first_error.map_or(Ok(()), |error| Err(error.into()))
   }
 
   /// Sends a system message about a change, encrypted like any message.
@@ -308,6 +335,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.enqueue(conversation, None, MessageContent::Event { event })?;
     self.flush_outbox().await.map(|_| ())
   }
+}
+
+fn space_role(is_guest: bool) -> SpaceRole {
+  if is_guest {
+    SpaceRole::Guest
+  } else {
+    SpaceRole::Member
+  }
+}
+
+/// The picked people who aren't in the space yet, each once, in the order picked.
+fn users_to_add(picked: &[UserId], members: impl IntoIterator<Item = UserId>) -> Vec<UserId> {
+  let mut skipped: std::collections::HashSet<UserId> = members.into_iter().collect();
+  picked
+    .iter()
+    .copied()
+    .filter(|user| skipped.insert(*user))
+    .collect()
 }
 
 /// The announcements a channel update calls for.

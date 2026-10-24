@@ -938,6 +938,14 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::InviteToSpace { invite });
   }
 
+  fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
+    self.act(ChatAction::AddSpaceMembers {
+      space,
+      users,
+      is_guest,
+    });
+  }
+
   fn has_external_people(&self, conversation: ConversationId) -> bool {
     matches!(
       self.ask(ChatQuery::HasExternalPeople { conversation }),

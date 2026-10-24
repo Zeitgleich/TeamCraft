@@ -50,11 +50,8 @@ pub fn SpaceRail() -> impl IntoView {
           }
         }}
       </ul>
-      <button class="rail-add" on:click=move |_| {
-        // Joining an open space is the common case for everyone but the first person.
-        let has_joinable = state.read(|backend| !backend.joinable_spaces().is_empty());
-        state.overlay.set(if has_joinable { Overlay::JoinSpace } else { Overlay::NewSpace });
-      } aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
+      // Browsing lists the open spaces to join and has the button to create a new one.
+      <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::BrowseSpaces(None)) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
         <Icon name=IconName::Plus />
       </button>
     </nav>
