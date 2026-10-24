@@ -49,6 +49,7 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
       SessionState::ConfirmServer(check) => view! { <ServerConfirmScreen check=*check control=control /> }.into_any(),
       SessionState::SignedOut(problem) => view! { <LoginScreen problem=problem control=control /> }.into_any(),
       SessionState::SigningIn => view! { <SigningInScreen control=control /> }.into_any(),
+      SessionState::OpeningCore => view! { <OpeningCoreScreen control=control /> }.into_any(),
       SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost } => {
         view! { <EnrollScreen name=me.display_name has_existing_identity=has_existing_identity was_data_lost=was_data_lost control=control /> }.into_any()
       },
@@ -156,6 +157,24 @@ fn SigningInScreen(control: SessionControl) -> impl IntoView {
   }
 }
 
+/// Signed in; the encrypted data opens as soon as the core has the access token.
+#[component]
+fn OpeningCoreScreen(control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <AuthFrame>
+      <h1>{move || i18n.t("login-opening-core-title")}</h1>
+      <p class="auth-status" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>{move || i18n.t("login-opening-core")}</span>
+      </p>
+      <button class="btn" on:click=move |_| control.sign_out()>
+        {move || i18n.t("login-core-sign-out")}
+      </button>
+    </AuthFrame>
+  }
+}
+
 #[component]
 fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl IntoView {
   let i18n = use_i18n();
@@ -167,6 +186,10 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
   let sign_in = SignInPageState::load(server_url);
   let form = LocalForm::new();
   let is_role_problem = problem == Some(LoginProblem::NoTeamcraftRole);
+  let is_core_problem = matches!(
+    problem,
+    Some(LoginProblem::CoreFailed(_) | LoginProblem::CoreNotSignedIn)
+  );
   let detail = match &problem {
     Some(LoginProblem::Failed(text) | LoginProblem::CoreFailed(text)) => Some(text.clone()),
     _ => None,
@@ -179,6 +202,10 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     Some(LoginProblem::Cancelled) => (Some("login-cancelled-title"), Some("login-cancelled-body")),
     Some(LoginProblem::Failed(_)) => (Some("login-failed-title"), Some("login-failed-body")),
     Some(LoginProblem::CoreFailed(_)) => (Some("login-core-failed-title"), Some("login-core-failed-body")),
+    Some(LoginProblem::CoreNotSignedIn) => (
+      Some("login-core-no-token-title"),
+      Some("login-core-no-token-body"),
+    ),
     None => (None, None),
   };
   let subtitle = move || i18n.t(sign_in.page.with(subtitle_key));
@@ -206,6 +233,19 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
           <div class="auth-actions">
             <button class="btn btn-primary" data-autofocus on:click=move |_| control.sign_out()>
               {move || i18n.t("login-use-other-account")}
+            </button>
+          </div>
+        }
+        .into_any()
+      } else if is_core_problem {
+        // Still signed in: retry the core, or sign out (which also unlocks changing the server).
+        view! {
+          <div class="auth-actions">
+            <button class="btn btn-primary" data-autofocus on:click=move |_| control.retry_core()>
+              {move || i18n.t("login-core-retry")}
+            </button>
+            <button class="btn" on:click=move |_| control.sign_out()>
+              {move || i18n.t("login-core-sign-out")}
             </button>
           </div>
         }

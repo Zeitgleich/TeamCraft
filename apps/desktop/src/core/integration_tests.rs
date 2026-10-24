@@ -135,6 +135,45 @@ async fn alice_and_carol_chat_in_a_channel_and_a_dm_through_the_core() {
   );
 }
 
+/// The app's order on a new device: sign in, then start the core at once, with nothing copied into
+/// the token cache by hand. The core must read the fresh session and offer enrollment.
+#[tokio::test]
+async fn a_core_started_right_after_login_reads_the_live_session() {
+  let config = DesktopConfig::from_env();
+  let service =
+    Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));
+  service
+    .login(|url| spawn_fake_browser(url, "alice"))
+    .await
+    .expect("login");
+  let me = service.api_get("/api/v1/me").await.expect("me");
+  let me: GetMeResponse = serde_json::from_str(&me.body).expect("me body");
+  let directory = std::env::temp_dir().join(format!("teamcraft-core-e2e-{}-live", std::process::id()));
+  let runtime = CoreRuntime::spawn(
+    CoreConfig {
+      server_url: config.server_url.clone(),
+      data_dir: directory.clone(),
+      keystore_scope: "test".into(),
+      argon2: Argon2Settings {
+        memory_kib: 1024,
+        iterations: 1,
+        parallelism: 1,
+      },
+    },
+    me.id,
+    KeyChoice::Fixed(vec![7; 32]),
+    TokenCache::live(service.clone()),
+    Arc::new(|| {}),
+    Arc::new(|_| {}),
+  );
+
+  let status = runtime.status().await;
+
+  assert!(matches!(status, CoreStatus::NeedsEnrollment { .. }), "{status:?}");
+  drop(runtime);
+  drop(std::fs::remove_dir_all(&directory));
+}
+
 pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person {
   let service =
     Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));

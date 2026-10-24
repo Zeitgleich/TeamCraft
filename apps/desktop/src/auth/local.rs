@@ -3,7 +3,7 @@
 //! client core, and in the keyring as its own entry per server so the session survives a restart
 //! until it expires.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,15 @@ impl LocalSession {
 
   pub fn is_live(&self, now_ms: i64) -> bool {
     self.expires_at_ms - EXPIRY_MARGIN_MS > now_ms
+  }
+
+  /// How long the token may still be sent (expiry minus the margin); `None` once that has passed.
+  pub fn remaining(&self, now_ms: i64) -> Option<Duration> {
+    let left_ms = self.expires_at_ms - EXPIRY_MARGIN_MS - now_ms;
+    u64::try_from(left_ms)
+      .ok()
+      .filter(|left_ms| *left_ms > 0)
+      .map(Duration::from_millis)
   }
 
   /// A copy of the token for one request.

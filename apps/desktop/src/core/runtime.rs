@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use secrecy::ExposeSecret;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
@@ -39,6 +40,8 @@ use teamcraft_proto::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::auth::{AuthService, TokenPeek, TokenStore};
+
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// Retries (outbox, uploads, previews), staggered commits and the other periodic upkeep; also the
@@ -49,6 +52,10 @@ const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
 /// A core of this process that is just stopping may hold the store lock for a moment longer.
 const STORE_LOCK_ATTEMPTS: u32 = 15;
 const STORE_LOCK_RETRY: Duration = Duration::from_millis(200);
+/// Opening without an access token yet (sign-in still settling) is retried after this, doubling up
+/// to [`OPEN_RETRY_MAX`].
+const OPEN_RETRY_FIRST: Duration = Duration::from_millis(250);
+const OPEN_RETRY_MAX: Duration = Duration::from_secs(10);
 
 /// Where the core keeps its data and talks to.
 #[derive(Clone, Debug)]
@@ -61,17 +68,41 @@ pub struct CoreConfig {
   pub argon2: Argon2Settings,
 }
 
-/// The newest access token with the server (origin) it belongs to, kept fresh by the login code
-/// and read synchronously by the core.
+/// The access token the core sends, with the server (origin) it belongs to. With a live source
+/// (the login session) every request reads the current token, so a core started right after
+/// sign-in never sees an empty cache; while a refresh holds the session, the token seen last is
+/// used only as long as it is still valid. Without a source (tests) it holds what [`Self::set`]
+/// put there.
 #[derive(Clone, Default)]
-pub struct TokenCache(Arc<Mutex<Option<(String, String)>>>);
+pub struct TokenCache {
+  last: Arc<Mutex<Option<CachedToken>>>,
+  maybe_source: Option<Arc<dyn Fn() -> TokenPeek + Send + Sync>>,
+}
+
+struct CachedToken {
+  server_url: String,
+  token: String,
+  /// `None` for a token set by hand, which has no known expiry.
+  maybe_valid_until: Option<Instant>,
+}
 
 impl TokenCache {
-  /// `(server origin, access token)`, or nothing while signed out.
-  pub fn set(&self, maybe_token: Option<(String, String)>) {
-    if let Ok(mut slot) = self.0.lock() {
-      *slot = maybe_token;
+  /// Reads the current token of `service` on every request.
+  pub fn live<S: TokenStore>(service: Arc<AuthService<S>>) -> Self {
+    Self {
+      last: Arc::default(),
+      maybe_source: Some(Arc::new(move || service.peek_server_bearer_token())),
     }
+  }
+
+  /// `(server origin, access token)`, or nothing while signed out.
+  #[cfg(test)]
+  pub fn set(&self, maybe_token: Option<(String, String)>) {
+    self.remember(maybe_token.map(|(server_url, token)| CachedToken {
+      server_url,
+      token,
+      maybe_valid_until: None,
+    }));
   }
 
   /// The tokens of one server: a core never sends another server's token, even right after the
@@ -80,6 +111,44 @@ impl TokenCache {
     ServerTokens {
       cache: self.clone(),
       server_url: server_url.to_owned(),
+    }
+  }
+
+  fn current(&self) -> Option<(String, String)> {
+    match self.maybe_source.as_ref().map(|source| source()) {
+      Some(TokenPeek::Ready {
+        server_url,
+        token,
+        valid_for,
+      }) => {
+        let token = token.expose_secret().to_owned();
+        self.remember(Some(CachedToken {
+          server_url: server_url.clone(),
+          token: token.clone(),
+          maybe_valid_until: Some(Instant::now() + valid_for),
+        }));
+        Some((server_url, token))
+      },
+      Some(TokenPeek::Unavailable) => {
+        self.remember(None);
+        None
+      },
+      Some(TokenPeek::Busy) | None => self.last.lock().ok().and_then(|slot| {
+        slot
+          .as_ref()
+          .filter(|cached| {
+            cached
+              .maybe_valid_until
+              .is_none_or(|until| until > Instant::now())
+          })
+          .map(|cached| (cached.server_url.clone(), cached.token.clone()))
+      }),
+    }
+  }
+
+  fn remember(&self, maybe_token: Option<CachedToken>) {
+    if let Ok(mut slot) = self.last.lock() {
+      *slot = maybe_token;
     }
   }
 }
@@ -95,10 +164,7 @@ impl AccessTokenSource for ServerTokens {
   fn access_token(&self) -> Result<String, ApiError> {
     self
       .cache
-      .0
-      .lock()
-      .ok()
-      .and_then(|slot| slot.clone())
+      .current()
       .filter(|(server_url, _)| *server_url == self.server_url)
       .map(|(_, token)| token)
       .ok_or_else(|| ApiError::Token("not signed in".to_owned()))
@@ -111,8 +177,8 @@ pub enum KeyChoice {
     service: String,
     account: String,
   },
-  /// A fixed key (dev-stack tests).
-  #[cfg(all(test, feature = "integration"))]
+  /// A fixed key (tests).
+  #[cfg(test)]
   Fixed(Vec<u8>),
 }
 
@@ -120,7 +186,7 @@ impl DatabaseKeySource for KeyChoice {
   fn database_key(&self) -> Result<SymmetricKey, KeySourceError> {
     match self {
       Self::Keyring { service, account } => KeyringKeySource::new(service, account).database_key(),
-      #[cfg(all(test, feature = "integration"))]
+      #[cfg(test)]
       Self::Fixed(bytes) => SymmetricKey::from_slice(bytes).ok_or(KeySourceError::InvalidKey(bytes.len())),
     }
   }
@@ -195,6 +261,8 @@ enum Request {
   ApprovalCancel,
   /// The network changed or the computer woke up: check the connection now.
   NetworkChanged,
+  /// Ends the core loop, closing the database and releasing the store lock.
+  Shutdown,
 }
 
 /// Handle to the core thread. Dropping it stops the thread.
@@ -202,7 +270,8 @@ pub struct CoreRuntime {
   requests: mpsc::UnboundedSender<Request>,
   /// Read without asking the core thread, which may be busy connecting.
   connection: ConnectionStatus,
-  thread: Option<std::thread::JoinHandle<()>>,
+  /// Taken by [`CoreRuntime::shutdown`] or on drop.
+  thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl CoreRuntime {
@@ -236,7 +305,17 @@ impl CoreRuntime {
     Self {
       requests,
       connection,
-      thread,
+      thread: Mutex::new(thread),
+    }
+  }
+
+  /// Stops the core thread and waits until it closed the database and released the store lock,
+  /// even while other handles to this runtime are still around (they then get "not running").
+  pub fn shutdown(&self) {
+    drop(self.requests.send(Request::Shutdown));
+    let maybe_thread = self.thread.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(thread) = maybe_thread {
+      drop(thread.join());
     }
   }
 
@@ -418,7 +497,11 @@ impl Drop for CoreRuntime {
     // Closing the channel ends the loop; wait so the database is closed before a new core opens it.
     let (closed, _) = mpsc::unbounded_channel();
     drop(std::mem::replace(&mut self.requests, closed));
-    if let Some(thread) = self.thread.take() {
+    let maybe_thread = match self.thread.get_mut() {
+      Ok(slot) => slot.take(),
+      Err(poisoned) => poisoned.into_inner().take(),
+    };
+    if let Some(thread) = maybe_thread {
       drop(thread.join());
     }
   }
@@ -451,6 +534,34 @@ struct Core {
   /// The last attention report, repeated after a reconnect (the server forgets it with the
   /// connection).
   maybe_attention: Option<bool>,
+  /// Set while opening waits for an access token.
+  maybe_open_retry: Option<OpenRetry>,
+}
+
+/// Why the client could not be opened.
+enum OpenError {
+  /// No access token yet: retried, the user is not stuck.
+  NoToken(String),
+  Failed(String),
+}
+
+/// The next attempt to open the client without an access token.
+struct OpenRetry {
+  attempt: u32,
+  at: tokio::time::Instant,
+}
+
+impl OpenRetry {
+  fn after(maybe_previous: Option<&Self>) -> Self {
+    let attempt = maybe_previous.map_or(0, |previous| previous.attempt.saturating_add(1));
+    let delay = OPEN_RETRY_FIRST
+      .saturating_mul(2u32.saturating_pow(attempt.min(16)))
+      .min(OPEN_RETRY_MAX);
+    Self {
+      attempt,
+      at: tokio::time::Instant::now() + delay,
+    }
+  }
 }
 
 /// A link in progress on this (new) device.
@@ -492,6 +603,7 @@ impl Core {
       approval: None,
       approval_misses: 0,
       maybe_attention: None,
+      maybe_open_retry: None,
     }
   }
 
@@ -503,8 +615,8 @@ impl Core {
       let maybe_deadline = self.connection_deadline();
       tokio::select! {
         request = requests.recv() => match request {
+          Some(Request::Shutdown) | None => break,
           Some(request) => self.handle(request).await,
-          None => break,
         },
         frame = self.connection.receive() => self.on_frame(frame).await,
         _ = flush.tick(), if self.client.is_some() => {
@@ -515,36 +627,59 @@ impl Core {
           self.connection.on_tick(SystemClock.now_ms()).await;
         },
         linked = poll_link(&mut self.link), if self.link.is_some() => self.on_linked(linked).await,
+        () = sleep_until_retry(self.maybe_open_retry.as_ref()), if self.maybe_open_retry.is_some() => {
+          self.open().await;
+          self.changed();
+        },
       }
     }
   }
 
-  /// Opens the database and the client of an already enrolled device.
+  /// Opens the database and the client of an already enrolled device. Without an access token yet
+  /// (sign-in still settling) it stays `NotStarted` and tries again soon, never a sticky `Failed`.
   async fn open(&mut self) {
     match self.try_open().await {
-      Ok(status) => self.status = status,
-      Err(message) => {
+      Ok(status) => {
+        self.status = status;
+        self.maybe_open_retry = None;
+      },
+      Err(OpenError::NoToken(message)) => {
+        let retry = OpenRetry::after(self.maybe_open_retry.as_ref());
+        tracing::info!(%message, attempt = retry.attempt, "no access token yet; opening the client again soon");
+        self.status = CoreStatus::NotStarted;
+        self.maybe_open_retry = Some(retry);
+      },
+      Err(OpenError::Failed(message)) => {
         tracing::error!(%message, "could not open the local client");
         self.status = CoreStatus::Failed { message };
+        self.maybe_open_retry = None;
       },
     }
   }
 
-  async fn try_open(&mut self) -> Result<CoreStatus, String> {
-    std::fs::create_dir_all(&self.config.data_dir).map_err(|error| error.to_string())?;
+  async fn try_open(&mut self) -> Result<CoreStatus, OpenError> {
+    std::fs::create_dir_all(&self.config.data_dir).map_err(|error| OpenError::Failed(error.to_string()))?;
     let path = self.config.data_dir.join(format!("{}.db", self.user));
     if self.store_lock.is_none() {
-      self.store_lock = Some(lock_store(&path).await?);
+      self.store_lock = Some(lock_store(&path).await.map_err(OpenError::Failed)?);
     }
-    let store = Arc::new(SqlCipherStore::open(&path, &self.key).map_err(|error| error.to_string())?);
-    self.store = Some(store.clone());
+    let store = match &self.store {
+      Some(store) => store.clone(),
+      None => {
+        let store = Arc::new(
+          SqlCipherStore::open(&path, &self.key).map_err(|error| OpenError::Failed(error.to_string()))?,
+        );
+        self.store = Some(store.clone());
+        store
+      },
+    };
     match Client::open(
       self.api(),
       store,
       Box::new(SystemClock),
       ClientSettings::default(),
     )
-    .map_err(|e| e.to_string())?
+    .map_err(|e| OpenError::Failed(e.to_string()))?
     {
       Some(client) => {
         let status = self.adopt(client);
@@ -554,7 +689,8 @@ impl Core {
         let has_existing_identity = match self.api().identity_key(self.user).await {
           Ok(_) => true,
           Err(error) if error.is_not_found() => false,
-          Err(error) => return Err(error.to_string()),
+          Err(error @ ApiError::Token(_)) => return Err(OpenError::NoToken(error.to_string())),
+          Err(error) => return Err(OpenError::Failed(error.to_string())),
         };
         Ok(CoreStatus::NeedsEnrollment {
           has_existing_identity,
@@ -608,6 +744,10 @@ impl Core {
   async fn handle(&mut self, request: Request) {
     match request {
       Request::Status(reply) => {
+        // Asked for the status (the UI starting the core): try at once, the token may be there now.
+        if self.maybe_open_retry.is_some() {
+          self.open().await;
+        }
         self.refresh_enrollment_hint().await;
         drop(reply.send(self.status.clone()));
       },
@@ -636,6 +776,8 @@ impl Core {
       },
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(SystemClock.now_ms()).await,
+      // Handled by the loop in `run`.
+      Request::Shutdown => {},
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::UpdatePolicy(reply) => drop(
         reply.send(
@@ -1075,6 +1217,14 @@ impl Core {
   }
 }
 
+/// Sleeps until the next attempt to open the client (only polled when there is one).
+async fn sleep_until_retry(maybe_retry: Option<&OpenRetry>) {
+  match maybe_retry {
+    Some(retry) => tokio::time::sleep_until(retry.at).await,
+    None => std::future::pending().await,
+  }
+}
+
 /// Sleeps `maybe_duration` (only polled when there is one).
 async fn sleep_for(maybe_duration: Option<Duration>) {
   match maybe_duration {
@@ -1168,5 +1318,55 @@ mod tests {
     assert!(tokens.access_token().is_err());
     cache.set(Some(("https://a.example.com".into(), "token-a".into())));
     assert_eq!(tokens.access_token().ok().as_deref(), Some("token-a"));
+  }
+
+  mod live_source {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use secrecy::SecretString;
+
+    use super::*;
+
+    const SERVER: &str = "https://a.example.com";
+
+    #[test]
+    fn a_busy_session_falls_back_to_a_token_that_is_still_valid() {
+      let cache = cache_with(Duration::from_secs(60));
+      let tokens = cache.for_server(SERVER);
+
+      assert_eq!(tokens.access_token().ok().as_deref(), Some("token-a"));
+      assert_eq!(tokens.access_token().ok().as_deref(), Some("token-a"), "busy");
+    }
+
+    #[test]
+    fn a_busy_session_never_falls_back_to_an_expired_token() {
+      let cache = cache_with(Duration::ZERO);
+      let tokens = cache.for_server(SERVER);
+
+      assert!(tokens.access_token().is_ok());
+      assert!(
+        tokens.access_token().is_err(),
+        "busy, and the token seen last has run out"
+      );
+    }
+
+    /// Ready with a token valid for `valid_for` once, busy afterwards.
+    fn cache_with(valid_for: Duration) -> TokenCache {
+      let was_read = Arc::new(AtomicBool::new(false));
+      TokenCache {
+        last: Arc::default(),
+        maybe_source: Some(Arc::new(move || {
+          if was_read.swap(true, Ordering::SeqCst) {
+            TokenPeek::Busy
+          } else {
+            TokenPeek::Ready {
+              server_url: SERVER.into(),
+              token: SecretString::from("token-a"),
+              valid_for,
+            }
+          }
+        })),
+      }
+    }
   }
 }

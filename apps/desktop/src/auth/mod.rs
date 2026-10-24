@@ -39,12 +39,17 @@ use teamcraft_client_api::server_entry::{
 };
 
 use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
+#[cfg(test)]
+pub(crate) use store::MemoryStore;
 pub use store::{KeyringStore, TokenStore};
 
 /// How long the browser may take to come back.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Refresh this long before the access token expires.
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
+/// An identity provider token this close to its expiry is not handed to the core any more: a
+/// request with a token that runs out on the way fails anyway (local sessions use the same margin).
+const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The webview may only ask for API paths below this prefix.
 const API_PREFIX: &str = "/api/v1/";
@@ -202,6 +207,23 @@ struct Discovery {
   token_endpoint: String,
   #[serde(default)]
   end_session_endpoint: Option<String>,
+}
+
+/// The access token as it stands right now, read without waiting or refreshing
+/// ([`AuthService::peek_server_bearer_token`]).
+pub enum TokenPeek {
+  /// The token of the active server and how long it may still be sent (expiry minus a margin).
+  Ready {
+    server_url: String,
+    token: SecretString,
+    valid_for: Duration,
+  },
+  /// No server, nobody signed in to it, or the token has (nearly) run out: no token is sent until
+  /// the refresh loop replaced it.
+  Unavailable,
+  /// A sign-in or refresh holds the session: the caller may use the token it saw last, while that
+  /// is still valid.
+  Busy,
 }
 
 struct Tokens {
@@ -598,6 +620,41 @@ impl<S: TokenStore> AuthService<S> {
     let server = self.server()?;
     let token = self.access_token(&server).await?;
     Ok((server.server_url, token.expose_secret().to_owned()))
+  }
+
+  /// The access token of the active server without waiting for the session or refreshing it, for
+  /// the core's synchronous token source: a core started right after sign-in sees the new token
+  /// at once instead of after the next refresh tick.
+  pub fn peek_server_bearer_token(&self) -> TokenPeek {
+    let Some(server) = self.active_server() else {
+      return TokenPeek::Unavailable;
+    };
+    let Ok(session) = self.session.try_lock() else {
+      return TokenPeek::Busy;
+    };
+    let maybe_token = match (&session.maybe_local, &session.maybe_tokens) {
+      (Some(local), _) => local
+        .remaining(local::now_ms())
+        .map(|valid_for| (local.token(), valid_for)),
+      (None, Some(tokens)) => {
+        let valid_for = tokens.expires_at.saturating_duration_since(Instant::now());
+        (valid_for > TOKEN_EXPIRY_MARGIN).then(|| {
+          (
+            SecretString::from(tokens.access.expose_secret().to_owned()),
+            valid_for - TOKEN_EXPIRY_MARGIN,
+          )
+        })
+      },
+      (None, None) => None,
+    };
+    match maybe_token {
+      Some((token, valid_for)) => TokenPeek::Ready {
+        server_url: server.server_url,
+        token,
+        valid_for,
+      },
+      None => TokenPeek::Unavailable,
+    }
   }
 
   /// Whether a session (identity provider or local account) exists.

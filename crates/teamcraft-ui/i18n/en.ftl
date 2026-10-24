@@ -884,6 +884,12 @@ calls-background-hint = Applied on your device before your video is sent.
 ## First-run key setup
 login-core-failed-title = Your encrypted data could not be opened
 login-core-failed-body = The local database or the system keystore is not available. Check that a keyring service (for example GNOME Keyring) is running, then try again.
+login-core-no-token-title = Sign-in is not complete yet
+login-core-no-token-body = TeamCraft did not receive your sign-in in time to open your encrypted data. Try again, or sign out and sign in again.
+login-core-retry = Try again
+login-core-sign-out = Sign out
+login-opening-core-title = Opening your encrypted data
+login-opening-core = Connecting…
 enroll-title = Set up this device, { $name }
 enroll-new-subtitle = Create your encryption keys. Only you can read your messages; not even the server can.
 enroll-recover-subtitle = Your account already has encryption keys. Enter your recovery passphrase to unlock them on this device.

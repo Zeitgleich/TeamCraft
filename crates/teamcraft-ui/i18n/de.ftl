@@ -884,6 +884,12 @@ calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gese
 ## Einrichtung der Schlüssel
 login-core-failed-title = Deine verschlüsselten Daten konnten nicht geöffnet werden
 login-core-failed-body = Die lokale Datenbank oder der Schlüsselbund des Systems ist nicht verfügbar. Prüfe, ob ein Schlüsselbund-Dienst (zum Beispiel GNOME Keyring) läuft, und versuche es erneut.
+login-core-no-token-title = Die Anmeldung ist noch nicht abgeschlossen
+login-core-no-token-body = TeamCraft hat deine Anmeldung nicht rechtzeitig erhalten, um deine verschlüsselten Daten zu öffnen. Versuche es erneut oder melde dich ab und wieder an.
+login-core-retry = Erneut versuchen
+login-core-sign-out = Abmelden
+login-opening-core-title = Deine verschlüsselten Daten werden geöffnet
+login-opening-core = Verbinde …
 enroll-title = Dieses Gerät einrichten, { $name }
 enroll-new-subtitle = Erstelle deine Verschlüsselungsschlüssel. Nur du kannst deine Nachrichten lesen, nicht einmal der Server.
 enroll-recover-subtitle = Dein Konto hat bereits Verschlüsselungsschlüssel. Gib deine Wiederherstellungs-Passphrase ein, um sie auf diesem Gerät zu entsperren.
