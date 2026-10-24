@@ -189,7 +189,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
 
-  let _ = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
+  let listener = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
   let banners = NodeRef::<leptos::html::Div>::new();
   track_banner_height(banners);
 

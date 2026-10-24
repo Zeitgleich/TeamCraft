@@ -406,12 +406,14 @@ pub fn MessageList(
     }
     schedule_measure();
   });
-  let _ = window_event_listener(ev::resize, move |_| {
+  let listener = window_event_listener(ev::resize, move |_| {
     if let Some(element) = container.get_untracked() {
       viewport.set(f64::from(element.client_height()));
       schedule_measure();
     }
   });
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
 
   let on_scroll = move |_| {
     let Some(element) = container.get_untracked() else {
