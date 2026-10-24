@@ -52,6 +52,7 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           scripts/check-versions.sh "$TAG"
+          echo "image_owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
       # Candidates must sort before their release in rpm and deb, or dnf/apt never upgrade to it
       # (scripts/linux-package-version.sh maps the tag to the package versions).
       - name: Candidate packages sort before the release
@@ -60,7 +61,6 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends rpm
           scripts/linux-package-version.sh check "$TAG"
-          echo "image_owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
 
   image:
     name: Image ${{ matrix.image }} (${{ matrix.platform }})
