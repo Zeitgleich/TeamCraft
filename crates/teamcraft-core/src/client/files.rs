@@ -17,7 +17,7 @@ use super::attachments::OutgoingFile;
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
-use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageFilter, Table};
+use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageFilter, Table};
 
 /// Argon2id for share link passwords: the browser download page runs it in WebAssembly, so it is
 /// lighter than the backup passphrase's (the link itself is the main secret).
@@ -399,6 +399,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let content = read_source(&file.source).map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
     let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type);
+    // Receivers reserve the picture's space before anything loads (issue #316).
+    let maybe_dimensions = crate::thumbnail::image_dimensions(&content, &file.media_type)
+      .map(|(width, height)| ImageDimensions { width, height });
     let encrypted = encrypt_attachment(&content, DEFAULT_CHUNK_SIZE, &mut OsRng)
       .map_err(|_| UploadError::Failed(TransferFailure::LocalFile))?;
     let size_bytes = encrypted.ciphertext.len() as u64;
@@ -408,10 +411,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     file.maybe_slot = Some(slot.clone());
     if let Err(error) = self.api.put_blob(&slot.upload_url, encrypted.ciphertext).await {
-      return Err(self.slot_failure(file, CoreError::Api(error)));
-    }
-    if let Err(error) = self.api.complete_attachment(slot.attachment_id).await {
-      return Err(self.slot_failure(file, CoreError::Api(error)));
+      // Was it the storage or the whole network? Completing the slot tells: it succeeds if the
+      // blob arrived after all, fails with "not uploaded" if the server is there, and doesn't reach
+      // it when this device is offline.
+      match self.api.complete_attachment(slot.attachment_id).await {
+        Ok(_) => {},
+        Err(probe) if is_unreachable(&probe) => return Err(UploadError::Offline(CoreError::Api(error))),
+        Err(_) => return Err(slot_failure(file, error)),
+      }
+    } else if let Err(error) = self.api.complete_attachment(slot.attachment_id).await {
+      if is_unreachable(&error) {
+        return Err(UploadError::Offline(CoreError::Api(error)));
+      }
+      return Err(slot_failure(file, error));
     }
     Ok(AttachmentRef {
       attachment_id: slot.attachment_id,
@@ -421,12 +433,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       media_type: file.media_type.clone(),
       size_bytes: content.len() as u64,
       maybe_thumbnail: maybe_thumbnail.map(Base64Bytes::new),
+      maybe_dimensions,
     })
   }
 
-  /// Announces an upload. A server out of reach is "offline" (retried on every tick, like the
-  /// outbox); too many unfinished uploads (409) clear up as the server sweeps expired ones, so that
-  /// is retried with backoff rather than failing the file.
+  /// Announces an upload. Only a server out of reach is "offline" (retried on every tick without
+  /// counting, like the outbox). Server trouble (5xx, 429) and too many unfinished uploads (409,
+  /// cleared as the server sweeps expired ones) count as failed attempts: backoff, then a visible
+  /// stall with "Try again". Only a file the server can never take fails for good.
   async fn announce_upload(
     &self,
     conversation: ConversationId,
@@ -442,23 +456,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         upload_url: created.upload_url,
         size_bytes,
       }),
-      Err(error) if error.is_retry_later() => Err(UploadError::Offline(CoreError::Api(error))),
-      Err(error) if is_status(&error, 409) => Err(UploadError::Retry(CoreError::Api(error))),
+      Err(error) if is_unreachable(&error) => Err(UploadError::Offline(CoreError::Api(error))),
       Err(error) if error.error_code() == Some(&ErrorCode::PayloadTooLarge) || is_status(&error, 413) => {
         Err(UploadError::Failed(TransferFailure::TooLarge))
       },
-      Err(_) => Err(UploadError::Failed(TransferFailure::Network)),
+      Err(error) => Err(UploadError::Retry(CoreError::Api(error))),
     }
-  }
-
-  /// A failed blob upload or completion: network trouble keeps the slot for the next attempt; a
-  /// refusal (expired URL, a blob the storage lost) drops it, and the next attempt starts over.
-  fn slot_failure(&self, file: &mut PendingFile, error: CoreError) -> UploadError {
-    if !error.is_retry_later() {
-      tracing::debug!(%error, "upload slot refused; the next attempt announces a new one");
-      file.maybe_slot = None;
-    }
-    UploadError::Retry(error)
   }
 
   /// Deletes the app's staged plaintext copies of a finished upload (see
@@ -539,6 +542,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     save_in_browser(plaintext.expose_secret(), &file_name)?;
     Ok(file_name)
   }
+}
+
+/// A failed blob upload or completion while the server answers: a refusal (expired URL, a blob the
+/// storage lost) drops the slot, so the next attempt announces a new one; server trouble (5xx, 429)
+/// and a refused connection (CSP, proxy) keep it.
+fn slot_failure(file: &mut PendingFile, error: ApiError) -> UploadError {
+  let is_refused =
+    matches!(&error, ApiError::Status { status, .. } if (400..500).contains(status) && *status != 429);
+  if is_refused && !error.is_sign_in_required() {
+    tracing::debug!(%error, "upload slot refused; the next attempt announces a new one");
+    file.maybe_slot = None;
+  }
+  UploadError::Retry(CoreError::Api(error))
+}
+
+/// The request never got an answer: this device is offline or the server is out of reach.
+fn is_unreachable(error: &ApiError) -> bool {
+  matches!(error, ApiError::Network(_))
 }
 
 enum UploadError {

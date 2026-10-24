@@ -5,7 +5,9 @@
 //!   used first out, within [`MEDIA_CACHE_BUDGET_BYTES`]. A view still showing an evicted image keeps
 //!   its own reference; the URL is revoked once nobody holds it.
 //! - Inline previews load in the background, at most [`MAX_BACKGROUND_LOADS`] at a time, and skip
-//!   the download when their row left the screen while they waited. The lightbox loads at once.
+//!   the download when their row left the screen while they waited. They keep a rendition of at
+//!   most [`INLINE_RENDITION_SIDE`] pixels, not the decoded original. The lightbox loads the full
+//!   file at once.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -20,22 +22,25 @@ use crate::object_url::{ObjectUrl, fetch_attachment};
 /// Decrypted bytes the cache keeps at most. A large workspace stays within the memory budget of
 /// docs/performance.md with this on top; one image bigger than this is shown but not kept.
 pub const MEDIA_CACHE_BUDGET_BYTES: u64 = 160 * 1024 * 1024;
+/// Longest side of an inline rendition: the largest inline box (480 CSS pixels) on a 2x screen.
+pub const INLINE_RENDITION_SIDE: u32 = 960;
 /// Inline previews downloading at the same time; opening a channel full of photos doesn't start
 /// dozens of downloads at once.
 const MAX_BACKGROUND_LOADS: usize = 3;
 
 thread_local! {
-  static CACHE: RefCell<Lru<MediaKey, Rc<ObjectUrl>>> = RefCell::new(Lru::new(MEDIA_CACHE_BUDGET_BYTES));
+  static CACHE: RefCell<Lru<(MediaKey, Rendition), Rc<ObjectUrl>>> = RefCell::new(Lru::new(MEDIA_CACHE_BUDGET_BYTES));
   static PERMITS: RefCell<Permits> = RefCell::new(Permits::new(MAX_BACKGROUND_LOADS));
 }
 
-/// Who waits for an image.
+/// Which version of a picture is wanted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LoadPriority {
-  /// The lightbox: the user is looking at it.
-  Now,
-  /// An inline preview: queued behind other previews.
-  Background,
+pub enum Rendition {
+  /// The conversation: scaled down to [`INLINE_RENDITION_SIDE`], loaded in the background behind
+  /// other previews. Animations stay as they are.
+  Inline,
+  /// The lightbox: the original, loaded at once.
+  Full,
 }
 
 /// Least recently used entries with a size each, within a byte budget.
@@ -56,37 +61,37 @@ struct Permits {
 /// A slot for one background load, given back when dropped.
 struct Permit;
 
-/// The image, from the cache or downloaded and decrypted. A background load first waits for a slot
-/// and gives up (`Ok(None)`) when `is_wanted` says the preview is gone by then.
+/// The image, from the cache or downloaded and decrypted. An inline load first waits for a slot and
+/// gives up (`Ok(None)`) when `is_wanted` says the preview is gone by then.
 pub async fn load(
   conversation: ConversationId,
   key: MediaKey,
   media_type: &str,
-  priority: LoadPriority,
+  rendition: Rendition,
   is_wanted: impl Fn() -> bool,
 ) -> Result<Option<Rc<ObjectUrl>>, String> {
-  if let Some(hit) = cached(key) {
+  if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
   }
-  let _permit = match priority {
-    LoadPriority::Now => None,
-    LoadPriority::Background => Some(Permit::acquire().await),
+  let (_permit, maybe_max_side) = match rendition {
+    Rendition::Full => (None, None),
+    Rendition::Inline => (Some(Permit::acquire().await), Some(INLINE_RENDITION_SIDE)),
   };
-  if let Some(hit) = cached(key) {
+  if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
   }
   if !is_wanted() {
     return Ok(None);
   }
-  let url =
-    Rc::new(fetch_attachment(conversation, key.message, key.attachment.to_string(), media_type).await?);
-  CACHE.with_borrow_mut(|cache| cache.insert(key, url.clone(), url.byte_len()));
+  let file_id = key.attachment.to_string();
+  let url = Rc::new(fetch_attachment(conversation, key.message, file_id, media_type, maybe_max_side).await?);
+  CACHE.with_borrow_mut(|cache| cache.insert((key, rendition), url.clone(), url.byte_len()));
   Ok(Some(url))
 }
 
 /// The image if it is in the cache (and marks it as just used).
-pub fn cached(key: MediaKey) -> Option<Rc<ObjectUrl>> {
-  CACHE.with_borrow_mut(|cache| cache.get(&key))
+pub fn cached(key: MediaKey, rendition: Rendition) -> Option<Rc<ObjectUrl>> {
+  CACHE.with_borrow_mut(|cache| cache.get(&(key, rendition)))
 }
 
 impl<K: PartialEq, V: Clone> Lru<K, V> {

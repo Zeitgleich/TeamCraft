@@ -41,7 +41,7 @@ use crate::lightbox::{
   Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, ModifierStyle, Point, Pointers, Release,
   Size, Viewport, album_len, images_in_scope, neighbor, position, wheel_zoom_factor,
 };
-use crate::media_cache::{self, LoadPriority};
+use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
 use crate::object_url::ObjectUrl;
 use crate::state::use_app_state;
@@ -397,20 +397,24 @@ fn load_current(inputs: LoadInputs) {
         .is_some_and(|kind| kind.starts_paused(prefers_reduced_motion())),
     );
     // Replacing the old values drops their URLs, which releases the previous file right away.
-    thumbnail.set(current_file.with_untracked(|file| file.as_ref().and_then(thumbnail_url)));
+    // The sharper inline rendition when the conversation already loaded it, else the thumbnail.
+    thumbnail.set(
+      media_cache::cached(key, Rendition::Inline)
+        .or_else(|| current_file.with_untracked(|file| file.as_ref().and_then(thumbnail_url))),
+    );
     let size_bytes = current_file.with_untracked(|file| file.as_ref().map_or(0, |file| file.size_bytes));
     if size_bytes > MAX_VIEWER_BYTES {
       full.set(FullMedia::TooLarge);
       return;
     }
     // Seen before in this session (inline or in the lightbox): shown at once.
-    if let Some(url) = media_cache::cached(key) {
+    if let Some(url) = media_cache::cached(key, Rendition::Full) {
       full.set(FullMedia::Ready(url));
       return;
     }
     full.set(FullMedia::Loading);
     spawn_local(async move {
-      let result = media_cache::load(conversation, key, &media_type, LoadPriority::Now, || true).await;
+      let result = media_cache::load(conversation, key, &media_type, Rendition::Full, || true).await;
       if ticket.try_get_value() != Some(next_ticket) {
         // The user moved on or closed the lightbox; the cache keeps the file for next time.
         return;

@@ -1,7 +1,7 @@
 //! Files in the UI adapter: attachments of messages, uploads, downloads and share links.
 
 use teamcraft_client_api::actions::{
-  FileFailure, FileInfo, FileSource, FileTransfer, OutgoingFile, ShareLink, ShareLinkOptions,
+  FileFailure, FileInfo, FileSource, FileTransfer, OutgoingFile, PixelSize, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
@@ -40,6 +40,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           transfer: upload_transfer(&upload, file),
           maybe_sender,
           maybe_sent_at,
+          maybe_dimensions: None,
         })
         .collect();
     }
@@ -64,6 +65,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         },
         maybe_sender,
         maybe_sent_at,
+        maybe_dimensions: None,
       });
     attachments_of(&stored.content)
       .into_iter()
@@ -96,6 +98,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
         },
         maybe_sender,
         maybe_sent_at,
+        maybe_dimensions: attachment.maybe_dimensions.map(|size| PixelSize {
+          width: size.width,
+          height: size.height,
+        }),
       })
       .chain(failed)
       .collect()

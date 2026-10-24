@@ -258,6 +258,19 @@ async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
   };
   assert!(matches!(transfer(), FileTransfer::Uploading { .. }));
 
+  // Offline in between: nothing reaches the server, so no attempt counts, however long it lasts.
+  server.set_offline(alice.client.user_id(), true);
+  for _ in 0..20 {
+    clock.advance(60_000);
+    assert!(alice.client.upload_pending().await.is_err());
+  }
+  server.set_offline(alice.client.user_id(), false);
+  server.refuse_blob_uploads(alice.client.user_id(), true);
+  assert!(
+    matches!(transfer(), FileTransfer::Uploading { .. }),
+    "offline doesn't stall"
+  );
+
   clock.advance(4_000);
   assert!(alice.client.upload_pending().await.is_err());
   assert_eq!(

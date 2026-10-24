@@ -89,6 +89,7 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
       transfer: FileTransfer::Remote,
       maybe_sender: Some(message.author),
       maybe_sent_at: Some(message.sent_at),
+      maybe_dimensions: None,
     }));
   }
   files

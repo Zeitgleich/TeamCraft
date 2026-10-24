@@ -24,8 +24,8 @@ use crate::components::lightbox::prefers_reduced_motion;
 use crate::components::message_actions::copy_to_clipboard;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
-use crate::media_cache::{self, LoadPriority};
-use crate::media_layout::{inline_size, loads_inline, thumbnail_size, thumbnail_type};
+use crate::media_cache::{self, Rendition};
+use crate::media_layout::{fit_picture, inline_size, loads_inline, thumbnail_size, thumbnail_type};
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::ObjectUrl;
 use crate::state::{AppState, Overlay, use_app_state};
@@ -105,10 +105,12 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     .as_deref()
     .and_then(ObjectUrl::from_thumbnail);
   let maybe_thumbnail_size = file.maybe_thumbnail_png.as_deref().and_then(thumbnail_size);
+  // The sender's size of the picture is exact; older messages only have the thumbnail's.
+  let maybe_dimensions = file.maybe_dimensions;
   let thumbnail_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
   // Revoked when the row leaves the screen.
   StoredValue::new_local(thumbnail);
-  let full = RwSignal::new_local(media_cache::cached(key));
+  let full = RwSignal::new_local(media_cache::cached(key, Rendition::Inline));
   let is_motion_reduced = prefers_reduced_motion();
   if full.get_untracked().is_none() && loads_inline(kind, file.size_bytes, is_motion_reduced) {
     load_full(conversation, key, file.media_type.clone(), full);
@@ -121,23 +123,30 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   };
   // Long-press on touch screens opens the context menu event: it shows the actions instead.
   let is_pinned = RwSignal::new(false);
+  let is_touch = StoredValue::new(false);
   let name = file.file_name.clone();
   let label = name.clone();
   // Follows the "Image size" setting.
-  let style = move || match (layout, maybe_thumbnail_size) {
-    (TileLayout::Single, Some((width, height))) => {
-      let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
-      let (width, height) = inline_size(width, height, image_size);
-      format!("--media-w: {width}px; --media-h: {height}px")
-    },
-    _ => String::new(),
+  let style = move || {
+    if layout != TileLayout::Single {
+      return String::new();
+    }
+    let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
+    let maybe_size = match (maybe_dimensions, maybe_thumbnail_size) {
+      (Some(picture), _) => Some(fit_picture(picture.width, picture.height, image_size)),
+      (None, Some((width, height))) => Some(inline_size(width, height, image_size)),
+      (None, None) => None,
+    };
+    maybe_size
+      .map(|(width, height)| format!("--media-w: {width}px; --media-h: {height}px"))
+      .unwrap_or_default()
   };
   let maybe_hidden = match layout {
     TileLayout::Grid { maybe_hidden } => maybe_hidden,
     TileLayout::Single => None,
   };
   let is_single = layout == TileLayout::Single;
-  let has_size = maybe_thumbnail_size.is_some();
+  let has_size = maybe_dimensions.is_some() || maybe_thumbnail_size.is_some();
   let has_badge =
     matches!(kind, MediaKind::Animated) && (is_motion_reduced || !loads_inline(kind, file.size_bytes, false));
   view! {
@@ -147,9 +156,13 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       class:has-size=has_size
       class:actions-pinned=move || is_pinned.get()
       style=style
+      on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
       on:contextmenu=move |ev: web_sys::MouseEvent| {
-        ev.prevent_default();
-        is_pinned.update(|pinned| *pinned = !*pinned);
+        // A long-press shows the actions; a right click keeps the browser's menu ("Save image as").
+        if is_touch.get_value() {
+          ev.prevent_default();
+          is_pinned.update(|pinned| *pinned = !*pinned);
+        }
       }
     >
       <button
@@ -190,15 +203,7 @@ fn load_full(
 ) {
   spawn_local(async move {
     let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
-    match media_cache::load(
-      conversation,
-      key,
-      &media_type,
-      LoadPriority::Background,
-      is_wanted,
-    )
-    .await
-    {
+    match media_cache::load(conversation, key, &media_type, Rendition::Inline, is_wanted).await {
       // The row may be gone by now: `try_set` drops the URL then.
       Ok(Some(url)) => drop(full.try_set(Some(url))),
       Ok(None) => {},
@@ -216,7 +221,7 @@ fn MediaToolbar(file: FileInfo) -> impl IntoView {
   let actions = FileActions::new(state, &file);
   let is_saved = actions.is_saved();
   view! {
-    <div class="media-toolbar" role="toolbar" aria-label=move || i18n.t("lightbox-toolbar")>
+    <div class="media-toolbar" role="group" aria-label=move || i18n.t("lightbox-toolbar")>
       <ToolbarButton label="file-download" icon=IconName::Download on_click=move || actions.download() />
       <ToolbarButton label="file-copy-share" icon=IconName::Link on_click=move || actions.share() />
       <ToolbarButton label="lightbox-forward" icon=IconName::Forward on_click=move || actions.forward() />

@@ -102,6 +102,27 @@ pub fn inline_size(width: u32, height: u32, size: ImageSize) -> (u32, u32) {
   (scale(width, max_width), scale(height, max_height))
 }
 
+/// The inline size of a picture of `width` × `height` pixels (the sender's dimensions): fitted into
+/// the box, never enlarged.
+pub fn fit_picture(width: u32, height: u32, size: ImageSize) -> (u32, u32) {
+  let (max_width, max_height) = inline_box(size);
+  let (width, height) = (u64::from(width.max(1)), u64::from(height.max(1)));
+  let (max_width, max_height) = (u64::from(max_width), u64::from(max_height));
+  let (numerator, denominator) = match max_width * height <= max_height * width {
+    true => (max_width, width),
+    false => (max_height, height),
+  };
+  let (numerator, denominator) = match numerator >= denominator {
+    true => (1, 1),
+    false => (numerator, denominator),
+  };
+  let scale = |side: u64, max: u64| {
+    let scaled = (side * numerator / denominator).clamp(u64::from(MIN_SIDE_PX).min(max), max);
+    u32::try_from(scaled).unwrap_or(MIN_SIDE_PX)
+  };
+  (scale(width, max_width), scale(height, max_height))
+}
+
 /// Whether an inline preview downloads the full file: pictures within the size limit do, an
 /// animated one only when the user doesn't ask for reduced motion (its thumbnail stays still then),
 /// and videos never play by themselves.
@@ -170,6 +191,14 @@ mod tests {
   fn the_standard_size_has_a_smaller_box() {
     assert_eq!(inline_size(320, 180, ImageSize::Standard), (240, 135));
     assert_eq!(inline_size(148, 320, ImageSize::Standard), (148, 320));
+  }
+
+  #[test]
+  fn sender_dimensions_fit_the_box_without_enlarging() {
+    assert_eq!(fit_picture(8000, 6000, LARGE), (360, 270));
+    assert_eq!(fit_picture(1170, 2532, LARGE), (221, 480), "a phone screenshot");
+    assert_eq!(fit_picture(64, 48, LARGE), (64, 48));
+    assert_eq!(fit_picture(8000, 6000, ImageSize::Standard), (240, 180));
   }
 
   #[test]

@@ -19,7 +19,7 @@ use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
 use crate::model::{ConversationKind, MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
-use crate::reactive::{SetIfAlive, UpdateIfAlive};
+use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
 use crate::state::use_app_state;

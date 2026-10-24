@@ -1194,6 +1194,7 @@ mod tests {
       transfer: FileTransfer::Remote,
       maybe_sender: None,
       maybe_sent_at: None,
+      maybe_dimensions: None,
     }
   }
 
