@@ -57,6 +57,13 @@ pub enum UploadSource {
   Path { path: String },
 }
 
+/// Largest file the browser saves: it holds the decrypted bytes in memory until the `<a download>`
+/// click, so bigger files wait for streaming downloads. Native builds write to disk and have no cap.
+#[cfg(target_arch = "wasm32")]
+const MAX_DOWNLOAD_BYTES: Option<u64> = Some(256 * 1024 * 1024);
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_DOWNLOAD_BYTES: Option<u64> = None;
+
 /// Progress of a file on this device, keyed by attachment ID.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -170,6 +177,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<String, CoreError> {
     let reference = find_attachment(&self.store, conversation, attachment)?
       .ok_or_else(|| CoreError::Corrupt("no such file in this conversation".into()))?;
+    if exceeds_download_limit(reference.size_bytes, MAX_DOWNLOAD_BYTES) {
+      set_transfer(
+        &self.store,
+        attachment,
+        &TransferState::Failed {
+          reason: TransferFailure::TooLarge,
+        },
+      )?;
+      return Err(CoreError::InvalidRequest(
+        "the file is too large to download here".into(),
+      ));
+    }
     set_transfer(
       &self.store,
       attachment,
@@ -335,10 +354,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(path.to_string_lossy().into_owned())
   }
 
-  /// The browser has no download directory; the page saves files itself.
+  /// The browser has no download directory: the decrypted file is handed to the browser through a
+  /// temporary `<a download>` link, which saves it into the browser's download folder.
   #[cfg(target_arch = "wasm32")]
-  async fn download_to_disk(&self, _reference: &AttachmentRef) -> Result<String, CoreError> {
-    Err(CoreError::Browser("downloads to disk".into()))
+  async fn download_to_disk(&self, reference: &AttachmentRef) -> Result<String, CoreError> {
+    let plaintext = self.download_decrypted(reference).await?;
+    let file_name = sanitize_file_name(&reference.file_name);
+    save_in_browser(plaintext.expose_secret(), &file_name)?;
+    Ok(file_name)
   }
 }
 
@@ -515,24 +538,79 @@ fn is_status(error: &ApiError, status: u16) -> bool {
   matches!(error, ApiError::Status { status: actual, .. } if *actual == status)
 }
 
-/// `name`, or `name (2)`, `name (3)`, ... if taken. Path separators in the sender's name are
-/// replaced, so a file can't land outside the directory.
-#[cfg(not(target_arch = "wasm32"))]
-fn unique_path(directory: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+/// Makes a sender-chosen file name safe to save: path separators and control characters become `_`
+/// and leading dots are dropped, so a file can't land outside the download folder or hide.
+fn sanitize_file_name(file_name: &str) -> String {
   let safe: String = file_name
     .chars()
     .map(|character| {
-      if matches!(character, '/' | '\\' | '\0') {
+      if matches!(character, '/' | '\\') || character.is_control() {
         '_'
       } else {
         character
       }
     })
     .collect();
-  let safe = match safe.trim_start_matches('.') {
+  match safe.trim_start_matches('.').trim() {
     "" => "file".to_string(),
     trimmed => trimmed.to_string(),
+  }
+}
+
+/// Whether a file of `size_bytes` is over the platform's download cap (`None`: no cap).
+fn exceeds_download_limit(size_bytes: u64, maybe_max_bytes: Option<u64>) -> bool {
+  maybe_max_bytes.is_some_and(|max| size_bytes > max)
+}
+
+/// Offers `bytes` to the browser as a download: Blob, object URL, a clicked `<a download>`, and the
+/// URL is revoked right after.
+#[cfg(target_arch = "wasm32")]
+fn save_in_browser(bytes: &[u8], file_name: &str) -> Result<(), CoreError> {
+  use wasm_bindgen::JsCast;
+
+  let browser = |what: &str| CoreError::Browser(what.to_string());
+  let document = web_sys::window()
+    .and_then(|window| window.document())
+    .ok_or_else(|| browser("no document"))?;
+  let options = web_sys::BlobPropertyBag::new();
+  options.set_type("application/octet-stream");
+  let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+  let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options)
+    .map_err(|_| browser("could not build the file"))?;
+  let url =
+    web_sys::Url::create_object_url_with_blob(&blob).map_err(|_| browser("could not build the file"))?;
+  let anchor = document
+    .create_element("a")
+    .ok()
+    .and_then(|element| element.dyn_into::<web_sys::HtmlAnchorElement>().ok());
+  let result = match anchor {
+    Some(anchor) => {
+      anchor.set_href(&url);
+      anchor.set_download(file_name);
+      anchor.set_hidden(true);
+      // Some browsers only honour clicks on attached elements.
+      let attached = document
+        .body()
+        .is_some_and(|body| body.append_child(&anchor).is_ok());
+      anchor.click();
+      if attached {
+        anchor.remove();
+      }
+      Ok(())
+    },
+    None => Err(browser("could not create a download link")),
   };
+  // The browser has started reading the blob by the time click() returns.
+  if let Err(error) = web_sys::Url::revoke_object_url(&url) {
+    tracing::debug!(?error, "the download URL could not be revoked");
+  }
+  result
+}
+
+/// `name`, or `name (2)`, `name (3)`, ... if taken. The name is sanitized first.
+#[cfg(not(target_arch = "wasm32"))]
+fn unique_path(directory: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+  let safe = sanitize_file_name(file_name);
   let candidate = directory.join(&safe);
   if !candidate.exists() {
     return candidate;
@@ -550,6 +628,26 @@ fn unique_path(directory: &std::path::Path, file_name: &str) -> std::path::PathB
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
   use super::*;
+
+  #[test]
+  fn sanitized_names_have_no_separators_or_control_characters() {
+    assert_eq!(sanitize_file_name("../../etc/passwd"), "_.._etc_passwd");
+    assert_eq!(sanitize_file_name("a\\b/c.txt"), "a_b_c.txt");
+    assert_eq!(sanitize_file_name("tab\there\u{7}\0.txt"), "tab_here__.txt");
+    assert_eq!(sanitize_file_name("...hidden"), "hidden");
+    assert_eq!(sanitize_file_name(".."), "file");
+    assert_eq!(sanitize_file_name(""), "file");
+    assert_eq!(sanitize_file_name("report (final).pdf"), "report (final).pdf");
+  }
+
+  #[test]
+  fn only_capped_platforms_refuse_large_downloads() {
+    assert!(!exceeds_download_limit(u64::MAX, None));
+    assert!(!exceeds_download_limit(100, Some(100)));
+    assert!(exceeds_download_limit(101, Some(100)));
+    // Native builds write to disk and have no cap; the browser does.
+    assert_eq!(MAX_DOWNLOAD_BYTES.is_some(), cfg!(target_arch = "wasm32"));
+  }
 
   #[test]
   fn downloaded_names_stay_in_the_directory_and_do_not_overwrite() {
