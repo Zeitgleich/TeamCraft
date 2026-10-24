@@ -8,9 +8,12 @@
 //! | Windows  | taskbar overlay dot              | left click shows the window    |
 //!
 //! Without libayatana-appindicator (Linux) there is no tray icon; the badge still works and the
-//! window is never hidden (see `has_tray`).
+//! window is never hidden (see `has_tray`). The same holds while no StatusNotifier host shows the
+//! icon (GNOME without the AppIndicator extension): the icon exists but nobody can see it.
 
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
 #[cfg(windows)]
@@ -54,6 +57,11 @@ pub struct TrayMenu {
   #[cfg(not(target_os = "linux"))]
   quit: MenuItem<Wry>,
 }
+
+/// Linux: whether a StatusNotifier host shows the tray icon. Managed while the tray icon exists;
+/// follows the D-Bus watcher, since a panel may start after the app (autostart at login).
+#[cfg(target_os = "linux")]
+pub struct TrayHost(AtomicBool);
 
 /// The unread count last shown on the badge; managed with or without a tray icon.
 #[derive(Default)]
@@ -105,6 +113,8 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
     builder = builder.icon(icon.clone());
   }
   builder.build(app)?;
+  #[cfg(target_os = "linux")]
+  watch_tray_host(app);
   app.manage(TrayMenu {
     labels: Mutex::new(labels),
     #[cfg(not(target_os = "linux"))]
@@ -113,6 +123,29 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
     quit: _quit,
   });
   Ok(())
+}
+
+/// Asks once before the window is created (start minimized hides it only when the icon can be
+/// seen), then follows the watcher in the background.
+#[cfg(target_os = "linux")]
+fn watch_tray_host(app: &tauri::App) {
+  let buses = app.state::<crate::attention::OsProbe>().buses();
+  let is_present = tauri::async_runtime::block_on(buses.has_status_notifier_host());
+  if !is_present {
+    tracing::info!("no StatusNotifier host; the window is not hidden to the tray");
+  }
+  app.manage(TrayHost(AtomicBool::new(is_present)));
+  let handle = app.handle().clone();
+  tauri::async_runtime::spawn(async move {
+    buses
+      .watch_status_notifier_host(move |is_present| {
+        let host = handle.state::<TrayHost>();
+        if host.0.swap(is_present, Ordering::Relaxed) != is_present {
+          tracing::info!(is_present, "StatusNotifier host changed");
+        }
+      })
+      .await;
+  });
 }
 
 fn build_menu(
@@ -180,9 +213,22 @@ pub fn set_zoom(app: AppHandle, factor: f64) {
   }
 }
 
-/// Whether the tray icon exists (closing to the tray only makes sense with one).
+/// Whether the tray icon exists and can be seen (closing to the tray only makes sense then).
 pub fn has_tray(app: &AppHandle) -> bool {
-  app.tray_by_id(TRAY_ID).is_some()
+  app.tray_by_id(TRAY_ID).is_some() && is_icon_shown(app)
+}
+
+#[cfg(target_os = "linux")]
+fn is_icon_shown(app: &AppHandle) -> bool {
+  app
+    .try_state::<TrayHost>()
+    .is_some_and(|host| host.0.load(Ordering::Relaxed))
+}
+
+/// macOS and Windows always show the icon.
+#[cfg(not(target_os = "linux"))]
+fn is_icon_shown(_app: &AppHandle) -> bool {
+  true
 }
 
 #[tauri::command]

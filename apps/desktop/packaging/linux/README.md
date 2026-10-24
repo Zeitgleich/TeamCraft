@@ -148,3 +148,9 @@ VA-API plugin (`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`) and t
 recommended because the app runs without it, just without a tray icon (as in the Flatpak, whose
 runtime doesn't ship it). The release workflow builds them in a Debian 13 container (see the
 distribution table for what that implies).
+
+The app only counts a tray library built for its own architecture (a 32-bit one in `/usr/lib`
+doesn't), and it only hides the window to the tray (close to tray, start minimized) while a
+StatusNotifier host shows the icon: GNOME without the AppIndicator extension has none, and the
+window then stays reachable in the taskbar. The app follows the `org.kde.StatusNotifierWatcher` on
+the session bus, so a panel that starts later is picked up.

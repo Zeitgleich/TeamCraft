@@ -28,6 +28,13 @@ const URGENCY_CRITICAL: u8 = 2;
 const LOGIND: &str = "org.freedesktop.login1";
 const LOGIND_MANAGER: &str = "org.freedesktop.login1.Manager";
 
+/// The StatusNotifier (appindicator) watcher; panels that show tray icons register with it as hosts.
+const STATUS_NOTIFIER_WATCHER: &str = "org.kde.StatusNotifierWatcher";
+const STATUS_NOTIFIER_WATCHER_PATH: &str = "/StatusNotifierWatcher";
+const STATUS_NOTIFIER_HOST_SIGNALS: [&str; 2] =
+  ["StatusNotifierHostRegistered", "StatusNotifierHostUnregistered"];
+const BUS_DAEMON: &str = "org.freedesktop.DBus";
+
 /// Session and system bus, connected on first use.
 #[derive(Default)]
 pub struct Buses {
@@ -237,6 +244,69 @@ impl Buses {
         && !is_going_to_sleep
       {
         on_wake();
+      }
+    }
+  }
+
+  /// Whether a panel shows StatusNotifier icons: the watcher runs and a host is registered with it.
+  /// GNOME has neither without an extension, and an appindicator icon is then invisible.
+  pub async fn has_status_notifier_host(&self) -> bool {
+    let Some(session) = self.session().await else {
+      return false;
+    };
+    call::<OwnedValue, _>(
+      session,
+      STATUS_NOTIFIER_WATCHER,
+      STATUS_NOTIFIER_WATCHER_PATH,
+      "org.freedesktop.DBus.Properties",
+      "Get",
+      &(STATUS_NOTIFIER_WATCHER, "IsStatusNotifierHostRegistered"),
+    )
+    .await
+    .and_then(|value| bool::try_from(value).ok())
+    .unwrap_or(false)
+  }
+
+  /// Calls `on_change` with `has_status_notifier_host` once subscribed and again whenever the
+  /// watcher appears or goes away or a host registers or unregisters (a panel started after the
+  /// app, an extension switched on), for as long as the session bus lives. Returns at once when
+  /// there is no session bus.
+  pub async fn watch_status_notifier_host(&self, on_change: impl Fn(bool) + Send + 'static) {
+    let Some(session) = self.session().await else {
+      return;
+    };
+    let owner_rule = zbus::MatchRule::builder()
+      .msg_type(zbus::message::Type::Signal)
+      .sender(BUS_DAEMON)
+      .and_then(|builder| builder.interface(BUS_DAEMON))
+      .and_then(|builder| builder.member("NameOwnerChanged"))
+      .and_then(|builder| builder.arg(0, STATUS_NOTIFIER_WATCHER))
+      .map(|builder| builder.build());
+    let host_rule = zbus::MatchRule::builder()
+      .msg_type(zbus::message::Type::Signal)
+      .interface(STATUS_NOTIFIER_WATCHER)
+      .map(|builder| builder.build());
+    let (Ok(owner_rule), Ok(host_rule)) = (owner_rule, host_rule) else {
+      return;
+    };
+    let (Ok(owners), Ok(hosts)) = (
+      zbus::MessageStream::for_match_rule(owner_rule, session, None).await,
+      zbus::MessageStream::for_match_rule(host_rule, session, None).await,
+    ) else {
+      tracing::debug!("cannot watch for a StatusNotifier host");
+      return;
+    };
+    // Subscribed first, then asked: a host that registers in between is not missed.
+    on_change(self.has_status_notifier_host().await);
+    let mut changes = futures_util::stream::select(owners, hosts);
+    while let Some(Ok(message)) = changes.next().await {
+      // The watcher also reports every other app's icons; only hosts matter here.
+      let header = message.header();
+      let is_host_change = header.member().is_some_and(|member| {
+        member.as_str() == "NameOwnerChanged" || STATUS_NOTIFIER_HOST_SIGNALS.contains(&member.as_str())
+      });
+      if is_host_change {
+        on_change(self.has_status_notifier_host().await);
       }
     }
   }
