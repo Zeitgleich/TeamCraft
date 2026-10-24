@@ -297,7 +297,8 @@ kbd {
   background: rgba(255, 255, 255, 0.12);
 }
 
-.search-btn span {
+/* Only the label grows; the shortcut's own spans (`.shortcut`, `.shortcut-plus`) stay compact. */
+.search-btn > span:not(.shortcut) {
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
