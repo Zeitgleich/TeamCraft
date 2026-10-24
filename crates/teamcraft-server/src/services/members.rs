@@ -5,6 +5,7 @@ use teamcraft_proto::{
   ConversationVisibility, GatewayEvent, ListConversationMembersResponse, Permission, SetReadPositionRequest,
   SpaceRole, SystemEventKind, UpdateConversationMemberRequest, UserId,
 };
+use tracing::warn;
 
 use super::access::{ConversationAccess, is_guest, load_conversation, require};
 use super::audit::{self, Target as AuditTarget};
@@ -12,6 +13,7 @@ use super::conversations::{can_list_members, ensure_open_channel};
 use super::convert::user_summary;
 use super::notifications;
 use super::system_events;
+use super::threads;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -322,6 +324,11 @@ pub async fn set_read_position(
     [caller.user.id],
     &GatewayEvent::ConversationUpdate { conversation_id: id },
   );
+  // The position is stored; a failed count must not fail the request (nor skip the push dismissal
+  // and the read receipt below). The devices' next resync repairs the badge.
+  if let Err(error) = threads::publish_unread(state, caller.user.id, id).await {
+    warn!(conversation_id = %id, %error, "could not send the new unread counts");
+  }
   // Phones that show a notification for what was just read remove it.
   tokio::spawn(crate::push::routing::dismiss_read(
     state.clone(),

@@ -179,6 +179,7 @@ impl PendingEnrollment {
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
     };
     client.persist_sync()?;

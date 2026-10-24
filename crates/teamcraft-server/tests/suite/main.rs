@@ -62,6 +62,7 @@ mod shares;
 mod space_features;
 mod status;
 mod threads;
+mod unread_events;
 mod user_groups;
 mod web;
 mod workspace;

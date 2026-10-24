@@ -18,10 +18,11 @@ use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval;
+use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
 
-/// How often the console reloads from the server while it is open.
+/// How often the console reloads from the server while it is open and the page is visible: admins
+/// watch audit entries and device lists change, nobody else needs the requests.
 const REFRESH_MS: u64 = 30_000;
 
 /// Administration inside the normal client. Everything here is metadata: admins can manage rooms
@@ -32,7 +33,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   let i18n = use_i18n();
   // Backends that read the server fetch fresh data when the console opens and while it stays open.
   state.read(|backend| backend.admin_refresh());
-  use_interval(REFRESH_MS, move || state.read(|backend| backend.admin_refresh()));
+  use_interval_while_visible(REFRESH_MS, move || state.read(|backend| backend.admin_refresh()));
   let maybe_error = Memo::new(move |_| state.read(|backend| backend.admin_error()));
 
   let nav_item = move |target: AdminSection, icon: IconName| {

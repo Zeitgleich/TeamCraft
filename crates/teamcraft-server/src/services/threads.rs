@@ -148,9 +148,10 @@ pub async fn list_threads(
 
 /// Unread and mention counts of all conversations and followed threads.
 pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<UnreadResponse, ApiError> {
+  let max_counted = state.settings.get().limits.max_unread_counted;
   let conversations = state
     .database
-    .conversation_unread_counts(caller.user.id, state.settings.get().limits.max_unread_counted)
+    .conversation_unread_counts(caller.user.id, max_counted)
     .await?
     .into_iter()
     .map(|row| ConversationUnread {
@@ -164,7 +165,30 @@ pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<
     conversations,
     unread_thread_count: totals.unread_thread_count,
     thread_mention_count: totals.mention_count,
+    maybe_max_counted: Some(max_counted),
   })
+}
+
+/// Sends the user's devices their new counts of the conversation (issue #183: clients keep their
+/// badges from events instead of polling `GET /unread`).
+pub async fn publish_unread(
+  state: &AppState,
+  user: UserId,
+  conversation: ConversationId,
+) -> Result<(), ApiError> {
+  let row = state
+    .database
+    .conversation_unread_count(conversation, user, state.settings.get().limits.max_unread_counted)
+    .await?;
+  state.hub.publish(
+    [user],
+    &GatewayEvent::UnreadUpdate {
+      conversation_id: conversation,
+      unread_count: row.unread_count,
+      mention_count: row.mention_count,
+    },
+  );
+  Ok(())
 }
 
 /// The caller must be a member and `thread` must be the root message of a thread in the conversation.

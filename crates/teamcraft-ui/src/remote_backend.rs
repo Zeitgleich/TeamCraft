@@ -821,6 +821,10 @@ impl ChatBackend for RemoteChat {
     self.mirror.borrow().snapshot.users.clone()
   }
 
+  fn live_snapshot(&self) -> Option<teamcraft_client_api::live::LiveSnapshot> {
+    self.mirror.borrow().snapshot.maybe_live.clone()
+  }
+
   fn spaces(&self) -> Vec<Space> {
     self.mirror.borrow().snapshot.spaces.clone()
   }

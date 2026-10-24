@@ -986,6 +986,7 @@ impl Core {
       message_counts,
       last_activity,
       security: self.security_snapshot()?,
+      maybe_live: backend.live_snapshot(),
     })
   }
 

@@ -289,6 +289,47 @@ impl Database {
       .collect()
   }
 
+  /// Unread and mention counts of one conversation for one member (zero when they are not a member
+  /// or read everything), counted like [`Self::conversation_unread_counts`]. Cheap enough to run
+  /// whenever the member's read position moves.
+  pub async fn conversation_unread_count(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    max_counted: u32,
+  ) -> Result<ConversationUnreadRow, DbError> {
+    let maybe_row = sqlx::query!(
+      r#"SELECT counted.unread AS "unread!",
+                counted.mentions AS "mentions!"
+         FROM memberships ms
+         CROSS JOIN LATERAL (
+           SELECT COUNT(*) AS unread,
+                  COUNT(*) FILTER (WHERE ms.user_id = ANY(newest.mentioned_user_ids)) AS mentions
+           FROM (
+             SELECT m.mentioned_user_ids
+             FROM messages m
+             WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL
+               AND m.sender_user_id <> ms.user_id
+               AND m.id > COALESCE(ms.last_read_message_id, 0)
+               AND m.id >= tc_snowflake_floor(ms.joined_at)
+             ORDER BY m.id DESC
+             LIMIT $3
+           ) newest
+         ) counted
+         WHERE ms.conversation_id = $1 AND ms.user_id = $2"#,
+      to_db(conversation),
+      to_db(user),
+      i64::from(max_counted),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(ConversationUnreadRow {
+      conversation,
+      unread_count: maybe_row.as_ref().map_or(0, |row| saturating_u32(row.unread)),
+      mention_count: maybe_row.as_ref().map_or(0, |row| saturating_u32(row.mentions)),
+    })
+  }
+
   /// Number of followed threads with unread replies and the unread replies that mention the user.
   pub async fn thread_unread_totals(&self, user: UserId) -> Result<ThreadUnreadTotals, DbError> {
     let row = sqlx::query!(

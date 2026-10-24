@@ -31,6 +31,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       CoreCommand::MarkRead { conversation } => {
         self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
+        // The badge clears now; the server's `unread_update` confirms it.
+        crate::read_state::note_unread(&self.store, conversation, 0, 0)?;
         let maybe_latest = self
           .store
           .messages(conversation, MessageFilter::All)?

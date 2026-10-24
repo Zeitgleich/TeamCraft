@@ -13,6 +13,32 @@ pub fn get_if_observed<T: Clone + Send + Sync + 'static>(signal: RwSignal<T>) ->
   }
 }
 
+/// Whether the page is visible: the browser tab in front, the desktop window not minimized or
+/// hidden to the tray (the webview reports both as `visibilitychange`). Timers whose result only
+/// shows on screen pause while it is hidden.
+pub fn use_page_visible() -> Signal<bool> {
+  let is_visible = RwSignal::new(is_document_visible());
+  // `visibilitychange` bubbles from the document to the window.
+  let handle = window_event_listener_untyped("visibilitychange", move |_| {
+    is_visible.set(is_document_visible());
+  });
+  on_cleanup(move || handle.remove());
+  is_visible.into()
+}
+
+/// Like [`use_interval_while`], for timers whose result only shows on screen: they pause while the
+/// page is hidden and run once right when it becomes visible again.
+pub fn use_interval_while_visible(interval_ms: u64, callback: impl Fn() + Clone + 'static) {
+  let is_visible = use_page_visible();
+  use_interval_while(interval_ms, move || is_visible.get(), callback);
+}
+
+fn is_document_visible() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .is_none_or(|document| !document.hidden())
+}
+
 /// Runs `callback` every `interval_ms` until the current scope is dropped.
 pub fn use_interval(interval_ms: u64, callback: impl Fn() + 'static) {
   use std::time::Duration;

@@ -122,6 +122,9 @@ pub struct ClientSettings {
   /// Show messages from before senders signed them (their sender is only "some member"). Off by
   /// default: a removed member could otherwise keep writing in anyone's name (security review A10).
   pub accept_unsigned_messages: bool,
+  /// How many people's announced presence the core keeps for the UI (the newest announcements);
+  /// a UI that fell further behind reads presence from the server again.
+  pub max_announced_presence: usize,
 }
 
 pub struct Client<A, S> {
@@ -148,6 +151,9 @@ pub struct Client<A, S> {
   /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
   /// sends into the others only after catching up (e2ee.md §4.6).
   mls_current: std::collections::BTreeSet<ConversationId>,
+  /// Events of a resume replay still to come: the counters are read once it has drained, because
+  /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
+  maybe_replay_left: Option<u64>,
 }
 
 impl Default for ClientSettings {
@@ -173,6 +179,7 @@ impl Default for ClientSettings {
       workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       maybe_attestation: None,
       accept_unsigned_messages: false,
+      max_announced_presence: 500,
     }
   }
 }
@@ -210,6 +217,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
     };
     // Startup: removal records of the user's devices count from the start, and this device's own

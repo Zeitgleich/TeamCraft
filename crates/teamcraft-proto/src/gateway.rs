@@ -174,6 +174,14 @@ pub enum GatewayEvent {
     user_id: UserId,
     message_id: MessageId,
   },
+  /// The user's unread and mention counts of a conversation changed because their read position
+  /// moved (on any of their devices). Sent only to that user. New messages raise the counts without
+  /// this event: clients count them from `message_create` (notifications.md, "Unread counts").
+  UnreadUpdate {
+    conversation_id: ConversationId,
+    unread_count: u32,
+    mention_count: u32,
+  },
   /// The user's notification settings (DND schedule and overrides, push mode) changed on another
   /// device; refetch `GET /me/notification-settings`. Sent only to that user.
   NotificationSettingsUpdate,
@@ -380,6 +388,22 @@ mod tests {
     );
     let future_frame: GatewayServerMessage = serde_json::from_str(r#"{"type":"maintenance"}"#).unwrap();
     assert_eq!(future_frame, GatewayServerMessage::Unknown);
+  }
+
+  #[test]
+  fn unread_update_has_a_stable_wire_format() {
+    let event = GatewayEvent::UnreadUpdate {
+      conversation_id: conversation(),
+      unread_count: 3,
+      mention_count: 1,
+    };
+    let json = r#"{"type":"unread_update","conversation_id":"7","unread_count":3,"mention_count":1}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert_eq!(serde_json::from_str::<GatewayEvent>(json).unwrap(), event);
+    // Older clients that don't know the event yet skip it.
+    let unknown: GatewayEvent =
+      serde_json::from_str(r#"{"type":"unread_update_v2","conversation_id":"7"}"#).unwrap();
+    assert_eq!(unknown, GatewayEvent::Unknown);
   }
 
   #[test]

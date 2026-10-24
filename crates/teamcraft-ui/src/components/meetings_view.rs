@@ -15,10 +15,11 @@ use crate::meetings::{
   ExternalInvitee, FormError, MeetingsHub, Repeat, ScheduleForm, hosts_lobby, is_over, my_rsvp,
 };
 use crate::model::{ConversationId, UserId};
-use crate::reactive::use_interval;
+use crate::reactive::use_interval_while_visible;
 use crate::state::{AppState, Overlay, use_app_state};
 
-/// How often the list and the lobbies are reloaded while the screen is open.
+/// How often the list and the lobbies are reloaded while the screen is open and visible (guests
+/// waiting in a lobby show up without a reload; `meeting_update` events cover the rest).
 const REFRESH_MS: u64 = 10_000;
 /// A first meeting suggestion starts at the next full hour, at least this far ahead.
 const MIN_LEAD_MS: i64 = 10 * 60_000;
@@ -33,7 +34,7 @@ pub fn MeetingsView() -> impl IntoView {
   let me = state.me().id;
   let reload = move || spawn_local(async move { hub.refresh(me, now_ms()).await });
   reload();
-  use_interval(REFRESH_MS, reload);
+  use_interval_while_visible(REFRESH_MS, reload);
 
   let start_now = move |_| {
     spawn_local(async move {
