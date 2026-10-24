@@ -187,6 +187,9 @@ pub struct ContactKeys {
   /// Set when the server now presents another identity key (e2ee.md §3: shown, never trusted silently).
   #[serde(default)]
   pub maybe_new_fingerprint: Option<String>,
+  /// The identity provider attested the pinned key (otherwise it was trusted on first use).
+  #[serde(default)]
+  pub is_attested: bool,
 }
 
 impl ChatSnapshot {
@@ -413,6 +416,13 @@ pub enum ChatAction {
     owners: Vec<UserId>,
     #[serde(default)]
     admins: Vec<UserId>,
+  },
+  /// Signs and publishes the admin roster as the next version (owners only, admin.md §2.3). The
+  /// core refuses a roster without an owner and a signer who isn't an owner.
+  PublishRoster {
+    /// The roster version the editor started from; the core signs nothing if a newer one arrived.
+    base_version: u64,
+    members: Vec<crate::admin::RosterEntry>,
   },
   /// Wraps the key backup with a new recovery passphrase (the old one stops working for recovery).
   ChangePassphrase {

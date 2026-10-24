@@ -165,6 +165,8 @@ impl AdminBackend for MockBackend {
         user: crate::backend::ChatBackend::me(self).id,
         maybe_last_signed_at: Some(self.now - 3 * DAY),
       }],
+      version: 1,
+      admins: Vec::new(),
       maybe_expires_at: Some(self.now + 27 * DAY),
       recommended_minimum: self.ops.borrow().policy.owners.recommended_minimum,
       warning_lead_ms: 7 * DAY,

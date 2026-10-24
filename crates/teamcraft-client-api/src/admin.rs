@@ -206,7 +206,13 @@ pub enum PolicyBlocker {
 /// The owners of the roster this device verified, for the console's owner warnings (admin.md §2.3).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OwnerRosterStatus {
+  /// The verified roster's version, the base of an edit.
+  #[serde(default)]
+  pub version: u64,
   pub owners: Vec<OwnerSigning>,
+  /// Admins of the verified roster (not owners).
+  #[serde(default)]
+  pub admins: Vec<UserId>,
   /// When member clients stop accepting the admins unless an owner signs the roster again; `None`
   /// for a roster from before signing times.
   #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +231,122 @@ pub struct OwnerSigning {
   pub maybe_last_signed_at: Option<TimestampMs>,
 }
 
+/// A role in the signed admin roster (admin.md §2.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RosterRoleChoice {
+  Owner,
+  Admin,
+}
+
+/// One person of a roster an owner signs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RosterEntry {
+  pub user: UserId,
+  pub role: RosterRoleChoice,
+}
+
+/// How a proposed roster differs from the signed one, per person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterChange {
+  Add {
+    user: UserId,
+    role: RosterRoleChoice,
+  },
+  /// The person stays in the roster with another role (promotion or demotion).
+  ChangeRole {
+    user: UserId,
+    role: RosterRoleChoice,
+  },
+  Remove {
+    user: UserId,
+  },
+}
+
+/// Why a proposed roster can't be signed as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterProblem {
+  /// Nobody could sign the next roster (the core refuses it too, `last_owner`).
+  NoOwner,
+}
+
+/// A roster as an ordered list of entries: owners first, each person once (the first role wins).
+pub fn normalized_roster(entries: &[RosterEntry]) -> Vec<RosterEntry> {
+  let mut seen = std::collections::HashSet::new();
+  let mut unique: Vec<RosterEntry> = entries
+    .iter()
+    .filter(|entry| seen.insert(entry.user))
+    .copied()
+    .collect();
+  unique.sort_by_key(|entry| entry.role);
+  unique
+}
+
+/// The entries of the signed roster in `status`.
+pub fn signed_roster(status: &OwnerRosterStatus) -> Vec<RosterEntry> {
+  let owners = status.owners.iter().map(|owner| RosterEntry {
+    user: owner.user,
+    role: RosterRoleChoice::Owner,
+  });
+  let admins = status.admins.iter().map(|user| RosterEntry {
+    user: *user,
+    role: RosterRoleChoice::Admin,
+  });
+  normalized_roster(&owners.chain(admins).collect::<Vec<_>>())
+}
+
+/// The roster the identity provider's role holders describe; owners win over admins.
+pub fn roster_from_roles(owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntry> {
+  let entries: Vec<RosterEntry> = owners
+    .iter()
+    .map(|user| RosterEntry {
+      user: *user,
+      role: RosterRoleChoice::Owner,
+    })
+    .chain(admins.iter().map(|user| RosterEntry {
+      user: *user,
+      role: RosterRoleChoice::Admin,
+    }))
+    .collect();
+  normalized_roster(&entries)
+}
+
+/// What signing `proposed` would change compared with `signed`, in a stable order.
+pub fn roster_changes(signed: &[RosterEntry], proposed: &[RosterEntry]) -> Vec<RosterChange> {
+  let role_in = |roster: &[RosterEntry], user: UserId| {
+    roster
+      .iter()
+      .find(|entry| entry.user == user)
+      .map(|entry| entry.role)
+  };
+  let mut changes: Vec<RosterChange> = proposed
+    .iter()
+    .filter_map(|entry| match role_in(signed, entry.user) {
+      None => Some(RosterChange::Add {
+        user: entry.user,
+        role: entry.role,
+      }),
+      Some(role) if role != entry.role => Some(RosterChange::ChangeRole {
+        user: entry.user,
+        role: entry.role,
+      }),
+      Some(_) => None,
+    })
+    .collect();
+  changes.extend(
+    signed
+      .iter()
+      .filter(|entry| role_in(proposed, entry.user).is_none())
+      .map(|entry| RosterChange::Remove { user: entry.user }),
+  );
+  changes
+}
+
+/// Whether `proposed` may be signed.
+pub fn roster_problem(proposed: &[RosterEntry]) -> Option<RosterProblem> {
+  (!proposed.iter().any(|entry| entry.role == RosterRoleChoice::Owner)).then_some(RosterProblem::NoOwner)
+}
+
 /// Something about the owners the console should point out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerWarning {
@@ -240,8 +362,22 @@ pub enum OwnerWarning {
 /// a stable error code (the core puts it first). Other errors are shown as they are.
 pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
   let last_owner = format!("{}:", teamcraft_proto::ErrorCode::LastOwner.as_str());
-  detail.contains(&last_owner).then_some("admin-error-last-owner")
+  if detail.contains(&last_owner) {
+    return Some("admin-error-last-owner");
+  }
+  if detail.contains(&format!("{ROSTER_BASE_CODE}:")) {
+    return Some("admin-error-roster-changed");
+  }
+  detail
+    .contains(&format!("{NOT_AN_OWNER_CODE}:"))
+    .then_some("admin-error-not-an-owner")
 }
+
+/// Stable code that starts the core's refusal to sign a roster or policy for a non-owner.
+pub const NOT_AN_OWNER_CODE: &str = "not_an_owner";
+
+/// Stable code that starts the core's refusal to sign a roster edited from an older version.
+pub const ROSTER_BASE_CODE: &str = "roster_changed";
 
 impl OwnerRosterStatus {
   /// The warnings at `now`, most urgent first.
@@ -410,6 +546,112 @@ mod tests {
       Some("admin-error-last-owner")
     );
     assert_eq!(admin_error_i18n_key("server answered 500: oops"), None);
+    assert_eq!(
+      admin_error_i18n_key("not_an_owner: only owners sign the roster"),
+      Some("admin-error-not-an-owner")
+    );
+    assert_eq!(
+      admin_error_i18n_key("roster_changed: another owner changed the roster meanwhile"),
+      Some("admin-error-roster-changed")
+    );
+  }
+
+  mod roster_edits {
+    use super::*;
+    use crate::model::Id;
+
+    #[test]
+    fn adding_an_owner_and_an_admin() {
+      let signed = vec![owner(1)];
+      let proposed = normalized_roster(&[owner(1), admin(3), owner(2)]);
+      assert_eq!(proposed, vec![owner(1), owner(2), admin(3)], "owners first");
+      assert_eq!(
+        roster_changes(&signed, &proposed),
+        vec![
+          RosterChange::Add {
+            user: user(2),
+            role: RosterRoleChoice::Owner
+          },
+          RosterChange::Add {
+            user: user(3),
+            role: RosterRoleChoice::Admin
+          },
+        ]
+      );
+      assert_eq!(roster_problem(&proposed), None);
+    }
+
+    #[test]
+    fn demoting_and_removing() {
+      let signed = vec![owner(1), owner(2), admin(3)];
+      let proposed = vec![owner(2), admin(1)];
+      assert_eq!(
+        roster_changes(&signed, &proposed),
+        vec![
+          RosterChange::ChangeRole {
+            user: user(1),
+            role: RosterRoleChoice::Admin
+          },
+          RosterChange::Remove { user: user(3) },
+        ]
+      );
+    }
+
+    #[test]
+    fn a_roster_without_an_owner_is_a_problem() {
+      assert_eq!(roster_problem(&[admin(1)]), Some(RosterProblem::NoOwner));
+      assert_eq!(roster_problem(&[]), Some(RosterProblem::NoOwner));
+    }
+
+    #[test]
+    fn identity_provider_roles_become_a_roster() {
+      let proposed = roster_from_roles(&[user(2)], &[user(2), user(4)]);
+      assert_eq!(
+        proposed,
+        vec![owner(2), admin(4)],
+        "an owner who is also admin stays owner"
+      );
+      let status = OwnerRosterStatus {
+        version: 1,
+        owners: vec![OwnerSigning {
+          user: user(1),
+          maybe_last_signed_at: None,
+        }],
+        admins: vec![user(4)],
+        maybe_expires_at: None,
+        recommended_minimum: 2,
+        warning_lead_ms: 0,
+      };
+      assert_eq!(
+        roster_changes(&signed_roster(&status), &proposed),
+        vec![
+          RosterChange::Add {
+            user: user(2),
+            role: RosterRoleChoice::Owner
+          },
+          RosterChange::Remove { user: user(1) },
+        ]
+      );
+      assert!(roster_changes(&proposed, &proposed).is_empty());
+    }
+
+    fn user(raw: i64) -> UserId {
+      UserId::from_snowflake(crate::model::Snowflake::new(raw).unwrap())
+    }
+
+    fn owner(raw: i64) -> RosterEntry {
+      RosterEntry {
+        user: user(raw),
+        role: RosterRoleChoice::Owner,
+      }
+    }
+
+    fn admin(raw: i64) -> RosterEntry {
+      RosterEntry {
+        user: user(raw),
+        role: RosterRoleChoice::Admin,
+      }
+    }
   }
 
   mod owner_warnings {
@@ -468,6 +710,8 @@ mod tests {
 
     fn status(owners: i64, maybe_expires_at: Option<TimestampMs>, minimum: u8) -> OwnerRosterStatus {
       OwnerRosterStatus {
+        version: 1,
+        admins: Vec::new(),
         owners: (1..=owners)
           .map(|raw| OwnerSigning {
             user: UserId::from_snowflake(crate::model::Snowflake::new(raw).unwrap()),
