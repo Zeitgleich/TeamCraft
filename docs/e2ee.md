@@ -226,7 +226,9 @@ Result:
   put in the group; a person whose devices ran out of key packages can't be added either. The
   conversation (a DM, or a channel the person is added to) is made anyway and the server lists
   them; the adding device keeps a pending addition with the history choice it settled. It costs no
-  network while it waits: the person's first device (`device_add`) makes it due, and it is then
+  network while it waits: the person's first device (`device_add`) makes it due; a full sync (at
+  start, and after the gateway's resume window expired, when that event may have gone by) asks for
+  the device lists of up to 50 waiting people again, at most once per `rejoin_retry`. It is then
   committed like any add (the signed change is made when committed, so it is never stale). Without
   key packages it is retried after `device_add_stagger`, doubling up to `rejoin_retry_max`; when no
   device passes the checks (signed device list, credential) it isn't retried until the person's

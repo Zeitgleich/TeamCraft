@@ -181,6 +181,7 @@ impl PendingEnrollment {
       mls_current: Default::default(),
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
+      maybe_waiting_checked_at_ms: None,
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;

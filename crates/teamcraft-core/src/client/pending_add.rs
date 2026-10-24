@@ -22,6 +22,9 @@ use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
+/// People checked again per full sync at most ([`Client::recheck_waiting_additions`]).
+const MAX_WAITING_CHECKS: usize = 50;
+
 /// Why a user isn't in the encryption group yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +76,46 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       0,
     )?;
     Ok(true)
+  }
+
+  /// After a full sync (at start, and when the gateway's resume window had expired): asks the
+  /// server again whether people waiting for a device have one by now, since their `device_add`
+  /// may have gone by while this device was offline. One device list per person, at most
+  /// [`MAX_WAITING_CHECKS`] people, and not again within `rejoin_retry`. Returns how many woke.
+  pub async fn recheck_waiting_additions(&mut self) -> Result<usize, CoreError> {
+    let now = self.now_ms();
+    let interval_ms = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
+    if self
+      .maybe_waiting_checked_at_ms
+      .is_some_and(|checked| now.saturating_sub(checked) < interval_ms)
+    {
+      return Ok(0);
+    }
+    let mut waiting: Vec<UserId> = records::list_json::<PendingChange>(&self.store, Table::PendingChanges)?
+      .into_iter()
+      .filter_map(|change| match change {
+        PendingChange::AddUser {
+          user_id,
+          wait: UserAddWait::NoDevice | UserAddWait::Unverifiable,
+          maybe_not_before_ms: None,
+          ..
+        } => Some(user_id),
+        _ => None,
+      })
+      .collect();
+    waiting.sort();
+    waiting.dedup();
+    waiting.truncate(MAX_WAITING_CHECKS);
+    let mut woken = 0;
+    for user in waiting {
+      if !self.api.list_user_devices(user).await?.devices.is_empty() {
+        self.wake_user_additions(user)?;
+        woken += 1;
+      }
+    }
+    // Only after all answered: a sync cut short checks again next time.
+    self.maybe_waiting_checked_at_ms = Some(now);
+    Ok(woken)
   }
 
   /// `user` registered a device: their waiting additions are due now.

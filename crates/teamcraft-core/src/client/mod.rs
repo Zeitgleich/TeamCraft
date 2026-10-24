@@ -167,6 +167,9 @@ pub struct Client<A, S> {
   /// When this device last tried to join each conversation's group as a further device (backs
   /// off while waiting for a member).
   member_join_attempts: HashMap<ConversationId, i64>,
+  /// When people waiting for a first device were last checked after a full sync
+  /// ([`Client::recheck_waiting_additions`]).
+  maybe_waiting_checked_at_ms: Option<i64>,
   /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
   /// sends into the others only after catching up (e2ee.md §4.6).
   mls_current: std::collections::BTreeSet<ConversationId>,
@@ -243,6 +246,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       mls_current: Default::default(),
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
+      maybe_waiting_checked_at_ms: None,
     };
     // Startup: removal records of the user's devices count from the start, and this device's own
     // (also from older versions) are shared.

@@ -44,6 +44,51 @@ async fn a_dm_with_somebody_without_a_device_adds_them_when_their_first_device_a
 }
 
 #[tokio::test]
+async fn a_first_device_missed_while_offline_is_found_by_the_next_full_sync() {
+  let server = FakeServer::new();
+  // Checked on every full sync (the test's clock stands still).
+  let no_interval = teamcraft_core::ClientSettings {
+    rejoin_retry: Duration::ZERO,
+    ..common::settings()
+  };
+  let mut alice = Peer::enroll_with_settings(&server, "Alice", no_interval).await;
+  let bob_api = server.add_user("Bob");
+  let bob_id = bob_api.user_id();
+  let dm = alice.client.open_dm(bob_id).await.unwrap();
+  // Nothing to find yet: the check costs one device list and wakes nobody.
+  assert_eq!(alice.client.recheck_waiting_additions().await.unwrap(), 0);
+
+  // Bob sets up the app while Alice's gateway is gone beyond its resume window.
+  server.drop_gateways(alice.client.user_id());
+  let mut bob = Peer::enroll_as(bob_api, "Bob").await;
+
+  // The next full sync finds Bob's device without the missed event and adds him.
+  alice.client.full_sync().await.unwrap();
+  assert!(
+    pending_user_additions(alice.store.as_ref(), dm)
+      .unwrap()
+      .is_empty()
+  );
+  bob.client.full_sync().await.unwrap();
+  assert!(bob.client.has_group(dm).unwrap());
+}
+
+#[tokio::test]
+async fn waiting_people_are_checked_again_at_most_once_per_interval() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob_api = server.add_user("Bob");
+  let dm = alice.client.open_dm(bob_api.user_id()).await.unwrap();
+  assert_eq!(alice.client.recheck_waiting_additions().await.unwrap(), 0);
+  server.drop_gateways(alice.client.user_id());
+  let _bob = Peer::enroll_as(bob_api, "Bob").await;
+
+  // Within `rejoin_retry` of the last check nothing is asked, so Bob still waits.
+  assert_eq!(alice.client.recheck_waiting_additions().await.unwrap(), 0);
+  assert_eq!(pending_user_additions(alice.store.as_ref(), dm).unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn a_dm_with_somebody_who_has_devices_needs_no_waiting() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
