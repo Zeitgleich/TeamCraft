@@ -148,35 +148,30 @@ pub async fn add_member(
   })
 }
 
-/// Removes a member, or leaves when `user_id` is the caller.
+/// Checks that the caller may remove `user_id` (or leave), without changing anything. Clients ask
+/// before they commit the MLS removal, so the group never drops somebody the server then refuses
+/// to remove (e2ee.md §4.6, removal order).
+pub async fn check_removal(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+  user_id: UserId,
+) -> Result<(), ApiError> {
+  authorize_removal(state, caller, id, user_id).await.map(|_| ())
+}
+
+/// Removes a member, or leaves when `user_id` is the caller. Idempotent: removing somebody who is
+/// no longer a member succeeds, so a retry after a lost answer or a second admin doing the same
+/// finishes instead of failing.
 pub async fn remove_member(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: ConversationId,
   user_id: UserId,
 ) -> Result<(), ApiError> {
-  let access = load_conversation(state, caller, id).await?;
-  ensure_open_channel_for_leaving(&access)?;
-  if user_id != caller.user.id {
-    require(state, caller, Permission::ManageMembers, &access.target())?;
-  }
-  let members = state.database.list_conversation_members(id).await?;
-  let Some(target) = members.iter().find(|m| m.user.id == user_id) else {
-    return Err(ApiError::user_not_found());
+  let Some(members) = authorize_removal(state, caller, id, user_id).await? else {
+    return Ok(());
   };
-  // Moderators remove members; removing a moderator or an admin takes the right to manage roles.
-  if user_id != caller.user.id && is_privileged(&target.role) {
-    require(state, caller, Permission::ManageChannelRoles, &access.target())?;
-  }
-  if target.role == ChannelRole::Admin
-    && members.len() > 1
-    && state.database.count_channel_admins(id).await? <= 1
-  {
-    return Err(ApiError::Conflict(
-      "make another member channel admin first".into(),
-    ));
-  }
-
   state.database.remove_conversation_member(id, user_id).await?;
   if user_id != caller.user.id {
     audit::record(
@@ -343,6 +338,38 @@ pub async fn set_read_position(
   )
   .await?;
   Ok(())
+}
+
+/// The permission checks of a removal. `None` if `user_id` isn't a member (nothing left to do),
+/// otherwise the current members.
+async fn authorize_removal(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+  user_id: UserId,
+) -> Result<Option<Vec<teamcraft_db::ConversationMember>>, ApiError> {
+  let access = load_conversation(state, caller, id).await?;
+  ensure_open_channel_for_leaving(&access)?;
+  if user_id != caller.user.id {
+    require(state, caller, Permission::ManageMembers, &access.target())?;
+  }
+  let members = state.database.list_conversation_members(id).await?;
+  let Some(target) = members.iter().find(|m| m.user.id == user_id) else {
+    return Ok(None);
+  };
+  // Moderators remove members; removing a moderator or an admin takes the right to manage roles.
+  if user_id != caller.user.id && is_privileged(&target.role) {
+    require(state, caller, Permission::ManageChannelRoles, &access.target())?;
+  }
+  if target.role == ChannelRole::Admin
+    && members.len() > 1
+    && state.database.count_channel_admins(id).await? <= 1
+  {
+    return Err(ApiError::Conflict(
+      "make another member channel admin first".into(),
+    ));
+  }
+  Ok(Some(members))
 }
 
 fn ensure_open_channel_for_leaving(access: &ConversationAccess) -> Result<(), ApiError> {

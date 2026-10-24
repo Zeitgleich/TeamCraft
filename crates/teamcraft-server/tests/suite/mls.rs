@@ -370,6 +370,62 @@ mod welcomes {
   }
 }
 
+/// e2ee.md §4.6, removal order: the remover commits the MLS removal first, then drops the server's
+/// membership. What the removed member can still get from the server afterwards.
+mod removal {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_removed_member_gets_nothing_of_the_next_epoch() {
+    let app = app!();
+    let g = group(&app).await;
+    let dave_id = user_id(&app, &g.dave).await;
+    let alice = owner();
+
+    // Carol commits Dave's removal (no welcome for him), then the owner drops his membership.
+    let removal = commit(&app, &g.carol, &g.channel, &g.carol_device, 0, json!([])).await;
+    assert_eq!(removal.status, StatusCode::CREATED, "{}", removal.body);
+    let removed = app
+      .delete(&alice, &format!("/conversations/{}/members/{dave_id}", g.channel))
+      .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT, "{}", removed.body);
+
+    // Nothing of the queue, the group information or the next epoch reaches him.
+    for path in ["mls", "mls/group-info"] {
+      let reply = app
+        .get(&g.dave, &format!("/conversations/{}/{path}", g.channel))
+        .await;
+      assert!(
+        matches!(reply.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+        "{path}: {}",
+        reply.status
+      );
+    }
+    let next = commit(
+      &app,
+      &g.carol,
+      &g.channel,
+      &g.carol_device,
+      1,
+      json!([{"device_id": g.dave_device, "welcome": b64("welcome-for-dave")}]),
+    )
+    .await;
+    assert_eq!(next.status, StatusCode::BAD_REQUEST, "{}", next.body);
+    let waiting = app
+      .get(&g.dave, &format!("/devices/{}/welcomes", g.dave_device))
+      .await;
+    assert_eq!(waiting.body["messages"], json!([]));
+    // Nor can he commit or post into the group any more.
+    let own = commit(&app, &g.dave, &g.channel, &g.dave_device, 1, json!([])).await;
+    assert!(
+      matches!(own.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+      "{}",
+      own.status
+    );
+    app.stop().await;
+  }
+}
+
 mod messages {
   use super::*;
 
