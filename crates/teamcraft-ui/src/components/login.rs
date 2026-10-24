@@ -42,7 +42,7 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
       SessionState::NeedsServer { maybe_address, maybe_problem } => {
         view! { <ServerEntryScreen maybe_address=maybe_address maybe_problem=maybe_problem control=control /> }.into_any()
       },
-      SessionState::ConfirmServer(check) => view! { <ServerConfirmScreen check=check control=control /> }.into_any(),
+      SessionState::ConfirmServer(check) => view! { <ServerConfirmScreen check=*check control=control /> }.into_any(),
       SessionState::SignedOut(problem) => view! { <LoginScreen problem=problem control=control /> }.into_any(),
       SessionState::SigningIn => view! { <SigningInScreen control=control /> }.into_any(),
       SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost } => {

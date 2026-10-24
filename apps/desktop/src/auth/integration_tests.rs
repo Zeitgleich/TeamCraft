@@ -44,7 +44,11 @@ async fn login_restore_api_and_logout_against_keycloak() {
   assert_eq!(me.status, 200, "{}", me.body);
   assert!(me.body.contains("\"username\":\"alice\""), "{}", me.body);
   assert!(
-    store.load().await.expect("load").is_some(),
+    store
+      .load(&DesktopConfig::from_env().token_key())
+      .await
+      .expect("load")
+      .is_some(),
     "refresh token was persisted"
   );
 
@@ -57,7 +61,13 @@ async fn login_restore_api_and_logout_against_keycloak() {
   );
 
   restarted.logout().await.expect("logout");
-  assert!(store.load().await.expect("load").is_none());
+  assert!(
+    store
+      .load(&DesktopConfig::from_env().token_key())
+      .await
+      .expect("load")
+      .is_none()
+  );
   assert!(matches!(
     restarted.api_get("/api/v1/me").await,
     Err(AuthError::NotSignedIn)

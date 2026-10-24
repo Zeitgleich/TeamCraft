@@ -474,8 +474,9 @@ impl<S: TokenStore> AuthService<S> {
     })
   }
 
-  /// The current access token as text, refreshed when needed. For the in-process client core only:
-  /// the webview never gets it.
+  /// The current access token as text, refreshed when needed (tests against the dev stack; the
+  /// app uses [`Self::server_bearer_token`]).
+  #[cfg(all(test, feature = "integration"))]
   pub async fn bearer_token(&self) -> Result<String, AuthError> {
     Ok(self.server_bearer_token().await?.1)
   }

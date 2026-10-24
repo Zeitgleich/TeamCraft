@@ -28,7 +28,7 @@ pub enum SessionState {
     maybe_problem: Option<ServerProblem>,
   },
   /// Desktop: the server answered; the user confirms its name and host before signing in.
-  ConfirmServer(ServerCheck),
+  ConfirmServer(Box<ServerCheck>),
   SignedOut(Option<LoginProblem>),
   /// The identity provider is open in the browser.
   SigningIn,
@@ -133,7 +133,7 @@ impl SessionControl {
       let outcome = tauri::server_check(&address).await;
       control.is_checking_server.set(false);
       control.state.set(match outcome {
-        Ok(check) => SessionState::ConfirmServer(check),
+        Ok(check) => SessionState::ConfirmServer(Box::new(check)),
         Err(problem) => SessionState::NeedsServer {
           maybe_address: Some(address),
           maybe_problem: Some(problem),

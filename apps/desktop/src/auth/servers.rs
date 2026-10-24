@@ -74,7 +74,7 @@ impl ServerState {
   /// The account to start with: the active one, unless the managed configuration forbids its
   /// server. A forbidden one is forgotten and returned as `Err`, so its tokens can be deleted;
   /// the managed server is offered instead.
-  pub fn startup_account(&self) -> Result<Option<ServerProfile>, ServerProfile> {
+  pub fn startup_account(&self) -> Result<Option<ServerProfile>, Box<ServerProfile>> {
     let Some(active) = self.directory.active() else {
       return Ok(None);
     };
@@ -85,7 +85,7 @@ impl ServerState {
     if let Err(error) = self.directory.forget_active() {
       tracing::warn!(%error, "could not update the account list");
     }
-    Err(active)
+    Err(Box::new(active))
   }
 }
 
