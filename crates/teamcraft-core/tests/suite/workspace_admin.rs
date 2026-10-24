@@ -332,6 +332,64 @@ async fn guests_are_added_with_the_guest_role_and_invitations_carry_the_message(
 }
 
 #[tokio::test]
+async fn space_settings_list_change_and_remove_members_and_withdraw_invitations() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob = server.add_user("Bob");
+  let space = alice.space().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.invite_to_space(SpaceInvite {
+    space,
+    email: "new@example.com".into(),
+    is_guest: false,
+    channels: Vec::new(),
+    maybe_expires_at: None,
+    maybe_message: None,
+  });
+  run_commands(&mut alice, &alice_ui).await;
+
+  assert_eq!(
+    alice_ui.space_members(space),
+    None,
+    "nothing until the settings ask"
+  );
+  alice_ui.refresh_space_roster(space);
+  run_commands(&mut alice, &alice_ui).await;
+  let members = alice_ui.space_members(space).unwrap();
+  assert!(
+    members
+      .iter()
+      .any(|member| member.user == bob.user_id() && member.role == SpaceRole::Member)
+  );
+  let invites = alice_ui.space_invites(space);
+  assert_eq!(invites.len(), 1);
+  assert_eq!(invites[0].email, "new@example.com");
+
+  alice_ui.set_space_role(space, bob.user_id(), SpaceRole::SpaceAdmin);
+  run_commands(&mut alice, &alice_ui).await;
+  let bob_now = |ui: &dyn ChatBackend| {
+    ui.space_members(space)
+      .unwrap()
+      .into_iter()
+      .find(|member| member.user == bob.user_id())
+  };
+  assert_eq!(
+    bob_now(&alice_ui).map(|member| member.role),
+    Some(SpaceRole::SpaceAdmin)
+  );
+
+  alice_ui.remove_space_member(space, bob.user_id());
+  alice_ui.revoke_space_invite(space, invites[0].id);
+  run_commands(&mut alice, &alice_ui).await;
+  assert_eq!(
+    bob_now(&alice_ui),
+    None,
+    "the roster is reloaded after the removal"
+  );
+  assert!(alice_ui.space_invites(space).is_empty());
+}
+
+#[tokio::test]
 async fn the_people_of_my_spaces_are_known_without_a_shared_conversation() {
   let server = FakeServer::new();
   let alice = Peer::enroll(&server, "Alice").await;

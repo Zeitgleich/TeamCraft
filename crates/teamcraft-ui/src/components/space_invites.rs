@@ -706,6 +706,7 @@ mod tests {
       join_policy: JoinPolicy::Open,
       can_add_members,
       can_invite_guests,
+      can_manage_space: false,
     }
   }
 

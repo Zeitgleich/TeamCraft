@@ -439,6 +439,9 @@ pub struct BrowsableChannel {
   pub is_archived: bool,
   /// Contains people from outside the organization (guests).
   pub has_external_people: bool,
+  /// The category the channel is listed under in its space.
+  #[serde(default)]
+  pub maybe_category: Option<CategoryId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -620,6 +620,22 @@ pub enum ChatAction {
     users: Vec<UserId>,
     is_guest: bool,
   },
+  RefreshSpaceRoster {
+    space: SpaceId,
+  },
+  SetSpaceRole {
+    space: SpaceId,
+    user: UserId,
+    role: crate::model::SpaceRole,
+  },
+  RemoveSpaceMember {
+    space: SpaceId,
+    user: UserId,
+  },
+  RevokeSpaceInvite {
+    space: SpaceId,
+    invite: crate::model::InviteId,
+  },
   SetThreadFollowed {
     conversation: ConversationId,
     thread: ThreadId,
@@ -775,6 +791,10 @@ impl ChatAction {
         users,
         is_guest,
       } => backend.add_space_members(space, users, is_guest),
+      Self::RefreshSpaceRoster { space } => backend.refresh_space_roster(space),
+      Self::SetSpaceRole { space, user, role } => backend.set_space_role(space, user, role),
+      Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
+      Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
       Self::DeleteSavedSearch { id } => backend.delete_saved_search(id),
       original => return Some(original),
@@ -840,6 +860,12 @@ pub enum ChatQuery {
     space: SpaceId,
   },
   JoinableSpaces,
+  SpaceMembers {
+    space: SpaceId,
+  },
+  SpaceInvites {
+    space: SpaceId,
+  },
   Categories {
     space: SpaceId,
   },
@@ -931,6 +957,13 @@ pub enum ChatAnswer {
   },
   JoinableSpaces {
     spaces: Vec<crate::model::JoinableSpace>,
+  },
+  SpaceMembers {
+    #[serde(default)]
+    maybe_members: Option<Vec<crate::model::SpaceMember>>,
+  },
+  SpaceInvites {
+    invites: Vec<crate::model::PendingInvite>,
   },
   Categories {
     categories: Vec<CategoryInfo>,
@@ -1057,6 +1090,12 @@ impl ChatQuery {
       },
       Self::JoinableSpaces => ChatAnswer::JoinableSpaces {
         spaces: backend.joinable_spaces(),
+      },
+      Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
+        maybe_members: backend.space_members(space),
+      },
+      Self::SpaceInvites { space } => ChatAnswer::SpaceInvites {
+        invites: backend.space_invites(space),
       },
       Self::Categories { space } => ChatAnswer::Categories {
         categories: backend.categories(space),

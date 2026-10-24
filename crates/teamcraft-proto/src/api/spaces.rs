@@ -51,6 +51,10 @@ pub struct SpaceResponse {
   /// `can_add_members`.
   #[serde(default)]
   pub can_invite_guests: bool,
+  /// Whether the caller may change the space's properties (name, picture, join policy, archive).
+  /// A UI hint like `can_add_members`.
+  #[serde(default)]
+  pub can_manage_space: bool,
 }
 
 /// The picture of a space: a square PNG the server re-encoded from the upload
@@ -285,6 +289,7 @@ mod tests {
       member_count: 0,
       can_add_members: false,
       can_invite_guests: false,
+      can_manage_space: false,
     }
   }
 }

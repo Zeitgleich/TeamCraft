@@ -178,6 +178,8 @@ struct State {
   space_member_adds: Vec<(SpaceId, AddSpaceMemberRequest)>,
   /// Known users who are in no space until `add_space_member` adds them.
   space_outsiders: HashSet<UserId>,
+  /// Space roles other than plain member, set through `update_space_member`.
+  space_roles: HashMap<(SpaceId, UserId), SpaceRole>,
   /// The personal message of each invitation, in order (the response doesn't carry it).
   invite_messages: Vec<Option<String>>,
   /// Calls served by `list_call_history` to everybody who took part (newest first).
@@ -1319,7 +1321,11 @@ impl ServerApi for FakeServerApi {
         .filter(|user| !state.space_outsiders.contains(&user.id))
         .map(|user| SpaceMemberResponse {
           user: user.clone(),
-          role: SpaceRole::Member,
+          role: state
+            .space_roles
+            .get(&(space, user.id))
+            .cloned()
+            .unwrap_or(SpaceRole::Member),
           maybe_expires_at: None,
           maybe_sponsor_user_id: None,
         })
@@ -2153,6 +2159,7 @@ impl ServerApi for FakeServerApi {
         member_count: 1,
         can_add_members: true,
         can_invite_guests: true,
+        can_manage_space: true,
       };
       state.spaces.insert(id, space.clone());
       if let Some(key) = request.maybe_idempotency_key {
@@ -2280,6 +2287,59 @@ impl ServerApi for FakeServerApi {
       state.invites.push(invite.clone());
       state.invite_messages.push(request.maybe_message.clone());
       Ok(invite)
+    })
+  }
+
+  async fn list_invites(&self, space: SpaceId) -> Result<teamcraft_proto::ListInvitesResponse, ApiError> {
+    self.with(|state, _| {
+      Ok(teamcraft_proto::ListInvitesResponse {
+        invites: state
+          .invites
+          .iter()
+          .filter(|invite| invite.space_id == space)
+          .cloned()
+          .collect(),
+      })
+    })
+  }
+
+  async fn delete_invite(&self, space: SpaceId, invite: teamcraft_proto::InviteId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      let before = state.invites.len();
+      state
+        .invites
+        .retain(|candidate| !(candidate.id == invite && candidate.space_id == space));
+      if state.invites.len() == before {
+        return Err(ApiError::status(404, ErrorCode::InviteNotFound, "no such invite"));
+      }
+      Ok(())
+    })
+  }
+
+  async fn update_space_member(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    request: &teamcraft_proto::UpdateSpaceMemberRequest,
+  ) -> Result<SpaceMemberResponse, ApiError> {
+    self.with(|state, _| {
+      let summary = state.user(user)?.clone();
+      state.space_roles.insert((space, user), request.role.clone());
+      Ok(SpaceMemberResponse {
+        user: summary,
+        role: request.role.clone(),
+        maybe_expires_at: request.maybe_expires_at,
+        maybe_sponsor_user_id: None,
+      })
+    })
+  }
+
+  async fn remove_space_member(&self, space: SpaceId, user: UserId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      state.user(user)?;
+      state.space_roles.remove(&(space, user));
+      state.space_outsiders.insert(user);
+      Ok(())
     })
   }
 
@@ -3199,6 +3259,7 @@ impl State {
       member_count: 0,
       can_add_members: false,
       can_invite_guests: false,
+      can_manage_space: false,
     });
   }
 

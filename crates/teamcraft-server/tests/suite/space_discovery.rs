@@ -79,10 +79,12 @@ mod browsing {
     let as_admin = space_of(&app, &carol, &space).await;
     assert_eq!(as_admin["can_add_members"], json!(true));
     assert_eq!(as_admin["can_invite_guests"], json!(true));
+    assert_eq!(as_admin["can_manage_space"], json!(true));
     assert_eq!(as_admin["member_count"], json!(3));
     let as_member = space_of(&app, &dave, &space).await;
     assert_eq!(as_member["can_add_members"], json!(false));
     assert_eq!(as_member["can_invite_guests"], json!(false));
+    assert_eq!(as_member["can_manage_space"], json!(false));
 
     let reply = app
       .patch(&alice, &format!("/spaces/{space}"), json!({"is_archived": true}))

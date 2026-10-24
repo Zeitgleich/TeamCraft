@@ -5,9 +5,10 @@ use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, ConversationId, ConversationKind, ConversationResponse,
   ConversationVisibility, CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest,
-  CreateSpaceRequest, HistoryPolicy, IdempotencyKey, ListCategoriesResponse, ListConversationsResponse,
-  MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest,
-  UpdateConversationRequest, UpdateSpaceRequest, UserId,
+  CreateSpaceRequest, HistoryPolicy, IdempotencyKey, InviteId, ListCategoriesResponse,
+  ListConversationsResponse, ListInvitesResponse, MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole,
+  UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
+  UserId,
 };
 
 use super::Client;
@@ -295,7 +296,58 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_message,
     };
     self.api.create_invite(space, &request).await?;
+    self.refresh_space_invites(space).await
+  }
+
+  /// The space's members with their roles, kept for the space settings.
+  pub async fn refresh_space_roster(&mut self, space: SpaceId) -> Result<(), CoreError> {
+    let roster = self.api.list_space_members(space).await?;
+    records::put_json(&self.store, Table::SpaceRosters, &space.to_string(), &roster)?;
     Ok(())
+  }
+
+  /// The space's pending invitations. Only member managers may list them; for everybody else the
+  /// list is empty rather than an error.
+  pub async fn refresh_space_invites(&mut self, space: SpaceId) -> Result<(), CoreError> {
+    let invites = match self.api.list_invites(space).await {
+      Ok(invites) => invites,
+      Err(ApiError::Status {
+        status: 403 | 404, ..
+      }) => ListInvitesResponse { invites: Vec::new() },
+      Err(error) => return Err(error.into()),
+    };
+    records::put_json(&self.store, Table::SpaceInvites, &space.to_string(), &invites)?;
+    Ok(())
+  }
+
+  /// Changes a member's role in the space (member, guest, space admin).
+  pub async fn set_space_role(
+    &mut self,
+    space: SpaceId,
+    user: UserId,
+    role: SpaceRole,
+  ) -> Result<(), CoreError> {
+    let request = UpdateSpaceMemberRequest {
+      role,
+      maybe_expires_at: None,
+      clears_expiry: false,
+    };
+    self.api.update_space_member(space, user, &request).await?;
+    self.refresh_space_roster(space).await
+  }
+
+  /// Removes someone from the space; the server also takes them out of its channels, whose
+  /// members' clients then remove their devices from the encryption groups (e2ee.md §4.6).
+  pub async fn remove_space_member(&mut self, space: SpaceId, user: UserId) -> Result<(), CoreError> {
+    self.api.remove_space_member(space, user).await?;
+    self.refresh_space_roster(space).await?;
+    self.refresh_spaces().await
+  }
+
+  /// Withdraws a pending invitation.
+  pub async fn revoke_space_invite(&mut self, space: SpaceId, invite: InviteId) -> Result<(), CoreError> {
+    self.api.delete_invite(space, invite).await?;
+    self.refresh_space_invites(space).await
   }
 
   /// Adds people from the directory to a space, as members or guests. People already in the space
@@ -321,8 +373,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_first_error.get_or_insert(error);
       }
     }
-    // The member count and the people the user can find changed.
+    // The member count, the roster and the people the user can find changed.
     self.refresh_spaces().await?;
+    self.refresh_space_roster(space).await?;
     maybe_first_error.map_or(Ok(()), |error| Err(error.into()))
   }
 

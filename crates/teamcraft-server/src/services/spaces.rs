@@ -112,6 +112,7 @@ fn space_for_caller(state: &AppState, caller: &AuthenticatedUser, view: &SpaceVi
   SpaceResponse {
     can_add_members: may(Permission::ManageSpaceMembers),
     can_invite_guests: may(Permission::InviteGuest),
+    can_manage_space: may(Permission::ManageSpaceProperties),
     ..space_response(view)
   }
 }
