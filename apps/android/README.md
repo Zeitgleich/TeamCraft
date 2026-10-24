@@ -145,7 +145,12 @@ pass leads back to the entry. Everything of an account is keyed by the server's 
 "Change server" on the sign-in screen forgets the server's profile (local data stays); signing out
 keeps the server. The app only ever contacts servers the user entered or the managed configuration
 names, never one a server points to. Builds from before the server entry kept one unkeyed session
-and store: the first start removes them and the user signs in (and links the device) again.
+and store: the first start moves them aside to `legacy/` and the user signs in (and links the
+device) again. `auth/LegacySignOut.kt` then signs the old session out: when the user enters the
+server it belonged to (same identity provider and client), it unregisters the old device's push
+with the old session and revokes its refresh token; after 14 days without that server it revokes
+the token alone. Then `legacy/` is deleted. The core (`legacy_session`) decides which provider may
+get the token.
 
 A self-built app can set `teamcraft.defaultServer`: it is checked on first start and shown for
 confirmation like a managed server, but the user can still change it.

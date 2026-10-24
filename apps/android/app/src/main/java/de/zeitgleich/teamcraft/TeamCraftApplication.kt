@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.auth.AuthRepository
+import de.zeitgleich.teamcraft.auth.LegacySignOut
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
@@ -31,6 +32,7 @@ class AppGraph(context: Context) {
   val servers = ServerStore(context)
   val managedConfig = ManagedConfig(context)
   val auth = AuthRepository(context, servers)
+  val legacySignOut = LegacySignOut(context, servers)
   val core = CoreRepository(context, auth)
   val notifier = MessageNotifier(context)
   val mentionPrefs = MentionPrefs(context)
@@ -53,6 +55,8 @@ class TeamCraftApplication : Application() {
     // Before anything opens a session or a store: builds with a baked-in server kept them unkeyed.
     graph.servers.migrateLegacyLayout()
     graph.scope.launch(Dispatchers.IO) { graph.servers.removeLegacyTrash() }
+    // The old session's push and refresh token, once its server is known (#224).
+    graph.scope.launch { graph.legacySignOut.run(graph.servers.active()) }
     graph.segmentPrefetch.schedule()
     graph.readWatcher.start()
     graph.network.start()

@@ -282,12 +282,20 @@ final class SessionVault {
     }
   }
 
-  /// Deletes the session of a build before server entry; `true` if there was one (its account
-  /// then signs in again).
-  func removeLegacySession() -> Bool {
-    guard (try? keychain.read(Self.legacyAccount)) != nil else { return false }
+  /// The session of a build before server entry, kept until `LegacySignOut` signed it out.
+  func legacySession() -> OidcSession? {
+    guard let data = try? keychain.read(Self.legacyAccount) else { return nil }
+    return try? JSONDecoder().decode(OidcSession.self, from: data)
+  }
+
+  /// Whether a build before server entry left its session item (readable or not).
+  var hasLegacySession: Bool {
+    (try? keychain.read(Self.legacyAccount)) != nil
+  }
+
+  /// Deletes the session of a build before server entry.
+  func removeLegacySession() {
     try? keychain.delete(Self.legacyAccount)
-    return true
   }
 
   /// A valid access token, refreshed if it is about to expire; `nil` when signed out or the
