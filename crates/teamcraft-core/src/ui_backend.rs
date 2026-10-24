@@ -21,9 +21,9 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinableSpace,
-  MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space,
-  SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
+  JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction,
+  SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -136,6 +136,10 @@ pub enum CoreCommand {
   /// Presence and last seen of these people.
   RefreshPresence {
     users: Vec<UserId>,
+  },
+  /// Ask the server's directory for people matching the query (people page, quick switcher).
+  SearchDirectory {
+    query: String,
   },
   RefreshPrivacy,
   SetLastSeenVisibility {
@@ -351,7 +355,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .unwrap_or_default()
   }
 
-  fn to_user(&self, summary: &UserSummary) -> User {
+  pub(crate) fn to_user(&self, summary: &UserSummary) -> User {
     let maybe_presence: Option<PresenceState> = self.read(records::get_json(
       &self.store,
       Table::Presence,
@@ -367,6 +371,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
       is_guest: summary.kind == UserKind::Guest,
       is_bot: false,
       maybe_organization: summary.maybe_organization.clone(),
+      device_setup: match summary.maybe_has_devices {
+        Some(true) => DeviceSetup::HasDevices,
+        Some(false) => DeviceSetup::NoDevices,
+        None => DeviceSetup::Unknown,
+      },
     }
   }
 
@@ -685,6 +694,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         is_guest: false,
         is_bot: false,
         maybe_organization: None,
+        device_setup: DeviceSetup::HasDevices,
       })
   }
 
@@ -698,6 +708,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .values()
       .map(|summary| self.to_user(summary))
       .collect()
+  }
+
+  fn search_people(&self, query: &str) -> Vec<User> {
+    self.ui_search_people(query)
   }
 
   fn spaces(&self) -> Vec<Space> {
@@ -1074,6 +1088,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     if self.read(crate::client::is_queue_refused(&self.store, conversation)) {
       issues.push(MembershipIssue::GroupRefused);
     }
+    issues.extend(
+      self
+        .read(crate::client::pending_user_additions(&self.store, conversation))
+        .into_iter()
+        .map(|(user, wait)| match wait {
+          crate::client::UserAddWait::NoDevice => MembershipIssue::WaitingForFirstDevice { user },
+          crate::client::UserAddWait::NoKeyPackage => MembershipIssue::NoKeyPackage { user },
+          crate::client::UserAddWait::Unverifiable => MembershipIssue::DevicesUnverified { user },
+        }),
+    );
     issues
   }
 
@@ -1431,6 +1455,7 @@ mod tests {
       kind: teamcraft_proto::UserKind::Member,
       maybe_email: None,
       maybe_organization: None,
+      maybe_has_devices: None,
     };
     let direct = ConversationResponse {
       id: id(10),
@@ -1703,6 +1728,7 @@ mod tests {
         kind: teamcraft_proto::UserKind::Member,
         maybe_email: None,
         maybe_organization: None,
+        maybe_has_devices: None,
       };
       (backend, conversation, BTreeMap::from([(me.id, me)]))
     }

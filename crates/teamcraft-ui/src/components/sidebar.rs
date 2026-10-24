@@ -7,7 +7,6 @@ use crate::components::avatar::PresenceDot;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
 use crate::sections::{
@@ -103,11 +102,6 @@ pub fn Sidebar() -> impl IntoView {
           </button>
         </Show>
       </div>
-      <button class="jump-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
-        <Icon name=IconName::Search />
-        <span class="jump-label">{move || i18n.t("sidebar-jump")}</span>
-        <ShortcutKeys shortcut=QUICK_SWITCHER />
-      </button>
       <GlobalEntries />
       <div class="sidebar-scroll">
         {move || {
@@ -130,7 +124,7 @@ pub fn Sidebar() -> impl IntoView {
 }
 
 /// The entries that are not about one space: threads, activity, calls, meetings, people, saved
-/// items and search. Home and the space sidebar both start with them.
+/// items. Home and the space sidebar both start with them; search lives in the top bar.
 #[component]
 pub fn GlobalEntries() -> impl IntoView {
   let state = use_app_state();
@@ -215,15 +209,6 @@ pub fn GlobalEntries() -> impl IntoView {
       >
         <Icon name=IconName::Bookmark />
         <span class="sb-name">{move || i18n.t("sidebar-saved")}</span>
-      </button>
-      <button
-        class="sb-item"
-        class:current=move || state.view.get() == MainView::Search
-        aria-current=move || (state.view.get() == MainView::Search).then_some("page")
-        on:click=move |_| state.open_search(None)
-      >
-        <Icon name=IconName::Search />
-        <span class="sb-name">{move || i18n.t("sidebar-search")}</span>
       </button>
   }
 }

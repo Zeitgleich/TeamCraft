@@ -323,6 +323,7 @@ mod tests {
         kind: UserKind::Member,
         maybe_email: None,
         maybe_organization: None,
+        maybe_has_devices: None,
       };
       records::put_json(&store, Table::Users, &user.to_string(), &summary).unwrap();
     }

@@ -26,6 +26,7 @@ pub async fn search_users(
     .await?;
   let mut summaries: Vec<UserSummary> = users.iter().map(|user| user_summary(state, user)).collect();
   add_emails(state, caller, &mut summaries).await?;
+  add_device_presence(state, &mut summaries).await?;
   Ok(SearchUsersResponse { users: summaries })
 }
 
@@ -50,6 +51,7 @@ pub async fn get_user(
 ) -> Result<UserSummary, ApiError> {
   let mut summary = vec![user_summary(state, &visible_user(state, caller, id).await?)];
   add_emails(state, caller, &mut summary).await?;
+  add_device_presence(state, &mut summary).await?;
   summary
     .pop()
     .ok_or_else(|| ApiError::Internal("summary missing".into()))
@@ -68,6 +70,17 @@ async fn add_emails(
   let emails = state.database.get_user_emails(&ids).await?;
   for summary in summaries {
     summary.maybe_email = emails.get(&summary.id).cloned();
+  }
+  Ok(())
+}
+
+/// Marks who has a device, so the directory can tell who hasn't set up the app yet. Only for
+/// people the caller may see anyway; one query for the whole page.
+async fn add_device_presence(state: &AppState, summaries: &mut [UserSummary]) -> Result<(), ApiError> {
+  let ids: Vec<UserId> = summaries.iter().map(|summary| summary.id).collect();
+  let with_devices = state.database.users_with_active_devices(&ids).await?;
+  for summary in summaries {
+    summary.maybe_has_devices = Some(with_devices.contains(&summary.id));
   }
   Ok(())
 }

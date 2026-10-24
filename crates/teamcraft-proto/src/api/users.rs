@@ -29,6 +29,10 @@ pub struct UserSummary {
   /// depends on it.
   #[serde(rename = "organization", default, skip_serializing_if = "Option::is_none")]
   pub maybe_organization: Option<String>,
+  /// Whether the user has a device (set up the app). Only directory answers carry it; absent from
+  /// older servers and from member lists.
+  #[serde(rename = "has_devices", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_has_devices: Option<bool>,
 }
 
 /// `GET /api/v1/users?query=` – the directory. Guests only find people they share a conversation with.

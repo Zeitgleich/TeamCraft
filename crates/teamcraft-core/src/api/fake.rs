@@ -60,6 +60,8 @@ use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, 
 use crate::clock::{Clock, SystemClock};
 
 const PAGE_SIZE: usize = 50;
+/// People per directory answer (the server's default `max_directory_results`).
+const DIRECTORY_PAGE: usize = 50;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// The server's defaults: key packages are handed out while they stay valid this long, and count as
@@ -96,6 +98,7 @@ pub struct FakeGateway {
 #[derive(Default)]
 struct State {
   next_id: i64,
+  directory_searches: u64,
   users: BTreeMap<UserId, UserSummary>,
   devices: BTreeMap<DeviceId, Device>,
   identity_keys: HashMap<UserId, IdentityKeyResponse>,
@@ -292,6 +295,7 @@ impl FakeServer {
         kind: UserKind::Member,
         maybe_email: None,
         maybe_organization: None,
+        maybe_has_devices: None,
       },
     );
     drop(state);
@@ -351,6 +355,11 @@ impl FakeServer {
   /// How many gateway handshakes were refused for a bad token so far.
   pub fn gateway_refusal_count(&self) -> u64 {
     self.lock().gateway_refusals
+  }
+
+  /// How many directory searches (`GET /users?query=`) arrived so far.
+  pub fn directory_search_count(&self) -> u64 {
+    self.lock().directory_searches
   }
 
   /// How many gateway connections were opened so far.
@@ -927,6 +936,31 @@ impl ServerApi for FakeServerApi {
 
   async fn user(&self, user: UserId) -> Result<UserSummary, ApiError> {
     self.with(|state, _| state.user(user).cloned())
+  }
+
+  async fn search_users(&self, query: &str) -> Result<teamcraft_proto::SearchUsersResponse, ApiError> {
+    let needle = query.trim().to_lowercase();
+    self.with(|state, _| {
+      state.directory_searches += 1;
+      let mut users: Vec<UserSummary> = state
+        .users
+        .values()
+        .filter(|user| {
+          user.display_name.to_lowercase().contains(&needle)
+            || user
+              .maybe_username
+              .as_deref()
+              .is_some_and(|name| name.to_lowercase().contains(&needle))
+        })
+        .cloned()
+        .collect();
+      users.sort_by(|a, b| (&a.display_name, a.id).cmp(&(&b.display_name, b.id)));
+      users.truncate(DIRECTORY_PAGE);
+      for user in &mut users {
+        user.maybe_has_devices = Some(state.devices_of(user.id).next().is_some());
+      }
+      Ok(teamcraft_proto::SearchUsersResponse { users })
+    })
   }
 
   async fn register_device(&self, request: &RegisterDeviceRequest) -> Result<DeviceResponse, ApiError> {

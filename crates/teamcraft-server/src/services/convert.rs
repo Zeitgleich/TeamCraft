@@ -26,6 +26,7 @@ pub fn user_summary(state: &AppState, user: &User) -> UserSummary {
     kind: user.kind.clone(),
     maybe_email: None,
     maybe_organization: user.maybe_organization.clone(),
+    maybe_has_devices: None,
   }
 }
 

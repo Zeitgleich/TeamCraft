@@ -13,7 +13,7 @@ loader-failed-body = Check your connection, then try again.
 loader-retry = Try again
 
 ## Top bar and account menu
-search-placeholder = Search channels and people
+search-placeholder = Search
 account-menu-label = Account menu for { $name }, status { $status }
 status-menu-label = Account and status
 menu-settings = Settings
@@ -65,7 +65,6 @@ home-filter-people = People
 home-filter-groups = Groups
 dm-new = New message
 dm-options = List options
-dm-filter = Filter direct messages
 dm-filter-empty = No direct messages match.
 dm-sort = Sort
 dm-sort-recent = Newest first
@@ -83,7 +82,6 @@ dm-new-start-group = Start group
 
 ## Sidebar
 sidebar-label = Channels and direct messages
-sidebar-jump = Find or jump to…
 sidebar-threads = Threads
 sidebar-unreads = Unreads
 sidebar-favorites = Favorites
@@ -169,11 +167,24 @@ threads-empty = No threads to show.
 threads-select = Select a thread to read it here.
 
 ## Quick switcher
-switcher-title = Quick switcher
-switcher-input-label = Jump to a channel or conversation
-switcher-placeholder = Find or jump to…
+switcher-title = Search
+switcher-input-label = Search people, threads, channels, spaces and messages
+switcher-placeholder = Search people, channels and messages…
 switcher-results = Results
-switcher-empty = Nothing matches your search.
+switcher-empty = No results.
+switcher-group-recent = Recent
+switcher-group-people = People
+switcher-group-threads = Threads
+switcher-group-channels = Channels
+switcher-group-spaces = Spaces
+switcher-group-messages = Messages
+switcher-context-person = Person
+switcher-context-thread = Thread in { $channel }
+switcher-context-direct = Direct message
+switcher-context-group = Group message
+switcher-context-space = Space
+switcher-context-join = Join space
+switcher-all-messages = All messages for “{ $query }”
 switcher-hint-navigate = navigate
 switcher-hint-open = open
 switcher-hint-close = close
@@ -196,7 +207,7 @@ settings-join-leave = Show join and leave messages
 settings-unreads-group = Group unread channels at the top of the sidebar
 settings-advanced-stub = Advanced settings will appear here.
 
-shortcut-switcher = Open the quick switcher
+shortcut-switcher = Search everything
 shortcut-settings = Open settings
 shortcut-shortcuts = Show keyboard shortcuts
 shortcut-prev-next = Previous or next conversation
@@ -613,6 +624,9 @@ removal-unconfirmed = Your removal of { $name } from #{ $channel } isn't confirm
 removal-unconfirmed-remove = Remove again
 removal-unconfirmed-keep = Keep them
 group-refused = The server doesn't let this device read the encrypted group of this conversation. New messages may be missing.
+waiting-first-device = { $name } hasn't set up the app yet. Write anyway: { $name } is added to this conversation when signing in for the first time.
+devices-unverified = { $name } can't be added to the encryption: none of their devices could be verified. Ask { $name } to sign in again; a new device is tried by itself.
+waiting-key-package = { $name } can't be added to the encryption yet because none of their devices has keys left on the server. This is fixed once one of their devices is online again.
 key-changed-title = { $name }'s security key changed
 key-changed-body = This normally happens only after a full account reset. Check with { $name } through another channel before you share anything sensitive.
 key-verify = Compare keys
@@ -696,8 +710,6 @@ data-failed-body = The server answered, but your spaces and conversations could 
 data-retry = Try again
 
 ## Search
-sidebar-search = Search
-shortcut-search = Search messages
 switcher-search-messages = search messages
 search-title = Search
 search-input-label = Search messages
@@ -1233,6 +1245,7 @@ directory-people = People
 directory-groups = Groups
 directory-filter = Find a person
 directory-empty = Nobody found.
+directory-no-devices = hasn't set up the app yet
 directory-organization = Organization
 directory-all-organizations = All organizations
 groups-unavailable = User groups need a signed-in session.

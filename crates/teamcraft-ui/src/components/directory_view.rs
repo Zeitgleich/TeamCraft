@@ -9,14 +9,17 @@ use teamcraft_proto::{
 use crate::auth::ApiMethod;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::i18n::use_i18n;
-use crate::model::{User, UserId};
+use crate::model::{DeviceSetup, User, UserId};
 use crate::profiles::use_profiles;
+use crate::reactive::use_debounced;
 use crate::rest::RestClient;
 use crate::session::use_session;
 use crate::state::{Overlay, use_app_state};
 
 /// People shown at once; the filter narrows a larger workspace down.
 const MAX_ROWS: usize = 200;
+/// The directory on the server is asked once typing paused this long.
+const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DirectoryTab {
@@ -56,6 +59,7 @@ fn PeopleList() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let filter = RwSignal::new(String::new());
+  let directory_query = use_debounced(filter, DIRECTORY_DEBOUNCE_MS);
   // Empty: everybody; otherwise only people of this organization.
   let organization = RwSignal::new(String::new());
   let organizations = Memo::new(move |_| {
@@ -72,7 +76,10 @@ fn PeopleList() -> impl IntoView {
   let people = Memo::new(move |_| {
     let needle = filter.get().trim().to_lowercase();
     let selected = organization.get();
-    let mut all: Vec<User> = state.read(|backend| backend.users());
+    let query = directory_query.get();
+    // Who the app knows and the server's directory for the text (one page of it, never everybody):
+    // colleagues who share no space or conversation with the user yet are found too.
+    let mut all: Vec<User> = state.read(|backend| backend.search_people(query.trim()));
     all.retain(|user| !user.is_bot);
     if !selected.is_empty() {
       all.retain(|user| user.maybe_organization.as_deref() == Some(selected.as_str()));
@@ -140,6 +147,7 @@ fn PersonRow(user: User) -> impl IntoView {
     })
   };
   let is_me = id == state.me().id;
+  let no_devices = user.device_setup == DeviceSetup::NoDevices;
   view! {
     <li class="person-row">
       <button class="person-main" on:click=move |_| state.overlay.set(Overlay::UserProfile(id))>
@@ -147,6 +155,7 @@ fn PersonRow(user: User) -> impl IntoView {
         <span class="person-text">
           <span class="person-name" translate="no">{user.display_name.clone()}</span>
           <span class="person-facts" translate="no">{facts}</span>
+          {no_devices.then(|| view! { <span class="person-facts">{move || i18n.t("directory-no-devices")}</span> })}
         </span>
         <crate::components::profile_views::InMeetingBadge user=id />
         {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}

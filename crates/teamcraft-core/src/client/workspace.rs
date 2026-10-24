@@ -7,12 +7,13 @@ use teamcraft_crypto::membership::{MembershipAction, MembershipChange, SignedMem
 use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry};
 use teamcraft_proto::{
   AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ClientMessageId, ConversationId,
-  DeviceId, ErrorCode, Id, ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest, PresenceState,
-  UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
+  DeviceId, ErrorCode, HistoryPolicy, Id, ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest,
+  PresenceState, UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
 };
 
 use super::Client;
 use super::groups::{ADMIN_CHANGE_MAGIC, ChangeSource};
+use super::pending_add::UserAddWait;
 use super::removal::{RemovalProgress, RemovalRun, is_worth_retrying};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
@@ -103,6 +104,19 @@ pub(crate) enum PendingChange {
     #[serde(default)]
     not_before_ms: i64,
   },
+  /// A user this device added who had no device to add yet (none set up, or none with a key
+  /// package left); see [`super::pending_add`]. The server lists them already.
+  AddUser {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    history: HistoryPolicy,
+    wait: UserAddWait,
+    /// When to try next; `None` waits for the user's first device (`device_add`).
+    #[serde(default)]
+    maybe_not_before_ms: Option<i64>,
+    #[serde(default)]
+    attempts: u32,
+  },
 }
 
 /// The next step of a [`PendingChange::Removal`].
@@ -181,7 +195,7 @@ pub(crate) enum SharedKeys {
 }
 
 /// What became of a pending change in this round.
-enum PendingOutcome {
+pub(crate) enum PendingOutcome {
   Done,
   /// Keep it, possibly updated (not due yet, or retried later).
   Later(PendingChange),
@@ -191,6 +205,11 @@ impl PendingChange {
   /// Where a device's rejoin request waits ([`PendingChange::Rejoin`]).
   pub(crate) fn rejoin_key(conversation: ConversationId, device: DeviceId) -> String {
     format!("rejoin/{conversation}/{device}")
+  }
+
+  /// Where the addition of a user without a device waits ([`PendingChange::AddUser`]).
+  pub(crate) fn user_add_key(conversation: ConversationId, user: UserId) -> String {
+    format!("add_user/{conversation}/{user}")
   }
 
   /// Where a removal this device started waits ([`PendingChange::Removal`]).
@@ -506,6 +525,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ..
       } => PendingChange::removal_key(*conversation_id, *user_id),
       PendingChange::Revocation { device_id, .. } => PendingChange::revocation_key(*device_id),
+      PendingChange::AddUser {
+        conversation_id,
+        user_id,
+        ..
+      } => PendingChange::user_add_key(*conversation_id, *user_id),
     };
     records::put_json(&self.store, Table::PendingChanges, &key, &change)
   }
@@ -516,6 +540,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// would hold everybody up); the delay is capped, so a new device waits at most
   /// `device_add_max_rank` × `device_add_stagger`.
   pub(crate) fn queue_device_addition(&mut self, user: UserId, device: DeviceId) -> Result<(), CoreError> {
+    // A user this device added before they had a device can be added now.
+    self.remember_has_devices(user)?;
+    self.wake_user_additions(user)?;
     let conversations: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
     for conversation in conversations {
       self.queue_device_addition_in(conversation, user, device)?;
@@ -647,6 +674,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return self.removal_outcome(&key, change, result.map(|()| RemovalProgress::Done));
       },
       PendingChange::Rejoin { .. } => return self.apply_rejoin(change).await,
+      PendingChange::AddUser { .. } => return self.apply_user_addition(change).await,
       PendingChange::ShareHistory {
         conversation_id,
         share,

@@ -839,6 +839,10 @@ pub enum ChatQuery {
   Privacy,
   CallHistory,
   OwnDevices,
+  /// People by name, the server's directory included ([`ChatBackend::search_people`]).
+  SearchPeople {
+    query: String,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -909,6 +913,9 @@ pub enum ChatAnswer {
   },
   Users {
     users: Vec<UserId>,
+  },
+  People {
+    people: Vec<User>,
   },
   Activity {
     feed: ActivityFeed,
@@ -1055,6 +1062,9 @@ impl ChatQuery {
       },
       Self::OwnDevices => ChatAnswer::Devices {
         devices: backend.own_devices(),
+      },
+      Self::SearchPeople { query } => ChatAnswer::People {
+        people: backend.search_people(&query),
       },
       Self::Unknown => ChatAnswer::Unsupported,
     }

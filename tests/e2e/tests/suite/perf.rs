@@ -288,7 +288,7 @@ async fn sign_in_and_unlock(page: &Page, user: &str) {
     .await
     .unwrap();
   click_text(page, "Unlock").await;
-  wait_for_text(page, "Find or jump to").await;
+  wait_for_text(page, "Activity").await;
 }
 
 /// Alice owns every space; Bob and Carol (the browser) are in all of them. Channels get their
@@ -597,7 +597,7 @@ async fn come_back(page: &Page, needle: &str) -> bool {
     if !has_signed_in && page.find_element("input[name=username]").await.is_ok() {
       sign_in_at_keycloak(page, "carol").await;
       has_signed_in = true;
-    } else if !has_signed_in && text.contains("Sign in") && !text.contains("Find or jump to") {
+    } else if !has_signed_in && text.contains("Sign in") && !text.contains("Activity") {
       click_text(page, "Sign in").await;
     }
     assert!(

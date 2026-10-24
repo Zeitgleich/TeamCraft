@@ -427,6 +427,7 @@ mod tests {
       is_guest: false,
       is_bot: false,
       maybe_organization: None,
+      device_setup: crate::model::DeviceSetup::Unknown,
     }
   }
 

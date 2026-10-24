@@ -8,6 +8,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Changed
+
+- **One search for everything**: the search in the top bar (Ctrl/Cmd+K, Ctrl/Cmd+F,
+  Ctrl/Cmd+Shift+F) finds people, threads, channels, spaces and messages, grouped in that order,
+  and lists the conversations visited last before anything is typed; "all messages for …" opens
+  the search page with its filters. The sidebar's "find or jump to" button, its "Search" entry and
+  the DM filter field are gone; the home chips sit in one compact row.
+
+### Fixed
+
+- **Find colleagues who haven't joined anything yet**: the people page, the search and "new
+  message" ask the server's directory (debounced, one page at a time) instead of only knowing
+  people who share a space or conversation; guests still only find whom they share a conversation
+  with. People without a device show "hasn't set up the app yet".
+- **DM with somebody who has no device**: the DM is made, a banner says the person hasn't set up
+  the app yet, and they are added to the encryption group when their first device appears,
+  without the DM repair retrying in the meantime. Somebody added to a channel whose devices ran
+  out of key packages is retried with a growing delay, and one none of whose devices can be
+  verified waits for a new device; the banner says which, instead of the person being silently
+  left out.
+
 ## [1.0.1] - 2026-10-24
 
 ### Added

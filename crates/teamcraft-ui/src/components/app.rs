@@ -334,20 +334,22 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
       .update(|prefs| prefs.display.zoom = change(prefs.display.zoom));
     return;
   }
-  // Ctrl/Cmd+F searches the open conversation (as in Slack and Teams), Ctrl/Cmd+Shift+F everything.
+  // Everything opens the one search of the top bar: Ctrl/Cmd+F scoped to the open conversation
+  // (as in Slack and Teams), Ctrl/Cmd+Shift+F unscoped.
   if modifier && !ev.shift_key() && !ev.alt_key() && key == "f" {
     ev.prevent_default();
-    let maybe_scope = state
+    let scope = state
       .current_conversation_id()
       .and_then(|id| state.read(|backend| backend.conversation(id)))
       .filter(|conversation| !conversation.name.contains(char::is_whitespace))
-      .map(|conversation| format!("in:#{} ", conversation.name));
-    state.open_search(maybe_scope.as_deref());
+      .map(|conversation| format!("in:#{} ", conversation.name))
+      .unwrap_or_default();
+    state.open_switcher(&scope);
     return;
   }
   if modifier && ev.shift_key() && !ev.alt_key() && key == "f" {
     ev.prevent_default();
-    state.open_search(None);
+    state.open_switcher("");
     return;
   }
   if ev.alt_key() && ev.shift_key() && !modifier {

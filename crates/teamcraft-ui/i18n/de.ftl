@@ -13,7 +13,7 @@ loader-failed-body = Prüfe deine Verbindung und versuche es dann erneut.
 loader-retry = Erneut versuchen
 
 ## Kopfleiste und Kontomenü
-search-placeholder = Kanäle und Personen suchen
+search-placeholder = Suchen
 account-menu-label = Kontomenü für { $name }, Status { $status }
 status-menu-label = Konto und Status
 menu-settings = Einstellungen
@@ -65,7 +65,6 @@ home-filter-people = Personen
 home-filter-groups = Gruppen
 dm-new = Neue Nachricht
 dm-options = Listenoptionen
-dm-filter = Direktnachrichten filtern
 dm-filter-empty = Keine Direktnachricht passt.
 dm-sort = Sortierung
 dm-sort-recent = Neueste zuerst
@@ -83,7 +82,6 @@ dm-new-start-group = Gruppe starten
 
 ## Seitenleiste
 sidebar-label = Kanäle und Direktnachrichten
-sidebar-jump = Suchen oder springen zu …
 sidebar-threads = Threads
 sidebar-unreads = Ungelesen
 sidebar-favorites = Favoriten
@@ -169,11 +167,24 @@ threads-empty = Keine Threads vorhanden.
 threads-select = Wähle einen Thread, um ihn hier zu lesen.
 
 ## Schnellwechsler
-switcher-title = Schnellwechsler
-switcher-input-label = Zu einem Kanal oder einer Unterhaltung springen
-switcher-placeholder = Suchen oder springen zu …
+switcher-title = Suche
+switcher-input-label = Personen, Threads, Kanäle, Spaces und Nachrichten durchsuchen
+switcher-placeholder = Personen, Kanäle und Nachrichten suchen …
 switcher-results = Ergebnisse
 switcher-empty = Keine Treffer.
+switcher-group-recent = Zuletzt geöffnet
+switcher-group-people = Personen
+switcher-group-threads = Threads
+switcher-group-channels = Kanäle
+switcher-group-spaces = Spaces
+switcher-group-messages = Nachrichten
+switcher-context-person = Person
+switcher-context-thread = Thread in { $channel }
+switcher-context-direct = Direktnachricht
+switcher-context-group = Gruppennachricht
+switcher-context-space = Space
+switcher-context-join = Space beitreten
+switcher-all-messages = Alle Nachrichten zu „{ $query }“
 switcher-hint-navigate = navigieren
 switcher-hint-open = öffnen
 switcher-hint-close = schließen
@@ -196,7 +207,7 @@ settings-join-leave = Beitritts- und Austrittsmeldungen anzeigen
 settings-unreads-group = Ungelesene Kanäle oben in der Seitenleiste gruppieren
 settings-advanced-stub = Hier erscheinen die erweiterten Einstellungen.
 
-shortcut-switcher = Schnellwechsler öffnen
+shortcut-switcher = Alles durchsuchen
 shortcut-settings = Einstellungen öffnen
 shortcut-shortcuts = Tastenkürzel anzeigen
 shortcut-prev-next = Vorherige oder nächste Unterhaltung
@@ -613,6 +624,9 @@ removal-unconfirmed = Deine Entfernung von { $name } aus #{ $channel } ist nicht
 removal-unconfirmed-remove = Erneut entfernen
 removal-unconfirmed-keep = Behalten
 group-refused = Der Server lässt dieses Gerät die verschlüsselte Gruppe dieser Unterhaltung nicht lesen. Neue Nachrichten fehlen eventuell.
+waiting-first-device = { $name } hat die App noch nicht eingerichtet. Schreib trotzdem: { $name } wird bei der ersten Anmeldung zu dieser Unterhaltung hinzugefügt.
+devices-unverified = { $name } kann nicht verschlüsselt hinzugefügt werden: Keines der Geräte ließ sich prüfen. Bitte { $name }, sich neu anzumelden; ein neues Gerät wird von selbst versucht.
+waiting-key-package = { $name } kann noch nicht verschlüsselt hinzugefügt werden, weil keines der Geräte mehr Schlüssel auf dem Server hat. Das behebt sich, sobald eines der Geräte wieder online ist.
 key-changed-title = Der Sicherheitsschlüssel von { $name } hat sich geändert
 key-changed-body = Das passiert normalerweise nur nach einem vollständigen Zurücksetzen des Kontos. Frage { $name } über einen anderen Kanal, bevor du etwas Sensibles teilst.
 key-verify = Schlüssel vergleichen
@@ -696,8 +710,6 @@ data-failed-body = Der Server hat geantwortet, aber deine Spaces und Unterhaltun
 data-retry = Erneut versuchen
 
 ## Suche
-sidebar-search = Suche
-shortcut-search = Nachrichten durchsuchen
 switcher-search-messages = Nachrichten suchen
 search-title = Suche
 search-input-label = Nachrichten durchsuchen
@@ -1233,6 +1245,7 @@ directory-people = Personen
 directory-groups = Gruppen
 directory-filter = Person suchen
 directory-empty = Niemand gefunden.
+directory-no-devices = hat die App noch nicht eingerichtet
 directory-organization = Organisation
 directory-all-organizations = Alle Organisationen
 groups-unavailable = Benutzergruppen brauchen eine angemeldete Sitzung.

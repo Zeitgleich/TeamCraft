@@ -24,6 +24,7 @@ mod messages;
 mod mls_recovery;
 mod org_backgrounds;
 mod org_recovery;
+mod people_directory;
 mod push;
 mod push_guard;
 mod queries;

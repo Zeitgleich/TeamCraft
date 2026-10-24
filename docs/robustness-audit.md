@@ -48,6 +48,7 @@ is the current plan.
 | B14   | Offline queue for read markers and pins; resilient full sync                                      | medium      | v1.1, #159      |
 | B15   | Local store integrity: transactions, schema versions, recovery                                    | medium      | v1.1, #160      |
 | F1    | A new device of an existing member reads nothing until another device is online; announces a join | high        | v1.1, #161      |
+| F2    | Only the adding device can add someone who had no device yet; if it is gone, nobody adds them     | medium      | v1.1, open      |
 
 B1 (one owner per store) and B9 (web release lifecycle, web push, browser storage) are fixed
 (docs/e2ee.md §7, §9.3, §9.4); their rows below describe the state before, marked `fixed (B1)` /

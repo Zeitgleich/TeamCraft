@@ -1006,6 +1006,7 @@ fn user_from_wire(
       is_guest: summary.kind == UserKind::Guest,
       is_bot: false,
       maybe_organization: None,
+      device_setup: crate::model::DeviceSetup::Unknown,
     },
     role,
     devices: devices

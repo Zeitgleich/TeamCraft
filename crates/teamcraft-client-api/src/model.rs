@@ -122,6 +122,22 @@ pub struct User {
   /// The organization from the identity provider, shown as a badge (no permission depends on it).
   #[serde(default)]
   pub maybe_organization: Option<String>,
+  /// Whether the person has set up the app (has a device), as far as the backend knows.
+  #[serde(default)]
+  pub device_setup: DeviceSetup,
+}
+
+/// Whether a person has a device to receive messages on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceSetup {
+  HasDevices,
+  /// Hasn't set up the app yet: a DM is made, they get it once their first device appears.
+  NoDevices,
+  /// The backend doesn't know (older server, or only seen in member lists).
+  #[default]
+  #[serde(other)]
+  Unknown,
 }
 
 impl User {
@@ -179,6 +195,15 @@ pub enum MembershipIssue {
   /// The server lists the user but refuses this device the encryption group: new messages may be
   /// missing.
   GroupRefused,
+  /// `user` hasn't set up the app yet; they are added to the encryption group (and get the
+  /// messages) once their first device appears.
+  WaitingForFirstDevice { user: UserId },
+  /// `user`'s devices have no key package left on the server; they are added once one of their
+  /// devices comes online and uploads new ones.
+  NoKeyPackage { user: UserId },
+  /// None of `user`'s devices passed the checks (signed device list, credential), so they can't
+  /// be added; a new device of theirs is tried again.
+  DevicesUnverified { user: UserId },
   #[serde(other)]
   Unknown,
 }

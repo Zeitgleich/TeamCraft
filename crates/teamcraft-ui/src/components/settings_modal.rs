@@ -196,17 +196,16 @@ fn demo_tools() -> impl IntoView {
 pub fn ShortcutsModal() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let rows: [(Vec<Shortcut>, &'static str); 14] = [
-    (vec![QUICK_SWITCHER], "shortcut-switcher"),
+  let rows: [(Vec<Shortcut>, &'static str); 13] = [
+    (
+      vec![
+        QUICK_SWITCHER,
+        Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Char("F")),
+      ],
+      "shortcut-switcher",
+    ),
     (vec![Shortcut::primary(",")], "shortcut-settings"),
     (vec![Shortcut::primary("/")], "shortcut-shortcuts"),
-    (
-      vec![Shortcut::new(
-        &[Modifier::Primary, Modifier::Shift],
-        Key::Char("F"),
-      )],
-      "shortcut-search",
-    ),
     (vec![Shortcut::primary("F")], "shortcut-search-here"),
     (
       vec![

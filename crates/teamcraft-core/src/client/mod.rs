@@ -22,6 +22,7 @@ mod messaging;
 mod notifications;
 mod org_backgrounds;
 mod org_recovery;
+mod pending_add;
 pub mod people;
 pub mod previews;
 mod removal;
@@ -57,6 +58,7 @@ pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
+pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
 use teamcraft_crypto::membership::ChangeId;

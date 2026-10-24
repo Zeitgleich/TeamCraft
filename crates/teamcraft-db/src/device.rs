@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use teamcraft_proto::{DeviceId, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
-use crate::ids::{from_db, to_db};
+use crate::ids::{from_db, to_db, to_db_all};
 
 #[derive(Debug, Clone)]
 pub struct Device {
@@ -97,6 +99,19 @@ impl Database {
     .fetch_one(self.pool())
     .await?;
     Ok(u64::try_from(count).unwrap_or(u64::MAX))
+  }
+
+  /// Of these users, the ones with at least one device that is not revoked (the directory shows
+  /// who hasn't set up the app yet).
+  pub async fn users_with_active_devices(&self, users: &[UserId]) -> Result<HashSet<UserId>, DbError> {
+    let rows = sqlx::query_scalar!(
+      r#"SELECT DISTINCT user_id AS "user_id!" FROM devices
+         WHERE user_id = ANY($1) AND revoked_at IS NULL"#,
+      &to_db_all(users),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows.into_iter().map(from_db).collect()
   }
 
   pub async fn is_active_device_of(&self, user: UserId, device: DeviceId) -> Result<bool, DbError> {
