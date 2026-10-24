@@ -10,7 +10,9 @@ use chromiumoxide::cdp::browser_protocol::emulation::{
 };
 use chromiumoxide::page::Page;
 
-use crate::web::{Rig, body_text, click_text, shot, sign_in_as_alice, wait_for_element, wait_for_text};
+use crate::web::{
+  Rig, WEB_ORIGIN, body_text, click_text, shot, sign_in_as_alice, wait_for_element, wait_for_text,
+};
 
 /// Phones the layout is checked on: an iPhone 15 and a Pixel 8 Pro class device, both ways round.
 const PHONES: [(i64, i64); 4] = [(390, 844), (844, 390), (412, 915), (915, 412)];
@@ -102,7 +104,7 @@ async fn check_phone(page: &Page, (width, height): (i64, i64)) {
     is_shown(page, ".compact-back").await,
     "the conversation has a back button ({size})"
   );
-  shots(page, &format!("mobile-conversation-{size}")).await;
+  shots(page, &format!("mobile-conversation-{size}"), (width, height)).await;
 
   // Browser back returns to the list (the routes of #250).
   page.evaluate("history.back()").await.unwrap();
@@ -113,12 +115,12 @@ async fn check_phone(page: &Page, (width, height): (i64, i64)) {
   );
   assert_no_sideways_scroll(page, &format!("channel list at {size}")).await;
   assert_touch_targets(page, ".bottom-nav-tab, .sb-item, .compact-back", &size).await;
-  shots(page, &format!("mobile-channels-{size}")).await;
+  shots(page, &format!("mobile-channels-{size}"), (width, height)).await;
 
   click_text(page, "Home").await;
   wait_for_pane(page, "list").await;
   assert_no_sideways_scroll(page, &format!("home at {size}")).await;
-  shots(page, &format!("mobile-home-{size}")).await;
+  shots(page, &format!("mobile-home-{size}"), (width, height)).await;
 
   click_text(page, "Activity").await;
   wait_for_pane(page, "main").await;
@@ -127,7 +129,7 @@ async fn check_phone(page: &Page, (width, height): (i64, i64)) {
     "Activity keeps the bottom navigation ({size})"
   );
   assert_no_sideways_scroll(page, &format!("activity at {size}")).await;
-  shots(page, &format!("mobile-activity-{size}")).await;
+  shots(page, &format!("mobile-activity-{size}"), (width, height)).await;
 
   // The search is a full-screen sheet.
   page
@@ -138,16 +140,13 @@ async fn check_phone(page: &Page, (width, height): (i64, i64)) {
     .await
     .unwrap();
   wait_for_element(page, ".modal-switcher").await;
-  let sheet_width = eval_f64(
-    page,
-    "document.querySelector('.modal-switcher').getBoundingClientRect().width",
-  )
-  .await;
+  // The layout width: it scales in, which a bounding box would include.
+  let sheet_width = eval_f64(page, "document.querySelector('.modal-switcher').offsetWidth").await;
   assert!(
     (sheet_width - width as f64).abs() < 1.0,
     "the search fills the width ({size}: {sheet_width})"
   );
-  shots(page, &format!("mobile-search-{size}")).await;
+  shots(page, &format!("mobile-search-{size}"), (width, height)).await;
   page
     .evaluate("document.querySelector('.switcher-input .compact-only').click()")
     .await
@@ -160,11 +159,30 @@ async fn open_test_channel(page: &Page) {
   wait_for_element(page, ".bottom-nav").await;
   click_text(page, "Spaces").await;
   wait_for_text(page, "browser-channel").await;
-  click_text(page, "browser-channel").await;
+  // The sidebar row itself; its list item around it doesn't open anything.
+  let opened = page
+    .evaluate(
+      "(() => { const row = [...document.querySelectorAll('.sidebar button')].find(e => e.innerText.includes('browser-channel')); if (!row) return false; row.click(); return true; })()",
+    )
+    .await
+    .unwrap()
+    .into_value::<bool>()
+    .unwrap_or(false);
+  assert!(opened, "no sidebar row for the test channel");
   wait_for_element(page, "textarea").await;
 }
 
 async fn emulate_phone(page: &Page, (width, height): (i64, i64)) {
+  // A fresh tab is still on about:blank, which has no window to measure.
+  if page
+    .url()
+    .await
+    .ok()
+    .flatten()
+    .is_none_or(|url| !url.starts_with(WEB_ORIGIN))
+  {
+    page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
+  }
   page
     .execute(SetDeviceMetricsOverrideParams::new(width, height, 3.0, true))
     .await
@@ -179,7 +197,13 @@ async fn emulate_phone(page: &Page, (width, height): (i64, i64)) {
     )
     .await
     .unwrap();
-  // The layout follows media queries, which fire after the resize.
+  // The layout follows media queries, which fire after the resize. A page without a viewport tag
+  // (before the app loads) lays out 980px wide on a phone, so only the app is waited for.
+  let has_viewport_tag =
+    eval_f64(page, "document.querySelectorAll('meta[name=viewport]').length").await > 0.0;
+  if !has_viewport_tag {
+    return;
+  }
   let deadline = Instant::now() + WAIT;
   while eval_f64(page, "innerWidth").await as i64 != width {
     assert!(
@@ -190,8 +214,9 @@ async fn emulate_phone(page: &Page, (width, height): (i64, i64)) {
   }
 }
 
-/// Screenshots of the page in the light and the dark theme.
-async fn shots(page: &Page, name: &str) {
+/// Screenshots of the page in the light and the dark theme. A full-page screenshot resizes the
+/// page and drops the device emulation, so the phone is emulated again after each.
+async fn shots(page: &Page, name: &str, phone: (i64, i64)) {
   for scheme in ["light", "dark"] {
     page
       .execute(
@@ -204,6 +229,7 @@ async fn shots(page: &Page, name: &str) {
     // Let the theme's colors settle (no transition is longer than this).
     tokio::time::sleep(Duration::from_millis(300)).await;
     shot(page, &format!("{name}-{scheme}")).await;
+    emulate_phone(page, phone).await;
   }
 }
 
@@ -215,7 +241,8 @@ async fn wait_for_pane(page: &Page, pane: &str) {
     }
     assert!(
       Instant::now() < deadline,
-      "the {pane} pane did not show; the page says:\n{}",
+      "the {pane} pane did not show ({}); the page says:\n{}",
+      eval_string(page, "location.pathname + ' pane=' + (document.querySelector('.app')?.dataset.pane ?? '-') + ' depth=' + history.state").await,
       body_text(page).await
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
